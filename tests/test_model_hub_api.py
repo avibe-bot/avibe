@@ -285,6 +285,8 @@ def _refresh_fixture_routes(config: ModelHubConfig) -> None:
         for source_id in agent.sources.order:
             source = by_id[source_id]
             for model in source.models:
+                if agent.menu_kind == "fixed" and model.id not in agent.routes:
+                    continue
                 if agent.menu_kind == "open" and (
                     agent.menu is None or model.id not in agent.menu.checked
                 ):

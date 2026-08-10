@@ -493,8 +493,9 @@ def test_opencode_menu_validation_rejects_noncanonical_identifier(tmp_path):
 
 
 def test_direct_mode_rejects_chain_write_before_config_mutation(tmp_path):
-    source = _source("src_direct01", ("requested",))
-    config = _config([source], model="requested")
+    menu_model = "claude-opus-4-6"
+    source = _source("src_direct01", (menu_model,))
+    config = _config([source], model=menu_model)
     service, store, _ = _service(tmp_path, config)
     asyncio.run(service.set_agent_mode("claude", "direct"))
     before = store.load().to_payload()
@@ -503,7 +504,7 @@ def test_direct_mode_rejects_chain_write_before_config_mutation(tmp_path):
         asyncio.run(
             service.set_agent_chain(
                 "claude",
-                "requested",
+                menu_model,
                 {"hops": []},
             )
         )
@@ -552,18 +553,19 @@ def test_chain_write_rejects_models_outside_the_current_menu(
 
 
 def test_refresh_ignores_preexisting_unrelated_interruption(tmp_path):
-    source = _source("src_refresh02", ("requested",))
+    menu_model = "claude-opus-4-6"
+    source = _source("src_refresh02", (menu_model,))
     broken = _source("src_refresh03", ("other",), status="cooldown")
     broken.state = ModelHubSourceStateConfig(
         status="cooldown",
         retry_at="2099-01-01T00:00:00Z",
         detail_key="models.source.cooldown.rate_limited",
     )
-    config = _config([source, broken], model="requested")
-    config.agents["claude"].routes["other-route"] = ModelHubRouteConfig(
+    config = _config([source, broken], model=menu_model)
+    config.agents["claude"].routes["claude-sonnet-4-6"] = ModelHubRouteConfig(
         hops=(ModelHubRouteHopConfig(broken.id, "other"),)
     )
-    adapter = FakeAdapter(discovered=("requested",))
+    adapter = FakeAdapter(discovered=(menu_model,))
     service, _store, _ = _service(tmp_path, config, adapter)
 
     result = asyncio.run(service.refresh_source(source.id))
@@ -581,35 +583,91 @@ def test_engine_binding_excludes_empty_inventory(tmp_path):
 
 
 def test_opencode_normalization_has_one_resolver_consumer():
-    from ast import ImportFrom, Name, NodeVisitor, parse
+    from ast import (
+        Attribute,
+        AsyncFunctionDef,
+        Import,
+        ImportFrom,
+        Name,
+        NodeVisitor,
+        parse,
+        walk,
+    )
     from pathlib import Path
 
-    class ForbiddenCalls(NodeVisitor):
+    class RawIdentityCalls(NodeVisitor):
         def __init__(self):
             self.calls = []
 
         def visit_Call(self, node):
-            if isinstance(node.func, Name) and node.func.id in {
+            symbol = (
+                node.func.id
+                if isinstance(node.func, Name)
+                else node.func.attr
+                if isinstance(node.func, Attribute)
+                else None
+            )
+            if symbol in {
                 "parse_opencode_model_id",
                 "normalize_opencode_requested_model",
                 "opencode_model_id",
             }:
-                self.calls.append(node.func.id)
+                self.calls.append(symbol)
+            self.generic_visit(node)
+
+        def visit_Import(self, node):
+            if any(
+                alias.name == "core.handlers.model_hub.identifiers"
+                for alias in node.names
+            ):
+                self.calls.append("core.handlers.model_hub.identifiers")
             self.generic_visit(node)
 
         def visit_ImportFrom(self, node):
             if node.module == "core.handlers.model_hub.identifiers":
                 self.calls.extend(alias.name for alias in node.names)
+            if node.module == "core.handlers.model_hub.resolver":
+                self.calls.extend(
+                    alias.name
+                    for alias in node.names
+                    if alias.name == "normalize_opencode_requested_model"
+                )
             self.generic_visit(node)
 
     root = Path(__file__).parents[1]
-    for relative in (
-        "core/handlers/model_hub/service.py",
-        "modules/agents/model_hub.py",
-    ):
-        visitor = ForbiddenCalls()
-        visitor.visit(parse((root / relative).read_text(encoding="utf-8")))
-        assert visitor.calls == []
+    allowed = {
+        root / "core/handlers/model_hub/identifiers.py",
+        root / "core/handlers/model_hub/resolver.py",
+    }
+    violations = {}
+    for production_root in ("config", "core", "modules", "vibe"):
+        for path in (root / production_root).rglob("*.py"):
+            if path in allowed:
+                continue
+            visitor = RawIdentityCalls()
+            visitor.visit(parse(path.read_text(encoding="utf-8")))
+            if visitor.calls:
+                violations[str(path.relative_to(root))] = visitor.calls
+    assert violations == {}
+
+    shared_startup = parse(
+        (root / "modules/agents/model_hub.py").read_text(encoding="utf-8")
+    )
+    overlay = next(
+        node
+        for node in walk(shared_startup)
+        if isinstance(node, AsyncFunctionDef)
+        and node.name == "prepare_opencode_overlay"
+    )
+    resolution_inputs = {
+        node.attr
+        for node in walk(overlay)
+        if isinstance(node, Attribute)
+        and isinstance(node.value, Name)
+        and node.value.id == "resolution"
+    }
+    assert {"candidate_hops", "projectable_hops"} <= resolution_inputs
+    assert "inspected_hops" not in resolution_inputs
 
     assert canonical_opencode_menu_identity("openai/menu-model") == (
         "openai",
@@ -1056,22 +1114,24 @@ def test_manual_model_delete_ignores_preexisting_unrelated_gap(tmp_path):
 
 
 def test_delete_source_reports_and_then_prunes_exact_hops(tmp_path):
-    source = _source("src_delete01", ("requested",))
-    config = _config([source], model="requested")
+    menu_model = "claude-opus-4-6"
+    source = _source("src_delete01", (menu_model,))
+    config = _config([source], model=menu_model)
     service, store, _ = _service(tmp_path, config)
     with pytest.raises(ModelHubError) as exc:
         asyncio.run(service.delete_source(source.id))
     assert exc.value.code == "source_in_route_chain"
-    assert exc.value.data["would_remove_hops"][0]["model_id"] == "requested"
+    assert exc.value.data["would_remove_hops"][0]["model_id"] == menu_model
     result = asyncio.run(service.delete_source(source.id, force=True))
     assert result["removed_hops"]
     assert store.load().sources == []
-    assert store.load().agents["claude"].routes["requested"].hops == ()
+    assert store.load().agents["claude"].routes[menu_model].hops == ()
 
 
 def test_refresh_source_uses_guarded_success_shape(tmp_path):
-    source = _source("src_refresh1", ("requested",))
-    config = _config([source], model="requested")
+    menu_model = "claude-opus-4-6"
+    source = _source("src_refresh1", (menu_model,))
+    config = _config([source], model=menu_model)
     adapter = FakeAdapter(discovered=("new-model",))
     service, store, _ = _service(tmp_path, config, adapter)
     with pytest.raises(ModelHubError) as exc:
@@ -1079,8 +1139,8 @@ def test_refresh_source_uses_guarded_success_shape(tmp_path):
     assert exc.value.code == "source_model_in_route_chain"
     result = asyncio.run(service.refresh_source(source.id, force=True))
     assert set(result) == {"source", "removed_hops", "interrupted"}
-    assert result["removed_hops"][0]["model_id"] == "requested"
-    assert store.load().agents["claude"].routes["requested"].hops == ()
+    assert result["removed_hops"][0]["model_id"] == menu_model
+    assert store.load().agents["claude"].routes[menu_model].hops == ()
 
 
 def test_direct_mode_refuses_chain_and_probe(tmp_path):

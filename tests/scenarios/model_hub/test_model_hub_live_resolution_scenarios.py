@@ -21,6 +21,7 @@ from config.v2_config import (
     ModelHubRouteHopConfig,
     ModelHubSourceConfig,
     ModelHubSourceStateConfig,
+    model_hub_fixed_menu_ids,
 )
 from core.handlers.model_hub.adapter import (
     EngineHealth,
@@ -44,6 +45,18 @@ class MemoryStore:
 
     def save(self, config: ModelHubConfig) -> None:
         self.config = config
+
+
+def _requested_model(backend: str) -> str:
+    if backend == "opencode":
+        return "anthropic/model-live"
+    return model_hub_fixed_menu_ids(backend)[0]
+
+
+def _source_model_id(backend: str) -> str:
+    if backend == "opencode":
+        return "model-live"
+    return _requested_model(backend)
 
 
 @dataclass(frozen=True)
@@ -123,7 +136,14 @@ def _source(
         supply_channel=channel,
         billing="monthly" if kind == "subscription" else "metered",
         state=ModelHubSourceStateConfig(status="standby"),
-        models=[ModelHubModelConfig(id="model-live", provenance="discovered")],
+        models=[
+            ModelHubModelConfig(id=model_id, provenance="discovered")
+            for model_id in (
+                _source_model_id("claude"),
+                _source_model_id("codex"),
+                _source_model_id("opencode"),
+            )
+        ],
         credential_ref=f"cred_{source_id}" if channel == "hub" else None,
     )
 
@@ -136,11 +156,6 @@ def _config(*sources: ModelHubSourceConfig) -> ModelHubConfig:
             for backend in ("claude", "codex", "opencode")
         },
     )
-    route_models = {
-        "claude": "model-live",
-        "codex": "model-live",
-        "opencode": "anthropic/model-live",
-    }
     for backend, agent in config.agents.items():
         eligible_sources = tuple(
             source
@@ -150,9 +165,9 @@ def _config(*sources: ModelHubSourceConfig) -> ModelHubConfig:
         agent.sources = ModelHubAgentSourcesConfig(
             order=[source.id for source in eligible_sources],
         )
-        agent.routes[route_models[backend]] = ModelHubRouteConfig(
+        agent.routes[_requested_model(backend)] = ModelHubRouteConfig(
             hops=tuple(
-                ModelHubRouteHopConfig(source.id, "model-live")
+                ModelHubRouteHopConfig(source.id, _source_model_id(backend))
                 for source in eligible_sources
             )
         )
@@ -217,9 +232,9 @@ def test_unpinned_hub_projection_is_null_while_explicit_turn_resolves(
         gateway = ModelHubTurnGateway(service)
         router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
         try:
-            launch = await router.resolve("claude", "model-live")
+            launch = await router.resolve("claude", _requested_model("claude"))
             assert launch.source_id == source.id
-            assert launch.target_model == "model-live"
+            assert launch.target_model == _source_model_id("claude")
         finally:
             await gateway.close()
 
@@ -229,9 +244,9 @@ def test_unpinned_hub_projection_is_null_while_explicit_turn_resolves(
 @pytest.mark.parametrize(
     ("backend", "requested_model", "endpoint"),
     [
-        ("claude", "model-live", "messages"),
-        ("codex", "model-live", "responses"),
-        ("opencode", "anthropic/model-live", "messages"),
+        ("claude", _requested_model("claude"), "messages"),
+        ("codex", _requested_model("codex"), "responses"),
+        ("opencode", _requested_model("opencode"), "messages"),
     ],
 )
 @pytest.mark.parametrize(
@@ -326,7 +341,9 @@ def test_mh_res_live_002_401_refreshes_once_in_live_turn(tmp_path: Path) -> None
         gateway = ModelHubTurnGateway(service)
         router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
         try:
-            status, body = await _post_turn(await router.resolve("claude", "model-live"))
+            status, body = await _post_turn(
+                await router.resolve("claude", _requested_model("claude"))
+            )
             assert status == 200
             assert body == b'{"ok":true}'
             assert [call[0] for call in adapter.invocations] == ["src_primary1", "src_primary1"]
@@ -360,7 +377,9 @@ def test_mh_res_live_002_second_401_blocks_source_and_falls_back(
         gateway = ModelHubTurnGateway(service)
         router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
         try:
-            status, _body = await _post_turn(await router.resolve("claude", "model-live"))
+            status, _body = await _post_turn(
+                await router.resolve("claude", _requested_model("claude"))
+            )
             assert status == 200
             assert [call[0] for call in adapter.invocations] == [
                 "src_primary1",
@@ -408,7 +427,10 @@ def test_mh_res_live_003_started_stream_never_retries(tmp_path: Path) -> None:
         gateway = ModelHubTurnGateway(service)
         router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
         try:
-            status, body = await _post_turn(await router.resolve("claude", "model-live"), stream=True)
+            status, body = await _post_turn(
+                await router.resolve("claude", _requested_model("claude")),
+                stream=True,
+            )
             assert status == 200
             assert body == b"data: partial\n\n"
             assert [call[0] for call in adapter.invocations] == ["src_primary1"]
@@ -445,7 +467,7 @@ def test_turn_gateway_nonstream_buffer_surfaces_terminal_failure(
         router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
         try:
             status, body = await _post_turn(
-                await router.resolve("claude", "model-live"),
+                await router.resolve("claude", _requested_model("claude")),
             )
             assert status == 429
             assert json.loads(body)["error"]["code"] == "stream_interrupted"
@@ -473,7 +495,7 @@ def test_turn_gateway_tokens_are_bound_to_backend_origin(tmp_path: Path) -> None
                 async with client.post(
                     f"{claude_url}/v1/messages",
                     headers={"Authorization": f"Bearer {codex_token}"},
-                    json={"model": "model-live", "messages": []},
+                    json={"model": _requested_model("claude"), "messages": []},
                 ) as response:
                     assert response.status == 401
             assert adapter.invocations == []
@@ -504,7 +526,7 @@ def test_turn_gateway_preserves_only_protocol_capability_headers(tmp_path: Path)
                         "Authorization": "Bearer upstream-must-not-cross",
                         "anthropic-beta": "interleaved-thinking",
                     },
-                    json={"model": "model-live", "messages": []},
+                    json={"model": _requested_model("claude"), "messages": []},
                 ) as response:
                     assert response.status == 200
             request = adapter.requests[0]
@@ -533,7 +555,7 @@ def test_mh_evt_002_switch_events_survive_router_and_service_restart(tmp_path: P
             turn_gateway=first_gateway,
             native_cli_ready=lambda backend: True,
         )
-        launch = await first_router.resolve("codex", "model-live")
+        launch = await first_router.resolve("codex", _requested_model("codex"))
         assert launch.channel == "native_cli"
         context = SimpleNamespace()
         bind_launch(context, launch)
@@ -549,7 +571,10 @@ def test_mh_evt_002_switch_events_survive_router_and_service_restart(tmp_path: P
             native_cli_ready=lambda backend: True,
         )
         try:
-            fallback = await second_router.resolve("codex", "model-live")
+            fallback = await second_router.resolve(
+                "codex",
+                _requested_model("codex"),
+            )
             assert fallback.channel == "hub"
             persisted = BoundedEventLog(tmp_path / "events.json").list(limit=10)
             assert [event["kind"] for event in persisted[:2]] == [

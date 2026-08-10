@@ -40,6 +40,7 @@ class ExactHopInspection:
     inventory_member: bool
     supply_eligible: bool
     runnable: bool
+    structural_blocker: bool
     reason: str | None
     retry_at: str | None
 
@@ -58,6 +59,7 @@ class ModelHubTurnResolution:
     matching_sources: tuple[ModelHubSourceConfig, ...] = ()
     candidates: tuple[ModelHubSourceConfig, ...] = ()
     candidate_hops: tuple[ExactHopInspection, ...] = ()
+    projectable_hops: tuple[ExactHopInspection, ...] = ()
     source_model_ids: tuple[tuple[str, str], ...] = ()
     inspected_hops: tuple[ExactHopInspection, ...] = ()
     unsupported_source_ids: tuple[str, ...] = ()
@@ -69,23 +71,15 @@ class ModelHubTurnResolution:
     recoverable_source_ids: tuple[str, ...] = ()
     supply_status: SupplyStatus | None = None
 
-    def model_for_source(self, source: ModelHubSourceConfig | str) -> str | None:
-        source_id = source if isinstance(source, str) else source.id
-        return next(
-            (model_id for candidate_source_id, model_id in self.source_model_ids if candidate_source_id == source_id),
-            None,
-        )
-
-    def inspection_for_source(
-        self,
-        source: ModelHubSourceConfig | str,
-    ) -> ExactHopInspection | None:
-        source_id = source if isinstance(source, str) else source.id
+    @property
+    def structural_blocker_reason(self) -> str | None:
+        if self.route_reason == "route_unconfigured":
+            return self.route_reason
         return next(
             (
-                inspection
+                inspection.reason
                 for inspection in self.inspected_hops
-                if inspection.source_id == source_id
+                if inspection.structural_blocker
             ),
             None,
         )
@@ -294,6 +288,7 @@ def inspect_exact_hop(
             inventory_member=False,
             supply_eligible=False,
             runnable=False,
+            structural_blocker=True,
             reason="route_unconfigured",
             retry_at=None,
         )
@@ -312,6 +307,7 @@ def inspect_exact_hop(
             inventory_member=False,
             supply_eligible=False,
             runnable=False,
+            structural_blocker=True,
             reason="source_missing",
             retry_at=None,
         )
@@ -327,10 +323,13 @@ def inspect_exact_hop(
         model_supported=inventory_member,
     )
     reason: str | None = None
+    structural_blocker = False
     if not inventory_member or not configuration_eligible:
         reason = "model_unsupported"
+        structural_blocker = True
     elif source.id in unavailable_source_ids:
         reason = "native_cli_unavailable"
+        structural_blocker = True
     elif source.state.status in {"needs_action", "error"}:
         reason = source.state.detail_key
     return ExactHopInspection(
@@ -345,6 +344,7 @@ def inspect_exact_hop(
         inventory_member=inventory_member,
         supply_eligible=supply_eligible,
         runnable=runnable,
+        structural_blocker=structural_blocker,
         reason=reason,
         retry_at=(
             source.state.retry_at
@@ -492,6 +492,11 @@ def resolve_model_hub_turn(
         for inspection in runnable_inspections
         if inspection.source is not None
     )
+    projectable_hops = tuple(
+        inspection
+        for inspection in matching_inspections
+        if inspection.supply_eligible
+    )
     recoverable = tuple(
         source.id
         for source in matching_sources
@@ -518,6 +523,7 @@ def resolve_model_hub_turn(
         matching_sources=matching_sources,
         candidates=candidates,
         candidate_hops=runnable_inspections,
+        projectable_hops=projectable_hops,
         source_model_ids=source_model_ids,
         inspected_hops=inspected_hops,
         unsupported_source_ids=tuple(unsupported_source_ids),

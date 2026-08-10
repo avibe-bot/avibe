@@ -16,6 +16,11 @@ from config.v2_config import (
     ModelHubSourceConfig,
     ModelHubSourceStateConfig,
 )
+from core.handlers.model_hub.adapter import (
+    ObservationDiscovery,
+    ObservationOutcome,
+    SourceObservation,
+)
 from core.handlers.model_hub.events import BoundedEventLog
 from core.handlers.model_hub.migration import scan_native_configs
 from core.handlers.model_hub.oauth import OAuthFlowRegistry
@@ -59,10 +64,48 @@ class MigrationAdapter:
     def __init__(self) -> None:
         self.provisioned: list[tuple[str, int, str]] = []
         self.revoked: list[str] = []
+        self.transient_refs: list[str] = []
+        self.transient_revoked: list[str] = []
+        self.observed: list[tuple[str, tuple[str, ...]]] = []
+        self.observed_protocols = {
+            "anthropic": "anthropic",
+            "openai": "openai_responses",
+            "openrouter": "openai_chat",
+            "zhipuai": "openai_chat",
+        }
+        self.fail_observation_vendor: str | None = None
         self.synced: list[tuple[object, ...]] = []
-        self.fail_discovery_ref: str | None = None
         self.fail_revoke_refs: set[str] = set()
         self.fail_sync_count = 0
+
+    async def provision_transient_credential(
+        self,
+        vendor: str,
+        secret: str,
+        base_url: str | None,
+    ) -> str:
+        credential_ref = f"cred_observation_{len(self.transient_refs) + 1}"
+        self.transient_refs.append(credential_ref)
+        return credential_ref
+
+    async def observe_source(
+        self,
+        vendor: str,
+        base_url: str | None,
+        credential_ref: str,
+        protocol_order,
+    ) -> SourceObservation:
+        self.observed.append((vendor, tuple(protocol_order)))
+        if vendor == self.fail_observation_vendor:
+            raise RuntimeError("redacted observation failure")
+        return SourceObservation(
+            outcome=ObservationOutcome.OBSERVED,
+            reachable=True,
+            authenticated=True,
+            protocol=self.observed_protocols[vendor],
+            discovery=ObservationDiscovery.SUCCEEDED,
+            model_ids=(f"{vendor}-model",),
+        )
 
     async def provision_credential(
         self,
@@ -82,8 +125,6 @@ class MigrationAdapter:
         base_url: str | None,
         credential_ref: str,
     ) -> tuple[str, ...]:
-        if credential_ref == self.fail_discovery_ref:
-            raise RuntimeError("redacted upstream failure")
         return (f"{vendor}-model",)
 
     async def sync_sources(self, bindings) -> None:
@@ -95,6 +136,9 @@ class MigrationAdapter:
     async def revoke_credential(self, credential_ref: str) -> None:
         if credential_ref in self.fail_revoke_refs:
             raise RuntimeError("redacted revoke failure")
+        if credential_ref in self.transient_refs:
+            self.transient_revoked.append(credential_ref)
+            return
         self.revoked.append(credential_ref)
 
 
@@ -495,6 +539,8 @@ def test_mh_mig_001_api_apply_keeps_native_tree_byte_identical(
     assert len(store.config.sources) == 4
     assert len(adapter.provisioned) == 4
     assert adapter.revoked == []
+    assert adapter.transient_revoked == adapter.transient_refs
+    assert len(adapter.observed) == len(adapter.transient_refs)
     assert before == _tree_digest(native_home)
     by_id = {source.id: source for source in store.config.sources}
     imported_ids = set(by_id)
@@ -521,7 +567,7 @@ def test_mh_mig_001_api_apply_keeps_native_tree_byte_identical(
     codex_source = next(
         source for source in store.config.sources if source.vendor == "openai" and source.kind == "api_key"
     )
-    assert codex_source.protocol == "openai_chat"
+    assert codex_source.protocol == "openai_responses"
     assert codex_source.base_url == "https://codex-relay.example/v1"
     openrouter_source = next(source for source in store.config.sources if source.vendor == "openrouter")
     assert openrouter_source.base_url == "https://openrouter.ai/api/v1"
@@ -943,12 +989,13 @@ def test_failed_batch_revokes_every_provisioned_credential(
     _isolate_native_home(monkeypatch, native_home)
     service, store, adapter = _service(tmp_path)
     item_ids = [item["id"] for item in service.migration_scan()["items"]]
-    adapter.fail_discovery_ref = "cred_migration_2"
+    adapter.fail_observation_vendor = "zhipuai"
 
     with pytest.raises(ModelHubError) as error:
         asyncio.run(service.migration_apply(item_ids))
-    assert error.value.code == "engine_down"
-    assert adapter.revoked == ["cred_migration_2", "cred_migration_1"]
+    assert error.value.code == "migration_item_conflict"
+    assert adapter.revoked == ["cred_migration_1"]
+    assert adapter.transient_revoked == adapter.transient_refs
     assert store.config.sources == []
     assert all(agent.sources.order == [] for agent in store.config.agents.values())
 
@@ -981,7 +1028,7 @@ def test_failed_revoke_survives_retry_with_same_source_id(
     _isolate_native_home(monkeypatch, native_home)
     service, store, adapter = _service(tmp_path)
     item_id = service.migration_scan()["items"][0]["id"]
-    adapter.fail_discovery_ref = "cred_migration_1"
+    adapter.fail_sync_count = 1
     adapter.fail_revoke_refs.add("cred_migration_1")
 
     with pytest.raises(ModelHubError) as error:
@@ -991,7 +1038,6 @@ def test_failed_revoke_survives_retry_with_same_source_id(
     assert ":migration:" in pending.source_id
     assert pending.credential_ref == "cred_migration_1"
 
-    adapter.fail_discovery_ref = None
     adapter.fail_revoke_refs.clear()
     result = asyncio.run(service.migration_apply([item_id]))
     assert result["applied"] == 1

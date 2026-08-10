@@ -67,18 +67,25 @@ async def _probe_protocol_response(
     root = base_url or _OFFICIAL_BASE_URLS.get(vendor)
     if not root:
         raise EngineClientError("source requires a base URL for protocol observation")
-    parsed = urllib.parse.urlparse(root)
+    parsed = urllib.parse.urlsplit(root)
     if (
         parsed.scheme not in {"http", "https"}
         or not parsed.netloc
         or parsed.username
         or parsed.password
-        or parsed.query
         or parsed.fragment
     ):
         raise EngineClientError("source base URL is invalid")
     endpoint = _endpoint_for_protocol(protocol).removeprefix("/v1")
-    url = f"{root.rstrip('/')}{endpoint}"
+    url = urllib.parse.urlunsplit(
+        (
+            parsed.scheme,
+            parsed.netloc,
+            f"{parsed.path.rstrip('/')}{endpoint}",
+            parsed.query,
+            "",
+        )
+    )
     headers = {
         "Authorization": f"Bearer {secret}",
         "Accept": "application/json",

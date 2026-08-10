@@ -685,6 +685,10 @@ class ModelHubRuntimeRouter:
         config: ModelHubConfig,
         resolution: ModelHubTurnResolution,
     ) -> EventReason:
+        if resolution.structural_blocker_reason == "model_unsupported":
+            return "model_unsupported"
+        if resolution.structural_blocker_reason is not None:
+            return "no_enabled_source"
         order = config.effective_source_order(resolution.backend)
         sources_by_id = {source.id: source for source in config.sources}
         enabled_sources = [
@@ -782,7 +786,10 @@ class ModelHubRuntimeRouter:
                 requested_model_id=requested_model,
                 supply_state=supply_state,
             )
-        if not resolution.matching_sources:
+        if (
+            not resolution.matching_sources
+            or resolution.structural_blocker_reason is not None
+        ):
             reason = self._supply_interruption_reason(config, resolution)
             supply_key = (backend, requested_model)
             current_state = ("interrupted", reason)
@@ -1050,28 +1057,19 @@ class ModelHubRuntimeRouter:
             menu_model_id = resolution.menu_model_id
             if provider_id is None or menu_model_id is None:
                 raise ModelHubError("mapping_target_unavailable", status=409)
-            available_source = resolution.source
-            inspection = next(
-                (
-                    item
-                    for item in resolution.inspected_hops
-                    if item.source is available_source
-                ),
-                None,
+            inspection = (
+                resolution.candidate_hops[0]
+                if resolution.candidate_hops
+                else None
             )
             if inspection is None:
                 # Keep a cooling/error route's public identifier stable in the
                 # overlay. Per-turn resolution still rejects that requested
                 # route, while unrelated checked models remain usable.
-                inspection = next(
-                    (
-                        item
-                        for item in resolution.inspected_hops
-                        if item.source is not None
-                        and item.source.supply_channel == "hub"
-                        and item.inventory_member
-                    ),
-                    None,
+                inspection = (
+                    resolution.projectable_hops[0]
+                    if resolution.projectable_hops
+                    else None
                 )
             if (
                 inspection is None
@@ -1105,7 +1103,7 @@ class ModelHubRuntimeRouter:
                 "name": model.display_name or menu_model_id,
             }
             projected_identifiers.append(identifier)
-            if available_source is not None:
+            if resolution.candidate_hops:
                 available_identifiers.append(identifier)
                 launches.append(
                     ModelHubLaunch(

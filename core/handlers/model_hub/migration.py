@@ -10,7 +10,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Literal, Optional, Protocol
+from typing import Any, Awaitable, Callable, Literal, Optional, Protocol, cast
 
 from config.v2_config import (
     ModelHubConfig,
@@ -18,6 +18,11 @@ from config.v2_config import (
     ModelHubSourceConfig,
     ModelHubSourceStateConfig,
     ModelHubSourceUsageConfig,
+)
+from core.handlers.model_hub.adapter import (
+    ObservationDiscovery,
+    ObservationOutcome,
+    SourceObservation,
 )
 from core.handlers.model_hub.events import contains_credential_material
 from vibe.backend_model_catalog import backend_model_entries, load_bundled_catalog
@@ -72,11 +77,18 @@ class MigrationHost(Protocol):
         credential_ref: str,
     ) -> None: ...
 
+    async def _observe_source_payload(
+        self,
+        payload: dict[str, object],
+    ) -> SourceObservation: ...
+
     def _apply_discovered_models(
         self,
         source: ModelHubSourceConfig,
         manual_models: list[ModelHubModelConfig],
         discovered: list[str],
+        *,
+        allow_empty: bool = False,
     ) -> None: ...
 
     def _apply_source_placement(
@@ -581,6 +593,7 @@ def _new_source(
     item: NativeMigrationItem,
     *,
     now: datetime,
+    protocol: Literal["anthropic", "openai_responses", "openai_chat"],
     validate_base_url: Callable[[object], Optional[str]],
 ) -> ModelHubSourceConfig:
     keep_native = item.proposed_action == "keep_native"
@@ -605,10 +618,10 @@ def _new_source(
         kind="subscription" if keep_native or controlled else "api_key",
         vendor=item.vendor,
         display_name=item.display_name,
-            protocol=item.protocol,
-            base_url=validate_base_url(item.base_url),
-            supply_channel="native_cli" if keep_native else "hub",
-            billing="monthly" if keep_native or controlled else "metered",
+        protocol=protocol,
+        base_url=validate_base_url(item.base_url),
+        supply_channel="native_cli" if keep_native else "hub",
+        billing="monthly" if keep_native or controlled else "metered",
         state=ModelHubSourceStateConfig(status="standby"),
         usage=ModelHubSourceUsageConfig(),
         models=models,
@@ -665,18 +678,44 @@ async def apply_native_migration(
         persisted = False
         try:
             for item in selected:
-                source = _new_source(
-                    item,
-                    now=host.now(),
-                    validate_base_url=validate_base_url,
-                )
+                protocol = item.protocol
+                observation: SourceObservation | None = None
                 if item.proposed_action == "import":
                     if not item.secret:
                         raise MigrationConflictError
+                    observation = await host._observe_source_payload(
+                        {
+                            "vendor": item.vendor,
+                            "base_url": validate_base_url(item.base_url),
+                            "key": item.secret,
+                        }
+                    )
+                    if (
+                        observation.outcome is not ObservationOutcome.OBSERVED
+                        or observation.protocol is None
+                    ):
+                        raise MigrationConflictError
+                    protocol = cast(
+                        Literal[
+                            "anthropic",
+                            "openai_responses",
+                            "openai_chat",
+                        ],
+                        observation.protocol,
+                    )
+                source = _new_source(
+                    item,
+                    now=host.now(),
+                    protocol=protocol,
+                    validate_base_url=validate_base_url,
+                )
+                if item.proposed_action == "import":
+                    assert item.secret is not None
+                    assert observation is not None
                     credential_ref = await host._engine_call(
                         host.adapter.provision_credential(
                             item.vendor,
-                            item.protocol,
+                            source.protocol,
                             item.secret,
                             source.base_url,
                         )
@@ -684,16 +723,6 @@ async def apply_native_migration(
                     provisioned.append((source.id, credential_ref))
                     source.credential_ref = credential_ref
                     source.masked_credential = mask_credential(item.secret)
-                    discovered = list(
-                        await host._engine_call(
-                            host.adapter.discover_models(
-                                item.vendor,
-                                item.protocol,
-                                source.base_url,
-                                credential_ref,
-                            )
-                        )
-                    )
                     manual_models = [
                         ModelHubModelConfig(
                             id=model.id,
@@ -702,7 +731,19 @@ async def apply_native_migration(
                         )
                         for model in item.manual_models
                     ]
-                    host._apply_discovered_models(source, manual_models, discovered)
+                    if observation.discovery is ObservationDiscovery.SUCCEEDED:
+                        host._apply_discovered_models(
+                            source,
+                            manual_models,
+                            list(observation.model_ids),
+                            allow_empty=True,
+                        )
+                    else:
+                        source.models = manual_models
+                        source.state = ModelHubSourceStateConfig(
+                            status="error",
+                            detail_key="models.source.error.unclassified",
+                        )
                 updated.sources.append(source)
                 host._apply_source_placement(updated, source)
 

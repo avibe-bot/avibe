@@ -1221,6 +1221,19 @@ class ModelHubConfig:
                 raise ValueError(
                     f"Config 'model_hub.agents.{backend}.routes' is missing menu model '{missing_route}'"
                 )
+            if backend in {"claude", "codex"}:
+                extra_route = next(
+                    (
+                        model_id
+                        for model_id in agents[backend].routes
+                        if model_id not in expected_menu_ids
+                    ),
+                    None,
+                )
+                if extra_route is not None:
+                    raise ValueError(
+                        f"Config 'model_hub.agents.{backend}.routes' contains non-menu model '{extra_route}'"
+                    )
         config = cls(
             sources=sources,
             agents=agents,

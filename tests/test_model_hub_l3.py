@@ -24,6 +24,7 @@ from config.v2_config import (
     ModelHubRouteHopConfig,
     ModelHubSourceConfig,
     ModelHubSourceStateConfig,
+    model_hub_fixed_menu_ids,
 )
 from core.handlers.model_hub.adapter import (
     EngineHealth,
@@ -236,6 +237,30 @@ def _service(
         now=lambda: NOW,
         requested_model_override=store.requested_model,
     )
+
+
+def _canonicalize_fixed_test_routes(
+    service: ModelHubService,
+) -> dict[str, str]:
+    selected = {}
+    config = service.store.load()
+    for backend in ("claude", "codex"):
+        menu_ids = model_hub_fixed_menu_ids(backend)
+        selected[backend] = menu_ids[0]
+        shared_route = config.agents[backend].routes.get(
+            "shared-model",
+            ModelHubRouteConfig(),
+        )
+        config.agents[backend].routes = {
+            model_id: (
+                shared_route
+                if model_id == selected[backend]
+                else ModelHubRouteConfig()
+            )
+            for model_id in menu_ids
+        }
+        service.store.requested_models[backend] = selected[backend]
+    return selected
 
 
 def _begin_hub_attempt(
@@ -635,6 +660,7 @@ def test_gateway_uses_persisted_exact_hops_for_failover(
                 ),
             ],
         )
+        _canonicalize_fixed_test_routes(service)
         service.store.config.agents["claude"].routes[requested_model] = ModelHubRouteConfig(
             hops=(
                 ModelHubRouteHopConfig(primary.id, primary_model),
@@ -1112,6 +1138,42 @@ def test_opencode_overlay_rejects_wrong_exact_hop_identity(tmp_path: Path) -> No
     assert exc.value.code == "mapping_target_unavailable"
 
 
+def test_opencode_overlay_selects_supported_fallback_by_exact_hop(tmp_path: Path) -> None:
+    source = _source(
+        "src_overlay03",
+        "Overlay",
+        model_id="supported-model",
+    )
+    config = _config([source])
+    agent = config.agents["opencode"]
+    agent.routes.pop("openai/shared-model")
+    agent.routes["openai/menu-model"] = ModelHubRouteConfig(
+        hops=(
+            ModelHubRouteHopConfig(source.id, "stale-model"),
+            ModelHubRouteHopConfig(source.id, "supported-model"),
+        )
+    )
+    agent.menu.checked = ["openai/menu-model"]
+    service = _service(tmp_path, sources=[source])
+    service.store.config = config
+    router = ModelHubRuntimeRouter(
+        service=service,
+        turn_gateway=SimpleNamespace(
+            endpoint=AsyncMock(
+                return_value=("http://127.0.0.1:19000", "gateway-token")
+            ),
+        ),
+        overlay_path=tmp_path / "overlay.json",
+    )
+
+    overlay = asyncio.run(router.prepare_opencode_overlay())
+
+    assert overlay is not None
+    assert [launch.target_model for launch in overlay.launches] == [
+        "supported-model"
+    ]
+
+
 def test_source_observation_requires_distinct_protocol_probes_and_never_infers_from_order(
     tmp_path: Path,
 ) -> None:
@@ -1218,12 +1280,14 @@ def test_source_observation_requires_distinct_protocol_probes_and_never_infers_f
     assert inventory_probe.await_args.kwargs["protocol"] == proved_protocol
 
 
-def test_protocol_observation_hits_one_distinct_upstream_path_per_protocol() -> None:
-    async def scenario() -> list[str]:
-        paths: list[str] = []
+def test_protocol_observation_preserves_query_on_each_distinct_upstream_path() -> None:
+    query = "api-version=2026-07-23"
+
+    async def scenario() -> list[tuple[str, str]]:
+        requests: list[tuple[str, str]] = []
 
         async def reject_empty_probe(request: web.Request) -> web.Response:
-            paths.append(request.path)
+            requests.append((request.path, request.query_string))
             return web.json_response({"error": {"type": "invalid_request"}}, status=400)
 
         app = web.Application()
@@ -1239,17 +1303,42 @@ def test_protocol_observation_hits_one_distinct_upstream_path_per_protocol() -> 
                 await _probe_protocol_response(
                     vendor="custom",
                     protocol=protocol,
-                    base_url=f"http://127.0.0.1:{port}/v1",
+                    base_url=f"http://127.0.0.1:{port}/v1?{query}",
                     secret="test-observation-key",
                 )
         finally:
             await runner.cleanup()
-        return paths
+        return requests
 
-    paths = asyncio.run(scenario())
+    requests = asyncio.run(scenario())
+    paths = [path for path, _query in requests]
 
     assert len(paths) == len(SOURCE_PROTOCOLS)
     assert len(set(paths)) == len(paths)
+    assert {request_query for _path, request_query in requests} == {query}
+
+
+def test_blocked_exact_hop_emits_one_supply_interruption(tmp_path: Path) -> None:
+    source = _source("src_blocked01", "Blocked")
+    service = _service(tmp_path, sources=[source])
+    service.store.config.agents["claude"].routes["shared-model"] = (
+        ModelHubRouteConfig(
+            hops=(ModelHubRouteHopConfig(source.id, "removed-model"),)
+        )
+    )
+    router = ModelHubRuntimeRouter(service=service)
+
+    for _attempt in range(2):
+        with pytest.raises(ModelHubError):
+            asyncio.run(router.resolve("claude", "shared-model"))
+
+    events = [
+        event
+        for event in service.list_events(limit=20)
+        if event["kind"] == "supply_interrupted"
+    ]
+    assert len(events) == 1
+    assert events[0]["reason"] == "model_unsupported"
 
 
 def test_same_scope_concurrency_is_absent_and_sequential_control_is_present(
@@ -1357,19 +1446,23 @@ def test_chain_projection_and_probe_latency_partition(tmp_path: Path) -> None:
         sources=[cooling, primary],
         outcomes=[_outcome(RawOutcomeKind.SUCCESS)],
     )
+    menu_model = _canonicalize_fixed_test_routes(service)["claude"]
 
-    chain = service.agent_chain("claude", "shared-model")
+    chain = service.agent_chain("claude", menu_model)
     assert [item["source_id"] for item in chain["chain"]] == [
         "src_cooling01",
         "src_primary01",
     ]
     assert chain["supply_state"] == "ok"
-    assert chain["current"] == {"source_id": "src_primary01", "model_id": "shared-model"}
+    assert chain["current"] == {
+        "source_id": "src_primary01",
+        "model_id": "shared-model",
+    }
     assert all(item["channel"] == "hub" for item in chain["chain"])
     assert all(item["reason"] is None for item in chain["chain"])
     _assert_valid("agent-chain.schema.json", chain)
 
-    probe = asyncio.run(service.probe_agent("claude", "shared-model"))
+    probe = asyncio.run(service.probe_agent("claude", menu_model))
     assert probe["channel"] == "hub"
     assert probe["reachable"] is True
     assert probe["source_id"] == "src_primary01"
@@ -1382,7 +1475,8 @@ def test_chain_projection_and_probe_latency_partition(tmp_path: Path) -> None:
         sources=[_source("src_primary01", "Primary")],
         outcomes=[_outcome(RawOutcomeKind.NETWORK_ERROR)],
     )
-    network = asyncio.run(network_service.probe_agent("claude", "shared-model"))
+    network_model = _canonicalize_fixed_test_routes(network_service)["claude"]
+    network = asyncio.run(network_service.probe_agent("claude", network_model))
     assert network["reachable"] is False
     assert network["latency_ms"] is None
     assert network["error"] == "models.source.cooldown.network"
@@ -1393,7 +1487,8 @@ def test_chain_projection_and_probe_latency_partition(tmp_path: Path) -> None:
         sources=[_source("src_primary01", "Primary")],
         outcomes=[_outcome(RawOutcomeKind.TIMEOUT)],
     )
-    timeout = asyncio.run(timeout_service.probe_agent("claude", "shared-model"))
+    timeout_model = _canonicalize_fixed_test_routes(timeout_service)["claude"]
+    timeout = asyncio.run(timeout_service.probe_agent("claude", timeout_model))
     assert timeout["reachable"] is False
     assert timeout["latency_ms"] is None
     assert timeout["error"] == "models.source.cooldown.timeout"
@@ -1412,7 +1507,8 @@ def test_chain_projection_and_probe_latency_partition(tmp_path: Path) -> None:
             )
         ],
     )
-    rate_limited = asyncio.run(rate_service.probe_agent("claude", "shared-model"))
+    rate_model = _canonicalize_fixed_test_routes(rate_service)["claude"]
+    rate_limited = asyncio.run(rate_service.probe_agent("claude", rate_model))
     assert rate_limited["reachable"] is False
     assert isinstance(rate_limited["latency_ms"], int)
     assert rate_limited["error"] == "models.source.cooldown.rate_limited"
@@ -1429,7 +1525,12 @@ def test_chain_projection_and_probe_latency_partition(tmp_path: Path) -> None:
             )
         ],
     )
-    unclassified = asyncio.run(unclassified_service.probe_agent("claude", "shared-model"))
+    unclassified_model = _canonicalize_fixed_test_routes(unclassified_service)[
+        "claude"
+    ]
+    unclassified = asyncio.run(
+        unclassified_service.probe_agent("claude", unclassified_model)
+    )
     assert unclassified["reachable"] is False
     assert isinstance(unclassified["latency_ms"], int)
     assert unclassified["error"] == "models.source.error.unclassified"
@@ -1447,7 +1548,12 @@ def test_chain_projection_and_probe_latency_partition(tmp_path: Path) -> None:
             )
         ],
     )
-    request_error = asyncio.run(request_error_service.probe_agent("claude", "shared-model"))
+    request_error_model = _canonicalize_fixed_test_routes(request_error_service)[
+        "claude"
+    ]
+    request_error = asyncio.run(
+        request_error_service.probe_agent("claude", request_error_model)
+    )
     assert request_error["reachable"] is False
     assert isinstance(request_error["latency_ms"], int)
     assert request_error["error"] == "models.source.error.unclassified"
@@ -1466,7 +1572,12 @@ def test_chain_projection_and_probe_latency_partition(tmp_path: Path) -> None:
             )
         ],
     )
-    not_found = asyncio.run(anthropic_not_found.probe_agent("claude", "shared-model"))
+    not_found_model = _canonicalize_fixed_test_routes(anthropic_not_found)[
+        "claude"
+    ]
+    not_found = asyncio.run(
+        anthropic_not_found.probe_agent("claude", not_found_model)
+    )
     assert not_found["reachable"] is False
     assert anthropic_not_found.store.load().sources[0].state.status == "standby"
     assert anthropic_not_found.events.list(limit=10) == []
@@ -1658,8 +1769,9 @@ def test_source_failure_event_is_single_grain_and_retained(tmp_path: Path) -> No
             )
         ],
     )
+    menu_model = _canonicalize_fixed_test_routes(service)["claude"]
 
-    probe = asyncio.run(service.probe_agent("claude", "shared-model"))
+    probe = asyncio.run(service.probe_agent("claude", menu_model))
     assert probe["reachable"] is False
     events = service.list_events(limit=20)
     failures = [event for event in events if event["kind"] == "needs_action"]
@@ -1717,6 +1829,7 @@ def test_shared_source_cooldown_emits_only_on_state_transition(
 ) -> None:
     source = _source("src_primary01", "Shared source")
     service = _service(tmp_path, sources=[source])
+    menu_models = _canonicalize_fixed_test_routes(service)
     decision = classify_outcome(
         _outcome(
             RawOutcomeKind.HTTP_ERROR,
@@ -1730,13 +1843,13 @@ def test_shared_source_cooldown_emits_only_on_state_transition(
             source,
             decision,
             agent="claude",
-            model_id="shared-model",
+            model_id=menu_models["claude"],
         )
         await service._cooldown(
             source,
             decision,
             agent="codex",
-            model_id="shared-model",
+            model_id=menu_models["codex"],
         )
 
     asyncio.run(cool_twice())
