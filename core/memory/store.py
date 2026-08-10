@@ -2761,6 +2761,7 @@ class MemoryStore:
 
     def _initialize(self) -> None:
         schema_sql = Path(__file__).with_name("schema.sql").read_text(encoding="utf-8")
+        # Store migrations deliberately compose on this already-open connection.
         with self._connection() as conn:
             version = int(conn.execute("PRAGMA user_version").fetchone()[0])
             application_tables = _application_tables(conn)
@@ -2788,6 +2789,12 @@ class MemoryStore:
 
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Connection]:
+        """Transact on the Store's already-open connection.
+
+        Store migrations and composed writes intentionally retain this path;
+        ``PrivateSqliteDatabase.transaction`` owns newly opened connections.
+        """
+
         with self._connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
             try:

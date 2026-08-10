@@ -11,6 +11,7 @@ import os
 import re
 import secrets
 import sqlite3
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -206,50 +207,41 @@ class MemoryClearJournal:
         _validated_epoch_pair(pre_epoch, target_epoch)
         now = _utc_now()
         token = secrets.token_hex(16)
-        connection = self._connect()
         try:
-            connection.execute("BEGIN IMMEDIATE")
-            connection.execute(
-                """
-                INSERT INTO clear_operation (
-                    operation_id, operator_ref, state, started_at, updated_at,
-                    pre_epoch, target_epoch, destructive_started, open_slot,
-                    revision, execution_token
-                ) VALUES (?, ?, 'preparing', ?, ?, ?, ?, 0, 1, 1, ?)
-                """,
-                (identifier, actor, now, now, pre_epoch, target_epoch, token),
-            )
-            connection.executemany(
-                """
-                INSERT INTO clear_surface (
-                    operation_id, surface, relative_path, state, updated_at
-                ) VALUES (?, ?, ?, 'pending', ?)
-                """,
-                [
-                    (identifier, surface.name, surface.relative_path, now)
-                    for surface in self._surfaces
-                ],
-            )
-            self._append_event(
-                connection,
-                identifier,
-                "started",
-                actor,
-                occurred_at=now,
-                resulting_revision=1,
-            )
-            connection.commit()
+            with self._transaction() as connection:
+                connection.execute(
+                    """
+                    INSERT INTO clear_operation (
+                        operation_id, operator_ref, state, started_at, updated_at,
+                        pre_epoch, target_epoch, destructive_started, open_slot,
+                        revision, execution_token
+                    ) VALUES (?, ?, 'preparing', ?, ?, ?, ?, 0, 1, 1, ?)
+                    """,
+                    (identifier, actor, now, now, pre_epoch, target_epoch, token),
+                )
+                connection.executemany(
+                    """
+                    INSERT INTO clear_surface (
+                        operation_id, surface, relative_path, state, updated_at
+                    ) VALUES (?, ?, ?, 'pending', ?)
+                    """,
+                    [
+                        (identifier, surface.name, surface.relative_path, now)
+                        for surface in self._surfaces
+                    ],
+                )
+                self._append_event(
+                    connection,
+                    identifier,
+                    "started",
+                    actor,
+                    occurred_at=now,
+                    resulting_revision=1,
+                )
         except sqlite3.IntegrityError as error:
-            connection.rollback()
             if self.get_open_operation() is not None:
                 raise ClearOperationConflict("a Memory clear operation is already open") from error
             raise MemoryClearJournalError("Memory clear journal rejected the operation") from error
-        except Exception:
-            connection.rollback()
-            raise
-        finally:
-            connection.close()
-            self._harden_database_files()
         return self._require_operation(identifier)
 
     def get_operation(self, operation_id: str) -> ClearOperation | None:
@@ -405,9 +397,7 @@ class MemoryClearJournal:
         if set(receipts) != expected_paths or len(receipts) != len(snapshot.surface_receipts):
             raise ValueError("Memory snapshot receipt must cover exactly four surfaces")
 
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
+        with self._transaction() as connection:
             row = self._cas_row(
                 connection,
                 identifier,
@@ -467,13 +457,6 @@ class MemoryClearJournal:
                 """,
                 (relative_snapshot, manifest_digest, now, revision, identifier),
             )
-            connection.commit()
-        except Exception:
-            connection.rollback()
-            raise
-        finally:
-            connection.close()
-            self._harden_database_files()
         return self._require_operation(identifier)
 
     def mark_prepared(
@@ -486,9 +469,7 @@ class MemoryClearJournal:
         """Seal the independently verified snapshot before destructive work."""
 
         identifier = _validated_operation_id(operation_id)
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
+        with self._transaction() as connection:
             row = self._cas_row(
                 connection,
                 identifier,
@@ -531,13 +512,6 @@ class MemoryClearJournal:
                 occurred_at=now,
                 resulting_revision=revision,
             )
-            connection.commit()
-        except Exception:
-            connection.rollback()
-            raise
-        finally:
-            connection.close()
-            self._harden_database_files()
         return self._require_operation(identifier)
 
     def begin_deleting(
@@ -590,9 +564,7 @@ class MemoryClearJournal:
         """Close a clear only after all four deletion receipts are durable."""
 
         identifier = _validated_operation_id(operation_id)
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
+        with self._transaction() as connection:
             row = self._cas_row(
                 connection,
                 identifier,
@@ -628,13 +600,6 @@ class MemoryClearJournal:
                 occurred_at=now,
                 resulting_revision=revision,
             )
-            connection.commit()
-        except Exception:
-            connection.rollback()
-            raise
-        finally:
-            connection.close()
-            self._harden_database_files()
         return self._require_operation(identifier)
 
     def mark_recovery_needed(
@@ -649,9 +614,7 @@ class MemoryClearJournal:
 
         identifier = _validated_operation_id(operation_id)
         error = _validated_error(closed_error)
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
+        with self._transaction() as connection:
             row = self._cas_row(
                 connection,
                 identifier,
@@ -680,13 +643,6 @@ class MemoryClearJournal:
                 closed_error=error,
                 resulting_revision=revision,
             )
-            connection.commit()
-        except Exception:
-            connection.rollback()
-            raise
-        finally:
-            connection.close()
-            self._harden_database_files()
         return self._require_operation(identifier)
 
     def mark_boot_recovery_needed(
@@ -702,14 +658,11 @@ class MemoryClearJournal:
         """
 
         error = _validated_error(closed_error)
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
+        with self._transaction() as connection:
             row = connection.execute(
                 "SELECT * FROM clear_operation WHERE open_slot = 1"
             ).fetchone()
             if row is None:
-                connection.commit()
                 return None
             now = _utc_now()
             revision = row["revision"] + 1
@@ -737,13 +690,6 @@ class MemoryClearJournal:
                 closed_error=error,
                 resulting_revision=revision,
             )
-            connection.commit()
-        except Exception:
-            connection.rollback()
-            raise
-        finally:
-            connection.close()
-            self._harden_database_files()
         return self._require_operation(row["operation_id"])
 
     def claim_resume(
@@ -757,9 +703,7 @@ class MemoryClearJournal:
 
         identifier = _validated_operation_id(operation_id)
         actor = _validated_actor(operator_ref)
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
+        with self._transaction() as connection:
             row = self._recovery_claim_row(connection, identifier, actor, expected_revision)
             if row["resolution"] == "abort":
                 raise ClearTransitionError("an abort decision cannot be changed to resume")
@@ -786,13 +730,6 @@ class MemoryClearJournal:
                 occurred_at=now,
                 resulting_revision=revision,
             )
-            connection.commit()
-        except Exception:
-            connection.rollback()
-            raise
-        finally:
-            connection.close()
-            self._harden_database_files()
         return self._require_operation(identifier)
 
     def claim_abort(
@@ -806,9 +743,7 @@ class MemoryClearJournal:
 
         identifier = _validated_operation_id(operation_id)
         actor = _validated_actor(operator_ref)
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
+        with self._transaction() as connection:
             row = self._recovery_claim_row(connection, identifier, actor, expected_revision)
             if row["resolution"] == "resume":
                 raise ClearTransitionError("a resume decision cannot be changed to abort")
@@ -834,13 +769,6 @@ class MemoryClearJournal:
                 occurred_at=now,
                 resulting_revision=revision,
             )
-            connection.commit()
-        except Exception:
-            connection.rollback()
-            raise
-        finally:
-            connection.close()
-            self._harden_database_files()
         return self._require_operation(identifier)
 
     def release_recovery_claim(
@@ -855,9 +783,7 @@ class MemoryClearJournal:
 
         identifier = _validated_operation_id(operation_id)
         error = _validated_error(closed_error)
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
+        with self._transaction() as connection:
             row = self._cas_row(
                 connection,
                 identifier,
@@ -887,13 +813,6 @@ class MemoryClearJournal:
                 closed_error=error,
                 resulting_revision=revision,
             )
-            connection.commit()
-        except Exception:
-            connection.rollback()
-            raise
-        finally:
-            connection.close()
-            self._harden_database_files()
         return self._require_operation(identifier)
 
     def record_surface_restored(
@@ -930,9 +849,7 @@ class MemoryClearJournal:
 
         identifier = _validated_operation_id(operation_id)
         error = _validated_optional_error(closed_error)
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
+        with self._transaction() as connection:
             row = self._cas_row(
                 connection,
                 identifier,
@@ -971,13 +888,6 @@ class MemoryClearJournal:
                 closed_error=error,
                 resulting_revision=revision,
             )
-            connection.commit()
-        except Exception:
-            connection.rollback()
-            raise
-        finally:
-            connection.close()
-            self._harden_database_files()
         return self._require_operation(identifier)
 
     def _initialize(self) -> None:
@@ -1020,6 +930,16 @@ class MemoryClearJournal:
             return self._database.connect()
         except ConfinedFilesystemError as error:
             raise MemoryClearJournalError("Memory clear journal is unsafe") from error
+
+    def _transaction(self) -> AbstractContextManager[sqlite3.Connection]:
+        return self._database.transaction(
+            translate_connect_error=lambda _error: MemoryClearJournalError(
+                "Memory clear journal is unsafe"
+            ),
+            translate_harden_error=lambda _error: MemoryClearJournalError(
+                "Memory clear journal files could not be hardened safely"
+            ),
+        )
 
     def _validate_surfaces(self) -> None:
         if len(self._surfaces) != len(_SURFACE_NAMES):
@@ -1162,9 +1082,7 @@ class MemoryClearJournal:
         values = dict(assignments or {})
         if not set(values).issubset(allowed_assignments):
             raise ValueError("unsupported Memory clear journal assignment")
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
+        with self._transaction() as connection:
             row = self._cas_row(
                 connection,
                 identifier,
@@ -1192,13 +1110,6 @@ class MemoryClearJournal:
                 occurred_at=now,
                 resulting_revision=revision,
             )
-            connection.commit()
-        except Exception:
-            connection.rollback()
-            raise
-        finally:
-            connection.close()
-            self._harden_database_files()
         return self._require_operation(identifier)
 
     def _surface_transition(
@@ -1223,9 +1134,7 @@ class MemoryClearJournal:
         values = dict(assignments or {})
         if not set(values).issubset(allowed_assignments):
             raise ValueError("unsupported Memory clear surface assignment")
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
+        with self._transaction() as connection:
             row = self._cas_row(
                 connection,
                 operation_id,
@@ -1277,13 +1186,6 @@ class MemoryClearJournal:
                 occurred_at=now,
                 resulting_revision=revision,
             )
-            connection.commit()
-        except Exception:
-            connection.rollback()
-            raise
-        finally:
-            connection.close()
-            self._harden_database_files()
         return self._require_operation(operation_id)
 
     @staticmethod

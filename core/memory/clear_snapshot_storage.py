@@ -46,9 +46,7 @@ class MemoryClearSnapshotStorage:
         """Discard one exact unrecorded preparing snapshot and journal the result."""
 
         identifier = _validated_operation_id(operation_id)
-        connection = self._journal._connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
+        with self._journal._transaction() as connection:
             row = self._journal._cas_row(
                 connection,
                 identifier,
@@ -108,13 +106,6 @@ class MemoryClearSnapshotStorage:
                 occurred_at=now,
                 resulting_revision=revision,
             )
-            connection.commit()
-        except BaseException:
-            connection.rollback()
-            raise
-        finally:
-            connection.close()
-            self._journal._harden_database_files()
         return self._journal._require_operation(identifier)
 
     def eligible_terminal_snapshot_ids(self) -> tuple[str, ...]:

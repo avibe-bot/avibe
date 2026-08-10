@@ -6,6 +6,8 @@ import os
 import sqlite3
 import stat
 from collections import OrderedDict
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
@@ -66,14 +68,76 @@ class PrivateSqliteDatabase:
             self._path,
             timeout=PRIVATE_SQLITE_BUSY_TIMEOUT_SECONDS,
         )
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys=ON")
-        connection.execute(
-            f"PRAGMA busy_timeout={int(PRIVATE_SQLITE_BUSY_TIMEOUT_SECONDS * 1000)}"
-        )
-        connection.execute("PRAGMA journal_mode=WAL")
-        connection.execute("PRAGMA synchronous=FULL")
+        try:
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys=ON")
+            connection.execute(
+                f"PRAGMA busy_timeout={int(PRIVATE_SQLITE_BUSY_TIMEOUT_SECONDS * 1000)}"
+            )
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute("PRAGMA synchronous=FULL")
+        except BaseException:
+            try:
+                connection.close()
+            except BaseException:
+                pass
+            raise
         return connection
+
+    @contextmanager
+    def transaction(
+        self,
+        *,
+        translate_connect_error: Callable[[ConfinedFilesystemError], Exception]
+        | None = None,
+        translate_harden_error: Callable[[ConfinedFilesystemError], Exception]
+        | None = None,
+    ) -> Iterator[sqlite3.Connection]:
+        """Own one immediate transaction through commit and file hardening.
+
+        Translation callbacks preserve an owner's public errors without moving
+        domain-specific exception types into this filesystem module.
+        """
+
+        try:
+            connection = self.connect()
+        except ConfinedFilesystemError as error:
+            if translate_connect_error is None:
+                raise
+            raise translate_connect_error(error) from error
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            yield connection
+            connection.commit()
+        except BaseException:
+            # Cleanup is bounded and cannot replace the transaction failure.
+            try:
+                connection.rollback()
+            except BaseException:
+                pass
+            try:
+                connection.close()
+            except BaseException:
+                pass
+            try:
+                self.harden()
+            except BaseException:
+                pass
+            raise
+        try:
+            connection.close()
+        except BaseException:
+            try:
+                self.harden()
+            except BaseException:
+                pass
+            raise
+        try:
+            self.harden()
+        except ConfinedFilesystemError as error:
+            if translate_harden_error is None:
+                raise
+            raise translate_harden_error(error) from error
 
     def harden(self, *, sync_parent: bool = False) -> None:
         """Set owner-only modes after SQLite may have created sidecar files."""

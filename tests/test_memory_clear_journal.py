@@ -484,6 +484,101 @@ def test_concurrent_starts_create_exactly_one_open_operation(tmp_path: Path) -> 
     assert journal.get_open_operation() == winners[0]
 
 
+def test_clear_journal_preserves_commit_failure_when_close_cleanup_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    journal = _journal(tmp_path)
+    commit_error = sqlite3.OperationalError("commit failed")
+    real_connect = sqlite3.connect
+
+    class FailingConnection(sqlite3.Connection):
+        def commit(self) -> None:
+            raise commit_error
+
+        def close(self) -> None:
+            super().close()
+            raise OSError("close cleanup failed")
+
+    def connect(*args, **kwargs):
+        return real_connect(*args, **kwargs, factory=FailingConnection)
+
+    from core.memory import confined_filesystem
+
+    monkeypatch.setattr(confined_filesystem.sqlite3, "connect", connect)
+
+    with pytest.raises(sqlite3.OperationalError) as raised:
+        journal.start(
+            operation_id="commit-failure",
+            operator_ref="user:owner",
+            pre_epoch=0,
+            target_epoch=1,
+        )
+
+    assert raised.value is commit_error
+
+
+def test_clear_journal_translates_hardening_failure_after_durable_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    journal = _journal(tmp_path)
+
+    from core.memory import confined_filesystem
+
+    real_chmod = confined_filesystem.os.chmod
+
+    def fail_journal_hardening(target, mode: int) -> None:
+        if Path(target) == journal.database_path and mode == 0o600:
+            raise confined_filesystem.ConfinedFilesystemError("unsafe journal")
+        real_chmod(target, mode)
+
+    monkeypatch.setattr(confined_filesystem.os, "chmod", fail_journal_hardening)
+
+    with pytest.raises(
+        MemoryClearJournalError,
+        match="Memory clear journal files could not be hardened safely",
+    ):
+        journal.start(
+            operation_id="harden-failure",
+            operator_ref="user:owner",
+            pre_epoch=0,
+            target_epoch=1,
+        )
+
+    committed = journal.get_operation("harden-failure")
+    assert committed is not None
+    assert committed.state == "preparing"
+
+
+def test_clear_journal_keeps_sqlite_busy_failure_public(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    journal = _journal(tmp_path)
+    blocker = sqlite3.connect(journal.database_path)
+    blocker.execute("BEGIN IMMEDIATE")
+
+    from core.memory import confined_filesystem
+
+    monkeypatch.setattr(
+        confined_filesystem,
+        "PRIVATE_SQLITE_BUSY_TIMEOUT_SECONDS",
+        0.001,
+    )
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            journal.start(
+                operation_id="busy-failure",
+                operator_ref="user:owner",
+                pre_epoch=0,
+                target_epoch=1,
+            )
+    finally:
+        blocker.rollback()
+        blocker.close()
+
+
 def test_terminal_headers_and_events_are_immutable_in_sqlite(tmp_path: Path) -> None:
     journal = _journal(tmp_path)
     operation = journal.start(
