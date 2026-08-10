@@ -51,9 +51,8 @@ from core.memory.process import (
     EverOSProcess,
     EverOSProcessFactory,
     EverOSProcessPort,
+    EverOSRebuildProcess,
     EverOSProcessSettings,
-    SidecarOwnership,
-    sidecar_record_path,
 )
 from core.memory.sidecar_lifecycle import MemorySidecarLifecycle, SidecarSnapshot
 from core.memory.processing_record import (
@@ -637,13 +636,14 @@ class MemoryRuntime:
         async with self._reconcile_lock:
             if self._process is not None:
                 return False
-            ownership = SidecarOwnership(
-                record_path=sidecar_record_path(self._memory_dir),
-                socket_path=self._socket_path,
-                provider_root=self._provider_root,
-            )
             try:
-                await ownership.reap()
+                required_no_follow_flag()
+                recovery = EverOSRebuildProcess(
+                    None,
+                    effective_home=self._effective_home,
+                    provider_root=self._provider_root,
+                )
+                await recovery.reconcile_orphan()
             except Exception as exc:
                 logger.warning("Recorded EverOS sidecar recovery did not finish: %s", exc)
                 return False

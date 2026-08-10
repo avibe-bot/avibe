@@ -66,12 +66,19 @@ def strict_file_create_flags(*, read_write: bool = False) -> int:
     )
 
 
-def ensure_private_directory(home: Path, directory: Path) -> None:
+def ensure_private_directory(
+    home: Path,
+    directory: Path,
+    *,
+    harden_confinement_root: bool = True,
+) -> None:
     """Create one owner-private directory chain through anchored descriptors."""
 
     required_no_follow_flag()
     relative = _relative_to_home(directory, home)
     if not home.exists():
+        if not harden_confinement_root:
+            raise ConfinedFilesystemError("confinement root does not exist")
         try:
             home.mkdir(parents=True, mode=0o700)
         except FileExistsError:
@@ -87,7 +94,10 @@ def ensure_private_directory(home: Path, directory: Path) -> None:
             "confinement root cannot be opened safely"
         ) from error
     try:
-        _harden_private_directory_fd(current, "confinement root")
+        if harden_confinement_root:
+            _harden_private_directory_fd(current, "confinement root")
+        else:
+            _require_exact_private_directory(os.fstat(current), "confinement root")
         for component in relative.parts:
             try:
                 child = os.open(

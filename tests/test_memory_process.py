@@ -7,6 +7,7 @@ import os
 import signal
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 import time
@@ -31,11 +32,17 @@ from core.memory.process import (
     _SystemProcessHost,
     EverOSProcess,
     EverOSProcessSettings,
+    EverOSRebuildProcess,
     FakeEverOSProcess,
+    RebuildProcessResult,
+    _MemoryChildRole,
     _ProcessKind,
     _ProcessIdentity,
     _RecordedSidecar,
+    _classify_recorded_child,
     _classify_recorded_sidecar,
+    _processes_rebuilding_owned_root,
+    _REBUILD_TIMEOUT_SECONDS,
 )
 from core.memory.sidecar import _request_rejection
 from core.memory.types import (
@@ -64,12 +71,14 @@ class _FakeProcessHost:
     trees: dict[tuple[int, int | None], dict[int, float]] = field(default_factory=dict)
     groups: dict[int, tuple[dict[int, float], list[int]]] = field(default_factory=dict)
     sidecars: dict[int, float] = field(default_factory=dict)
+    root_sidecars: dict[int, float] = field(default_factory=dict)
+    rebuilds: dict[int, float] = field(default_factory=dict)
     live_processes: dict[int, float] = field(default_factory=dict)
     listeners: set[int] = field(default_factory=set)
     wait_results: deque[bool] = field(default_factory=deque)
     remove_on_signal: bool = True
     signal_effect: Callable[[Mapping[int, float], int], None] | None = None
-    spawn_calls: list[tuple[_ProcessKind, Path, Path, Path | None]] = field(default_factory=list)
+    spawn_calls: list[tuple[_ProcessKind, Path, Path, Path | None, dict[str, str]]] = field(default_factory=list)
     snapshot_calls: list[tuple[int, int | None]] = field(default_factory=list)
     group_scans: list[int] = field(default_factory=list)
     sidecar_scans: list[Path] = field(default_factory=list)
@@ -85,8 +94,7 @@ class _FakeProcessHost:
         env: Mapping[str, str],
         socket_path: Path | None = None,
     ):
-        del env
-        self.spawn_calls.append((kind, python, cwd, socket_path))
+        self.spawn_calls.append((kind, python, cwd, socket_path, dict(env)))
         if not self.spawns:
             raise OSError("no fake process queued")
         result = self.spawns.popleft()
@@ -110,8 +118,9 @@ class _FakeProcessHost:
         *,
         socket_path: Path,
         provider_root: Path,
+        role=None,
     ) -> tuple[dict[int, float], list[int]]:
-        del socket_path, provider_root
+        del socket_path, provider_root, role
         self.group_scans.append(process_group)
         owned, foreign = self.groups.get(process_group, ({}, []))
         return dict(owned), list(foreign)
@@ -119,6 +128,19 @@ class _FakeProcessHost:
     def find_sidecars(self, *, socket_path: Path) -> dict[int, float]:
         self.sidecar_scans.append(socket_path)
         return dict(self.sidecars)
+
+    def find_sidecars_by_root(self, *, provider_root: Path) -> dict[int, float]:
+        del provider_root
+        return dict(self.root_sidecars)
+
+    def find_rebuilds(
+        self,
+        *,
+        provider_root: Path,
+        python: Path | None,
+    ) -> dict[int, float]:
+        del provider_root, python
+        return dict(self.rebuilds)
 
     def live(self, identities: Mapping[int, float]) -> dict[int, float]:
         return {
@@ -156,6 +178,10 @@ class _FakeProcessHost:
         if self.wait_results:
             return self.wait_results.popleft()
         return not self.live(identities)
+
+    async def wait_for_stopped(self, pid: int, timeout_seconds: float) -> bool:
+        del pid, timeout_seconds
+        return True
 
     def has_tcp_listener(self, identities: Mapping[int, float]) -> bool:
         self.listener_checks.append(dict(identities))
@@ -850,7 +876,9 @@ def _orphan_identity(process: EverOSProcess, **overrides) -> _ProcessIdentity:
 
 def _write_orphan_record(process: EverOSProcess, record: dict) -> Path:
     path = process._ownership.record_path
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    os.chmod(path.parent.parent, 0o700)
+    os.chmod(path.parent, 0o700)
     path.write_text(json.dumps(record), encoding="utf-8")
     return path
 
@@ -928,6 +956,76 @@ def test_recorded_sidecar_identity_accepts_only_a_provably_owned_orphan(tmp_path
         assert verdict(_orphan_record(process), _orphan_identity(process, uid=None)) is (
             _RecordedSidecar.UNVERIFIABLE
         )
+
+
+def test_new_sidecar_role_record_reaps_with_exact_role_environment(tmp_path: Path) -> None:
+    host = _FakeProcessHost(
+        process_groups={_ORPHAN_PID: _ORPHAN_PID},
+        live_processes={_ORPHAN_PID: _ORPHAN_CREATE_TIME},
+        trees={
+            (_ORPHAN_PID, _ORPHAN_PID): {_ORPHAN_PID: _ORPHAN_CREATE_TIME},
+        },
+    )
+    process = _orphan_process(tmp_path, host=host)
+    host.identities[_ORPHAN_PID] = _orphan_identity(
+        process,
+        environment={
+            "EVEROS_ROOT": str(process.provider_root),
+            "AVIBE_MEMORY_CHILD_ROLE": "sidecar",
+        },
+    )
+    record_path = _write_orphan_record(
+        process,
+        _orphan_record(process, role="sidecar", python=sys.executable),
+    )
+    rebuild = _rebuild_process(tmp_path, host)
+
+    asyncio.run(rebuild._ownership.reap())
+
+    assert not host.live_processes
+    assert not record_path.exists()
+    assert process._ownership.consume_planned_reap(
+        _ORPHAN_PID,
+        _ORPHAN_CREATE_TIME,
+    ) is True
+    assert process._ownership.consume_planned_reap(
+        _ORPHAN_PID,
+        _ORPHAN_CREATE_TIME,
+    ) is False
+
+
+def test_legacy_sidecar_group_matching_remains_role_agnostic(tmp_path: Path) -> None:
+    helper = {_ORPHAN_GROUP_HELPER_PID: _ORPHAN_CREATE_TIME + 1}
+
+    class _LegacyGroupHost(_FakeProcessHost):
+        def __init__(self, **kwargs) -> None:
+            super().__init__(**kwargs)
+            self.matched_roles: list[_MemoryChildRole | None] = []
+
+        def recorded_group_members(
+            self,
+            process_group: int,
+            *,
+            socket_path: Path,
+            provider_root: Path,
+            role=None,
+        ) -> tuple[dict[int, float], list[int]]:
+            del process_group, socket_path, provider_root
+            self.matched_roles.append(role)
+            return (dict(helper), []) if role is None else ({}, list(helper))
+
+    host = _LegacyGroupHost(
+        identities={_ORPHAN_PID: None},
+        live_processes=dict(helper),
+    )
+    process = _orphan_process(tmp_path, host=host)
+    record_path = _write_orphan_record(process, _orphan_record(process))
+
+    asyncio.run(process._ownership.reap())
+
+    assert host.matched_roles and set(host.matched_roles) == {None}
+    assert not host.live_processes
+    assert not record_path.exists()
 
 
 def _guarded_process_class(
@@ -1240,7 +1338,11 @@ def test_sidecar_records_a_verified_launch_identity_privately(tmp_path: Path) ->
     process._ownership.record_launch(_ORPHAN_PID, _ORPHAN_CREATE_TIME, _ORPHAN_PID)
     recorded = json.loads(process._ownership.record_path.read_text(encoding="utf-8"))
 
-    assert recorded == _orphan_record(process)
+    assert recorded == _orphan_record(
+        process,
+        role="sidecar",
+        python=sys.executable,
+    )
     assert stat.S_IMODE(process._ownership.record_path.lstat().st_mode) == 0o600
 
     process._ownership.record_path.unlink()
@@ -1513,7 +1615,9 @@ def test_sidecar_launch_reaps_a_live_sidecar_an_unusable_record_cannot_name(
     )
     process = _orphan_process(tmp_path, host=host, stop_timeout_seconds=0.1)
     record_path = process._ownership.record_path
-    record_path.parent.mkdir(parents=True, exist_ok=True)
+    record_path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    os.chmod(record_path.parent.parent, 0o700)
+    os.chmod(record_path.parent, 0o700)
     record_path.write_bytes(_UNUSABLE_RECORDS["truncated"])
     with caplog.at_level(logging.WARNING, logger=memory_process.logger.name):
         asyncio.run(process._ownership.reap())
@@ -1523,6 +1627,10 @@ def test_sidecar_launch_reaps_a_live_sidecar_an_unusable_record_cannot_name(
     assert str(_FOREIGN_GROUP_PID) not in caplog.text
     assert str(_FOREIGN_UID_GROUP_PID) not in caplog.text
     assert not record_path.exists()
+    assert process._ownership.consume_planned_reap(
+        _ORPHAN_PID,
+        _ORPHAN_CREATE_TIME,
+    ) is False
 
 
 @pytest.mark.parametrize("corruption", sorted(_UNUSABLE_RECORDS))
@@ -1551,11 +1659,11 @@ def test_sidecar_launch_proceeds_when_an_unusable_record_names_nothing_running(
     assert not record_path.exists()
 
 
-def test_sidecar_launch_scans_for_processes_only_when_a_record_exists(
+def test_sidecar_launch_scans_for_recordless_managed_children(
     tmp_path: Path,
     short_socket_path: Path,
 ) -> None:
-    """The ordinary first boot must not pay for a machine-wide process scan."""
+    """Every launch checks for a rebuild that died before recording ownership."""
 
     host = _FakeProcessHost()
     process = _orphan_process(
@@ -1568,7 +1676,7 @@ def test_sidecar_launch_scans_for_processes_only_when_a_record_exists(
     assert not process._ownership.record_path.exists()
     assert asyncio.run(process.start()) is False
 
-    assert host.sidecar_scans == []
+    assert host.sidecar_scans == [short_socket_path]
     assert host.spawn_calls
 
 
@@ -1656,11 +1764,228 @@ def test_sidecar_notifies_reaped_callback_only_after_tree_cleanup(
         events.append("tree-cleaned")
 
     monkeypatch.setattr(process, "_terminate_owned_tree", terminate)
-    monkeypatch.setattr(process._ownership, "retire_if_group_is_clear", lambda _group: events.append("retired"))
+    monkeypatch.setattr(
+        process._ownership,
+        "retire_if_group_is_clear",
+        lambda _pid, _group: events.append("retired"),
+    )
 
     asyncio.run(process._watch_child(child))
 
     assert events == ["tree-cleaned", "retired", "reaped"]
+
+
+@pytest.mark.parametrize(
+    "termination_signal",
+    [signal.SIGTERM, getattr(signal, "SIGKILL", signal.SIGTERM)],
+)
+async def test_planned_sidecar_reaps_do_not_consume_crash_budget(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    termination_signal: int,
+) -> None:
+    """Rebuild handoffs keep restart supervision without charging crashes."""
+
+    restart_delays: list[float] = []
+    process = EverOSProcess(
+        sys.executable,
+        effective_home=tmp_path,
+        settings=_settings(),
+    )
+    process._memory_dir.mkdir(mode=0o700)
+
+    async def terminate(*_args, **_kwargs) -> None:
+        return None
+
+    async def restart_after(delay_seconds: float) -> None:
+        restart_delays.append(delay_seconds)
+
+    monkeypatch.setattr(process, "_terminate_owned_tree", terminate)
+    monkeypatch.setattr(process, "_restart_after", restart_after)
+
+    for _ in range(5):
+        child = _ExitedChild()
+        child.returncode = -termination_signal
+        _supervising(process, child)
+        process._desired_running = True
+        process._ownership.record_planned_reap(
+            child.pid,
+            _ORPHAN_CREATE_TIME,
+        )
+
+        await process._watch_child(child)
+        assert process._restart_task is not None
+        await process._restart_task
+        assert process._ownership.consume_planned_reap(
+            child.pid,
+            _ORPHAN_CREATE_TIME,
+        ) is False
+
+    assert process.consecutive_failures == 0
+    assert process.down is False
+    assert restart_delays == [0.0] * 5
+
+
+@pytest.mark.parametrize(
+    "termination_signal",
+    [signal.SIGTERM, getattr(signal, "SIGKILL", signal.SIGTERM)],
+)
+async def test_unplanned_sidecar_signals_still_consume_crash_budget(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    termination_signal: int,
+) -> None:
+    process = EverOSProcess(
+        sys.executable,
+        effective_home=tmp_path,
+        settings=_settings(),
+    )
+    process._consecutive_failures = 4
+    child = _ExitedChild()
+    child.returncode = -termination_signal
+    _supervising(process, child)
+    process._desired_running = True
+
+    async def terminate(*_args, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(process, "_terminate_owned_tree", terminate)
+
+    await process._watch_child(child)
+
+    assert process.consecutive_failures == 5
+    assert process.down is True
+    assert process._restart_task is None
+
+
+async def test_planned_reap_from_exited_issuer_cannot_exempt_same_generation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    process = EverOSProcess(
+        sys.executable,
+        effective_home=tmp_path,
+        settings=_settings(),
+    )
+    process._memory_dir.mkdir(mode=0o700)
+    issuer = """
+import sys
+from pathlib import Path
+from core.memory.process import SidecarOwnership, _MemoryChildRole
+
+root = Path(sys.argv[1])
+ownership = SidecarOwnership(
+    record_path=Path(sys.argv[2]),
+    socket_path=Path(sys.argv[3]),
+    provider_root=root,
+    role=_MemoryChildRole.CASCADE_REBUILD,
+)
+ownership.record_planned_reap(int(sys.argv[4]), float(sys.argv[5]))
+"""
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            issuer,
+            str(process.provider_root),
+            str(process._ownership.record_path),
+            str(process.socket_path),
+            str(_ORPHAN_PID),
+            str(_ORPHAN_CREATE_TIME),
+        ],
+        check=True,
+        cwd=Path(__file__).resolve().parents[1],
+    )
+
+    process._consecutive_failures = 4
+    child = _ExitedChild()
+    child.returncode = -signal.SIGTERM
+    _supervising(process, child)
+    process._desired_running = True
+
+    async def terminate(*_args, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(process, "_terminate_owned_tree", terminate)
+
+    await process._watch_child(child)
+
+    assert process.consecutive_failures == 5
+    assert process.down is True
+    assert process._restart_task is None
+    assert process._ownership.consume_planned_reap(
+        child.pid,
+        _ORPHAN_CREATE_TIME,
+    ) is False
+
+
+async def test_stale_planned_reap_cannot_exempt_replacement_generation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    process = EverOSProcess(
+        sys.executable,
+        effective_home=tmp_path,
+        settings=_settings(),
+    )
+    process._memory_dir.mkdir(mode=0o700)
+    process._consecutive_failures = 4
+    process._ownership.record_planned_reap(
+        _ORPHAN_PID,
+        _ORPHAN_CREATE_TIME,
+    )
+    child = _ExitedChild()
+    child.returncode = -signal.SIGTERM
+    replacement_create_time = _ORPHAN_CREATE_TIME + 1
+    process._process = child
+    process._process_group = _ORPHAN_PID
+    process._owned_processes = {_ORPHAN_PID: replacement_create_time}
+    process._desired_running = True
+
+    async def terminate(*_args, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(process, "_terminate_owned_tree", terminate)
+
+    await process._watch_child(child)
+
+    assert process.consecutive_failures == 5
+    assert process.down is True
+    assert process._restart_task is None
+
+
+async def test_planned_reap_does_not_restart_a_stopped_supervisor(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    process = EverOSProcess(
+        sys.executable,
+        effective_home=tmp_path,
+        settings=_settings(),
+    )
+    process._memory_dir.mkdir(mode=0o700)
+    child = _ExitedChild()
+    child.returncode = -getattr(signal, "SIGKILL", signal.SIGTERM)
+    _supervising(process, child)
+    process._desired_running = False
+    process._ownership.record_planned_reap(
+        child.pid,
+        _ORPHAN_CREATE_TIME,
+    )
+
+    async def terminate(*_args, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(process, "_terminate_owned_tree", terminate)
+
+    await process._watch_child(child)
+
+    assert process.consecutive_failures == 0
+    assert process._restart_task is None
+    assert process._ownership.consume_planned_reap(
+        child.pid,
+        _ORPHAN_CREATE_TIME,
+    ) is False
 
 
 def test_sidecar_start_failure_after_host_handoff_notifies_reaped(tmp_path: Path) -> None:
@@ -1844,3 +2169,2411 @@ def test_sidecar_orphan_reap_sweeps_the_group_before_retiring_the_record(
         (signal.SIGTERM, _ORPHAN_PID, None),
         (getattr(signal, "SIGKILL", signal.SIGTERM), _ORPHAN_PID, None),
     ]
+
+
+class _RebuildChild:
+    def __init__(self, exit_code: int | None = 0, *, pid: int = _ORPHAN_PID) -> None:
+        self.pid = pid
+        self.returncode: int | None = None
+        self._exit_code = exit_code
+        self.waiting = asyncio.Event()
+
+    async def wait(self) -> int:
+        self.waiting.set()
+        if self._exit_code is None:
+            await asyncio.Event().wait()
+        self.returncode = self._exit_code
+        return int(self.returncode)
+
+    def send_signal(self, _signum: int) -> None:
+        return None
+
+
+def _rebuild_process(
+    tmp_path: Path,
+    host: _FakeProcessHost,
+    *,
+    timeout_seconds: float = 1.0,
+    settings: EverOSProcessSettings | None = None,
+) -> EverOSRebuildProcess:
+    return EverOSRebuildProcess(
+        sys.executable,
+        effective_home=tmp_path,
+        settings=settings or _settings(),
+        timeout_seconds=timeout_seconds,
+        stop_timeout_seconds=0.1,
+        _host=host,
+    )
+
+
+async def test_rebuild_requires_only_complete_embedding_settings(tmp_path: Path) -> None:
+    child = _RebuildChild(0)
+    identities = {child.pid: _ORPHAN_CREATE_TIME}
+    host = _FakeProcessHost(
+        spawns=deque([child]),
+        trees={(child.pid, None): identities},
+        live_processes=dict(identities),
+    )
+    settings = replace(
+        _settings(),
+        llm_base_url=None,
+        llm_model=None,
+        llm_api_key=None,
+    )
+
+    assert await _rebuild_process(tmp_path, host, settings=settings).run() is (
+        RebuildProcessResult.COMPLETED
+    )
+    assert len(host.spawn_calls) == 1
+
+
+async def test_rebuild_normalizes_relative_provider_root_before_launch(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    provider_parent = tmp_path / "shared"
+    provider_parent.mkdir(mode=0o700)
+    expected_root = provider_parent / "everos-root"
+    child = _RebuildChild(0)
+    identities = {child.pid: _ORPHAN_CREATE_TIME}
+    host = _FakeProcessHost(
+        spawns=deque([child]),
+        trees={(child.pid, None): identities},
+        live_processes=dict(identities),
+    )
+    process = EverOSRebuildProcess(
+        sys.executable,
+        effective_home=tmp_path / "home",
+        provider_root=Path("shared/everos-root"),
+        settings=_settings(),
+        _host=host,
+    )
+
+    assert await process.run() is RebuildProcessResult.COMPLETED
+    assert process._provider_root == expected_root
+    assert (expected_root / "everos.toml").is_file()
+    assert host.spawn_calls[0][4]["EVEROS_ROOT"] == str(expected_root)
+    assert memory_process._provider_rebuild_lock_path(
+        provider_root=process._provider_root
+    ).parent.parent == provider_parent
+
+
+def test_provider_root_aliases_share_lock_identity_without_changing_access_path(
+    tmp_path: Path,
+) -> None:
+    provider_parent = tmp_path / "provider-parent"
+    provider_parent.mkdir(mode=0o700)
+    alias_parent = tmp_path / "legacy-provider-parent"
+    alias_parent.symlink_to(provider_parent, target_is_directory=True)
+    expected_root = provider_parent / "everos-root"
+
+    sidecar = EverOSProcess(
+        sys.executable,
+        effective_home=tmp_path / "sidecar-home",
+        provider_root=alias_parent / "everos-root",
+        settings=_settings(),
+    )
+    rebuild = EverOSRebuildProcess(
+        sys.executable,
+        effective_home=tmp_path / "rebuild-home",
+        provider_root=expected_root,
+        settings=_settings(),
+    )
+
+    alias_root = alias_parent / "everos-root"
+    assert sidecar.provider_root == alias_root
+    assert rebuild._provider_root == expected_root
+    assert sidecar._ownership._provider_root == alias_root
+    assert rebuild._ownership._provider_root == expected_root
+    assert sidecar._child_environment()["EVEROS_ROOT"] == str(alias_root)
+    assert memory_process._provider_rebuild_lock_path(
+        provider_root=sidecar.provider_root,
+    ) == memory_process._provider_rebuild_lock_path(
+        provider_root=rebuild._provider_root,
+    )
+    sidecar._ownership.record_launch(
+        _ORPHAN_PID,
+        _ORPHAN_CREATE_TIME,
+        None,
+    )
+    record = json.loads(sidecar._ownership.record_path.read_text(encoding="utf-8"))
+    assert record["provider_root"] == str(alias_root)
+
+
+async def test_rebuild_rejects_final_provider_root_symlink_without_touching_target(
+    tmp_path: Path,
+) -> None:
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir(mode=0o700)
+    target = tmp_path / "provider-target"
+    target.mkdir(mode=0o700)
+    sentinel = target / "sentinel"
+    sentinel.write_text("unchanged", encoding="utf-8")
+    provider_root = memory_dir / "everos-root"
+    provider_root.symlink_to(target, target_is_directory=True)
+    host = _FakeProcessHost()
+    process = EverOSRebuildProcess(
+        sys.executable,
+        effective_home=tmp_path,
+        provider_root=provider_root,
+        settings=_settings(),
+        _host=host,
+    )
+
+    assert await process.run() is RebuildProcessResult.FAILED
+    assert host.spawn_calls == []
+    assert provider_root.is_symlink()
+    assert stat.S_IMODE(target.stat().st_mode) == 0o700
+    assert sentinel.read_text(encoding="utf-8") == "unchanged"
+    assert sorted(path.name for path in target.iterdir()) == ["sentinel"]
+
+
+async def test_direct_ownership_reap_rejects_provider_root_symlink(
+    tmp_path: Path,
+) -> None:
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir(mode=0o700)
+    target = tmp_path / "provider-target"
+    target.mkdir(mode=0o700)
+    provider_root = memory_dir / "everos-root"
+    provider_root.symlink_to(target, target_is_directory=True)
+    host = _FakeProcessHost(root_sidecars={_ORPHAN_PID: _ORPHAN_CREATE_TIME})
+    ownership = memory_process.SidecarOwnership(
+        record_path=memory_process.sidecar_record_path(memory_dir),
+        socket_path=memory_dir / ".rt" / "everos.sock",
+        provider_root=provider_root,
+        _host=host,
+    )
+
+    with pytest.raises(RuntimeError, match="provider root chain contains a symlink"):
+        await ownership.reap(discover_missing=True)
+    assert host.signal_calls == []
+
+
+def test_case_aliases_share_existing_provider_root_lock_identity(
+    tmp_path: Path,
+) -> None:
+    provider_parent = tmp_path / "ProviderData"
+    provider_parent.mkdir(mode=0o700)
+    provider_root = provider_parent / "EverOS"
+    provider_root.mkdir(mode=0o700)
+    case_alias = provider_parent / "everos"
+    if case_alias == provider_root or not case_alias.exists():
+        pytest.skip("filesystem is case-sensitive")
+
+    first = EverOSRebuildProcess(
+        sys.executable,
+        effective_home=tmp_path / "first-home",
+        provider_root=provider_root,
+        settings=_settings(),
+    )
+    second = EverOSRebuildProcess(
+        sys.executable,
+        effective_home=tmp_path / "second-home",
+        provider_root=case_alias,
+        settings=_settings(),
+    )
+    first_lock = first._provider_root_lock()
+    second_lock = second._provider_root_lock()
+    first_lock.acquire()
+    try:
+        with pytest.raises(memory_process._ProviderRootBusy):
+            second_lock.acquire()
+    finally:
+        first_lock.release()
+        second_lock.release()
+
+
+async def test_rebuild_normalizes_relative_interpreter_before_child_cwd(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    interpreter = tmp_path / ".venv" / "bin" / "python"
+    interpreter.parent.mkdir(parents=True)
+    interpreter.write_bytes(b"")
+    child = _RebuildChild(0)
+    identities = {child.pid: _ORPHAN_CREATE_TIME}
+    host = _FakeProcessHost(
+        spawns=deque([child]),
+        trees={(child.pid, None): identities},
+        live_processes=dict(identities),
+    )
+    process = EverOSRebuildProcess(
+        Path(".venv/bin/python"),
+        effective_home=tmp_path / "home",
+        settings=_settings(),
+        _host=host,
+    )
+
+    assert await process.run() is RebuildProcessResult.COMPLETED
+    assert process._python == interpreter
+    assert host.spawn_calls[0][1] == interpreter
+
+
+@pytest.mark.parametrize(
+    "missing_field",
+    ["embedding_base_url", "embedding_model", "embedding_api_key"],
+)
+async def test_rebuild_never_spawns_with_incomplete_embedding_settings(
+    tmp_path: Path,
+    missing_field: str,
+) -> None:
+    host = _FakeProcessHost()
+    settings = replace(_settings(), **{missing_field: None})
+
+    assert await _rebuild_process(tmp_path, host, settings=settings).run() is (
+        RebuildProcessResult.FAILED
+    )
+    assert host.spawn_calls == []
+
+
+async def test_rebuild_without_artifact_python_is_recovery_only(tmp_path: Path) -> None:
+    host = _FakeProcessHost()
+    process = EverOSRebuildProcess(
+        None,
+        effective_home=tmp_path,
+        settings=_settings(),
+        _host=host,
+    )
+
+    assert await process.run() is RebuildProcessResult.FAILED
+    assert host.spawn_calls == []
+
+
+@pytest.mark.parametrize(
+    ("exit_code", "expected"),
+    [
+        (0, RebuildProcessResult.COMPLETED),
+        (3, RebuildProcessResult.ROOT_BUSY),
+        (130, RebuildProcessResult.INTERRUPTED),
+        (1, RebuildProcessResult.FAILED),
+    ],
+)
+async def test_rebuild_maps_closed_results_and_reaps_the_whole_group(
+    tmp_path: Path,
+    exit_code: int,
+    expected: RebuildProcessResult,
+) -> None:
+    child = _RebuildChild(exit_code)
+    identities = {
+        child.pid: _ORPHAN_CREATE_TIME,
+        _ORPHAN_DESCENDANT_PID: _ORPHAN_CREATE_TIME + 1,
+    }
+    host = _FakeProcessHost(
+        spawns=deque([child]),
+        process_groups={child.pid: child.pid},
+        trees={(child.pid, child.pid): identities},
+        live_processes=dict(identities),
+    )
+
+    result = await _rebuild_process(tmp_path, host).run()
+
+    assert result is expected
+    assert not host.live_processes
+    kind, python, _cwd, socket_path, environment = host.spawn_calls[0]
+    assert kind is _ProcessKind.CASCADE_REBUILD
+    assert python == Path(sys.executable)
+    assert socket_path is None
+    assert environment["EVEROS_ROOT"] == str(tmp_path / "memory" / "everos-root")
+    assert environment["AVIBE_MEMORY_CHILD_ROLE"] == "cascade_rebuild"
+
+
+async def test_rebuild_timeout_terminates_and_reaps_before_returning(tmp_path: Path) -> None:
+    child = _RebuildChild(None)
+    identities = {child.pid: _ORPHAN_CREATE_TIME}
+    host = _FakeProcessHost(
+        spawns=deque([child]),
+        process_groups={child.pid: child.pid},
+        trees={(child.pid, child.pid): identities},
+        live_processes=dict(identities),
+    )
+
+    result = await _rebuild_process(tmp_path, host, timeout_seconds=0.01).run()
+
+    assert result is RebuildProcessResult.TIMED_OUT
+    assert not host.live_processes
+    assert host.signal_calls
+
+
+async def test_rebuild_never_reports_completed_while_a_late_group_helper_survives(
+    tmp_path: Path,
+) -> None:
+    child = _RebuildChild(0)
+    root = {child.pid: _ORPHAN_CREATE_TIME}
+    helper = {_ORPHAN_DESCENDANT_PID: _ORPHAN_CREATE_TIME + 1}
+    host = _FakeProcessHost(
+        spawns=deque([child]),
+        process_groups={child.pid: child.pid},
+        trees={(child.pid, child.pid): root},
+        groups={child.pid: (helper, [])},
+        live_processes={**root, **helper},
+        wait_results=deque([True, False, False]),
+        remove_on_signal=False,
+    )
+
+    result = await _rebuild_process(tmp_path, host).run()
+
+    assert result is RebuildProcessResult.FAILED
+    assert host.live_processes
+    assert (tmp_path / "memory" / ".rt" / "everos.sidecar.json").exists()
+
+
+async def test_rebuild_never_reports_completed_with_an_unverifiable_group_member(
+    tmp_path: Path,
+) -> None:
+    child = _RebuildChild(0)
+    root = {child.pid: _ORPHAN_CREATE_TIME}
+    host = _FakeProcessHost(
+        spawns=deque([child]),
+        process_groups={child.pid: child.pid},
+        trees={(child.pid, child.pid): root},
+        groups={child.pid: ({}, [_FOREIGN_GROUP_PID])},
+        live_processes={
+            **root,
+            _FOREIGN_GROUP_PID: _ORPHAN_CREATE_TIME + 1,
+        },
+    )
+
+    result = await _rebuild_process(tmp_path, host).run()
+
+    assert result is RebuildProcessResult.FAILED
+    assert host.live_processes == {
+        _FOREIGN_GROUP_PID: _ORPHAN_CREATE_TIME + 1,
+    }
+    assert (tmp_path / "memory" / ".rt" / "everos.sidecar.json").exists()
+
+
+async def test_rebuild_keeps_late_unverifiable_member_found_during_group_cleanup(
+    tmp_path: Path,
+) -> None:
+    child = _RebuildChild(0)
+    root = {child.pid: _ORPHAN_CREATE_TIME}
+    helper = {_ORPHAN_DESCENDANT_PID: _ORPHAN_CREATE_TIME + 1}
+
+    class _LateForeignHost(_FakeProcessHost):
+        group_reads = 0
+
+        def recorded_group_members(
+            self,
+            process_group: int,
+            *,
+            socket_path: Path,
+            provider_root: Path,
+            role=None,
+        ) -> tuple[dict[int, float], list[int]]:
+            del process_group, socket_path, provider_root, role
+            self.group_reads += 1
+            if self.group_reads == 1:
+                return dict(helper), []
+            return {}, [_FOREIGN_GROUP_PID]
+
+    host = _LateForeignHost(
+        spawns=deque([child]),
+        process_groups={child.pid: child.pid},
+        trees={(child.pid, child.pid): root},
+        live_processes={
+            **root,
+            **helper,
+            _FOREIGN_GROUP_PID: _ORPHAN_CREATE_TIME + 2,
+        },
+    )
+
+    result = await _rebuild_process(tmp_path, host).run()
+
+    assert result is RebuildProcessResult.FAILED
+    assert host.live_processes == {
+        _FOREIGN_GROUP_PID: _ORPHAN_CREATE_TIME + 2,
+    }
+    assert (tmp_path / "memory" / ".rt" / "everos.sidecar.json").exists()
+
+
+async def test_rebuild_cancellation_returns_interrupted_after_reaping(tmp_path: Path) -> None:
+    child = _RebuildChild(None)
+    identities = {child.pid: _ORPHAN_CREATE_TIME}
+    host = _FakeProcessHost(
+        spawns=deque([child]),
+        process_groups={child.pid: child.pid},
+        trees={(child.pid, child.pid): identities},
+        live_processes=dict(identities),
+    )
+    task = asyncio.create_task(_rebuild_process(tmp_path, host).run())
+    await child.waiting.wait()
+
+    task.cancel()
+    result = await task
+
+    assert result is RebuildProcessResult.INTERRUPTED
+    assert not host.live_processes
+    assert host.signal_calls
+
+
+async def test_rebuild_cancellation_waits_for_spawn_handoff_then_reaps(tmp_path: Path) -> None:
+    child = _RebuildChild(None)
+    identities = {child.pid: _ORPHAN_CREATE_TIME}
+    releases: list[int] = []
+    child.send_signal = releases.append
+
+    class _BlockingSpawnHost(_FakeProcessHost):
+        def __init__(self, **kwargs) -> None:
+            super().__init__(**kwargs)
+            self.spawned = asyncio.Event()
+            self.release_spawn = asyncio.Event()
+
+        async def spawn(self, *args, **kwargs):
+            self.live_processes[child.pid] = _ORPHAN_CREATE_TIME
+            self.spawned.set()
+            await self.release_spawn.wait()
+            return await super().spawn(*args, **kwargs)
+
+    host = _BlockingSpawnHost(
+        spawns=deque([child]),
+        process_groups={child.pid: child.pid},
+        trees={(child.pid, child.pid): identities},
+    )
+    task = asyncio.create_task(_rebuild_process(tmp_path, host).run())
+    await host.spawned.wait()
+
+    task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done()
+    host.release_spawn.set()
+
+    assert await task is RebuildProcessResult.INTERRUPTED
+    assert releases == [signal.SIGCONT]
+    assert not host.live_processes
+    assert host.signal_calls
+    assert not (tmp_path / "memory" / ".rt" / "everos.sidecar.json").exists()
+
+
+async def test_rebuild_cleanup_survives_a_second_cancellation(tmp_path: Path) -> None:
+    class _BlockingCleanupHost(_FakeProcessHost):
+        def __init__(self, **kwargs) -> None:
+            super().__init__(**kwargs)
+            self.cleanup_started = asyncio.Event()
+            self.release_cleanup = asyncio.Event()
+
+        async def wait_for_exit(self, *args, **kwargs) -> bool:
+            self.cleanup_started.set()
+            await self.release_cleanup.wait()
+            return await super().wait_for_exit(*args, **kwargs)
+
+    child = _RebuildChild(None)
+    identities = {child.pid: _ORPHAN_CREATE_TIME}
+    host = _BlockingCleanupHost(
+        spawns=deque([child]),
+        process_groups={child.pid: child.pid},
+        trees={(child.pid, child.pid): identities},
+        live_processes=dict(identities),
+    )
+    task = asyncio.create_task(_rebuild_process(tmp_path, host).run())
+    await child.waiting.wait()
+
+    task.cancel()
+    await host.cleanup_started.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done()
+    host.release_cleanup.set()
+
+    assert await task is RebuildProcessResult.INTERRUPTED
+    assert not host.live_processes
+    assert not (tmp_path / "memory" / ".rt" / "everos.sidecar.json").exists()
+
+
+async def test_rebuild_cancellation_during_cleanup_cannot_report_completed(tmp_path: Path) -> None:
+    class _BlockingCleanupHost(_FakeProcessHost):
+        def __init__(self, **kwargs) -> None:
+            super().__init__(**kwargs)
+            self.cleanup_started = asyncio.Event()
+            self.release_cleanup = asyncio.Event()
+
+        async def wait_for_exit(self, *args, **kwargs) -> bool:
+            self.cleanup_started.set()
+            await self.release_cleanup.wait()
+            return await super().wait_for_exit(*args, **kwargs)
+
+    child = _RebuildChild(0)
+    identities = {child.pid: _ORPHAN_CREATE_TIME}
+    host = _BlockingCleanupHost(
+        spawns=deque([child]),
+        process_groups={child.pid: child.pid},
+        trees={(child.pid, child.pid): identities},
+        live_processes=dict(identities),
+    )
+    task = asyncio.create_task(_rebuild_process(tmp_path, host).run())
+    await host.cleanup_started.wait()
+
+    task.cancel()
+    host.release_cleanup.set()
+
+    assert await task is RebuildProcessResult.INTERRUPTED
+    assert not host.live_processes
+
+
+def test_rebuild_default_deadline_is_thirty_minutes(tmp_path: Path) -> None:
+    process = EverOSRebuildProcess(
+        sys.executable,
+        effective_home=tmp_path,
+        settings=_settings(),
+        _host=_FakeProcessHost(),
+    )
+
+    assert _REBUILD_TIMEOUT_SECONDS == 30 * 60
+    assert process._timeout_seconds == 30 * 60
+
+
+async def test_system_host_uses_the_exact_pinned_rebuild_argv(monkeypatch, tmp_path: Path) -> None:
+    captured: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    async def create_subprocess(*arguments, **options):
+        captured.append((arguments, options))
+        return object()
+
+    monkeypatch.setattr(memory_process.asyncio, "create_subprocess_exec", create_subprocess)
+
+    await _SystemProcessHost().spawn(
+        _ProcessKind.CASCADE_REBUILD,
+        Path("/artifact/bin/python"),
+        cwd=tmp_path,
+        env={"EVEROS_ROOT": str(tmp_path / "root")},
+    )
+
+    assert captured[0][0] == (
+        "/artifact/bin/python",
+        "-m",
+        "core.memory.rebuild_child",
+        "cascade",
+        "rebuild",
+        "--yes",
+    )
+    assert captured[0][1]["start_new_session"] is True
+
+
+def test_rebuild_child_installs_scrubbers_before_delegating(monkeypatch) -> None:
+    from core.memory import rebuild_child
+
+    calls: list[object] = []
+    monkeypatch.setattr(
+        rebuild_child,
+        "_set_private_umask",
+        lambda: calls.append("private-umask"),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        rebuild_child,
+        "_await_parent_ownership",
+        lambda: calls.append("ownership-established"),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        rebuild_child,
+        "install_error_scrubbers",
+        lambda: calls.append("scrubbers"),
+    )
+    monkeypatch.setattr(
+        rebuild_child.runpy,
+        "run_module",
+        lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+
+    assert rebuild_child.main() == 0
+    assert calls == [
+        "private-umask",
+        "ownership-established",
+        "scrubbers",
+        (("everos.entrypoints.cli.main",), {"run_name": "__main__", "alter_sys": True}),
+    ]
+
+
+@pytest.mark.parametrize("exit_code", [0, 3, 130])
+def test_rebuild_child_real_seam_scrubs_before_cli_and_preserves_exit_code(
+    tmp_path: Path,
+    exit_code: int,
+) -> None:
+    artifact_site = tmp_path / "artifact-site"
+    packages = (
+        "everos",
+        "everos/entrypoints",
+        "everos/entrypoints/cli",
+        "everos/infra",
+        "everos/infra/ome",
+        "everos/infra/ome/_stores",
+        "everos/infra/persistence",
+        "everos/infra/persistence/sqlite",
+        "everos/infra/persistence/sqlite/repos",
+    )
+    for package in packages:
+        directory = artifact_site / package
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "__init__.py").write_text("", encoding="utf-8")
+    (artifact_site / "everos/infra/ome/_stores/run_record.py").write_text(
+        "class RunRecordStore:\n"
+        "    async def _update_status(self, *args, **kwargs):\n"
+        "        return None\n",
+        encoding="utf-8",
+    )
+    (artifact_site / "everos/infra/persistence/sqlite/repos/md_change_state.py").write_text(
+        "class StateRepo:\n"
+        "    async def mark_failed(self, *args, **kwargs):\n"
+        "        return None\n"
+        "md_change_state_repo = StateRepo()\n",
+        encoding="utf-8",
+    )
+    (artifact_site / "everos/entrypoints/cli/main.py").write_text(
+        "import os\n"
+        "import sys\n"
+        "from pathlib import Path\n"
+        "from everos.infra.ome._stores.run_record import RunRecordStore\n"
+        "from everos.infra.persistence.sqlite.repos.md_change_state import md_change_state_repo\n"
+        "assert getattr(RunRecordStore._update_status, '__avibe_memory_call_patch__', False)\n"
+        "assert getattr(type(md_change_state_repo).mark_failed, '__avibe_memory_call_patch__', False)\n"
+        "assert sys.argv[1:] == ['cascade', 'rebuild', '--yes']\n"
+        "assert os.environ['AVIBE_MEMORY_CHILD_ROLE'] == 'cascade_rebuild'\n"
+        "root = Path(os.environ['EVEROS_ROOT'])\n"
+        "probe_dir = root / 'mode-probe'\n"
+        "probe_dir.mkdir(parents=True)\n"
+        "(probe_dir / 'created.txt').write_text('private', encoding='utf-8')\n"
+        "raise SystemExit(int(os.environ['TEST_REBUILD_EXIT']))\n",
+        encoding="utf-8",
+    )
+    memory_dir = tmp_path / "memory"
+    provider_root = memory_dir / "everos-root"
+    memory_dir.mkdir()
+    source_root = Path(__file__).resolve().parents[1]
+    environment = memory_process._memory_child_environment(
+        python=Path(sys.executable),
+        memory_dir=memory_dir,
+        provider_root=provider_root,
+        attachments_root=memory_dir / "attachments",
+        settings=_settings(),
+        role=_MemoryChildRole.CASCADE_REBUILD,
+    )
+    environment["PYTHONPATH"] = os.pathsep.join((str(source_root), str(artifact_site)))
+    environment["TEST_REBUILD_EXIT"] = str(exit_code)
+
+    child = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "core.memory.rebuild_child",
+            "cascade",
+            "rebuild",
+            "--yes",
+        ],
+        cwd=memory_dir,
+        env=environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    assert asyncio.run(_SystemProcessHost().wait_for_stopped(child.pid, 10))
+    child_process = psutil.Process(child.pid)
+    assert child.poll() is None
+    assert child_process.status() == psutil.STATUS_STOPPED
+    child.send_signal(signal.SIGCONT)
+    _stdout, stderr = child.communicate(timeout=10)
+
+    assert child.returncode == exit_code, stderr
+    assert stat.S_IMODE((provider_root / "mode-probe").stat().st_mode) == 0o700
+    assert stat.S_IMODE((provider_root / "mode-probe/created.txt").stat().st_mode) == 0o600
+
+
+async def test_rebuild_releases_child_only_after_persisting_ownership(tmp_path: Path) -> None:
+    child = _RebuildChild(0)
+    identities = {child.pid: _ORPHAN_CREATE_TIME}
+    host = _FakeProcessHost(
+        spawns=deque([child]),
+        trees={(child.pid, None): identities},
+        live_processes=dict(identities),
+    )
+    process = _rebuild_process(tmp_path, host)
+    releases: list[int] = []
+
+    def release(signum: int) -> None:
+        assert process._ownership.record_path.exists()
+        releases.append(signum)
+
+    child.send_signal = release
+
+    assert await process.run() is RebuildProcessResult.COMPLETED
+    assert releases == [signal.SIGCONT]
+
+
+async def test_rebuild_waits_for_stopped_handshake_before_record_and_release(
+    tmp_path: Path,
+) -> None:
+    child = _RebuildChild(0)
+    identities = {child.pid: _ORPHAN_CREATE_TIME}
+    releases: list[int] = []
+    child.send_signal = releases.append
+
+    class _DelayedHandshakeHost(_FakeProcessHost):
+        def __init__(self, **kwargs) -> None:
+            super().__init__(**kwargs)
+            self.handshake_started = asyncio.Event()
+            self.child_stopped = asyncio.Event()
+
+        async def wait_for_stopped(self, pid: int, timeout_seconds: float) -> bool:
+            del pid, timeout_seconds
+            self.handshake_started.set()
+            await self.child_stopped.wait()
+            return True
+
+    host = _DelayedHandshakeHost(
+        spawns=deque([child]),
+        trees={(child.pid, None): identities},
+        live_processes=dict(identities),
+    )
+    process = _rebuild_process(tmp_path, host)
+    task = asyncio.create_task(process.run())
+
+    await asyncio.wait_for(host.handshake_started.wait(), timeout=0.5)
+    assert releases == []
+    assert not process._ownership.record_path.exists()
+    host.child_stopped.set()
+
+    assert await task is RebuildProcessResult.COMPLETED
+    assert releases == [signal.SIGCONT]
+
+
+async def test_rebuild_cancellation_finishes_stopped_handoff_before_cleanup(
+    tmp_path: Path,
+) -> None:
+    child = _RebuildChild(None)
+    identities = {child.pid: _ORPHAN_CREATE_TIME}
+    releases: list[int] = []
+    child.send_signal = releases.append
+
+    class _DelayedHandshakeHost(_FakeProcessHost):
+        def __init__(self, **kwargs) -> None:
+            super().__init__(**kwargs)
+            self.handshake_started = asyncio.Event()
+            self.child_stopped = asyncio.Event()
+
+        async def wait_for_stopped(self, pid: int, timeout_seconds: float) -> bool:
+            del pid, timeout_seconds
+            self.handshake_started.set()
+            await self.child_stopped.wait()
+            return True
+
+    host = _DelayedHandshakeHost(
+        spawns=deque([child]),
+        trees={(child.pid, None): identities},
+        live_processes=dict(identities),
+    )
+    process = _rebuild_process(tmp_path, host)
+    task = asyncio.create_task(process.run())
+
+    await asyncio.wait_for(host.handshake_started.wait(), timeout=0.5)
+    task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done()
+    assert releases == []
+    assert not process._ownership.record_path.exists()
+    host.child_stopped.set()
+
+    assert await task is RebuildProcessResult.INTERRUPTED
+    assert releases == [signal.SIGCONT]
+    assert not host.live_processes
+    assert not process._ownership.record_path.exists()
+
+
+async def test_rebuild_never_releases_without_a_stopped_handshake(tmp_path: Path) -> None:
+    child = _RebuildChild(None)
+    identities = {child.pid: _ORPHAN_CREATE_TIME}
+    releases: list[int] = []
+    child.send_signal = releases.append
+
+    class _MissingHandshakeHost(_FakeProcessHost):
+        async def wait_for_stopped(self, pid: int, timeout_seconds: float) -> bool:
+            del pid, timeout_seconds
+            return False
+
+    host = _MissingHandshakeHost(
+        spawns=deque([child]),
+        trees={(child.pid, None): identities},
+        live_processes=dict(identities),
+    )
+
+    assert await _rebuild_process(tmp_path, host).run() is RebuildProcessResult.FAILED
+    assert releases == []
+    assert not host.live_processes
+
+
+async def test_rebuild_refuses_a_provider_root_locked_by_another_process(tmp_path: Path) -> None:
+    memory_dir = tmp_path / "memory"
+    (memory_dir / "everos-root").mkdir(parents=True)
+    memory_dir.chmod(0o700)
+    lock_path = memory_process._provider_rebuild_lock_path(
+        provider_root=memory_dir / "everos-root",
+    )
+    lock_path.parent.mkdir(parents=True)
+    script = "\n".join(
+        (
+            "import fcntl",
+            "import os",
+            "import sys",
+            "from pathlib import Path",
+            "descriptor = os.open(Path(sys.argv[1]), os.O_RDWR | os.O_CREAT, 0o600)",
+            "fcntl.flock(descriptor, fcntl.LOCK_EX)",
+            "print('locked', flush=True)",
+            "sys.stdin.read(1)",
+            "fcntl.flock(descriptor, fcntl.LOCK_UN)",
+            "os.close(descriptor)",
+        )
+    )
+    locker = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-c",
+        script,
+        str(lock_path),
+        cwd=str(Path(__file__).resolve().parents[1]),
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    assert locker.stdout is not None
+    assert await locker.stdout.readline() == b"locked\n"
+    host = _FakeProcessHost()
+    try:
+        assert await _rebuild_process(tmp_path, host).run() is RebuildProcessResult.ROOT_BUSY
+        assert host.spawn_calls == []
+    finally:
+        assert locker.stdin is not None
+        locker.stdin.write(b"\n")
+        await locker.stdin.drain()
+        locker.stdin.close()
+        await locker.wait()
+
+
+async def test_rebuild_lock_is_shared_across_effective_homes_for_one_provider_root(
+    tmp_path: Path,
+) -> None:
+    provider_root = tmp_path / "shared" / "everos-root"
+    owner_home = tmp_path / "owner-home"
+    contender_home = tmp_path / "contender-home"
+    provider_root.parent.mkdir(mode=0o700)
+    owner_home.mkdir(mode=0o700)
+    contender_home.mkdir(mode=0o700)
+    script = "\n".join(
+        (
+            "import asyncio",
+            "import sys",
+            "from core.memory.process import EverOSProcessSettings, EverOSRebuildProcess, RebuildProcessResult",
+            "from pathlib import Path",
+            "async def main():",
+            "    process = EverOSRebuildProcess(",
+            "        sys.executable,",
+            "        effective_home=Path(sys.argv[1]),",
+            "        provider_root=Path(sys.argv[2]),",
+            "        settings=EverOSProcessSettings(",
+            "            embedding_base_url='https://embedding.invalid/v1',",
+            "            embedding_model='embedding-model',",
+            "            embedding_api_key='secret',",
+            "        ),",
+            "    )",
+            "    async def hold_lock():",
+            "        print('locked', flush=True)",
+            "        await asyncio.to_thread(sys.stdin.read, 1)",
+            "        return RebuildProcessResult.COMPLETED",
+            "    process._run_exclusive = hold_lock",
+            "    assert await process.run() is RebuildProcessResult.COMPLETED",
+            "asyncio.run(main())",
+        )
+    )
+    owner = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-c",
+        script,
+        str(owner_home),
+        str(provider_root),
+        cwd=str(Path(__file__).resolve().parents[1]),
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    assert owner.stdout is not None
+    ready = await owner.stdout.readline()
+    if ready != b"locked\n":
+        assert owner.stderr is not None
+        pytest.fail((await owner.stderr.read()).decode(errors="replace"))
+    lock_path = memory_process._provider_rebuild_lock_path(provider_root=provider_root)
+    assert lock_path.parent.parent == provider_root.parent
+    provider_root.rmdir()
+    contender_host = _FakeProcessHost()
+    contender = EverOSRebuildProcess(
+        sys.executable,
+        effective_home=contender_home,
+        provider_root=provider_root,
+        settings=_settings(),
+        stop_timeout_seconds=0.1,
+        _host=contender_host,
+    )
+    reconcile_entered = False
+
+    async def record_reconcile(*, discover_missing: bool = False) -> None:
+        nonlocal reconcile_entered
+        del discover_missing
+        reconcile_entered = True
+
+    contender._ownership.reap = record_reconcile
+    try:
+        with pytest.raises(memory_process._ProviderRootBusy):
+            await contender.reconcile_orphan()
+        assert reconcile_entered is False
+        assert not provider_root.exists()
+        assert await contender.run() is RebuildProcessResult.ROOT_BUSY
+        assert reconcile_entered is False
+        assert contender_host.spawn_calls == []
+        assert not provider_root.exists()
+
+        provider_root.mkdir(mode=0o755)
+        sentinel = provider_root / "owner-data"
+        sentinel.write_text("unchanged", encoding="utf-8")
+        assert await contender.run() is RebuildProcessResult.ROOT_BUSY
+        assert stat.S_IMODE(provider_root.stat().st_mode) == 0o755
+        assert sentinel.read_text(encoding="utf-8") == "unchanged"
+        assert sorted(path.name for path in provider_root.iterdir()) == ["owner-data"]
+        assert contender._ownership.record_path != memory_process.sidecar_record_path(
+            owner_home / "memory"
+        )
+    finally:
+        assert owner.stdin is not None
+        owner.stdin.write(b"\n")
+        await owner.stdin.drain()
+        owner.stdin.close()
+        await owner.wait()
+        assert owner.returncode == 0
+
+
+async def _hold_provider_root_lock(provider_root: Path) -> asyncio.subprocess.Process:
+    lock_path = memory_process._provider_rebuild_lock_path(provider_root=provider_root)
+    lock_path.parent.mkdir(mode=0o700)
+    script = "\n".join(
+        (
+            "import fcntl",
+            "import os",
+            "import sys",
+            "descriptor = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o600)",
+            "fcntl.flock(descriptor, fcntl.LOCK_EX)",
+            "print('locked', flush=True)",
+            "sys.stdin.read(1)",
+            "fcntl.flock(descriptor, fcntl.LOCK_UN)",
+            "os.close(descriptor)",
+        )
+    )
+    owner = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-c",
+        script,
+        str(lock_path),
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    assert owner.stdout is not None
+    assert await owner.stdout.readline() == b"locked\n"
+    return owner
+
+
+async def _release_provider_root_lock(owner: asyncio.subprocess.Process) -> None:
+    assert owner.stdin is not None
+    owner.stdin.write(b"\n")
+    await owner.stdin.drain()
+    owner.stdin.close()
+    await owner.wait()
+    assert owner.returncode == 0
+
+
+@pytest.mark.parametrize("entrypoint", ["start", "supervisor_restart"])
+async def test_sidecar_start_and_restart_wait_for_shared_rebuild_lock(
+    tmp_path: Path,
+    monkeypatch,
+    short_socket_path: Path,
+    entrypoint: str,
+) -> None:
+    provider_parent = tmp_path / "shared"
+    provider_parent.mkdir(mode=0o700)
+    provider_root = provider_parent / "everos-root"
+    provider_root.mkdir(mode=0o755)
+    sentinel = provider_root / "owner-data"
+    sentinel.write_text("unchanged", encoding="utf-8")
+    owner = await _hold_provider_root_lock(provider_root)
+    child = _RebuildChild(None)
+    identities = {child.pid: _ORPHAN_CREATE_TIME}
+    host = _FakeProcessHost(
+        spawns=deque([child]),
+        trees={(child.pid, None): identities},
+        live_processes=dict(identities),
+    )
+    process = EverOSProcess(
+        sys.executable,
+        effective_home=tmp_path / "other-home",
+        provider_root=provider_root,
+        socket_path=short_socket_path,
+        settings=_settings(),
+        _host=host,
+    )
+    lock_attempted = asyncio.Event()
+    ownership_scan = asyncio.Event()
+    original_acquire = memory_process._ProviderRootLock.acquire
+
+    def observe_lock_attempt(root_lock) -> None:
+        lock_attempted.set()
+        original_acquire(root_lock)
+
+    async def observe_reap(*, discover_missing: bool = False) -> None:
+        assert discover_missing is True
+        ownership_scan.set()
+
+    async def ready(_child) -> None:
+        return None
+
+    monkeypatch.setattr(memory_process._ProviderRootLock, "acquire", observe_lock_attempt)
+    monkeypatch.setattr(process._ownership, "reap", observe_reap)
+    monkeypatch.setattr(process, "_wait_for_ready", ready)
+    monkeypatch.setattr(process, "_secure_socket", lambda: None)
+    monkeypatch.setattr(process, "_assert_no_tcp_listener", lambda *_args, **_kwargs: None)
+    if entrypoint == "start":
+        start_task = asyncio.create_task(process.start())
+    else:
+        process._desired_running = True
+        start_task = asyncio.create_task(process._restart_after(0))
+    try:
+        await asyncio.wait_for(lock_attempted.wait(), timeout=0.5)
+        await asyncio.sleep(0)
+        assert not start_task.done()
+        assert not ownership_scan.is_set()
+        assert host.spawn_calls == []
+        assert stat.S_IMODE(provider_root.stat().st_mode) == 0o755
+        assert sentinel.read_text(encoding="utf-8") == "unchanged"
+        assert sorted(path.name for path in provider_root.iterdir()) == ["owner-data"]
+
+        await _release_provider_root_lock(owner)
+        result = await asyncio.wait_for(start_task, timeout=1.0)
+        assert result is (True if entrypoint == "start" else None)
+        assert process.running
+        assert ownership_scan.is_set()
+        assert len(host.spawn_calls) == 1
+    finally:
+        if owner.returncode is None:
+            await _release_provider_root_lock(owner)
+        if process.running:
+            await process.stop()
+
+
+async def test_sidecar_stop_and_cancellation_end_a_busy_root_wait(
+    tmp_path: Path,
+    monkeypatch,
+    short_socket_path: Path,
+) -> None:
+    provider_parent = tmp_path / "shared"
+    provider_parent.mkdir(mode=0o700)
+    provider_root = provider_parent / "everos-root"
+    provider_root.mkdir(mode=0o755)
+    owner = await _hold_provider_root_lock(provider_root)
+    host = _FakeProcessHost()
+    process = EverOSProcess(
+        sys.executable,
+        effective_home=tmp_path / "other-home",
+        provider_root=provider_root,
+        socket_path=short_socket_path,
+        settings=_settings(),
+        _host=host,
+    )
+    lock_attempted = asyncio.Event()
+    original_acquire = memory_process._ProviderRootLock.acquire
+
+    def observe_lock_attempt(root_lock) -> None:
+        lock_attempted.set()
+        original_acquire(root_lock)
+
+    monkeypatch.setattr(memory_process._ProviderRootLock, "acquire", observe_lock_attempt)
+    try:
+        start_task = asyncio.create_task(process.start())
+        await asyncio.wait_for(lock_attempted.wait(), timeout=0.5)
+        await asyncio.wait_for(process.stop(), timeout=0.5)
+        assert await asyncio.wait_for(start_task, timeout=0.5) is False
+        assert process.consecutive_failures == 0
+        assert process.last_error is None
+        assert process.down is False
+        assert process.starting is False
+        assert host.spawn_calls == []
+
+        lock_attempted.clear()
+        cancelled_start = asyncio.create_task(process.start())
+        await asyncio.wait_for(lock_attempted.wait(), timeout=0.5)
+        cancelled_start.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await cancelled_start
+        assert process.consecutive_failures == 0
+        assert process.last_error is None
+        assert process.down is False
+        assert process.starting is False
+        assert host.spawn_calls == []
+    finally:
+        await process.stop()
+        await _release_provider_root_lock(owner)
+
+
+async def test_sidecar_stop_does_not_retire_an_active_rebuild_record(
+    tmp_path: Path,
+) -> None:
+    child = _RebuildChild(None)
+    identities = {child.pid: _ORPHAN_CREATE_TIME}
+    host = _FakeProcessHost(
+        process_groups={child.pid: child.pid},
+        trees={(child.pid, child.pid): identities},
+        live_processes=dict(identities),
+    )
+    process = EverOSProcess(
+        sys.executable,
+        effective_home=tmp_path,
+        settings=_settings(),
+        _host=host,
+    )
+    process._process = child
+    process._process_group = child.pid
+    process._owned_processes = dict(identities)
+    process._ownership.record_path.parent.mkdir(parents=True, exist_ok=True)
+    process._ownership.record_path.write_text(
+        json.dumps(
+            {
+                "pid": _ORPHAN_DESCENDANT_PID,
+                "create_time": _ORPHAN_CREATE_TIME + 1,
+                "process_group": _ORPHAN_DESCENDANT_PID,
+                "socket_path": str(process._socket_path),
+                "provider_root": str(process._provider_root),
+                "role": "cascade_rebuild",
+                "python": sys.executable,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    await process.stop()
+
+    record = json.loads(process._ownership.record_path.read_text(encoding="utf-8"))
+    assert record["role"] == "cascade_rebuild"
+    assert record["pid"] == _ORPHAN_DESCENDANT_PID
+
+
+@pytest.mark.parametrize("cancel_stage", ["spawn_handoff", "readiness"])
+async def test_cancelled_sidecar_start_holds_root_lock_through_owned_cleanup(
+    tmp_path: Path,
+    monkeypatch,
+    short_socket_path: Path,
+    cancel_stage: str,
+) -> None:
+    provider_parent = tmp_path / "shared"
+    provider_parent.mkdir(mode=0o700)
+    provider_root = provider_parent / "everos-root"
+    provider_root.mkdir(mode=0o700)
+    child = _RebuildChild(None)
+    identities = {child.pid: _ORPHAN_CREATE_TIME}
+
+    class _BlockingStartHost(_FakeProcessHost):
+        def __init__(self, **kwargs) -> None:
+            super().__init__(**kwargs)
+            self.spawn_started = asyncio.Event()
+            self.release_spawn = asyncio.Event()
+            self.cleanup_started = asyncio.Event()
+            self.release_cleanup = asyncio.Event()
+
+        async def spawn(self, *args, **kwargs):
+            self.live_processes[child.pid] = _ORPHAN_CREATE_TIME
+            self.spawn_started.set()
+            if cancel_stage == "spawn_handoff":
+                await self.release_spawn.wait()
+            return await super().spawn(*args, **kwargs)
+
+        async def wait_for_exit(self, *args, **kwargs) -> bool:
+            self.cleanup_started.set()
+            await self.release_cleanup.wait()
+            return await super().wait_for_exit(*args, **kwargs)
+
+    host = _BlockingStartHost(
+        spawns=deque([child]),
+        trees={(child.pid, None): identities},
+    )
+    retention_started = asyncio.Event()
+
+    async def on_reaped() -> None:
+        assert host.live_processes == {}
+        assert not process._ownership.record_path.exists()
+        retention_started.set()
+
+    process = EverOSProcess(
+        sys.executable,
+        effective_home=tmp_path / "sidecar-home",
+        provider_root=provider_root,
+        socket_path=short_socket_path,
+        settings=_settings(),
+        stop_timeout_seconds=0.1,
+        on_reaped=on_reaped,
+        _host=host,
+    )
+    ready_started = asyncio.Event()
+    release_ready = asyncio.Event()
+
+    async def blocking_ready(_child) -> None:
+        ready_started.set()
+        await release_ready.wait()
+
+    monkeypatch.setattr(process, "_wait_for_ready", blocking_ready)
+    monkeypatch.setattr(process, "_secure_socket", lambda: None)
+    monkeypatch.setattr(process, "_assert_no_tcp_listener", lambda *_args, **_kwargs: None)
+    start_task = asyncio.create_task(process.start())
+    try:
+        if cancel_stage == "spawn_handoff":
+            await asyncio.wait_for(host.spawn_started.wait(), timeout=0.5)
+        else:
+            await asyncio.wait_for(ready_started.wait(), timeout=0.5)
+            assert process._ownership.record_path.exists()
+        start_task.cancel()
+        await asyncio.sleep(0)
+        assert not start_task.done()
+        host.release_spawn.set()
+        release_ready.set()
+        await asyncio.wait_for(host.cleanup_started.wait(), timeout=0.5)
+
+        contender_host = _FakeProcessHost()
+        contender = EverOSRebuildProcess(
+            sys.executable,
+            effective_home=tmp_path / "rebuild-home",
+            provider_root=provider_root,
+            settings=_settings(),
+            stop_timeout_seconds=0.1,
+            _host=contender_host,
+        )
+        assert await contender.run() is RebuildProcessResult.ROOT_BUSY
+        assert contender_host.spawn_calls == []
+        assert not start_task.done()
+
+        host.release_cleanup.set()
+        with pytest.raises(asyncio.CancelledError):
+            await start_task
+        assert host.live_processes == {}
+        assert not process._ownership.record_path.exists()
+        assert retention_started.is_set()
+        assert process.consecutive_failures == 0
+        assert process.starting is False
+
+        rebuild_child = _RebuildChild(0, pid=_ORPHAN_DESCENDANT_PID)
+        rebuild_identities = {
+            rebuild_child.pid: _ORPHAN_CREATE_TIME + 1,
+        }
+        contender_host.spawns.append(rebuild_child)
+        contender_host.trees[(rebuild_child.pid, None)] = rebuild_identities
+        contender_host.live_processes.update(rebuild_identities)
+        assert await contender.run() is RebuildProcessResult.COMPLETED
+    finally:
+        host.release_spawn.set()
+        release_ready.set()
+        host.release_cleanup.set()
+        if process._process is not None:
+            await process.stop()
+
+
+async def test_sidecar_start_discovers_recordless_rebuild_before_spawn(
+    tmp_path: Path,
+    monkeypatch,
+    short_socket_path: Path,
+) -> None:
+    provider_parent = tmp_path / "shared"
+    provider_parent.mkdir(mode=0o700)
+    provider_root = provider_parent / "everos-root"
+    provider_root.mkdir(mode=0o700)
+    foreign_home = tmp_path / "rebuild-home"
+    sidecar_child = _RebuildChild(None, pid=_ORPHAN_DESCENDANT_PID)
+    rebuild = {
+        _ORPHAN_PID: _ORPHAN_CREATE_TIME,
+        _ORPHAN_GROUP_HELPER_PID: _ORPHAN_CREATE_TIME + 0.5,
+    }
+    sidecar = {sidecar_child.pid: _ORPHAN_CREATE_TIME + 1}
+    events: list[str] = []
+
+    class _OrderedDiscoveryHost(_FakeProcessHost):
+        def find_rebuilds(self, **kwargs) -> dict[int, float]:
+            events.append("discover-rebuilds")
+            return super().find_rebuilds(**kwargs)
+
+        async def spawn(self, *args, **kwargs):
+            events.append("spawn-sidecar")
+            return await super().spawn(*args, **kwargs)
+
+    host = _OrderedDiscoveryHost(
+        spawns=deque([sidecar_child]),
+        process_groups={
+            _ORPHAN_PID: _ORPHAN_PID,
+            sidecar_child.pid: sidecar_child.pid,
+        },
+        trees={(sidecar_child.pid, sidecar_child.pid): sidecar},
+        groups={_ORPHAN_PID: (rebuild, [])},
+        rebuilds={_ORPHAN_PID: _ORPHAN_CREATE_TIME},
+        live_processes={**rebuild, **sidecar},
+    )
+    process = EverOSProcess(
+        sys.executable,
+        effective_home=tmp_path / "sidecar-home",
+        provider_root=provider_root,
+        socket_path=short_socket_path,
+        settings=_settings(),
+        _host=host,
+    )
+    host.identities[_ORPHAN_PID] = _rebuild_identity(process)
+    foreign_record = memory_process.sidecar_record_path(foreign_home / "memory")
+    foreign_record.parent.mkdir(parents=True, exist_ok=True)
+    foreign_record.write_text(
+        json.dumps(
+            {
+                "pid": _ORPHAN_PID,
+                "create_time": _ORPHAN_CREATE_TIME,
+                "process_group": _ORPHAN_PID,
+                "socket_path": str(foreign_home / "memory/.rt/everos.sock"),
+                "provider_root": str(provider_root),
+                "role": "cascade_rebuild",
+                "python": sys.executable,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    async def ready(_child) -> None:
+        return None
+
+    monkeypatch.setattr(process, "_wait_for_ready", ready)
+    monkeypatch.setattr(process, "_secure_socket", lambda: None)
+    monkeypatch.setattr(process, "_assert_no_tcp_listener", lambda *_args, **_kwargs: None)
+    try:
+        assert await process.start() is True
+        assert events.index("discover-rebuilds") < events.index("spawn-sidecar")
+        assert not set(rebuild).intersection(host.live_processes)
+        assert sidecar_child.pid in host.live_processes
+        assert foreign_record.exists()
+        record = json.loads(process._ownership.record_path.read_text(encoding="utf-8"))
+        assert record["pid"] == sidecar_child.pid
+        assert record["role"] == "sidecar"
+    finally:
+        await process.stop()
+
+
+async def test_sidecar_start_fails_closed_on_ambiguous_recordless_rebuilds(
+    tmp_path: Path,
+    short_socket_path: Path,
+) -> None:
+    host = _FakeProcessHost(
+        rebuilds={
+            _ORPHAN_PID: _ORPHAN_CREATE_TIME,
+            _ORPHAN_DESCENDANT_PID: _ORPHAN_CREATE_TIME + 1,
+        }
+    )
+    process = EverOSProcess(
+        sys.executable,
+        effective_home=tmp_path,
+        socket_path=short_socket_path,
+        settings=_settings(),
+        _host=host,
+    )
+    try:
+        assert await process.start() is False
+        assert host.signal_calls == []
+        assert host.spawn_calls == []
+    finally:
+        await process.stop()
+
+
+async def test_rebuild_refuses_a_symlinked_provider_root_lock(tmp_path: Path) -> None:
+    memory_dir = tmp_path / "memory"
+    provider_root = tmp_path / "memory" / "everos-root"
+    provider_root.mkdir(parents=True)
+    memory_dir.chmod(0o700)
+    sentinel = tmp_path / "outside.txt"
+    sentinel.write_text("must stay intact", encoding="utf-8")
+    lock_path = memory_process._provider_rebuild_lock_path(
+        provider_root=provider_root,
+    )
+    lock_path.parent.mkdir()
+    lock_path.symlink_to(sentinel)
+    host = _FakeProcessHost()
+
+    assert await _rebuild_process(tmp_path, host).run() is RebuildProcessResult.FAILED
+    assert host.spawn_calls == []
+    assert sentinel.read_text(encoding="utf-8") == "must stay intact"
+
+
+async def test_rebuild_refuses_nonprivate_provider_parent_without_changing_its_mode(
+    tmp_path: Path,
+) -> None:
+    provider_parent = tmp_path / "shared"
+    provider_parent.mkdir(mode=0o755)
+    provider_root = provider_parent / "everos-root"
+    provider_root.mkdir(mode=0o700)
+    host = _FakeProcessHost()
+    process = EverOSRebuildProcess(
+        sys.executable,
+        effective_home=tmp_path,
+        provider_root=provider_root,
+        settings=_settings(),
+        _host=host,
+    )
+
+    assert await process.run() is RebuildProcessResult.FAILED
+    assert host.spawn_calls == []
+    assert stat.S_IMODE(provider_parent.stat().st_mode) == 0o755
+
+
+async def test_rebuild_holds_provider_root_lock_through_child_retirement(tmp_path: Path) -> None:
+    child = _RebuildChild(0)
+    identities = {child.pid: _ORPHAN_CREATE_TIME}
+
+    class _BlockingRetirementHost(_FakeProcessHost):
+        def __init__(self, **kwargs) -> None:
+            super().__init__(**kwargs)
+            self.retirement_started = asyncio.Event()
+            self.release_retirement = asyncio.Event()
+
+        async def wait_for_exit(self, *args, **kwargs) -> bool:
+            self.retirement_started.set()
+            await self.release_retirement.wait()
+            return await super().wait_for_exit(*args, **kwargs)
+
+    owner_host = _BlockingRetirementHost(
+        spawns=deque([child]),
+        process_groups={child.pid: child.pid},
+        trees={(child.pid, child.pid): identities},
+        live_processes=dict(identities),
+    )
+    owner = asyncio.create_task(_rebuild_process(tmp_path, owner_host).run())
+    await owner_host.retirement_started.wait()
+
+    contender_host = _FakeProcessHost()
+    assert await _rebuild_process(tmp_path, contender_host).run() is RebuildProcessResult.ROOT_BUSY
+    assert contender_host.spawn_calls == []
+
+    owner_host.release_retirement.set()
+    assert await owner is RebuildProcessResult.COMPLETED
+    assert not (tmp_path / "memory" / ".rt" / "everos.sidecar.json").exists()
+
+
+def _rebuild_record(process: EverOSRebuildProcess, **overrides) -> dict:
+    record = {
+        "pid": _ORPHAN_PID,
+        "create_time": _ORPHAN_CREATE_TIME,
+        "process_group": _ORPHAN_PID,
+        "socket_path": str(process._socket_path),
+        "provider_root": str(process._provider_root),
+        "role": "cascade_rebuild",
+        "python": sys.executable,
+    }
+    record.update(overrides)
+    return record
+
+
+def _rebuild_identity(process: EverOSRebuildProcess, **overrides) -> _ProcessIdentity:
+    fields = {
+        "create_time": _ORPHAN_CREATE_TIME,
+        "cmdline": (
+            sys.executable,
+            "-m",
+            "core.memory.rebuild_child",
+            "cascade",
+            "rebuild",
+            "--yes",
+        ),
+        "uid": os.getuid() if hasattr(os, "getuid") else None,
+        "environment": {
+            "EVEROS_ROOT": str(process._provider_root),
+            "AVIBE_MEMORY_CHILD_ROLE": "cascade_rebuild",
+        },
+    }
+    fields.update(overrides)
+    return _ProcessIdentity(**fields)
+
+
+def test_recorded_rebuild_requires_exact_role_argv_uid_and_root(tmp_path: Path) -> None:
+    process = _rebuild_process(tmp_path, _FakeProcessHost())
+    record = _rebuild_record(process)
+
+    def verdict(identity: _ProcessIdentity) -> _RecordedSidecar:
+        return _classify_recorded_child(
+            record,
+            identity,
+            socket_path=process._socket_path,
+            provider_root=process._provider_root,
+            role=_MemoryChildRole.CASCADE_REBUILD,
+        )
+
+    assert verdict(_rebuild_identity(process)) is _RecordedSidecar.OURS
+    assert verdict(
+        _rebuild_identity(process, cmdline=(sys.executable, "-m", "http.server"))
+    ) is _RecordedSidecar.NOT_OURS
+    assert verdict(
+        _rebuild_identity(
+            process,
+            cmdline=(
+                "/other/python",
+                "-m",
+                "core.memory.rebuild_child",
+                "cascade",
+                "rebuild",
+                "--yes",
+            ),
+        )
+    ) is _RecordedSidecar.NOT_OURS
+    assert verdict(
+        _rebuild_identity(
+            process,
+            environment={
+                "EVEROS_ROOT": str(process._provider_root),
+                "AVIBE_MEMORY_CHILD_ROLE": "sidecar",
+            },
+        )
+    ) is _RecordedSidecar.NOT_OURS
+    assert verdict(
+        _rebuild_identity(
+            process,
+            environment={
+                "EVEROS_ROOT": str(tmp_path / "other-root"),
+                "AVIBE_MEMORY_CHILD_ROLE": "cascade_rebuild",
+            },
+        )
+    ) is _RecordedSidecar.NOT_OURS
+    if hasattr(os, "getuid"):
+        assert verdict(
+            _rebuild_identity(process, uid=os.getuid() + 1)
+        ) is _RecordedSidecar.NOT_OURS
+    assert verdict(_rebuild_identity(process, environment=None)) is _RecordedSidecar.UNVERIFIABLE
+
+
+class _RebuildDiscoveryCandidate:
+    def __init__(
+        self,
+        *,
+        cmdline: tuple[str, ...],
+        uid: int,
+        environment: Mapping[str, str] | None,
+    ) -> None:
+        self.pid = _ORPHAN_PID
+        self._cmdline = cmdline
+        self._uid = uid
+        self._environment = environment
+
+    def cmdline(self) -> list[str]:
+        return list(self._cmdline)
+
+    def create_time(self) -> float:
+        return _ORPHAN_CREATE_TIME
+
+    def uids(self):
+        return SimpleNamespace(real=self._uid, effective=self._uid, saved=self._uid)
+
+    def environ(self) -> dict[str, str]:
+        if self._environment is None:
+            raise psutil.AccessDenied(pid=self.pid)
+        return dict(self._environment)
+
+
+def test_rebuild_discovery_accepts_only_the_exact_role_owned_candidate(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    own_uid = os.getuid() if hasattr(os, "getuid") else 0
+    command = (
+        sys.executable,
+        "-m",
+        "core.memory.rebuild_child",
+        "cascade",
+        "rebuild",
+        "--yes",
+    )
+    environment = {
+        "EVEROS_ROOT": str(tmp_path),
+        "AVIBE_MEMORY_CHILD_ROLE": "cascade_rebuild",
+    }
+    exact = _RebuildDiscoveryCandidate(
+        cmdline=command,
+        uid=own_uid,
+        environment=environment,
+    )
+    monkeypatch.setattr(memory_process.psutil, "process_iter", lambda: [exact])
+    assert _processes_rebuilding_owned_root(
+        provider_root=tmp_path,
+        python=Path(sys.executable),
+    ) == {
+        _ORPHAN_PID: _ORPHAN_CREATE_TIME
+    }
+
+    rejected = [
+        _RebuildDiscoveryCandidate(
+            cmdline=("/other/python", *command[1:]),
+            uid=own_uid,
+            environment=environment,
+        ),
+        _RebuildDiscoveryCandidate(
+            cmdline=(sys.executable, "-m", "http.server"),
+            uid=own_uid,
+            environment=environment,
+        ),
+        _RebuildDiscoveryCandidate(
+            cmdline=command,
+            uid=own_uid + 1,
+            environment=environment,
+        ),
+        _RebuildDiscoveryCandidate(
+            cmdline=command,
+            uid=own_uid,
+            environment={**environment, "EVEROS_ROOT": str(tmp_path / "other")},
+        ),
+        _RebuildDiscoveryCandidate(
+            cmdline=command,
+            uid=own_uid,
+            environment={**environment, "AVIBE_MEMORY_CHILD_ROLE": "sidecar"},
+        ),
+    ]
+    for candidate in rejected:
+        monkeypatch.setattr(memory_process.psutil, "process_iter", lambda candidate=candidate: [candidate])
+        assert _processes_rebuilding_owned_root(
+            provider_root=tmp_path,
+            python=Path(sys.executable),
+        ) == {}
+
+    unverifiable = _RebuildDiscoveryCandidate(
+        cmdline=command,
+        uid=own_uid,
+        environment=None,
+    )
+    monkeypatch.setattr(memory_process.psutil, "process_iter", lambda: [unverifiable])
+    with pytest.raises(RuntimeError, match="identity could not be verified"):
+        _processes_rebuilding_owned_root(
+            provider_root=tmp_path,
+            python=Path(sys.executable),
+        )
+
+
+def test_sidecar_root_discovery_requires_exact_uid_argv_root_and_role(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    own_uid = os.getuid() if hasattr(os, "getuid") else 0
+    command = (
+        sys.executable,
+        "-m",
+        "core.memory.sidecar",
+        "--uds",
+        str(tmp_path / "other-home/memory/.rt/everos.sock"),
+    )
+    environment = {
+        "EVEROS_ROOT": str(tmp_path),
+        "AVIBE_MEMORY_CHILD_ROLE": "sidecar",
+    }
+    exact = _RebuildDiscoveryCandidate(
+        cmdline=command,
+        uid=own_uid,
+        environment=environment,
+    )
+    monkeypatch.setattr(memory_process.psutil, "process_iter", lambda: [exact])
+    assert memory_process._processes_serving_owned_root(provider_root=tmp_path) == {
+        _ORPHAN_PID: _ORPHAN_CREATE_TIME
+    }
+
+    legacy = _RebuildDiscoveryCandidate(
+        cmdline=command,
+        uid=own_uid,
+        environment={"EVEROS_ROOT": str(tmp_path)},
+    )
+    monkeypatch.setattr(memory_process.psutil, "process_iter", lambda: [legacy])
+    assert memory_process._processes_serving_owned_root(provider_root=tmp_path) == {
+        _ORPHAN_PID: _ORPHAN_CREATE_TIME
+    }
+
+    canonical_root = tmp_path / "canonical-root"
+    canonical_root.mkdir()
+    legacy_root = tmp_path / "legacy-root"
+    legacy_root.symlink_to(canonical_root, target_is_directory=True)
+    symlink_spelling = _RebuildDiscoveryCandidate(
+        cmdline=command,
+        uid=own_uid,
+        environment={"EVEROS_ROOT": str(legacy_root)},
+    )
+    monkeypatch.setattr(
+        memory_process.psutil,
+        "process_iter",
+        lambda: [symlink_spelling],
+    )
+    assert memory_process._processes_serving_owned_root(
+        provider_root=canonical_root,
+    ) == {_ORPHAN_PID: _ORPHAN_CREATE_TIME}
+
+    rejected = [
+        _RebuildDiscoveryCandidate(
+            cmdline=(*command, "--extra"),
+            uid=own_uid,
+            environment=environment,
+        ),
+        _RebuildDiscoveryCandidate(
+            cmdline=(sys.executable, "-m", "http.server"),
+            uid=own_uid,
+            environment=environment,
+        ),
+        _RebuildDiscoveryCandidate(
+            cmdline=command,
+            uid=own_uid + 1,
+            environment=environment,
+        ),
+        _RebuildDiscoveryCandidate(
+            cmdline=command,
+            uid=own_uid,
+            environment={**environment, "EVEROS_ROOT": str(tmp_path / "other")},
+        ),
+        _RebuildDiscoveryCandidate(
+            cmdline=command,
+            uid=own_uid,
+            environment={**environment, "AVIBE_MEMORY_CHILD_ROLE": "cascade_rebuild"},
+        ),
+    ]
+    for candidate in rejected:
+        monkeypatch.setattr(
+            memory_process.psutil,
+            "process_iter",
+            lambda candidate=candidate: [candidate],
+        )
+        assert memory_process._processes_serving_owned_root(provider_root=tmp_path) == {}
+
+    unverifiable = _RebuildDiscoveryCandidate(
+        cmdline=command,
+        uid=own_uid,
+        environment=None,
+    )
+    monkeypatch.setattr(memory_process.psutil, "process_iter", lambda: [unverifiable])
+    with pytest.raises(RuntimeError, match="sidecar identity could not be verified"):
+        memory_process._processes_serving_owned_root(provider_root=tmp_path)
+
+
+@pytest.mark.parametrize("record_state", ["absent", "corrupt"])
+async def test_rebuild_boot_discovers_and_reaps_an_unrecorded_exact_child(
+    tmp_path: Path,
+    record_state: str,
+) -> None:
+    identities = {
+        _ORPHAN_PID: _ORPHAN_CREATE_TIME,
+        _ORPHAN_DESCENDANT_PID: _ORPHAN_CREATE_TIME + 1,
+    }
+    host = _FakeProcessHost(
+        rebuilds={_ORPHAN_PID: _ORPHAN_CREATE_TIME},
+        process_groups={_ORPHAN_PID: _ORPHAN_PID},
+        groups={_ORPHAN_PID: (identities, [])},
+        live_processes=dict(identities),
+    )
+    process = _rebuild_process(tmp_path, host)
+    host.identities[_ORPHAN_PID] = _rebuild_identity(process)
+    reconstructed_records: list[dict] = []
+
+    def observe_reconstructed_record(owned: Mapping[int, float], _signum: int) -> None:
+        reconstructed_records.append(
+            json.loads(process._ownership.record_path.read_text(encoding="utf-8"))
+        )
+        for pid in owned:
+            host.live_processes.pop(pid, None)
+
+    host.signal_effect = observe_reconstructed_record
+    if record_state == "corrupt":
+        process._ownership.record_path.parent.mkdir(parents=True, exist_ok=True)
+        process._ownership.record_path.write_text("{broken", encoding="utf-8")
+
+    await process.reconcile_orphan()
+
+    assert not host.live_processes
+    assert not process._ownership.record_path.exists()
+    assert host.signal_calls == [(identities, signal.SIGTERM, _ORPHAN_PID, None)]
+    assert reconstructed_records[0]["role"] == "cascade_rebuild"
+    assert reconstructed_records[0]["python"] == sys.executable
+
+
+async def test_rebuild_boot_without_artifact_python_discovers_and_reaps_child(
+    tmp_path: Path,
+) -> None:
+    identities = {
+        _ORPHAN_PID: _ORPHAN_CREATE_TIME,
+        _ORPHAN_DESCENDANT_PID: _ORPHAN_CREATE_TIME + 1,
+    }
+    provider_root = tmp_path / "memory" / "everos-root"
+    host = _FakeProcessHost(
+        rebuilds={_ORPHAN_PID: _ORPHAN_CREATE_TIME},
+        process_groups={_ORPHAN_PID: _ORPHAN_PID},
+        identities={
+            _ORPHAN_PID: _ProcessIdentity(
+                create_time=_ORPHAN_CREATE_TIME,
+                cmdline=(
+                    sys.executable,
+                    "-m",
+                    "core.memory.rebuild_child",
+                    "cascade",
+                    "rebuild",
+                    "--yes",
+                ),
+                uid=os.getuid() if hasattr(os, "getuid") else None,
+                environment={
+                    "EVEROS_ROOT": str(provider_root),
+                    "AVIBE_MEMORY_CHILD_ROLE": "cascade_rebuild",
+                },
+            )
+        },
+        groups={_ORPHAN_PID: (identities, [])},
+        live_processes=dict(identities),
+    )
+    process = EverOSRebuildProcess(
+        None,
+        effective_home=tmp_path,
+        settings=_settings(),
+        _host=host,
+    )
+    reconstructed_records: list[dict] = []
+
+    def observe_reconstructed_record(owned: Mapping[int, float], _signum: int) -> None:
+        reconstructed_records.append(
+            json.loads(process._ownership.record_path.read_text(encoding="utf-8"))
+        )
+        for pid in owned:
+            host.live_processes.pop(pid, None)
+
+    host.signal_effect = observe_reconstructed_record
+
+    await process.reconcile_orphan()
+
+    assert not host.live_processes
+    assert not process._ownership.record_path.exists()
+    assert reconstructed_records[0]["role"] == "cascade_rebuild"
+    assert reconstructed_records[0]["python"] == sys.executable
+
+
+async def test_rebuild_boot_discovers_an_orphan_from_the_previous_artifact(
+    tmp_path: Path,
+) -> None:
+    old_python = tmp_path / "old-runtime" / "bin" / "python"
+    identities = {_ORPHAN_PID: _ORPHAN_CREATE_TIME}
+
+    class _InterpreterFilteringHost(_FakeProcessHost):
+        def find_rebuilds(
+            self,
+            *,
+            provider_root: Path,
+            python: Path | None,
+        ) -> dict[int, float]:
+            del provider_root
+            return dict(self.rebuilds) if python is None else {}
+
+    host = _InterpreterFilteringHost(
+        rebuilds=dict(identities),
+        process_groups={_ORPHAN_PID: _ORPHAN_PID},
+        identities={
+            _ORPHAN_PID: _ProcessIdentity(
+                create_time=_ORPHAN_CREATE_TIME,
+                cmdline=(
+                    str(old_python),
+                    "-m",
+                    "core.memory.rebuild_child",
+                    "cascade",
+                    "rebuild",
+                    "--yes",
+                ),
+                uid=os.getuid() if hasattr(os, "getuid") else None,
+                environment={
+                    "EVEROS_ROOT": str(tmp_path / "memory" / "everos-root"),
+                    "AVIBE_MEMORY_CHILD_ROLE": "cascade_rebuild",
+                },
+            )
+        },
+        groups={_ORPHAN_PID: (identities, [])},
+        live_processes=dict(identities),
+    )
+    process = _rebuild_process(tmp_path, host)
+    reconstructed_records: list[dict] = []
+
+    def observe_reconstructed_record(owned: Mapping[int, float], _signum: int) -> None:
+        reconstructed_records.append(
+            json.loads(process._ownership.record_path.read_text(encoding="utf-8"))
+        )
+        for pid in owned:
+            host.live_processes.pop(pid, None)
+
+    host.signal_effect = observe_reconstructed_record
+
+    await process.reconcile_orphan()
+
+    assert not host.live_processes
+    assert reconstructed_records[0]["python"] == str(old_python)
+    assert not process._ownership.record_path.exists()
+
+
+async def test_rebuild_boot_retains_reconstructed_record_for_unverifiable_group(
+    tmp_path: Path,
+) -> None:
+    identities = {_ORPHAN_PID: _ORPHAN_CREATE_TIME}
+    host = _FakeProcessHost(
+        rebuilds=dict(identities),
+        process_groups={_ORPHAN_PID: _ORPHAN_PID},
+        groups={_ORPHAN_PID: (identities, [_FOREIGN_GROUP_PID])},
+        live_processes={
+            **identities,
+            _FOREIGN_GROUP_PID: _ORPHAN_CREATE_TIME + 1,
+        },
+    )
+    process = _rebuild_process(tmp_path, host)
+    host.identities[_ORPHAN_PID] = _rebuild_identity(process)
+
+    with pytest.raises(RuntimeError, match="rebuild group could not be verified"):
+        await process.reconcile_orphan()
+
+    assert host.live_processes == {
+        _FOREIGN_GROUP_PID: _ORPHAN_CREATE_TIME + 1,
+    }
+    assert process._ownership.record_path.exists()
+
+
+async def test_rebuild_boot_reaps_a_role_recorded_orphan(tmp_path: Path) -> None:
+    host = _FakeProcessHost(
+        process_groups={_ORPHAN_PID: _ORPHAN_PID},
+        identities={_ORPHAN_PID: None},
+    )
+    process = _rebuild_process(tmp_path, host)
+    host.identities[_ORPHAN_PID] = _rebuild_identity(process)
+    host.live_processes[_ORPHAN_PID] = _ORPHAN_CREATE_TIME
+    host.trees[(_ORPHAN_PID, _ORPHAN_PID)] = {_ORPHAN_PID: _ORPHAN_CREATE_TIME}
+    process._ownership.record_path.parent.mkdir(parents=True, exist_ok=True)
+    process._ownership.record_path.write_text(
+        json.dumps(_rebuild_record(process)),
+        encoding="utf-8",
+    )
+
+    await process.reconcile_orphan()
+
+    assert not host.live_processes
+    assert not process._ownership.record_path.exists()
+
+
+async def test_rebuild_boot_discovers_exact_survivor_after_reaping_valid_record(
+    tmp_path: Path,
+) -> None:
+    recorded = {_ORPHAN_PID: _ORPHAN_CREATE_TIME}
+    survivor = {_ORPHAN_DESCENDANT_PID: _ORPHAN_CREATE_TIME + 1}
+    host = _FakeProcessHost(
+        rebuilds=dict(survivor),
+        process_groups={
+            _ORPHAN_PID: _ORPHAN_PID,
+            _ORPHAN_DESCENDANT_PID: _ORPHAN_DESCENDANT_PID,
+        },
+        identities={},
+        trees={(_ORPHAN_PID, _ORPHAN_PID): recorded},
+        groups={
+            _ORPHAN_PID: ({}, []),
+            _ORPHAN_DESCENDANT_PID: (survivor, []),
+        },
+        live_processes={**recorded, **survivor},
+    )
+    process = _rebuild_process(tmp_path, host)
+    host.identities.update(
+        {
+            _ORPHAN_PID: _rebuild_identity(process),
+            _ORPHAN_DESCENDANT_PID: _rebuild_identity(
+                process,
+                create_time=_ORPHAN_CREATE_TIME + 1,
+            ),
+        }
+    )
+    process._ownership.record_path.parent.mkdir(parents=True, exist_ok=True)
+    process._ownership.record_path.write_text(
+        json.dumps(_rebuild_record(process)),
+        encoding="utf-8",
+    )
+
+    await process.reconcile_orphan()
+
+    assert host.live_processes == {}
+    assert {next(iter(owned)) for owned, *_rest in host.signal_calls} == {
+        _ORPHAN_PID,
+        _ORPHAN_DESCENDANT_PID,
+    }
+    assert not process._ownership.record_path.exists()
+
+
+async def test_rebuild_boot_cancellation_waits_for_orphan_reaping(tmp_path: Path) -> None:
+    class _BlockingReapHost(_FakeProcessHost):
+        def __init__(self, **kwargs) -> None:
+            super().__init__(**kwargs)
+            self.reap_started = asyncio.Event()
+            self.release_reap = asyncio.Event()
+
+        async def wait_for_exit(self, *args, **kwargs) -> bool:
+            self.reap_started.set()
+            await self.release_reap.wait()
+            return await super().wait_for_exit(*args, **kwargs)
+
+    identities = {_ORPHAN_PID: _ORPHAN_CREATE_TIME}
+    host = _BlockingReapHost(
+        rebuilds=dict(identities),
+        process_groups={_ORPHAN_PID: _ORPHAN_PID},
+        groups={_ORPHAN_PID: (identities, [])},
+        live_processes=dict(identities),
+    )
+    process = _rebuild_process(tmp_path, host)
+    host.identities[_ORPHAN_PID] = _rebuild_identity(process)
+    task = asyncio.create_task(process.reconcile_orphan())
+    await host.reap_started.wait()
+
+    task.cancel()
+    host.release_reap.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert not host.live_processes
+    assert not process._ownership.record_path.exists()
+
+
+async def test_standalone_rebuild_reconciles_are_provider_root_exclusive(
+    tmp_path: Path,
+) -> None:
+    class _BlockingReapHost(_FakeProcessHost):
+        def __init__(self, **kwargs) -> None:
+            super().__init__(**kwargs)
+            self.reap_started = asyncio.Event()
+            self.release_reap = asyncio.Event()
+
+        async def wait_for_exit(self, *args, **kwargs) -> bool:
+            self.reap_started.set()
+            await self.release_reap.wait()
+            return await super().wait_for_exit(*args, **kwargs)
+
+    identities = {_ORPHAN_PID: _ORPHAN_CREATE_TIME}
+    owner_host = _BlockingReapHost(
+        rebuilds=dict(identities),
+        process_groups={_ORPHAN_PID: _ORPHAN_PID},
+        groups={_ORPHAN_PID: (identities, [])},
+        live_processes=dict(identities),
+    )
+    owner = _rebuild_process(tmp_path, owner_host)
+    owner_host.identities[_ORPHAN_PID] = _rebuild_identity(owner)
+    owner_task = asyncio.create_task(owner.reconcile_orphan())
+    await owner_host.reap_started.wait()
+
+    contender = _rebuild_process(tmp_path, _FakeProcessHost())
+    contender_scanned = False
+
+    async def record_reconcile(*, discover_missing: bool = False) -> None:
+        nonlocal contender_scanned
+        del discover_missing
+        contender_scanned = True
+
+    contender._ownership.reap = record_reconcile
+    with pytest.raises(memory_process._ProviderRootBusy):
+        await contender.reconcile_orphan()
+    assert contender_scanned is False
+
+    owner_host.release_reap.set()
+    await owner_task
+    await contender.reconcile_orphan()
+    assert contender_scanned is True
+
+
+async def test_rebuild_boot_reaps_multiple_exact_sidecars_before_rebuild(
+    tmp_path: Path,
+) -> None:
+    anchors = {
+        _ORPHAN_PID: _ORPHAN_CREATE_TIME,
+        _ORPHAN_DESCENDANT_PID: _ORPHAN_CREATE_TIME + 1,
+    }
+    host = _FakeProcessHost(
+        sidecars=dict(anchors),
+        process_groups={pid: pid for pid in anchors},
+        groups={pid: ({pid: created_at}, []) for pid, created_at in anchors.items()},
+        live_processes=dict(anchors),
+    )
+    process = _rebuild_process(tmp_path, host)
+
+    await process.reconcile_orphan()
+
+    assert host.live_processes == {}
+    assert {next(iter(owned)) for owned, *_rest in host.signal_calls} == set(anchors)
+    assert not process._ownership.record_path.exists()
+
+
+async def test_rebuild_boot_reaps_sidecar_from_another_home_on_shared_root(
+    tmp_path: Path,
+) -> None:
+    identities = {_ORPHAN_PID: _ORPHAN_CREATE_TIME}
+    host = _FakeProcessHost(
+        root_sidecars=dict(identities),
+        process_groups={_ORPHAN_PID: _ORPHAN_PID},
+        groups={_ORPHAN_PID: (identities, [])},
+        live_processes=dict(identities),
+    )
+    process = _rebuild_process(tmp_path, host)
+    sidecar = EverOSProcess(
+        sys.executable,
+        effective_home=tmp_path / "sidecar-home",
+        provider_root=process._provider_root,
+        settings=_settings(),
+    )
+    consumed: list[bool] = []
+
+    def consume_while_issuer_is_active(
+        signalled: Mapping[int, float],
+        _signum: int,
+    ) -> None:
+        consumed.append(
+            sidecar._ownership.consume_planned_reap(
+                _ORPHAN_PID,
+                _ORPHAN_CREATE_TIME,
+            )
+        )
+        for pid in signalled:
+            host.live_processes.pop(pid, None)
+
+    host.signal_effect = consume_while_issuer_is_active
+
+    await process.reconcile_orphan()
+
+    assert host.live_processes == {}
+    assert host.signal_calls == [(identities, signal.SIGTERM, _ORPHAN_PID, None)]
+    assert not process._ownership.record_path.exists()
+    assert consumed == [True]
+    assert sidecar._ownership.consume_planned_reap(
+        _ORPHAN_PID,
+        _ORPHAN_CREATE_TIME,
+    ) is False
+
+
+async def test_rebuild_retains_committed_handoff_until_delayed_watcher_ack(
+    tmp_path: Path,
+) -> None:
+    identities = {_ORPHAN_PID: _ORPHAN_CREATE_TIME}
+    host = _FakeProcessHost(
+        root_sidecars=dict(identities),
+        process_groups={_ORPHAN_PID: _ORPHAN_PID},
+        groups={_ORPHAN_PID: (identities, [])},
+        live_processes=dict(identities),
+    )
+    rebuild = _rebuild_process(tmp_path, host)
+    await rebuild.reconcile_orphan()
+
+    delayed_watcher = EverOSProcess(
+        sys.executable,
+        effective_home=tmp_path / "delayed-sidecar-home",
+        provider_root=rebuild._provider_root,
+        settings=_settings(),
+    )
+    assert delayed_watcher._ownership.consume_planned_reap(
+        _ORPHAN_PID,
+        _ORPHAN_CREATE_TIME,
+    ) is True
+    assert delayed_watcher._ownership.consume_planned_reap(
+        _ORPHAN_PID,
+        _ORPHAN_CREATE_TIME,
+    ) is False
+
+
+async def test_cancelled_rebuild_reap_before_signal_revokes_planned_lease(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    identities = {_ORPHAN_PID: _ORPHAN_CREATE_TIME}
+    host = _FakeProcessHost(
+        root_sidecars=dict(identities),
+        process_groups={_ORPHAN_PID: _ORPHAN_PID},
+        groups={_ORPHAN_PID: (identities, [])},
+        live_processes=dict(identities),
+    )
+    rebuild = _rebuild_process(tmp_path, host)
+
+    async def cancel_before_signal(*_args, **_kwargs):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(
+        rebuild._ownership,
+        "_terminate_claimed_processes",
+        cancel_before_signal,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await rebuild.reconcile_orphan()
+
+    sidecar = EverOSProcess(
+        sys.executable,
+        effective_home=tmp_path / "sidecar-home",
+        provider_root=rebuild._provider_root,
+        settings=_settings(),
+    )
+    sidecar._consecutive_failures = 4
+    child = _ExitedChild()
+    child.returncode = -signal.SIGTERM
+    _supervising(sidecar, child)
+    sidecar._desired_running = True
+
+    async def terminate(*_args, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(sidecar, "_terminate_owned_tree", terminate)
+    await sidecar._watch_child(child)
+
+    assert host.signal_calls == []
+    assert sidecar.consecutive_failures == 5
+    assert sidecar.down is True
+    assert sidecar._restart_task is None
+
+
+async def test_sidecar_start_refuses_live_cross_home_peer_on_shared_root(
+    tmp_path: Path,
+    short_socket_path: Path,
+) -> None:
+    provider_root = tmp_path / "shared" / "everos-root"
+    provider_root.parent.mkdir(mode=0o700)
+    peer_socket = tmp_path / "peer" / "everos.sock"
+    host = _FakeProcessHost(
+        root_sidecars={_ORPHAN_PID: _ORPHAN_CREATE_TIME},
+        identities={
+            _ORPHAN_PID: _ProcessIdentity(
+                create_time=_ORPHAN_CREATE_TIME,
+                cmdline=(
+                    sys.executable,
+                    "-m",
+                    _SIDECAR_ENTRYPOINT_MODULE,
+                    "--uds",
+                    str(peer_socket),
+                ),
+                uid=os.getuid() if hasattr(os, "getuid") else None,
+            )
+        },
+        live_processes={_ORPHAN_PID: _ORPHAN_CREATE_TIME},
+    )
+    process = EverOSProcess(
+        sys.executable,
+        effective_home=tmp_path / "local-home",
+        provider_root=provider_root,
+        socket_path=short_socket_path,
+        settings=_settings(),
+        _host=host,
+    )
+
+    assert await process.start() is False
+    assert process.consecutive_failures == 0
+    assert process.last_error == "memory_provider_root_busy"
+    assert host.signal_calls == []
+    assert host.spawn_calls == []
+    retry = process._restart_task
+    process._desired_running = False
+    if retry is not None:
+        retry.cancel()
+        try:
+            await retry
+        except asyncio.CancelledError:
+            pass
+
+
+async def test_rebuild_boot_fails_closed_on_ambiguous_discovery(tmp_path: Path) -> None:
+    host = _FakeProcessHost(
+        rebuilds={
+            _ORPHAN_PID: _ORPHAN_CREATE_TIME,
+            _ORPHAN_DESCENDANT_PID: _ORPHAN_CREATE_TIME + 1,
+        }
+    )
+
+    with pytest.raises(RuntimeError, match="ambiguous EverOS child ownership"):
+        await _rebuild_process(tmp_path, host).reconcile_orphan()
+
+    assert host.signal_calls == []
+
+
+async def test_rebuild_boot_fails_closed_on_mixed_role_discovery(tmp_path: Path) -> None:
+    host = _FakeProcessHost(
+        sidecars={_ORPHAN_PID: _ORPHAN_CREATE_TIME},
+        rebuilds={_ORPHAN_DESCENDANT_PID: _ORPHAN_CREATE_TIME + 1},
+    )
+
+    with pytest.raises(RuntimeError, match="ambiguous EverOS child ownership"):
+        await _rebuild_process(tmp_path, host).reconcile_orphan()
+
+    assert host.signal_calls == []
+
+
+async def test_rebuild_boot_fails_closed_on_cross_home_sidecar_and_rebuild(
+    tmp_path: Path,
+) -> None:
+    host = _FakeProcessHost(
+        root_sidecars={_ORPHAN_PID: _ORPHAN_CREATE_TIME},
+        rebuilds={_ORPHAN_DESCENDANT_PID: _ORPHAN_CREATE_TIME + 1},
+    )
+
+    with pytest.raises(RuntimeError, match="ambiguous EverOS child ownership"):
+        await _rebuild_process(tmp_path, host).reconcile_orphan()
+
+    assert host.signal_calls == []
+
+
+async def test_rebuild_boot_keeps_an_unknown_role_record_fail_closed(tmp_path: Path) -> None:
+    host = _FakeProcessHost()
+    process = _rebuild_process(tmp_path, host)
+    process._ownership.record_path.parent.mkdir(parents=True, exist_ok=True)
+    process._ownership.record_path.write_text(
+        json.dumps(_rebuild_record(process, role="future_role")),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="role could not be verified"):
+        await process.reconcile_orphan()
+
+    assert process._ownership.record_path.exists()
+    assert host.signal_calls == []
+
+
+async def test_rebuild_boot_keeps_record_when_a_group_survives(tmp_path: Path) -> None:
+    survivor = {_ORPHAN_DESCENDANT_PID: _ORPHAN_CREATE_TIME + 1}
+    host = _FakeProcessHost(
+        identities={_ORPHAN_PID: None},
+        groups={_ORPHAN_PID: (survivor, [])},
+        live_processes=dict(survivor),
+        wait_results=deque([False, False]),
+        remove_on_signal=False,
+    )
+    process = _rebuild_process(tmp_path, host)
+    process._ownership.record_path.parent.mkdir(parents=True, exist_ok=True)
+    process._ownership.record_path.write_text(
+        json.dumps(_rebuild_record(process)),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="orphaned sidecar group did not exit"):
+        await process.reconcile_orphan()
+
+    assert process._ownership.record_path.exists()
+
+
+async def test_rebuild_record_failure_reaps_the_just_spawned_child(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    child = _RebuildChild(None)
+    releases: list[int] = []
+    child.send_signal = releases.append
+    identities = {child.pid: _ORPHAN_CREATE_TIME}
+    host = _FakeProcessHost(
+        spawns=deque([child]),
+        process_groups={child.pid: child.pid},
+        trees={(child.pid, child.pid): identities},
+        live_processes=dict(identities),
+    )
+    process = _rebuild_process(tmp_path, host)
+    original_write = memory_process._write_private_text
+
+    def fail_record(path: Path, contents: str) -> None:
+        if path == process._ownership.record_path:
+            raise OSError("simulated crash after spawn")
+        original_write(path, contents)
+
+    monkeypatch.setattr(memory_process, "_write_private_text", fail_record)
+
+    assert await process.run() is RebuildProcessResult.FAILED
+    assert releases == []
+    assert not host.live_processes
+    assert host.signal_calls
