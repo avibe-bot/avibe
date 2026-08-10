@@ -1342,6 +1342,14 @@ def mapping_tables(doc: Document) -> list[tuple[int, str, set[str], set[str], bo
 # one invents a domain member no schema declares.
 VALUE_TOKEN_RE = re.compile(r"`([a-z][a-z0-9_]*)`")
 
+# This document's dispatch idiom: one or more values, then an arrow, then the
+# state they land in. The values have to sit immediately before the arrow —
+# 「an `active` nothing adopts →」 is a sentence about a value, not a pairing —
+# and the landing runs to the next quoted value, because that is where the next
+# pairing starts.
+ARROW_LANDING_RE = re.compile(r"((?:`[a-z][a-z0-9_]*`(?:\s*(?:,|、|/|or|或)\s*)?)+)\s*→\s*([^`]*)")
+LANDING_END_RE = re.compile(r"[。;;]|\.\s")
+
 
 def frame_mappings(doc: Document, copy_u: Universe) -> dict[str, dict[str, dict[str, set[str]]]]:
     """frame → field → value → the copy keys that frame's own table renders it as.
@@ -2574,8 +2582,46 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
             v for v, land in landings.items() if v not in spoken and land["state"] not in named
         ]
 
+    # A value spoken anywhere in the exit was enough to call it routed, and
+    # membership is not correspondence. The head this arm was written for shipped
+    # 「`standby` or `active` → Ready」 while its own frame drew `standby` as Not
+    # supplying; the arm read the mention, called the landing reached, and the
+    # contradiction it exists to catch survived one spelling short of caught.
+    #
+    # Where the exit writes this document's own dispatch idiom — one or more
+    # values, an arrow, the state they land in — the pair is decidable, so the
+    # landing it names has to be the landing the register keys on that value.
+    #
+    # Two refusals. A value written more than once in the same exit is being
+    # split by a condition rather than dispatched: §1.6 sends 「an `active`
+    # nothing adopts」 to Not supplying and 「an adopted `active`」 to Ready, and
+    # both are right, so neither spelling is checked. And a target naming no
+    # state of this frame is prose the arm has nothing to compare — the sentence
+    # continues, and only a named landing is a claim about where a value goes.
+    def _misrouted(
+        row: dict[str, Any], landings: dict[str, dict[str, Any]]
+    ) -> list[tuple[str, dict[str, Any], list[str]]]:
+        names = {r["state"] for r in reg if r["frame"].lstrip("§") == row["frame"].lstrip("§")}
+        spoken = VALUE_TOKEN_RE.findall(row["exit"])
+        wrong: list[tuple[str, dict[str, Any], list[str]]] = []
+        for run, target in ARROW_LANDING_RE.findall(row["exit"]):
+            # A landing ends where the sentence does. The last pair in a cell has
+            # no following value to stop at, so without this it swallows the rest
+            # of the exit and any state named there vouches for it.
+            named = {n for n in names if n in LANDING_END_RE.split(target)[0]}
+            named -= {n for n in named if any(n != o and n in o for o in named)}
+            if not named:
+                continue
+            for value in VALUE_TOKEN_RE.findall(run):
+                land = landings.get(value)
+                if land is None or spoken.count(value) > 1 or land["state"] in named:
+                    continue
+                wrong.append((value, land, sorted(named)))
+        return wrong
+
     dispatch_landings = 0
     dispatch_rows = 0
+    dispatch_pairs = 0
     for frame in sorted(reg_frames):
         maps = frame_maps.get(frame)
         if not maps:
@@ -2608,6 +2654,7 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
                     if router is primary
                     else f"a row that routes this frame by `{field}`"
                 )
+                dispatch_pairs += len(ARROW_LANDING_RE.findall(router["exit"]))
                 for value in _unrouted(router, landings):
                     row = landings[value]
                     add(
@@ -2616,6 +2663,14 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
                         f"§{frame} draws `{field}` reading `{value}` as 「{row['state']}」 "
                         f"(L{row['line']}), and 「{router['state']}」 — {role} — "
                         f"names neither, so that reading reaches no state",
+                    )
+                for value, row, named in _misrouted(router, landings):
+                    add(
+                        "C",
+                        f"L{router['line']}",
+                        f"「{router['state']}」 — {role} — sends `{value}` to "
+                        f"{'、'.join('「' + n + '」' for n in named)}, and §{frame} keys "
+                        f"「{row['state']}」 (L{row['line']}) on that same reading",
                     )
     for sec in sorted(p["inventories"]):
         if sec not in reg_frames:
@@ -2764,6 +2819,7 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
         "frame mapping-table value→key pairs": pairs,
         "dispatch landings compared": dispatch_landings,
         "dispatch rows checked": dispatch_rows,
+        "dispatch value→state pairs read": dispatch_pairs,
         "copy tables / rows": f"{p['tables']} / {p['rows']}",
         "copy keys defined": len(copy_u),
         "condition-named keys": len(conditions),

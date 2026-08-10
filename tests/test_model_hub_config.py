@@ -1108,6 +1108,26 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "`[contract-gap]` G-10 |",
         "reading `waiting` as 「Installing」",
     ),
+    # And the third side, which membership could not see: the dispatch names
+    # every reading and sends one of them to the wrong state. The head this arm
+    # was written for shipped 「`standby` or `active` → Ready」 over a frame that
+    # drew `standby` as Not supplying; the value was spoken, the landing counted
+    # as reached, and the contradiction stood. Both cases below are a single
+    # arrow, one on each router this document has.
+    GateCase(
+        "C", None, "arm",
+        "the dispatching row sends a reading to a state its own frame keys elsewhere",
+        "`not_started` → Not started",
+        "`not_started` → Ready",
+        "sends `not_started` to 「Ready」, and §1.0 keys 「Not started」",
+    ),
+    GateCase(
+        "C", None, "arm",
+        "a routing exit swaps two of its field's landings",
+        "`cooldown` → Cooling",
+        "`cooldown` → Needs action",
+        "sends `cooldown` to 「Needs action」, and §1.6 keys 「Cooling」",
+    ),
 )
 
 
@@ -1289,6 +1309,20 @@ GATE_INNOCENT: tuple[InnocentCase, ...] = (
         "class C's dispatch arm accepts either vocabulary, the reading or its state",
         "`not_started` → Not started, `degraded` → Impaired",
         "a runtime that has never been started → Not started, `degraded` → Impaired",
+    ),
+    # The correspondence half of the same arm needs its own line, and this is
+    # where it falls: a reading a frame splits by a condition lands in two
+    # states, and both are right. §1.6 already sends 「an `active` nothing
+    # adopts」 and 「an adopted `active`」 to different states; a second such
+    # split has to stay as legal as the first, or the arm buys correspondence by
+    # forbidding the one thing a dispatch legitimately does with a reading whose
+    # meaning depends on more than itself.
+    InnocentCase(
+        "a reading the frame splits by a condition, landing in two states",
+        "class C's dispatch arm declines a value its exit writes more than once",
+        "`standby` or an `active` nothing adopts → Not supplying",
+        "`standby` or an `active` nothing adopts → Not supplying, and once the engine "
+        "resumes `standby` → Ready",
     ),
 )
 
