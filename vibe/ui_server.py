@@ -3144,8 +3144,8 @@ async def model_hub_sources_patch(source_id):
     from core.handlers.model_hub import ModelHubError
 
     try:
-        source = await _model_hub_service().patch_source(source_id, _model_hub_json_object())
-        return _model_hub_success(source=source)
+        result = await _model_hub_service().patch_source(source_id, _model_hub_json_object())
+        return _model_hub_success(**result)
     except ModelHubError as exc:
         return _model_hub_error(exc)
 

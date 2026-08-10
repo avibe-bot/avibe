@@ -1974,7 +1974,6 @@ class ModelHubService:
                 raise ModelHubError("discovery_failed")
 
             old_credential_ref = source.credential_ref
-            recovered = source.state.status in {"needs_action", "error"}
             replacement_ref = await self._engine_call(
                 self.adapter.provision_credential(
                     source.vendor,
@@ -1995,13 +1994,12 @@ class ModelHubService:
                 self._apply_discovered_models(source, manual, discovered)
                 source.state = ModelHubSourceStateConfig(status="standby")
 
-                interrupted_pairs = self._introduced_interruptions(previous, config)
-                if interrupted_pairs and not force:
-                    raise ModelHubError(
-                        "source_last_supplier",
-                        status=409,
-                        data={"would_interrupt": interrupted_pairs},
-                    )
+                removed_hops, interrupted = self._guard_inventory_mutation(
+                    previous,
+                    config,
+                    source.id,
+                    force=force,
+                )
 
                 if old_credential_ref != replacement_ref:
                     self.revocations.add(source.id, old_credential_ref)
@@ -2045,14 +2043,19 @@ class ModelHubService:
                         pass
             return {
                 "source": source.to_payload(),
-                "recovered": recovered,
-                "interrupted_pairs": interrupted_pairs,
+                "removed_hops": removed_hops,
+                "interrupted": interrupted,
             }
 
     async def patch_source(self, source_id: str, payload: dict) -> dict:
-        if not isinstance(payload, dict) or set(payload) - {"display_name", "base_url"}:
+        if (
+            not isinstance(payload, dict)
+            or set(payload) - {"display_name", "base_url", "force"}
+            or ("force" in payload and not isinstance(payload["force"], bool))
+        ):
             raise ModelHubError("discovery_failed")
         base_url = _validated_base_url(payload.get("base_url")) if "base_url" in payload else None
+        force = payload.get("force") is True
         async with self._mutation_lock:
             previous = self.store.load()
             config = self._clone_config(previous)
@@ -2074,11 +2077,23 @@ class ModelHubService:
                 discovered = await self._discover(source)
                 manual = [model for model in source.models if model.provenance == "manual"]
                 self._apply_discovered_models(source, manual, discovered)
+                removed_hops, interrupted = self._guard_inventory_mutation(
+                    previous,
+                    config,
+                    source.id,
+                    force=force,
+                )
             if "base_url" in payload:
                 await self._commit_synced(previous, config)
             else:
                 self._save_config(config)
-            return source.to_payload()
+                removed_hops = []
+                interrupted = []
+            return {
+                "source": source.to_payload(),
+                "removed_hops": removed_hops,
+                "interrupted": interrupted,
+            }
 
     def _protected_menu_models(
         self,
@@ -2166,6 +2181,86 @@ class ModelHubService:
             )
             if (item["backend"], item["model_id"]) not in baseline
         ]
+
+    def _invalidated_route_hops(
+        self,
+        config: ModelHubConfig,
+        source_id: str,
+    ) -> list[dict]:
+        return [
+            {
+                "backend": backend,
+                "menu_model": menu_model,
+                "source_id": source_id,
+                "model_id": hop.model_id,
+            }
+            for backend in MODEL_HUB_BACKENDS
+            for menu_model, route in config.agents[backend].routes.items()
+            for hop in route.hops
+            if hop.source_id == source_id
+            and inspect_exact_hop(
+                config,
+                cast(BackendName, backend),
+                menu_model,
+                hop,
+                now=self.now(),
+                unavailable_source_ids=self._unavailable_native_sources(
+                    config,
+                    cast(BackendName, backend),
+                ),
+            ).reason
+            == "model_unsupported"
+        ]
+
+    @staticmethod
+    def _prune_invalidated_route_hops(
+        config: ModelHubConfig,
+        invalidated_hops: list[dict],
+    ) -> None:
+        identities = {
+            (
+                item["backend"],
+                item["menu_model"],
+                item["source_id"],
+                item["model_id"],
+            )
+            for item in invalidated_hops
+        }
+        for backend in MODEL_HUB_BACKENDS:
+            for menu_model, route in config.agents[backend].routes.items():
+                route.hops = tuple(
+                    hop
+                    for hop in route.hops
+                    if (backend, menu_model, hop.source_id, hop.model_id)
+                    not in identities
+                )
+
+    def _guard_inventory_mutation(
+        self,
+        previous: ModelHubConfig,
+        updated: ModelHubConfig,
+        source_id: str,
+        *,
+        force: bool,
+    ) -> tuple[list[dict], list[dict]]:
+        would_remove_hops = self._invalidated_route_hops(updated, source_id)
+        would_interrupt = self._introduced_interruptions(previous, updated)
+        if (would_remove_hops or would_interrupt) and not force:
+            raise ModelHubError(
+                (
+                    "source_model_in_route_chain"
+                    if would_remove_hops
+                    else "source_last_supplier"
+                ),
+                status=409,
+                data={
+                    "would_remove_hops": would_remove_hops,
+                    "would_interrupt": would_interrupt,
+                },
+            )
+        if would_remove_hops:
+            self._prune_invalidated_route_hops(updated, would_remove_hops)
+        return would_remove_hops, would_interrupt
 
     async def delete_source(self, source_id: str, *, force: bool = False) -> dict:
         async with self._mutation_lock:
@@ -2275,56 +2370,16 @@ class ModelHubService:
                 )
                 raise
             source.state = ModelHubSourceStateConfig(status="standby")
-            would_remove_hops = [
-                {
-                    "backend": backend,
-                    "menu_model": menu_model,
-                    "source_id": source_id,
-                    "model_id": hop.model_id,
-                }
-                for backend in MODEL_HUB_BACKENDS
-                for menu_model, route in config.agents[backend].routes.items()
-                for hop in route.hops
-                if hop.source_id == source_id
-                and inspect_exact_hop(
-                    config,
-                    cast(BackendName, backend),
-                    menu_model,
-                    hop,
-                    now=self.now(),
-                    unavailable_source_ids=self._unavailable_native_sources(
-                        config,
-                        cast(BackendName, backend),
-                    ),
-                ).reason
-                == "model_unsupported"
-            ]
-            would_interrupt = self._introduced_interruptions(previous, config)
-            if (would_remove_hops or would_interrupt) and not force:
-                raise ModelHubError(
-                    "source_model_in_route_chain" if would_remove_hops else "source_last_supplier",
-                    status=409,
-                    data={
-                        "would_remove_hops": would_remove_hops,
-                        "would_interrupt": would_interrupt,
-                    },
-                )
-            if force and would_remove_hops:
-                discovered_ids = {model.id for model in source.models}
-                for agent in config.agents.values():
-                    for menu_model, route in agent.routes.items():
-                        route.hops = tuple(
-                            hop
-                            for hop in route.hops
-                            if not (
-                                hop.source_id == source_id
-                                and hop.model_id not in discovered_ids
-                            )
-                        )
+            removed_hops, would_interrupt = self._guard_inventory_mutation(
+                previous,
+                config,
+                source.id,
+                force=force,
+            )
             await self._commit_synced(previous, config)
             return {
                 "source": source.to_payload(),
-                "removed_hops": would_remove_hops if force else [],
+                "removed_hops": removed_hops,
                 "interrupted": would_interrupt,
             }
 
@@ -3353,6 +3408,10 @@ class ModelHubService:
         channel = payload.get("channel") if isinstance(payload, dict) else None
         if not isinstance(vendor, str) or channel not in {"native_cli", "hub"}:
             raise ModelHubError("flow_not_found", status=400)
+        try:
+            vendor = normalize_model_hub_vendor_id(vendor)
+        except ValueError:
+            raise ModelHubError("flow_not_found", status=400) from None
         oauth_channel = cast(OAuthChannel, channel)
         if oauth_channel == "native_cli":
             backend = _NATIVE_VENDOR_BACKENDS.get(vendor)
@@ -3681,6 +3740,52 @@ class ModelHubService:
             return handle, None
         return handle, await self._engine_call(handle.outcome())
 
+    @staticmethod
+    def _request_reasoning_effort(request: Mapping[str, Any]) -> str | None:
+        direct = request.get("reasoning_effort")
+        if isinstance(direct, str) and direct:
+            return direct
+        reasoning = request.get("reasoning")
+        if isinstance(reasoning, Mapping):
+            nested = reasoning.get("effort")
+            if isinstance(nested, str) and nested:
+                return nested
+        return None
+
+    @staticmethod
+    def _request_for_exact_reasoning_effort(
+        request: Mapping[str, Any],
+        source: ModelHubSourceConfig,
+        model_id: str,
+    ) -> Mapping[str, Any]:
+        requested = ModelHubService._request_reasoning_effort(request)
+        model = next((item for item in source.models if item.id == model_id), None)
+        exact = (
+            requested
+            if requested is not None
+            and model is not None
+            and requested in model.reasoning_efforts
+            else None
+        )
+        payload = dict(request)
+        changed = False
+        if "reasoning_effort" in payload:
+            payload["reasoning_effort"] = exact
+            changed = True
+        reasoning = payload.get("reasoning")
+        if isinstance(reasoning, Mapping) and "effort" in reasoning:
+            payload["reasoning"] = {**reasoning, "effort": exact}
+            changed = True
+        if not changed:
+            return request
+        if isinstance(request, ModelHubRequest):
+            return ModelHubRequest(
+                payload,
+                protocol=request.protocol,
+                headers=request.headers,
+            )
+        return payload
+
     async def resolve(
         self,
         *,
@@ -3756,6 +3861,11 @@ class ModelHubService:
                 raise AssertionError("runnable hop must have an exact identity")
             if source.id in globally_blocked_source_ids:
                 continue
+            exact_request = self._request_for_exact_reasoning_effort(
+                request,
+                source,
+                target_model,
+            )
             if source.supply_channel == "native_cli":
                 self._emit_switch(
                     agent=event_agent,
@@ -3785,7 +3895,7 @@ class ModelHubService:
             handle, outcome = await self._invoke(
                 source=source,
                 model_id=target_model,
-                request=request,
+                request=exact_request,
                 stream=stream,
                 backend=backend,
             )
@@ -3805,7 +3915,7 @@ class ModelHubService:
                 handle, outcome = await self._invoke(
                     source=source,
                     model_id=target_model,
-                    request=request,
+                    request=exact_request,
                     stream=stream,
                     backend=backend,
                 )

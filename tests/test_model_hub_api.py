@@ -949,6 +949,17 @@ def test_native_oauth_rejects_duplicate_source_before_adapter(tmp_path):
     assert adapter.oauth_start_calls == []
 
 
+def test_oauth_start_normalizes_vendor_before_singleton_and_adapter(tmp_path):
+    service, _store, adapter = _service(tmp_path)
+
+    flow = asyncio.run(
+        service.oauth_start({"vendor": " Anthropic ", "channel": "hub"})
+    )["flow"]
+
+    assert flow["vendor"] == "anthropic"
+    assert adapter.oauth_start_calls == [(flow["source_id"], "anthropic")]
+
+
 def test_chain_route_reorders_exact_persisted_hops(monkeypatch, tmp_path):
     service, _, _ = _service(tmp_path)
     first = asyncio.run(
@@ -2651,7 +2662,12 @@ def test_credential_route_carries_body_force_override_and_structured_guard(
 
     assert refused.status_code == 409
     refusal = refused.get_json()
-    assert refusal["error"] == "source_last_supplier"
+    assert refusal["error"] == "source_model_in_route_chain"
+    assert refusal["would_remove_hops"]
+    assert all(
+        hop["source_id"] == created["id"]
+        for hop in refusal["would_remove_hops"]
+    )
     assert refusal["would_interrupt"] == [
         {
             "backend": "claude",
@@ -2671,9 +2687,19 @@ def test_credential_route_carries_body_force_override_and_structured_guard(
         base_url=base_url,
     ).get_json()
 
-    assert committed["recovered"] is False
-    assert committed["interrupted_pairs"] == refusal["would_interrupt"]
+    assert committed["removed_hops"] == refusal["would_remove_hops"]
+    assert committed["interrupted"] == refusal["would_interrupt"]
     assert committed["source"]["credential_ref"] == "cred_route_3"
+    removed_identities = {
+        (hop["backend"], hop["menu_model"], hop["source_id"], hop["model_id"])
+        for hop in committed["removed_hops"]
+    }
+    assert all(
+        (backend, menu_model, hop.source_id, hop.model_id) not in removed_identities
+        for backend, agent in store.config.agents.items()
+        for menu_model, route in agent.routes.items()
+        for hop in route.hops
+    )
     assert adapter.revoked == ["cred_test001", "cred_route_2", "cred_route_1"]
 
 
@@ -3382,6 +3408,69 @@ def test_source_patch_rejects_credential_bearing_discovered_model_id(tmp_path):
     assert "sk-model-never-persist-this" not in json.dumps(store.config.to_payload())
 
 
+def test_base_url_change_guards_and_prunes_invalid_exact_hops(
+    monkeypatch,
+    tmp_path,
+):
+    service, store, adapter = _service(tmp_path)
+    source = asyncio.run(
+        _create_source(
+            service,
+            {
+                "kind": "api_key",
+                "vendor": "anthropic",
+                "display_name": "Guarded endpoint",
+                "key": "sk-test-transient-only",
+            },
+        )
+    )
+
+    async def discover_narrower(vendor, protocol, base_url, credential_ref):
+        return ("replacement-only-model",)
+
+    adapter.discover_models = discover_narrower
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
+    client = app.test_client()
+    origin = "http://127.0.0.1:15131"
+    headers = csrf_headers(client, origin)
+    replacement_url = "https://other-relay.example/v1"
+
+    refused = client.patch(
+        f"/api/models/sources/{source['id']}",
+        json={"base_url": replacement_url},
+        headers=headers,
+        base_url=origin,
+    )
+
+    assert refused.status_code == 409
+    refusal = refused.get_json()
+    assert refusal["error"] == "source_model_in_route_chain"
+    assert refusal["would_remove_hops"]
+    assert store.config.sources[0].base_url is None
+
+    committed = client.patch(
+        f"/api/models/sources/{source['id']}",
+        json={"base_url": replacement_url, "force": True},
+        headers=headers,
+        base_url=origin,
+    ).get_json()
+
+    assert committed["source"]["base_url"] == replacement_url
+    assert committed["removed_hops"] == refusal["would_remove_hops"]
+    assert committed["interrupted"] == refusal["would_interrupt"]
+    assert store.config.sources[0].base_url == replacement_url
+    removed_identities = {
+        (hop["backend"], hop["menu_model"], hop["source_id"], hop["model_id"])
+        for hop in committed["removed_hops"]
+    }
+    assert all(
+        (backend, menu_model, hop.source_id, hop.model_id) not in removed_identities
+        for backend, agent in store.config.agents.items()
+        for menu_model, route in agent.routes.items()
+        for hop in route.hops
+    )
+
+
 def test_metadata_only_source_patch_does_not_require_engine_sync(tmp_path):
     service, store, adapter = _service(tmp_path)
     source = asyncio.run(
@@ -3400,6 +3489,8 @@ def test_metadata_only_source_patch_does_not_require_engine_sync(tmp_path):
 
     updated = asyncio.run(service.patch_source(source["id"], {"display_name": "After rename"}))
 
-    assert updated["display_name"] == "After rename"
+    assert updated["source"]["display_name"] == "After rename"
+    assert updated["removed_hops"] == []
+    assert updated["interrupted"] == []
     assert store.config.sources[0].display_name == "After rename"
     assert len(adapter.synced) == sync_count

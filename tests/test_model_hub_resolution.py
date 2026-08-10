@@ -4,6 +4,7 @@ import asyncio
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Mapping
 from unittest.mock import patch
 
 import pytest
@@ -28,6 +29,7 @@ from core.handlers.model_hub.adapter import (
     SourceObservation,
 )
 from core.handlers.model_hub.events import BoundedEventLog
+from core.handlers.model_hub.request import ModelHubRequest
 from core.handlers.model_hub.resolver import allowed_origins, resolve_model_hub_turn
 from core.handlers.model_hub.resolver import (
     canonical_opencode_menu_identity,
@@ -86,6 +88,7 @@ class FakeAdapter:
         self.sync_block: asyncio.Event | None = None
         self.outcomes = deque()
         self.invocations: list[tuple[str, str]] = []
+        self.invocation_requests: list[Mapping[str, object]] = []
 
     async def ensure_installed(self):
         return await self.status()
@@ -156,6 +159,7 @@ class FakeAdapter:
 
     async def invoke(self, source_id, model_id, request, stream, origin):
         self.invocations.append((source_id, model_id))
+        self.invocation_requests.append(request)
         outcome = self.outcomes.popleft()
         return FakeInvokeHandle(outcome)
 
@@ -468,6 +472,63 @@ def test_runtime_skips_later_hops_after_a_source_global_failure(tmp_path):
         (second.id, "upstream-third"),
     ]
     assert resolved.model_id == "upstream-third"
+
+
+def test_runtime_filters_reasoning_effort_for_each_exact_hop(tmp_path):
+    first = _source("src_effort001", ("upstream-first",))
+    second = _source("src_effort002", ("upstream-second",))
+    first.models[0].reasoning_efforts = ["high"]
+    second.models[0].reasoning_efforts = ["low"]
+    config = _config([first, second])
+    config.agents["claude"].routes["claude-opus-4-6"] = ModelHubRouteConfig(
+        hops=(
+            ModelHubRouteHopConfig(first.id, "upstream-first"),
+            ModelHubRouteHopConfig(second.id, "upstream-second"),
+        )
+    )
+    adapter = FakeAdapter()
+    adapter.outcomes.extend(
+        (
+            RawCallOutcome(
+                kind=RawOutcomeKind.HTTP_ERROR,
+                http_status=403,
+                error_code="permission_error",
+                redacted_message=None,
+                stream_started=False,
+                model_id="upstream-first",
+                source_id=first.id,
+            ),
+            RawCallOutcome(
+                kind=RawOutcomeKind.SUCCESS,
+                http_status=200,
+                error_code=None,
+                redacted_message=None,
+                stream_started=False,
+                model_id="upstream-second",
+                source_id=second.id,
+            ),
+        )
+    )
+    service, _store, _ = _service(tmp_path, config, adapter)
+    request = ModelHubRequest(
+        {"reasoning": {"effort": "high"}},
+        protocol="openai_responses",
+        headers={"x-test": "preserved"},
+    )
+
+    resolved = asyncio.run(
+        service.resolve(
+            backend="claude",
+            model_id="claude-opus-4-6",
+            request=request,
+        )
+    )
+
+    assert resolved.source_id == second.id
+    assert adapter.invocation_requests[0]["reasoning"] == {"effort": "high"}
+    assert adapter.invocation_requests[1]["reasoning"] == {"effort": None}
+    assert adapter.invocation_requests[1].protocol == "openai_responses"
+    assert adapter.invocation_requests[1].headers == {"x-test": "preserved"}
 
 
 def test_runtime_does_not_alias_unpersisted_claude_request():
@@ -1354,7 +1415,8 @@ def test_credential_replace_ignores_preexisting_unrelated_gap(tmp_path):
         service.replace_credential(healthy.id, {"key": "replacement-key"})
     )
 
-    assert result["interrupted_pairs"] == []
+    assert result["removed_hops"] == []
+    assert result["interrupted"] == []
     assert adapter.provisioned == ["replacement-key"]
 
 
@@ -1397,19 +1459,25 @@ def test_all_interruption_guards_use_the_shared_baseline_comparator():
             encoding="utf-8"
         )
     )
-    guarded_methods = {
-        "replace_credential",
+    direct_baseline_guards = {
         "delete_source",
-        "refresh_source",
         "set_agent_chain",
         "delete_custom_model",
     }
-    for method in (
-        node
+    inventory_guards = {
+        "patch_source",
+        "replace_credential",
+        "refresh_source",
+    }
+    methods = {
+        node.name: node
         for node in walk(tree)
-        if isinstance(node, AsyncFunctionDef) and node.name in guarded_methods
-    ):
-        calls = [
+        if isinstance(node, AsyncFunctionDef)
+        and node.name in direct_baseline_guards | inventory_guards
+    }
+
+    def calls(method):
+        return [
             (
                 node.func.id
                 if isinstance(node.func, Name)
@@ -1420,8 +1488,23 @@ def test_all_interruption_guards_use_the_shared_baseline_comparator():
             for node in walk(method)
             if node.__class__.__name__ == "Call"
         ]
-        assert "_introduced_interruptions" in calls
-        assert "_would_interrupt" not in calls
+
+    inventory_guard = next(
+        node
+        for node in walk(tree)
+        if node.__class__.__name__ == "FunctionDef"
+        and node.name == "_guard_inventory_mutation"
+    )
+    assert "_introduced_interruptions" in calls(inventory_guard)
+    assert "_would_interrupt" not in calls(inventory_guard)
+
+    for name in inventory_guards:
+        assert "_guard_inventory_mutation" in calls(methods[name])
+        assert "_introduced_interruptions" not in calls(methods[name])
+
+    for name in direct_baseline_guards:
+        assert "_introduced_interruptions" in calls(methods[name])
+        assert "_would_interrupt" not in calls(methods[name])
 
 
 def test_direct_mode_refuses_chain_and_probe(tmp_path):
