@@ -1022,19 +1022,14 @@ class MemoryRuntime:
         operator_ref: str | None = None,
         verified_user_key: str | None = None,
     ) -> dict[str, Any]:
-        summary = await self._processing_record.read(
-            "record",
+        summary = await self._processing_record.read_record(
             verified_user_key=verified_user_key,
             operator_ref=operator_ref,
         )
-        if not isinstance(summary, ProcessingRecordSummary):
-            raise RuntimeError("invalid Processing Record projection")
         return _processing_record_payload(summary)
 
     async def status_payload(self) -> dict[str, Any]:
-        runtime = await self._processing_record.read("status")
-        if not isinstance(runtime, RuntimeHealthProjection):
-            raise RuntimeError("invalid Memory status projection")
+        runtime = await self._processing_record.read_status()
         return _runtime_health_payload(runtime)
 
     async def failure_log_payload(
@@ -1043,13 +1038,10 @@ class MemoryRuntime:
         operator_ref: str | None = None,
         verified_user_key: str | None = None,
     ) -> dict[str, Any]:
-        projection = await self._processing_record.read(
-            "failures",
+        projection = await self._processing_record.read_failures(
             verified_user_key=verified_user_key,
             operator_ref=operator_ref,
         )
-        if not isinstance(projection, tuple):
-            raise RuntimeError("invalid Memory failures projection")
         anomalies, maintenance = projection
         if anomalies.source.status == "unavailable":
             raise self._unavailable()
@@ -1067,13 +1059,10 @@ class MemoryRuntime:
     ) -> dict[str, Any]:
         """Return cheap local maintenance facts without probing or scanning EverOS."""
 
-        result = await self._processing_record.read(
-            "maintenance",
+        result = await self._processing_record.read_maintenance(
             verified_user_key=verified_user_key,
             operator_ref=operator_ref,
         )
-        if not isinstance(result, MaintenanceProjection):
-            raise RuntimeError("invalid Memory maintenance projection")
         return {
             "status": "ok",
             "data_exists": result.data_exists,
