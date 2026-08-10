@@ -1015,26 +1015,13 @@ class SessionTurnManager:
         text: str,
         *,
         delivery: Optional[dict[str, Any]] = None,
+        decorate: bool = True,
     ) -> str:
-        """Decorate scheduled backend text immediately before native dispatch."""
+        """Restore scheduled provenance and optionally decorate backend text."""
         if delivery is not None:
-            payload = delivery_store.delivery_payload(delivery)
-            provenance = (payload.get("metadata") or {}).get(SCHEDULED_PROVENANCE_KEY)
-            preserved = (
-                provenance.get("platform_specific")
-                if isinstance(provenance, dict)
-                else None
-            )
-            if isinstance(preserved, dict):
-                spec = dict(getattr(context, "platform_specific", None) or {})
-                spec.update(
-                    {
-                        key: value
-                        for key, value in preserved.items()
-                        if key not in _EXECUTION_ROUTING_KEYS
-                    }
-                )
-                context.platform_specific = spec
+            self._restore_scheduled_dispatch_context(context, delivery)
+        if not decorate:
+            return text
         spec = dict(getattr(context, "platform_specific", None) or {})
         if spec.get(SCHEDULED_DISPATCH_METADATA_APPLIED_KEY):
             return text
@@ -1043,6 +1030,30 @@ class SessionTurnManager:
         if not callable(decorator) or not inspect.iscoroutinefunction(decorator):
             return text
         return await decorator(context, text, include_user_info=False)
+
+    @staticmethod
+    def _restore_scheduled_dispatch_context(
+        context: "MessageContext",
+        delivery: dict[str, Any],
+    ) -> None:
+        payload = delivery_store.delivery_payload(delivery)
+        provenance = (payload.get("metadata") or {}).get(SCHEDULED_PROVENANCE_KEY)
+        preserved = (
+            provenance.get("platform_specific")
+            if isinstance(provenance, dict)
+            else None
+        )
+        if not isinstance(preserved, dict):
+            return
+        spec = dict(getattr(context, "platform_specific", None) or {})
+        spec.update(
+            {
+                key: value
+                for key, value in preserved.items()
+                if key not in _EXECUTION_ROUTING_KEYS
+            }
+        )
+        context.platform_specific = spec
 
     @staticmethod
     def _apply_delivery_binding_provenance(
@@ -3784,6 +3795,17 @@ class SessionTurnManager:
                     else str(delivery["id"])
                 )
             text = str(turn.get("dispatch_text") or "")
+            if source == SOURCE_SCHEDULED:
+                # Keep the raw prompt until MessageHandler parses an explicit
+                # ``subagent: prompt`` prefix. The handler adds metadata to the
+                # final backend request after routing; decorating here would make
+                # the metadata line hide that prefix from the parser.
+                await self.prepare_scheduled_dispatch(
+                    resolved,
+                    text,
+                    delivery=delivery,
+                    decorate=False,
+                )
         except Exception:
             logger.exception(
                 "durable native start failed during pre-dispatch preparation for Turn=%s",
