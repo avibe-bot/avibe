@@ -45,6 +45,8 @@ event. The runtime currently loses both facts between cycles.
 6. Resume clears the live burst window but retains the last follow-up Run ID. If the
    repair Agent resumes the Watch before its own Run settles, the waiter still waits
    for that Run and the five-second re-arm delay.
+7. An allowed retry exit is healthy while the Watch remains enabled, regardless of
+   mode. The same exit is failing once the Watch retires because no retry remains.
 
 The SQLite outbox transaction also rejects a new Watch follow-up while an older one
 for the same definition is queued or running. The runtime-level wait handles normal

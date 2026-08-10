@@ -7699,11 +7699,7 @@ class SQLiteBackgroundTaskStore:
                     or exit_code is not None
                     or str(row.get("last_error") or "").strip()
                 )
-                retry_is_healthy = (
-                    row.get("mode") == "forever"
-                    and bool(row.get("enabled"))
-                    and exit_code in retry_codes
-                )
+                retry_is_healthy = bool(row.get("enabled")) and exit_code in retry_codes
                 successful_exit_codes = {0, NO_EVENT_EXIT_CODE}
                 waiter_failed = bool(
                     (
