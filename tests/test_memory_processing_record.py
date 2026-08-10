@@ -653,6 +653,114 @@ async def test_health_probe_discards_result_after_same_process_lifecycle_transit
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "enabled",
+    (False, True),
+    ids=("disabled", "sidecar-stopped"),
+)
+async def test_processing_sources_read_local_history_without_a_running_sidecar(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    enabled: bool,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    source_reads = 0
+
+    class Reader:
+        def source_observation(self) -> ProcessingSourceObservations:
+            nonlocal source_reads
+            source_reads += 1
+            return _sources()
+
+    runtime = MemoryRuntime(
+        MemoryConfig(enabled=enabled),
+        effective_home=tmp_path,
+        insight_reader=Reader(),
+    )
+
+    sources = await runtime._processing_record_sources(None)
+
+    assert sources == _sources()
+    assert source_reads == 1
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fence", ("reconcile", "root"))
+async def test_processing_anomalies_return_busy_without_waiting_for_fences(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fence: str,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime = MemoryRuntime(MemoryConfig(enabled=False), effective_home=tmp_path)
+    failure_log_reads = 0
+
+    def failure_log(*, limit: int) -> tuple[MemoryFailureLogEntry, ...]:
+        nonlocal failure_log_reads
+        failure_log_reads += 1
+        assert limit == 50
+        return ()
+
+    monkeypatch.setattr(runtime._store, "failure_log", failure_log)
+    lock = (
+        runtime._reconcile_lock
+        if fence == "reconcile"
+        else runtime.module._root_lifecycle_lock()
+    )
+
+    async with lock:
+        blocked = await asyncio.wait_for(
+            runtime._processing_record_failure_log(None),
+            timeout=0.1,
+        )
+
+    assert blocked == FailureLogObservation((), "busy")
+    assert failure_log_reads == 0
+
+    available = await asyncio.wait_for(
+        runtime._processing_record_failure_log(None),
+        timeout=0.1,
+    )
+
+    assert available == FailureLogObservation(())
+    assert failure_log_reads == 1
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_processing_anomalies_discard_read_after_lifecycle_transition(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime = MemoryRuntime(MemoryConfig(enabled=False), effective_home=tmp_path)
+    failure_log_started = threading.Event()
+    release_failure_log = threading.Event()
+
+    def failure_log(*, limit: int) -> tuple[MemoryFailureLogEntry, ...]:
+        assert limit == 50
+        failure_log_started.set()
+        assert release_failure_log.wait(2)
+        return ()
+
+    monkeypatch.setattr(runtime._store, "failure_log", failure_log)
+    reading = asyncio.create_task(runtime._processing_record_failure_log(None))
+    try:
+        assert await asyncio.to_thread(failure_log_started.wait, 1)
+        runtime._advance_processing_lifecycle()
+        release_failure_log.set()
+        observation = await asyncio.wait_for(reading, timeout=1)
+    finally:
+        release_failure_log.set()
+        await asyncio.gather(reading, return_exceptions=True)
+
+    assert observation == FailureLogObservation((), "busy")
+    assert runtime.module._root_lifecycle_lock().locked() is False
+    await runtime.close()
+
+
+@pytest.mark.asyncio
 async def test_processing_sources_return_busy_without_waiting_for_lifecycle_locks(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -698,8 +806,7 @@ async def test_processing_sources_return_busy_without_waiting_for_lifecycle_lock
 @pytest.mark.parametrize(
     ("transition", "expected_reason"),
     [
-        ("generation", "memory_sidecar_unavailable"),
-        ("process", "memory_sidecar_unavailable"),
+        ("generation", "busy"),
         ("maintenance", "busy"),
     ],
 )
@@ -731,8 +838,6 @@ async def test_processing_sources_discard_stale_lifecycle_observation(
         assert await asyncio.to_thread(source_read_started.wait, 1)
         if transition == "generation":
             runtime._advance_processing_lifecycle()
-        elif transition == "process":
-            runtime._process = SimpleNamespace(running=True)
         else:
             runtime._enter_maintenance()
         release_source_read.set()

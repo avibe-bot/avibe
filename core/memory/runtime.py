@@ -123,6 +123,20 @@ class _ProcessingRuntimeSnapshot:
             return self.runtime_error or "memory_sidecar_unavailable"
         return None
 
+    def local_observation_reason(
+        self,
+        maintenance_reason: str | None,
+    ) -> str | None:
+        """Gate local history reads independently of provider liveness."""
+
+        if not self.store_available:
+            return "memory_store_unavailable"
+        if maintenance_reason is not None:
+            return maintenance_reason
+        if self.maintenance_active or self.transition_active or self.closing:
+            return "busy"
+        return None
+
     def same_lifecycle(self, other: _ProcessingRuntimeSnapshot) -> bool:
         return (
             self.generation == other.generation
@@ -925,24 +939,36 @@ class MemoryRuntime:
         self,
         maintenance_reason: str | None,
     ) -> FailureLogObservation:
-        if not self.available:
-            raise self._unavailable()
-        if maintenance_reason is not None:
-            return FailureLogObservation((), maintenance_reason)
-        if self.module._clear_active:
+        before = self._processing_runtime_snapshot()
+        reason = before.local_observation_reason(maintenance_reason)
+        if reason is not None:
+            return FailureLogObservation((), reason)
+        root_lock = self.module._root_lifecycle_lock()
+        if root_lock.locked():
             return FailureLogObservation((), "busy")
-        async with self.module._root_lifecycle_lock():
-            if self.module._clear_active:
-                return FailureLogObservation((), "busy")
+        # asyncio.Lock's uncontended acquire completes synchronously, so no
+        # lifecycle owner can enter between this check and acquisition.
+        await root_lock.acquire()
+        try:
+            acquired = self._processing_runtime_snapshot()
+            reason = acquired.local_observation_reason(maintenance_reason)
+            if acquired.generation != before.generation or reason is not None:
+                return FailureLogObservation((), reason or "busy")
             entries = await run_blocking(self._store.failure_log, limit=50)
+            after = self._processing_runtime_snapshot()
+            reason = after.local_observation_reason(maintenance_reason)
+            if after.generation != before.generation or reason is not None:
+                return FailureLogObservation((), reason or "busy")
             return FailureLogObservation(entries)
+        finally:
+            root_lock.release()
 
     async def _processing_record_sources(
         self,
         maintenance_reason: str | None,
     ) -> ProcessingSourceObservations:
         before = self._processing_runtime_snapshot()
-        reason = before.unavailable_reason(maintenance_reason)
+        reason = before.local_observation_reason(maintenance_reason)
         if reason is not None:
             unavailable = SourceObservation(
                 "unavailable",
@@ -958,11 +984,11 @@ class MemoryRuntime:
             raise self._unavailable()
         observation = await run_blocking(reader.source_observation)
         after = self._processing_runtime_snapshot()
-        current_reason = after.unavailable_reason(maintenance_reason)
-        if not after.same_lifecycle(before) or current_reason is not None:
+        current_reason = after.local_observation_reason(maintenance_reason)
+        if after.generation != before.generation or current_reason is not None:
             unavailable = SourceObservation(
                 "unavailable",
-                reason=current_reason or "memory_sidecar_unavailable",
+                reason=current_reason or "busy",
             )
             return ProcessingSourceObservations(
                 everos=unavailable,
