@@ -47,7 +47,10 @@ from _github_wait_common import (  # noqa: E402
     WATCH_ID_ENV,
 )
 
-CODEX_REVIEW_PASS_REACTION_USER = "chatgpt-codex-connector[bot]"
+CODEX_REVIEW_PASS_REACTION_USERS = {
+    "chatgpt-codex-connector",
+    "chatgpt-codex-connector[bot]",
+}
 CODEX_REVIEW_PASS_REACTION_CONTENT = "+1"
 
 # Comments that only drive the review loop rather than report its result. On a
@@ -199,7 +202,7 @@ def _keep_item(
 def _is_codex_pass_reaction(reaction: dict[str, Any]) -> bool:
     author = ((reaction.get("user") or {}).get("login")) or ""
     content = str(reaction.get("content") or "")
-    return author == CODEX_REVIEW_PASS_REACTION_USER and content == CODEX_REVIEW_PASS_REACTION_CONTENT
+    return author in CODEX_REVIEW_PASS_REACTION_USERS and content == CODEX_REVIEW_PASS_REACTION_CONTENT
 
 
 def _format_reaction(reaction: dict[str, Any]) -> str:
@@ -252,6 +255,26 @@ def _format_pr_status_event(pr: dict[str, Any], previous_status: str, current_st
     )
 
 
+def _current_pr_head_sha(pr: dict[str, Any] | None) -> str:
+    if not isinstance(pr, dict):
+        return ""
+    head = pr.get("head")
+    if not isinstance(head, dict):
+        return ""
+    value = head.get("sha")
+    return value if isinstance(value, str) else ""
+
+
+def _format_pr_head_event(pr: dict[str, Any], previous_sha: str, current_sha: str) -> str:
+    pr_number = pr.get("number")
+    url = pr.get("html_url") or ""
+    return (
+        f"- pr_head #{pr_number} {previous_sha[:12]} -> {current_sha[:12]}\n"
+        "  Pull request head changed; start a fresh exact-head review cycle.\n"
+        f"  {url}"
+    )
+
+
 def _format_pull_request(pr: dict[str, Any]) -> str:
     pr_number = pr.get("number")
     author = ((pr.get("user") or {}).get("login")) or "unknown"
@@ -259,6 +282,52 @@ def _format_pull_request(pr: dict[str, Any]) -> str:
     title = squash(pr.get("title") or "")
     url = pr.get("html_url") or ""
     return f"- pull_request #{pr_number} by {author} ({state})\n  {title}\n  {url}"
+
+
+def _item_fingerprint(item: dict[str, Any]) -> str:
+    mutable = {
+        key: item.get(key)
+        for key in (
+            "id",
+            "body",
+            "path",
+            "line",
+            "original_line",
+            "side",
+            "start_line",
+            "start_side",
+            "user",
+            "updated_at",
+        )
+    }
+    encoded = json.dumps(mutable, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(encoded.encode()).hexdigest()
+
+
+def _changed_items(
+    items: list[dict[str, Any]],
+    since_id: int,
+    fingerprints: dict[str, str],
+) -> list[dict[str, Any]]:
+    """Return new or edited items while advancing fingerprints for this fetch."""
+
+    changed: dict[int, dict[str, Any]] = {}
+    for item in items:
+        item_id = item.get("id")
+        if not isinstance(item_id, int):
+            continue
+        key = str(item_id)
+        fingerprint = _item_fingerprint(item)
+        # A legacy cursor has no content baseline. Seed it silently; otherwise every
+        # pre-existing item would look edited on the first run after the migration.
+        previous = fingerprints.get(key)
+        if item_id > since_id or (previous is not None and previous != fingerprint):
+            changed[item_id] = item
+        fingerprints[key] = fingerprint
+    return sorted(
+        changed.values(),
+        key=lambda item: (str(item.get("updated_at") or item.get("created_at") or ""), int(item["id"])),
+    )
 
 
 def _with_since(url: str, since: str | None) -> str:
@@ -349,6 +418,9 @@ def _render_activity(
     reaction_cursor: int,
     pr_status: str,
     event_limit: int,
+    previous_head_sha: str | None = None,
+    review_comment_fingerprints: dict[str, str] | None = None,
+    issue_comment_fingerprints: dict[str, str] | None = None,
     viewer_login: str | None = None,
     ignore_self_comments: bool = True,
     actionable_only: bool = False,
@@ -357,10 +429,21 @@ def _render_activity(
 ) -> tuple[str | None, int, int, int, int, str]:
     ignored_authors = ignored_authors or set()
     ignore_patterns = ignore_patterns or []
+    review_comment_fingerprints = (
+        {} if review_comment_fingerprints is None else review_comment_fingerprints
+    )
+    issue_comment_fingerprints = (
+        {} if issue_comment_fingerprints is None else issue_comment_fingerprints
+    )
     current_pr_status = _current_pr_status(state.get("pull_request"))
+    current_head_sha = _current_pr_head_sha(state.get("pull_request"))
     new_reviews = filter_new(state["reviews"], review_cursor)
-    new_review_comments = filter_new(state["review_comments"], review_comment_cursor)
-    new_issue_comments = filter_new(state["issue_comments"], issue_comment_cursor)
+    new_review_comments = _changed_items(
+        state["review_comments"], review_comment_cursor, review_comment_fingerprints
+    )
+    new_issue_comments = _changed_items(
+        state["issue_comments"], issue_comment_cursor, issue_comment_fingerprints
+    )
 
     def _visible(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         # Cursors advance over everything new; only the rendering is filtered, so a
@@ -385,8 +468,16 @@ def _render_activity(
         if _is_codex_pass_reaction(reaction)
     ]
     has_pr_status_event = current_pr_status != pr_status
+    has_head_event = bool(previous_head_sha and current_head_sha and previous_head_sha != current_head_sha)
 
-    if not (new_reviews or new_review_comments or new_issue_comments or new_reactions or has_pr_status_event):
+    if not (
+        new_reviews
+        or new_review_comments
+        or new_issue_comments
+        or new_reactions
+        or has_pr_status_event
+        or has_head_event
+    ):
         return None, review_cursor, review_comment_cursor, issue_comment_cursor, reaction_cursor, pr_status
 
     next_review_cursor = max(review_cursor, max_id(new_reviews))
@@ -400,14 +491,16 @@ def _render_activity(
     )
 
     rendered_events: list[str] = []
+    if has_head_event and isinstance(state.get("pull_request"), dict):
+        rendered_events.append(_format_pr_head_event(state["pull_request"], previous_head_sha, current_head_sha))
     if render_pr_status_event and isinstance(state.get("pull_request"), dict):
         rendered_events.append(_format_pr_status_event(state["pull_request"], pr_status, current_pr_status))
     rendered_events.extend(_format_review(review) for review in visible_reviews)
     rendered_events.extend(_format_review_comment(comment) for comment in visible_review_comments)
     rendered_events.extend(_format_issue_comment(comment) for comment in visible_issue_comments)
-    rendered_events.extend(_format_reaction(reaction) for reaction in new_reactions)
+    rendered_reactions = [_format_reaction(reaction) for reaction in new_reactions]
 
-    if not rendered_events:
+    if not rendered_events and not rendered_reactions:
         return (
             None,
             next_review_cursor,
@@ -422,6 +515,7 @@ def _render_activity(
     visible_limit = max(event_limit, 1)
     for entry in rendered_events[:visible_limit]:
         lines.append(entry)
+    lines.extend(rendered_reactions)
 
     total_events = len(rendered_events)
     if total_events > visible_limit:
@@ -1004,6 +1098,17 @@ def _saved_str(saved: dict[str, Any], key: str) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def _saved_fingerprints(saved: dict[str, Any], key: str) -> dict[str, str]:
+    value = saved.get(key)
+    if not isinstance(value, dict):
+        return {}
+    return {
+        str(item_id): fingerprint
+        for item_id, fingerprint in value.items()
+        if isinstance(fingerprint, str) and fingerprint
+    }
+
+
 def _last_delivery() -> str | None:
     """When the supervisor last queued a report from this watch, as it sees it.
 
@@ -1231,6 +1336,12 @@ def main() -> int:
         if token_fingerprint is not None and _saved_str(saved, "token_fingerprint") == token_fingerprint:
             viewer_login = _saved_str(saved, "viewer_login")
         viewer_login = viewer_login or get_authenticated_login(token)
+        if token is not None and viewer_login is None:
+            print(
+                "Could not resolve the authenticated GitHub login; refusing to poll while self-comment filtering is enabled.",
+                file=sys.stderr,
+            )
+            return 1
 
     base_interval = max(args.interval, 1.0)
     effective_interval = base_interval
@@ -1264,6 +1375,10 @@ def main() -> int:
     # An explicit --since-pr-id names a replay point and still wins.
     saved_pr_cursor = None if args.catch_up else _saved_int(saved, "pr_cursor")
     since_pr_id = args.since_pr_id if args.since_pr_id is not None else saved_pr_cursor
+    tracked_head_sha = _saved_str(saved, "head_sha")
+    observed_head_sha = tracked_head_sha
+    review_comment_fingerprints = _saved_fingerprints(saved, "review_comment_fingerprints")
+    issue_comment_fingerprints = _saved_fingerprints(saved, "issue_comment_fingerprints")
 
     try:
         if args.pr is not None:
@@ -1298,6 +1413,8 @@ def main() -> int:
     except Exception as err:  # noqa: BLE001
         print(f"Failed to fetch initial PR state: {err}", file=sys.stderr)
         return 1
+
+    observed_head_sha = _current_pr_head_sha(state.get("pull_request"))
 
     if token is None:
         bootstrap_requests = requests_per_poll_count
@@ -1372,6 +1489,9 @@ def main() -> int:
                 reaction_cursor=cursors[3],
                 pr_status=cursors[4],
                 event_limit=args.event_limit,
+                previous_head_sha=tracked_head_sha,
+                review_comment_fingerprints=review_comment_fingerprints,
+                issue_comment_fingerprints=issue_comment_fingerprints,
                 viewer_login=viewer_login,
                 ignore_self_comments=not args.include_self_comments,
                 actionable_only=args.actionable_only,
@@ -1395,10 +1515,14 @@ def main() -> int:
                 "issue_comment_since": issue_comment_since,
                 "viewer_login": viewer_login,
                 "token_fingerprint": token_fingerprint,
+                "head_sha": tracked_head_sha,
+                "review_comment_fingerprints": dict(review_comment_fingerprints),
+                "issue_comment_fingerprints": dict(issue_comment_fingerprints),
             }
 
         def _persist_pr_state(*, previous: dict[str, Any] | None = None) -> None:
             fields = _pr_state_fields()
+            fields["head_sha"] = observed_head_sha
             if previous is not None:
                 # Committed state stays where the reported event is still unseen; the
                 # cursors past it wait under STAGED_KEY, stamped with the delivery this
@@ -1470,12 +1594,18 @@ def main() -> int:
                         review_comment_since=review_comment_since,
                         issue_comment_since=issue_comment_since,
                     )
-                except Exception as err:  # noqa: BLE001
-                    print(
-                        f"Settle re-poll failed; reporting the batch as first seen: {err}",
-                        file=sys.stderr,
-                    )
+                except urllib.error.HTTPError as err:
+                    print(f"Settle GitHub API error: {err.code} {err.reason}", file=sys.stderr)
+                    if not is_retryable_http_error(err):
+                        raise
                     return best
+                except urllib.error.URLError as err:
+                    print(f"Settle GitHub network error: {err.reason}", file=sys.stderr)
+                    return best
+                except Exception:
+                    # Malformed responses and other protocol failures are terminal;
+                    # hiding them behind a partial review report leaves the loop blind.
+                    raise
                 # Rendered from the same cursors as the first hit, so the result is a
                 # superset rather than a second, partial report.
                 candidate = _render(pending)
@@ -1505,11 +1635,13 @@ def main() -> int:
             reaction_cursor,
             pr_status,
         ) = initial_result
+        observed_head_sha = _current_pr_head_sha(state.get("pull_request"))
         _advance_since()
         if initial_output is None:
             # Persisted even with nothing to report: the baseline this cycle
             # established is exactly what the next cycle must resume from.
             _persist_pr_state()
+            tracked_head_sha = observed_head_sha
         else:
             _write_cursor_output(
                 args.cursor_output,
@@ -1610,10 +1742,13 @@ def main() -> int:
                 )
                 return 1
             print(f"GitHub API error during polling: {err.code} {err.reason}", file=sys.stderr)
-            continue
+            return RETRY_EXIT_CODE if is_retryable_http_error(err) else 1
+        except urllib.error.URLError as err:
+            print(f"GitHub network error during polling: {err.reason}", file=sys.stderr)
+            return RETRY_EXIT_CODE
         except Exception as err:  # noqa: BLE001
             print(f"Polling failed: {err}", file=sys.stderr)
-            continue
+            return 1
 
         if token is None:
             unauthenticated_min = min_interval_for_unauthenticated(requests_per_poll_count)
@@ -1640,6 +1775,7 @@ def main() -> int:
                 effective_interval = target_interval
 
         if args.pr is not None:
+            observed_head_sha = _current_pr_head_sha(state.get("pull_request"))
             pending_cursors = (
                 review_cursor,
                 review_comment_cursor,
@@ -1659,12 +1795,14 @@ def main() -> int:
                 reaction_cursor,
                 pr_status,
             ) = result
+            observed_head_sha = _current_pr_head_sha(state.get("pull_request"))
             _advance_since()
             if output is None:
                 # Cursors also move when everything new was filtered out, and that
                 # progress has to survive the cycle or the next one re-examines it.
                 # Nothing is being reported, so there is no delivery to wait for.
                 _persist_pr_state()
+                tracked_head_sha = observed_head_sha
                 continue
 
             _write_cursor_output(

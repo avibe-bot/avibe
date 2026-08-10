@@ -195,8 +195,15 @@ vibe watch add \
     --pr 151 \
     --actionable-only \
     --settle 20 \
+    --catch-up \
     --interval 60
 ```
+
+Use `--catch-up` when the watch is armed after the triggering push or review
+comment. Without an explicit state baseline, the first poll treats activity
+already present as history and can wait past the event that should wake the
+Agent. A pre-seeded owner-specific `--state-file` is the alternative when the
+watch is armed before the push.
 
 Prefer `--actionable-only` for review loops. Without it the waiter wakes the Agent
 for every comment on the PR, including the `@codex review` triggers the loop itself
@@ -260,7 +267,9 @@ The login is reused only while the token still fingerprints to the account it wa
 resolved for, and an explicit `--since-review-comment-id` /
 `--since-issue-comment-id` drops the matching saved `since` so the replay it asks
 for is not narrowed away. It is written on every cursor advance and on timeout,
-replaced atomically. Cursors that cover a reported event are not committed by the
+replaced atomically. The state also records the last observed PR head and mutable
+review/comment fingerprints, so a pushed head or an edited existing comment is
+activity even when no new numeric ID exists. Cursors that cover a reported event are not committed by the
 cycle that reports it. A waiter cannot observe its own delivery — `vibe watch` reads
 its stdout only after the process exits — so those cursors are staged under `pending`
 while the committed ones stay before the event, together with the value of
@@ -317,8 +326,13 @@ GitHub-specific notes:
 - polling is cheap by design: comment fetches are filtered server-side with `since`,
   reactions with `content=+1`, and unchanged pages revalidate to `304`, which GitHub
   does not charge against the rate limit — an idle watch can poll for hours for free
-- PR activity also includes the special case where `chatgpt-codex-connector[bot]` leaves a `+1` reaction on the PR body instead of posting a comment
+- PR activity also includes the special case where `chatgpt-codex-connector` or
+  `chatgpt-codex-connector[bot]` leaves a `+1` reaction on the PR body instead of
+  posting a comment; pass reactions remain visible even when `--event-limit` is
+  reached
 - PR activity also includes lifecycle changes on the PR itself, for example draft/ready, closed, reopened, or merged transitions
+- a changed PR head is reported as activity so a new push cannot leave the review
+  loop asleep
 - self-authored comments are ignored by default when the current authenticated GitHub user can be resolved; pass `--include-self-comments` to keep them
 - authentication is preferred; unauthenticated polling is slower and more fragile
 
@@ -355,17 +369,14 @@ vibe watch add \
     --sha "$HEAD_SHA" \
     --workflow CI \
     --workflow "Security Scan" \
-    --only-on-failure \
     --interval 60
 ```
 
-`--only-on-failure` exits `64` with the no-event marker when every watched workflow succeeded, so a green
-build ends the watch silently instead of spending an Agent turn to say so. The
-full summary still goes to `stderr`, which the supervisor records in the Avibe log
-(`~/.avibe/logs/vibe_remote.log`) beside the watch id; `vibe watch show` reports
-that the cycle ran and found nothing, not the summary itself.
-Drop the flag when the follow-up should also run on success, for example when a
-green build is supposed to trigger a deploy.
+For a merge gate, omit `--only-on-failure`: a successful exact-head build must
+wake the Agent so it can perform the final gate and close out the watch. Use
+`--only-on-failure` only when a green result intentionally needs no follow-up;
+that mode exits `64` with the no-event marker and records the summary in the
+Avibe watch log instead of creating an Agent turn.
 
 ## Practical Advice
 

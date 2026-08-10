@@ -205,6 +205,10 @@ turn ends because you armed a watch and are waiting, say exactly that.
   `background-watch-hook` management commands to verify exactly one live watch
   for this owner, concern, repository, and PR. Do not rely on a remembered watch
   ID or one bookkeeping field as proof that its waiter is live.
+- When the watch is armed after a push or review trigger, use the
+  `background-watch-hook` catch-up mode or a pre-seeded owner-specific state file
+  so activity that landed before the first poll is still delivered. A first-poll
+  baseline is only safe when it was established before the action being watched.
 - A watch you remove while handling its event is not a liveness break: the
   running turn owns progress until the replacement is armed. Re-arm after the
   push and close-out actions, then verify the invariant again.

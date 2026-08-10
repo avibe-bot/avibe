@@ -65,6 +65,141 @@ def test_render_activity_includes_codex_pr_body_reaction() -> None:
     assert pr_status == "open"
 
 
+def test_render_activity_accepts_api_codex_login_and_keeps_reaction_outside_limit() -> None:
+    module = _load_module()
+    state = {
+        "pull_request": {"number": 153, "state": "open", "draft": False},
+        "reviews": [],
+        "review_comments": [
+            {
+                "id": 501,
+                "body": "Fix this",
+                "path": "core/watches.py",
+                "html_url": "https://github.com/example/repo/pull/153#discussion_r501",
+                "user": {"login": "reviewer"},
+            }
+        ],
+        "issue_comments": [],
+        "reactions": [
+            {
+                "id": 601,
+                "content": "+1",
+                "created_at": "2026-04-02T13:05:42Z",
+                "user": {"login": "chatgpt-codex-connector"},
+            }
+        ],
+    }
+
+    output, *_rest = module._render_activity(
+        repo="avibe-bot/avibe",
+        pr_number=153,
+        state=state,
+        review_cursor=0,
+        review_comment_cursor=0,
+        issue_comment_cursor=0,
+        reaction_cursor=0,
+        pr_status="open",
+        event_limit=1,
+    )
+
+    assert output is not None
+    assert "review_comment #501" in output
+    assert "pr_reaction #601" in output
+    assert "additional event(s) omitted" not in output
+
+
+def test_render_activity_reports_a_changed_pr_head() -> None:
+    module = _load_module()
+    state = {
+        "pull_request": {
+            "number": 153,
+            "state": "open",
+            "draft": False,
+            "head": {"sha": "new-head"},
+            "html_url": "https://github.com/example/repo/pull/153",
+        },
+        "reviews": [],
+        "review_comments": [],
+        "issue_comments": [],
+        "reactions": [],
+    }
+
+    output, *_rest = module._render_activity(
+        repo="avibe-bot/avibe",
+        pr_number=153,
+        state=state,
+        review_cursor=0,
+        review_comment_cursor=0,
+        issue_comment_cursor=0,
+        reaction_cursor=0,
+        pr_status="open",
+        event_limit=8,
+        previous_head_sha="old-head",
+    )
+
+    assert output is not None
+    assert "pr_head #153 old-head -> new-head" in output
+
+
+def test_render_activity_reports_an_edited_existing_comment() -> None:
+    module = _load_module()
+    comment = {
+        "id": 501,
+        "body": "Initial text",
+        "path": "core/watches.py",
+        "created_at": "2026-04-02T13:05:42Z",
+        "updated_at": "2026-04-02T13:05:42Z",
+        "html_url": "https://github.com/example/repo/pull/153#discussion_r501",
+        "user": {"login": "reviewer"},
+    }
+    state = _pr_state(review_comments=[comment])
+    fingerprints: dict[str, str] = {}
+
+    first = module._render_activity(
+        repo="avibe-bot/avibe",
+        pr_number=153,
+        state=state,
+        review_cursor=0,
+        review_comment_cursor=0,
+        issue_comment_cursor=0,
+        reaction_cursor=0,
+        pr_status="open",
+        event_limit=8,
+        review_comment_fingerprints=fingerprints,
+    )
+    assert first[0] is not None
+
+    unchanged = module._render_activity(
+        repo="avibe-bot/avibe",
+        pr_number=153,
+        state=state,
+        review_cursor=first[1],
+        review_comment_cursor=first[2],
+        issue_comment_cursor=first[3],
+        reaction_cursor=first[4],
+        pr_status=first[5],
+        event_limit=8,
+        review_comment_fingerprints=fingerprints,
+    )
+    assert unchanged[0] is None
+
+    edited = dict(comment, body="Corrected text", updated_at="2026-04-02T13:10:42Z")
+    changed = module._render_activity(
+        repo="avibe-bot/avibe",
+        pr_number=153,
+        state=_pr_state(review_comments=[edited]),
+        review_cursor=unchanged[1],
+        review_comment_cursor=unchanged[2],
+        issue_comment_cursor=unchanged[3],
+        reaction_cursor=unchanged[4],
+        pr_status=unchanged[5],
+        event_limit=8,
+        review_comment_fingerprints=fingerprints,
+    )
+    assert changed[0] is not None
+    assert "Corrected text" in changed[0]
+
+
 def test_render_activity_ignores_non_codex_or_non_plus_one_reactions() -> None:
     module = _load_module()
     state = {
@@ -535,7 +670,7 @@ def test_main_uses_since_pr_cursor_for_initial_new_pr_fetch() -> None:
     with (
         patch.object(module, "_fetch_new_pr_state", side_effect=_fake_fetch_new_pr_state),
         patch.object(module, "get_token", return_value="token"),
-        patch.object(module, "get_authenticated_login", return_value=None),
+        patch.object(module, "get_authenticated_login", return_value="tester"),
         patch(
             "sys.argv",
             [
@@ -584,7 +719,7 @@ def test_main_bootstraps_new_pr_watch_from_first_page_only() -> None:
     with (
         patch.object(module, "_fetch_new_pr_state", side_effect=_fake_fetch_new_pr_state),
         patch.object(module, "get_token", return_value="token"),
-        patch.object(module, "get_authenticated_login", return_value=None),
+        patch.object(module, "get_authenticated_login", return_value="tester"),
         patch.object(module.time, "sleep", return_value=None),
         patch("sys.argv", ["wait_pr.py", "--repo", "avibe-bot/avibe", "--new-prs", "--interval", "1"]),
         redirect_stdout(stdout),
@@ -640,7 +775,7 @@ def test_main_detects_pr_status_change_during_polling() -> None:
     with (
         patch.object(module, "_fetch_state", side_effect=_fake_fetch_state),
         patch.object(module, "get_token", return_value="token"),
-        patch.object(module, "get_authenticated_login", return_value=None),
+        patch.object(module, "get_authenticated_login", return_value="tester"),
         patch.object(module.time, "sleep", return_value=None),
         patch("sys.argv", ["wait_pr.py", "--repo", "avibe-bot/avibe", "--pr", "153", "--interval", "1"]),
         redirect_stdout(stdout),
@@ -688,7 +823,7 @@ def test_main_reduces_unauthenticated_new_pr_interval_after_bootstrap() -> None:
     with (
         patch.object(module, "_fetch_new_pr_state", side_effect=_fake_fetch_new_pr_state),
         patch.object(module, "get_token", return_value=None),
-        patch.object(module, "get_authenticated_login", return_value=None),
+        patch.object(module, "get_authenticated_login", return_value="tester"),
         patch.object(module, "min_interval_for_unauthenticated", side_effect=_fake_min_interval),
         patch.object(module.time, "sleep", side_effect=lambda seconds: sleep_calls.append(seconds)),
         patch(
@@ -721,7 +856,7 @@ def test_main_returns_retry_exit_code_for_retryable_initial_pr_http_error() -> N
     with (
         patch.object(module, "_fetch_state", side_effect=err),
         patch.object(module, "get_token", return_value="token"),
-        patch.object(module, "get_authenticated_login", return_value=None),
+        patch.object(module, "get_authenticated_login", return_value="tester"),
         patch("sys.argv", ["wait_pr.py", "--repo", "avibe-bot/avibe", "--pr", "153"]),
         patch("sys.stderr", stderr),
     ):
@@ -739,7 +874,7 @@ def test_main_returns_terminal_exit_code_for_non_retryable_initial_pr_http_error
     with (
         patch.object(module, "_fetch_state", side_effect=err),
         patch.object(module, "get_token", return_value="token"),
-        patch.object(module, "get_authenticated_login", return_value=None),
+        patch.object(module, "get_authenticated_login", return_value="tester"),
         patch("sys.argv", ["wait_pr.py", "--repo", "avibe-bot/avibe", "--pr", "153"]),
         patch("sys.stderr", stderr),
     ):
@@ -757,7 +892,7 @@ def test_main_returns_retry_exit_code_for_initial_pr_network_error() -> None:
     with (
         patch.object(module, "_fetch_state", side_effect=err),
         patch.object(module, "get_token", return_value="token"),
-        patch.object(module, "get_authenticated_login", return_value=None),
+        patch.object(module, "get_authenticated_login", return_value="tester"),
         patch("sys.argv", ["wait_pr.py", "--repo", "avibe-bot/avibe", "--pr", "153"]),
         patch("sys.stderr", stderr),
     ):
@@ -765,6 +900,51 @@ def test_main_returns_retry_exit_code_for_initial_pr_network_error() -> None:
 
     assert rc == 75
     assert "GitHub network error: temporary network failure" in stderr.getvalue()
+
+
+def test_main_stops_on_a_terminal_polling_http_error() -> None:
+    module = _load_module()
+    error = urllib.error.HTTPError(
+        url="https://api.github.com/repos/example/repo/pulls/153",
+        code=404,
+        msg="Not Found",
+        hdrs=None,
+        fp=None,
+    )
+    stderr = io.StringIO()
+
+    with (
+        patch.object(module, "_fetch_state", side_effect=[(_pr_state(), 1), error]),
+        patch.object(module, "get_token", return_value="token"),
+        patch.object(module, "get_authenticated_login", return_value="tester"),
+        patch.object(module.time, "sleep", return_value=None),
+        patch(
+            "sys.argv",
+            ["wait_pr.py", "--repo", "avibe-bot/avibe", "--pr", "153", "--interval", "1"],
+        ),
+        patch("sys.stderr", stderr),
+    ):
+        rc = module.main()
+
+    assert rc == 1
+    assert "GitHub API error during polling: 404 Not Found" in stderr.getvalue()
+
+
+def test_main_fails_closed_when_authenticated_login_cannot_be_resolved() -> None:
+    module = _load_module()
+    stderr = io.StringIO()
+
+    with (
+        patch.object(module, "get_token", return_value="token"),
+        patch.object(module, "get_authenticated_login", return_value=None),
+        patch.object(module, "_fetch_state", side_effect=AssertionError("must not poll")),
+        patch("sys.argv", ["wait_pr.py", "--repo", "avibe-bot/avibe", "--pr", "153"]),
+        patch("sys.stderr", stderr),
+    ):
+        rc = module.main()
+
+    assert rc == 1
+    assert "refusing to poll" in stderr.getvalue()
 
 
 def test_render_activity_actionable_only_drops_bot_trigger_comment_but_advances_cursor() -> None:
@@ -1280,7 +1460,7 @@ def test_main_settle_window_reports_a_batched_review_as_one_event() -> None:
     with (
         patch.object(module, "_fetch_state", side_effect=_fake_fetch_state),
         patch.object(module, "get_token", return_value="token"),
-        patch.object(module, "get_authenticated_login", return_value=None),
+        patch.object(module, "get_authenticated_login", return_value="tester"),
         patch.object(module.time, "sleep", return_value=None),
         patch(
             "sys.argv",
@@ -1324,7 +1504,7 @@ def test_main_settle_window_stops_once_the_batch_is_stable() -> None:
     with (
         patch.object(module, "_fetch_state", side_effect=_fake_fetch_state),
         patch.object(module, "get_token", return_value="token"),
-        patch.object(module, "get_authenticated_login", return_value=None),
+        patch.object(module, "get_authenticated_login", return_value="tester"),
         patch.object(module.time, "sleep", return_value=None),
         patch(
             "sys.argv",
@@ -1358,7 +1538,7 @@ def test_main_settle_window_survives_a_failed_re_poll() -> None:
     with (
         patch.object(module, "_fetch_state", side_effect=_fake_fetch_state),
         patch.object(module, "get_token", return_value="token"),
-        patch.object(module, "get_authenticated_login", return_value=None),
+        patch.object(module, "get_authenticated_login", return_value="tester"),
         patch.object(module.time, "sleep", return_value=None),
         patch(
             "sys.argv",
@@ -1596,7 +1776,7 @@ def test_main_replays_from_an_explicit_cursor_without_a_saved_since(tmp_path) ->
     with (
         patch.object(module, "_fetch_state", side_effect=_fake_fetch_state),
         patch.object(module, "get_token", return_value="token"),
-        patch.object(module, "get_authenticated_login", return_value=None),
+        patch.object(module, "get_authenticated_login", return_value="tester"),
         patch(
             "sys.argv",
             [
@@ -1645,7 +1825,7 @@ def test_main_refuses_a_state_file_belonging_to_another_pr(tmp_path) -> None:
     with (
         patch.object(module, "_fetch_state", side_effect=AssertionError("must not poll")),
         patch.object(module, "get_token", return_value="token"),
-        patch.object(module, "get_authenticated_login", return_value=None),
+        patch.object(module, "get_authenticated_login", return_value="tester"),
         patch.object(module.time, "sleep", return_value=None),
         patch(
             "sys.argv",
@@ -1702,7 +1882,7 @@ def test_main_ignores_a_partial_state_file(tmp_path) -> None:
     with (
         patch.object(module, "_fetch_state", side_effect=_fake_fetch_state),
         patch.object(module, "get_token", return_value="token"),
-        patch.object(module, "get_authenticated_login", return_value=None),
+        patch.object(module, "get_authenticated_login", return_value="tester"),
         patch.object(module.time, "sleep", return_value=None),
         patch(
             "sys.argv",
@@ -1751,7 +1931,7 @@ def test_main_refuses_to_poll_past_an_unreadable_state_file(tmp_path) -> None:
     with (
         patch.object(module, "_fetch_state", side_effect=_fake_fetch_state),
         patch.object(module, "get_token", return_value="token"),
-        patch.object(module, "get_authenticated_login", return_value=None),
+        patch.object(module, "get_authenticated_login", return_value="tester"),
         patch.object(module.time, "sleep", return_value=None),
         patch(
             "sys.argv",
@@ -1794,7 +1974,7 @@ def test_main_refuses_a_state_file_it_does_not_recognise(tmp_path) -> None:
     with (
         patch.object(module, "_fetch_state", side_effect=AssertionError("must not poll")),
         patch.object(module, "get_token", return_value="token"),
-        patch.object(module, "get_authenticated_login", return_value=None),
+        patch.object(module, "get_authenticated_login", return_value="tester"),
         patch(
             "sys.argv",
             ["wait_pr.py", "--repo", "avibe-bot/avibe", "--pr", "153", "--state-file", str(state_file)],
@@ -1826,7 +2006,7 @@ def test_main_starts_over_from_an_empty_state_file(tmp_path) -> None:
     with (
         patch.object(module, "_fetch_state", side_effect=_fake_fetch_state),
         patch.object(module, "get_token", return_value="token"),
-        patch.object(module, "get_authenticated_login", return_value=None),
+        patch.object(module, "get_authenticated_login", return_value="tester"),
         patch.object(module.time, "sleep", return_value=None),
         patch(
             "sys.argv",
@@ -1872,7 +2052,7 @@ def test_main_refuses_to_poll_when_the_state_file_cannot_be_written(tmp_path) ->
         with (
             patch.object(module, "_fetch_state", side_effect=AssertionError("must not poll")),
             patch.object(module, "get_token", return_value="token"),
-            patch.object(module, "get_authenticated_login", return_value=None),
+            patch.object(module, "get_authenticated_login", return_value="tester"),
             patch.object(module.time, "sleep", return_value=None),
             patch(
                 "sys.argv",
@@ -1906,7 +2086,7 @@ def test_main_refuses_to_poll_when_the_state_file_cannot_be_replaced(tmp_path) -
     with (
         patch.object(module, "_fetch_state", side_effect=AssertionError("must not poll")),
         patch.object(module, "get_token", return_value="token"),
-        patch.object(module, "get_authenticated_login", return_value=None),
+        patch.object(module, "get_authenticated_login", return_value="tester"),
         patch.object(module.time, "sleep", return_value=None),
         patch(
             "sys.argv",
@@ -2152,7 +2332,7 @@ def _run_new_pr_catch_up(module, state_file, *extra: str) -> str:
     with (
         patch.object(module, "_fetch_new_pr_state", side_effect=_fake_fetch_new_pr_state),
         patch.object(module, "get_token", return_value="token"),
-        patch.object(module, "get_authenticated_login", return_value=None),
+        patch.object(module, "get_authenticated_login", return_value="tester"),
         patch.object(module.time, "sleep", return_value=None),
         patch(
             "sys.argv",
@@ -2233,7 +2413,7 @@ def test_main_stops_when_persisting_advanced_cursors_fails(tmp_path) -> None:
     with (
         patch.object(module, "_fetch_state", side_effect=_fake_fetch_state),
         patch.object(module, "get_token", return_value="token"),
-        patch.object(module, "get_authenticated_login", return_value=None),
+        patch.object(module, "get_authenticated_login", return_value="tester"),
         patch.object(module.os, "replace", side_effect=_replace_then_break),
         patch.object(module.time, "sleep", return_value=None),
         patch(
@@ -2285,7 +2465,7 @@ def test_main_state_file_round_trips_new_pr_cursor(tmp_path) -> None:
     with (
         patch.object(module, "_fetch_new_pr_state", side_effect=_fake_fetch_new_pr_state),
         patch.object(module, "get_token", return_value="token"),
-        patch.object(module, "get_authenticated_login", return_value=None),
+        patch.object(module, "get_authenticated_login", return_value="tester"),
         patch.object(module.time, "sleep", return_value=None),
         patch(
             "sys.argv",
@@ -2456,7 +2636,7 @@ def test_main_skips_the_settle_window_that_would_outlast_the_timeout(tmp_path) -
     with (
         patch.object(module, "_fetch_state", side_effect=_fake_fetch_state),
         patch.object(module, "get_token", return_value="token"),
-        patch.object(module, "get_authenticated_login", return_value=None),
+        patch.object(module, "get_authenticated_login", return_value="tester"),
         patch.object(module.time, "sleep") as fake_sleep,
         patch(
             "sys.argv",
@@ -2525,7 +2705,7 @@ def test_main_skips_the_settle_window_when_only_its_sleep_would_fit(tmp_path) ->
     with (
         patch.object(module, "_fetch_state", side_effect=_fake_fetch_state),
         patch.object(module, "get_token", return_value="token"),
-        patch.object(module, "get_authenticated_login", return_value=None),
+        patch.object(module, "get_authenticated_login", return_value="tester"),
         patch.object(module.time, "sleep") as fake_sleep,
         patch(
             "sys.argv",
@@ -2604,7 +2784,7 @@ def test_main_commits_cursors_only_after_the_event_is_reported(tmp_path) -> None
     with (
         patch.object(module, "_fetch_state", side_effect=_fake_fetch_state),
         patch.object(module, "get_token", return_value="token"),
-        patch.object(module, "get_authenticated_login", return_value=None),
+        patch.object(module, "get_authenticated_login", return_value="tester"),
         patch(
             "sys.argv",
             ["wait_pr.py", "--repo", "avibe-bot/avibe", "--pr", "153", "--state-file", str(state_file)],
@@ -2646,7 +2826,7 @@ def test_main_new_prs_commits_the_cursor_only_after_the_event_is_reported(tmp_pa
     with (
         patch.object(module, "_fetch_new_pr_state", side_effect=_fake_fetch_new_pr_state),
         patch.object(module, "get_token", return_value="token"),
-        patch.object(module, "get_authenticated_login", return_value=None),
+        patch.object(module, "get_authenticated_login", return_value="tester"),
         patch(
             "sys.argv",
             ["wait_pr.py", "--repo", "avibe-bot/avibe", "--new-prs", "--state-file", str(state_file)],
@@ -2695,7 +2875,7 @@ def _run_managed(module, state_file, fetch, *, delivery: str = ""):
         patch.dict("os.environ", env, clear=False),
         patch.object(module, "_fetch_state", side_effect=fetch),
         patch.object(module, "get_token", return_value="token"),
-        patch.object(module, "get_authenticated_login", return_value=None),
+        patch.object(module, "get_authenticated_login", return_value="tester"),
         patch(
             "sys.argv",
             ["wait_pr.py", "--repo", "avibe-bot/avibe", "--pr", "153", "--state-file", str(state_file)],
@@ -2829,7 +3009,7 @@ def test_a_manual_run_stages_nothing_because_printing_is_its_delivery(tmp_path) 
         patch.dict("os.environ", {module.WATCH_ID_ENV: "", module.LAST_DELIVERY_ENV: ""}, clear=False),
         patch.object(module, "_fetch_state", side_effect=_fetch),
         patch.object(module, "get_token", return_value="token"),
-        patch.object(module, "get_authenticated_login", return_value=None),
+        patch.object(module, "get_authenticated_login", return_value="tester"),
         patch(
             "sys.argv",
             ["wait_pr.py", "--repo", "avibe-bot/avibe", "--pr", "153", "--state-file", str(state_file)],
