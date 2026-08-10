@@ -1,5 +1,4 @@
 import { useTranslation } from 'react-i18next';
-import type { TFunction } from 'i18next';
 import {
   AlertTriangle,
   CheckCircle2,
@@ -23,176 +22,20 @@ import type {
   MemoryStatus,
 } from '../../../context/ApiContext';
 import { memoryErrorMessage } from '../../../lib/memoryRead';
-import { memoryLogEnumLabel } from './memoryLog';
-
-type SourceState = MemoryStatus['source']['status'] | MemoryLogSourceStatus['status'];
-type BadgeVariant = 'success' | 'warning' | 'destructive' | 'info' | 'secondary';
-
-const SOURCE_BADGE_VARIANT: Record<SourceState, BadgeVariant> = {
-  available: 'success',
-  partial: 'warning',
-  stale: 'warning',
-  unknown: 'secondary',
-  unavailable: 'destructive',
-};
-
-const ANOMALY_LABEL_KEYS = {
-  kind: {
-    boot_recovery: 'memory.status.failureLog.kind.boot_recovery',
-    delivery_abandoned: 'memory.status.failureLog.kind.delivery_abandoned',
-    distillation_rejected: 'memory.status.failureLog.kind.distillation_rejected',
-    recorder_degraded: 'memory.status.failureLog.kind.recorder_degraded',
-    result_unknown: 'memory.status.failureLog.kind.result_unknown',
-  },
-  state: {
-    dead: 'memory.processingRecord.anomalyState.dead',
-    degraded: 'memory.processingRecord.anomalyState.degraded',
-    manual_required: 'memory.processingRecord.anomalyState.manualRequired',
-    rejected: 'memory.processingRecord.anomalyState.rejected',
-  },
-  operation: {
-    add: 'memory.processingRecord.anomalyOperation.add',
-    flush: 'memory.processingRecord.anomalyOperation.flush',
-    record: 'memory.processingRecord.anomalyOperation.record',
-  },
-} as const;
-
-const CLEAR_RECOVERY_STATE_LABEL_KEYS = {
-  preparing: 'memory.processingRecord.clearRecovery.state.preparing',
-  prepared: 'memory.processingRecord.clearRecovery.state.prepared',
-  deleting: 'memory.processingRecord.clearRecovery.state.deleting',
-  recovery_needed: 'memory.processingRecord.clearRecovery.state.recoveryNeeded',
-} as const;
-
-const HEALTH_STATUS_LABEL_KEYS = {
-  ok: 'memory.processingRecord.runtime.healthStatus.ok',
-} as const;
-
-const MEMORY_SOURCE_ERROR_REASONS = new Set([
-  'memory_disabled',
-  'memory_runtime_missing',
-  'memory_runtime_unsupported',
-  'memory_runtime_install_failed',
-  'memory_sidecar_unavailable',
-  'memory_provider_timeout',
-  'memory_provider_response_invalid',
-  'memory_processing_failed',
-  'memory_clear_failed',
-  'memory_restart_failed',
-]);
-
-const RUNTIME_FACT_LABEL_KEYS = {
-  capability: {
-    llm: 'memory.processingRecord.runtime.fact.capability.llm',
-    embed: 'memory.processingRecord.runtime.fact.capability.embed',
-    rerank: 'memory.processingRecord.runtime.fact.capability.rerank',
-    multimodal_llm: 'memory.processingRecord.runtime.fact.capability.multimodalLlm',
-    parser: 'memory.processingRecord.runtime.fact.capability.parser',
-  },
-  cascade: {
-    healthy: 'memory.processingRecord.runtime.fact.cascade.healthy',
-    reasons: 'memory.processingRecord.runtime.fact.cascade.reasons',
-    pending: 'memory.processingRecord.runtime.fact.cascade.pending',
-    failed_permanent: 'memory.processingRecord.runtime.fact.cascade.failedPermanent',
-    failed_retryable: 'memory.processingRecord.runtime.fact.cascade.failedRetryable',
-    drain_consecutive_failures: 'memory.processingRecord.runtime.fact.cascade.drainConsecutiveFailures',
-    unrecoverable_total: 'memory.processingRecord.runtime.fact.cascade.unrecoverableTotal',
-    optimize_failure_streak: 'memory.processingRecord.runtime.fact.cascade.optimizeFailureStreak',
-    prune_stale_seconds: 'memory.processingRecord.runtime.fact.cascade.pruneStaleSeconds',
-  },
-  recorder: {
-    state: 'memory.processingRecord.runtime.fact.recorder.state',
-    reason: 'memory.processingRecord.runtime.fact.recorder.reason',
-  },
-} as const;
-
-const CASCADE_REASON_LABEL_KEYS = {
-  drain_failures: 'memory.processingRecord.runtime.fact.cascadeReason.drainFailures',
-  optimize_stuck: 'memory.processingRecord.runtime.fact.cascadeReason.optimizeStuck',
-  prune_stale: 'memory.processingRecord.runtime.fact.cascadeReason.pruneStale',
-  health_probe_failed: 'memory.processingRecord.runtime.fact.cascadeReason.healthProbeFailed',
-  unknown: 'memory.processingRecord.runtime.fact.cascadeReason.unknown',
-} as const;
-
-const RECORDER_STATE_LABEL_KEYS = {
-  active: 'memory.processingRecord.runtime.fact.recorderState.active',
-  degraded: 'memory.processingRecord.runtime.fact.recorderState.degraded',
-  disabled: 'memory.processingRecord.runtime.fact.recorderState.disabled',
-} as const;
-
-const RECORDER_REASON_LABEL_KEYS = {
-  writer_failures: 'memory.processingRecord.runtime.fact.recorderReason.writerFailures',
-  serialization_failed: 'memory.processingRecord.runtime.fact.recorderReason.serializationFailed',
-  call_log_corrupt: 'memory.processingRecord.runtime.fact.recorderReason.callLogCorrupt',
-} as const;
-
-type AnomalyLabelGroup = keyof typeof ANOMALY_LABEL_KEYS;
-type RuntimeFactGroup = keyof typeof RUNTIME_FACT_LABEL_KEYS;
-
-const anomalyLabel = (t: TFunction, group: AnomalyLabelGroup, value: string): string => {
-  const keys = ANOMALY_LABEL_KEYS[group] as Record<string, string>;
-  return keys[value] ? t(keys[value]) : value;
-};
-
-const clearRecoveryStateLabel = (t: TFunction, value: string): string => {
-  const keys = CLEAR_RECOVERY_STATE_LABEL_KEYS as Record<string, string>;
-  return keys[value] ? t(keys[value]) : value;
-};
-
-const sourceReasonLabel = (t: TFunction, value: string): string => (
-  MEMORY_SOURCE_ERROR_REASONS.has(value)
-    ? memoryErrorMessage(t, value)
-    : memoryLogEnumLabel(t, 'reason', value)
-);
-
-const formatTimestamp = (value: string | null | undefined): string => {
-  if (!value) return '-';
-  const timestamp = new Date(value);
-  return Number.isNaN(timestamp.getTime()) ? value : timestamp.toLocaleString();
-};
-
-const formatFact = (value: unknown): string => {
-  if (value === null || value === undefined) return '-';
-  if (typeof value === 'boolean') return value ? 'true' : 'false';
-  if (typeof value === 'string' || typeof value === 'number') return String(value);
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return '-';
-  }
-};
-
-const knownLabel = (t: TFunction, keys: Record<string, string>, value: string): string => {
-  const key = Object.prototype.hasOwnProperty.call(keys, value) ? keys[value] : undefined;
-  return key ? t(key) : value;
-};
-
-const runtimeFactLabel = (t: TFunction, group: RuntimeFactGroup, value: string): string => (
-  knownLabel(t, RUNTIME_FACT_LABEL_KEYS[group] as Record<string, string>, value)
-);
-
-const formatRuntimeFact = (t: TFunction, group: RuntimeFactGroup, name: string, value: unknown): string => {
-  const knownField = Object.prototype.hasOwnProperty.call(RUNTIME_FACT_LABEL_KEYS[group], name);
-  if (!knownField) return formatFact(value);
-  if (typeof value === 'boolean') {
-    return t(`memory.processingRecord.runtime.fact.boolean.${value ? 'true' : 'false'}`);
-  }
-  if (group === 'cascade' && name === 'reasons' && Array.isArray(value)) {
-    if (value.length === 0) return formatFact(value);
-    return value
-      .map((reason) => typeof reason === 'string'
-        ? knownLabel(t, CASCADE_REASON_LABEL_KEYS, reason)
-        : formatFact(reason))
-      .join(', ');
-  }
-  if (group === 'recorder' && name === 'state' && typeof value === 'string') {
-    return knownLabel(t, RECORDER_STATE_LABEL_KEYS, value);
-  }
-  if (group === 'recorder' && name === 'reason' && typeof value === 'string') {
-    return knownLabel(t, RECORDER_REASON_LABEL_KEYS, value);
-  }
-  return formatFact(value);
-};
+import {
+  formatMemoryStatusRuntimeFact,
+  formatMemoryStatusTimestamp,
+  memoryStatusAnomalyLabel,
+  memoryStatusClearRecoveryStateLabel,
+  memoryStatusHealthLabel,
+  memoryStatusRuntimeFactLabel,
+  memoryStatusSourceBadgeVariant,
+  memoryStatusSourceDisplayState,
+  memoryStatusSourceReasonLabel,
+  memoryStatusSourceStateLabel,
+  type RuntimeFactGroup,
+  type SourceState,
+} from './memoryStatusPresentation';
 
 const FactList: React.FC<{
   facts: Record<string, unknown>;
@@ -206,9 +49,9 @@ const FactList: React.FC<{
     <dl className="grid min-w-0 gap-x-4 gap-y-2 text-[11.5px] sm:grid-cols-2">
       {entries.map(([name, value]) => (
         <div key={name} className="flex min-w-0 items-start justify-between gap-3">
-          <dt className="break-words text-muted">{runtimeFactLabel(t, group, name)}</dt>
+          <dt className="break-words text-muted">{memoryStatusRuntimeFactLabel(t, group, name)}</dt>
           <dd className="max-w-[65%] break-all text-right font-mono text-foreground">
-            {formatRuntimeFact(t, group, name, value)}
+            {formatMemoryStatusRuntimeFact(t, group, name, value)}
           </dd>
         </div>
       ))}
@@ -221,28 +64,26 @@ const SourceCard: React.FC<{
   source: { status: SourceState; observed_at: string | null; reason?: string | null };
 }> = ({ label, source }) => {
   const { t } = useTranslation();
-  const displayStatus = source.observed_at || source.status === 'unavailable'
-    ? source.status
-    : 'unknown';
+  const displayStatus = memoryStatusSourceDisplayState(source);
   return (
     <div className="flex min-w-0 flex-col gap-2 rounded-md border border-border bg-surface px-3 py-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <span className="text-[12px] font-semibold text-foreground">{label}</span>
-        <Badge variant={SOURCE_BADGE_VARIANT[displayStatus]}>
-          {t(`memory.processingRecord.sourceState.${displayStatus}`)}
+        <Badge variant={memoryStatusSourceBadgeVariant(displayStatus)}>
+          {memoryStatusSourceStateLabel(t, displayStatus)}
         </Badge>
       </div>
       <div className="flex min-w-0 items-center gap-1.5 text-[10.5px] text-muted">
         <Clock3 className="size-3 shrink-0" />
         <span className="truncate">
           {source.observed_at
-            ? formatTimestamp(source.observed_at)
+            ? formatMemoryStatusTimestamp(source.observed_at)
             : t('memory.processingRecord.sourceNotObserved')}
         </span>
       </div>
       {source.reason ? (
         <div className="break-words text-[11px] text-muted">
-          {t('memory.processingRecord.sourceReason', { reason: sourceReasonLabel(t, source.reason) })}
+          {t('memory.processingRecord.sourceReason', { reason: memoryStatusSourceReasonLabel(t, source.reason) })}
         </div>
       ) : null}
     </div>
@@ -269,13 +110,13 @@ const FailureRow: React.FC<{ entry: MemoryFailureLogEntry }> = ({ entry }) => {
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             <span className="break-words text-[12.5px] font-medium text-foreground">
-              {anomalyLabel(t, 'kind', entry.kind)}
+              {memoryStatusAnomalyLabel(t, 'kind', entry.kind)}
             </span>
             <Badge variant={manualRequired ? 'warning' : 'secondary'}>
-              {anomalyLabel(t, 'state', entry.state)}
+              {memoryStatusAnomalyLabel(t, 'state', entry.state)}
             </Badge>
           </div>
-          <div className="mt-1 font-mono text-[10.5px] text-muted">{formatTimestamp(entry.occurred_at)}</div>
+          <div className="mt-1 font-mono text-[10.5px] text-muted">{formatMemoryStatusTimestamp(entry.occurred_at)}</div>
           {manualRequired ? (
             <div className="mt-1.5 text-[11px] text-gold">{t('memory.processingRecord.manualRequiredReadOnly')}</div>
           ) : null}
@@ -284,7 +125,7 @@ const FailureRow: React.FC<{ entry: MemoryFailureLogEntry }> = ({ entry }) => {
       <div className="grid min-w-0 gap-1.5 text-[11px] sm:grid-cols-2 lg:min-w-[440px]">
         <Field
           label={t('memory.processingRecord.field.operation')}
-          value={anomalyLabel(t, 'operation', entry.operation)}
+          value={memoryStatusAnomalyLabel(t, 'operation', entry.operation)}
         />
         <Field
           label={t('memory.processingRecord.field.errorCode')}
@@ -320,10 +161,10 @@ const ClearRecoveryCard: React.FC<{
         <Field label={t('memory.processingRecord.field.operationId')} value={recovery.operation_id} />
         <Field
           label={t('memory.processingRecord.field.state')}
-          value={clearRecoveryStateLabel(t, recovery.state)}
+          value={memoryStatusClearRecoveryStateLabel(t, recovery.state)}
         />
         {recovery.occurred_at ? (
-          <Field label={t('memory.processingRecord.field.occurredAt')} value={formatTimestamp(recovery.occurred_at)} />
+          <Field label={t('memory.processingRecord.field.occurredAt')} value={formatMemoryStatusTimestamp(recovery.occurred_at)} />
         ) : null}
         {recovery.error_code ? (
           <Field
@@ -438,7 +279,7 @@ export const MemoryStatusPanel: React.FC<{
               <>
                 <div className="flex flex-wrap items-center gap-2">
                   <Badge variant={health.status === 'ok' ? 'success' : 'warning'}>
-                    {knownLabel(t, HEALTH_STATUS_LABEL_KEYS, health.status)}
+                    {memoryStatusHealthLabel(t, health.status)}
                   </Badge>
                   <span className="text-[11.5px] text-muted">
                     {t('memory.processingRecord.runtime.version')}: <code className="text-foreground">{health.version ?? '-'}</code>
@@ -464,7 +305,7 @@ export const MemoryStatusPanel: React.FC<{
                     ) : (
                       <div className="flex flex-wrap gap-1.5">
                         {health.disabled_features.map((feature) => (
-                          <Badge key={feature} variant="secondary">{runtimeFactLabel(t, 'capability', feature)}</Badge>
+                          <Badge key={feature} variant="secondary">{memoryStatusRuntimeFactLabel(t, 'capability', feature)}</Badge>
                         ))}
                       </div>
                     )}

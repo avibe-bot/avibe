@@ -85,127 +85,27 @@ describe('MemoryStatusPanel', () => {
     expect(screen.queryByText('memory.status.state.degraded')).toBeNull();
   });
 
-  it('does not present an unobserved source as available', () => {
-    render(
+  it('preserves the Processing Record structure and responsive class contract', () => {
+    const { container } = render(
       <MemoryStatusPanel
         {...baseProps}
-        logSections={{
-          ...baseProps.logSections!,
-          everos: { status: 'available', observed_at: null },
-        }}
+        failures={[MANUAL_FAILURE]}
+        recovery={{ operation_id: 'clear-dom', state: 'prepared', can_resume: true, can_abort: true }}
       />,
     );
 
-    expect(screen.getByText('memory.processingRecord.sourceState.unknown')).toBeTruthy();
-    expect(screen.getAllByText('memory.processingRecord.sourceNotObserved').length).toBeGreaterThan(0);
-  });
-
-  it('preserves a future runtime health status as diagnostic fallback text', () => {
-    render(
-      <MemoryStatusPanel
-        {...baseProps}
-        status={{
-          ...STATUS,
-          health: { ...STATUS.health!, status: 'future_health_state' },
-        }}
-      />,
+    expect(container.firstElementChild?.className).toBe('flex flex-col gap-5');
+    expect(Array.from(container.querySelectorAll('section')).map((section) => section.getAttribute('aria-labelledby'))).toEqual([
+      'memory-runtime-title',
+      'memory-sources-title',
+      'memory-anomalies-title',
+    ]);
+    expect(container.querySelector('#memory-sources-title')?.parentElement?.nextElementSibling?.className).toBe(
+      'grid gap-2 sm:grid-cols-2 xl:grid-cols-4',
     );
-
-    expect(screen.getByText('future_health_state')).toBeTruthy();
-  });
-
-  it('localizes closed runtime fact labels and enum values while preserving diagnostics', () => {
-    render(
-      <MemoryStatusPanel
-        {...baseProps}
-        status={{
-          ...STATUS,
-          health: {
-            ...STATUS.health!,
-            capabilities: { embed: false },
-            disabled_features: ['embed'],
-            cascade: {
-              healthy: false,
-              reasons: ['drain_failures'],
-              prune_stale_seconds: 45,
-            },
-            recorder: { state: 'degraded', reason: 'call_log_corrupt' },
-          },
-        }}
-      />,
+    expect(screen.getByTestId('memory-anomaly-result_unknown').className).toBe(
+      'flex min-w-0 flex-col gap-3 border-b border-border py-3 last:border-b-0 lg:flex-row lg:justify-between',
     );
-
-    expect(screen.getAllByText('memory.processingRecord.runtime.fact.capability.embed')).toHaveLength(2);
-    expect(screen.getAllByText('memory.processingRecord.runtime.fact.boolean.false')).toHaveLength(2);
-    expect(screen.getByText('memory.processingRecord.runtime.fact.cascade.pruneStaleSeconds')).toBeTruthy();
-    expect(screen.getByText('memory.processingRecord.runtime.fact.cascadeReason.drainFailures')).toBeTruthy();
-    expect(screen.getByText('memory.processingRecord.runtime.fact.recorder.state')).toBeTruthy();
-    expect(screen.getByText('memory.processingRecord.runtime.fact.recorderState.degraded')).toBeTruthy();
-    expect(screen.getByText('memory.processingRecord.runtime.fact.recorderReason.callLogCorrupt')).toBeTruthy();
-    expect(screen.getByText('45')).toBeTruthy();
-  });
-
-  it('leaves future runtime fact labels and values as raw fallback text', () => {
-    render(
-      <MemoryStatusPanel
-        {...baseProps}
-        status={{
-          ...STATUS,
-          health: {
-            ...STATUS.health!,
-            capabilities: { future_capability: true },
-            disabled_features: ['future_feature'],
-            cascade: { reasons: ['future_reason'], future_counter: 12 },
-            recorder: { state: 'future_state', future_field: 'future_value' },
-          },
-        }}
-      />,
-    );
-
-    expect(screen.getByText('future_capability')).toBeTruthy();
-    expect(screen.getByText('true')).toBeTruthy();
-    expect(screen.getByText('future_feature')).toBeTruthy();
-    expect(screen.getByText('future_reason')).toBeTruthy();
-    expect(screen.getByText('future_counter')).toBeTruthy();
-    expect(screen.getByText('12')).toBeTruthy();
-    expect(screen.getByText('future_state')).toBeTruthy();
-    expect(screen.getByText('future_field')).toBeTruthy();
-    expect(screen.getByText('future_value')).toBeTruthy();
-  });
-
-  it('localizes known runtime and log source reasons', () => {
-    render(
-      <MemoryStatusPanel
-        {...baseProps}
-        status={{
-          ...STATUS,
-          source: { status: 'unavailable', observed_at: null, reason: 'memory_sidecar_unavailable' },
-        }}
-        logSections={{
-          ...baseProps.logSections!,
-          everos: { status: 'unavailable', observed_at: null, reason: 'missing' },
-          capture: { status: 'stale', observed_at: null, reason: 'runs_busy' },
-        }}
-      />,
-    );
-
-    expect(screen.getByText('memory.processingRecord.sourceReason:errors.memory_sidecar_unavailable')).toBeTruthy();
-    expect(screen.getByText('memory.processingRecord.sourceReason:memory.log.reason.missing')).toBeTruthy();
-    expect(screen.getByText('memory.processingRecord.sourceReason:memory.log.reason.runsBusy')).toBeTruthy();
-  });
-
-  it('leaves a future source reason as inert fallback text', () => {
-    render(
-      <MemoryStatusPanel
-        {...baseProps}
-        status={{
-          ...STATUS,
-          source: { status: 'unavailable', observed_at: null, reason: 'future_source_reason' },
-        }}
-      />,
-    );
-
-    expect(screen.getByText('memory.processingRecord.sourceReason:future_source_reason')).toBeTruthy();
   });
 
   it('keeps source-independent anomalies visible when health cannot be read', () => {
@@ -260,36 +160,6 @@ describe('MemoryStatusPanel', () => {
     consoleError.mockRestore();
   });
 
-  it('localizes the boot recovery anomaly kind', () => {
-    render(
-      <MemoryStatusPanel
-        {...baseProps}
-        failures={[{ ...MANUAL_FAILURE, kind: 'boot_recovery' }]}
-      />,
-    );
-
-    expect(screen.getByText('memory.status.failureLog.kind.boot_recovery')).toBeTruthy();
-    expect(screen.queryByText('boot_recovery')).toBeNull();
-  });
-
-  it('leaves future anomaly enum values as inert fallback text', () => {
-    render(
-      <MemoryStatusPanel
-        {...baseProps}
-        failures={[{
-          ...MANUAL_FAILURE,
-          kind: 'future_kind',
-          state: 'future_state',
-          operation: 'future_operation',
-        }]}
-      />,
-    );
-
-    expect(screen.getByText('future_kind')).toBeTruthy();
-    expect(screen.getByText('future_state')).toBeTruthy();
-    expect(screen.getByText('future_operation')).toBeTruthy();
-  });
-
   it('offers distinct resume and abort commands for clear recovery', async () => {
     const onResumeClear = vi.fn();
     const onAbortClear = vi.fn();
@@ -308,34 +178,6 @@ describe('MemoryStatusPanel', () => {
 
     expect(onResumeClear).toHaveBeenCalledWith('clear-42');
     expect(onAbortClear).toHaveBeenCalledWith('clear-42');
-  });
-
-  it.each([
-    ['preparing', 'memory.processingRecord.clearRecovery.state.preparing'],
-    ['prepared', 'memory.processingRecord.clearRecovery.state.prepared'],
-    ['deleting', 'memory.processingRecord.clearRecovery.state.deleting'],
-    ['recovery_needed', 'memory.processingRecord.clearRecovery.state.recoveryNeeded'],
-  ])('localizes the known Clear recovery state %s', (state, label) => {
-    render(
-      <MemoryStatusPanel
-        {...baseProps}
-        recovery={{ operation_id: `clear-${state}`, state, can_resume: true, can_abort: false }}
-      />,
-    );
-
-    expect(screen.getByText(label)).toBeTruthy();
-    expect(screen.queryByText(state)).toBeNull();
-  });
-
-  it('leaves a future Clear recovery state as inert fallback text', () => {
-    render(
-      <MemoryStatusPanel
-        {...baseProps}
-        recovery={{ operation_id: 'clear-future', state: 'future_state', can_resume: false, can_abort: false }}
-      />,
-    );
-
-    expect(screen.getByText('future_state')).toBeTruthy();
   });
 
   it.each([
