@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from pathlib import Path
 from typing import Any, List, Tuple
 
@@ -165,6 +166,52 @@ def _save_custom(payload: dict) -> dict:
 
 def _delete_custom(provider_id: str) -> dict:
     return asyncio.run(api.delete_opencode_custom_provider_async(provider_id))
+
+
+def test_delete_provider_auth_settles_default_clear_on_cancellation(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    server = _FakeServer(tmp_path)
+    server._write_auth({"deepseek": {"type": "api", "key": "sk-old"}})
+
+    async def get_server():
+        return server
+
+    async def no_config_keys():
+        return set()
+
+    clear_entered = threading.Event()
+    release_clear = threading.Event()
+    clear_finished = threading.Event()
+
+    def blocking_clear(provider_id: str) -> None:
+        assert provider_id == "deepseek"
+        clear_entered.set()
+        assert release_clear.wait(timeout=5)
+        clear_finished.set()
+
+    monkeypatch.setattr(api, "_opencode_get_server", get_server)
+    monkeypatch.setattr(
+        "vibe.opencode_config.read_opencode_provider_auth_entries",
+        lambda **_kwargs: {"deepseek": {"type": "api", "key": "sk-old"}},
+    )
+    monkeypatch.setattr(api, "_read_opencode_config_api_key_provider_ids", no_config_keys)
+    monkeypatch.setattr(api, "_clear_opencode_default_provider_if", blocking_clear)
+
+    async def exercise() -> None:
+        task = asyncio.create_task(api.delete_opencode_provider_auth_async("deepseek"))
+        assert await asyncio.to_thread(clear_entered.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        release_clear.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(exercise())
+
+    assert clear_finished.is_set()
 
 
 def test_base_url_absent_leaves_existing_value_untouched(fake_save_env) -> None:

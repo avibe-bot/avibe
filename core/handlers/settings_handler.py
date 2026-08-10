@@ -6,6 +6,7 @@ from typing import Optional
 
 from modules.agents import get_agent_display_name
 from modules.im import MessageContext, InlineKeyboard, InlineButton
+from core.memory.blocking import run_blocking
 from core.modals import RoutingModalData, RoutingModalSelection
 from vibe import backend_model_catalog
 
@@ -708,10 +709,13 @@ class SettingsHandler(BaseHandler):
                 try:
                     from config.v2_config import V2Config, config_write_transaction
 
-                    with config_write_transaction():
-                        v2_config = V2Config.load()
-                        v2_config.language = language
-                        v2_config.save()
+                    def persist_language() -> None:
+                        with config_write_transaction():
+                            v2_config = V2Config.load()
+                            v2_config.language = language
+                            v2_config.save()
+
+                    await run_blocking(persist_language)
                     self.config.language = language
                 except Exception as err:
                     language_saved = False

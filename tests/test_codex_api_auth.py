@@ -48,6 +48,36 @@ def _save_codex_base_url(
     finished.set()
 
 
+def _save_codex_api_key(
+    avibe_home: str,
+    codex_home: str,
+    api_key: str,
+    attempting,
+    finished,
+) -> None:
+    os.environ["AVIBE_HOME"] = avibe_home
+    os.environ["CODEX_HOME"] = codex_home
+    from storage.lock import MigrationFileLock
+    from vibe import api as child_api
+
+    original_acquire = MigrationFileLock.acquire
+
+    def signal_acquire(lock) -> None:
+        attempting.set()
+        original_acquire(lock)
+
+    MigrationFileLock.acquire = signal_acquire
+    child_api.restart_backend = lambda name, **kwargs: {"ok": True}
+    child_api.save_codex_auth(
+        {
+            "auth_mode": "api_key",
+            "api_key": api_key,
+            "base_url": "https://new.example.test/v1",
+        }
+    )
+    finished.set()
+
+
 def _seed_disk(home: Path, *, api_key: str | None, store: str | None) -> None:
     codex_home = home / ".codex"
     codex_home.mkdir(parents=True, exist_ok=True)
@@ -201,3 +231,69 @@ def test_save_codex_auth_preserved_fields_share_final_config_transaction(
     assert concurrent.exitcode == 0
     assert observed_base_urls == ["https://old.example.test/v1"]
     assert api.load_config().agents.codex.base_url == "https://new.example.test/v1"
+
+
+def test_remove_codex_api_key_serializes_credential_and_config_mutations(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from core.services.settings import default_config
+    from storage.lock import MigrationFileLock
+    from vibe import codex_config
+
+    codex_home = tmp_path / ".codex"
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    config = default_config()
+    config.agents.codex.auth_mode = "api_key"
+    config.agents.codex.api_key = "sk-old"
+    config.agents.codex.base_url = "https://old.example.test/v1"
+    config.save()
+    codex_config.apply_codex_auth(
+        auth_mode="api_key",
+        api_key="sk-old",
+        base_url="https://old.example.test/v1",
+    )
+    context = multiprocessing.get_context("spawn")
+    attempting = context.Event()
+    finished = context.Event()
+    concurrent = context.Process(
+        target=_save_codex_api_key,
+        args=(str(tmp_path), str(codex_home), "sk-new", attempting, finished),
+    )
+    original_apply = codex_config.apply_codex_auth
+    original_acquire = MigrationFileLock.acquire
+    interleaved = False
+
+    def remove_then_interleave(**kwargs):
+        nonlocal interleaved
+        result = original_apply(**kwargs)
+        interleaved = True
+        concurrent.start()
+        assert attempting.wait(timeout=5)
+        return result
+
+    def wait_for_concurrent_writer(lock) -> None:
+        if interleaved:
+            assert finished.wait(timeout=5)
+        original_acquire(lock)
+
+    monkeypatch.setattr(codex_config, "apply_codex_auth", remove_then_interleave)
+    monkeypatch.setattr(MigrationFileLock, "acquire", wait_for_concurrent_writer)
+    monkeypatch.setattr(api, "restart_backend", lambda name, **kwargs: {"ok": True})
+    try:
+        result = api.remove_backend_api_key("codex")
+        assert finished.wait(timeout=5)
+    finally:
+        concurrent.join(timeout=5)
+        if concurrent.is_alive():
+            concurrent.terminate()
+            concurrent.join(timeout=5)
+
+    persisted = api.load_config()
+    assert result["ok"] is True
+    assert concurrent.exitcode == 0
+    assert codex_config.read_codex_api_key() == "sk-new"
+    assert persisted.agents.codex.auth_mode == "api_key"
+    assert persisted.agents.codex.api_key == "sk-new"
+    assert persisted.agents.codex.base_url == "https://new.example.test/v1"

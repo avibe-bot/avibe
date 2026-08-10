@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from unittest.mock import patch
+
+import pytest
 
 from config.v2_settings import RoutingSettings
 from core.handlers.settings_handler import SettingsHandler
@@ -82,6 +85,62 @@ def test_settings_update_materializes_topic_mention_before_saving_other_fields()
     )
 
     assert calls == ["mention", "read", "save"]
+
+
+def test_settings_language_save_stays_responsive_and_settles_on_cancellation(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from core.services.settings import default_config
+    from storage.lock import MigrationFileLock
+    from config.v2_config import V2Config
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = default_config()
+    config.language = "en"
+    config.save()
+    lock_entered = threading.Event()
+    release_lock = threading.Event()
+    original_acquire = MigrationFileLock.acquire
+
+    def blocking_acquire(lock) -> None:
+        lock_entered.set()
+        assert release_lock.wait(timeout=5)
+        original_acquire(lock)
+
+    monkeypatch.setattr(MigrationFileLock, "acquire", blocking_acquire)
+    user_settings = SimpleNamespace(show_message_types=[])
+    settings_manager = SimpleNamespace(
+        set_require_mention=lambda *_args: None,
+        get_user_settings=lambda _key: user_settings,
+        update_user_settings=lambda *_args: None,
+    )
+    handler, _ = _make_handler(settings_manager)
+
+    async def exercise() -> None:
+        task = asyncio.create_task(
+            handler.handle_settings_update(
+                user_id="42",
+                channel_id="-100123",
+                show_message_types=["assistant"],
+                language="zh",
+                notify_user=False,
+                platform="telegram",
+            )
+        )
+        assert await asyncio.to_thread(lock_entered.wait, 5)
+        loop_progressed = asyncio.Event()
+        asyncio.get_running_loop().call_soon(loop_progressed.set)
+        await asyncio.wait_for(loop_progressed.wait(), timeout=0.2)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        release_lock.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(exercise())
+    assert V2Config.load().language == "zh"
 
 
 class _FlatScopeSessions:

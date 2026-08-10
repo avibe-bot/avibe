@@ -42,6 +42,7 @@ from config.v2_settings import (
 )
 from config.v2_sessions import SessionsStore
 from config.platform_registry import get_platform_descriptor
+from core.memory.blocking import run_blocking
 from vibe.opencode_config import (
     get_opencode_config_paths,
     load_first_opencode_user_config,
@@ -8974,34 +8975,49 @@ def remove_backend_api_key(backend: str) -> dict:
         return {"ok": False, "error": "unsupported_backend"}
 
     notices: list = []
-    if backend == "codex":
-        from vibe.codex_config import apply_codex_auth
+    with config_write_transaction():
+        if backend == "codex":
+            from vibe.codex_config import apply_codex_auth
 
+            try:
+                result = apply_codex_auth(
+                    auth_mode="oauth",
+                    api_key=None,
+                    base_url=None,
+                )
+                if isinstance(result, dict):
+                    raw_notices = result.get("notices")
+                    if isinstance(raw_notices, list):
+                        notices = raw_notices
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "apply_codex_auth(oauth) during remove-key failed: %s",
+                    exc,
+                    exc_info=True,
+                )
+                return {"ok": False, "error": "remove_failed", "detail": str(exc)}
+        else:
+            from vibe.claude_config import apply_claude_auth
+
+            try:
+                apply_claude_auth(auth_mode="oauth", api_key=None, base_url=None)
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "apply_claude_auth(oauth) during remove-key failed: %s",
+                    exc,
+                    exc_info=True,
+                )
+                return {"ok": False, "error": "remove_failed", "detail": str(exc)}
+
+        # Clear V2Config api_key for both backends while the credential-file
+        # mutation remains serialized with concurrent auth saves.
         try:
-            result = apply_codex_auth(auth_mode="oauth", api_key=None, base_url=None)
-            if isinstance(result, dict):
-                raw_notices = result.get("notices")
-                if isinstance(raw_notices, list):
-                    notices = raw_notices
-        except Exception as exc:  # noqa: BLE001
-            logger.error("apply_codex_auth(oauth) during remove-key failed: %s", exc, exc_info=True)
-            return {"ok": False, "error": "remove_failed", "detail": str(exc)}
-    elif backend == "claude":
-        from vibe.claude_config import apply_claude_auth
-
-        try:
-            apply_claude_auth(auth_mode="oauth", api_key=None, base_url=None)
-        except Exception as exc:  # noqa: BLE001
-            logger.error("apply_claude_auth(oauth) during remove-key failed: %s", exc, exc_info=True)
-            return {"ok": False, "error": "remove_failed", "detail": str(exc)}
-
-    # Clear V2Config api_key for both backends.
-    try:
-        with config_write_transaction():
             try:
                 config = load_config()
             except FileNotFoundError:
-                config = V2Config()
+                from core.services.settings import default_config
+
+                config = default_config()
             target = getattr(getattr(config, "agents", None), backend, None)
             if target is not None:
                 target.auth_mode = "oauth"
@@ -9021,8 +9037,12 @@ def remove_backend_api_key(backend: str) -> dict:
                 if backend == "claude":
                     target.auth_mode_set = True
                 config.save()
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("V2Config clear during remove-key failed for %s: %s", backend, exc)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "V2Config clear during remove-key failed for %s: %s",
+                backend,
+                exc,
+            )
 
     # Both backends keep runtime state in the controller. Codex owns a
     # persistent app-server; Claude owns cached SDK sessions and a loaded
@@ -10538,7 +10558,7 @@ async def delete_opencode_custom_provider_async(provider_id: str) -> dict:
         return {"ok": False, "message": str(exc)}
 
     try:
-        _clear_opencode_default_provider_if(pid)
+        await run_blocking(_clear_opencode_default_provider_if, pid)
     except Exception as exc:
         logger.warning(
             "Failed to revalidate opencode.default_provider after custom provider delete for %s: %s",
@@ -11018,7 +11038,7 @@ async def delete_opencode_provider_auth_async(provider_id: str) -> dict:
     if removed_auth:
         _OPENCODE_OPTIONS_CACHE.clear()
         try:
-            _clear_opencode_default_provider_if(pid)
+            await run_blocking(_clear_opencode_default_provider_if, pid)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "Failed to revalidate opencode.default_provider after delete for %s: %s",
@@ -11053,7 +11073,9 @@ def set_opencode_default_provider(payload: dict) -> dict:
         try:
             config = load_config()
         except FileNotFoundError:
-            config = V2Config()
+            from core.services.settings import default_config
+
+            config = default_config()
         config.agents.opencode.default_provider = provider_id
         config.save()
     return {"ok": True, "default_provider": provider_id}
