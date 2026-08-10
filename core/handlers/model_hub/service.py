@@ -96,6 +96,15 @@ PROBE_RESULT_CONTRACT_VERSION = 5
 logger = logging.getLogger(__name__)
 
 _NATIVE_VENDOR_BACKENDS = {"anthropic": "claude", "openai": "codex"}
+_FIXED_BACKEND_PROTOCOLS: dict[
+    str,
+    Literal["anthropic", "openai_responses", "openai_chat"],
+] = {
+    "claude": "anthropic",
+    "codex": "openai_responses",
+}
+
+
 class ModelHubError(Exception):
     def __init__(
         self,
@@ -279,14 +288,6 @@ def _native_model_ids(vendor: str) -> tuple[str, ...]:
     if backend is None:
         return ()
     return _builtin_model_ids(backend)
-
-
-def _default_protocol(vendor: str) -> str:
-    if vendor == "anthropic":
-        return "anthropic"
-    if vendor == "openai":
-        return "openai_responses"
-    return "openai_chat"
 
 
 async def _provision_transient_credential_with_cancellation_ownership(
@@ -840,7 +841,76 @@ class ModelHubService:
             raise ModelHubError("discovery_failed", status=502)
         return observation
 
-    async def _observe_source_payload(self, payload: Mapping[str, Any]) -> SourceObservation:
+    async def _observe_provisioned_credential(
+        self,
+        vendor: str,
+        base_url: str | None,
+        credential_ref: str,
+        protocol_order: tuple[str, ...],
+    ) -> SourceObservation:
+        try:
+            observation = await self.adapter.observe_source(
+                vendor,
+                base_url,
+                credential_ref,
+                protocol_order,
+            )
+        except asyncio.TimeoutError:
+            observation = SourceObservation(
+                outcome=ObservationOutcome.TIMEOUT,
+                reachable=None,
+                authenticated=None,
+                protocol=None,
+                discovery=ObservationDiscovery.NOT_ATTEMPTED,
+                model_ids=(),
+            )
+        except EngineUnavailableError:
+            raise ModelHubError("engine_down", status=503) from None
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            observation = SourceObservation(
+                outcome=ObservationOutcome.ADAPTER_ERROR,
+                reachable=None,
+                authenticated=None,
+                protocol=None,
+                discovery=ObservationDiscovery.NOT_ATTEMPTED,
+                model_ids=(),
+            )
+        return self._validate_observation(observation)
+
+    async def _require_proven_observation(
+        self,
+        vendor: str,
+        base_url: str | None,
+        credential_ref: str,
+        protocol_order: tuple[str, ...],
+    ) -> SourceObservation:
+        """Require response-backed protocol evidence before Source persistence."""
+
+        observation = await self._observe_provisioned_credential(
+            vendor,
+            base_url,
+            credential_ref,
+            protocol_order,
+        )
+        if (
+            observation.outcome is not ObservationOutcome.OBSERVED
+            or observation.protocol is None
+        ):
+            raise ModelHubError(
+                "discovery_failed",
+                status=422,
+                data={"observation": self._observation_payload(observation)},
+            )
+        return observation
+
+    async def _observe_source_payload(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        require_proven: bool = False,
+    ) -> SourceObservation:
         if set(payload) - {"vendor", "base_url", "key", "protocol_order"}:
             raise ModelHubError("discovery_failed")
         vendor = payload.get("vendor")
@@ -860,42 +930,31 @@ class ModelHubService:
             base_url,
         )
         try:
-            try:
-                observation = await self.adapter.observe_source(
+            if require_proven:
+                return await self._require_proven_observation(
                     vendor,
                     base_url,
                     transient_ref,
                     protocol_order,
                 )
-            except asyncio.TimeoutError:
-                observation = SourceObservation(
-                    outcome=ObservationOutcome.TIMEOUT,
-                    reachable=None,
-                    authenticated=None,
-                    protocol=None,
-                    discovery=ObservationDiscovery.NOT_ATTEMPTED,
-                    model_ids=(),
-                )
-            except EngineUnavailableError:
-                raise ModelHubError("engine_down", status=503) from None
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                observation = SourceObservation(
-                    outcome=ObservationOutcome.ADAPTER_ERROR,
-                    reachable=None,
-                    authenticated=None,
-                    protocol=None,
-                    discovery=ObservationDiscovery.NOT_ATTEMPTED,
-                    model_ids=(),
-                )
-            return self._validate_observation(observation)
+            return await self._observe_provisioned_credential(
+                vendor,
+                base_url,
+                transient_ref,
+                protocol_order,
+            )
         finally:
             await _rollback_credential_before_settling(
                 self,
                 "observation",
                 transient_ref,
             )
+
+    async def _require_proven_source_payload(
+        self,
+        payload: Mapping[str, Any],
+    ) -> SourceObservation:
+        return await self._observe_source_payload(payload, require_proven=True)
 
     async def observe_source(self, payload: object) -> dict:
         if not isinstance(payload, dict):
@@ -1153,9 +1212,11 @@ class ModelHubService:
 
     async def _create_oauth_source(
         self,
-        source: ModelHubSourceConfig,
         manual_models: list[ModelHubModelConfig],
         *,
+        display_name: str,
+        billing: Literal["monthly", "metered"],
+        created_at: str,
         oauth_ref: str,
         channel: Literal["native_cli", "hub"],
         vendor: str,
@@ -1167,6 +1228,7 @@ class ModelHubService:
         # credential while still retaining rollback ownership before discovery.
         async with self._mutation_lock:
             rollback_credential_ref: Optional[str] = None
+            source_id = ""
             persisted = False
             try:
                 binding = self._oauth_binding(oauth_ref)
@@ -1187,9 +1249,9 @@ class ModelHubService:
                 ):
                     raise ModelHubError("flow_not_found", status=404)
 
-                source.id = flow.source_id
+                source_id = flow.source_id
                 previous = self.store.load()
-                existing = next((item for item in previous.sources if item.id == source.id), None)
+                existing = next((item for item in previous.sources if item.id == source_id), None)
                 if idempotent and existing is not None and self._source_matches_binding(existing, binding):
                     try:
                         self.oauth_flows.complete(oauth_ref)
@@ -1198,10 +1260,40 @@ class ModelHubService:
                     return existing.to_payload()
                 if existing is not None:
                     raise ModelHubError("migration_item_conflict", status=409)
+                account_label: str | None = None
+                state = ModelHubSourceStateConfig(status="standby")
+                discovered: list[str] | None
                 if channel == "hub":
-                    source.credential_ref = cast(str, flow.credential_ref)
-                    rollback_credential_ref = source.credential_ref
+                    rollback_credential_ref = cast(str, flow.credential_ref)
+                    observation = await self._require_proven_observation(
+                        vendor,
+                        None,
+                        rollback_credential_ref,
+                        SOURCE_PROTOCOLS,
+                    )
+                    protocol = cast(
+                        Literal["anthropic", "openai_responses", "openai_chat"],
+                        observation.protocol,
+                    )
+                    if observation.discovery is ObservationDiscovery.SUCCEEDED:
+                        discovered = list(observation.model_ids)
+                    elif observation.discovery is ObservationDiscovery.FAILED:
+                        discovered = None
+                        state = ModelHubSourceStateConfig(
+                            status="error",
+                            detail_key="models.source.error.unclassified",
+                        )
+                    else:
+                        raise ModelHubError("discovery_failed", status=502)
                 else:
+                    backend = _NATIVE_VENDOR_BACKENDS.get(vendor)
+                    protocol = (
+                        _FIXED_BACKEND_PROTOCOLS.get(backend)
+                        if backend is not None
+                        else None
+                    )
+                    if protocol is None:
+                        raise ModelHubError("discovery_failed")
                     try:
                         source_status = self.native_oauth_adapter.completed_source_status(oauth_ref)
                     except KeyError:
@@ -1210,8 +1302,8 @@ class ModelHubService:
                         raise ModelHubError("engine_down", status=503) from None
                     except Exception:
                         raise ModelHubError("engine_down", status=503) from None
-                    source.account_label = source_status.account_label
-                    source.state = (
+                    account_label = source_status.account_label
+                    state = (
                         ModelHubSourceStateConfig(status="standby")
                         if source_status.signed_in
                         else ModelHubSourceStateConfig(
@@ -1219,15 +1311,42 @@ class ModelHubService:
                             detail_key="models.source.needs_action.oauth_expired",
                         )
                     )
-
-                discovered = (
-                    await self._discover(source)
-                    if channel == "hub"
-                    else list(_native_model_ids(vendor))
-                )
+                    discovered = list(_native_model_ids(vendor))
                 if channel == "native_cli" and not discovered:
                     raise ModelHubError("discovery_failed")
-                self._apply_discovered_models(source, manual_models, discovered)
+                source_payload: dict[str, Any] = {
+                    "id": source_id,
+                    "created_at": created_at,
+                    "kind": "subscription",
+                    "vendor": vendor,
+                    "display_name": display_name,
+                    "protocol": protocol,
+                    "base_url": None,
+                    "supply_channel": channel,
+                    "billing": billing,
+                    "state": state.to_payload(),
+                    "usage": ModelHubSourceUsageConfig().to_payload(),
+                    "models": [model.to_payload() for model in manual_models],
+                }
+                if rollback_credential_ref is not None:
+                    source_payload["credential_ref"] = rollback_credential_ref
+                if account_label is not None:
+                    source_payload["account_label"] = account_label
+                try:
+                    source = ModelHubSourceConfig.from_payload(source_payload)
+                except (TypeError, ValueError):
+                    raise ModelHubError("discovery_failed") from None
+                if discovered is not None:
+                    self._apply_discovered_models(
+                        source,
+                        manual_models,
+                        discovered,
+                        allow_empty=channel == "hub",
+                    )
+                try:
+                    source = ModelHubSourceConfig.from_payload(source.to_payload())
+                except (TypeError, ValueError):
+                    raise ModelHubError("discovery_failed") from None
                 await self._commit_new_source_locked(
                     source,
                     previous=previous,
@@ -1241,13 +1360,13 @@ class ModelHubService:
             except asyncio.CancelledError:
                 persisted = self._persisted_credential(
                     self.store.load(),
-                    source.id,
+                    source_id,
                     rollback_credential_ref,
                 )
                 if rollback_credential_ref is not None and not persisted:
                     await _rollback_credential_before_settling(
                         self,
-                        source.id,
+                        source_id,
                         rollback_credential_ref,
                     )
                     try:
@@ -1259,7 +1378,7 @@ class ModelHubService:
                 if rollback_credential_ref is not None and not persisted:
                     await _require_credential_cleanup(
                         self,
-                        source.id,
+                        source_id,
                         rollback_credential_ref,
                     )
                     try:
@@ -1739,23 +1858,11 @@ class ModelHubService:
                 flow,
             )
             return flow, repair_result
-        source = ModelHubSourceConfig(
-            id=binding.source_id,
-            created_at=self.now().isoformat(),
-            kind="subscription",
-            vendor=binding.vendor,
-            display_name=binding.vendor,
-            protocol=_default_protocol(binding.vendor),
-            base_url=None,
-            supply_channel=binding.channel,
-            billing="monthly",
-            state=ModelHubSourceStateConfig(status="standby"),
-            usage=ModelHubSourceUsageConfig(),
-            models=[],
-        )
         await self._create_oauth_source(
-            source,
             [],
+            display_name=binding.vendor,
+            billing="monthly",
+            created_at=self.now().isoformat(),
             oauth_ref=flow_id,
             channel=binding.channel,
             vendor=binding.vendor,
@@ -1856,24 +1963,12 @@ class ModelHubService:
             raise ModelHubError("discovery_failed")
 
         if oauth_ref:
-            source = ModelHubSourceConfig(
-                id=_source_id(),
-                kind=kind,
-                vendor=vendor,
-                display_name=display_name,
-                protocol=_default_protocol(vendor),
-                base_url=base_url,
-                supply_channel=channel,
-                billing=billing,
-                state=ModelHubSourceStateConfig(status="standby"),
-                usage=ModelHubSourceUsageConfig(),
-                models=manual_models,
-                created_at=self.now().isoformat(),
-            )
             return self._source_creation_result(
                 await self._create_oauth_source(
-                    source,
                     manual_models,
+                    display_name=display_name,
+                    billing=cast(Literal["monthly", "metered"], billing),
+                    created_at=self.now().isoformat(),
                     oauth_ref=oauth_ref,
                     channel=cast(Literal["native_cli", "hub"], channel),
                     vendor=vendor,
@@ -1882,7 +1977,7 @@ class ModelHubService:
         if kind == "subscription":
             raise ModelHubError("flow_not_found", status=404)
 
-        observation = await self._observe_source_payload(
+        observation = await self._require_proven_source_payload(
             {
                 "vendor": vendor,
                 "base_url": base_url,
@@ -1890,15 +1985,6 @@ class ModelHubService:
                 "protocol_order": payload.get("protocol_order"),
             }
         )
-        if (
-            observation.outcome is not ObservationOutcome.OBSERVED
-            or observation.protocol is None
-        ):
-            raise ModelHubError(
-                "discovery_failed",
-                status=422,
-                data={"observation": self._observation_payload(observation)},
-            )
         source = ModelHubSourceConfig(
             id=_source_id(),
             kind=kind,
@@ -2966,10 +3052,7 @@ class ModelHubService:
     ) -> ModelHubRequest:
         # A probe enters the same translation seam as a live backend turn, so
         # its payload must be shaped in the backend's client protocol.
-        request_protocol = {
-            "claude": "anthropic",
-            "codex": "openai_responses",
-        }.get(backend, source.protocol)
+        request_protocol = _FIXED_BACKEND_PROTOCOLS.get(backend, source.protocol)
         if request_protocol == "anthropic":
             payload = {
                 "model": model_id,
@@ -3652,6 +3735,10 @@ class ModelHubService:
             )
         except MigrationConflictError:
             raise ModelHubError("migration_item_conflict", status=409)
+        except ModelHubError as exc:
+            if exc.code != "discovery_failed":
+                raise
+            raise ModelHubError("migration_item_conflict", status=409) from None
         return {
             "applied": applied,
             "sources": self.list_sources(),

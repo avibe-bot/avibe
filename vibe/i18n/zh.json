@@ -744,6 +744,7 @@
       "waiting": "模型 {model} 暂时不可用，等待 {source} 于 {retry_at} 自动恢复。",
       "interrupted": "模型 {model} 当前不可用：{blockers}。请前往 Models 处理。",
       "native_cli_unavailable": "当前进程无法使用 CLI 登录",
+      "route_unconfigured": "模型 {model} 尚未配置路由。请前往 Models 配置。",
       "no_enabled_source": "模型 {model} 没有已启用的来源。请前往 Models 配置。",
       "no_eligible_source": "模型 {model} 没有适用于 {backend} 的来源。请前往 Models 配置。",
       "model_unsupported": "没有来源支持模型 {model}。请前往 Models 配置。"

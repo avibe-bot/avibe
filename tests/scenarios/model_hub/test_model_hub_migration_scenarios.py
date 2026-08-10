@@ -73,7 +73,7 @@ class MigrationAdapter:
             "openrouter": "openai_chat",
             "zhipuai": "openai_chat",
         }
-        self.fail_observation_vendor: str | None = None
+        self.unproven_observation_vendor: str | None = None
         self.synced: list[tuple[object, ...]] = []
         self.fail_revoke_refs: set[str] = set()
         self.fail_sync_count = 0
@@ -96,8 +96,15 @@ class MigrationAdapter:
         protocol_order,
     ) -> SourceObservation:
         self.observed.append((vendor, tuple(protocol_order)))
-        if vendor == self.fail_observation_vendor:
-            raise RuntimeError("redacted observation failure")
+        if vendor == self.unproven_observation_vendor:
+            return SourceObservation(
+                outcome=ObservationOutcome.AMBIGUOUS,
+                reachable=True,
+                authenticated=True,
+                protocol=None,
+                discovery=ObservationDiscovery.NOT_ATTEMPTED,
+                model_ids=(),
+            )
         return SourceObservation(
             outcome=ObservationOutcome.OBSERVED,
             reachable=True,
@@ -992,7 +999,7 @@ def test_failed_batch_revokes_every_provisioned_credential(
     _isolate_native_home(monkeypatch, native_home)
     service, store, adapter = _service(tmp_path)
     item_ids = [item["id"] for item in service.migration_scan()["items"]]
-    adapter.fail_observation_vendor = "zhipuai"
+    adapter.unproven_observation_vendor = "zhipuai"
 
     with pytest.raises(ModelHubError) as error:
         asyncio.run(service.migration_apply(item_ids))

@@ -114,6 +114,8 @@ class FakeAdapter:
         self.cancel_disposition = RetainedMaterialDisposition.NONE
         self.start_calls = 0
         self.credential_count = 0
+        self.observation: SourceObservation | None = None
+        self.observed_protocol_orders: list[tuple[str, ...]] = []
 
     async def ensure_installed(self):
         return await self.status()
@@ -164,6 +166,9 @@ class FakeAdapter:
         return ("claude-opus-4-6", "claude-sonnet-4-6")
 
     async def observe_source(self, vendor, base_url, credential_ref, protocol_order):
+        self.observed_protocol_orders.append(tuple(protocol_order))
+        if self.observation is not None:
+            return self.observation
         models = await self.discover_models(
             vendor,
             protocol_order[0],
@@ -2734,6 +2739,67 @@ def test_failed_hub_oauth_source_creation_revokes_credential(tmp_path):
     assert adapter.revoked == ["cred_oauth_rollback"]
     assert store.config.sources == []
     assert service.oauth_flows.channel(flow["flow_id"]) is None
+
+
+def test_completed_hub_oauth_persists_only_a_response_proven_protocol(tmp_path):
+    service, store, adapter = _service(tmp_path)
+    flow = asyncio.run(service.oauth_start({"vendor": "openai", "channel": "hub"}))[
+        "flow"
+    ]
+    adapter.flows[flow["flow_id"]] = OAuthFlowState(
+        **{
+            **adapter.flows[flow["flow_id"]].__dict__,
+            "state": "success",
+            "credential_ref": "cred_oauth_proven",
+        }
+    )
+    adapter.observation = SourceObservation(
+        outcome=ObservationOutcome.OBSERVED,
+        reachable=True,
+        authenticated=True,
+        protocol="openai_chat",
+        discovery=ObservationDiscovery.SUCCEEDED,
+        model_ids=("gpt-5.6",),
+    )
+
+    result = asyncio.run(service.oauth_status(flow["flow_id"]))
+
+    assert result["source"]["protocol"] == "openai_chat"
+    assert store.config.sources[0].protocol == "openai_chat"
+    assert store.config.sources[0].credential_ref == "cred_oauth_proven"
+    assert adapter.observed_protocol_orders == [SOURCE_PROTOCOLS]
+    assert adapter.revoked == []
+
+
+def test_completed_hub_oauth_rejects_unproven_protocol_before_persistence(tmp_path):
+    service, store, adapter = _service(tmp_path)
+    flow = asyncio.run(service.oauth_start({"vendor": "openai", "channel": "hub"}))[
+        "flow"
+    ]
+    adapter.flows[flow["flow_id"]] = OAuthFlowState(
+        **{
+            **adapter.flows[flow["flow_id"]].__dict__,
+            "state": "success",
+            "credential_ref": "cred_oauth_unproven",
+        }
+    )
+    adapter.observation = SourceObservation(
+        outcome=ObservationOutcome.AMBIGUOUS,
+        reachable=True,
+        authenticated=True,
+        protocol=None,
+        discovery=ObservationDiscovery.NOT_ATTEMPTED,
+        model_ids=(),
+    )
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(service.oauth_status(flow["flow_id"]))
+
+    assert exc_info.value.code == "discovery_failed"
+    assert exc_info.value.status == 422
+    assert store.config.sources == []
+    assert adapter.revoked == ["cred_oauth_unproven"]
+    assert service.oauth_flows.binding(flow["flow_id"]) is None
 
 
 def test_concurrent_completed_hub_oauth_flow_has_single_credential_owner(tmp_path):

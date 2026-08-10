@@ -1376,6 +1376,67 @@ def test_credential_cleanup_settlement_has_one_durable_boundary():
     assert raw_cleanup_callers == {"_require_credential_cleanup"}
 
 
+def test_every_persisting_source_path_requires_response_backed_protocol_evidence():
+    from ast import AsyncFunctionDef, Attribute, Call, Name, parse, walk
+    from pathlib import Path
+
+    root = Path(__file__).parents[1]
+    production_trees = [
+        parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for directory in ("config", "core", "modules", "vibe")
+        for path in (root / directory).rglob("*.py")
+    ]
+    assert not any(
+        (
+            isinstance(node, Name)
+            and node.id == "_default_protocol"
+        )
+        or (
+            isinstance(node, Attribute)
+            and node.attr == "_default_protocol"
+        )
+        for tree in production_trees
+        for node in walk(tree)
+    )
+
+    def async_functions(path: Path) -> dict[str, AsyncFunctionDef]:
+        tree = parse(path.read_text(encoding="utf-8"), filename=str(path))
+        return {
+            node.name: node
+            for node in walk(tree)
+            if isinstance(node, AsyncFunctionDef)
+        }
+
+    def calls(function: AsyncFunctionDef) -> set[str]:
+        return {
+            (
+                node.func.id
+                if isinstance(node.func, Name)
+                else node.func.attr
+            )
+            for node in walk(function)
+            if isinstance(node, Call)
+            and isinstance(node.func, (Name, Attribute))
+        }
+
+    service_functions = async_functions(
+        root / "core/handlers/model_hub/service.py"
+    )
+    migration_functions = async_functions(
+        root / "core/handlers/model_hub/migration.py"
+    )
+
+    assert "_require_proven_source_payload" in calls(
+        service_functions["create_source"]
+    )
+    assert "_require_proven_source_payload" in calls(
+        migration_functions["apply_native_migration"]
+    )
+    assert "_require_proven_observation" in calls(
+        service_functions["_create_oauth_source"]
+    )
+
+
 def test_manual_model_delete_ignores_preexisting_unrelated_gap(tmp_path):
     source = _source("src_manual001")
     source.models.append(

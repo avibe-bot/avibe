@@ -61,7 +61,7 @@ async def _probe_protocol_response(
     base_url: str | None,
     secret: str,
     timeout: float = 15.0,
-) -> None:
+) -> bool:
     """Require a response from the candidate protocol's distinct request path."""
 
     root = base_url or _OFFICIAL_BASE_URLS.get(vendor)
@@ -97,13 +97,17 @@ async def _probe_protocol_response(
                         "protocol observation authentication failed",
                         status_code=response.status,
                     )
-                # Empty JSON is intentionally invalid. A protocol-aware endpoint
-                # rejects it after authentication without consuming a model turn.
-                if response.status not in {400, 422} and not 200 <= response.status < 300:
+                if response.status in {400, 422}:
+                    # Empty JSON is intentionally invalid. A protocol-aware endpoint
+                    # rejects it after authentication without consuming a model turn.
+                    return True
+                if not 200 <= response.status < 300:
                     raise EngineClientError(
                         f"protocol observation returned HTTP {response.status}",
                         status_code=response.status,
                     )
+                body = await response.content.read(64 * 1024)
+                return _successful_response_proves_protocol(protocol, body)
     except asyncio.TimeoutError:
         raise EngineClientError("protocol observation timed out", error_type="timeout") from None
     except aiohttp.ClientError:
@@ -116,9 +120,102 @@ async def _probe_protocol_response(
 @dataclass(frozen=True)
 class _AuthRecord:
     identity: str
+    auth_index: str
     name: str
     provider: str
     fingerprint: str
+    account_id: str | None = None
+
+
+def _successful_response_proves_protocol(
+    protocol: str,
+    body: str | bytes,
+) -> bool:
+    """Keep the ambiguous-success boundary in one response-shape classifier."""
+
+    try:
+        payload = json.loads(body)
+    except (TypeError, UnicodeDecodeError, ValueError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    if protocol == "anthropic":
+        return payload.get("type") == "message"
+    if protocol == "openai_responses":
+        return payload.get("object") == "response"
+    if protocol == "openai_chat":
+        return payload.get("object") in {"chat.completion", "chat.completion.chunk"}
+    return False
+
+
+def _probe_oauth_protocol_response(
+    *,
+    client: EngineClient,
+    auth: _AuthRecord,
+    vendor: str,
+    protocol: str,
+) -> bool:
+    """Probe one allowlisted OAuth upstream through the engine-held credential."""
+
+    if vendor == "anthropic" and protocol == "anthropic":
+        url = "https://api.anthropic.com/v1/messages?beta=true"
+        headers = {
+            "Authorization": "Bearer $TOKEN$",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "Anthropic-Version": "2023-06-01",
+            "Anthropic-Beta": "oauth-2025-04-20",
+            "X-App": "cli",
+        }
+    elif vendor in {"openai", "codex"} and protocol == "openai_responses":
+        url = "https://chatgpt.com/backend-api/codex/responses"
+        headers = {
+            "Authorization": "Bearer $TOKEN$",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "Originator": "codex-tui",
+        }
+        if auth.account_id:
+            headers["Chatgpt-Account-Id"] = auth.account_id
+    else:
+        raise EngineClientError(
+            "OAuth credential does not support this protocol path",
+            status_code=404,
+        )
+    payload = client.management_request(
+        "POST",
+        "/api-call",
+        payload={
+            "auth_index": auth.auth_index,
+            "method": "POST",
+            "url": url,
+            "header": headers,
+            "data": "{}",
+        },
+    )
+    status = payload.get("status_code")
+    if not isinstance(status, int) or isinstance(status, bool):
+        raise EngineClientError(
+            "protocol observation returned an invalid status",
+            error_type="invalid_json",
+        )
+    if status in {401, 403}:
+        raise EngineClientError(
+            "protocol observation authentication failed",
+            status_code=status,
+        )
+    if status in {400, 422}:
+        return True
+    if not 200 <= status < 300:
+        raise EngineClientError(
+            f"protocol observation returned HTTP {status}",
+            status_code=status,
+        )
+    body = payload.get("body")
+    return _successful_response_proves_protocol(
+        protocol,
+        body if isinstance(body, str) else "",
+    )
 
 
 @dataclass
@@ -370,7 +467,14 @@ class CLIProxyEngineAdapter:
         credential_ref: str,
         protocol_order: Sequence[str],
     ) -> SourceObservation:
-        """Probe each ordered protocol and keep only response-backed conclusions."""
+        """Observe sequentially and stop at the first response-backed proof.
+
+        ``protocol_order`` orders attempts only. A protocol-specific upstream
+        response proves the current attempt and terminates observation before any
+        later candidate runs; vendor, URL, and order never create a conclusion.
+        A successful response whose shape proves no candidate is the single
+        ambiguous boundary. This is the require-proven reading of AC-27.
+        """
 
         metadata = await asyncio.to_thread(
             self.state_store.credential_metadata,
@@ -381,40 +485,81 @@ class CLIProxyEngineAdapter:
             normalized_base_url = normalize_model_hub_base_url(base_url)
         except (TypeError, ValueError):
             raise EngineStateError("invalid source base URL") from None
-        if (
-            metadata.get("kind") != "api_key"
-            or metadata.get("vendor") != normalized_vendor
-            or metadata.get("base_url") != normalized_base_url
-        ):
+        if metadata.get("vendor") != normalized_vendor:
             raise EngineStateError("credential does not match observation target")
-        secret = await asyncio.to_thread(self.state_store.read_api_key, credential_ref)
-        successes: list[str] = []
+        credential_kind = metadata.get("kind")
+        secret: str | None = None
+        oauth_auth: _AuthRecord | None = None
+        if credential_kind == "api_key":
+            if metadata.get("base_url") != normalized_base_url:
+                raise EngineStateError("credential does not match observation target")
+            secret = await asyncio.to_thread(self.state_store.read_api_key, credential_ref)
+        elif credential_kind == "oauth":
+            if normalized_base_url is not None:
+                raise EngineStateError("credential does not match observation target")
+            client = await asyncio.to_thread(self.supervisor.client)
+            inventory = await asyncio.to_thread(_auth_inventory, client)
+            auth_name = str(metadata.get("auth_name") or "")
+            matches = [
+                auth
+                for auth in inventory.values()
+                if auth.name == auth_name or auth.identity == auth_name
+            ]
+            if len(matches) != 1 or not matches[0].auth_index:
+                raise EngineStateError("OAuth credential binding is unavailable")
+            oauth_auth = matches[0]
+        else:
+            raise EngineStateError("credential does not match observation target")
+
         failures: list[EngineClientError] = []
         for protocol in protocol_order:
             if protocol not in SOURCE_PROTOCOLS:
                 raise EngineStateError("unsupported source protocol")
             try:
-                await _probe_protocol_response(
-                    vendor=normalized_vendor,
-                    protocol=protocol,
-                    base_url=base_url,
-                    secret=secret,
-                )
+                if credential_kind == "api_key":
+                    proved = await _probe_protocol_response(
+                        vendor=normalized_vendor,
+                        protocol=protocol,
+                        base_url=base_url,
+                        secret=secret or "",
+                    )
+                else:
+                    assert oauth_auth is not None
+                    proved = await asyncio.to_thread(
+                        _probe_oauth_protocol_response,
+                        client=client,
+                        auth=oauth_auth,
+                        vendor=normalized_vendor,
+                        protocol=protocol,
+                    )
             except EngineClientError as exc:
                 failures.append(exc)
                 continue
-            successes.append(protocol)
-
-        if len(successes) == 1:
-            protocol = successes[0]
-            try:
-                models = await probe_models(
-                    vendor=normalized_vendor,
-                    protocol=protocol,
-                    base_url=base_url,
-                    secret=secret,
+            if not proved:
+                return SourceObservation(
+                    outcome=ObservationOutcome.AMBIGUOUS,
+                    reachable=True,
+                    authenticated=True,
+                    protocol=None,
+                    discovery=ObservationDiscovery.NOT_ATTEMPTED,
+                    model_ids=(),
                 )
-            except EngineClientError:
+            try:
+                if credential_kind == "api_key":
+                    models = await probe_models(
+                        vendor=normalized_vendor,
+                        protocol=protocol,
+                        base_url=base_url,
+                        secret=secret or "",
+                    )
+                else:
+                    models = await self.discover_models(
+                        normalized_vendor,
+                        protocol,
+                        None,
+                        credential_ref,
+                    )
+            except (EngineClientError, ModelDiscoveryError):
                 discovery = ObservationDiscovery.FAILED
                 models = ()
             else:
@@ -426,15 +571,6 @@ class CLIProxyEngineAdapter:
                 protocol=protocol,
                 discovery=discovery,
                 model_ids=tuple(models),
-            )
-        if len(successes) > 1:
-            return SourceObservation(
-                outcome=ObservationOutcome.AMBIGUOUS,
-                reachable=True,
-                authenticated=True,
-                protocol=None,
-                discovery=ObservationDiscovery.NOT_ATTEMPTED,
-                model_ids=(),
             )
 
         if any(error.status_code in {401, 403} for error in failures):
@@ -892,9 +1028,16 @@ def _auth_inventory(client: EngineClient) -> dict[str, _AuthRecord]:
     for item in files:
         if not isinstance(item, dict):
             continue
-        identity = str(item.get("id") or item.get("auth_index") or item.get("name") or "").strip()
+        auth_index = str(item.get("auth_index") or "").strip()
+        identity = str(item.get("id") or auth_index or item.get("name") or "").strip()
         name = str(item.get("name") or item.get("id") or "").strip()
         provider = str(item.get("provider") or item.get("type") or "").strip().lower()
+        id_token = item.get("id_token")
+        account_id = (
+            str(id_token.get("chatgpt_account_id") or "").strip() or None
+            if isinstance(id_token, dict)
+            else None
+        )
         if identity and name and provider:
             fingerprint = json.dumps(
                 {
@@ -915,9 +1058,11 @@ def _auth_inventory(client: EngineClient) -> dict[str, _AuthRecord]:
             )
             inventory[identity] = _AuthRecord(
                 identity=identity,
+                auth_index=auth_index,
                 name=name,
                 provider=provider,
                 fingerprint=fingerprint,
+                account_id=account_id,
             )
     return inventory
 

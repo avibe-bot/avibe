@@ -21,7 +21,6 @@ from config.v2_config import (
 )
 from core.handlers.model_hub.adapter import (
     ObservationDiscovery,
-    ObservationOutcome,
     SourceObservation,
 )
 from core.handlers.model_hub.events import contains_credential_material
@@ -77,7 +76,7 @@ class MigrationHost(Protocol):
         credential_ref: str,
     ) -> None: ...
 
-    async def _observe_source_payload(
+    async def _require_proven_source_payload(
         self,
         payload: dict[str, object],
     ) -> SourceObservation: ...
@@ -685,18 +684,13 @@ async def apply_native_migration(
                 if item.proposed_action == "import":
                     if not item.secret:
                         raise MigrationConflictError
-                    observation = await host._observe_source_payload(
+                    observation = await host._require_proven_source_payload(
                         {
                             "vendor": item.vendor,
                             "base_url": validate_base_url(item.base_url),
                             "key": item.secret,
                         }
                     )
-                    if (
-                        observation.outcome is not ObservationOutcome.OBSERVED
-                        or observation.protocol is None
-                    ):
-                        raise MigrationConflictError
                     protocol = cast(
                         Literal[
                             "anthropic",

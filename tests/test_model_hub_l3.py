@@ -58,6 +58,7 @@ from core.session_turns import SessionTurnManager
 from modules.agents.model_hub import (
     ModelHubLaunch,
     ModelHubRuntimeRouter,
+    _localized_launch_error,
     bind_launch,
     bind_turn_mode,
 )
@@ -84,6 +85,41 @@ def _assert_valid(schema_name: str, payload: dict) -> None:
         key=lambda error: list(error.path),
     )
     assert not errors, [error.message for error in errors]
+
+
+def test_route_unconfigured_launch_copy_exists_in_each_backend_locale() -> None:
+    locale_launch = {
+        locale: json.loads(
+            (Path(__file__).parents[1] / f"vibe/i18n/{locale}.json").read_text(
+                encoding="utf-8"
+            )
+        )["modelHub"]["launch"]
+        for locale in ("en", "zh")
+    }
+
+    assert locale_launch["en"].keys() == locale_launch["zh"].keys()
+    assert all(
+        "{model}" in launch["route_unconfigured"]
+        for launch in locale_launch.values()
+    )
+    failure = ModelHubError(
+        "no_candidate",
+        data={
+            "copy_key": "route_unconfigured",
+            "model": "menu-model",
+            "blockers": [],
+        },
+    )
+    for locale, launch in locale_launch.items():
+        rendered = _localized_launch_error(
+            SimpleNamespace(config=SimpleNamespace(language=locale)),
+            "claude",
+            "menu-model",
+            failure,
+        )
+        assert rendered.detail == launch["route_unconfigured"].format(
+            model="menu-model"
+        )
 
 
 class MemoryStore:
@@ -1241,7 +1277,7 @@ def test_opencode_overlay_preserves_checked_route_with_stale_exact_hop(
     assert overlay.launches == ()
 
 
-def test_source_observation_requires_distinct_protocol_probes_and_never_infers_from_order(
+def test_source_observation_stops_at_the_first_response_backed_proof(
     tmp_path: Path,
 ) -> None:
     base_url = "https://relay.example/v1?api-version=2026-07-23"
@@ -1261,73 +1297,16 @@ def test_source_observation_requires_distinct_protocol_probes_and_never_infers_f
         status_code=404,
     )
 
-    ambiguous_protocols = frozenset(SOURCE_PROTOCOLS[1:])
-
-    async def ambiguous_probe(**kwargs) -> None:
-        if kwargs["protocol"] not in ambiguous_protocols:
-            raise unsupported
-
-    with (
-        patch(
-            "vibe.model_hub_runtime.adapter._probe_protocol_response",
-            new=AsyncMock(side_effect=ambiguous_probe),
-        ) as protocol_probe,
-        patch(
-            "vibe.model_hub_runtime.adapter.probe_models",
-            new=AsyncMock(return_value=("upstream-model",)),
-        ) as inventory_probe,
-    ):
-        ambiguous = asyncio.run(
-            adapter.observe_source(
-                "openai",
-                base_url,
-                credential_ref,
-                SOURCE_PROTOCOLS,
-            )
-        )
-
-    assert ambiguous.outcome.value == "ambiguous"
-    assert protocol_probe.await_count == len(SOURCE_PROTOCOLS)
-    inventory_probe.assert_not_awaited()
-
     hinted_order = tuple(reversed(SOURCE_PROTOCOLS))
+
+    async def every_candidate_is_supported(**_kwargs) -> bool:
+        return True
+
     with (
         patch(
             "vibe.model_hub_runtime.adapter._probe_protocol_response",
-            new=AsyncMock(side_effect=ambiguous_probe),
+            new=AsyncMock(side_effect=every_candidate_is_supported),
         ) as protocol_probe,
-        patch(
-            "vibe.model_hub_runtime.adapter.probe_models",
-            new=AsyncMock(return_value=("upstream-model",)),
-        ) as inventory_probe,
-    ):
-        reordered = asyncio.run(
-            adapter.observe_source(
-                "openai",
-                base_url,
-                credential_ref,
-                hinted_order,
-            )
-        )
-
-    assert reordered.outcome.value == "ambiguous"
-    assert reordered.protocol is None
-    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(
-        hinted_order
-    )
-    inventory_probe.assert_not_awaited()
-
-    proved_protocol = hinted_order[0]
-
-    async def single_protocol_probe(**kwargs) -> None:
-        if kwargs["protocol"] != proved_protocol:
-            raise unsupported
-
-    with (
-        patch(
-            "vibe.model_hub_runtime.adapter._probe_protocol_response",
-            new=AsyncMock(side_effect=single_protocol_probe),
-        ),
         patch(
             "vibe.model_hub_runtime.adapter.probe_models",
             new=AsyncMock(return_value=("upstream-model",)),
@@ -1343,10 +1322,154 @@ def test_source_observation_requires_distinct_protocol_probes_and_never_infers_f
         )
 
     assert observed.outcome.value == "observed"
+    assert observed.protocol == hinted_order[0]
+    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == [
+        hinted_order[0]
+    ]
+    assert inventory_probe.await_args.kwargs["protocol"] == hinted_order[0]
+
+    async def indistinguishable_response(**_kwargs) -> bool:
+        return False
+
+    with (
+        patch(
+            "vibe.model_hub_runtime.adapter._probe_protocol_response",
+            new=AsyncMock(side_effect=indistinguishable_response),
+        ) as protocol_probe,
+        patch(
+            "vibe.model_hub_runtime.adapter.probe_models",
+            new=AsyncMock(return_value=("upstream-model",)),
+        ) as inventory_probe,
+    ):
+        ambiguous = asyncio.run(
+            adapter.observe_source(
+                "openai",
+                base_url,
+                credential_ref,
+                hinted_order,
+            )
+        )
+
+    assert ambiguous.outcome.value == "ambiguous"
+    assert ambiguous.protocol is None
+    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == [
+        hinted_order[0]
+    ]
+    inventory_probe.assert_not_awaited()
+
+    proved_protocol = SOURCE_PROTOCOLS[1]
+
+    async def later_protocol_probe(**kwargs) -> bool:
+        if kwargs["protocol"] != proved_protocol:
+            raise unsupported
+        return True
+
+    with (
+        patch(
+            "vibe.model_hub_runtime.adapter._probe_protocol_response",
+            new=AsyncMock(side_effect=later_protocol_probe),
+        ) as protocol_probe,
+        patch(
+            "vibe.model_hub_runtime.adapter.probe_models",
+            new=AsyncMock(return_value=("upstream-model",)),
+        ) as inventory_probe,
+    ):
+        observed = asyncio.run(
+            adapter.observe_source(
+                "openai",
+                base_url,
+                credential_ref,
+                SOURCE_PROTOCOLS,
+            )
+        )
+
+    assert observed.outcome.value == "observed"
     assert observed.protocol == proved_protocol
     assert observed.model_ids == ("upstream-model",)
+    assert [call.kwargs["protocol"] for call in protocol_probe.await_args_list] == list(
+        SOURCE_PROTOCOLS[:2]
+    )
     assert inventory_probe.await_args.kwargs["protocol"] == proved_protocol
     assert inventory_probe.await_args.kwargs["base_url"] == base_url
+
+
+def test_oauth_observation_uses_the_bound_auth_index_and_requires_response_proof(
+    tmp_path: Path,
+) -> None:
+    state_store = EngineStateStore(tmp_path / "engine-state")
+    credential_ref = state_store.bind_oauth_credential(
+        "src_oauthproof",
+        "openai",
+        "codex-test.json",
+    )
+    client = Mock()
+    api_calls: list[dict] = []
+
+    def management_request(method, path, *, query=None, payload=None):
+        if path == "/auth-files":
+            return {
+                "files": [
+                    {
+                        "id": "codex-test",
+                        "auth_index": "auth-index-test",
+                        "name": "codex-test.json",
+                        "provider": "codex",
+                        "id_token": {"chatgpt_account_id": "account-test"},
+                    }
+                ]
+            }
+        if path == "/api-call":
+            api_calls.append(payload)
+            return {"status_code": 400, "header": {}, "body": "{}"}
+        if path == "/auth-files/models":
+            assert query == {"name": "codex-test.json"}
+            return {"models": [{"id": "gpt-5.6"}]}
+        raise AssertionError((method, path))
+
+    client.management_request.side_effect = management_request
+    supervisor = Mock()
+    supervisor.client.return_value = client
+    adapter = CLIProxyEngineAdapter(
+        supervisor=supervisor,
+        state_store=state_store,
+    )
+
+    observed = asyncio.run(
+        adapter.observe_source(
+            "openai",
+            None,
+            credential_ref,
+            SOURCE_PROTOCOLS,
+        )
+    )
+
+    assert observed.outcome.value == "observed"
+    assert observed.protocol == "openai_responses"
+    assert observed.model_ids == ("gpt-5.6",)
+    assert len(api_calls) == 1
+    assert api_calls[0]["auth_index"] == "auth-index-test"
+    assert api_calls[0]["header"]["Chatgpt-Account-Id"] == "account-test"
+    assert api_calls[0]["url"].endswith("/responses")
+
+    def ambiguous_management_request(method, path, *, query=None, payload=None):
+        if path == "/auth-files":
+            return management_request(method, path, query=query, payload=payload)
+        if path == "/api-call":
+            return {"status_code": 200, "header": {}, "body": '{"ok":true}'}
+        raise AssertionError((method, path))
+
+    client.management_request.side_effect = ambiguous_management_request
+    ambiguous = asyncio.run(
+        adapter.observe_source(
+            "openai",
+            None,
+            credential_ref,
+            SOURCE_PROTOCOLS,
+        )
+    )
+
+    assert ambiguous.outcome.value == "ambiguous"
+    assert ambiguous.protocol is None
 
 
 def test_protocol_observation_preserves_query_on_each_distinct_upstream_path() -> None:
