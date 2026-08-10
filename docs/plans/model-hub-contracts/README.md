@@ -107,7 +107,7 @@ revision; the discovering lane does not reinterpret or edit the contract in plac
 | --- | --- |
 | `source.schema.json` | Source identity, channel, three protocols, state, usage, inventory, credential reference, and audit metadata. |
 | `agent-supply.schema.json` | Backend mode, explicit policy-free Source order, configuration eligibility, model-supply and backend-health projections. |
-| `agent-chain.schema.json` | Read projection of exact stored hops plus current runnability, blockers, retry metadata, and model supply state. |
+| `agent-chain.schema.json` | Read projection of exact stored hops plus current execution position, runnability, blockers, retry metadata, and model supply state. |
 | `probe-result.schema.json` | Saved recovery probes and route probes over exact configured hops. |
 | `observation-result.schema.json` | Non-persisting Add-time connectivity, authentication, response-backed protocol, and inventory observation. |
 | `turn-provenance.schema.json` | Exactly attributed turn attempts and terminal outcome; no policy or mapping discriminator. |

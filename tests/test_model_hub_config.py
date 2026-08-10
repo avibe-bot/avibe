@@ -573,6 +573,7 @@ def test_v5_shape_amendments_reject_the_false_states_they_replace():
             "reason": None,
             "retry_at": None,
         }],
+        "current": {"source_id": "src_claudepro1", "model_id": "claude-opus-4-6"},
         "supply_state": "ok",
     }
     chain_validator.validate(exact_hop)

@@ -994,6 +994,7 @@ def test_chain_route_reorders_exact_persisted_hops(monkeypatch, tmp_path):
     assert [(hop["source_id"], hop["model_id"]) for hop in body["chain"]["chain"]] == [
         (hop["source_id"], hop["model_id"]) for hop in hops
     ]
+    assert body["chain"]["current"] == {"source_id": second["id"], "model_id": model_id}
 
 
 def test_delete_guard_reports_only_routes_emptied_by_this_mutation(tmp_path):

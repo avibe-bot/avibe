@@ -2954,11 +2954,20 @@ class ModelHubService:
                     ),
                 }
             )
+        current = next(
+            (
+                {"source_id": item["source_id"], "model_id": item["model_id"]}
+                for item in chain
+                if item["runnable"]
+            ),
+            None,
+        )
         return {
             "contract_version": AGENT_CHAIN_CONTRACT_VERSION,
             "backend": backend,
             "model_id": resolution.requested_model or model_id,
             "chain": chain,
+            "current": current,
             "supply_state": self._chain_supply_state(chain),
         }
 

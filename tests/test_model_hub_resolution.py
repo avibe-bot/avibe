@@ -380,6 +380,7 @@ def test_agent_chain_projects_exact_hops_and_blockers(tmp_path):
             "retry_at": None,
         }
     ]
+    assert payload["current"] is None
     assert payload["supply_state"] == "interrupted"
 
 
@@ -404,6 +405,7 @@ def test_set_agent_chain_returns_guarded_exact_route(tmp_path):
     assert result["removed_hops"] == []
     assert isinstance(result["interrupted"], list)
     assert [item["source_id"] for item in result["chain"]["chain"]] == [second.id, first.id]
+    assert result["chain"]["current"] == {"source_id": second.id, "model_id": "requested"}
     assert [hop.source_id for hop in store.load().agents["claude"].routes["requested"].hops] == [second.id, first.id]
 
 

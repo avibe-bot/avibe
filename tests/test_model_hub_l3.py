@@ -1161,6 +1161,7 @@ def test_chain_projection_and_probe_latency_partition(tmp_path: Path) -> None:
         "src_primary01",
     ]
     assert chain["supply_state"] == "ok"
+    assert chain["current"] == {"source_id": "src_primary01", "model_id": "shared-model"}
     assert all(item["channel"] == "hub" for item in chain["chain"])
     assert all(item["reason"] is None for item in chain["chain"])
     _assert_valid("agent-chain.schema.json", chain)
@@ -1348,6 +1349,7 @@ def test_native_chain_visibility_and_probe_readiness(tmp_path: Path) -> None:
             "retry_at": None,
         }
     ]
+    assert chain["current"] == {"source_id": native.id, "model_id": "shared-model"}
     assert chain["supply_state"] == "ok"
     _assert_valid("agent-chain.schema.json", chain)
 
@@ -1383,6 +1385,7 @@ def test_native_unavailability_is_orthogonal_to_health(
     assert chain["chain"][0]["health"] == "cooldown"
     assert chain["chain"][0]["reason"] == "native_cli_unavailable"
     assert chain["chain"][0]["runnable"] is False
+    assert chain["current"] is None
     assert chain["supply_state"] == "interrupted"
     _assert_valid("agent-chain.schema.json", chain)
 

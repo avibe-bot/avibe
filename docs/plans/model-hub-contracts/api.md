@@ -460,6 +460,9 @@ In Hub mode, `AgentChain.chain` is the exact stored per-model Route chain in the
 order. Runtime does not filter or rebuild it: cooling, missing, model-unsupported,
 source-blocked, and process-unavailable native CLI hops stay at their configured
 positions with live annotations.
+`AgentChain.current` is either null or the exact `{source_id, model_id}` identity of
+the hop that is current for the next execution. Recovery changes `current` on the next
+turn without changing the stored `chain` array.
 Each item carries `channel`, source-global `health`, process-aware `runnable`, and
 nullable `reason`. The complete axiom is:
 
@@ -491,6 +494,7 @@ remains a valid `interrupted` chain.
         "retry_at": null
       }
     ],
+    "current": null,
     "supply_state": "interrupted"
   }
 }
@@ -659,7 +663,7 @@ contract harness and API-boundary tests enforce:
 | every `sources.order` id exists, is unique, and is eligible | config loader + source-order route |
 | eligibility contains one row per source and every ordered source is eligible | AgentSupply assembler |
 | every AgentSupply eligibility row carries `in_current_model_chain` and `process_availability_reason`; membership nullability follows `selected_model_id`, and only a native source may carry `native_cli_unavailable` | AgentSupply assembler |
-| `AgentChain.chain` re-echoes the stored exact hops in the same order, including missing, model-unsupported, and process-unavailable native CLI items | chain assembler |
+| `AgentChain.chain` re-echoes the stored exact hops in the same order, including missing, model-unsupported, and process-unavailable native CLI items; `AgentChain.current` is null or identifies one exact hop in that array | chain assembler |
 | `model_supply` has one row per menu model with unique ids | AgentSupply assembler |
 | probe `source_id` names an existing source | probe assembler |
 | non-null event endpoints name existing sources at emission time | event emitter |

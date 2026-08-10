@@ -2,14 +2,29 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "model-hub/agent-chain.schema.json",
   "title": "AgentChain",
-  "description": "Read projection of one stored per-model Route chain. Items preserve exact configured Source/model pairs and order; runtime adds only live health, runnability, blocker, and retry annotations. Runtime never derives membership, resolves aliases, or substitutes a model.",
+  "description": "Read projection of one stored per-model Route chain. Items preserve exact configured Source/model pairs and order; runtime adds only live health, runnability, blocker, retry annotations, and the current execution position. Runtime never derives membership, resolves aliases, or substitutes a model.",
   "type": "object",
-  "required": ["contract_version", "backend", "model_id", "chain", "supply_state"],
+  "required": ["contract_version", "backend", "model_id", "chain", "current", "supply_state"],
   "additionalProperties": false,
   "properties": {
     "contract_version": { "const": 5 },
     "backend": { "enum": ["claude", "codex", "opencode"] },
     "model_id": { "type": "string" },
+    "current": {
+      "anyOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "required": ["source_id", "model_id"],
+          "additionalProperties": false,
+          "properties": {
+            "source_id": { "type": "string", "pattern": "^src_[a-z0-9]{8,}$" },
+            "model_id": { "type": "string", "minLength": 1 }
+          }
+        }
+      ],
+      "description": "The live execution position, identified by one exact stored hop. It is null when no hop is current. Recovery may change this projection on the next turn without changing the stored chain."
+    },
     "chain": {
       "type": "array",
       "description": "Exact stored hops in configured order. Empty is a first-class unconfigured route.",
@@ -94,6 +109,7 @@
       "backend": "claude",
       "model_id": "claude-opus-4-6",
       "chain": [{ "source_id": "src_claudepro1", "model_id": "claude-opus-4-6", "channel": "native_cli", "health": "cooldown", "runnable": false, "reason": null, "retry_at": "2026-07-29T04:00:00Z" }],
+      "current": null,
       "supply_state": "waiting"
     },
     {
@@ -101,6 +117,7 @@
       "backend": "codex",
       "model_id": "gpt-5.6",
       "chain": [{ "source_id": "src_chatgptplus", "model_id": "gpt-5.6", "channel": "native_cli", "health": "healthy", "runnable": false, "reason": "native_cli_unavailable", "retry_at": null }],
+      "current": null,
       "supply_state": "interrupted"
     },
     {
@@ -108,6 +125,7 @@
       "backend": "claude",
       "model_id": "claude-haiku-4-5",
       "chain": [],
+      "current": null,
       "supply_state": "interrupted"
     }
   ]
