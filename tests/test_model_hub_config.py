@@ -1075,6 +1075,22 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "renders",
         within="1.0",
     ),
+    # Reviewer's finding, round 1 of #1276: a gap registration says one field is
+    # absent, and the excusal read that as "this whole row is unverifiable" —
+    # every attributed-field claim inside it, including the *evidence*. G-3's
+    # evidence cell cites `source.schema.json`'s `models`, which the file really
+    # does declare and which the row does not claim is missing. So the one place
+    # a gap row's own reasoning is written down was the one place nothing checked
+    # it, and a mistyped citation there is the mistake a reader has no way to
+    # catch: the row is where they go to find out whether the gap is real.
+    GateCase(
+        "E", "schema fields", "arm",
+        "a gap row's evidence citation, mistyped",
+        "`source.schema.json`'s `models` carries no per-model retained flag",
+        "`source.schema.json`'s `models_typo` carries no per-model retained flag",
+        "declares no `models_typo`",
+        within="0.5",
+    ),
     # The right route and the wrong body: `{hops}` belongs to the per-model
     # chain save, and sending it here was a real finding.
     GateCase(
@@ -1193,6 +1209,32 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "`masked_key` are each",
         "declares no `masked_key`",
         within="1.1",
+    ),
+    # Reviewer's finding, round 1 of #1276: the counted-vocabulary arm knew the
+    # spellings `two`…`fifteen` and nothing else, so a claim written in digits
+    # or in a larger word was not skipped — it was never seen, and the arm
+    # reported a clean zero over a document that held three of them. An
+    # extractor narrower than the document reads exactly like agreement, which
+    # is the one thing a target-zero class cannot afford. Both spellings get a
+    # case here and both get a `SELF_TEST` fixture, because this is the arm
+    # whose verdict *is* its zero.
+    GateCase(
+        "E", "schema files", "arm",
+        "a counted claim written in digits",
+        "`agent-supply.schema.json`'s `model_supply` rows require exactly",
+        "`agent-supply.schema.json` has 16 properties, and its `model_supply` rows "
+        "require exactly",
+        "has 13 properties, not 16",
+        within="0.5",
+    ),
+    GateCase(
+        "E", "schema files", "arm",
+        "a counted claim spelled past the vocabulary the arm used to hold",
+        "`agent-supply.schema.json`'s `model_supply` rows require exactly",
+        "`agent-supply.schema.json` has sixteen properties, and its `model_supply` rows "
+        "require exactly",
+        "has 13 properties, not 16",
+        within="0.5",
     ),
     # §0.9 declares which keys interpolate each slot; §1.0 enumerates the same
     # set four hundred lines away, in prose. Two enumerations of one set, and
@@ -1472,6 +1514,41 @@ class InnocentCase(NamedTuple):
 
 
 GATE_INNOCENT: tuple[InnocentCase, ...] = (
+    # Reviewer's finding, round 1 of #1276, written as the reviewer wrote it: one
+    # paragraph, two routes, and a `409` that belongs to the first. Held against
+    # every route in the scope, this reports the unguarded runtime start as
+    # claiming a guard it does not have — a true sentence turned into a finding,
+    # and a reader sent to argue with `api.md` about a route nobody made a claim
+    # about. The binder measures to the nearest mention on either side, so the
+    # prose has to keep the guarded route the nearest thing to the number, which
+    # is also how the sentence reads out loud.
+    InnocentCase(
+        "a 409 written next to its own route, in a paragraph that names another",
+        "class E binds a guarded-status claim to its nearest route, not to its container",
+        "which is why the second caller costs no new frame.",
+        "which is why the second caller costs no new frame. The same envelope read "
+        "from the other end: `POST /api/models/sources/<source_id>/refresh` may come "
+        "back `409`, which is why that surface confirms before it resends; the press "
+        "a user makes once one succeeds is `POST /api/models/runtime/start`, and that "
+        "route is contracted with no guard of its own.",
+        within="0.5",
+    ),
+    # The sentence the widened count vocabulary reported first, restored as the
+    # green case it always was. G-20's row names two schema files and counts one
+    # of them, and the count is exactly right — the arm held it against both and
+    # reported the other, which is a true sentence turned into a finding and a
+    # reader sent to the wrong file. Both halves are pinned here at once: the
+    # count binds to the file it is written next to, and the property names the
+    # row goes on to cite are citations rather than a botched enumeration of the
+    # thirteen. Widen either reading back and this goes red while every red case
+    # above stays red.
+    InnocentCase(
+        "a counted claim in a row that names a second schema too",
+        "class E binds a count to its own subject and reads a cited property as a citation",
+        "`agent-supply.schema.json` declares no `adopted_by`",
+        "`agent-supply.schema.json`'s 13 properties do not include `adopted_by`",
+        within="0.5",
+    ),
     InnocentCase(
         "two members of a vocabulary named as examples",
         "class B's restated-vocabulary arm reads an enumeration, not a mention",

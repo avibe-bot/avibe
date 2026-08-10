@@ -655,13 +655,46 @@ DOTTED_TOKEN_RE = re.compile(r"`([a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*)`")
 PY_CITE_RE = re.compile(r"`([A-Za-z0-9_./-]+\.py)(?::([A-Za-z_][A-Za-z0-9_]*))?`")
 STATUS_RE = re.compile(r"\b(4\d\d|5\d\d)\b")
 COUNT_WORDS = {
-    "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
     "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
-    "thirteen": 13, "fourteen": 14, "fifteen": 15,
+    "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16,
+    "seventeen": 17, "eighteen": 18, "nineteen": 19,
 }
-COUNT_CLAIM_RE = re.compile(
-    r"\b(" + "|".join(COUNT_WORDS) + r")\s+(?:\w+\s+)?(properties|values|transports)\b"
-)
+COUNT_TENS = {
+    "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50,
+    "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90,
+}
+# The head is any word, and `count_value` decides whether it is a number. Built
+# as an alternation of the spellings it knew, this pattern did not *skip* the
+# claims outside that list — it never saw them, so 「16 properties」 and
+# 「sixteen properties」 were both uncounted while the arm reported a clean zero.
+# An extractor narrower than the document reads as agreement.
+#
+# The noun is matched by lookahead so it is not consumed: 「the 13 properties」
+# has two readings that overlap on it, and a consuming match would take the one
+# headed by 「the」 and leave the number unread — the same silence, arrived at
+# from the other side.
+COUNT_CLAIM_RE = re.compile(r"\b([\w-]+)(?=\s+(?:\w+\s+)?(properties|values|transports)\b)")
+
+
+def count_value(word: str) -> int | None:
+    """How many `word` says, or `None` where it says no number at all.
+
+    Digits, the spellings through nineteen, the tens, and the hyphenated pairs
+    English builds from them (`twenty-eight`). Composition rather than a longer
+    list, because a list is what silently ran out the first time.
+    """
+    token = word.strip().lower()
+    if token.isdigit():
+        return int(token)
+    if token in COUNT_WORDS:
+        return COUNT_WORDS[token]
+    if token in COUNT_TENS:
+        return COUNT_TENS[token]
+    tens, sep, units = token.partition("-")
+    if sep and tens in COUNT_TENS and COUNT_WORDS.get(units, 10) < 10:
+        return COUNT_TENS[tens] + COUNT_WORDS[units]
+    return None
 # Which schema a field name belongs to, where the sentence says so outright.
 # `SCHEMA_OWNS_RE` is the possessive — `` `source.schema.json`'s `models` `` —
 # with room for the qualifier the document sometimes puts between them
@@ -675,7 +708,45 @@ SCHEMA_OWNS_RE = re.compile(
     r"`([a-z][a-z-]*\.schema\.json)`[^`\n]{0,24}?['’]s\s+`([a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*)`"
 )
 ATTRIBUTED_TO_RE = re.compile(r"\b(?:in|of|from)\s+`([a-z][a-z-]*\.schema\.json)`")
+# A dotted backticked token that is a file rather than a field path. This
+# document cites exactly three kinds of file — `api.md`, `*.schema.json` and the
+# repo's `.py` — and each has its own arm; a clause that names one on its way to
+# attributing a field must not have the file read back as the field.
+FILE_TOKEN_RE = re.compile(r"\.(?:md|json|py)$")
 CLAUSE_END_RE = re.compile(r"[.;:。；：]\s")
+
+
+def nearest_subject(mentions: list[tuple[int, int, str]], start: int, end: int) -> str:
+    """Which subject a claim written at `start`–`end` is about: the nearest named.
+
+    A scope names several subjects and a claim inside it is about one of them, so
+    binding by container — every claim to every subject — is not a reading of the
+    document, it is a refusal to read it. Measured before it was written: the
+    alternative, holding a claim against *every* route the scope names, reports
+    three of this document's own rows where a shared refusal envelope, a shared
+    query parameter and a two-step OAuth exchange are each written once against
+    several routes on purpose. The counted-vocabulary arm found the same shape
+    from the other direction: 「`agent-supply.schema.json`'s 13 properties」 was
+    read as a claim about the `source.schema.json` named later in the same row.
+
+    One binder for all three callers — body literals, 409 branches, counts —
+    because the question is one question, and a second copy of it is where the
+    two answers start to differ.
+
+    Overlap counts as distance zero, so a claim written inside a mention binds to
+    it; otherwise it is the gap on whichever side is smaller, which is how the
+    sentence reads to a human.
+    """
+    return min(
+        mentions,
+        key=lambda mention: (
+            0
+            if mention[0] < end and start < mention[1]
+            else start - mention[1]
+            if mention[1] <= start
+            else mention[0] - end
+        ),
+    )[2]
 
 
 def literal_keys(text: str) -> set[str]:
@@ -751,7 +822,8 @@ def attributed_fields(scope: str) -> set[tuple[str, str]]:
     for m in ATTRIBUTED_TO_RE.finditer(scope):
         clause = CLAUSE_END_RE.split(scope[: m.start()])[-1]
         for token in DOTTED_TOKEN_RE.findall(clause):
-            pairs.add((m.group(1), token))
+            if not FILE_TOKEN_RE.search(token):
+                pairs.add((m.group(1), token))
     return pairs
 
 
@@ -1643,11 +1715,21 @@ class GapRow(NamedTuple):
     leaves a silencer armed and says nothing. The evidence cell is not read,
     because it quotes the contract and may legitimately strike a stale quote
     without retracting the row.
+
+    `fields` is the same reading of the same cell, for the other thing a row can
+    excuse. A gap row argues from the contract, so it quotes it — G-3 says the
+    delete route removes a manual entry only and that `source.schema.json`'s
+    `models` carries no retained flag — and while the *whole row* was exempt,
+    that quotation was the one kind of authority claim in this document nobody
+    checked: rename the field and the row still read as evidence. What a row is
+    entitled to excuse is what it declares missing, which is the cell that says
+    so; everything else in the row is argument, and argument is checkable.
     """
 
     line: int
     registers: bool
     routes: frozenset[str]
+    fields: frozenset[str]
 
 
 def registered_gaps(doc: Document) -> Universe:
@@ -1721,6 +1803,9 @@ def registered_gaps(doc: Document) -> Universe:
                         normalize_route(meth, path)
                         for meth, path in ANY_ROUTE_RE.findall(standing)
                     ),
+                    frozenset(
+                        token.split(".")[-1] for token in DOTTED_TOKEN_RE.findall(standing)
+                    ),
                 ),
                 content=line.strip(),
                 where=n,
@@ -1772,6 +1857,22 @@ def gap_excused_routes(gaps: Universe, text: str) -> set[str]:
     return excused
 
 
+def gap_excused_fields(gaps: Universe, text: str) -> set[str]:
+    """Which field names `text`'s gap markers excuse: the ones their rows name.
+
+    The mirror of `gap_excused_routes`, and it exists for the same reason a
+    register accounts for what it declares. A marker beside a sentence that
+    names a field the contract genuinely does not carry is the marker doing its
+    job; the same marker does not make every other field the paragraph mentions
+    unfalsifiable, and the paragraph around a gap row is where this document
+    does most of its quoting of the contract.
+    """
+    excused: set[str] = set()
+    for cite in active_gap_citations(gaps, text):
+        excused |= gaps.resolve(cite.group(1)).one.fields
+    return excused
+
+
 # A class whose correct value is zero cannot use "empty means the extractor
 # broke" as its guard — for these, empty is the goal. The document's own rule is
 # §1.2: state decisions, never restate facts, so every counted restatement of a
@@ -1787,6 +1888,13 @@ SELF_TEST = [
     # (fixture, must the extractor count it, must it report a finding)
     ("`agent-supply.schema.json`'s `supply_status` enumerates six values.", True, True),
     ("`agent-supply.schema.json`'s `supply_status` enumerates five values.", True, False),
+    # The same claim in the two spellings the extractor used not to know. Both
+    # belong here rather than only in the mutation suite: this is the arm whose
+    # zero is its verdict, and a vocabulary gap is precisely how that zero goes
+    # from *the document restates nothing* to *the reader restated it in words I
+    # do not read*.
+    ("`agent-supply.schema.json`'s `supply_status` enumerates 6 values.", True, True),
+    ("`agent-supply.schema.json`'s `supply_status` enumerates sixteen values.", True, True),
 ]
 
 
@@ -1833,7 +1941,7 @@ def authority_claims(doc: Document, auth: dict[str, Any], origin: Origin, regist
     auth["repo symbols"] = symbols
     read_files: set[str] = set()
 
-    registrations = {row.line for _token, row in gaps.items()}
+    registrations = {row.line: row for _token, row in gaps.items()}
 
     guarded_named: dict[str, int] = {}
     for line_no, scope in doc.claims():
@@ -1888,16 +1996,7 @@ def authority_claims(doc: Document, auth: dict[str, Any], origin: Origin, regist
             # OAuth exchange are each written once against several routes on
             # purpose. Nearest-mention reports none of them and still catches
             # both the original and a decoy with the routes reordered.
-            bound = min(
-                mentions,
-                key=lambda mention: (
-                    0
-                    if mention[0] < m_body.end() and m_body.start() < mention[1]
-                    else m_body.start() - mention[1]
-                    if mention[1] <= m_body.start()
-                    else mention[0] - m_body.end()
-                ),
-            )[2]
+            bound = nearest_subject(mentions, m_body.start(), m_body.end())
             # Which side of the cell a claim belongs to is not a guess. A `GET`
             # has no request body, so a body written against one is quoting the
             # answer; so is a body the document itself introduces as one, with
@@ -1955,34 +2054,50 @@ def authority_claims(doc: Document, auth: dict[str, Any], origin: Origin, regist
         # the same reason: a marker registered for the route two cells away is
         # not a statement about this one. A §0.5 row is still exempt whole,
         # because the row *is* the registration.
+        #
+        # And the claim binds the same way the excuse does. Holding every `409`
+        # in a scope against every route in it is the container reading twice
+        # over: it reports a guarded route's neighbour for a branch written
+        # about the guarded route, and — the direction that matters — one
+        # guarded route in a paragraph made every other route in it unreportable
+        # only by accident, because a single unguarded one anywhere would have
+        # fired. Same binder as the body literals, one line above.
         if named:
             excused = named if line_no in registrations else gap_excused_routes(gaps, scope)
-            for code in set(STATUS_RE.findall(scope)):
-                if code != "409":
+            for m_code in STATUS_RE.finditer(scope):
+                if m_code.group(1) != "409":
                     continue
                 scale["status branches"] += 1
-                unguarded = sorted(
-                    r
-                    for r in named
-                    if r not in excused
-                    for hit in [auth["routes"].resolve(r)]
-                    if not hit.empty and not hit.one["guarded"]
-                )
-                if unguarded:
-                    add(f"L{line_no}", f"a 409 branch is claimed for {' / '.join(unguarded)}, which `api.md` does not guard")
+                route = nearest_subject(mentions, m_code.start(), m_code.end())
+                if route in excused:
+                    continue
+                hit = auth["routes"].resolve(route)
+                if not hit.empty and not hit.one["guarded"]:
+                    add(f"L{line_no}", f"a 409 branch is claimed for {route}, which `api.md` does not guard")
 
-        for schema in SCHEMA_CITE_RE.findall(scope):
+        cited: list[tuple[int, int, str]] = []
+        for m_file in SCHEMA_CITE_RE.finditer(scope):
             scale["schema citations"] += 1
-            if auth["schema files"].resolve(schema).empty:
-                add(f"L{line_no}", f"`{schema}` is not a file in {CONTRACTS}")
+            if auth["schema files"].resolve(m_file.group(1)).empty:
+                add(f"L{line_no}", f"`{m_file.group(1)}` is not a file in {CONTRACTS}")
                 continue
-            claim = COUNT_CLAIM_RE.search(scope)
-            if not claim:
+            cited.append((m_file.start(), m_file.end(), m_file.group(1)))
+
+        # A count is about one vocabulary: the one it is written next to. Held
+        # against every schema the scope happened to cite, 「`agent-supply
+        # .schema.json`'s 13 properties do not include `adopted_by`」 was also
+        # read as a claim about the `source.schema.json` named later in the same
+        # gap row, and reported against it — a true sentence turned into a
+        # finding, and the reader sent to the wrong file to fix it. Same binder
+        # as the body literals and the 409 branches.
+        for m_count in COUNT_CLAIM_RE.finditer(scope):
+            want = count_value(m_count.group(1))
+            if want is None or not cited:
                 continue
             scale["vocabulary claims"] += 1
-            want = COUNT_WORDS[claim.group(1)]
+            schema = nearest_subject(cited, m_count.start(), m_count.end())
             tokens = {t.split(".")[-1] for t in DOTTED_TOKEN_RE.findall(scope)}
-            if claim.group(2) == "properties":
+            if m_count.group(2) == "properties":
                 sets = {schema: auth["properties"][schema]}
             else:
                 fields = auth["enums"][schema]
@@ -1994,12 +2109,25 @@ def authority_claims(doc: Document, auth: dict[str, Any], origin: Origin, regist
                         f"{len(fields)} enum fields — the set being counted is not stated",
                     )
                     continue
-            noun = claim.group(2)
+            noun = m_count.group(2)
             for name, values in sorted(sets.items()):
-                listed = tokens & values
                 if len(values) != want:
                     add(f"L{line_no}", f"`{name}` has {len(values)} {noun}, not {want}")
-                elif listed and listed != values:
+                    continue
+                # The enumeration half is asked of enum values and not of
+                # property names, and the asymmetry is real rather than
+                # convenient. An enum value is only ever written here as part of
+                # a run, so a property-name-shaped token that is one of them is
+                # a rendering of the set and is compared to it. A property name
+                # is written constantly as a plain citation — 「four of them
+                # server-assigned (`id`, `created_at`, `state`, `usage`)」 names
+                # four of sixteen on purpose — so intersecting the scope's
+                # tokens with the property set read every such sentence as a
+                # botched total rendering. Whether a *cited* property is really
+                # declared is the attributed-fields arm's question, and it asks
+                # it of every citation rather than only of counted ones.
+                listed = tokens & values
+                if noun != "properties" and listed and listed != values:
                     add(
                         f"L{line_no}",
                         f"`{name}` is enumerated here as {sorted(listed)}, "
@@ -2020,10 +2148,22 @@ def authority_claims(doc: Document, auth: dict[str, Any], origin: Origin, regist
         # English negation-detector would be a guess. A scope that registers the
         # absence is doing its job; one that does not is claiming the field
         # exists.
-        for cited, field in sorted(() if exempt else attributed_fields(scope)):
+        #
+        # What the marker buys is the field it declares, not the paragraph it
+        # sits in. Exempting whole scopes made the §0.5 registry — the densest
+        # quoting of the contract in this document, and the place a stale quote
+        # is most load-bearing, because the row's whole argument is that quote —
+        # the one region of the file where a misattributed field could not be
+        # reported. A row is still entitled to its own claim: what it names in
+        # its *missing* cell is a behaviour it has already declared absent.
+        own = registrations.get(line_no)
+        excused_fields = set(own.fields) if own else gap_excused_fields(gaps, scope)
+        for cited, field in sorted(attributed_fields(scope)):
             if auth["schema files"].resolve(cited).empty:
                 continue  # the citation arm above already reported the file
             scale["attributed fields"] += 1
+            if field.split(".")[-1] in excused_fields:
+                continue
             # Compared by the tail of the path, because the vocabulary is a set
             # of names: `status.health` is a claim about `health` declared
             # somewhere in that file, and this arm answers whether the file
