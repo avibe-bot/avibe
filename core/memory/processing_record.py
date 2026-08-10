@@ -22,7 +22,6 @@ from core.memory.types import MemoryFailureLogEntry
 
 
 SourceStatus = Literal["available", "partial", "stale", "unknown", "unavailable"]
-ProcessingRecordKind = Literal["record", "status", "failures", "maintenance"]
 
 # One composite read performs an opaque operator lookup, then reads both
 # maintenance journals, then fans out over provider health, four local source
@@ -50,7 +49,7 @@ PROCESSING_RECORD_TRANSPORT_TIMEOUT_SECONDS = (
 )
 
 
-_Projection = TypeVar("_Projection")
+_AwaitResult = TypeVar("_AwaitResult")
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,52 +140,93 @@ class MemoryProcessingRecord:
         self._recorder_episode_observed_at: str | None = None
         self._recorder_episode_id: str | None = None
 
-    async def read(
+    async def read_record(
         self,
-        kind: ProcessingRecordKind,
         *,
         verified_user_key: str | None = None,
         operator_ref: str | None = None,
         deadline: float | None = None,
-    ) -> (
-        ProcessingRecordSummary
-        | RuntimeHealthProjection
-        | tuple[AnomalyProjection, MaintenanceProjection]
-        | MaintenanceProjection
-    ):
-        """Project one Memory read under a single absolute work deadline."""
+    ) -> ProcessingRecordSummary:
+        """Read the complete Processing Record projection."""
 
-        if deadline is None:
-            work_timeout = (
-                PROVIDER_READ_TIMEOUT_SECONDS
-                if kind == "status"
-                else PROCESSING_RECORD_WORK_TIMEOUT_SECONDS
-            )
-            deadline = time.monotonic() + work_timeout
-        if kind == "status":
-            runtime, _recorder_anomaly = await self._read_runtime(None, deadline)
-            return runtime
+        operator_ref, deadline = await self._prepare_authorized_read(
+            verified_user_key=verified_user_key,
+            operator_ref=operator_ref,
+            deadline=deadline,
+        )
+        return await self._read_record(operator_ref, deadline)
 
+    async def read_status(
+        self,
+        *,
+        deadline: float | None = None,
+    ) -> RuntimeHealthProjection:
+        """Read the narrow provider-only runtime status projection."""
+
+        deadline = self._projection_deadline(
+            deadline,
+            timeout=PROVIDER_READ_TIMEOUT_SECONDS,
+        )
+        runtime, _recorder_anomaly = await self._read_runtime(None, deadline)
+        return runtime
+
+    async def read_failures(
+        self,
+        *,
+        verified_user_key: str | None = None,
+        operator_ref: str | None = None,
+        deadline: float | None = None,
+    ) -> tuple[AnomalyProjection, MaintenanceProjection]:
+        """Read failure entries and their owner-scoped recovery capability."""
+
+        operator_ref, deadline = await self._prepare_authorized_read(
+            verified_user_key=verified_user_key,
+            operator_ref=operator_ref,
+            deadline=deadline,
+        )
+        return await self._read_failures(operator_ref, deadline)
+
+    async def read_maintenance(
+        self,
+        *,
+        verified_user_key: str | None = None,
+        operator_ref: str | None = None,
+        deadline: float | None = None,
+    ) -> MaintenanceProjection:
+        """Read owner-scoped maintenance facts."""
+
+        operator_ref, deadline = await self._prepare_authorized_read(
+            verified_user_key=verified_user_key,
+            operator_ref=operator_ref,
+            deadline=deadline,
+        )
+        return await self._read_maintenance_projection(operator_ref, deadline)
+
+    async def _prepare_authorized_read(
+        self,
+        *,
+        verified_user_key: str | None,
+        operator_ref: str | None,
+        deadline: float | None,
+    ) -> tuple[str | None, float]:
+        deadline = self._projection_deadline(
+            deadline,
+            timeout=PROCESSING_RECORD_WORK_TIMEOUT_SECONDS,
+        )
         operator_ref = await self._resolve_operator(
             verified_user_key,
             operator_ref,
             deadline,
         )
-        if kind == "record":
-            return await self._read_record(operator_ref, deadline)
-        if kind == "failures":
-            return await self._read_failures(operator_ref, deadline)
-        if kind == "maintenance":
-            observation = await self._read_maintenance_observation(
-                operator_ref,
-                deadline,
-            )
-            return await self._read_maintenance(
-                operator_ref,
-                observation,
-                deadline,
-            )
-        raise ValueError(f"unknown Processing Record projection: {kind}")
+        return operator_ref, deadline
+
+    @staticmethod
+    def _projection_deadline(
+        deadline: float | None,
+        *,
+        timeout: float,
+    ) -> float:
+        return time.monotonic() + timeout if deadline is None else deadline
 
     async def _resolve_operator(
         self,
@@ -275,6 +315,21 @@ class MemoryProcessingRecord:
         return (
             self._merge_recorder_anomaly(anomalies, recorder_anomaly),
             maintenance,
+        )
+
+    async def _read_maintenance_projection(
+        self,
+        operator_ref: str | None,
+        deadline: float,
+    ) -> MaintenanceProjection:
+        observation = await self._read_maintenance_observation(
+            operator_ref,
+            deadline,
+        )
+        return await self._read_maintenance(
+            operator_ref,
+            observation,
+            deadline,
         )
 
     async def _read_maintenance_observation(
@@ -483,8 +538,8 @@ def _utc_observed_at() -> str:
 
 async def _await_before(
     deadline: float,
-    operation: Callable[[], Awaitable[_Projection]],
-) -> _Projection:
+    operation: Callable[[], Awaitable[_AwaitResult]],
+) -> _AwaitResult:
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise asyncio.TimeoutError

@@ -7,6 +7,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
+from typing import get_type_hints
 
 import pytest
 
@@ -14,13 +15,21 @@ import core.memory.processing_record as processing_record_module
 import core.memory.snapshot as snapshot_module
 from config.v2_config import MemoryConfig
 from core.memory.everos import ProviderHealthSnapshot
-from core.memory.maintenance import MaintenanceObservation, MaintenanceResult
+from core.memory.maintenance import (
+    ClearRecoveryResult,
+    MaintenanceObservation,
+    MaintenanceResult,
+)
 from core.memory.processing_record import (
+    AnomalyProjection,
     FailureLogObservation,
+    MaintenanceProjection,
     MemoryProcessingRecord,
     MemoryProcessingRecordPort,
+    ProcessingRecordSummary,
     ProcessingSourceObservations,
     RuntimeHealthObservation,
+    RuntimeHealthProjection,
     SourceObservation,
 )
 from core.memory.runtime import MemoryRuntime
@@ -213,6 +222,23 @@ class _OverlappingRecorderObservations(_RuntimeObservations):
         return await super().failure_log(maintenance_reason)
 
 
+def test_processing_record_exposes_only_exact_typed_read_entry_points() -> None:
+    assert get_type_hints(MemoryProcessingRecord.read_record)["return"] is (
+        ProcessingRecordSummary
+    )
+    assert get_type_hints(MemoryProcessingRecord.read_status)["return"] is (
+        RuntimeHealthProjection
+    )
+    assert get_type_hints(MemoryProcessingRecord.read_failures)["return"] == tuple[
+        AnomalyProjection,
+        MaintenanceProjection,
+    ]
+    assert get_type_hints(MemoryProcessingRecord.read_maintenance)["return"] is (
+        MaintenanceProjection
+    )
+    assert not hasattr(MemoryProcessingRecord, "read")
+
+
 @pytest.mark.asyncio
 async def test_health_snapshot_falls_back_only_to_its_own_stale_observation(
     monkeypatch: pytest.MonkeyPatch,
@@ -228,12 +254,12 @@ async def test_health_snapshot_falls_back_only_to_its_own_stale_observation(
         lambda: next(times),
     )
 
-    current = await record.read("record")
+    current = await record.read_record()
     observations.health = RuntimeHealthObservation(
         snapshot=None,
         unavailable_reason="memory_provider_timeout",
     )
-    stale = await record.read("record")
+    stale = await record.read_record()
 
     assert current.runtime.source == SourceObservation("available", "current")
     assert stale.runtime.source == SourceObservation(
@@ -279,14 +305,14 @@ async def test_recorder_episode_is_stable_and_rotates_after_recovery_or_reason_c
     )
 
     observations.recorder = {"state": "degraded", "reason": "writer_failures"}
-    first = await record.read("record")
-    second = await record.read("record")
+    first = await record.read_record()
+    second = await record.read_record()
     observations.recorder = {"state": "active", "reason": None}
-    recovered = await record.read("record")
+    recovered = await record.read_record()
     observations.recorder = {"state": "degraded", "reason": "writer_failures"}
-    next_episode = await record.read("record")
+    next_episode = await record.read_record()
     observations.recorder = {"state": "degraded", "reason": "call_log_corrupt"}
-    changed_reason = await record.read("record")
+    changed_reason = await record.read_record()
 
     assert [item.id for item in first.anomalies.items] == [
         "ma_episode_1",
@@ -312,8 +338,7 @@ async def test_sources_anomalies_and_maintenance_degrade_independently() -> None
     observations.maintenance_error = OSError("private maintenance detail")
     observations.recorder = {"state": "degraded", "reason": "writer_failures"}
 
-    summary = await MemoryProcessingRecord(observations.port()).read(
-        "record",
+    summary = await MemoryProcessingRecord(observations.port()).read_record(
         operator_ref="u-operator",
     )
 
@@ -350,8 +375,7 @@ async def test_verified_identity_lookup_is_inside_deadline_and_fails_closed() ->
     deadline = asyncio.get_running_loop().time() + 0.01
 
     summary = await asyncio.wait_for(
-        MemoryProcessingRecord(port).read(
-            "record",
+        MemoryProcessingRecord(port).read_record(
             verified_user_key="avibe:remote:subject",
             deadline=deadline,
         ),
@@ -372,7 +396,7 @@ async def test_fenced_anomaly_read_reports_maintenance_reason() -> None:
         False,
     )
 
-    summary = await MemoryProcessingRecord(observations.port()).read("record")
+    summary = await MemoryProcessingRecord(observations.port()).read_record()
 
     assert summary.anomalies.source == SourceObservation(
         "unavailable",
@@ -388,7 +412,7 @@ async def test_maintenance_observation_failure_marks_only_maintenance_unavailabl
     observations.maintenance_observation_error = OSError("journal unavailable")
     observations.maintenance = MaintenanceResult(False, False, None)
 
-    summary = await MemoryProcessingRecord(observations.port()).read("record")
+    summary = await MemoryProcessingRecord(observations.port()).read_record()
 
     assert summary.runtime.source.reason == "memory_store_unavailable"
     assert summary.sources.everos.reason == "memory_store_unavailable"
@@ -406,9 +430,9 @@ async def test_overlapping_composite_reads_keep_their_own_recorder_episode() -> 
     observations = _OverlappingRecorderObservations()
     record = MemoryProcessingRecord(observations.port())
 
-    first_reading = asyncio.create_task(record.read("record"))
+    first_reading = asyncio.create_task(record.read_record())
     await asyncio.wait_for(observations.first_health_read.wait(), timeout=0.2)
-    second = await asyncio.wait_for(record.read("record"), timeout=0.2)
+    second = await asyncio.wait_for(record.read_record(), timeout=0.2)
     observations.release_first_failure_read.set()
     first = await asyncio.wait_for(first_reading, timeout=0.2)
 
@@ -427,7 +451,7 @@ async def test_composite_reads_sources_concurrently_then_merges_recorder_episode
     observations = _ConcurrentRuntimeObservations()
     record = MemoryProcessingRecord(observations.port())
 
-    summary = await asyncio.wait_for(record.read("record"), timeout=0.2)
+    summary = await asyncio.wait_for(record.read_record(), timeout=0.2)
 
     assert summary.runtime.health is not None
     assert summary.runtime.health.recorder == {
@@ -440,6 +464,57 @@ async def test_composite_reads_sources_concurrently_then_merges_recorder_episode
 
 
 @pytest.mark.asyncio
+async def test_typed_failure_and_maintenance_reads_preserve_owner_recovery_and_recorder_merge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observations = _RuntimeObservations()
+    recovery = ClearRecoveryResult(
+        state="recovery_needed",
+        operation_id="clear-owner",
+        occurred_at="recovery-at",
+        error_code="memory_clear_failed",
+        can_resume=True,
+        can_abort=True,
+    )
+    observations.maintenance_observation = MaintenanceObservation(
+        None,
+        recovery,
+        True,
+    )
+    observations.maintenance = MaintenanceResult(True, True, recovery)
+    observations.failures = (
+        MemoryFailureLogEntry(
+            id="ma_durable",
+            kind="delivery_abandoned",
+            occurred_at="durable-at",
+        ),
+    )
+    observations.recorder = {"state": "degraded", "reason": "writer_failures"}
+    monkeypatch.setattr(
+        processing_record_module,
+        "_new_recorder_episode_id",
+        lambda: "ma_recorder",
+    )
+    monkeypatch.setattr(
+        processing_record_module,
+        "_utc_observed_at",
+        lambda: "recorder-at",
+    )
+    record = MemoryProcessingRecord(observations.port())
+
+    anomalies, failure_maintenance = await record.read_failures(
+        verified_user_key="owner",
+    )
+    maintenance = await record.read_maintenance(verified_user_key="owner")
+
+    assert [item.id for item in anomalies.items] == ["ma_recorder", "ma_durable"]
+    assert failure_maintenance.clear_recovery is recovery
+    assert maintenance.clear_recovery is recovery
+    assert maintenance.can_clear is True
+    assert observations.operator_refs == ["u-owner", "u-owner"]
+
+
+@pytest.mark.asyncio
 async def test_runtime_serializes_one_composite_and_compatibility_projections(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -447,11 +522,33 @@ async def test_runtime_serializes_one_composite_and_compatibility_projections(
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
 
+    typed_composite = await runtime._processing_record.read_record(
+        operator_ref="u-operator"
+    )
+    typed_status = await runtime._processing_record.read_status()
+    typed_failures = await runtime._processing_record.read_failures(
+        operator_ref="u-operator"
+    )
+    typed_maintenance = await runtime._processing_record.read_maintenance(
+        operator_ref="u-operator"
+    )
     composite = await runtime.processing_record_payload(operator_ref="u-operator")
     status = await runtime.status_payload()
     failures = await runtime.failure_log_payload(operator_ref="u-operator")
     maintenance = await runtime.maintenance_payload(operator_ref="u-operator")
 
+    assert typed_status == typed_composite.runtime
+    assert typed_failures[0].items == typed_composite.anomalies.items
+    assert (
+        typed_failures[1].clear_recovery
+        == typed_composite.maintenance.clear_recovery
+    )
+    assert typed_maintenance.data_exists == typed_composite.maintenance.data_exists
+    assert typed_maintenance.can_clear == typed_composite.maintenance.can_clear
+    assert (
+        typed_maintenance.clear_recovery
+        == typed_composite.maintenance.clear_recovery
+    )
     assert set(composite) == {
         "status",
         "runtime",
@@ -886,6 +983,49 @@ async def test_status_projection_never_reads_maintenance_journals(
 
     assert payload["source"]["reason"] == "memory_disabled"
     await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_typed_status_uses_provider_budget_without_identity_or_composite_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observations = _RuntimeObservations()
+
+    async def blocked_health(_maintenance_reason: str | None) -> RuntimeHealthObservation:
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    async def unexpected_read(*_args: object) -> object:
+        raise AssertionError("status reads must stay runtime-only")
+
+    port = replace(
+        observations.port(),
+        resolve_operator=unexpected_read,
+        observe_maintenance=unexpected_read,
+        observe_health=blocked_health,
+        failure_log=unexpected_read,
+        observe_sources=unexpected_read,
+        maintenance=unexpected_read,
+    )
+    monkeypatch.setattr(
+        processing_record_module,
+        "PROVIDER_READ_TIMEOUT_SECONDS",
+        0.01,
+    )
+
+    status = await asyncio.wait_for(
+        MemoryProcessingRecord(port).read_status(),
+        timeout=0.2,
+    )
+
+    assert status == RuntimeHealthProjection(
+        source=SourceObservation(
+            "unavailable",
+            reason="memory_sidecar_unavailable",
+        ),
+        health=None,
+    )
+    assert observations.operator_refs == []
 
 
 @pytest.mark.asyncio
