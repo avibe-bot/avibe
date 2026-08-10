@@ -16,6 +16,7 @@ from typing import Any, Callable, Optional
 
 from core.backend_failure import terminal_backend_failure_output
 from core.delivery_evidence import DeliveryEvidence, STAGE_PERSIST, STAGE_SEND
+from core.delivery_target import routed_delivery_context
 from core.message_output import MessageOutput, terminal_turn_output
 from core.resource_governance import governor_from_controller
 from modules.claude_sdk_compat import (
@@ -940,15 +941,19 @@ class AgentAuthService:
             backend == "codex"
             and getattr(backend_config, "auth_mode", None) == "api_key"
         )
+        delivery_context = routed_delivery_context(context)
         delivery = DeliveryEvidence()
         try:
             if uses_codex_api_key:
                 recovery_text = f"{error_text}\n\n{self._t('command.setup.apiKeyRecoveryPrompt', backend=backend)}"
-                delivered_id = await self._send_message(context, recovery_text)
+                delivered_id = await self._send_message(
+                    delivery_context,
+                    recovery_text,
+                )
             else:
                 recovery_text = f"{error_text}\n\n{self._t('command.setup.resetPrompt', backend=backend)}"
                 delivered_id = await self._send_message_with_button(
-                    context,
+                    delivery_context,
                     recovery_text,
                     button_text=self._t("button.resetOAuth"),
                     callback_data=f"auth_setup:{backend}",
@@ -981,7 +986,7 @@ class AgentAuthService:
             from core.message_mirror import persist_agent_message
 
             delivery.persisted_row = persist_agent_message(
-                context,
+                delivery_context,
                 "notify",
                 durable_text,
                 error_sink=persist_errors,

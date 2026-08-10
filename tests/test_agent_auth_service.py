@@ -274,6 +274,58 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
             },
         )
 
+    async def test_auth_recovery_sends_and_persists_to_delivery_override(self):
+        controller = _StubController()
+        source_client = controller.im_client
+        target_client = _StubIMClient()
+        controller.get_im_client_for_context = lambda context: (
+            target_client if context.platform == "telegram" else source_client
+        )
+        service = AgentAuthService(controller)
+        context = MessageContext(
+            user_id="U-source",
+            channel_id="C-source",
+            platform="slack",
+            platform_specific={
+                "turn_token": "turn-auth-routed",
+                "task_execution_id": "run-auth-routed",
+                "delivery_override": {
+                    "user_id": "U-target",
+                    "channel_id": "C-target",
+                    "platform": "telegram",
+                    "thread_id": "topic-target",
+                },
+            },
+        )
+
+        with patch(
+            "core.message_mirror.persist_agent_message",
+            return_value={"id": "message-auth-routed"},
+        ) as persist:
+            handled = await service.maybe_emit_auth_recovery_message(
+                context,
+                "codex",
+                "❌ Codex error: 401 Unauthorized",
+            )
+
+        self.assertTrue(handled)
+        self.assertEqual(source_client.sent_button_messages, [])
+        self.assertEqual(target_client.sent_button_messages[0][0], "C-target")
+        persisted_context = persist.call_args.args[0]
+        self.assertEqual(
+            (
+                persisted_context.platform,
+                persisted_context.channel_id,
+                persisted_context.thread_id,
+            ),
+            ("telegram", "C-target", "topic-target"),
+        )
+        terminal_call = controller.emit_agent_message.await_args
+        self.assertIs(terminal_call.args[0], context)
+        self.assertTrue(
+            terminal_call.kwargs["output"].metadata["turn_failure_notification"]["delivered"]
+        )
+
     async def test_codex_api_key_auth_error_points_to_key_settings_without_oauth_button(self):
         from config.v2_compat import to_app_config
         from config.v2_config import AgentsConfig, RuntimeConfig, SlackConfig, V2Config

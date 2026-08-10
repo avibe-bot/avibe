@@ -22,6 +22,7 @@ from config.v2_config import DEFAULT_AGENT_PROGRESS_STYLE
 from modules.im import MessageContext
 from modules.im.formatters.base_formatter import to_status_label
 from core.delivery_evidence import STAGE_PERSIST, STAGE_SEND, STAGE_STREAM, DeliveryEvidence
+from core.delivery_target import routed_delivery_context
 from core import failure_notices
 from core.message_context import resolve_turn_sink_key
 from core.message_mirror import (
@@ -430,19 +431,9 @@ class ConsolidatedMessageDispatcher:
         return i18n_t(key, lang, **kwargs)
 
     def _get_target_context(self, context: MessageContext) -> MessageContext:
-        payload = dict(context.platform_specific or {})
-        delivery_override = payload.get("delivery_override")
-        if isinstance(delivery_override, dict):
-            next_payload = dict(payload)
-            next_payload["is_dm"] = delivery_override.get("is_dm", next_payload.get("is_dm", False))
-            return MessageContext(
-                user_id=str(delivery_override.get("user_id") or context.user_id),
-                channel_id=str(delivery_override.get("channel_id") or context.channel_id),
-                platform=delivery_override.get("platform") or context.platform,
-                thread_id=delivery_override.get("thread_id"),
-                message_id=context.message_id,
-                platform_specific=next_payload,
-            )
+        target = routed_delivery_context(context)
+        if target is not context:
+            return target
         if self._get_im_client(context).should_use_thread_for_reply() and context.thread_id:
             return MessageContext(
                 user_id=context.user_id,

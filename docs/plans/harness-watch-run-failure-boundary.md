@@ -179,7 +179,9 @@ does not claim that an event was detected.
   attached, so every accepted Run shares one fallback owner instead of emitting
   one notice per Run. A primary error already delivered through the shared
   backend-failure path, the message-handler exception path, or auth recovery
-  carries its acknowledgement into the same monotonic contract.
+  carries its acknowledgement into the same monotonic contract. All visible
+  paths resolve the Harness delivery override before sending or persisting, so
+  acknowledgement can never be attributed to a different target.
 
 Residual manual check: trigger two one-shot Watches into one failing Turn and
 confirm that the conversation contains one backend error, both Runs are failed,

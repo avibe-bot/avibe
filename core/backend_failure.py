@@ -12,6 +12,7 @@ from core.delivery_evidence import (
     ACK_EVIDENCE_RECEIPT,
     DeliveryEvidence,
 )
+from core.delivery_target import routed_delivery_context
 from core.message_output import MessageOutput, terminal_output_for, terminal_turn_output
 from vibe.message_types import spec_for
 
@@ -164,24 +165,6 @@ def backend_failure_notification_output(
     )
 
 
-def _target_delivery_platform(context: Any) -> str:
-    platform_specific = getattr(context, "platform_specific", None) or {}
-    delivery_override = (
-        platform_specific.get("delivery_override")
-        if isinstance(platform_specific, dict)
-        else None
-    )
-    return str(
-        (
-            delivery_override.get("platform")
-            if isinstance(delivery_override, dict)
-            else None
-        )
-        or getattr(context, "platform", "")
-        or ""
-    ).strip()
-
-
 def _acknowledges_target(
     context: Any,
     evidence: str | None,
@@ -190,7 +173,7 @@ def _acknowledges_target(
         return True
     return (
         evidence == ACK_EVIDENCE_DELIVERY_ONLY
-        and _target_delivery_platform(context) != "avibe"
+        and routed_delivery_context(context).platform != "avibe"
     )
 
 

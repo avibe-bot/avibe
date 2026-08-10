@@ -13,13 +13,8 @@ from core.audio_asr import (
     detect_audio_mime_from_sample,
     format_audio_transcript_echo,
 )
-from core.backend_failure import emit_backend_failure, terminal_backend_failure_output
-from core.delivery_evidence import DeliveryEvidence, STAGE_PERSIST, STAGE_SEND, STAGE_STREAM
-from core.message_output import (
-    HARNESS_PROMPT_ECHO_SPEC_KEY,
-    terminal_output_for,
-    terminal_turn_output,
-)
+from core.backend_failure import emit_backend_failure
+from core.message_output import HARNESS_PROMPT_ECHO_SPEC_KEY
 from core.message_context import (
     SCHEDULED_DISPATCH_METADATA_APPLIED_KEY,
     resolve_context_thread_id,
@@ -874,46 +869,13 @@ class MessageHandler(BaseHandler):
             except Exception as cleanup_err:
                 logger.debug(f"Failed to clean up reaction on error: {cleanup_err}")
             error_text = self.formatter.format_error(self._t("error.processMessageFailed", error=str(e)))
-            delivery = DeliveryEvidence()
-            try:
-                delivered_id = await self._get_im_client(context).send_message(
-                    context,
-                    error_text,
-                )
-            except Exception as delivery_err:
-                delivery.error = delivery_err
-                delivery.error_stage = STAGE_SEND
-                raise
-            delivery.send_returned = True
-            delivery.delivered_id = (
-                str(delivered_id) if delivered_id is not None else None
-            )
-            # Surface the failure into the live web-Chat SSE stream first...
-            await self._stream_terminal_error(
+            await emit_backend_failure(
+                self.controller,
                 context,
+                str(getattr(request, "vibe_agent_backend", None) or "agent"),
                 error_text,
-                delivery=delivery,
-            )
-            # ...then settle the failed turn through the OUTBOUND status chokepoint:
-            # an empty terminal error result turns the dot red + releases the SSE
-            # waiter. The shared contract carries proof that the direct error path
-            # already delivered, so linked Runs cannot emit another fallback.
-            terminal_output = (
-                terminal_output_for(request)
-                if request is not None
-                else terminal_turn_output()
-            )
-            await self.controller.emit_agent_message(
-                context,
-                "result",
-                "",
-                is_error=True,
-                output=terminal_backend_failure_output(
-                    context,
-                    request=request,
-                    output=terminal_output,
-                    delivery=delivery,
-                ),
+                display_text=error_text,
+                request=request,
             )
             return str(e)
         finally:
@@ -1679,8 +1641,6 @@ class MessageHandler(BaseHandler):
         self,
         context: MessageContext,
         text: str,
-        *,
-        delivery: DeliveryEvidence | None = None,
     ) -> None:
         """Surface a synchronous, no-agent-dispatched failure (missing backend,
         a pre-dispatch exception) into the web Chat so the browser shows it
@@ -1696,32 +1656,14 @@ class MessageHandler(BaseHandler):
 
             # Persisted as ``notify`` → renders as a status box, not an answer;
             # publishes message.new so the async send path surfaces it.
-            persist_errors: list[BaseException] = []
-            persisted = persist_agent_message(
-                context,
-                "notify",
-                text,
-                native_message_id=(delivery.delivered_id if delivery else None),
-                error_sink=persist_errors,
-            )
-            if delivery is not None:
-                delivery.persisted_row = persisted
-                if persisted is None and persist_errors:
-                    delivery.error = persist_errors[0]
-                    delivery.error_stage = STAGE_PERSIST
-        except Exception as err:
-            if delivery is not None:
-                delivery.error = err
-                delivery.error_stage = STAGE_PERSIST
+            persist_agent_message(context, "notify", text)
+        except Exception:
             logger.debug("failed to persist terminal error row", exc_info=True)
         try:
             from core.message_dispatcher import _stream_chunk
 
             await _stream_chunk(self.controller, context, text=text, message_id=None, kind="error")
-        except Exception as err:
-            if delivery is not None:
-                delivery.error = err
-                delivery.error_stage = STAGE_STREAM
+        except Exception:
             logger.debug("failed to stream terminal error chunk", exc_info=True)
 
     async def _delete_ack(self, channel_id: str, request: AgentRequest):
