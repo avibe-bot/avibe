@@ -575,6 +575,7 @@
       "opencodeProviderSaved": "Provider credentials saved.",
       "opencodeProviderCatalogRefreshPending": "Provider saved. Refreshing the model list…",
       "opencodeProviderSaveFailed": "Could not save provider credentials.",
+      "opencodeProviderAuthCleanupFailed": "The API key was saved, but stale OpenCode credentials could not be cleared.",
       "opencodeProviderRemove": "Remove key",
       "opencodeProviderRemoveOauth": "Sign out",
       "opencodeProviderRemoveConfirm": "Remove the saved key for {{name}}?",

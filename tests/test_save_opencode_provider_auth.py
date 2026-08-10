@@ -444,7 +444,11 @@ def test_delete_custom_provider_settles_after_auth_delete_then_custom_failure(
     restart_calls: list[str] = []
 
     async def committed_auth_delete(_provider_id: str) -> dict:
-        return {"ok": True}
+        return {
+            "ok": True,
+            "mutation_attempted": True,
+            "removed": True,
+        }
 
     def failing_custom_delete(*_args, **_kwargs) -> None:
         raise RuntimeError("custom provider delete failed")
@@ -480,7 +484,7 @@ def test_delete_custom_provider_settles_after_auth_delete_then_custom_failure(
     assert result["message"] == "custom provider delete failed"
     assert result["partial"] is True
     assert result["mutation_attempted"] is True
-    assert result["removed"] is None
+    assert result["removed"] is True
     assert result["provider_id"] == "custom"
     assert result["restart"] == {"ok": True}
     assert clear_calls == ["custom"]
@@ -619,7 +623,7 @@ def test_delete_provider_settles_when_auth_delete_commits_then_close_fails(
     assert result["message"] == "session close failed"
     assert result["partial"] is True
     assert result["mutation_attempted"] is True
-    assert result["removed"] is (None if custom else True)
+    assert result["removed"] is True
     assert result["provider_id"] == provider_id
     assert server._read_auth() == {}
     assert clear_calls == [provider_id]
@@ -653,7 +657,8 @@ def test_save_provider_auth_partial_cleanup_clears_prefilled_cache(
     assert result["mutation_attempted"] is True
     assert result["saved"] is True
     assert result["provider_id"] == "deepseek"
-    assert result["message"] == "API key saved, but stale OpenCode auth cleanup failed: session close failed"
+    assert result["error_code"] == "opencode_stale_auth_cleanup_failed"
+    assert "message" not in result
     assert result["restart"] == {"ok": True}
     assert restart_calls == ["opencode"]
     assert api._OPENCODE_OPTIONS_CACHE == {}
@@ -1333,7 +1338,13 @@ def test_delete_custom_provider_removes_config_and_auth(fake_save_env) -> None:
 
     result = _delete_custom("my-relay")
 
-    assert result["ok"] is True
+    assert result == {
+        "ok": True,
+        "provider_id": "my-relay",
+        "mutation_attempted": True,
+        "removed": True,
+        "restart": {"ok": True},
+    }
     assert server.remove_calls == []
     assert read_opencode_custom_providers(home=home) == {}
 

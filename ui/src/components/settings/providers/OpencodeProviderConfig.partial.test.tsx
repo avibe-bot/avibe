@@ -148,7 +148,7 @@ describe('OpencodeProviderConfig partial save settlement', () => {
       saved: true,
       mutation_attempted: true,
       provider_id: 'deepseek',
-      message: 'saved, cleanup failed',
+      error_code: 'opencode_stale_auth_cleanup_failed',
     });
     const modelOptionsChanged = vi.fn();
     window.addEventListener('avibe:opencode-model-options-changed', modelOptionsChanged);
@@ -167,6 +167,82 @@ describe('OpencodeProviderConfig partial save settlement', () => {
     expect(screen.queryByLabelText('settings.backends.opencodeProviderApiKey')).toBeNull();
     expect(api.getOpencodeProviders).toHaveBeenCalledTimes(2);
     expect(modelOptionsChanged).toHaveBeenCalledOnce();
+    expect(showToast).toHaveBeenCalledWith(
+      'settings.backends.opencodeProviderAuthCleanupFailed',
+      'warning',
+    );
+    window.removeEventListener('avibe:opencode-model-options-changed', modelOptionsChanged);
+  });
+
+  it('clears and reconciles a custom secret when the submitted request rejects', async () => {
+    const maybeCommitted = provider({
+      id: 'my-relay',
+      name: 'My Relay',
+      configured: true,
+      custom: true,
+      has_auth: true,
+      api_key_masked: 'sk-•••elay',
+    });
+    api.getOpencodeProviders
+      .mockResolvedValueOnce({ ok: true, providers: [] })
+      .mockResolvedValue({ ok: true, providers: [maybeCommitted] });
+    api.saveOpencodeCustomProvider.mockRejectedValue(new Error('transport interrupted'));
+    const modelOptionsChanged = vi.fn();
+    window.addEventListener('avibe:opencode-model-options-changed', modelOptionsChanged);
+    const user = userEvent.setup();
+
+    render(<OpencodeProviderConfig hideEnableToggle />);
+    await screen.findByText('settings.backends.opencodeProvidersEmpty');
+    await user.click(screen.getByRole('button', { name: 'settings.backends.opencodeCustomProviderAdd' }));
+    await user.type(
+      screen.getByPlaceholderText('settings.backends.opencodeCustomProviderNamePlaceholder'),
+      'My Relay',
+    );
+    await user.type(
+      screen.getByPlaceholderText('settings.backends.opencodeProviderBaseUrlPlaceholder'),
+      'https://relay.example/v1',
+    );
+    await user.type(
+      screen.getByPlaceholderText('settings.backends.opencodeProviderApiKeyPlaceholder'),
+      'sk-top-secret',
+    );
+    await user.click(screen.getByRole('button', { name: 'settings.backends.opencodeCustomProviderSave' }));
+
+    await waitFor(() => expect(api.saveOpencodeCustomProvider).toHaveBeenCalledOnce());
+    await waitFor(() => expect(api.getOpencodeProviders).toHaveBeenCalledTimes(2));
+    expect(screen.queryByDisplayValue('sk-top-secret')).toBeNull();
+    expect(modelOptionsChanged).toHaveBeenCalledOnce();
+    expect(showToast).toHaveBeenCalledWith('transport interrupted', 'warning');
+    window.removeEventListener('avibe:opencode-model-options-changed', modelOptionsChanged);
+  });
+
+  it('clears and reconciles a replaced secret when the submitted auth request rejects', async () => {
+    const configured = provider({
+      configured: true,
+      has_auth: true,
+      api_key_masked: 'sk-•••old',
+    });
+    api.getOpencodeProviders.mockResolvedValue({ ok: true, providers: [configured] });
+    api.setOpencodeProviderAuth.mockRejectedValue(new Error('transport interrupted'));
+    const modelOptionsChanged = vi.fn();
+    window.addEventListener('avibe:opencode-model-options-changed', modelOptionsChanged);
+    const user = userEvent.setup();
+
+    render(<OpencodeProviderConfig hideEnableToggle />);
+    await user.click(await screen.findByRole('button', { name: /DeepSeek/ }));
+    await user.click(screen.getByRole('button', { name: 'settings.backends.replaceApiKey' }));
+    await user.type(
+      screen.getByLabelText('settings.backends.opencodeProviderApiKey'),
+      'sk-top-secret',
+    );
+    await user.click(screen.getByRole('button', { name: 'settings.backends.opencodeProviderSave' }));
+
+    await waitFor(() => expect(api.setOpencodeProviderAuth).toHaveBeenCalledOnce());
+    await waitFor(() => expect(api.getOpencodeProviders).toHaveBeenCalledTimes(2));
+    expect(screen.queryByDisplayValue('sk-top-secret')).toBeNull();
+    expect(screen.queryByLabelText('settings.backends.opencodeProviderApiKey')).toBeNull();
+    expect(modelOptionsChanged).toHaveBeenCalledOnce();
+    expect(showToast).toHaveBeenCalledWith('transport interrupted', 'warning');
     window.removeEventListener('avibe:opencode-model-options-changed', modelOptionsChanged);
   });
 });

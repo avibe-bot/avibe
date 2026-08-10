@@ -575,6 +575,7 @@
       "opencodeProviderSaved": "服务商凭据已保存。",
       "opencodeProviderCatalogRefreshPending": "服务商已保存，正在刷新模型列表…",
       "opencodeProviderSaveFailed": "保存服务商凭据失败。",
+      "opencodeProviderAuthCleanupFailed": "API 密钥已保存，但无法清理旧的 OpenCode 凭据。",
       "opencodeProviderRemove": "移除 Key",
       "opencodeProviderRemoveOauth": "退出登录",
       "opencodeProviderRemoveConfirm": "确定要删除 {{name}} 的已保存 Key 吗？",

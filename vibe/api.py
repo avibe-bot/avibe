@@ -10507,15 +10507,21 @@ async def save_opencode_custom_provider_async(payload: dict) -> dict:
             restart = {"ok": False, "message": str(exc)}
         _OPENCODE_OPTIONS_CACHE.clear()
         if not auth_result.get("ok"):
-            return {
+            failure = {
                 "ok": False,
                 "partial": True,
                 "saved": True,
                 "mutation_attempted": True,
                 "provider_id": provider_id.strip().lower(),
-                "message": auth_result.get("message") or "Provider saved, but API key save failed",
                 "restart": restart,
             }
+            error_code = auth_result.get("error_code")
+            message = auth_result.get("message")
+            if isinstance(error_code, str) and error_code:
+                failure["error_code"] = error_code
+            elif isinstance(message, str) and message:
+                failure["message"] = message
+            return failure
 
     catalog_refresh = await _refresh_opencode_provider_catalog_async(
         provider_id.strip().lower(),
@@ -10541,6 +10547,7 @@ async def delete_opencode_custom_provider_async(provider_id: str) -> dict:
     pid = provider_id.strip().lower()
     settlement: CancellationSettlement | None = None
     mutation_started = False
+    removed_fact: bool | None = False
     try:
         from vibe.opencode_config import (
             is_opencode_custom_provider,
@@ -10565,6 +10572,7 @@ async def delete_opencode_custom_provider_async(provider_id: str) -> dict:
                 _delete_opencode_provider_auth_async(pid)
             )
             mutation_started = bool(auth_result.get("mutation_attempted"))
+            removed_fact = auth_result.get("removed")
             if not auth_result.get("ok"):
                 restart = None
                 if mutation_started:
@@ -10579,13 +10587,17 @@ async def delete_opencode_custom_provider_async(provider_id: str) -> dict:
                     str(auth_result.get("message") or "Provider auth removal failed"),
                     restart,
                     mutation_attempted=mutation_started,
+                    removed=removed_fact,
                 )
+        if removed_fact is not True:
+            removed_fact = None
         mutation_started = True
         await settlement.run_blocking(
             remove_opencode_custom_provider,
             pid,
             logger_instance=logger,
         )
+        removed_fact = True
     except (Exception, asyncio.CancelledError) as exc:
         restart = None
         if settlement is not None and mutation_started:
@@ -10605,6 +10617,7 @@ async def delete_opencode_custom_provider_async(provider_id: str) -> dict:
             str(exc),
             restart,
             mutation_attempted=mutation_started,
+            removed=removed_fact,
         )
 
     restart = await _settle_opencode_delete_runtime(
@@ -10621,7 +10634,13 @@ async def delete_opencode_custom_provider_async(provider_id: str) -> dict:
     )
     if partial is not None:
         return partial
-    return {"ok": True, "provider_id": pid, "restart": restart}
+    return {
+        "ok": True,
+        "provider_id": pid,
+        "mutation_attempted": True,
+        "removed": True,
+        "restart": restart,
+    }
 
 
 def delete_opencode_custom_provider(provider_id: str) -> dict:
@@ -10829,15 +10848,11 @@ async def _save_opencode_provider_auth_async(
             if provider_id in auth_entries:
                 auth_cleanup = await _delete_opencode_provider_auth_async(provider_id)
                 if not auth_cleanup.get("ok"):
-                    cleanup_message = auth_cleanup.get("message")
                     return {
                         "ok": False,
                         "mutation_attempted": mutation_attempted,
                         "saved": saved,
-                        "message": (
-                            "API key saved, but stale OpenCode auth cleanup failed"
-                            + (f": {cleanup_message}" if cleanup_message else "")
-                        ),
+                        "error_code": "opencode_stale_auth_cleanup_failed",
                     }
         except Exception as exc:
             logger.warning(
@@ -10850,10 +10865,7 @@ async def _save_opencode_provider_auth_async(
                 "ok": False,
                 "mutation_attempted": mutation_attempted,
                 "saved": saved,
-                "message": (
-                    "API key saved, but stale OpenCode auth cleanup failed: "
-                    f"{exc}"
-                ),
+                "error_code": "opencode_stale_auth_cleanup_failed",
             }
 
     # ``baseURL`` is different: OpenCode's auth endpoint has no field for

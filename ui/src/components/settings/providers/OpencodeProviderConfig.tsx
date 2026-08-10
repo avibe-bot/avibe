@@ -291,6 +291,16 @@ export const OpencodeProviderConfig: React.FC<{
     [expandedId, loadProviders, showToast],
   );
 
+  const saveErrorMessage = useCallback(
+    (result: OpencodeMutationResult, fallbackKey: string): string => {
+      if (result.error_code === 'opencode_stale_auth_cleanup_failed') {
+        return t('settings.backends.opencodeProviderAuthCleanupFailed') as string;
+      }
+      return result.message || (t(fallbackKey) as string);
+    },
+    [t],
+  );
+
   useEffect(() => {
     loadProvidersRef.current = loadProviders;
   }, [loadProviders]);
@@ -435,7 +445,7 @@ export const OpencodeProviderConfig: React.FC<{
         ...(apiKey ? { api_key: apiKey } : {}),
       });
       if (!result.ok) {
-        const message = result.message || (t('settings.backends.opencodeCustomProviderSaveFailed') as string);
+        const message = saveErrorMessage(result, 'settings.backends.opencodeCustomProviderSaveFailed');
         if (result.partial) {
           if (result.saved === true) {
             const nextId = result.provider_id || providerId;
@@ -479,10 +489,18 @@ export const OpencodeProviderConfig: React.FC<{
         [nextId]: { ...(prev[nextId] || emptyEdit()), baseUrl },
       }));
     } catch (e) {
+      const message = errorMessage(e) || (t('settings.backends.opencodeCustomProviderSaveFailed') as string);
       updateCustomProviderDraft({
         saving: false,
-        error: errorMessage(e) || (t('settings.backends.opencodeCustomProviderSaveFailed') as string),
+        apiKey: '',
+        error: message,
       });
+      await settlePartialMutation(
+        { ok: false, partial: true },
+        providerId,
+        message,
+        false,
+      );
     }
   };
 
@@ -549,7 +567,7 @@ export const OpencodeProviderConfig: React.FC<{
     try {
       const result = await api.setOpencodeProviderAuth(provider.id, key, baseUrl);
       if (!result.ok) {
-        const message = result.message || (t('settings.backends.opencodeProviderSaveFailed') as string);
+        const message = saveErrorMessage(result, 'settings.backends.opencodeProviderSaveFailed');
         updateEdit(provider.id, {
           saving: false,
           ...(result.partial ? { apiKey: '', editingKey: false } : {}),
@@ -570,10 +588,19 @@ export const OpencodeProviderConfig: React.FC<{
         await loadProviders();
       }
     } catch (e) {
+      const message = errorMessage(e) || (t('settings.backends.opencodeProviderSaveFailed') as string);
       updateEdit(provider.id, {
         saving: false,
-        error: errorMessage(e) || (t('settings.backends.opencodeProviderSaveFailed') as string),
+        apiKey: '',
+        editingKey: false,
+        error: message,
       });
+      await settlePartialMutation(
+        { ok: false, partial: true },
+        provider.id,
+        message,
+        false,
+      );
     }
   };
 
