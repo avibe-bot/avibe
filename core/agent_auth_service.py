@@ -982,22 +982,24 @@ class AgentAuthService:
         )
         durable_text = f"{error_text}\n\n{durable_prompt}"
         persist_errors: list[BaseException] = []
-        try:
-            from core.message_mirror import persist_agent_message
+        target_platform = str(delivery_context.platform or "").strip()
+        if target_platform == "avibe" or delivery.delivered_id is not None:
+            try:
+                from core.message_mirror import persist_agent_message
 
-            delivery.persisted_row = persist_agent_message(
-                delivery_context,
-                "notify",
-                durable_text,
-                error_sink=persist_errors,
-            )
-        except Exception as err:
-            delivery.error = err
-            delivery.error_stage = STAGE_PERSIST
-            logger.debug("auth recovery: failed to persist durable notify", exc_info=True)
-        if delivery.persisted_row is None and persist_errors:
-            delivery.error = persist_errors[0]
-            delivery.error_stage = STAGE_PERSIST
+                delivery.persisted_row = persist_agent_message(
+                    delivery_context,
+                    "notify",
+                    durable_text,
+                    error_sink=persist_errors,
+                )
+            except Exception as err:
+                delivery.error = err
+                delivery.error_stage = STAGE_PERSIST
+                logger.debug("auth recovery: failed to persist durable notify", exc_info=True)
+            if delivery.persisted_row is None and persist_errors:
+                delivery.error = persist_errors[0]
+                delivery.error_stage = STAGE_PERSIST
         # Settle the failed turn through the outbound status chokepoint: a silent
         # terminal failure turns the dot red and releases the SSE waiter
         # without adding a second visible message (the recovery button above is the

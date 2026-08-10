@@ -274,6 +274,78 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
             },
         )
 
+    async def test_auth_recovery_does_not_persist_an_undelivered_external_message(self):
+        controller = _StubController()
+        service = AgentAuthService(controller)
+        service._send_message_with_button = AsyncMock(return_value=None)
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            platform="slack",
+            platform_specific={
+                "turn_token": "turn-auth-undelivered",
+                "task_execution_id": "run-auth-undelivered",
+            },
+        )
+
+        with patch(
+            "core.message_mirror.persist_agent_message",
+            return_value={"id": "message-auth-undelivered"},
+        ) as persist:
+            handled = await service.maybe_emit_auth_recovery_message(
+                context,
+                "codex",
+                "Codex error: 401 Unauthorized",
+            )
+
+        self.assertTrue(handled)
+        persist.assert_not_called()
+        terminal_output = controller.emit_agent_message.await_args.kwargs["output"]
+        self.assertEqual(
+            terminal_output.metadata["turn_failure_notification"],
+            {
+                "failure_id": "turn:turn-auth-undelivered",
+                "ack_evidence": None,
+                "delivered": False,
+            },
+        )
+
+    async def test_auth_recovery_keeps_local_persistence_without_a_send_id(self):
+        controller = _StubController()
+        service = AgentAuthService(controller)
+        service._send_message_with_button = AsyncMock(return_value=None)
+        context = MessageContext(
+            user_id="U1",
+            channel_id="ses-local",
+            platform="avibe",
+            platform_specific={
+                "turn_token": "turn-auth-local",
+                "task_execution_id": "run-auth-local",
+            },
+        )
+
+        with patch(
+            "core.message_mirror.persist_agent_message",
+            return_value={"id": "message-auth-local"},
+        ) as persist:
+            handled = await service.maybe_emit_auth_recovery_message(
+                context,
+                "codex",
+                "Codex error: 401 Unauthorized",
+            )
+
+        self.assertTrue(handled)
+        persist.assert_called_once()
+        terminal_output = controller.emit_agent_message.await_args.kwargs["output"]
+        self.assertEqual(
+            terminal_output.metadata["turn_failure_notification"],
+            {
+                "failure_id": "turn:turn-auth-local",
+                "ack_evidence": "receipt",
+                "delivered": True,
+            },
+        )
+
     async def test_auth_recovery_sends_and_persists_to_delivery_override(self):
         controller = _StubController()
         source_client = controller.im_client

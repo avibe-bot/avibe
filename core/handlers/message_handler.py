@@ -815,6 +815,11 @@ class MessageHandler(BaseHandler):
                 processing_indicator=processing_indicator,
                 files=processed_files,
             )
+            request.failure_handler = lambda error: self._emit_agent_dispatch_failure(
+                context,
+                request,
+                error,
+            )
             if processing_indicator is not None:
                 self.controller.processing_indicator.apply_to_request(request, processing_indicator)
             try:
@@ -868,15 +873,8 @@ class MessageHandler(BaseHandler):
                     )
             except Exception as cleanup_err:
                 logger.debug(f"Failed to clean up reaction on error: {cleanup_err}")
-            error_text = self.formatter.format_error(self._t("error.processMessageFailed", error=str(e)))
-            await emit_backend_failure(
-                self.controller,
-                context,
-                str(getattr(request, "vibe_agent_backend", None) or "agent"),
-                error_text,
-                display_text=error_text,
-                request=request,
-            )
+            if not bool(getattr(request, "failure_handled", False)):
+                await self._emit_agent_dispatch_failure(context, request, e)
             return str(e)
         finally:
             if not agent_dispatched:
@@ -887,6 +885,26 @@ class MessageHandler(BaseHandler):
                 mark_complete = getattr(self.controller, "mark_turn_complete", None)
                 if callable(mark_complete):
                     mark_complete(context)
+
+    async def _emit_agent_dispatch_failure(
+        self,
+        context: MessageContext,
+        request: AgentRequest | None,
+        error: BaseException,
+    ) -> None:
+        """Report one backend dispatch failure through the shared live boundary."""
+
+        error_text = self.formatter.format_error(
+            self._t("error.processMessageFailed", error=str(error))
+        )
+        await emit_backend_failure(
+            self.controller,
+            context,
+            str(getattr(request, "vibe_agent_backend", None) or "agent"),
+            error_text,
+            display_text=error_text,
+            request=request,
+        )
 
     async def _admit_human_delivery(
         self,
