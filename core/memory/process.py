@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import json
 import logging
@@ -29,6 +30,11 @@ import psutil
 
 from config import paths
 from core.memory.attachments import attachment_pin_root
+from core.memory.confined_filesystem import (
+    ConfinedFilesystemError,
+    create_confined_file,
+    open_confined_regular_file,
+)
 from core.memory.everos import EverOSPort
 from core.memory.types import MemoryErrorCode
 
@@ -49,7 +55,8 @@ _HEALTH_OBSERVATION_INTERVAL_SECONDS = 5.0
 _SIDECAR_RECORD_FILENAME = "everos.sidecar.json"
 _SIDECAR_RECORD_MAX_BYTES = 4 * 1024
 _SIDECAR_ENTRYPOINT_MODULE = "core.memory.sidecar"
-_EVEROS_CLI_MODULE = "everos.entrypoints.cli.main"
+_REBUILD_ENTRYPOINT_MODULE = "core.memory.rebuild_child"
+_REBUILD_LOCK_PREFIX = "cascade-rebuild-"
 _REBUILD_TIMEOUT_SECONDS = 30 * 60.0
 
 _IdentityFieldT = TypeVar("_IdentityFieldT")
@@ -88,6 +95,52 @@ class RebuildProcessResult(str, Enum):
     INTERRUPTED = "interrupted"
     TIMED_OUT = "timed_out"
     FAILED = "failed"
+
+
+class _ProviderRootBusy(RuntimeError):
+    """Another process owns the provider root's rebuild lifecycle."""
+
+
+class _ProviderRootLock:
+    """One private, no-follow file lock anchored below the effective home."""
+
+    def __init__(self, *, effective_home: Path, path: Path) -> None:
+        self._effective_home = effective_home
+        self._path = path
+        self._descriptor: int | None = None
+
+    def acquire(self) -> None:
+        try:
+            descriptor = create_confined_file(
+                self._effective_home,
+                self._path,
+                read_write=True,
+            )
+        except ConfinedFilesystemError:
+            descriptor = open_confined_regular_file(self._effective_home, self._path)
+        try:
+            import fcntl
+
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            os.close(descriptor)
+            raise _ProviderRootBusy from error
+        except BaseException:
+            os.close(descriptor)
+            raise
+        self._descriptor = descriptor
+
+    def release(self) -> None:
+        descriptor = self._descriptor
+        if descriptor is None:
+            return
+        self._descriptor = None
+        try:
+            import fcntl
+
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
 
 
 @runtime_checkable
@@ -830,9 +883,6 @@ class EverOSRebuildProcess:
     async def run(self) -> RebuildProcessResult:
         """Run the pinned rebuild command and release only after tree cleanup."""
 
-        process: asyncio.subprocess.Process | None = None
-        process_group: int | None = None
-        identities: dict[int, float] = {}
         try:
             if (
                 os.name != "posix"
@@ -846,6 +896,31 @@ class EverOSRebuildProcess:
                 provider_root=self._provider_root,
                 settings=self._settings,
             )
+            root_lock = _ProviderRootLock(
+                effective_home=self._effective_home,
+                path=_provider_rebuild_lock_path(
+                    memory_dir=self._memory_dir,
+                    provider_root=self._provider_root,
+                ),
+            )
+            root_lock.acquire()
+        except _ProviderRootBusy:
+            return RebuildProcessResult.ROOT_BUSY
+        except Exception:
+            logger.exception("EverOS cascade rebuild admission failed")
+            return RebuildProcessResult.FAILED
+        try:
+            return await self._run_exclusive()
+        finally:
+            root_lock.release()
+
+    async def _run_exclusive(self) -> RebuildProcessResult:
+        """Own the provider root from orphan reconciliation through retirement."""
+
+        process: asyncio.subprocess.Process | None = None
+        process_group: int | None = None
+        identities: dict[int, float] = {}
+        try:
             await self.reconcile_orphan()
             _write_memory_child_config(
                 memory_dir=self._memory_dir,
@@ -853,17 +928,19 @@ class EverOSRebuildProcess:
                 attachments_root=self._attachments_root,
                 settings=self._settings,
             )
-            process = await self._host.spawn(
-                _ProcessKind.CASCADE_REBUILD,
-                self._python,
-                cwd=self._memory_dir,
-                env=_memory_child_environment(
-                    python=self._python,
-                    memory_dir=self._memory_dir,
-                    provider_root=self._provider_root,
-                    attachments_root=self._attachments_root,
-                    settings=self._settings,
-                    role=_MemoryChildRole.CASCADE_REBUILD,
+            process, spawn_interrupted = await _finish_handoff_despite_cancellation(
+                self._host.spawn(
+                    _ProcessKind.CASCADE_REBUILD,
+                    self._python,
+                    cwd=self._memory_dir,
+                    env=_memory_child_environment(
+                        python=self._python,
+                        memory_dir=self._memory_dir,
+                        provider_root=self._provider_root,
+                        attachments_root=self._attachments_root,
+                        settings=self._settings,
+                        role=_MemoryChildRole.CASCADE_REBUILD,
+                    ),
                 ),
             )
             process_group = self._host.process_group(process.pid)
@@ -875,14 +952,17 @@ class EverOSRebuildProcess:
                 identities[process.pid],
                 process_group,
             )
-            try:
-                await asyncio.wait_for(process.wait(), timeout=self._timeout_seconds)
-            except asyncio.TimeoutError:
-                result = RebuildProcessResult.TIMED_OUT
-            except asyncio.CancelledError:
+            if spawn_interrupted:
                 result = RebuildProcessResult.INTERRUPTED
             else:
-                result = _rebuild_result_for_exit_code(process.returncode)
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=self._timeout_seconds)
+                except asyncio.TimeoutError:
+                    result = RebuildProcessResult.TIMED_OUT
+                except asyncio.CancelledError:
+                    result = RebuildProcessResult.INTERRUPTED
+                else:
+                    result = _rebuild_result_for_exit_code(process.returncode)
         except asyncio.CancelledError:
             result = RebuildProcessResult.INTERRUPTED
         except Exception:
@@ -923,6 +1003,13 @@ def _rebuild_result_for_exit_code(exit_code: int | None) -> RebuildProcessResult
     if exit_code == 130:
         return RebuildProcessResult.INTERRUPTED
     return RebuildProcessResult.FAILED
+
+
+def _provider_rebuild_lock_path(*, memory_dir: Path, provider_root: Path) -> Path:
+    """Keep root-scoped coordination outside the provider's own data namespace."""
+
+    root_identity = hashlib.sha256(os.fsencode(provider_root.absolute())).hexdigest()
+    return memory_dir / ".rt" / f"{_REBUILD_LOCK_PREFIX}{root_identity}.lock"
 
 
 def sidecar_record_path(memory_dir: Path | str) -> Path:
@@ -1060,6 +1147,9 @@ class SidecarOwnership:
                 "recorded EverOS child role could not be verified "
                 f"(pid {pid}, record {self.record_path})"
             )
+        group_match_role = (
+            None if isinstance(record, dict) and record.get("role") is None else recorded_role
+        )
         identity = self._host.inspect_identity(pid)
         verdict = _classify_recorded_child(
             record,
@@ -1080,7 +1170,7 @@ class SidecarOwnership:
                 await self._reap_recorded_group_without_leader(
                     record,
                     leader_pid=pid,
-                    role=recorded_role,
+                    role=group_match_role,
                 )
             _remove_sidecar_record(self.record_path)
             if discover_missing:
@@ -1109,7 +1199,7 @@ class SidecarOwnership:
         await self._reap_recorded_group_without_leader(
             record,
             leader_pid=pid,
-            role=recorded_role,
+            role=group_match_role,
         )
         _remove_sidecar_record(self.record_path)
 
@@ -1651,6 +1741,23 @@ async def _finish_cleanup_despite_cancellation(cleanup: Awaitable[None]) -> bool
     return interrupted
 
 
+async def _finish_handoff_despite_cancellation(
+    handoff: Awaitable[_IdentityFieldT],
+) -> tuple[_IdentityFieldT, bool]:
+    """Finish an ownership-bearing handoff before honoring cancellation."""
+
+    task = asyncio.create_task(handoff, name="memory-everos-owned-handoff")
+    interrupted = False
+    while not task.done():
+        try:
+            result = await asyncio.shield(task)
+        except asyncio.CancelledError:
+            interrupted = True
+            continue
+        return result, interrupted
+    return await task, interrupted
+
+
 def _socket_path_limit() -> int:
     return 104 if sys.platform == "darwin" else 108
 
@@ -1964,9 +2071,8 @@ def _cmdline_matches_role(
             str(socket_path),
         )
     return cmdline[1:] == (
-        "-I",
         "-m",
-        _EVEROS_CLI_MODULE,
+        _REBUILD_ENTRYPOINT_MODULE,
         "cascade",
         "rebuild",
         "--yes",
@@ -2510,9 +2616,8 @@ class _SystemProcessHost:
         if kind is _ProcessKind.CASCADE_REBUILD:
             arguments = [
                 str(python),
-                "-I",
                 "-m",
-                _EVEROS_CLI_MODULE,
+                _REBUILD_ENTRYPOINT_MODULE,
                 "cascade",
                 "rebuild",
                 "--yes",
