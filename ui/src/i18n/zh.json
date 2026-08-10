@@ -2837,6 +2837,8 @@
     "discardConfirm": "有未保存的修改，确定关闭并丢弃吗？"
   },
   "skills": {
+    "remoteReadOnly": "只读",
+    "remoteReadOnlyHint": "远程访问下技能目录为只读。请在运行 Avibe 的机器上打开以添加、更新或移除技能。",
     "title": "技能",
     "subtitle": "跨各 Agent 后端管理全局与项目级技能 · 基于 askill。",
     "scopeGlobal": "全局",
@@ -3350,6 +3352,8 @@
     }
   },
   "vaults": {
+    "remoteReadOnly": "只读",
+    "remoteReadOnlyHint": "远程访问下 Vault 为只读。请在运行 Avibe 的机器上打开以添加、编辑、查看或审批密钥。",
     "title": "保险库",
     "subtitle": "为你的 AI Agent 提供密钥，永不进入上下文。",
     "add": "添加密钥",

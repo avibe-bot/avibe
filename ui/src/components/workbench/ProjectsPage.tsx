@@ -25,6 +25,7 @@ import { useInstanceAuthorization } from '../../context/InstanceAuthorizationCon
 import type { ProjectSessionsState } from '../../context/WorkbenchProjectsContext';
 import type { WorkbenchProject, WorkbenchSession } from '../../context/ApiContext';
 import { formatRelativeTime } from '../../lib/relativeTime';
+import { canArchiveProjects, canEditProjectInstructions } from '../../lib/remoteAuth';
 import { canCreateLocalProject } from '../../lib/sessionInfo';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
@@ -81,7 +82,14 @@ const MobileProjectRow: React.FC<{
 }> = ({ project, open, state, onToggle }) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const { capabilities } = useInstanceAuthorization();
+  const { capabilities, remote } = useInstanceAuthorization();
+  // Rename and the Project settings are remote-permitted; archiving is not
+  // (`DELETE /api/projects/{id}` is local-only) even though
+  // `can_manage_projects` stays true for a remote Instance owner.
+  const canArchive = capabilities.can_manage_projects && canArchiveProjects({ remote });
+  // Reading a project's AGENTS.md is remote-permitted but saving it is not, and
+  // this surface is an editor with no read-only mode, so it stays local.
+  const canEditAgentsMd = capabilities.can_manage_projects && canEditProjectInstructions({ remote });
   const { renameProject, archiveProject, createSessionForProject } = useWorkbenchProjectsTree();
   const [menuOpen, setMenuOpen] = useState(false);
   // Guards against a double-tap creating two sessions before navigation unmounts.
@@ -212,7 +220,7 @@ const MobileProjectRow: React.FC<{
             >
               {t('workbench.projectSettings')}
             </MenuItem>
-            {project.folder_path && (
+            {project.folder_path && canEditAgentsMd && (
               <MenuItem
                 icon={FileText}
                 onClick={() => {
@@ -223,7 +231,7 @@ const MobileProjectRow: React.FC<{
                 {t('workbench.projectEditAgents')}
               </MenuItem>
             )}
-            <MenuItem
+            {canArchive && <MenuItem
               icon={Archive}
               danger
               onClick={async () => {
@@ -234,7 +242,7 @@ const MobileProjectRow: React.FC<{
               }}
             >
               {t('workbench.projectArchive')}
-            </MenuItem>
+            </MenuItem>}
             </>}
           </PopoverContent>
         </Popover>}

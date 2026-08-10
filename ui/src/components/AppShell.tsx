@@ -307,7 +307,16 @@ export const AppShell: React.FC = () => {
     ['/agents', '/harness', '/apps/library'].some(
       (path) => location.pathname === path || location.pathname.startsWith(`${path}/`),
     );
-  const localSystemPath = location.pathname.startsWith('/admin/settings/service');
+  // Owner is not enough for these: `can_manage_instance` stays true for a remote
+  // Instance owner, but Harness runs entirely on local-only routes (starting with
+  // `/api/harness/bootstrap`) and the Library's Show Page controls (visibility,
+  // share rotation, icon upload) are local-only too. `can_use_system` is the
+  // trusted-local capability (not remote AND owner), so require it as well.
+  const localSystemPath =
+    location.pathname.startsWith('/admin/settings/service') ||
+    ['/harness', '/apps/library'].some(
+      (path) => location.pathname === path || location.pathname.startsWith(`${path}/`),
+    );
   const resourceUseDenied =
     (location.pathname.startsWith('/skills') && !capabilities.can_use_skills) ||
     (location.pathname.startsWith('/vaults') && !capabilities.can_use_vault_secrets);

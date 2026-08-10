@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { AlertTriangle, Clock, Copy, Eye, Globe, History, Inbox, KeyRound, Link2, Loader2, MoreHorizontal, Pencil, Plus, Puzzle, RefreshCw, Settings, ShieldCheck, Tag, Trash2, Wallet, X } from 'lucide-react';
+import { AlertTriangle, Clock, Copy, Eye, Globe, History, Inbox, KeyRound, Link2, Loader2, Lock, MoreHorizontal, Pencil, Plus, Puzzle, RefreshCw, Settings, ShieldCheck, Tag, Trash2, Wallet, X } from 'lucide-react';
 import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
 import { CapabilityTabs } from './CapabilityTabs';
@@ -21,6 +21,7 @@ import { vaultRequestSessionDisplay } from '../ui/vault-request-session';
 import { VaultRequestSessionLink } from '../ui/vault-request-session-link';
 import { VaultSecretDialog } from '../ui/vault-secret-dialog';
 import { VaultSettingsDialog } from '../ui/vault-settings-dialog';
+import { canManageVaultSecrets } from '../../lib/remoteAuth';
 import { useProtectedVault } from '../../lib/useProtectedVault';
 import { useVaultRequestRefresh } from '../../lib/useVaultRequestRefresh';
 import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
@@ -231,7 +232,9 @@ function describeGrant(g: VaultGrant, t: TFunction): { Icon: typeof KeyRound; la
  * and an inline × to revoke. A grant is a fixed protected set keyed by grant_id — the chip
  * summarizes its `source_selector`, never a group.
  */
-const GrantChip: React.FC<{ grant: VaultGrant; now: number; onRevoke: (grant: VaultGrant) => void }> = ({
+// ``onRevoke`` is omitted when revocation is unavailable (remote access: the
+// revoke route is local-only), which renders the chip read-only.
+const GrantChip: React.FC<{ grant: VaultGrant; now: number; onRevoke?: (grant: VaultGrant) => void }> = ({
   grant: g,
   now,
   onRevoke,
@@ -260,14 +263,16 @@ const GrantChip: React.FC<{ grant: VaultGrant; now: number; onRevoke: (grant: Va
       <span className={cn('font-mono tabular-nums', rem.urgent ? 'text-warning' : 'text-mint/80')}>
         {rem.expired ? t('vaults.grants.expired') : chipCountdown(rem)}
       </span>
-      <button
-        type="button"
-        onClick={() => onRevoke(g)}
-        aria-label={t('vaults.grants.revoke')}
-        className="flex size-4 items-center justify-center rounded-full text-mint/70 transition-colors hover:bg-mint/15 hover:text-mint"
-      >
-        <X className="size-3" />
-      </button>
+      {onRevoke ? (
+        <button
+          type="button"
+          onClick={() => onRevoke(g)}
+          aria-label={t('vaults.grants.revoke')}
+          className="flex size-4 items-center justify-center rounded-full text-mint/70 transition-colors hover:bg-mint/15 hover:text-mint"
+        >
+          <X className="size-3" />
+        </button>
+      ) : null}
     </span>
   );
 };
@@ -484,8 +489,15 @@ export const VaultsPage: React.FC = () => {
   const api = useApi();
   const { showToast } = useToast();
   const vault = useProtectedVault();
-  const { capabilities } = useInstanceAuthorization();
-  const canManage = capabilities.can_manage_instance;
+  const { capabilities, remote } = useInstanceAuthorization();
+  // `can_manage_instance` stays true for a remote Instance owner, but every Vault
+  // mutation (create / edit / delete / reveal, settings save, request fulfil or
+  // deny, grant revoke, sign) and every key-material read the lock indicator
+  // needs (`vmk`, `pubkey`, `sandbox/root-metadata`) is local-only. Remote owners
+  // therefore keep the reads the policy permits — inventory, tags, settings,
+  // grants, audit — and lose the controls that would dead-end.
+  const canManage = capabilities.can_manage_instance && canManageVaultSecrets({ remote });
+  const canReadVaultState = capabilities.can_manage_instance;
   const [searchParams, setSearchParams] = useSearchParams();
   const [secrets, setSecrets] = useState<VaultSecret[]>([]);
   const [grants, setGrants] = useState<VaultGrant[]>([]);
@@ -523,7 +535,7 @@ export const VaultsPage: React.FC = () => {
     } finally {
       setLoading(false);
     }
-    if (!canManage) {
+    if (!canReadVaultState) {
       setGrants([]);
       return;
     }
@@ -536,7 +548,7 @@ export const VaultsPage: React.FC = () => {
     } catch {
       setGrants([]);
     }
-  }, [api, canManage]);
+  }, [api, canReadVaultState]);
 
   useEffect(() => {
     refresh();
@@ -734,7 +746,7 @@ export const VaultsPage: React.FC = () => {
         actions={
           <>
             {canManage ? <VaultLockIndicator className="max-sm:order-last max-sm:w-full max-sm:justify-between" /> : null}
-            {canManage ? <Button
+            {canReadVaultState ? <Button
               variant={showAudit ? 'secondary' : 'ghost'}
               size="icon"
               className="max-sm:border max-sm:border-border max-sm:bg-surface"
@@ -761,10 +773,17 @@ export const VaultsPage: React.FC = () => {
             >
               <RefreshCw className="size-4" />
             </Button>
-            {canManage ? <Button className="max-sm:flex-1" onClick={() => setAdding(true)}>
-              <Plus className="size-4" />
-              {t('vaults.add')}
-            </Button> : null}
+            {canManage ? (
+              <Button className="max-sm:flex-1" onClick={() => setAdding(true)}>
+                <Plus className="size-4" />
+                {t('vaults.add')}
+              </Button>
+            ) : remote ? (
+              <Badge variant="secondary" title={t('vaults.remoteReadOnlyHint')}>
+                <Lock className="size-3" />
+                {t('vaults.remoteReadOnly')}
+              </Badge>
+            ) : null}
           </>
         }
       />
@@ -772,7 +791,7 @@ export const VaultsPage: React.FC = () => {
         <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">{error}</div>
       )}
       {canManage ? <PendingRequestsSection onResolved={refresh} focusRequestId={focusRequestId} onFocusRequestOpened={clearFocusedRequest} /> : null}
-      {canManage && grants.length > 0 && (
+      {canReadVaultState && grants.length > 0 && (
         <div className="flex flex-col gap-2">
           <div className="flex items-center gap-2 px-1">
             <ShieldCheck className="size-4 text-mint" />
@@ -782,7 +801,7 @@ export const VaultsPage: React.FC = () => {
           </div>
           <div className="flex flex-wrap gap-2">
             {grants.map((g) => (
-              <GrantChip key={g.id} grant={g} now={now} onRevoke={onRevokeGrant} />
+              <GrantChip key={g.id} grant={g} now={now} onRevoke={canManage ? onRevokeGrant : undefined} />
             ))}
           </div>
         </div>

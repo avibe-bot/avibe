@@ -29,6 +29,24 @@ export function isSetupCheckBypassed(path: string): boolean {
 }
 
 /**
+ * Locality half of a Workbench control gate.
+ *
+ * `can_manage_instance` / `can_manage_agents` / `can_manage_projects` stay true
+ * for a remote Instance owner, so a role check alone still renders controls whose
+ * endpoints the remote HTTP policy classifies local-only — they dead-end in
+ * `remote_execution_disabled`. Every predicate below is that missing locality
+ * check; combine it with the capability that already guards the surface locally
+ * (`canManageSkills({ remote }) && capabilities.can_manage_instance`), the same
+ * shape as the trusted-local capabilities the backend derives
+ * (`can_use_system` = not remote and owner).
+ */
+type RemoteContext = { remote: boolean };
+
+function isTrustedLocal(context: RemoteContext): boolean {
+  return !context.remote;
+}
+
+/**
  * Agent definition editing is local-only. The remote HTTP policy permits Agent
  * detail reads and organization onboarding, and `/api/global-prompts` is local
  * only, so create / import / edit / enable / set-default / run / delete would
@@ -36,9 +54,57 @@ export function isSetupCheckBypassed(path: string): boolean {
  * read-only Agent catalog; onboarding stays available because it is separately
  * permitted.
  */
-export function canEditAgentDefinitions(context: { remote: boolean }): boolean {
-  return !context.remote;
+export function canEditAgentDefinitions(context: RemoteContext): boolean {
+  return isTrustedLocal(context);
 }
+
+/**
+ * Skill management is local-only: `GET /api/skills` is the only remote-permitted
+ * Skill route, while add / upload / preview / registry search / dependency
+ * install / update / remove are all local. Remote instances therefore get a
+ * read-only Skill catalog.
+ */
+export function canManageSkills(context: RemoteContext): boolean {
+  return isTrustedLocal(context);
+}
+
+/**
+ * Vault management is local-only. The inventory, tags, settings, pending
+ * requests, grants and audit reads are remote-permitted, but every mutation
+ * (create / edit / delete a secret, reveal, settings save, request fulfil/deny,
+ * grant revoke, sign) and every key-material read (`vmk`, `pubkey`,
+ * `sandbox/root-metadata`, WebAuthn factor options) is local. Remote instances
+ * therefore get a read-only Vault.
+ */
+export function canManageVaultSecrets(context: RemoteContext): boolean {
+  return isTrustedLocal(context);
+}
+
+/**
+ * Harness is local-only: the page opens on `/api/harness/bootstrap` and every
+ * task / watch / run route it drives is local, so the whole surface — route and
+ * navigation entry — is unavailable remotely.
+ */
+export function canUseHarness(context: RemoteContext): boolean {
+  return isTrustedLocal(context);
+}
+
+/**
+ * Archiving a Project is local-only (`DELETE /api/projects/{id}`), unlike the
+ * remote-permitted Project list, create and rename.
+ */
+export function canArchiveProjects(context: RemoteContext): boolean {
+  return isTrustedLocal(context);
+}
+
+/**
+ * Reading a Project's `AGENTS.md` is remote-permitted but saving it is
+ * local-only, so remote viewers get the instructions read-only.
+ */
+export function canEditProjectInstructions(context: RemoteContext): boolean {
+  return isTrustedLocal(context);
+}
+
 
 export async function checkRemoteAuthForPath<Session extends RemoteSession>(
   path: string,

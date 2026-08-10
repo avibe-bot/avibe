@@ -2837,6 +2837,8 @@
     "discardConfirm": "You have unsaved changes. Close and discard them?"
   },
   "skills": {
+    "remoteReadOnly": "Read-only",
+    "remoteReadOnlyHint": "The Skill catalog is read-only over remote access. Open Avibe on the machine to add, update, or remove Skills.",
     "title": "Skills",
     "subtitle": "Manage global and project skills across your agent backends · powered by askill.",
     "scopeGlobal": "Global",
@@ -3350,6 +3352,8 @@
     }
   },
   "vaults": {
+    "remoteReadOnly": "Read-only",
+    "remoteReadOnlyHint": "The Vault is read-only over remote access. Open Avibe on the machine to add, edit, reveal, or approve secrets.",
     "title": "Vaults",
     "subtitle": "Give your AI agents secrets — their values never enter the context.",
     "add": "Add secret",

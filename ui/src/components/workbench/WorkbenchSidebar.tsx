@@ -37,6 +37,7 @@ import { SESSION_ROW_MENU_POSITION_CLASS, sessionRowActionPaddingClass } from '.
 import { SessionActionMenuContent, SessionActionsTrigger } from './sessionActions';
 import { useSessionActions } from './useSessionActions';
 import { formatRelativeTime } from '../../lib/relativeTime';
+import { canArchiveProjects, canEditProjectInstructions, canUseHarness } from '../../lib/remoteAuth';
 import { canCreateLocalProject } from '../../lib/sessionInfo';
 import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { Button } from '../ui/button';
@@ -394,6 +395,12 @@ const ProjectRow: React.FC<{
   canChat: boolean;
   canManageMetadata: boolean;
   canManageProjects: boolean;
+  /** Archiving is local-only (`DELETE /api/projects/{id}`), unlike rename. */
+  canArchive: boolean;
+  /** The Editor app is a trusted-local surface. */
+  canOpenInEditor: boolean;
+  /** Saving a project's AGENTS.md is local-only; the dialog has no read-only mode. */
+  canEditAgentsMd: boolean;
   unreadBySession: Record<string, number>;
   onRename: (next: string) => Promise<void>;
   onArchive: () => Promise<void>;
@@ -411,6 +418,9 @@ const ProjectRow: React.FC<{
   canChat,
   canManageMetadata,
   canManageProjects,
+  canArchive,
+  canOpenInEditor,
+  canEditAgentsMd,
   unreadBySession,
   onRename,
   onArchive,
@@ -532,7 +542,7 @@ const ProjectRow: React.FC<{
                   <Settings2 className="size-3 text-muted" />
                   {t('workbench.projectSettings')}
                 </button>
-                {project.folder_path && (
+                {project.folder_path && canEditAgentsMd && (
                   <button
                     type="button"
                     onClick={() => {
@@ -545,7 +555,7 @@ const ProjectRow: React.FC<{
                     {t('workbench.projectEditAgents')}
                   </button>
                 )}
-                {project.folder_path && (
+                {project.folder_path && canOpenInEditor && (
                   <button
                     type="button"
                     onClick={() => {
@@ -560,20 +570,22 @@ const ProjectRow: React.FC<{
                     {t('workbench.projectOpenInEditor')}
                   </button>
                 )}
-                <button
-                  type="button"
-                  onClick={async () => {
-                    setMenuOpen(false);
-                    const ok = window.confirm(
-                      t('workbench.projectArchiveConfirm', { name: project.display_name }),
-                    );
-                    if (ok) await onArchive();
-                  }}
-                  className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] text-pink transition hover:bg-pink/[0.08]"
-                >
-                  <Archive className="size-3" />
-                  {t('workbench.projectArchive')}
-                </button>
+                {canArchive && (
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      setMenuOpen(false);
+                      const ok = window.confirm(
+                        t('workbench.projectArchiveConfirm', { name: project.display_name }),
+                      );
+                      if (ok) await onArchive();
+                    }}
+                    className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] text-pink transition hover:bg-pink/[0.08]"
+                  >
+                    <Archive className="size-3" />
+                    {t('workbench.projectArchive')}
+                  </button>
+                )}
               </PopoverContent>
             </Popover>}
             {canChat && <button
@@ -648,10 +660,14 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
   const { t } = useTranslation();
   const navigate = useNavigate();
   const authorizeRouteAction = useUnsavedChangesActionGuard();
-  const { capabilities } = useInstanceAuthorization();
+  const { capabilities, remote } = useInstanceAuthorization();
   const canCreateProject = canCreateLocalProject(capabilities);
   const capabilityNav = CAPABILITY_NAV.filter(({ to }) => {
-    if (to === '/agents' || to === '/harness') return capabilities.can_manage_agents;
+    // Harness is trusted-local: the page opens on `/api/harness/bootstrap` and
+    // every task/watch/run route it drives is local-only, while
+    // `can_manage_agents` stays true for a remote Instance owner.
+    if (to === '/harness') return capabilities.can_manage_agents && canUseHarness({ remote });
+    if (to === '/agents') return capabilities.can_manage_agents;
     if (to === '/skills') return capabilities.can_use_skills;
     if (to === '/vaults') return capabilities.can_use_vault_secrets;
     return false;
@@ -911,6 +927,9 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
                   canChat={capabilities.can_chat && project.capabilities.can_chat}
                   canManageMetadata={project.capabilities.can_chat}
                   canManageProjects={capabilities.can_manage_projects}
+                  canArchive={capabilities.can_manage_projects && canArchiveProjects({ remote })}
+                  canOpenInEditor={capabilities.can_use_files}
+                  canEditAgentsMd={capabilities.can_manage_projects && canEditProjectInstructions({ remote })}
                   unreadBySession={unreadBySession}
                   onRename={(next) => renameProject(project.id, next)}
                   onArchive={() => archiveProject(project.id)}

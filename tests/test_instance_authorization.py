@@ -242,6 +242,84 @@ def test_remote_http_policy_keeps_approved_management_and_read_surfaces(
     assert http_authorization_policy(method, path).remote_access == expected
 
 
+@pytest.mark.parametrize(
+    ("gate", "method", "path", "expected"),
+    [
+        # canManageSkills: read-only catalog remotely, every mutation local.
+        ("canManageSkills", "GET", "/api/skills", REMOTE_HTTP_ALLOWED),
+        ("canManageSkills", "POST", "/api/skills", REMOTE_HTTP_LOCAL_ONLY),
+        ("canManageSkills", "POST", "/api/skills/askill/update", REMOTE_HTTP_LOCAL_ONLY),
+        ("canManageSkills", "DELETE", "/api/skills/askill", REMOTE_HTTP_LOCAL_ONLY),
+        (
+            "canManageSkills",
+            "POST",
+            "/api/dependencies/askill/install",
+            REMOTE_HTTP_LOCAL_ONLY,
+        ),
+        # canManageVaultSecrets: inventory and audit reads stay remote, mutations
+        # and key material do not.
+        ("canManageVaultSecrets", "GET", "/api/vault/secrets", REMOTE_HTTP_ALLOWED),
+        ("canManageVaultSecrets", "GET", "/api/vault/settings", REMOTE_HTTP_ALLOWED),
+        ("canManageVaultSecrets", "GET", "/api/vault/grants", REMOTE_HTTP_ALLOWED),
+        ("canManageVaultSecrets", "POST", "/api/vault/secrets", REMOTE_HTTP_LOCAL_ONLY),
+        (
+            "canManageVaultSecrets",
+            "PATCH",
+            "/api/vault/secrets/prod",
+            REMOTE_HTTP_LOCAL_ONLY,
+        ),
+        (
+            "canManageVaultSecrets",
+            "DELETE",
+            "/api/vault/secrets/prod",
+            REMOTE_HTTP_LOCAL_ONLY,
+        ),
+        ("canManageVaultSecrets", "POST", "/api/vault/vmk", REMOTE_HTTP_LOCAL_ONLY),
+        # canUseHarness: the page cannot even bootstrap remotely.
+        ("canUseHarness", "GET", "/api/harness/bootstrap", REMOTE_HTTP_LOCAL_ONLY),
+        # canArchiveProjects: list and rename stay remote, archive does not.
+        ("canArchiveProjects", "GET", "/api/projects", REMOTE_HTTP_ALLOWED),
+        (
+            "canArchiveProjects",
+            "PATCH",
+            "/api/projects/proj-1",
+            REMOTE_HTTP_PAYLOAD_FILTERED,
+        ),
+        ("canArchiveProjects", "DELETE", "/api/projects/proj-1", REMOTE_HTTP_LOCAL_ONLY),
+        # canEditProjectInstructions: AGENTS.md reads remotely, saves locally.
+        (
+            "canEditProjectInstructions",
+            "GET",
+            "/api/projects/proj-1/agents-md",
+            REMOTE_HTTP_ALLOWED,
+        ),
+        (
+            "canEditProjectInstructions",
+            "PUT",
+            "/api/projects/proj-1/agents-md",
+            REMOTE_HTTP_LOCAL_ONLY,
+        ),
+        # canEditAgentDefinitions: catalog reads remotely, definition writes locally.
+        ("canEditAgentDefinitions", "GET", "/api/agents", REMOTE_HTTP_ALLOWED),
+        ("canEditAgentDefinitions", "POST", "/api/agents", REMOTE_HTTP_LOCAL_ONLY),
+    ],
+)
+def test_local_only_workbench_gates_match_the_remote_http_policy(
+    gate,
+    method,
+    path,
+    expected,
+) -> None:
+    """Pin the endpoint classifications the Workbench UI gates are derived from.
+
+    `can_manage_instance` / `can_manage_agents` / `can_manage_projects` stay true
+    for a remote Instance owner, so `ui/src/lib/remoteAuth.ts` adds a locality
+    check for every control whose endpoint is local-only. If one of these routes
+    is reclassified, that UI gate is stale and must be revisited with it.
+    """
+    assert http_authorization_policy(method, path).remote_access == expected, gate
+
+
 def test_workbench_event_policy_filters_privileged_and_unknown_events() -> None:
     viewer = _remote_context("viewer")
     editor = _remote_context("editor")
