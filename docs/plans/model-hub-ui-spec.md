@@ -71,20 +71,26 @@ This file **references anchors and never restates spec content**. If you want to
 know what a chain is, read §4.3 there; this file only says where it is drawn.
 
 **Verification basis.** Every anchor and every `[spec]` / `[contract]` claim below
-was checked against `docs/model-hub-v3-local-gateway` @ **`ca45aeb6`** — the current head
-of the spec lane's PR #1215 — **not** against `master`, whose §3, §4.1, §4.2, §4.6
-and §5 have all been superseded there. A reader on `master` will find some anchors
-missing; that is the expected state until #1215 lands, and this file must not merge
-before it does.
+was checked against **`ceace07f`** — the squash of the spec lane's PR #1215, and an
+ancestor of `master` — **not** against the pre-#1215 `master` whose §3, §4.1, §4.2,
+§4.6 and §5 it supersedes. Every anchor this file cites is reachable from `master`
+today, and the standing caveat that this file must not merge before #1215 lands is
+retired by #1215 having landed.
 
-The basis has moved twice while this file was being written: `7984aabf` → `176b41b7`
-→ `ca45aeb6`. The first move added AC-29/30/31, and **AC-30** (takeover is derived, and
-a chain with no runnable hop renders none of takeover's visual semantics) and **AC-31**
-(Direct is a mode and the first state of an existing install; Native names a hop and
-never a mode) land directly on frames 08, 09 and 10. The second move is **S-1**, and it
-is larger: a configured chain is now stored configuration executed as written, with no
-runtime Source/model matching, no `follow | custom` state, and no second projection
-derived from a backend order.
+The basis moved three times while this file was being written: `7984aabf` → `176b41b7`
+→ `ca45aeb6` → `ceace07f`. The first move added AC-29/30/31, and **AC-30** (takeover is
+derived, and a chain with no runnable hop renders none of takeover's visual semantics)
+and **AC-31** (Direct is a mode and the first state of an existing install; Native names
+a hop and never a mode) land directly on frames 08, 09 and 10. The second move is
+**S-1**, and it is larger: a configured chain is now stored configuration executed as
+written, with no runtime Source/model matching, no `follow | custom` state, and no
+second projection derived from a backend order. The third is the remainder of #1215's
+own review — five commits between `ca45aeb6` and the squash, sixteen contract files,
+1245 insertions against 1000 deletions — and it is the one move this document did not
+re-read commit by commit. It did not have to: the contract artefacts in this worktree
+are `ceace07f`'s byte-for-byte, so §0.10's class E re-derives every `[contract]` claim
+here from the landed text on every run, and drift against the basis is a red gate
+rather than a reading.
 
 Re-reading on each move is not bookkeeping, and this round proves it twice over. Two of
 the three frame-versus-contract conflicts in §0.6 existed only at `176b41b7`. And at
@@ -187,9 +193,13 @@ frames surfaced a *missing* behaviour invariant, it is listed in the PR
 description under 「建议移交 AC 账本」 for routing — not written here, and not
 written into §8 by this lane.
 
-**Contracted mutations these ten frames do not draw.** `api.md` contracts twenty
-state-changing routes; this document reaches most of them and states an absence
-in §0.5 for the ones whose affordance is missing. The four below are neither:
+**Contracted mutations these ten frames do not draw.** `api.md`'s route table
+carries twenty non-`GET` rows and **nineteen** state-changing routes: `POST
+/api/models/migration/scan` is declared 「Read-only.」 in that same table, so it is
+a read that takes a body, and counting by HTTP method rather than by declared
+semantics would put it on the mutation side of this section. This document reaches
+most of the nineteen and states an absence in §0.5 for the ones whose affordance
+is missing. The four below are neither:
 they belong to a surface outside this frame set, so silence about them here is a
 boundary, not an omission. The distinction matters because the two are fixed
 differently — a §0.5 row is work someone still owes, a row here is work that
@@ -198,7 +208,7 @@ from inside this file: a capability the product has and nobody can find.
 
 | Contracted route | Where it is drawn instead |
 | --- | --- |
-| `POST /api/models/migration/scan` | The migration surface. Neither of these ten frames offers an import, and a scan with nothing to show it is not a screen |
+| `POST /api/models/migration/scan` | The migration surface. Neither of these ten frames offers an import, and a scan with nothing to show it is not a screen. This is also the one row here that is not a mutation — the read-only `POST` counted out above — and it is listed anyway, because the question this table answers is 「where is this route drawn」 and not 「what does it write」 |
 | `POST /api/models/migration/apply` | The migration surface, following its own scan |
 | `PUT /api/models/agents/opencode/menu` | The open-menu configuration surface, which is where a menu is chosen; frame 01 renders the resulting supply and never edits the menu behind it |
 | `POST /api/models/agents/<backend>/probe` | Diagnostics. It answers "would a turn resolve right now", which none of these ten frames asks — 01 reports the supply it already has, and a probe run from a page that is not asking would report on something the user is not looking at |
@@ -242,6 +252,7 @@ than in a moving one.
 | G-28 | `Qp6FI`, the hop rows — both callers, §1.6's *Refetch refused* and *Guard refused* | the hop's position, on the reference the refusal returns | **The row draws a position pill and the refusal names no position.** `model-hub.md` §4.5 returns 「ordered `would_remove_hops` entries naming each `(backend, menu_model, source_id, model_id)` reference」 — four fields, and no index among them. The array's own order is not the answer: it spans every backend and menu model the change touches and carries only the hops being removed, so an entry's place in it is not its hop's place in its chain. Deriving it means one `GET /api/models/agents/<backend>/chain?model=<id>` per distinct `(backend, menu_model)` the refusal names, issued from inside a confirm, each async and each allowed to fail — the dependence §1.1 refuses for the collapse predicate, arriving on a surface that has to be right the first time. So `guard.hop.position` and its `{{n}}` stay in the register, because copy is this document's register and the frame draws the pill; the input is what is absent, and §1.6 states what the row renders until the reference carries one |
 | G-29 | 05 add-by-key, ⑦'s 重试 — the re-read F1 requires of a `POST /api/models/sources` that may have committed unseen | anything the client holds *before* the send that the committed Source can afterwards be recognized by | **The repair is contracted and its input is not.** F1 has a create whose response was lost re-read before it is re-sent, and `GET /api/models/sources` is the only read that answers `[contract]` — but nothing the dialog sent survives into what comes back. `Source.id` matches `^src_[a-z0-9]{8,}$` and is server-assigned, so it existed only in the response that died; `source.schema.json` returns no plaintext credential; and neither `base_url` nor `display_name` is declared unique in `api.md` or `model-hub.md`, so two Sources may legitimately carry both. No route in `api.md` takes an idempotency key, and G-27 leaves `SourceCreate`'s body unspecified, so this file cannot even say the client *could* supply one. The read therefore answers 「what is in the list」 and never 「whether this create is in it」, and §1.5's ⑦ states that instead of picking a Source out of an unordered list by resemblance |
 | G-30 | 04 add-subscription, *Start failed* entered by a lost response | a way to reach a flow whose `flow_id` never arrived | **A start that was accepted and not answered leaves a flow the client cannot name.** `api.md` contracts exactly four OAuth routes — `POST /api/models/oauth/start`, `GET /api/models/oauth/status/<flow_id>`, `POST /api/models/oauth/submit`, `POST /api/models/oauth/cancel` — and the last three all take the `flow_id` the lost response was carrying. There is no flow-list read, and `oauth-flow.schema.json` carries no property that would let one be found from what the dialog does hold: the vendor and the channel it sent are what *every* start for that backend sends. So 重试 can start a second flow beside a first that is still live, and the first ends only by expiring — `expires_at`, when the provider supplies one `[contract]`. §1.4's *Start failed* states that rather than asserting the call never reached the provider, which is the reading this row replaced |
+| G-31 | 01/08 model rows — the 当前 line (`gateway.row.current`, `gateway.row.currentTakeover`), the violet reroute, and §1.1's *Takeover active* entry and exit | the chain's **current** hop, on the one read that is supposed to carry it | **The behaviour spec puts it in the read projection and the wire shape closes the object without it.** `model-hub.md` §4.3 states 「the read projection is `C` with live annotations plus `current`, never a reconstructed provider list」, writes takeover on that field — 「the current hop is not `C[0]` and `C[0]` is unavailable for a recoverable quota/cooldown reason」 — and then fixes the timing: 「recovery changes current execution position **on the next turn** without changing `C`」. The read that would deliver it is `GET /api/models/agents/<backend>/chain?model=<id>` → `{chain: AgentChain}`, and `agent-chain.schema.json` is `additionalProperties: false` over exactly `contract_version`, `backend`, `model_id`, `chain` and `supply_state`, and each hop inside `chain` is closed the same way with no `current` among the keys it does carry. The substitute is the schema's own sentence — 「the next turn uses the FIRST item with `runnable: true`」 — and it agrees with `current` everywhere except the interval §4.3 legislates: from the moment a cooling head is reported runnable again until the next turn actually moves back, the derivation names the head and `current` still names the later hop. That interval is this row's entire content, and it is why the gap is narrow rather than structural: everything else the 当前 line and the takeover visuals need is on the wire. `model-hub-implementation.md` books the missing piece as AC-30's own lane I2, 「live current-hop input」, so what is absent is the field and not the decision. This is G-20's shape — one contract file naming a value another file must carry — on a different value, a different read and a different repair, so it is registered beside it rather than folded into it |
 
 **G-8 is closed by an owner ruling, and its number is not reused.** It asked for the
 route that saves an edited reasoning-effort list and the field it saves into. The ruling
@@ -643,7 +654,7 @@ as everywhere else in this document.
 | §1.1 | Backend has no usable source | Every candidate filtered out | F5 | `gateway.supply.none` | Any source becomes eligible; 来源顺序 → 03 |
 | §1.1 | Backend has no models | The group resolves to zero model rows `[derived]` | F5 | `gateway.group.emptyModels` | A model becomes available to that backend |
 | §1.1 | Nothing pinned | `mode` reads `hub` and `selected_model_id` is `null`, which is exactly when `supply_status` is `null` on the gateway `[contract]` | F5 — a rendered report, not a request | `gateway.group.subtitle.gateway`, `gateway.group.mode.gateway`, `gateway.group.status.noSelection` | A pinned model gives the rollup something to answer with → Ready, or whichever rollup state that reading names |
-| §1.1 | Takeover active | The chain read — `GET /api/models/agents/<backend>/chain?model=<id>`, the only read that carries a hop `[contract]` — answers with a serving hop that is not the head **and the head's source reads `cooldown`** — the one `Source.state.status` value that clears itself `[contract]` | F5 | `gateway.group.takenOver`, `gateway.row.currentTakeover`, `gateway.group.status.degraded` | A later chain read answers with the head serving → Ready `[contract]`. The cooldown expiring is not that answer: §4.3 recovers by changing execution position **on the next turn**, so a passed `retry_at` makes the head eligible to be attempted and nothing more, and the payload that reports the reroute gone is the only thing that can retire the violet. Same reading as the two rows above give a source and a group — this document keys no exit on a clock. This is frame 08 (§1.7) |
+| §1.1 | Takeover active | The chain read — `GET /api/models/agents/<backend>/chain?model=<id>`, the only read that carries hops `[contract]` — answers with the head not runnable while a later hop is, **and the head's source reads `cooldown`** — the one `Source.state.status` value that clears itself `[contract]`. §4.3 writes the predicate on the chain's **current** hop and the payload carries no such field `[contract-gap]` **G-31**, so the entry is the runnable reading and the exit states what that costs | F5 | `gateway.group.takenOver`, `gateway.row.currentTakeover`, `gateway.group.status.degraded` | A later chain read reports the head `runnable: true` → Ready `[contract]`. That is still a payload reading and not a clock — the server compares `retry_at` to now and this surface reads the boolean, which is why the exit matches the two rows above and no exit here keys on elapsed time. What it is not is the reroute itself: §4.3 recovers by changing execution position **on the next turn**, so until `current` is on the wire (G-31) the violet retires up to one turn before execution actually moves back, and that interval is the whole cost of the gap at this row. This is frame 08 (§1.7) |
 | §1.1 | Serving past a blocked head | The serving hop is not the head, and the head is blocked by something waiting does not clear — **stated as the negation of the row above, not as a list of causes.** `runnable = health-permits AND process-available` `[contract]`, so a head is here whenever it is not runnable and its block is not the `cooldown` *Takeover active* requires: the head's source reading `needs_action` or `error`, a source that is `healthy` while the native CLI it needs is unavailable in this process (`reason: native_cli_unavailable` `[contract]`), and a head the chain reports as `source_missing` or `model_unsupported` `[contract]`. Defined by negation because the set of non-self-healing blockers is the contract's to extend, and a row enumerated by cause has to be reopened every time it does | F5 | `gateway.group.status.degraded` | The head becomes runnable again → Ready; the head enters `cooldown` while a later hop still serves → Takeover active. Both are readings of a later payload and neither is a clock (D-16) — including the user-cleared blocks, which are reported by the same read as the rest |
 | §1.1 | Chain unresolved | Row grain, not group. That same chain read is outstanding for this row, or came back failed or refused, while the two page payloads are in hand | F2 read at row grain — the group keeps everything those two payloads drew, and this row's three derived columns render `—`. The engine is not implicated and nothing on the head changes | — | The read answers → Ready or Takeover active. What re-issues it is the collapse row (D-35): collapsing and re-expanding the group re-reads every row in it, and it is the drawn control this row's repair uses, there being no per-row 重试 on the frame. The two triggers beside it are the page's own — any mutation that re-renders the group (*Ready* above) and the next load — so a row that failed is never waiting on a request nobody will send |
 | §1.1 | Group expanded | Collapse row activated | F5 | `gateway.collapse` | Collapse toggled back → Ready |
@@ -1459,13 +1470,27 @@ dispatch arbitrates → each backend's models resolve to these sources today.
 element above it is drawn from the two page-level payloads — tile, name, count, the mode
 and status line, the head buttons, the collapse row — but the serving hop is in neither:
 `api.md` states that AgentSupply projects no backend-level serving head, and that
-`model_supply` carries only `chain_length`. The one read that answers with a hop is
+`model_supply` carries only `chain_length`. The one read that carries hops at all is
 `GET /api/models/agents/<backend>/chain?model=<id>`, per model and Hub only — a 直连
 backend gets the documented `direct_mode` refusal. So 「Ready」 is defined on the two
 payloads on purpose: waiting on the third would hold the whole page for one row's
 projection, and on a 直连 group it would wait for a read the contract refuses. That
 refusal is also why a 直连 group draws no 当前 line and no takeover rather than an empty
 one — there is nothing there to be pending about.
+
+**And when that read answers, it carries the hops without saying which one is current**
+`[contract-gap]` **G-31**. `model-hub.md` §4.3 puts `current` in the read projection —
+「the read projection is `C` with live annotations plus `current`」 — and writes takeover
+on it; `agent-chain.schema.json` closes the payload without it. What survives is most of
+the row: the hops, their configured order, their health, their runnability and the
+model-grain `supply_state` are all on the wire, so the cost is bounded and nameable
+rather than structural. 当前 therefore renders **the hop a turn would use now** — the
+schema's own 「the next turn uses the FIRST item with `runnable: true`」 — and that
+reading is exact except across the one interval §4.3 legislates: 「recovery changes
+current execution position **on the next turn**」, so between a head becoming runnable
+again and the turn that actually moves back, the wire says the head and the truth is
+still the later hop. §1.1's *Takeover active* states that interval instead of pretending
+the two readings are one, and no frame here reads `current` as though it had arrived.
 
 **Until that read answers, the derived columns say so** `[derived]`. Current source,
 chain and takeover render `—` while the chain read is outstanding, and again when it
@@ -1601,13 +1626,22 @@ gave it, and renders `—` in its three derived columns where it sits.
 
 **One row this predicate cannot protect, and the reason is the payload rather than the
 rule** `[contract-gap]` **G-25**. `chain_length` counts stored hops, and `model-hub.md`
-§4.6 keeps a hop whose Source was deleted or whose model the source no longer advertises
-**on purpose** — 「its live reason remains visible until the Source recovers, the user
-removes or changes the pair, or a guarded cascade removes it」. So a menu model whose
+§4.6 keeps a hop the live read cannot run **on purpose** — 「its live reason remains
+visible until the Source recovers, the user removes or changes the pair, or a guarded
+cascade removes it」. Deletion is not one of those reasons and this row does not claim
+it is: §4.5 refuses an unforced Source `DELETE` while any configured chain names that
+Source, and `force=true` removes the Source and every hop naming it **in the same
+transaction**, so the contracted delete path leaves nothing dangling behind it. The
+stale hop this row is about is the ordinary one — a model the Source no longer
+advertises, or a pair whose Source sits in a state that does not clear itself — and
+`source_missing` stays a real chain reading for the store that was corrupted or edited
+outside those routes. So a menu model whose
 every hop is stale reports the same nonzero `chain_length` as a healthy one, reads
 `nominal` here, and is collapsible — while it is exactly the row that needs a person:
-nothing about it heals on its own, and adding the source back produces a *different*
-source that does not re-satisfy the stored hop (§1.1's *a hop's source is gone*). The
+nothing about it heals on its own, a model the Source stopped advertising returns only
+if the Source advertises it again, and a source that vanished outside the contracted
+path cannot be restored by adding it back, because that produces a *different* source
+which does not re-satisfy the stored hop (§1.1's *a hop's source is gone*). The
 read that can see the difference is the per-model one the paragraph above rules out, and
 that ruling is not what this row asks to reverse — a predicate waiting on N async
 failable requests reorganizes the group under the user's hands and stops being hard the
@@ -1721,18 +1755,29 @@ section's.
 
 ### 1.3 Frame 03 `qZhJ3` — Source-order drawer (per backend)
 
-**The question it answers:** *for one backend, when several sources could serve the
-same model, who goes first?* One ordered list, scoped to one backend, deciding where a
-newly added source lands in the chains built from that moment on.
+**The question it answers:** *for one backend, which sources is the gateway willing to
+draw on, and in what order does the user keep them?* One ordered list, scoped to one
+backend — the list add-time placement writes into, not a value any current policy reads
+back out.
 
 **It governs placement, not execution** `[spec]` S-1. A chain is stored configuration
-executed exactly as stored, and this order is read at one moment only: when a source is
-added. Reordering the list therefore leaves every existing chain untouched — including
-the chains that were built from an earlier state of this very list — and that is the
-property that makes the list safe to edit. Bringing chains that already exist back in
-line with the current order is a thing a user may well want, and it can only ever be an
-explicit action taken on those chains; no frame draws one and no route carries it
-`[contract-gap]` G-13.
+executed exactly as stored, so nothing in this list reaches a turn; what it reaches is
+add-time placement, which is where `model-hub.md` §4.6 puts it — 「a visible Gateway
+configuration and Add-time placement input」. What it does **not** do is decide an order
+at that moment. §4.2's only policy value, `placement-v1`, **appends** a newly added
+Source to each configuration-eligible backend order and **appends** every accepted exact
+match to that menu model's Route-chain tail, and an append lands in the same place
+whatever sequence the list is already in, so the sequence stored here has no reader
+`[contract-gap]` G-26. Reordering therefore leaves every existing chain untouched —
+including the chains that were built from an earlier state of this very list — and,
+while `placement-v1` is the policy, every future one as well. That is the property that
+makes the list safe to edit, and it is why this section's copy states what the drawer
+stores rather than naming a consumer. §4.2 calls `placement-v1` 「only the current policy
+value, not an API, UI, or acceptance invariant」, so a later policy may give the sequence
+a reader; what this frame must not do is draw one before the contract has it. Bringing
+chains that already exist back in line with the current order is a thing a user may well
+want, and it can only ever be an explicit action taken on those chains; no frame draws
+one and no route carries it `[contract-gap]` G-13.
 
 The scope in that sentence is the whole point of the frame, and it is what the frame
 used to get wrong. An earlier version drew one product-global order with native
@@ -3504,14 +3549,28 @@ thicker one.
 
 ---
 
-### 1.8 Frame 09 `UVR97` — Direct-only home (the first screen after upgrading)
+### 1.8 Frame 09 `UVR97` — Direct-only home (the page with nothing adopted)
 
-**The question it answers:** *I just upgraded and I have never used a gateway — what
-is this page, and why would I want one?* It is the same page as 01, in the state where
-nothing has been adopted yet.
+**The question it answers:** *nothing here is on a gateway and there are no sources —
+what is this page, and why would I want one?* It is the same page as 01, in the state
+where nothing is adopted. Upgrading into it is the common way to arrive; it is not the
+only one.
 
-**Display condition** `[derived]`: every backend is in 直连 mode and no source has been
-added. This is a *state of the Models surface*, not a separate onboarding route — the
+**Display condition** `[derived]`: every backend is in 直连 mode and no source exists.
+Both terms are read from current state, and that is deliberate — **this is a repeatable
+empty state, not a first-run screen.** The return path is contracted end to end: AC-31's
+round trip switches a backend Direct → Gateway → Direct and 「preserves saved Sources and
+route configuration」, and §4.5's Source `DELETE` then removes the survivors — refusing
+while a configured chain names one, and with `force=true` removing the Source and every
+hop naming it in the same transaction. A user who walks that path lands back here, and
+the page they get is this one. Nothing in the contract would let it behave otherwise:
+`AgentSupply`'s thirteen properties are all current-state, no route or schema in
+`docs/plans/model-hub-contracts/` records whether adoption ever happened, and a
+condition keyed on that history would be keyed on an input the product does not have.
+So the frame is specified as the empty state it is, rather than promising a
+disappearance the inputs cannot deliver.
+
+This is a *state of the Models surface*, not a separate onboarding route — the
 moment one backend switches, the page becomes 01. Specifying it as a route would create
 a second address that has to be kept in sync with the first and that users can reach
 after it stops being true.
@@ -3529,11 +3588,11 @@ and it is the one state where the two terms disagree.
 | **Yes** | either | 「模型」 (`YkN0P` on 01, `VaXos` on 08) | present: 「来源与网关」 · 「用量与额度」 `[frame]` | 01 — this frame is gone as a page |
 
 **The middle row needs no new frame, and this section's own reasoning is what settles
-it** `[derived]`. Two sentences already written above decide it. 09 is 01 「in the state
-where nothing has been adopted yet」, and the 你会多出三件事 card disappears once 「the
-user has now made [that decision] at least once」 — in the retained-source state they
-have. And 09 draws no upstream column, so rendering it here would hide sources the
-product just promised to keep, leaving no surface to inspect or delete them on. So the
+it** `[derived]`. 09 is 01 「in the state where nothing is adopted」, and in the middle
+row something is: the sources are still there. That alone would leave the choice open,
+so the frame decides it — 09 draws no upstream column, so rendering it here would hide
+sources the product just promised to keep, leaving no surface to inspect or delete them
+on. So the
 page is 01, and every element of it is already specified: the upstream module lists the
 retained sources (§1.1), each backend group renders in the 直连 form with 切换到网关 on
 its header (`g3Wh0P`) exactly as a partially-adopted page renders its still-direct
@@ -3559,9 +3618,13 @@ its *function* does, relocated. The three backend rows here each carry 切换到
 and 08 the same action rides on the still-direct backend's own group header (`g3Wh0P`
 on 01, `lcPvy` on 08, next to the 「直连」 subtitle). So partial adoption keeps every
 remaining backend one press from the gateway, without the page having to keep an
-onboarding card around for the two backends that have not moved. What is genuinely
-first-run-only is the 你会多出三件事 card, and it is correct that it disappears: it
-argues for a decision the user has now made at least once.
+onboarding card around for the two backends that have not moved. The 你会多出三件事 card
+is the part that does not relocate — it exists only on this frame, and it leaves as soon
+as the page becomes 01. **What it is not is first-run-only**, and writing it that way was
+the error: it argues from what the user has right now — no gateway, no sources, and three
+things they would gain — not from whether they have ever adopted one. A user who adopted,
+reverted and deleted their sources sees it again, and it is still true when they do. That
+is the difference between an onboarding card and an empty state, and this is the second.
 
 **What the shell drops, and why** `[frame]`. Frame 09 renders the header but **no tab
 strip, no three-column `cols` track, no dispatch rail, no wire layer and no legend.**
