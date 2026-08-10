@@ -1762,6 +1762,79 @@ def test_remote_model_and_backend_reads_follow_execution_safety_policy(path, loc
     assert ui_server._is_remote_local_execution_request("GET", path) is local_only
 
 
+def _show_event_frame() -> str:
+    return json.dumps(
+        {
+            "type": "show.event",
+            "data": {
+                "id": "evt-1",
+                "session_id": "ses123",
+                "transcript_text": "Annotation at /Users/alex/.avibe/state/media/shot.png",
+                "payload": {
+                    "author": {"kind": "user", "email": "owner@example.com"},
+                    "screenshot": {
+                        "attachmentId": "med_1",
+                        "path": "/Users/alex/.avibe/state/media/shot.png",
+                        "mimeType": "image/png",
+                        "width": 10,
+                        "height": 10,
+                    },
+                },
+            },
+        }
+    )
+
+
+def test_remote_show_event_stream_redacts_local_screenshot_path() -> None:
+    from vibe.authorization import AuthorizationContext
+
+    projected = ui_server._workbench_event_payload_for_context(
+        AuthorizationContext(instance_role="owner", is_remote=True),
+        "show.event",
+        _show_event_frame(),
+    )
+
+    assert projected is not None
+    assert "/Users/alex/.avibe" not in projected
+    data = json.loads(projected)["data"]
+    screenshot = data["payload"]["screenshot"]
+    assert "path" not in screenshot
+    # Everything the remote workbench needs to render the annotation survives.
+    assert screenshot["attachmentId"] == "med_1"
+    assert data["session_id"] == "ses123"
+    assert data["transcript_text"] == "Annotation at med_1"
+
+
+def test_remote_show_event_stream_drops_unprojectable_frame() -> None:
+    from vibe.authorization import AuthorizationContext
+
+    remote_owner = AuthorizationContext(instance_role="owner", is_remote=True)
+
+    assert (
+        ui_server._workbench_event_payload_for_context(remote_owner, "show.event", "not json")
+        is None
+    )
+    assert (
+        ui_server._workbench_event_payload_for_context(
+            remote_owner, "show.event", json.dumps({"type": "show.event", "data": "opaque"})
+        )
+        is None
+    )
+
+
+def test_local_show_event_stream_keeps_the_screenshot_path() -> None:
+    from vibe.authorization import trusted_local_context
+
+    frame = _show_event_frame()
+
+    assert (
+        ui_server._workbench_event_payload_for_context(
+            trusted_local_context(), "show.event", frame
+        )
+        == frame
+    )
+
+
 @pytest.mark.parametrize(
     ("method", "path", "json_body", "api_method"),
     [

@@ -10519,8 +10519,29 @@ def _workbench_event_visible_to_context(context, event_type: str, payload: str) 
     return False
 
 
-def _workbench_event_payload_for_context(context, event_type: str, payload: str) -> str:
-    """Project-filter aggregate payloads whose values depend on the recipient."""
+def _workbench_event_payload_for_context(context, event_type: str, payload: str) -> str | None:
+    """Project-filter aggregate payloads whose values depend on the recipient.
+
+    Returns ``None`` when the event cannot be projected safely for this
+    recipient, in which case the caller drops the frame.
+    """
+    if event_type == "show.event" and context is not None and context.is_remote:
+        # A Show annotation event carries the absolute host path of its
+        # materialized screenshot. Remote subscribers read the image by
+        # attachment id, so drop the path rather than stream the host layout —
+        # and drop the whole frame if it cannot be projected.
+        try:
+            envelope = json.loads(payload)
+        except (TypeError, json.JSONDecodeError):
+            return None
+        data = envelope.get("data") if isinstance(envelope, dict) else None
+        if not isinstance(data, dict):
+            return None
+        return json.dumps(
+            {**envelope, "data": _remote_safe_show_event_payload(data)},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
     if event_type == "vaults.updated" and context is not None and context.is_remote:
         try:
             envelope = json.loads(payload)
@@ -10661,6 +10682,8 @@ async def workbench_events():
                         event_type,
                         payload,
                     )
+                    if payload is None:
+                        continue
                     if (
                         event_type == "authorization.changed"
                         and authorization_context is not None
@@ -11503,7 +11526,12 @@ def _is_show_runtime_sensitive_file_segment(segment: str) -> bool:
     )
 
 
-def _is_show_page_runtime_denied_path(asset_path: str, *, session_id: str, public: bool = False) -> bool:
+def _is_show_page_runtime_denied_path(
+    asset_path: str,
+    *,
+    session_id: str,
+    confine_to_workspace: bool = False,
+) -> bool:
     decoded = _decode_show_page_asset_path(asset_path)
     segments = [segment for segment in decoded.split("/") if segment]
     if any(_is_show_runtime_sensitive_file_segment(segment) for segment in segments):
@@ -11513,7 +11541,11 @@ def _is_show_page_runtime_denied_path(asset_path: str, *, session_id: str, publi
     # Vite `@fs/<abs>` paths can be non-dot (e.g. a workspace symlink `evil.txt`),
     # so classify them fully here rather than through the dot-segment fast path.
     if decoded.startswith("@fs/"):
-        return _is_denied_show_page_at_fs_path(decoded, session_id=session_id, public=public)
+        return _is_denied_show_page_at_fs_path(
+            decoded,
+            session_id=session_id,
+            confine_to_workspace=confine_to_workspace,
+        )
     dot_segments = [index for index, segment in enumerate(segments) if segment.startswith(".")]
     if not dot_segments:
         return False
@@ -11525,7 +11557,7 @@ def _is_show_page_runtime_denied_path(asset_path: str, *, session_id: str, publi
     return not vite_dependency
 
 
-def _is_denied_show_page_at_fs_path(decoded: str, *, session_id: str, public: bool) -> bool:
+def _is_denied_show_page_at_fs_path(decoded: str, *, session_id: str, confine_to_workspace: bool) -> bool:
     # Recover the absolute filesystem path from Vite's `/@fs/<abs>` convention,
     # mirroring Vite's own fsPathFromId. This route stripped the URL's single
     # leading slash, so a POSIX request arrives as `@fs/home/...` (restore the
@@ -11563,14 +11595,17 @@ def _is_denied_show_page_at_fs_path(decoded: str, *, session_id: str, public: bo
     try:
         workspace_relative = target.relative_to(workspace)
     except ValueError:
-        # The resolved target is outside the workspace. On the PUBLIC surface,
-        # untrusted viewers must not read through a workspace file that symlinks OUT
-        # of the workspace (a symlink escape), so confine them to the workspace. The
-        # private authoring surface keeps this — an agent may legitimately symlink a
-        # disk file into its own page — and a genuine dependency path (its parent is
-        # literally outside the workspace) is still deferred to the Show Runtime's
-        # fs allowlist on both surfaces.
-        if public:
+        # The resolved target is outside the workspace. Untrusted viewers must not
+        # read through a workspace file that symlinks OUT of the workspace (a
+        # symlink escape), so confine them to the workspace. That covers the PUBLIC
+        # surface and any REMOTE viewer of the private `/show/` surface: remote
+        # collaborators reach the page over the tunnel and must never be able to
+        # read out-of-Project disk files through an authored symlink. Trusted-local
+        # authoring keeps the escape — an agent may legitimately symlink a disk file
+        # into its own page — and a genuine dependency path (its parent is literally
+        # outside the workspace) is still deferred to the Show Runtime's fs
+        # allowlist on every surface.
+        if confine_to_workspace:
             # Compare the requested path lexically (symlinks NOT followed here;
             # `..` was already rejected): a request ROOTED in the workspace whose
             # real target escapes it is a symlink escape — via a symlinked file OR
@@ -11775,6 +11810,9 @@ async def _show_event_response_from_payload(
         and show_event_request_requests_dispatch(payload)
     ):
         return _remote_execution_disabled_response()
+    # The echo of the stored event goes back to whoever posted it, so a remote
+    # author must not learn the local screenshot path from its own response.
+    remote = not public and _is_remote_show_page_request()
     if show_event_payload_session_mismatch(session_id, payload):
         return (
             jsonify(
@@ -11815,6 +11853,7 @@ async def _show_event_response_from_payload(
                             event_payload,
                             public=public,
                             public_share_id=public_share_id,
+                            remote=remote,
                         ),
                     }
                 ),
@@ -11832,6 +11871,7 @@ async def _show_event_response_from_payload(
                             event_payload,
                             public=public,
                             public_share_id=public_share_id,
+                            remote=remote,
                         ),
                     }
                 ),
@@ -11845,6 +11885,7 @@ async def _show_event_response_from_payload(
                     event_payload,
                     public=public,
                     public_share_id=public_share_id,
+                    remote=remote,
                 ),
             }
         ),
@@ -12109,14 +12150,43 @@ def _legacy_show_event_dispatch_text(event_payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _remote_safe_show_event_payload(event_payload: dict[str, Any]) -> dict[str, Any]:
+    """Drop the absolute host screenshot path from one Show event.
+
+    ``ShowSessionEventStore`` records ``payload.screenshot.path`` as a local
+    filesystem path so local tooling can read the materialized image. A remote
+    subscriber reads the same bytes through its attachment id, so the path is
+    useless to it and only discloses the host's directory layout — the public
+    Show projection strips it for exactly that reason, and any authorized remote
+    reader (workbench SSE, private Show page events, its own POST echo) must get
+    the same treatment.
+    """
+
+    payload = event_payload.get("payload")
+    if not isinstance(payload, dict):
+        return event_payload
+    screenshot = payload.get("screenshot")
+    if not isinstance(screenshot, dict) or "path" not in screenshot:
+        return event_payload
+    local_path = screenshot.get("path")
+    safe_screenshot = {key: value for key, value in screenshot.items() if key != "path"}
+    safe_event = {**event_payload, "payload": {**payload, "screenshot": safe_screenshot}}
+    transcript_text = safe_event.get("transcript_text")
+    if isinstance(local_path, str) and local_path and isinstance(transcript_text, str):
+        safe_reference = str(safe_screenshot.get("attachmentId") or "screenshot attachment")
+        safe_event["transcript_text"] = transcript_text.replace(local_path, safe_reference)
+    return safe_event
+
+
 def _show_event_response_payload(
     event_payload: dict[str, Any],
     *,
     public: bool = False,
     public_share_id: str | None = None,
+    remote: bool = False,
 ) -> dict[str, Any]:
     if not public:
-        return event_payload
+        return _remote_safe_show_event_payload(event_payload) if remote else event_payload
     public_event = {
         key: value
         for key, value in event_payload.items()
@@ -12205,16 +12275,18 @@ def _show_events_list_payload(
     *,
     public: bool = False,
     public_share_id: str | None = None,
+    remote: bool = False,
 ) -> dict[str, Any]:
-    if not public:
+    if not public and not remote:
         return payload
     return {
         **payload,
         "events": [
             _show_event_response_payload(
                 event_payload,
-                public=True,
+                public=public,
                 public_share_id=public_share_id,
+                remote=remote,
             )
             for event_payload in payload.get("events", [])
             if isinstance(event_payload, dict)
@@ -12228,6 +12300,7 @@ async def _show_events_stream(
     after_id: str | None = None,
     public: bool = False,
     public_share_id: str | None = None,
+    remote: bool = False,
     authorization_refresh_at: float | None = None,
     authorization_context: Any = None,
     remote_session_payload: Mapping[str, Any] | None = None,
@@ -12298,6 +12371,7 @@ async def _show_events_stream(
                                 event_payload,
                                 public=public,
                                 public_share_id=public_share_id,
+                                remote=remote,
                             ),
                         )
                     cursor = batch.get("next_after_id")
@@ -12343,6 +12417,7 @@ async def _show_events_stream(
                                 event_payload,
                                 public=public,
                                 public_share_id=public_share_id,
+                                remote=remote,
                             ),
                         )
                     elif (
@@ -12386,6 +12461,10 @@ async def _show_events_response(
     public: bool = False,
     public_share_id: str | None = None,
 ):
+    # A remote reader of the private Show surface must not receive local
+    # screenshot paths either; resolve it here because the SSE generator runs
+    # after the request context is gone.
+    remote = not public and _is_remote_show_page_request()
     if request.method == "GET":
         if request.args.get("stream") == "1":
             return await _show_events_stream(
@@ -12393,6 +12472,7 @@ async def _show_events_response(
                 after_id=request.args.get("after_id") or _last_event_id_from_request(),
                 public=public,
                 public_share_id=public_share_id,
+                remote=remote,
                 authorization_refresh_at=(
                     None if public else getattr(g, "remote_authorization_refresh_at", None)
                 ),
@@ -12420,6 +12500,7 @@ async def _show_events_response(
                     payload,
                     public=public,
                     public_share_id=public_share_id,
+                    remote=remote,
                 )
             )
         finally:
@@ -13198,7 +13279,14 @@ async def serve_private_show_page(session_id, asset_path):
         # visibility still fall through to not-found.
         if page.visibility not in {"private", "public"}:
             return _show_page_not_found_response()
-        if _is_show_page_runtime_denied_path(asset_path, session_id=page.session_id):
+        # A remote viewer is an untrusted viewer even on the private surface: keep
+        # its asset reads inside the page workspace so an authored symlink cannot
+        # serve out-of-Project disk files across the tunnel.
+        if _is_show_page_runtime_denied_path(
+            asset_path,
+            session_id=page.session_id,
+            confine_to_workspace=_is_remote_show_page_request(),
+        ):
             return _show_page_file_not_found_response()
         show_author = _show_request_author()
         can_annotate = show_author is not None
@@ -13284,7 +13372,11 @@ async def serve_public_show_page(share_id, asset_path):
             return _show_page_offline_response()
         if page.visibility != "public":
             return _show_page_not_found_response()
-        if _is_show_page_runtime_denied_path(asset_path, session_id=page.session_id, public=True):
+        if _is_show_page_runtime_denied_path(
+            asset_path,
+            session_id=page.session_id,
+            confine_to_workspace=True,
+        ):
             return _show_page_file_not_found_response()
         if asset_path.strip("/") == "__show/me":
             if request.method not in {"GET", "HEAD"}:

@@ -1755,9 +1755,122 @@ def test_public_show_page_allows_at_fs_dependency_outside_workspace(monkeypatch,
     assert manager.calls
 
 
+class _FakeShowEventStore:
+    def __init__(self, events):
+        self._events = events
+
+    def list(self, session_id, after_id=None, limit=100):
+        return {"events": self._events, "next_after_id": None}
+
+    def close(self):
+        return None
+
+
+def _screenshot_event(local_path: str) -> dict:
+    return {
+        "id": "evt-1",
+        "session_id": "ses123",
+        "transcript_text": f"Annotation at {local_path}",
+        "payload": {
+            "screenshot": {
+                "attachmentId": "med_1",
+                "path": local_path,
+                "mimeType": "image/png",
+            }
+        },
+    }
+
+
+def test_remote_private_show_events_redact_the_local_screenshot_path(monkeypatch, tmp_path):
+    # The private Show event surface is remote-readable, so it must project the
+    # same way the workbench SSE does: attachment id yes, host path no.
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    _create_show_page("ses123", "private")
+    local_path = str(tmp_path / "state" / "media" / "shot.png")
+    monkeypatch.setattr(
+        "vibe.ui_server._show_session_event_store",
+        lambda: _FakeShowEventStore([_screenshot_event(local_path)]),
+    )
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(config, "owner@example.com", "owner-1"),
+        domain="alex.avibe.bot",
+    )
+
+    response = client.get(
+        "/show/ses123/__show/events",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+
+    assert response.status_code == 200
+    event = response.json()["events"][0]
+    assert "path" not in event["payload"]["screenshot"]
+    assert event["payload"]["screenshot"]["attachmentId"] == "med_1"
+    assert local_path not in event["transcript_text"]
+
+
+def test_local_private_show_events_keep_the_local_screenshot_path(monkeypatch, tmp_path):
+    # Trusted-local authoring tools still read the materialized file directly.
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _create_show_page("ses123", "private")
+    local_path = str(tmp_path / "state" / "media" / "shot.png")
+    monkeypatch.setattr(
+        "vibe.ui_server._show_session_event_store",
+        lambda: _FakeShowEventStore([_screenshot_event(local_path)]),
+    )
+
+    response = app.test_client().get(
+        "/show/ses123/__show/events",
+        base_url="http://127.0.0.1:5123",
+    )
+
+    assert response.status_code == 200
+    assert response.json()["events"][0]["payload"]["screenshot"]["path"] == local_path
+
+
+def test_remote_private_show_page_denies_at_fs_workspace_symlink_escape(monkeypatch, tmp_path):
+    # A REMOTE viewer of a private page is an untrusted viewer: the workspace
+    # symlink escape the local author may use must not serve out-of-Project disk
+    # files across the tunnel.
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    _create_show_page("ses123", "private")
+    workspace = paths.get_show_page_dir("ses123")
+    outside = tmp_path / "outside_secret.txt"
+    outside.write_text("TOPSECRET", encoding="utf-8")
+    link = workspace / "pwn.txt"
+    os.symlink(outside, link)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(config, "owner@example.com", "owner-1"),
+        domain="alex.avibe.bot",
+    )
+    manager = _FakeShowRuntimeManager(body=b"TOPSECRET")
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        response = client.get(
+            f"/show/ses123/@fs{link.as_posix()}",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 404
+    assert b"TOPSECRET" not in response.content
+    # The Show Runtime was never asked for the escaping path.
+    assert manager.calls == []
+
+
 def test_private_show_page_allows_at_fs_workspace_symlink(monkeypatch, tmp_path):
     # The private authoring surface intentionally allows a workspace symlink to a
-    # disk file (a supported feature). Only the public surface confines it.
+    # disk file (a supported feature) for trusted-local authors. Public and remote
+    # viewers are confined to the workspace.
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _create_show_page("ses123", "private")
@@ -1881,11 +1994,11 @@ def test_public_show_page_denies_at_fs_extra_leading_slash_symlink_escape(monkey
 
     decoded = f"@fs//{workspace.as_posix()}/pwn.txt"  # `@fs///<ws>/pwn.txt`
     assert ui_server._is_show_page_runtime_denied_path(
-        decoded, session_id="ses123", public=True
+        decoded, session_id="ses123", confine_to_workspace=True
     )
-    # The same request stays allowed on the private authoring surface.
+    # The same request stays allowed for a trusted-local author.
     assert not ui_server._is_show_page_runtime_denied_path(
-        decoded, session_id="ses123", public=False
+        decoded, session_id="ses123", confine_to_workspace=False
     )
 
 
