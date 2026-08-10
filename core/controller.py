@@ -15,6 +15,7 @@ from config.v2_config import (
     DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS,
     DEFAULT_AGENT_PROGRESS_STYLE,
     MemoryConfig,
+    config_write_transaction,
 )
 from modules.im import BaseIMClient, MessageContext, IMFactory
 from modules.im.multi import MultiIMClient
@@ -778,9 +779,10 @@ class Controller:
 
             from config.v2_config import V2Config
 
-            v2_config = V2Config.load()
-            v2_config.language = chosen
-            v2_config.save()
+            with config_write_transaction():
+                v2_config = V2Config.load()
+                v2_config.language = chosen
+                v2_config.save()
             self.config.language = chosen
             logger.info("Migrated legacy per-channel language to global config: %s", chosen)
         except Exception as err:

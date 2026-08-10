@@ -37,7 +37,7 @@ import requests
 from jwt import PyJWKClient
 
 from config import paths
-from config.v2_config import CONFIG_LOCK, V2Config
+from config.v2_config import CONFIG_LOCK, V2Config, config_write_transaction
 from vibe import api, cloudflare_network, runtime
 from vibe import tunnel_quality
 
@@ -2551,8 +2551,12 @@ def stop(config: V2Config | None = None) -> dict[str, Any]:
 
 
 def rotate_session_secret(config: V2Config) -> None:
-    config.remote_access.vibe_cloud.session_secret = secrets.token_urlsafe(32)
-    config.save()
+    session_secret = secrets.token_urlsafe(32)
+    with config_write_transaction():
+        persisted = V2Config.load()
+        persisted.remote_access.vibe_cloud.session_secret = session_secret
+        persisted.save()
+    config.remote_access.vibe_cloud.session_secret = session_secret
 
 
 def start(config: V2Config | None = None) -> dict[str, Any]:

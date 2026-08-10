@@ -15,7 +15,6 @@ from sqlalchemy import func, select
 
 from config import paths
 from config.v2_config import (
-    CONFIG_LOCK,
     MODEL_HUB_BACKENDS,
     ModelHubAgentSupplyConfig,
     ModelHubConfig,
@@ -26,6 +25,7 @@ from config.v2_config import (
     ModelHubSourceStateConfig,
     ModelHubSourceUsageConfig,
     V2Config,
+    config_write_transaction,
 )
 from core.services.settings import default_config
 from storage.db import get_cached_sqlite_engine
@@ -148,7 +148,7 @@ class V2ModelHubConfigStore:
             return default_config().model_hub
 
     def save(self, model_hub: ModelHubConfig) -> None:
-        with CONFIG_LOCK:
+        with config_write_transaction():
             try:
                 config = V2Config.load()
             except FileNotFoundError:

@@ -1639,7 +1639,7 @@ class V2Config:
         self,
         config_path: Optional[Path] = None,
         *,
-        preserve_memory: bool = True,
+        preserve_memory: bool = False,
     ) -> None:
         paths.ensure_data_dirs()
         path = config_path or paths.get_config_path()

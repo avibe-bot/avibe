@@ -30,7 +30,7 @@ def _save_stale_general_config(
     if not release.wait(timeout=5):
         raise TimeoutError("test did not release stale general config writer")
     stale.runtime.log_level = "DEBUG"
-    stale.save()
+    stale.save(preserve_memory=True)
 
 
 def _save_memory_candidate(avibe_home: str) -> None:
@@ -78,6 +78,30 @@ def _save_paused_memory_candidate(
 def _save_general_config(avibe_home: str) -> None:
     os.environ["AVIBE_HOME"] = avibe_home
     api.save_config({"runtime": {"log_level": "DEBUG"}})
+
+
+def _save_paused_model_hub_config(
+    avibe_home: str,
+    about_to_lock,
+    release,
+) -> None:
+    os.environ["AVIBE_HOME"] = avibe_home
+    from config.v2_config import ModelHubConfig
+    from core.handlers.model_hub.service import V2ModelHubConfigStore
+    from storage.lock import MigrationFileLock
+
+    original_acquire = MigrationFileLock.acquire
+
+    def acquire_after_release(lock) -> None:
+        about_to_lock.set()
+        if not release.wait(timeout=5):
+            raise TimeoutError("test did not release Model Hub config writer")
+        original_acquire(lock)
+
+    MigrationFileLock.acquire = acquire_after_release
+    V2ModelHubConfigStore().save(
+        ModelHubConfig(subscription_hub_experimental=True)
+    )
 
 
 def _payload(memory: dict) -> dict:
@@ -259,6 +283,25 @@ def test_generic_config_save_preserves_memory_keys(monkeypatch, tmp_path) -> Non
     assert saved.memory.embedding_change_pending is True
 
 
+def test_v2_config_save_persists_intentional_memory_mutation(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    V2Config.from_payload(
+        _payload({"enabled": False, "processing": {}})
+    ).save()
+    config = V2Config.load()
+    config.memory = MemoryConfig(
+        enabled=False,
+        embedding_change_pending=True,
+    )
+
+    config.save()
+
+    assert V2Config.load().memory.embedding_change_pending is True
+
+
 def test_config_write_transaction_reuses_same_path_lock(monkeypatch, tmp_path) -> None:
     from storage.lock import MigrationFileLock
 
@@ -382,6 +425,52 @@ def test_stale_memory_writer_cannot_overwrite_general_config_across_processes(
     assert persisted.runtime.log_level == "DEBUG"
     assert persisted.memory.processing.embedding.model == "embed-v2"
     assert persisted.memory.embedding_change_pending is True
+
+
+def test_model_hub_writer_preserves_concurrent_general_config_across_processes(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    V2Config.from_payload(
+        _payload(
+            {
+                "enabled": False,
+                "processing": _complete_processing(),
+            }
+        )
+    ).save()
+    context = multiprocessing.get_context("spawn")
+    about_to_lock = context.Event()
+    release = context.Event()
+    model_hub = context.Process(
+        target=_save_paused_model_hub_config,
+        args=(str(tmp_path), about_to_lock, release),
+    )
+    general = context.Process(
+        target=_save_general_config,
+        args=(str(tmp_path),),
+    )
+
+    model_hub.start()
+    try:
+        assert about_to_lock.wait(timeout=5)
+        general.start()
+        general.join(timeout=5)
+        assert general.exitcode == 0
+        release.set()
+        model_hub.join(timeout=5)
+        assert model_hub.exitcode == 0
+    finally:
+        release.set()
+        for process in (general, model_hub):
+            if process.is_alive():
+                process.terminate()
+            process.join(timeout=5)
+
+    persisted = V2Config.load()
+    assert persisted.runtime.log_level == "DEBUG"
+    assert persisted.model_hub.subscription_hub_experimental is True
 
 
 def test_memory_save_uses_dedicated_config_writer(monkeypatch, tmp_path) -> None:

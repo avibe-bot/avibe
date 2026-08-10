@@ -6336,7 +6336,7 @@ def _run_install_command(
             # config entries, so they must not touch V2Config bookkeeping.
             if installed_path and is_agent_backend(name):
                 try:
-                    with CONFIG_LOCK:
+                    with config_write_transaction():
                         try:
                             cfg = load_config()
                         except FileNotFoundError:
@@ -6623,7 +6623,7 @@ def _persist_avault_cli_path(path: str) -> None:
             load_config()
         except FileNotFoundError:
             save_config({})
-        with CONFIG_LOCK:
+        with config_write_transaction():
             cfg = load_config()
             previous = getattr(cfg.agents.avault, "cli_path", "") or ""
             if previous != path:
@@ -8997,7 +8997,7 @@ def remove_backend_api_key(backend: str) -> dict:
 
     # Clear V2Config api_key for both backends.
     try:
-        with CONFIG_LOCK:
+        with config_write_transaction():
             try:
                 config = load_config()
             except FileNotFoundError:
@@ -9286,7 +9286,7 @@ def save_codex_auth(payload: dict) -> dict:
         logger.error("Failed to write Codex auth files: %s", exc, exc_info=True)
         return {"ok": False, "message": f"Failed to write Codex config: {exc}"}
 
-    with CONFIG_LOCK:
+    with config_write_transaction():
         try:
             config = load_config()
         except FileNotFoundError:
@@ -9573,7 +9573,7 @@ def save_claude_auth(payload: dict) -> dict:
         logger.error("Failed to write Claude settings.json: %s", exc, exc_info=True)
         return {"ok": False, "message": f"Failed to write Claude settings: {exc}"}
 
-    with CONFIG_LOCK:
+    with config_write_transaction():
         try:
             config = load_config()
         except FileNotFoundError:
@@ -10958,7 +10958,7 @@ async def _delete_opencode_provider_auth_async(provider_id: str) -> dict:
 def _clear_opencode_default_provider_if(provider_id: str) -> None:
     """Clear the saved OpenCode default if it points at ``provider_id``."""
 
-    with CONFIG_LOCK:
+    with config_write_transaction():
         try:
             cfg = load_config()
         except FileNotFoundError:
@@ -11064,7 +11064,7 @@ def set_opencode_default_provider(payload: dict) -> dict:
         return {"ok": False, "message": "provider_id is required"}
     provider_id = raw.strip()
 
-    with CONFIG_LOCK:
+    with config_write_transaction():
         try:
             config = load_config()
         except FileNotFoundError:
