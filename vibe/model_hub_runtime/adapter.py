@@ -30,7 +30,6 @@ from core.handlers.model_hub.adapter import (
 from core.handlers.model_hub.errors import ModelDiscoveryError
 from vibe.model_hub_runtime.client import (
     _OFFICIAL_BASE_URLS,
-    _endpoint_for_protocol,
     EngineClient,
     EngineClientError,
     EngineInvokeHandle,
@@ -100,6 +99,22 @@ class _ProtocolEvidenceRule:
         if self.error_params is not None and error.get("param") not in self.error_params:
             return False
         return True
+
+
+@dataclass(frozen=True)
+class _ProtocolObservationTaxonomy:
+    """One protocol's request shape and response evidence table.
+
+    The request path and body are part of the same authority as the response
+    taxonomy. OpenAI probes deliberately provide the common ``model`` field
+    while omitting the candidate-specific ``input`` or ``messages`` field, so
+    each endpoint reaches its own protocol-shaped validation error.
+    """
+
+    request_path: str
+    request_body: Mapping[str, Any]
+    oauth_path: str | None
+    evidence_rules: tuple[_ProtocolEvidenceRule, ...]
 
 
 _SUCCESS_STATUSES = frozenset(range(200, 300))
@@ -197,55 +212,74 @@ def _openai_evidence_rules(
     )
 
 
-_PROTOCOL_EVIDENCE_RULES = {
-    "anthropic": (
-        _ProtocolEvidenceRule(
-            statuses=_SUCCESS_STATUSES,
-            top_level_field="type",
-            top_level_values=frozenset({"message"}),
-            protocol=_ProtocolProof.PROVEN,
-            authentication=_AuthenticationEvidence.ACCEPTED,
-        ),
-        _ProtocolEvidenceRule(
-            statuses=_REQUEST_ERROR_STATUSES,
-            top_level_field="type",
-            top_level_values=frozenset({"error"}),
-            error_identifiers=_REQUEST_ERROR_IDENTIFIERS | _MODEL_ERROR_IDENTIFIERS,
-            protocol=_ProtocolProof.PROVEN,
-            authentication=_AuthenticationEvidence.ACCEPTED,
-        ),
-        _ProtocolEvidenceRule(
-            statuses=_AUTHENTICATION_ERROR_STATUSES,
-            top_level_field="type",
-            top_level_values=frozenset({"error"}),
-            error_identifiers=_AUTHENTICATION_ERROR_IDENTIFIERS,
-            protocol=_ProtocolProof.PROVEN,
-            authentication=_AuthenticationEvidence.REJECTED,
-        ),
-        _ProtocolEvidenceRule(
-            statuses=_SERVER_ERROR_STATUSES,
-            top_level_field="type",
-            top_level_values=frozenset({"error"}),
-            error_identifiers=_SERVER_ERROR_IDENTIFIERS,
-            protocol=_ProtocolProof.PROVEN,
-            authentication=_AuthenticationEvidence.UNKNOWN,
-        ),
-        _ProtocolEvidenceRule(
-            statuses=_RATE_LIMIT_STATUSES,
-            top_level_field="type",
-            top_level_values=frozenset({"error"}),
-            error_identifiers=_RATE_LIMIT_ERROR_IDENTIFIERS,
-            protocol=_ProtocolProof.PROVEN,
-            authentication=_AuthenticationEvidence.UNKNOWN,
+_PROTOCOL_OBSERVATION_TAXONOMY = {
+    "anthropic": _ProtocolObservationTaxonomy(
+        request_path="/v1/messages",
+        request_body={
+            "model": "__avibe_model_hub_probe__",
+            "max_tokens": 1,
+            "messages": [{"role": "user", "content": "ping"}],
+        },
+        oauth_path="/v1/messages?beta=true",
+        evidence_rules=(
+            _ProtocolEvidenceRule(
+                statuses=_SUCCESS_STATUSES,
+                top_level_field="type",
+                top_level_values=frozenset({"message"}),
+                protocol=_ProtocolProof.PROVEN,
+                authentication=_AuthenticationEvidence.ACCEPTED,
+            ),
+            _ProtocolEvidenceRule(
+                statuses=_REQUEST_ERROR_STATUSES,
+                top_level_field="type",
+                top_level_values=frozenset({"error"}),
+                error_identifiers=_REQUEST_ERROR_IDENTIFIERS | _MODEL_ERROR_IDENTIFIERS,
+                protocol=_ProtocolProof.PROVEN,
+                authentication=_AuthenticationEvidence.ACCEPTED,
+            ),
+            _ProtocolEvidenceRule(
+                statuses=_AUTHENTICATION_ERROR_STATUSES,
+                top_level_field="type",
+                top_level_values=frozenset({"error"}),
+                error_identifiers=_AUTHENTICATION_ERROR_IDENTIFIERS,
+                protocol=_ProtocolProof.PROVEN,
+                authentication=_AuthenticationEvidence.REJECTED,
+            ),
+            _ProtocolEvidenceRule(
+                statuses=_SERVER_ERROR_STATUSES,
+                top_level_field="type",
+                top_level_values=frozenset({"error"}),
+                error_identifiers=_SERVER_ERROR_IDENTIFIERS,
+                protocol=_ProtocolProof.PROVEN,
+                authentication=_AuthenticationEvidence.UNKNOWN,
+            ),
+            _ProtocolEvidenceRule(
+                statuses=_RATE_LIMIT_STATUSES,
+                top_level_field="type",
+                top_level_values=frozenset({"error"}),
+                error_identifiers=_RATE_LIMIT_ERROR_IDENTIFIERS,
+                protocol=_ProtocolProof.PROVEN,
+                authentication=_AuthenticationEvidence.UNKNOWN,
+            ),
         ),
     ),
-    "openai_responses": _openai_evidence_rules(
-        frozenset({"response"}),
-        _OPENAI_RESPONSES_PARAMS,
+    "openai_responses": _ProtocolObservationTaxonomy(
+        request_path="/v1/responses",
+        request_body={"model": "__avibe_model_hub_probe__"},
+        oauth_path="/backend-api/codex/responses",
+        evidence_rules=_openai_evidence_rules(
+            frozenset({"response"}),
+            _OPENAI_RESPONSES_PARAMS,
+        ),
     ),
-    "openai_chat": _openai_evidence_rules(
-        frozenset({"chat.completion", "chat.completion.chunk"}),
-        _OPENAI_CHAT_PARAMS,
+    "openai_chat": _ProtocolObservationTaxonomy(
+        request_path="/v1/chat/completions",
+        request_body={"model": "__avibe_model_hub_probe__"},
+        oauth_path=None,
+        evidence_rules=_openai_evidence_rules(
+            frozenset({"chat.completion", "chat.completion.chunk"}),
+            _OPENAI_CHAT_PARAMS,
+        ),
     ),
 }
 
@@ -282,7 +316,8 @@ def _parse_protocol_authenticated_evidence(
             authentication=_AuthenticationEvidence.UNKNOWN,
         )
 
-    for rule in _PROTOCOL_EVIDENCE_RULES.get(protocol, ()):
+    taxonomy = _PROTOCOL_OBSERVATION_TAXONOMY.get(protocol)
+    for rule in taxonomy.evidence_rules if taxonomy is not None else ():
         if rule.matches(status, payload):
             return _ProtocolEvidence(
                 protocol=rule.protocol,
@@ -309,7 +344,10 @@ async def _probe_protocol_response(
     root = base_url or _OFFICIAL_BASE_URLS.get(vendor)
     if not root:
         raise EngineClientError("source requires a base URL for protocol observation")
-    endpoint = _endpoint_for_protocol(protocol).removeprefix("/v1")
+    taxonomy = _PROTOCOL_OBSERVATION_TAXONOMY.get(protocol)
+    if taxonomy is None:
+        raise EngineClientError("unsupported source protocol")
+    endpoint = taxonomy.request_path.removeprefix("/v1")
     try:
         url = normalize_model_hub_base_url(root, append_path=endpoint)
     except (TypeError, ValueError):
@@ -331,7 +369,7 @@ async def _probe_protocol_response(
             async with session.post(
                 url,
                 headers=headers,
-                json={},
+                json=dict(taxonomy.request_body),
                 allow_redirects=False,
             ) as response:
                 body = await response.content.read(64 * 1024)
@@ -391,8 +429,11 @@ def _probe_oauth_protocol_response(
 ) -> _ProtocolEvidence:
     """Probe one allowlisted OAuth upstream through the engine-held credential."""
 
+    taxonomy = _PROTOCOL_OBSERVATION_TAXONOMY.get(protocol)
+    if taxonomy is None:
+        raise EngineClientError("unsupported source protocol")
     if vendor == "anthropic" and protocol == "anthropic":
-        url = "https://api.anthropic.com/v1/messages?beta=true"
+        url = f"https://api.anthropic.com{taxonomy.oauth_path or taxonomy.request_path}"
         headers = {
             "Authorization": "Bearer $TOKEN$",
             "Accept": "application/json",
@@ -402,7 +443,7 @@ def _probe_oauth_protocol_response(
             "X-App": "cli",
         }
     elif vendor in {"openai", "codex"} and protocol == "openai_responses":
-        url = "https://chatgpt.com/backend-api/codex/responses"
+        url = f"https://chatgpt.com{taxonomy.oauth_path or taxonomy.request_path}"
         headers = {
             "Authorization": "Bearer $TOKEN$",
             "Accept": "application/json",
@@ -424,7 +465,7 @@ def _probe_oauth_protocol_response(
             "method": "POST",
             "url": url,
             "header": headers,
-            "data": "{}",
+            "data": json.dumps(taxonomy.request_body, separators=(",", ":")),
         },
     )
     status = payload.get("status_code")

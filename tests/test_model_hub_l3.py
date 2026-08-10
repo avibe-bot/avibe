@@ -71,7 +71,7 @@ from vibe.model_hub_runtime.adapter import (
     CLIProxyEngineAdapter,
     _parse_protocol_authenticated_evidence,
     _probe_protocol_response,
-    _PROTOCOL_EVIDENCE_RULES,
+    _PROTOCOL_OBSERVATION_TAXONOMY,
     _ProtocolEvidence,
     _ProtocolProof,
 )
@@ -1653,6 +1653,9 @@ def test_oauth_observation_uses_the_bound_auth_index_and_requires_response_proof
     assert api_calls[0]["auth_index"] == "auth-index-test"
     assert api_calls[0]["header"]["Chatgpt-Account-Id"] == "account-test"
     assert api_calls[0]["url"].endswith("/responses")
+    assert json.loads(api_calls[0]["data"]) == dict(
+        _PROTOCOL_OBSERVATION_TAXONOMY["openai_responses"].request_body
+    )
 
     def ambiguous_management_request(method, path, *, query=None, payload=None):
         if path == "/auth-files":
@@ -1871,8 +1874,18 @@ def test_shared_openai_authentication_rejection_does_not_prove_a_protocol() -> N
 
 def test_protocol_observation_consumers_cannot_classify_from_status_codes() -> None:
     module_path = Path(__file__).parents[1] / "vibe/model_hub_runtime/adapter.py"
-    tree = ast.parse(module_path.read_text(encoding="utf-8"))
-    assert _PROTOCOL_EVIDENCE_RULES.keys() == set(SOURCE_PROTOCOLS)
+    module_source = module_path.read_text(encoding="utf-8")
+    tree = ast.parse(module_source)
+    assert _PROTOCOL_OBSERVATION_TAXONOMY.keys() == set(SOURCE_PROTOCOLS)
+    assert _PROTOCOL_OBSERVATION_TAXONOMY["openai_responses"].request_path != _PROTOCOL_OBSERVATION_TAXONOMY[
+        "openai_chat"
+    ].request_path
+    assert _PROTOCOL_OBSERVATION_TAXONOMY["openai_responses"].request_body == {
+        "model": "__avibe_model_hub_probe__"
+    }
+    assert _PROTOCOL_OBSERVATION_TAXONOMY["openai_chat"].request_body == {
+        "model": "__avibe_model_hub_probe__"
+    }
     consumers = {
         node.name: node
         for node in ast.walk(tree)
@@ -1884,7 +1897,13 @@ def test_protocol_observation_consumers_cannot_classify_from_status_codes() -> N
         "_probe_protocol_response",
         "_probe_oauth_protocol_response",
     }
+    assert "json={}" not in module_source
+    assert '"data": "{}"' not in module_source
+    assert "_endpoint_for_protocol(" not in module_source
     for consumer in consumers.values():
+        consumer_source = ast.get_source_segment(module_source, consumer)
+        assert consumer_source is not None
+        assert "_PROTOCOL_OBSERVATION_TAXONOMY" in consumer_source
         calls = [node for node in ast.walk(consumer) if isinstance(node, ast.Call)]
         assert any(
             isinstance(call.func, ast.Name) and call.func.id == "_parse_protocol_authenticated_evidence"
@@ -1919,11 +1938,11 @@ def test_protocol_observation_consumers_cannot_classify_from_status_codes() -> N
 def test_protocol_observation_preserves_query_on_each_distinct_upstream_path() -> None:
     query = "api-version=2026-07-23"
 
-    async def scenario() -> list[tuple[str, str]]:
-        requests: list[tuple[str, str]] = []
+    async def scenario() -> list[tuple[str, str, dict]]:
+        requests: list[tuple[str, str, dict]] = []
 
         async def reject_empty_probe(request: web.Request) -> web.Response:
-            requests.append((request.path, request.query_string))
+            requests.append((request.path, request.query_string, await request.json()))
             return web.json_response({"error": {"type": "invalid_request"}}, status=400)
 
         app = web.Application()
@@ -1947,11 +1966,40 @@ def test_protocol_observation_preserves_query_on_each_distinct_upstream_path() -
         return requests
 
     requests = asyncio.run(scenario())
-    paths = [path for path, _query in requests]
+    paths = [path for path, _query, _body in requests]
 
     assert len(paths) == len(SOURCE_PROTOCOLS)
     assert len(set(paths)) == len(paths)
-    assert {request_query for _path, request_query in requests} == {query}
+    assert {request_query for _path, request_query, _body in requests} == {query}
+    assert [body for _path, _query, body in requests] == [
+        dict(_PROTOCOL_OBSERVATION_TAXONOMY[protocol].request_body)
+        for protocol in SOURCE_PROTOCOLS
+    ]
+
+
+def test_openai_probe_requests_are_mutually_distinguishable() -> None:
+    responses = _PROTOCOL_OBSERVATION_TAXONOMY["openai_responses"]
+    chat = _PROTOCOL_OBSERVATION_TAXONOMY["openai_chat"]
+
+    assert responses.request_path != chat.request_path
+    assert "input" not in responses.request_body
+    assert "messages" not in chat.request_body
+    assert _parse_protocol_authenticated_evidence(
+        "openai_responses",
+        400,
+        json.dumps({"error": {"type": "invalid_request_error", "param": "messages"}}),
+    ) == _ProtocolEvidence(
+        protocol=_ProtocolProof.UNPROVEN,
+        authentication=_AuthenticationEvidence.UNKNOWN,
+    )
+    assert _parse_protocol_authenticated_evidence(
+        "openai_chat",
+        400,
+        json.dumps({"error": {"type": "invalid_request_error", "param": "input"}}),
+    ) == _ProtocolEvidence(
+        protocol=_ProtocolProof.UNPROVEN,
+        authentication=_AuthenticationEvidence.UNKNOWN,
+    )
 
 
 def test_model_discovery_preserves_query_when_appending_models_path() -> None:

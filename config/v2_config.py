@@ -167,6 +167,51 @@ def model_hub_fixed_menu_ids(backend: str) -> tuple[str, ...]:
     )
 
 
+def _migrate_fixed_menu_routes_on_load(payload: dict) -> dict:
+    """Adapt fixed-menu route keys to the current bundled catalog on reload.
+
+    A changed catalog is a one-time structural migration: newly introduced
+    menu ids receive empty routes and removed ids are discarded. Existing hop
+    payloads are copied verbatim; matching and placement never run here.
+    """
+
+    model_hub = payload.get("model_hub")
+    if not isinstance(model_hub, dict):
+        return payload
+    agents = model_hub.get("agents")
+    if not isinstance(agents, dict):
+        return payload
+
+    migrated_agents = dict(agents)
+    changed = False
+    for backend in ("claude", "codex"):
+        raw_agent = agents.get(backend)
+        if not isinstance(raw_agent, dict):
+            continue
+        routes = raw_agent.get("routes")
+        expected_menu_ids = model_hub_fixed_menu_ids(backend)
+        if not isinstance(routes, dict) or not expected_menu_ids:
+            continue
+        migrated_routes = {
+            model_id: routes.get(model_id, {"hops": []})
+            for model_id in expected_menu_ids
+        }
+        if migrated_routes == routes:
+            continue
+        migrated_agent = dict(raw_agent)
+        migrated_agent["routes"] = migrated_routes
+        migrated_agents[backend] = migrated_agent
+        changed = True
+
+    if not changed:
+        return payload
+    migrated_model_hub = dict(model_hub)
+    migrated_model_hub["agents"] = migrated_agents
+    migrated_payload = dict(payload)
+    migrated_payload["model_hub"] = migrated_model_hub
+    return migrated_payload
+
+
 _MODEL_HUB_CREDENTIAL_QUERY_KEYS = {
     "access_token",
     "api_key",
@@ -1512,7 +1557,7 @@ class V2Config:
             if not path.exists():
                 raise FileNotFoundError(f"Config not found: {path}")
             payload = json.loads(path.read_text(encoding="utf-8"))
-        return cls.from_payload(payload)
+        return cls.from_payload(_migrate_fixed_menu_routes_on_load(payload))
 
     @classmethod
     def from_payload(cls, payload: dict) -> "V2Config":
