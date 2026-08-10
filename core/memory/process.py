@@ -881,11 +881,29 @@ class EverOSRebuildProcess:
     async def reconcile_orphan(self) -> None:
         """Reap any managed child that could still own this provider root."""
 
+        _ensure_owner_directory(self._memory_dir)
+        root_lock = self._provider_root_lock()
+        root_lock.acquire()
+        try:
+            await self._reconcile_orphan_exclusive()
+        finally:
+            root_lock.release()
+
+    async def _reconcile_orphan_exclusive(self) -> None:
+        """Reap one managed child while the provider-root lock is held."""
+
         interrupted = await _finish_cleanup_despite_cancellation(
             self._ownership.reap(discover_missing=True)
         )
         if interrupted:
             raise asyncio.CancelledError
+
+    def _provider_root_lock(self) -> _ProviderRootLock:
+        lock_path = _provider_rebuild_lock_path(provider_root=self._provider_root)
+        return _ProviderRootLock(
+            confinement_root=lock_path.parent.parent,
+            path=lock_path,
+        )
 
     async def run(self) -> RebuildProcessResult:
         """Run the pinned rebuild command and release only after tree cleanup."""
@@ -903,11 +921,7 @@ class EverOSRebuildProcess:
                 provider_root=self._provider_root,
                 settings=self._settings,
             )
-            lock_path = _provider_rebuild_lock_path(provider_root=self._provider_root)
-            root_lock = _ProviderRootLock(
-                confinement_root=lock_path.parent.parent,
-                path=lock_path,
-            )
+            root_lock = self._provider_root_lock()
             root_lock.acquire()
         except _ProviderRootBusy:
             return RebuildProcessResult.ROOT_BUSY
@@ -926,7 +940,7 @@ class EverOSRebuildProcess:
         process_group: int | None = None
         identities: dict[int, float] = {}
         try:
-            await self.reconcile_orphan()
+            await self._reconcile_orphan_exclusive()
             _write_memory_child_config(
                 memory_dir=self._memory_dir,
                 provider_root=self._provider_root,
@@ -1013,7 +1027,8 @@ def _rebuild_result_for_exit_code(exit_code: int | None) -> RebuildProcessResult
 def _provider_rebuild_lock_path(*, provider_root: Path) -> Path:
     """Bind coordination to the canonical root location, outside provider data."""
 
-    canonical_root = provider_root.resolve(strict=True)
+    absolute_root = Path(os.path.abspath(os.fspath(provider_root)))
+    canonical_root = absolute_root.parent.resolve(strict=True) / absolute_root.name
     root_identity = hashlib.sha256(os.fsencode(canonical_root)).hexdigest()
     return (
         canonical_root.parent

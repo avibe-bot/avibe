@@ -2535,12 +2535,16 @@ async def test_rebuild_lock_is_shared_across_effective_homes_for_one_provider_ro
     )
     reconcile_entered = False
 
-    async def record_reconcile() -> None:
+    async def record_reconcile(*, discover_missing: bool = False) -> None:
         nonlocal reconcile_entered
+        del discover_missing
         reconcile_entered = True
 
-    contender.reconcile_orphan = record_reconcile
+    contender._ownership.reap = record_reconcile
     try:
+        with pytest.raises(memory_process._ProviderRootBusy):
+            await contender.reconcile_orphan()
+        assert reconcile_entered is False
         assert await contender.run() is RebuildProcessResult.ROOT_BUSY
         assert reconcile_entered is False
         assert contender_host.spawn_calls == []
@@ -3057,6 +3061,51 @@ async def test_rebuild_boot_cancellation_waits_for_orphan_reaping(tmp_path: Path
 
     assert not host.live_processes
     assert not process._ownership.record_path.exists()
+
+
+async def test_standalone_rebuild_reconciles_are_provider_root_exclusive(
+    tmp_path: Path,
+) -> None:
+    class _BlockingReapHost(_FakeProcessHost):
+        def __init__(self, **kwargs) -> None:
+            super().__init__(**kwargs)
+            self.reap_started = asyncio.Event()
+            self.release_reap = asyncio.Event()
+
+        async def wait_for_exit(self, *args, **kwargs) -> bool:
+            self.reap_started.set()
+            await self.release_reap.wait()
+            return await super().wait_for_exit(*args, **kwargs)
+
+    identities = {_ORPHAN_PID: _ORPHAN_CREATE_TIME}
+    owner_host = _BlockingReapHost(
+        rebuilds=dict(identities),
+        process_groups={_ORPHAN_PID: _ORPHAN_PID},
+        groups={_ORPHAN_PID: (identities, [])},
+        live_processes=dict(identities),
+    )
+    owner = _rebuild_process(tmp_path, owner_host)
+    owner_host.identities[_ORPHAN_PID] = _rebuild_identity(owner)
+    owner_task = asyncio.create_task(owner.reconcile_orphan())
+    await owner_host.reap_started.wait()
+
+    contender = _rebuild_process(tmp_path, _FakeProcessHost())
+    contender_scanned = False
+
+    async def record_reconcile(*, discover_missing: bool = False) -> None:
+        nonlocal contender_scanned
+        del discover_missing
+        contender_scanned = True
+
+    contender._ownership.reap = record_reconcile
+    with pytest.raises(memory_process._ProviderRootBusy):
+        await contender.reconcile_orphan()
+    assert contender_scanned is False
+
+    owner_host.release_reap.set()
+    await owner_task
+    await contender.reconcile_orphan()
+    assert contender_scanned is True
 
 
 async def test_rebuild_boot_reaps_multiple_exact_sidecars_before_rebuild(
