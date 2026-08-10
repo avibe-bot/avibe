@@ -25,6 +25,7 @@ import re
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from typing import BinaryIO
 from urllib.parse import urlparse
 
 from sqlalchemy.engine import Connection
@@ -37,6 +38,8 @@ logger = logging.getLogger(__name__)
 
 MAX_SHOW_SCREENSHOT_LONG_EDGE = 2048
 MAX_SHOW_SCREENSHOT_BYTES = 25 * 1024 * 1024
+MAX_WORKBENCH_ATTACHMENT_BYTES = 25 * 1024 * 1024
+_WORKBENCH_UPLOAD_CHUNK_BYTES = 1024 * 1024
 _SHOW_SCREENSHOT_DATA_URL_RE = re.compile(
     r"\Adata:(image/(?P<format>png|webp));base64,(?P<data>[A-Za-z0-9+/=]+)\Z",
     re.IGNORECASE,
@@ -54,6 +57,105 @@ class MaterializedShowScreenshot:
     content_type: str
     width: int
     height: int
+
+
+class WorkbenchAttachmentUploadError(ValueError):
+    """A user-correctable workbench attachment upload failure."""
+
+    def __init__(self, code: str, message: str, status: int) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.status = status
+
+
+@dataclass(frozen=True)
+class MaterializedWorkbenchAttachment:
+    token: str
+    name: str
+    mime: str
+    size: int
+    kind: str
+    path: str
+    width: int | None
+    height: int | None
+
+
+def materialize_workbench_attachment(
+    conn: Connection,
+    *,
+    scope_id: str | None,
+    session_id: str,
+    file_name: object,
+    content_type: object,
+    source: BinaryIO,
+) -> MaterializedWorkbenchAttachment:
+    """Stream one browser upload to disk and register its media capability.
+
+    The multipart parser already enforces the same cap while receiving the body;
+    this second boundary also covers the legacy JSON compatibility path and any
+    future caller that hands us a file-like object directly.
+    """
+    raw_name = file_name.strip() if isinstance(file_name, str) else ""
+    name = raw_name.replace("\\", "/").rsplit("/", 1)[-1].strip() or "upload"
+    raw_mime = content_type.strip() if isinstance(content_type, str) else ""
+    mime = raw_mime[:255] or "application/octet-stream"
+    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("_") or "upload"
+    safe_name = safe_name[-160:]
+
+    upload_dir = paths.get_attachments_dir() / "avibe" / session_id
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    upload_id = uuid.uuid4().hex[:16]
+    local_path = upload_dir / f"{upload_id}_{safe_name}"
+    temp_path = upload_dir / f".{upload_id}.tmp"
+    size = 0
+    try:
+        with temp_path.open("xb") as target:
+            while True:
+                chunk = source.read(_WORKBENCH_UPLOAD_CHUNK_BYTES)
+                if not chunk:
+                    break
+                if not isinstance(chunk, bytes):
+                    raise TypeError("attachment stream must return bytes")
+                size += len(chunk)
+                if size > MAX_WORKBENCH_ATTACHMENT_BYTES:
+                    raise WorkbenchAttachmentUploadError(
+                        "too_large",
+                        "File exceeds the attachment size limit",
+                        413,
+                    )
+                target.write(chunk)
+        if size == 0:
+            raise WorkbenchAttachmentUploadError("empty_file", "File is empty", 400)
+        os.replace(temp_path, local_path)
+        canonical_path = str(local_path.resolve(strict=True))
+        kind = "image" if mime.startswith("image/") else "file"
+        token = media_service.register(
+            conn,
+            scope_id=scope_id,
+            session_id=session_id,
+            kind=kind,
+            source="user_upload",
+            local_path=canonical_path,
+            file_name=name,
+            content_type=mime,
+        )
+        row = media_service.get_by_token(conn, token)
+    except Exception:
+        temp_path.unlink(missing_ok=True)
+        local_path.unlink(missing_ok=True)
+        raise
+
+    return MaterializedWorkbenchAttachment(
+        token=token,
+        name=name,
+        mime=mime,
+        size=size,
+        kind=kind,
+        path=canonical_path,
+        width=row.get("width_px") if row else None,
+        height=row.get("height_px") if row else None,
+    )
 
 
 def register_agent_reply_media(

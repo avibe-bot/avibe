@@ -69,6 +69,52 @@ describe('apiFetch remote auth recovery', () => {
     expect(remoteAuth.deferRemoteAuthRedirect).not.toHaveBeenCalled();
   });
 
+  it('refreshes a rejected CSRF token and safely replays the guarded mutation once', async () => {
+    let cookie = 'vibe_csrf_token=stale-token';
+    vi.stubGlobal('document', {
+      get cookie() {
+        return cookie;
+      },
+      set cookie(value: string) {
+        cookie = value.includes('Max-Age=0') ? '' : value.split(';', 1)[0];
+      },
+    });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (input === '/api/csrf-token') {
+        document.cookie = 'vibe_csrf_token=fresh-token; path=/';
+        return Response.json({ csrf_token: 'fresh-token' });
+      }
+      const token = new Headers(init?.headers).get('X-Vibe-CSRF-Token');
+      if (token === 'stale-token') {
+        return Response.json({ ok: false, message: 'Forbidden: invalid csrf token' }, { status: 403 });
+      }
+      return Response.json({ ok: true }, { status: 201 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const response = await apiFetch('/api/sessions/ses-1/attachments', {
+      method: 'POST',
+      body: new FormData(),
+    });
+
+    expect(response.status).toBe(201);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(new Headers(fetchMock.mock.calls[2][1]?.headers).get('X-Vibe-CSRF-Token')).toBe('fresh-token');
+  });
+
+  it('does not retry an unrelated forbidden mutation', async () => {
+    vi.stubGlobal('document', { cookie: 'vibe_csrf_token=token' });
+    const fetchMock = vi.fn(async () =>
+      Response.json({ ok: false, message: 'Forbidden' }, { status: 403 }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const response = await apiFetch('/api/settings', { method: 'POST' });
+
+    expect(response.status).toBe(403);
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
   it('honors the request signal while a shared CSRF request is pending', async () => {
     let resolveCsrf!: (response: Response) => void;
     const fetchMock = vi.fn(

@@ -322,8 +322,6 @@ def test_workbench_dispatch_propagates_attachment_and_resolved_identity(
     isolated_state,
     tmp_path,
 ):
-    import base64
-
     from vibe.ui_server import app
 
     _, session_id = _make_session(tmp_path)
@@ -332,14 +330,11 @@ def test_workbench_dispatch_propagates_attachment_and_resolved_identity(
     headers = csrf_headers(client, "http://127.0.0.1:15131")
     upload = client.post(
         f"/api/sessions/{session_id}/attachments",
-        json={
-            "name": "diagram.png",
-            "mime": "image/png",
-            "data": base64.b64encode(b"attachment-bytes").decode("ascii"),
-        },
+        files={"file": ("diagram.png", b"attachment-bytes", "image/png")},
         headers=headers,
         base_url="http://127.0.0.1:15131",
     )
+    assert upload.status_code == 201
 
     with patch("vibe.internal_client.dispatch_async", dispatch):
         response = client.post(
@@ -1704,6 +1699,93 @@ def test_standalone_session_accepts_attachment_upload(isolated_state):
         ).mappings().one()
     assert row["scope_id"] is None
     assert row["session_id"] == session["id"]
+
+
+def test_attachment_upload_preserves_unicode_name_and_binary_body(isolated_state, tmp_path):
+    from vibe.ui_server import app
+
+    _, session_id = _make_session(tmp_path)
+    client = app.test_client()
+
+    response = client.post(
+        f"/api/sessions/{session_id}/attachments",
+        files={"file": ("报告.txt", b"raw-binary\x00body", "text/plain")},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 201
+    payload = response.get_json()
+    assert payload["name"] == "报告.txt"
+    assert payload["mime"] == "text/plain"
+    assert payload["size"] == 15
+
+    from storage import media_service
+    from storage.db import create_sqlite_engine
+
+    with create_sqlite_engine().connect() as conn:
+        row = media_service.get_by_token(conn, payload["token"])
+    assert row is not None
+    assert Path(row["local_path"]).read_bytes() == b"raw-binary\x00body"
+
+
+def test_attachment_upload_rejects_oversized_part_without_partial_file(
+    isolated_state,
+    tmp_path,
+    monkeypatch,
+):
+    from config import paths
+    from core import workbench_media
+    from vibe.ui_server import app
+
+    monkeypatch.setattr(workbench_media, "MAX_WORKBENCH_ATTACHMENT_BYTES", 4)
+    _, session_id = _make_session(tmp_path)
+    client = app.test_client()
+
+    response = client.post(
+        f"/api/sessions/{session_id}/attachments",
+        files={"file": ("large.bin", b"12345", "application/octet-stream")},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 413
+    assert response.get_json() == {
+        "ok": False,
+        "error": {
+            "code": "too_large",
+            "message": "File exceeds the attachment size limit",
+        },
+        "max_file_bytes": 4,
+    }
+    upload_dir = paths.get_attachments_dir() / "avibe" / session_id
+    assert not upload_dir.exists() or not list(upload_dir.iterdir())
+
+
+def test_attachment_upload_cleans_partial_file_after_registration_failure(
+    isolated_state,
+    tmp_path,
+    monkeypatch,
+):
+    from config import paths
+    from storage import media_service
+    from vibe.ui_server import app
+
+    _, session_id = _make_session(tmp_path)
+
+    def fail_register(*_args, **_kwargs):
+        raise OSError("database unavailable")
+
+    monkeypatch.setattr(media_service, "register", fail_register)
+    client = app.test_client()
+    response = client.post(
+        f"/api/sessions/{session_id}/attachments",
+        files={"file": ("note.txt", b"hello", "text/plain")},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 500
+    assert response.get_json()["error"]["code"] == "upload_failed"
+    upload_dir = paths.get_attachments_dir() / "avibe" / session_id
+    assert not upload_dir.exists() or not list(upload_dir.iterdir())
 
 
 def test_patch_agent_name_only_backend_switch_blocked_while_turn_in_flight(isolated_state, tmp_path):

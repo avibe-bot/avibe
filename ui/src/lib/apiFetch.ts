@@ -5,6 +5,7 @@ const CSRF_HEADER_NAME = 'X-Vibe-CSRF-Token';
 const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
 let csrfTokenPromise: Promise<string> | null = null;
+let csrfRefreshPromise: Promise<string> | null = null;
 
 function readCookie(name: string): string | null {
   if (typeof document === 'undefined') {
@@ -95,6 +96,50 @@ export async function ensureCsrfToken(signal?: AbortSignal): Promise<string> {
   }
 }
 
+function clearCsrfCookie(): void {
+  if (typeof document === 'undefined') return;
+  document.cookie = `${CSRF_COOKIE_NAME}=; Max-Age=0; path=/; SameSite=Strict`;
+}
+
+async function refreshRejectedCsrfToken(
+  rejectedToken: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  const current = readCookie(CSRF_COOKIE_NAME);
+  if (current && current !== rejectedToken) return current;
+
+  if (!csrfRefreshPromise) {
+    clearCsrfCookie();
+    csrfTokenPromise = null;
+    const pending = fetchCsrfToken();
+    csrfRefreshPromise = pending;
+    void pending.then(
+      () => {
+        if (csrfRefreshPromise === pending) csrfRefreshPromise = null;
+      },
+      () => {
+        if (csrfRefreshPromise === pending) csrfRefreshPromise = null;
+      },
+    );
+  }
+  return waitForSignal(csrfRefreshPromise!, signal);
+}
+
+async function isInvalidCsrfResponse(response: Response): Promise<boolean> {
+  if (response.status !== 403) return false;
+  try {
+    const payload = await response.json();
+    return payload?.message === 'Forbidden: invalid csrf token';
+  } catch {
+    return false;
+  }
+}
+
+function canReplayRequest(input: RequestInfo | URL, body: BodyInit | null | undefined): boolean {
+  if (typeof Request !== 'undefined' && input instanceof Request) return false;
+  return !(typeof ReadableStream !== 'undefined' && body instanceof ReadableStream);
+}
+
 export async function apiFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
   const method = (init.method || 'GET').toUpperCase();
   const nextInit: RequestInit = { ...init };
@@ -107,13 +152,26 @@ export async function apiFetch(input: RequestInfo | URL, init: RequestInit = {})
     headers.set('Accept', 'application/json');
   }
 
+  let csrfToken = '';
   if (MUTATING_METHODS.has(method)) {
-    const token = await ensureCsrfToken(init.signal ?? undefined);
-    headers.set(CSRF_HEADER_NAME, token);
+    csrfToken = await ensureCsrfToken(init.signal ?? undefined);
+    headers.set(CSRF_HEADER_NAME, csrfToken);
   }
 
   nextInit.headers = headers;
-  const response = await fetch(input, nextInit);
+  let response = await fetch(input, nextInit);
+  // The CSRF guard rejects before the endpoint runs, so this exact response is
+  // safe to replay once. It covers a cookie/header race or a stale page without
+  // turning arbitrary 403s or non-replayable request streams into retries.
+  if (
+    csrfToken
+    && canReplayRequest(input, init.body)
+    && await isInvalidCsrfResponse(response.clone())
+  ) {
+    csrfToken = await refreshRejectedCsrfToken(csrfToken, init.signal ?? undefined);
+    headers.set(CSRF_HEADER_NAME, csrfToken);
+    response = await fetch(input, { ...nextInit, headers });
+  }
   // Global remote-access auth recovery. The AuthGuard validates the session
   // once and then stops re-running on ordinary navigation (so it doesn't
   // re-mount the shell on every sidebar click). If the Avibe Cloud cookie
