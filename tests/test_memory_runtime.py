@@ -491,6 +491,34 @@ def test_memory_artifact_rejects_scrubber_incompatibility_as_repairable_dependen
     assert manager.status()["reason"] == "memory_runtime_install_failed"
 
 
+def test_memory_artifact_prepare_maps_scrubber_rejection_to_public_install_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    binary = tmp_path / "python"
+    binary.write_text("#!/bin/sh\n", encoding="utf-8")
+    manager = MemoryArtifactManager(runtime_dir=tmp_path / "runtime", offline=True)
+
+    def smoke_succeeds(
+        command: list[str],
+        **_kwargs,
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout="1.2.3\n3.12.12\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(memory_artifact.subprocess, "run", smoke_succeeds)
+    monkeypatch.setattr(manager, "_admit_error_scrubbers", lambda _binary: False)
+
+    assert manager._prepare_binary(binary) == {
+        "ok": False,
+        "reason": "memory_runtime_install_failed",
+    }
+
+
 def test_memory_artifact_refuses_dev_runtime_without_importable_everos(monkeypatch, caplog, tmp_path: Path) -> None:
     dev_python = tmp_path / "dev-venv" / "bin" / "python"
     dev_python.parent.mkdir(parents=True)
@@ -3145,6 +3173,38 @@ async def test_runtime_restart_replaces_process_without_processing_preflight(
     assert old.stops == 1
     assert len(factory.created) == 1
     assert factory.supervised[0].starts == 1
+    await memory_runtime_factory.close(runtime)
+
+
+async def test_runtime_restart_preserves_admitted_recorder_health(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    memory_runtime_factory,
+) -> None:
+    factory = FakeEverOSProcessFactory()
+    runtime = memory_runtime_factory(
+        MemoryConfig(enabled=True, processing=_processing_config()),
+        artifact_manager=_installed_artifact(),
+        process_factory=factory,
+        effective_home=tmp_path,
+    )
+    runtime._process = FakeEverOSProcess()
+
+    async def disabled_recorder_health() -> dict[str, str | None]:
+        return {"state": "disabled", "reason": "writer_failures"}
+
+    monkeypatch.setattr(
+        runtime._sidecar,
+        "_read_recorder_health",
+        disabled_recorder_health,
+    )
+
+    assert await runtime.restart() == {"ok": True, "state": "ready"}
+    assert runtime._recorder_health == {
+        "state": "disabled",
+        "reason": "writer_failures",
+    }
+    assert runtime._sidecar.snapshot().records_calls is False
     await memory_runtime_factory.close(runtime)
 
 

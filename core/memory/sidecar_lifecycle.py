@@ -290,6 +290,15 @@ class MemorySidecarLifecycle:
                 and snapshot.generation == generation
                 and snapshot.running
             ):
+                assert snapshot.process is not None
+                await self._admit_recorder_health(snapshot.process, generation)
+                snapshot = self.snapshot()
+                if (
+                    not self._ready_admission_open
+                    or snapshot.generation != generation
+                    or not snapshot.running
+                ):
+                    continue
                 result = self._on_current_sidecar_ready(generation)
                 if asyncio.iscoroutine(result):
                     await result

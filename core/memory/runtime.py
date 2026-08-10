@@ -1624,7 +1624,6 @@ class MemoryRuntime:
                 self._runtime_error = "memory_sidecar_unavailable"
                 return {"ok": False, "error": self._runtime_error}
 
-            self._update_recorder_health(_RECORDER_DEGRADED)
             self._runtime_error = None
             self.module.resume_claims()
             self._ensure_worker()

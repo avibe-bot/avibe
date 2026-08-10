@@ -97,7 +97,7 @@ def pinned_modality_contract_script() -> str:
     exclusions = repr(frozenset(PINNED_UPSTREAM_EXCLUDED_EXTENSIONS))
     return (
         "from everalgo.types.modality import SUPPORTED_EXTENSIONS\n"
-        "assert isinstance(SUPPORTED_EXTENSIONS, frozenset)\n"
+        "assert isinstance(SUPPORTED_EXTENSIONS, (set, frozenset))\n"
         "assert all(isinstance(extension, str) for extension in SUPPORTED_EXTENSIONS)\n"
-        f"assert SUPPORTED_EXTENSIONS - {exclusions} == {expected}\n"
+        f"assert frozenset(SUPPORTED_EXTENSIONS) - {exclusions} == {expected}\n"
     )

@@ -587,7 +587,7 @@ class MemoryArtifactManager(ManagedRuntimeManager):
         if result.returncode != 0 or result.stdout.splitlines() != [EVEROS_VERSION, EMBEDDED_PYTHON_VERSION]:
             return {"ok": False, "reason": "memory_runtime_smoke_failed"}
         if not self._admit_error_scrubbers(binary):
-            return {"ok": False, "reason": "memory_runtime_prepare_failed"}
+            return {"ok": False, "reason": "memory_runtime_install_failed"}
         return {
             "ok": True,
             "everos_version": EVEROS_VERSION,

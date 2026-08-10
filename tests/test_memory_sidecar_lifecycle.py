@@ -113,6 +113,51 @@ async def test_start_keeps_recorder_ownership_when_child_health_is_malformed(
     assert lifecycle.snapshot().records_calls is True
 
 
+async def test_supervised_restart_readmits_recorder_health_before_ready(
+    tmp_path: Path,
+) -> None:
+    factory = FakeEverOSProcessFactory()
+    health = iter(
+        (
+            {"state": "active", "reason": None},
+            {"state": "disabled", "reason": "writer_failures"},
+        )
+    )
+    seen: list[dict[str, str | None]] = []
+    ready_health: list[dict[str, str | None]] = []
+    ready = asyncio.Event()
+
+    async def recorder_health() -> dict[str, str | None]:
+        return next(health)
+
+    def observe_recorder_health(value: dict[str, str | None]) -> None:
+        seen.append(value)
+
+    def observe_ready(_generation: int) -> None:
+        ready_health.append(seen[-1])
+        ready.set()
+
+    lifecycle = _lifecycle(
+        tmp_path,
+        factory,
+        observe_ready,
+        recorder_health,
+        observe_recorder_health,
+    )
+
+    assert await lifecycle.start(Path(sys.executable), _settings()) is True
+    supervised = factory.supervised[0]
+    await supervised.start()
+    await asyncio.wait_for(ready.wait(), timeout=1.0)
+
+    assert seen == [
+        {"state": "active", "reason": None},
+        {"state": "disabled", "reason": "writer_failures"},
+    ]
+    assert ready_health == [{"state": "disabled", "reason": "writer_failures"}]
+    assert lifecycle.snapshot().records_calls is False
+
+
 async def test_stop_failure_retains_current_supervisor(tmp_path: Path) -> None:
     factory = FakeEverOSProcessFactory(template=lambda: FakeEverOSProcess(stop_failure=RuntimeError("stuck")))
     lifecycle = _lifecycle(tmp_path, factory, lambda _generation: None)
