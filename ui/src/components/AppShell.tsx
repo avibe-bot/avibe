@@ -343,12 +343,21 @@ export const AppShell: React.FC = () => {
       (path) => location.pathname === path || location.pathname.startsWith(`${path}/`),
     );
   // Owner is not enough for these: `can_manage_instance` stays true for a remote
-  // Instance owner, but Harness runs entirely on local-only routes (starting with
-  // `/api/harness/bootstrap`) and the Library's Show Page controls (visibility,
-  // share rotation, icon upload) are local-only too. `can_use_system` is the
-  // trusted-local capability (not remote AND owner), so require it as well.
+  // Instance owner, but these surfaces run on local-only routes. Harness opens
+  // entirely on `/api/harness/bootstrap`-style routes; the Library's Show Page
+  // controls (visibility, share rotation, icon upload) are local-only; the
+  // service page mutates runtime/local process state; and the platform/backend
+  // settings pages enter and validate IM credentials and agent CLI paths, whose
+  // config saves are protected fields rejected by the remote payload filter (or
+  // `POST /api/settings`, which is local-only). `can_use_system` is the
+  // trusted-local capability (not remote AND owner), so require it as well —
+  // otherwise a remote owner renders controls that dead-end in
+  // `remote_execution_disabled`. Messaging settings are excluded: its saves are
+  // restricted to remotely-mutable preference fields by the payload filter.
   const localSystemPath =
     location.pathname.startsWith('/admin/settings/service') ||
+    location.pathname.startsWith('/admin/settings/platforms') ||
+    location.pathname.startsWith('/admin/settings/backends') ||
     ['/harness', '/apps/library'].some(
       (path) => location.pathname === path || location.pathname.startsWith(`${path}/`),
     );
