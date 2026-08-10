@@ -25,6 +25,7 @@ from core.run_settlement import (
     SETTLED_BY_STOPPED,
     SETTLED_BY_TERMINAL_RESULT,
 )
+from core.processing_indicator import INTERRUPTED_REACTION_EMOJI
 from core.runtime_activation import (
     RuntimeActivationRegistry,
     RuntimeActivationResolution,
@@ -3180,6 +3181,105 @@ def test_accepted_codex_turn_without_runtime_settles_and_releases_queue(managers
     assert accepted is not None and accepted["state"] == "accepted"
     assert _row(engine, str(queued.delivery_id))["state"] == "claimed"
     assert [text for _started_turn, text in starts] == ["continue after restart"]
+
+
+def _capture_lost_turn_report(manager: SessionTurnManager) -> tuple[list, list]:
+    """Record what a lost turn reports outward, without a real IM client."""
+
+    emitted: list[tuple[str, str]] = []
+    stamped: list[tuple[str, str]] = []
+
+    async def _emit(_context, kind, text, **_kwargs):
+        emitted.append((kind, text))
+
+    async def _stamp(_context, message_id, emoji):
+        stamped.append((message_id, emoji))
+        return True
+
+    manager.controller.emit_agent_message = _emit
+    manager.controller.processing_indicator = SimpleNamespace(
+        stamp_orphaned_terminal_reaction=_stamp
+    )
+    return emitted, stamped
+
+
+def test_lost_im_turn_without_run_reports_interruption(managers) -> None:
+    # An IM turn owns no agent_runs row, so the Harness interruption lane cannot
+    # reach it: without this report the thread just stops, which is
+    # indistinguishable from an agent choosing to stay quiet.
+    first, restarted, engine, _engine_b, _starts = managers
+    context = _context()
+    admitted = asyncio.run(
+        first.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="im turn killed by restart",
+                native_message_id="m-origin",
+            ),
+            context=context,
+        )
+    )
+    turn_id = str(admitted.turn_id)
+    context.platform_specific["turn_token"] = turn_id
+    context.platform_specific["agent_runtime_turn_token"] = f"runtime-{turn_id}"
+    first._active_identity = lambda _backend, _session_id, logical_id: (
+        logical_id,
+        f"native-{logical_id}",
+    )
+    first.on_native_start(
+        context,
+        backend="codex",
+        runtime_key=f"runtime-key-{turn_id}",
+        runtime_turn_id=f"runtime-{turn_id}",
+    )
+    emitted, stamped = _capture_lost_turn_report(restarted)
+    restarted._active_identity = lambda *_args: None
+
+    asyncio.run(restarted.recover_durable_delivery_state("ses_fsm", service_restart=True))
+
+    with engine.connect() as conn:
+        settled = delivery_store.get_turn(conn, turn_id)
+    assert settled is not None and settled["terminal_evidence_kind"] == "restart_runtime_missing"
+    assert [kind for kind, _text in emitted] == ["notify"]
+    assert "interrupted" in emitted[0][1].lower()
+    # The dead process could not clear its own 👀; recovery retires it in place.
+    assert stamped == [("m-origin", INTERRUPTED_REACTION_EMOJI)]
+
+
+def test_lost_turn_owning_a_run_leaves_the_notice_to_the_harness_lane(managers) -> None:
+    # A Harness turn already gets harness.run.interrupted.* stamped on its Run.
+    # Reporting again here would double-notify the same interruption.
+    first, restarted, engine, _engine_b, _starts = managers
+    turn_id, _context_value = asyncio.run(_activate(first, text="harness turn"))
+    with engine.begin() as conn:
+        accepted = delivery_store.delivery_for_turn(conn, turn_id)
+        assert accepted is not None
+        conn.execute(
+            agent_runs.insert().values(
+                id="run-lost-turn",
+                definition_id=None,
+                run_type="scheduled",
+                status="running",
+                cancel_requested=0,
+                session_id="ses_fsm",
+                delivery_id=str(accepted["id"]),
+                created_at="2026-08-01T00:00:00Z",
+                updated_at="2026-08-01T00:00:00Z",
+                metadata_json="{}",
+            )
+        )
+    assert first.accepted_agent_run_ids_for_turn(turn_id) == ["run-lost-turn"]
+    emitted, stamped = _capture_lost_turn_report(restarted)
+    restarted._active_identity = lambda *_args: None
+
+    asyncio.run(restarted.recover_durable_delivery_state("ses_fsm", service_restart=True))
+
+    with engine.connect() as conn:
+        settled = delivery_store.get_turn(conn, turn_id)
+    assert settled is not None and settled["terminal_evidence_kind"] == "restart_runtime_missing"
+    assert emitted == []
+    assert stamped == []
 
 
 def test_accepted_opencode_turn_without_restored_identity_stays_live(managers) -> None:

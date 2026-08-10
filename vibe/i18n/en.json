@@ -768,5 +768,10 @@
       "invalid_oauth_nonce_title": "We couldn't verify this sign-in",
       "invalid_oauth_nonce_body": "This sign-in attempt couldn't be verified, so we stopped to keep your account secure. Start over to continue."
     }
+  },
+  "turn": {
+    "interrupted": {
+      "serviceRestart": "\u26a0\ufe0f This turn was interrupted \u2014 the Avibe service restarted while it was still running, and its agent runtime could not be resumed. Nothing further will arrive for it. Send the request again if the work still needs doing."
+    }
   }
 }

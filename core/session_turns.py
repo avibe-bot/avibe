@@ -40,6 +40,7 @@ from core.run_settlement import (
     SETTLED_BY_STOPPED,
     SETTLED_BY_TERMINAL_RESULT,
 )
+from core.processing_indicator import INTERRUPTED_REACTION_EMOJI
 from core.services.dispatch import SOURCE_HUMAN, SOURCE_SCHEDULED, dispatch_turn_with_outcome
 from core.services.agent_steering import (
     SteerOutcome,
@@ -5348,6 +5349,114 @@ class SessionTurnManager:
             return result.state != "reconciling_steer"
         return False
 
+    def _turn_origin_native_message_id(self, turn_id: str) -> str:
+        """The platform message id that opened one Turn, or ``""``.
+
+        Read durably rather than from the live indicator because the caller runs
+        AFTER a restart, where no in-memory handle survived. The Delivery's own
+        snapshot is NOT the source: admission materializes it into ``messages``
+        and clears ``snapshot_json``, so by the time a Turn is active its
+        Delivery no longer carries the native id — only the ledger row it points
+        at does. The snapshot is still consulted first for a Delivery caught
+        before materialization.
+        """
+
+        if not turn_id or not self._durable_schema_available():
+            return ""
+        try:
+            with self._sqlite_engine().connect() as conn:
+                turn = delivery_store.get_turn(conn, turn_id)
+                if turn is None:
+                    return ""
+                delivery = delivery_store.get_delivery(
+                    conn,
+                    str(turn["initial_delivery_id"]),
+                )
+                if delivery is None:
+                    return ""
+                payload = delivery_store.delivery_payload(delivery)
+                native_id = str(payload.get("native_message_id") or "").strip()
+                if native_id:
+                    return native_id
+                message_id = str(delivery.get("message_id") or "").strip()
+                if not message_id:
+                    return ""
+                message = messages_service.get_message(conn, message_id)
+                if message is None:
+                    return ""
+                return str(message.get("native_message_id") or "").strip()
+        except Exception:
+            logger.debug(
+                "turn origin lookup failed for turn=%s", turn_id, exc_info=True
+            )
+            return ""
+
+    def _controller_language(self) -> str:
+        language_getter = getattr(self.controller, "_get_lang", None)
+        if callable(language_getter):
+            return language_getter()
+        return getattr(getattr(self.controller, "config", None), "language", "en")
+
+    async def _report_lost_im_turn(
+        self,
+        session_id: str,
+        origin_native_message_id: str,
+    ) -> None:
+        """Tell an IM turn's author that its runtime died with the service.
+
+        An IM turn owns no ``agent_runs`` row, so the Harness interruption lane is
+        structurally unreachable for it: notices are stamped on runs, and
+        ``_settle_agent_run_ids`` returns early for a Turn that has none. Without
+        this report the turn's only trace is a durable row the user cannot read —
+        the thread simply stops, which is indistinguishable from an agent that
+        chose to stay quiet. The reported field case had a user wait five hours
+        before asking what had happened to their request.
+
+        This is deliberately NOT the shape of a Stop, which stays silent because
+        the user caused it and already knows. Nobody asked for this ending, so it
+        has to announce itself.
+        """
+
+        if self.controller is None:
+            return
+        try:
+            context = self._delivery_context(session_id)
+        except Exception:
+            logger.debug(
+                "lost turn report: no delivery context for session=%s",
+                session_id,
+                exc_info=True,
+            )
+            return
+        try:
+            await self.controller.emit_agent_message(
+                context,
+                "notify",
+                i18n_t("turn.interrupted.serviceRestart", self._controller_language()),
+            )
+        except Exception:
+            logger.warning(
+                "lost turn report: failed to notify session=%s",
+                session_id,
+                exc_info=True,
+            )
+            return
+        # The dead process could not clear its own 👀. Retire it here so the
+        # triggering message stops claiming the turn is still running.
+        native_message_id = str(origin_native_message_id or "")
+        service = getattr(self.controller, "processing_indicator", None)
+        stamp = getattr(service, "stamp_orphaned_terminal_reaction", None)
+        if not native_message_id or not callable(stamp):
+            return
+        try:
+            await stamp(context, native_message_id, INTERRUPTED_REACTION_EMOJI)
+        except Exception:
+            logger.debug(
+                "lost turn report: terminal reaction failed for session=%s",
+                session_id,
+                exc_info=True,
+            )
+
     async def recover_durable_delivery_state(
         self,
         session_id: str | None = None,
@@ -5516,6 +5625,11 @@ class SessionTurnManager:
                     )
 
         for target_session, turn_id, attempt_id, backend in lost_active_turns:
+            # Read Run attribution BEFORE terminalizing: the notice below is owed
+            # only to a turn that has none, and terminalization retires the
+            # deliveries the attribution is derived from.
+            owning_run_ids = self.accepted_agent_run_ids_for_turn(turn_id)
+            origin_message_id = self._turn_origin_native_message_id(turn_id)
             terminal = self._terminalize_durable_turn(
                 turn_id,
                 "failed",
@@ -5530,6 +5644,8 @@ class SessionTurnManager:
             if not terminal.get("changed"):
                 continue
             recovered.append(target_session)
+            if not owning_run_ids:
+                await self._report_lost_im_turn(target_session, origin_message_id)
             successor_turn_id = str(terminal.get("successor_turn_id") or "")
             if successor_turn_id:
                 await self._start_persisted_turn(successor_turn_id)
@@ -7291,16 +7407,7 @@ class SessionTurnManager:
                     if session_row["status"] != "active":
                         return False
                     delivery_id = delivery_store.new_delivery_id()
-                    language_getter = getattr(self.controller, "_get_lang", None)
-                    language = (
-                        language_getter()
-                        if callable(language_getter)
-                        else getattr(
-                            getattr(self.controller, "config", None),
-                            "language",
-                            "en",
-                        )
-                    )
+                    language = self._controller_language()
                     trigger_text = str(
                         payload.get("agent_initiated_trigger_text")
                         or i18n_t("harness.agentInitiatedContinuation", language)
