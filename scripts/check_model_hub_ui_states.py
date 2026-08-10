@@ -461,12 +461,23 @@ class Universe:
         return sorted(self._payload.items())
 
     def resolve(self, citation: str) -> Match:
-        """The one comparison. Exact token, then declared aliases, then families.
+        """The one comparison. Everything answering to the name, exact and alias.
 
         A citation ending in `*` names a family, and a family is still matched by
         token: the prefix is split into segments and compared segment for
         segment, so `sourceDetail.tiers.*` reaches `sourceDetail.tiers.add` and
         never reaches `sourceDetail.tiersAdd`. String prefixing would reach both.
+
+        The exact and alias halves are unioned rather than tried in order.
+        Preferring the token made one spelling answer for two things and report
+        as though it answered for one: a file with a module-level `load` and a
+        `ConfigStore.load` registers `service.py:load` as a token *and* as an
+        alias of the method, and stopping at the token called the citation
+        unambiguous while the reader still had two places to go. Ordering is what
+        a lookup does; this is an inventory, and an inventory has to answer with
+        everything that answers to the name — that is the whole basis on which
+        `Match.ambiguous` means anything. `define` never records a self-alias, so
+        the union cannot manufacture a second hit out of one definition.
         """
         cite = citation.strip().strip("`")
         if cite.endswith("*"):
@@ -475,11 +486,11 @@ class Universe:
             for alias, targets in self._alias.items():
                 if segments(alias)[: len(prefix)] == prefix:
                     hits |= targets
-            found = tuple(sorted(hits))
-        elif cite in self._payload:
-            found = (cite,)
         else:
-            found = tuple(sorted(self._alias.get(cite, ())))
+            hits = set(self._alias.get(cite, ()))
+            if cite in self._payload:
+                hits.add(cite)
+        found = tuple(sorted(hits))
         return Match(self.name, cite, found, tuple(self._payload[t] for t in found))
 
 
@@ -650,7 +661,24 @@ VARIANT_NAME_RE = re.compile(r"\"([a-z_]+)\"")
 # say which side it is quoting, and these are the ways this document says it.
 ANSWER_CUE_RE = re.compile(r"(?:→|returns|answers|echoes|responds with|re-echoes)\s*$")
 JSONISH_RE = re.compile(r"\{[^{}]*\}")
-SCHEMA_CITE_RE = re.compile(r"`([a-z][a-z-]*\.schema\.json)`")
+FENCED_JSON_RE = re.compile(r"```json\n(.*?)\n```", re.S)
+# The sentence api.md writes when a section stops describing one route and
+# starts defining the shape *every* guarded mutation answers with. Deriving the
+# definition sites from the document's own claim is what keeps the allowance
+# from being "the rest of the file"; the size of the set it yields is reported
+# with the other scales, so an api.md that rewords this says so out loud instead
+# of silently narrowing every guarded route to nothing.
+GUARD_ENVELOPE_RE = re.compile(r"every guarded [^\n]*envelope", re.I)
+# What a backticked schema-file citation *looks like*, deliberately wider than
+# any name `docs/plans/model-hub-contracts/` actually holds. An extraction
+# pattern that doubles as an admissibility test cannot report a near miss: it
+# does not reject `runtime_dependency.schema.json`, it never sees it, and the
+# citation, the field attributed to it and every arm downstream go quiet
+# together — a misspelling reading as agreement. The shape says "this sentence
+# is citing a schema file"; whether that file exists is the universe's answer,
+# and `empty` is a finding. Spelled once because three extractors ask it.
+SCHEMA_FILE = r"[A-Za-z0-9][A-Za-z0-9._-]*\.schema\.json"
+SCHEMA_CITE_RE = re.compile(rf"`({SCHEMA_FILE})`")
 DOTTED_TOKEN_RE = re.compile(r"`([a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*)`")
 PY_CITE_RE = re.compile(r"`([A-Za-z0-9_./-]+\.py)(?::([A-Za-z_][A-Za-z0-9_]*))?`")
 STATUS_RE = re.compile(r"\b(4\d\d|5\d\d)\b")
@@ -705,9 +733,9 @@ def count_value(word: str) -> int | None:
 # back that reading may reach, because a clause is as much of a sentence as one
 # attribution can honestly claim. See `attributed_fields`.
 SCHEMA_OWNS_RE = re.compile(
-    r"`([a-z][a-z-]*\.schema\.json)`[^`\n]{0,24}?['’]s\s+`([a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*)`"
+    rf"`({SCHEMA_FILE})`[^`\n]{{0,24}}?['’]s\s+`([a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*)`"
 )
-ATTRIBUTED_TO_RE = re.compile(r"\b(?:in|of|from)\s+`([a-z][a-z-]*\.schema\.json)`")
+ATTRIBUTED_TO_RE = re.compile(rf"\b(?:in|of|from)\s+`({SCHEMA_FILE})`")
 # A dotted backticked token that is a file rather than a field path. This
 # document cites exactly three kinds of file — `api.md`, `*.schema.json` and the
 # repo's `.py` — and each has its own arm; a clause that names one on its way to
@@ -747,6 +775,36 @@ def nearest_subject(mentions: list[tuple[int, int, str]], start: int, end: int) 
             else mention[0] - end
         ),
     )[2]
+
+
+def json_keys(text: str) -> set[str]:
+    """Every key name the fenced ```json blocks in `text` declare, at any depth.
+
+    `literal_keys` reads a body the way this document usually writes one — one
+    line, no nesting — and `\\{[^{}]*\\}` is exactly that reading. A real example
+    block nests, and on a nested one the innermost braces are what it returns:
+    api.md's refusal envelope came back as the `SupplyGap` inside
+    `would_interrupt`, with `ok`, `error` and both report arrays dropped. A
+    parser is the shorter answer than a cleverer regex, and it is also the one
+    that says so when the block is not JSON at all.
+    """
+    found: set[str] = set()
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            found.update(k for k in node if isinstance(k, str))
+            for child in node.values():
+                walk(child)
+        elif isinstance(node, list):
+            for child in node:
+                walk(child)
+
+    for block in FENCED_JSON_RE.findall(text):
+        try:
+            walk(json.loads(block))
+        except json.JSONDecodeError:
+            continue
+    return found
 
 
 def literal_keys(text: str) -> set[str]:
@@ -794,6 +852,42 @@ def schema_vocabulary(node: Any) -> set[str]:
     elif isinstance(node, list):
         for child in node:
             found |= schema_vocabulary(child)
+    return found
+
+
+def property_tails(node: Any, path: str = "") -> set[str]:
+    """Every property a schema declares, as each dotted tail it can be cited by.
+
+    `schema_vocabulary` answers "does this file declare that name anywhere",
+    which is the right question for a one-word citation and the wrong one for
+    `status.health`: reduced to its last segment, a real leaf under the wrong
+    parent answered a claim about a parent it has nothing to do with, so
+    `manifest.health` passed on the strength of `status.health`. Where the prose
+    supplies the parents, the parents are part of the claim.
+
+    Tails rather than full paths, because this document names a field by any
+    tail — `health`, `status.health`, `RuntimeDependency.status.health` — and all
+    three are the same claim. Declaring the tails is what lets the comparison
+    stay one `in`: a suffix test would also accept `tus.health`.
+    """
+    found: set[str] = set()
+    if isinstance(node, dict):
+        props = node.get("properties")
+        if isinstance(props, dict):
+            for name, child in props.items():
+                here = f"{path}.{name}" if path else name
+                parts = segments(here)
+                found |= {".".join(parts[i:]) for i in range(len(parts))}
+                found |= property_tails(child, here)
+        for name, child in node.items():
+            # `items`, `$defs`, `oneOf` and the rest keep the path they are
+            # written under, which is what makes `named_agents[].supply_status`
+            # come back as `named_agents.supply_status`.
+            if name != "properties":
+                found |= property_tails(child, path)
+    elif isinstance(node, list):
+        for child in node:
+            found |= property_tails(child, path)
     return found
 
 
@@ -886,7 +980,6 @@ def load_authorities(origin: Origin) -> dict[str, Any]:
     if api_text is None:
         raise SystemExit(f"{origin.label} holds no {API_CONTRACT}")
     routes = Universe("routes", "authority", "E")
-    table_spans: list[str] = []
     for line in api_text.split("\n"):
         if not line.startswith("| "):
             continue
@@ -896,7 +989,6 @@ def load_authorities(origin: Origin) -> dict[str, Any]:
         m = API_ROW_RE.match(cells[0])
         if not m:
             continue
-        table_spans.append(line)
         # `request → response` in one cell, and only the left side is what a
         # client may send. Reading the whole cell let a response field stand in
         # for a request field: the source-order row answers `{agent: AgentSupply}`,
@@ -918,11 +1010,24 @@ def load_authorities(origin: Origin) -> dict[str, Any]:
             where=cells[0],
         )
     # The shared envelopes are defined in prose and in the JSON examples, and a
-    # guarded route's row names them rather than spelling them out. Their
-    # vocabulary is collected from everything that is not a route row, so a
-    # route's own request shape can never leak into another route's allowance.
-    outside = "\n".join(l for l in api_text.split("\n") if l not in table_spans)
-    envelope = literal_keys(outside)
+    # guarded route's row names them rather than spelling them out. Read as
+    # "everything that is not a route row", that allowance was every response
+    # shape in the file: `recovered` belongs to the OAuth terminal and nothing
+    # else, and a claim that the chain `PUT` answers `{chain, removed_hops,
+    # interrupted, recovered}` was waved through by a section about a different
+    # route. An allowance collected from everywhere is not an allowance.
+    #
+    # So the sections are chosen by the sentence that makes them the definition —
+    # api.md says which one governs *every* guarded mutation — and the keys come
+    # from parsing the fenced JSON rather than from brace-matching it: the
+    # refusal envelope nests `SupplyGap` inside `would_interrupt`, and the
+    # innermost-braces reading returned that nested shape and called it the
+    # envelope, dropping `ok`, `error` and both report arrays.
+    envelope: set[str] = set()
+    for block in re.split(r"^## ", api_text, flags=re.M)[1:]:
+        _heading, _, body = block.partition("\n")
+        if GUARD_ENVELOPE_RE.search(body):
+            envelope |= json_keys(body) | literal_keys(body)
 
     # A route that answers a named shape is contracted as exactly as one that
     # spells its body — the spelling is just somewhere else. Left unread, both
@@ -948,6 +1053,7 @@ def load_authorities(origin: Origin) -> dict[str, Any]:
             row["response_readings"] = {k: v for k, v in readings.items() if k}
 
     schemas: dict[str, set[str]] = {}
+    paths: dict[str, set[str]] = {}
     properties: dict[str, set[str]] = {}
     enums: dict[str, dict[str, set[str]]] = {}
     files = Universe("schema files", "authority", "E")
@@ -965,6 +1071,7 @@ def load_authorities(origin: Origin) -> dict[str, Any]:
         path = Path(name_json)
         doc = json.loads(raw)
         schemas[path.name] = schema_vocabulary(doc)
+        paths[path.name] = property_tails(doc)
         properties[path.name] = set(doc.get("properties", {}))
         enums[path.name] = enum_fields(doc)
         files.define(path.name, schema_vocabulary(doc), content=path.name, where=path.name)
@@ -989,6 +1096,7 @@ def load_authorities(origin: Origin) -> dict[str, Any]:
         "routes": routes,
         "envelope": envelope,
         "schemas": schemas,
+        "schema paths": paths,
         "properties": properties,
         "enums": enums,
         "schema files": files,
@@ -1382,11 +1490,45 @@ def parse(doc: Document) -> dict[str, Any]:
         sec = doc.section_of(n)
         if line.startswith("**Element inventory**"):
             inventories.add(sec)
+        # A key's own definition row is not a citation of it. The namespace test
+        # below used to exclude these by accident — a row inside a namespaced
+        # table writes its key bare, and a bare head is no namespace — and the
+        # accident stopped holding the moment prose citations were allowed to
+        # reach the universe on the strength of their tail: `| `fail.save` |`,
+        # written in two tables that each qualify it differently, read as a
+        # prose citation of both at once.
+        if KEY_DEF_RE.match(line):
+            continue
         for k in KEY_REF_RE.findall(line):
             head = k.split(".")[0]
-            if head == "models" and k.startswith("models.hub."):
+            if (head == "models" and k.startswith("models.hub.")) or head in namespaces:
                 refs.append((sec, n, k))
-            elif head in namespaces:
+                continue
+            # A first segment no copy table declares is not on its own a copy
+            # citation — this document backticks `api.md`, `source.schema.json`
+            # and `status.health` in exactly this shape — so the namespace test
+            # is what keeps those three out. Used as the *only* test it also kept
+            # out two kinds of sentence that are unmistakably about copy.
+            #
+            # The first is the citation a frame makes of its own table. A table
+            # that declares `models.hub.adopt.*` writes its rows bare, and the
+            # frame's prose cites them the same way: `fail.title` names a key
+            # that exists, under a first segment that is not a namespace and was
+            # never meant to be one. Those citations reached no arm at all.
+            #
+            # The second is the one worth reporting: `shel.gatewayInfo.body` has
+            # a namespace no table declares *because the namespace is misspelt*,
+            # and dropping it produced the same silence a correct citation does.
+            # What identifies it is that the document declares a namespace under
+            # which this exact citation resolves — so the sentence is citing copy
+            # and has spelt the head wrong. The correction is not accepted in its
+            # place: the citation as written goes to the universe, which answers
+            # `empty`, and an undefined key is reported the way any other is.
+            if not copy.resolve(k).empty:
+                refs.append((sec, n, k))
+                continue
+            tail = k.split(".", 1)[1] if "." in k else ""
+            if any(not copy.resolve(f"{cand}.{tail}").empty for cand in namespaces):
                 refs.append((sec, n, k))
         for meth, path in ROUTE_RE.findall(line):
             # Normalized on the way in, because class A compares this against a
@@ -1952,6 +2094,19 @@ def authority_claims(doc: Document, auth: dict[str, Any], origin: Origin, regist
         # this scope a registration?" is answered by the registry's own line
         # numbers, not by re-testing the row shape here — that shape matches
         # anywhere, including the places §0.5 is quoted.
+        # A marker that resolves to nothing is reported for being unresolved,
+        # here, before anyone asks what it excuses. `active_gap_citations` only
+        # ever *omitted* it from the live exemptions, so a bad number surfaced
+        # exactly when the sentence around it needed an excuse for something
+        # else: `[contract-gap] G-99` on a row that owes no other exemption cost
+        # nothing at all, and the register went on citing a row that does not
+        # exist. An excuse nobody can look up is a defect whether or not it was
+        # load-bearing, and it is class E's — a §0.5 row is a claim about the
+        # contract, so a citation of one that is not there is a claim with no
+        # authority behind it.
+        for m_gap in GAP_REF_RE.finditer(scope):
+            if gaps.resolve(m_gap.group(1)).empty:
+                add(f"L{line_no}", f"`[contract-gap] {m_gap.group(1)}` names no §0.5 row")
         exempt = line_no in registrations or cites_a_registered_gap(gaps, scope)
         # Where each route is written, not just which routes appear: a body
         # literal is bound to one route, and binding needs positions.
@@ -2164,12 +2319,17 @@ def authority_claims(doc: Document, auth: dict[str, Any], origin: Origin, regist
             scale["attributed fields"] += 1
             if field.split(".")[-1] in excused_fields:
                 continue
-            # Compared by the tail of the path, because the vocabulary is a set
-            # of names: `status.health` is a claim about `health` declared
-            # somewhere in that file, and this arm answers whether the file
-            # declares it at all. Which of two declarations a bare name means is
-            # the mapping-table arm's question, and it has the resolver for it.
-            if field.split(".")[-1] not in auth["schemas"][cited]:
+            # A path is compared as a path. Reduced to its last segment,
+            # `status.health` asked only whether the file declares `health`
+            # *somewhere* — so `manifest.health`, whose parent that file does not
+            # have, was answered by the leaf under the parent the sentence was
+            # not about, and a citation naming the wrong object read as verified.
+            # A one-word citation still asks the vocabulary question it always
+            # asked: it names no parent, so there is no parent to be wrong about,
+            # and which of two declarations it means is the mapping-table arm's
+            # question, which has the resolver for it.
+            known = auth["schema paths"][cited] if "." in field else auth["schemas"][cited]
+            if field not in known:
                 add(f"L{line_no}", f"`{cited}` declares no `{field}`")
 
         for rel, symbol in PY_CITE_RE.findall(scope):
@@ -2361,11 +2521,16 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
         # nothing at all decided the verdict. A sixth treatment is the one thing
         # §0.8 says is closed, and it was the one thing the check could not say.
         cited_treatments = sorted(set(re.findall(r"\bF\d+\b", cell)))
-        if cited_treatments:
-            for t in cited_treatments:
-                if treatment_u.resolve(t).empty:
-                    add("A", f"L{r['line']}", f"「{r['state']}」 names {t}, which §0.8's closed set does not define")
-            continue
+        for t in cited_treatments:
+            if treatment_u.resolve(t).empty:
+                add("A", f"L{r['line']}", f"「{r['state']}」 names {t}, which §0.8's closed set does not define")
+        # A named treatment answered the whole cell, and most cells name one and
+        # nothing else. The live ones that do not are the point: 「F1 → Install
+        # failed」 says how the failure is treated *and* where it lands, and
+        # returning on the treatment left the landing unread — 「F1 → Vanished
+        # forever」 was a complete cell as far as this arm could tell. A cell is
+        # answered by what it says, so both halves are read; what a treatment
+        # buys is only the right to say nothing about a landing.
         frame = r["frame"].lstrip("§")
         # A cell may hand its failure to another frame — 「As §1.0」, 「→ §1.0
         # Unreachable」 — and that is a treatment, so the arm stops asking for an
@@ -2400,6 +2565,16 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
             hits = [state_u.resolve(f"{frame} · {t}") for t in targets]
             if targets and all(not h.empty and not h.ambiguous for h in hits):
                 continue
+            if cited_treatments:
+                add(
+                    "A",
+                    f"L{r['line']}",
+                    f"「{r['state']}」 treats its failure with {'/'.join(cited_treatments)} "
+                    f"and then lands nowhere §{frame} files: {cell!r}",
+                )
+                continue
+        if cited_treatments:
+            continue
         add("A", f"L{r['line']}", f"「{r['state']}」 failure cell names no F1–F5 and no known state: {cell!r}")
 
     # Arm L — class A finishing the job it abstained on four lines above.
@@ -2573,6 +2748,23 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
     interpolate: dict[str, set[str]] = {}
     slot_consumers = 0
     for token, rows_ in copy_u.items():
+        # i18next reads `_one` / `_other` as one key with two cardinalities, so a
+        # stem carrying either suffix is a plural key and owes both rows. Which
+        # is why the family test in `parse` cannot also be the completeness test:
+        # it asks whether the rows *form* a family, and the survivor of an
+        # incomplete pair forms nothing, so it fell through as an ordinary
+        # singular key and the one case worth reporting was the one case that
+        # could not be. Declaration is decided there; whether the declaration is
+        # complete is decided here, where every other copy-row rule is.
+        marked = {m.group(1) for m in (re.search(r"_(one|other)$", r["key"]) for r in rows_) if m}
+        if marked and marked != {"one", "other"}:
+            missing = sorted({"one", "other"} - marked)
+            add(
+                "B",
+                f"L{min(r['line'] for r in rows_)}",
+                f"key `{token}` is written as a plural family and declares no "
+                f"`_{missing[0]}` row, so that cardinality renders nothing",
+            )
         for row in rows_:
             if not row["en"]:
                 add("B", f"L{row['line']}", f"key `{row['key']}` has no English column")
@@ -3183,6 +3375,7 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
             1 for _t, r in auth["routes"].items() if r["named_answer"]
         ),
         "authority: schema enum declarations": len(auth["schema fields"]),
+        "authority: shared guarded-envelope keys": len(auth["envelope"]),
         "authority: route claims": e_scale["routes"],
         "authority: request/response body claims": e_scale["bodies"],
         "authority: guarded-status claims": e_scale["status branches"],

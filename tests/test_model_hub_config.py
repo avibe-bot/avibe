@@ -305,6 +305,15 @@ def test_model_hub_ui_state_completeness_is_generated_from_live_files():
     # document before trusting the verdict they produce.
     assert not result["empty_inventories"], result["empty_inventories"]
     assert result["input_scale"]["register rows"] > 50
+    # A count is the only thing that notices an extractor going quietly narrow.
+    # Class B's copy citations were read for one round by a single test — the
+    # first segment has to be a declared namespace — which is true of the way
+    # half this document cites copy and false of the other half, where a frame
+    # cites its own table's rows bare. The gate stayed green throughout, because
+    # what it had stopped reading it also stopped judging. This floor sits under
+    # the 157 the document currently holds, far enough not to be churn and close
+    # enough that dropping a family of citations trips it.
+    assert result["input_scale"]["prose key references"] > 120
     # The document and every authority came from one place, and the run says
     # which. A verdict that does not name its authority origin cannot be told
     # apart from one that read the wrong revision's contracts.
@@ -656,6 +665,18 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "defers to 「Unreachably」 in §1.0, which files no such state",
         within="0.8",
     ),
+    # Reviewer's finding, round 2 of #1276: a failure cell says how the failure
+    # is treated *and* where it lands — 「F1 → Install failed」 is both — and the
+    # arm returned as soon as it had read the treatment. The landing went unread
+    # on every mixed cell in the register, which is most of them.
+    GateCase(
+        "A", "states", "arm",
+        "a named treatment lands in a state nobody files",
+        "F1 → Install failed",
+        "F1 → Vanished forever",
+        "treats its failure with F1 and then lands nowhere",
+        within="0.8",
+    ),
     # --- C: frames ----------------------------------------------------------
     # Reviewer's finding, round 1 of #1276: the N arm asked whether a landing
     # *contained* a registered state name, so 「Not startedness」 vouched for
@@ -672,6 +693,30 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         within="0.8",
     ),
     # --- B: copy, slots -----------------------------------------------------
+    # Reviewer's finding, round 2 of #1276: an i18next plural is one key written
+    # on two rows, and a stem left with one of them fell through as an ordinary
+    # single-row key. The cardinality the survivor does not cover renders nothing
+    # at runtime, and the gate read the family as complete.
+    GateCase(
+        "B", "copy", "arm",
+        "a plural family with one of its two forms deleted",
+        "| `gateway.modelCount_other` | {{count}} 个型号 | {{count}} models |\n",
+        "",
+        "is written as a plural family and declares no `_other` row",
+        within="1.0",
+    ),
+    # Reviewer's finding, round 2 of #1276: a citation was admitted only when its
+    # first segment was a namespace some copy table declares, so a misspelt
+    # namespace was dropped before the universe could answer — the same silence a
+    # correct citation produces. `shell` is declared; `shel` is the typo.
+    GateCase(
+        "B", "copy", "empty",
+        "a copy citation whose namespace is misspelt",
+        "Tooltip: `shell.gatewayInfo.body`",
+        "Tooltip: `shel.gatewayInfo.body`",
+        "key `shel.gatewayInfo.body` is cited and never defined",
+        within="1.0",
+    ),
     GateCase(
         "B", "copy", "token",
         "a citation truncated to a prefix two keys share",
@@ -918,6 +963,28 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "`agent-source.schema.json` is not a file in",
         within="1.0",
     ),
+    # Reviewer's finding, round 2 of #1276: the citation pattern admitted only
+    # lowercase letters and hyphens, so the two commonest near-misses of a real
+    # filename — a digit, an underscore — matched nothing and disappeared,
+    # taking the field attributed to them along. What the extractor cannot spell
+    # it cannot report, so the shape is now everything a filename may look like
+    # and the universe is what says the name is unknown.
+    GateCase(
+        "E", "schema files", "arm",
+        "a schema citation misspelt with a digit",
+        "| `runtime-dependency.schema.json` → `status.health` `[contract]` |",
+        "| `runtime1-dependency.schema.json` → `status.health` `[contract]` |",
+        "`runtime1-dependency.schema.json` is not a file in",
+        within="1.0",
+    ),
+    GateCase(
+        "E", "schema files", "arm",
+        "a schema citation misspelt with an underscore",
+        "| `runtime-dependency.schema.json` → `status.health` `[contract]` |",
+        "| `runtime_dependency.schema.json` → `status.health` `[contract]` |",
+        "`runtime_dependency.schema.json` is not a file in",
+        within="1.0",
+    ),
     GateCase(
         "E", "schema files", "empty",
         "a schema citation naming no file",
@@ -1063,6 +1130,43 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "`PUT /api/models/agents/<backend>/sources` is `[contract-gap]` G-9.1.",
         "a 409 branch is claimed for",
         within="1.4",
+    ),
+    # Reviewer's finding, round 2 of #1276: an unresolved marker only dropped out
+    # of the list of active exemptions. A row that needed no other exemption
+    # therefore spent a number nobody registered and nothing said so — the marker
+    # is a citation of §0.5, and a citation that resolves to nothing is reported
+    # whether or not ignoring it happens to redden some other arm.
+    GateCase(
+        "E", "gaps", "empty",
+        "a marker spends a gap number no row registers",
+        "An install confirm was accepted `[contract-gap]` G-10",
+        "An install confirm was accepted `[contract-gap]` G-99",
+        "`[contract-gap] G-99` names no §0.5 row",
+        within="0.8",
+    ),
+    # Reviewer's finding, round 2 of #1276: the guarded envelope was every literal
+    # written outside the route table, unioned, so a key from one section vouched
+    # for a claim about another route entirely. `recovered` is real — it is in the
+    # OAuth completion example — and the chain route never returns it.
+    GateCase(
+        "E", "routes", "arm",
+        "a response claim borrows a key from another section's example",
+        "on success it returns `{chain, removed_hops, interrupted}`",
+        "on success it returns `{chain, removed_hops, interrupted, recovered}`",
+        "names recovered — not contracted for",
+        within="0.5",
+    ),
+    # Reviewer's finding, round 2 of #1276: an attributed field was reduced to its
+    # last segment before it was resolved, so a real leaf under the wrong parent
+    # answered for it. `health` exists in that schema; `manifest` does not, and
+    # the sentence naming the wrong object read as verified.
+    GateCase(
+        "E", "schema fields", "arm",
+        "an attributed field path hangs under a parent the schema lacks",
+        "v5's `status.health` runs",
+        "v5's `manifest.health` runs",
+        "declares no `manifest.health`",
+        within="0.5",
     ),
     # A total rendering of a contracted vocabulary that quietly drops a row. The
     # author cannot see the schema while writing the table, so nothing but a set
@@ -1667,6 +1771,20 @@ GATE_INNOCENT: tuple[InnocentCase, ...] = (
     # forbidding its own contents and the document is pushed back into prose,
     # where no arm can check it. Which is what the unread section did: this text
     # and the red case above were reported identically, four fields each.
+    # The green half of the widened copy admission. A citation now reaches class
+    # B when the copy universe answers to it as written *or* under a namespace
+    # the document declares — which is what admits `fail.title` from the frame
+    # that owns the table, and what reports `shel.gatewayInfo.body`. Neither
+    # clause may be read as 「a dotted name in backticks is copy」: this document
+    # backticks contract field paths in frame prose in exactly that shape, and
+    # they belong to class E, which has the schema to judge them against.
+    InnocentCase(
+        "a contract field path backticked in the middle of frame prose",
+        "class B admits a citation the copy universe answers to, not one that looks like copy",
+        "Tooltip: `shell.gatewayInfo.body`",
+        "Tooltip: `shell.gatewayInfo.body` — the pill beside it reads `status.health`",
+        within="1.0",
+    ),
     InnocentCase(
         "the create terminal's own fields, written as a body",
         "class E reads a named answer from the section that spells it, by reading",
@@ -1851,6 +1969,41 @@ def test_authority_side_universes_report_a_duplicate_definition():
         "several names twice, under different owners. If that stops being true the "
         "ambiguity case in GATE_MUTATIONS is testing a condition the repo no longer has."
     )
+
+
+def test_a_citation_resolves_to_everything_answering_to_it():
+    """Reviewer's finding, round 2 of #1276, proved on the comparator itself.
+
+    One spelling may reach a universe twice — once as a token, once as an alias
+    of something else — and `resolve` used to stop at the token. `service.py:load`
+    is the live shape: a module-level `load` registers that citation as a token,
+    and `ConfigStore.load` registers it as an alias, so the reader who followed
+    it had two places to go and was told there was one. The two halves are
+    unioned now, and the ambiguity is reported.
+
+    Nothing is manufactured by the union: `define` never records a self-alias, so
+    a token that also lists its own spelling as an alias still resolves to one.
+    This case is written here rather than in `GATE_MUTATIONS` because it needs a
+    repo file with both shapes, and that suite mutates the spec.
+    """
+    from scripts.check_model_hub_ui_states import Universe
+
+    u = Universe("repo symbols", "authority", "E")
+    u.define("service.py:load", {"line": 10}, content="module", where="service.py:10")
+    u.define(
+        "service.py:ConfigStore.load", {"line": 40},
+        content="method", where="service.py:40",
+        aliases=("service.py:load",),
+    )
+    hit = u.resolve("service.py:load")
+    assert set(hit.hits) == {"service.py:load", "service.py:ConfigStore.load"}
+    assert hit.ambiguous, "a citation two declarations answer to is ambiguous"
+
+    solo = Universe("repo symbols", "authority", "E")
+    solo.define("service.py:only", {"line": 3}, content="one", where="service.py:3",
+                aliases=("service.py:only",))
+    assert solo.resolve("service.py:only").hits == ("service.py:only",)
+    assert not solo.resolve("service.py:only").ambiguous
 
 
 def test_model_hub_ui_gate_target_zero_classes_prove_their_own_zero():
