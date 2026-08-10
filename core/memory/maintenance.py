@@ -16,6 +16,7 @@ from core.memory.backup_restore_journal import (
 )
 from core.memory.blocking import run_blocking
 from core.memory.clear_journal import ClearOperation, ClearSurface, MemoryClearJournal
+from core.memory.clear_snapshot_storage import MemoryClearSnapshotStorage
 from core.memory.snapshot import MemorySnapshot, MemorySnapshotManager
 from core.memory.store import MemoryStore
 
@@ -105,6 +106,7 @@ class MemoryMaintenance:
         self._backup_restore_journal: MemoryBackupRestoreJournal | None = None
         self._clear_journal: MemoryClearJournal | None = None
         self._snapshot_manager: MemorySnapshotManager | None = None
+        self._clear_snapshot_storage: MemoryClearSnapshotStorage | None = None
         self._backup_manager: MemorySnapshotManager | None = None
         self._initialization_error: Exception | None = None
         self._terminal_snapshot_gc_task: asyncio.Task[None] | None = None
@@ -114,6 +116,10 @@ class MemoryMaintenance:
             self._backup_restore_journal = MemoryBackupRestoreJournal(effective_home)
             self._clear_journal = MemoryClearJournal(effective_home)
             self._snapshot_manager = MemorySnapshotManager(effective_home)
+            self._clear_snapshot_storage = MemoryClearSnapshotStorage(
+                self._clear_journal,
+                self._snapshot_manager,
+            )
             self._backup_manager = MemorySnapshotManager._for_backup(
                 effective_home,
                 operation_guard=self._clear_journal.assert_backup_allowed,
@@ -133,6 +139,7 @@ class MemoryMaintenance:
             and self._backup_restore_journal is not None
             and self._clear_journal is not None
             and self._snapshot_manager is not None
+            and self._clear_snapshot_storage is not None
             and self._backup_manager is not None
             and self._initialization_error is None
         )
@@ -617,22 +624,18 @@ class MemoryMaintenance:
     ) -> ClearOperation:
         journal = self._require_clear_journal()
         manager = self._require_snapshot_manager()
+        snapshot_storage = self._require_clear_snapshot_storage()
         await self._runtime.quiesce(claims_already_paused)
         if operation.state == "preparing":
             if operation.snapshot_path is None or operation.manifest_sha256 is None:
                 if operation.resolution == "resume":
-                    with journal.authorize_preparing_snapshot_discard(
-                        operation.operation_id,
-                        expected_revision=operation.revision,
-                        execution_token=self._clear_execution_token(operation),
-                    ) as permit:
-                        await self._run_maintenance_io(
-                            lambda: manager.discard_unrecorded(permit)
+                    operation = await self._run_maintenance_io(
+                        lambda: snapshot_storage.discard_unrecorded_preparing_snapshot(
+                            operation.operation_id,
+                            expected_revision=operation.revision,
+                            execution_token=self._clear_execution_token(operation),
                         )
-                    refreshed = journal.get_operation(operation.operation_id)
-                    if refreshed is None:
-                        raise RuntimeError("Memory clear operation disappeared")
-                    operation = refreshed
+                    )
                 snapshot = await self._run_maintenance_io(
                     lambda: manager.create(operation.operation_id)
                 )
@@ -842,15 +845,14 @@ class MemoryMaintenance:
         )
 
     def _reconcile_terminal_clear_snapshots(self) -> None:
-        journal = self._require_clear_journal()
-        manager = self._require_snapshot_manager()
-        for permit in journal.terminal_snapshot_permits():
+        storage = self._require_clear_snapshot_storage()
+        for operation_id in storage.eligible_terminal_snapshot_ids():
             try:
-                manager.remove(permit)
+                storage.remove_terminal_snapshot(operation_id)
             except Exception:
                 logger.warning(
                     "Terminal Memory clear snapshot %s could not be removed",
-                    permit.snapshot_id,
+                    operation_id,
                     exc_info=True,
                 )
 
@@ -866,8 +868,7 @@ class MemoryMaintenance:
         if (
             self._closing
             or state.artifact_installing
-            or self._clear_journal is None
-            or self._snapshot_manager is None
+            or self._clear_snapshot_storage is None
             or self._initialization_error is not None
             or (task is not None and not task.done())
         ):
@@ -935,29 +936,32 @@ class MemoryMaintenance:
             )
 
     async def _run_terminal_snapshot_gc(self) -> None:
-        journal = self._require_clear_journal()
-        manager = self._require_snapshot_manager()
+        storage = self._require_clear_snapshot_storage()
         try:
-            permits = await self._run_maintenance_io(journal.terminal_snapshot_permits)
+            operation_ids = await self._run_maintenance_io(
+                storage.eligible_terminal_snapshot_ids
+            )
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.warning(
-                "Terminal Memory clear snapshot permits could not be loaded",
+                "Terminal Memory clear snapshots could not be enumerated",
                 exc_info=True,
             )
             return
-        for permit in permits:
+        for operation_id in operation_ids:
             try:
                 await self._run_maintenance_io(
-                    lambda permit=permit: manager.remove(permit)
+                    lambda operation_id=operation_id: storage.remove_terminal_snapshot(
+                        operation_id
+                    )
                 )
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.warning(
                     "Terminal Memory clear snapshot %s could not be removed",
-                    permit.snapshot_id,
+                    operation_id,
                     exc_info=True,
                 )
 
@@ -1044,6 +1048,16 @@ class MemoryMaintenance:
         if self._snapshot_manager is None or self._initialization_error is not None:
             raise MemoryStoreUnavailableError("Memory snapshot manager is unavailable")
         return self._snapshot_manager
+
+    def _require_clear_snapshot_storage(self) -> MemoryClearSnapshotStorage:
+        if (
+            self._clear_snapshot_storage is None
+            or self._initialization_error is not None
+        ):
+            raise MemoryStoreUnavailableError(
+                "Memory clear snapshot storage is unavailable"
+            )
+        return self._clear_snapshot_storage
 
     def _require_backup_manager(self) -> MemorySnapshotManager:
         if self._backup_manager is None or self._initialization_error is not None:

@@ -11,25 +11,16 @@ import os
 import re
 import secrets
 import sqlite3
-from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Iterator, Literal, Mapping, Sequence
+from typing import Literal, Mapping, Sequence
 
 from core.memory.confined_filesystem import (
     ConfinedFilesystemError,
     PrivateSqliteDatabase,
 )
-from core.memory.snapshot import (
-    MemorySnapshot,
-    _TerminalSnapshotPermit,
-    _issue_terminal_snapshot_permit,
-    _issue_preparing_snapshot_discard_permit,
-    _PreparingSnapshotDiscardPermit,
-    _preparing_snapshot_discard_succeeded,
-    _revoke_preparing_snapshot_discard_permit,
-)
+from core.memory.snapshot import MemorySnapshot
 from core.memory.types import CLOSED_MEMORY_ERROR_CODES, is_memory_error_code
 
 
@@ -392,52 +383,6 @@ class MemoryClearJournal:
         if operation is not None:
             raise ClearBackupBlocked(operation.operation_id, operation.state)
 
-    def terminal_snapshot_permit(self, operation_id: str) -> _TerminalSnapshotPermit:
-        """Issue snapshot-GC authority for a fully audited terminal clear."""
-
-        operation = self._require_operation(_validated_operation_id(operation_id))
-        required_surface_state = {
-            "completed": "deleted",
-            "aborted": "restored",
-        }.get(operation.state)
-        if required_surface_state is None:
-            raise ClearTransitionError("only a terminal Memory clear may remove its snapshot")
-        if operation.snapshot_path is None or operation.manifest_sha256 is None:
-            raise ClearTransitionError("terminal Memory clear snapshot metadata is missing")
-        surfaces = self.get_surfaces(operation.operation_id)
-        if len(surfaces) != len(_SURFACE_NAMES) or any(
-            surface.state != required_surface_state or surface.present is None
-            for surface in surfaces
-        ):
-            raise ClearTransitionError("terminal Memory clear surface audit is incomplete")
-        return _issue_terminal_snapshot_permit(
-            snapshot_id=operation.operation_id,
-            relative_path=operation.snapshot_path,
-            manifest_sha256=operation.manifest_sha256,
-            surface_digests=tuple(
-                (surface.relative_path, surface.snapshot_digest) for surface in surfaces
-            ),
-        )
-
-    def terminal_snapshot_permits(self) -> tuple[_TerminalSnapshotPermit, ...]:
-        """Return durable GC work left by every eligible terminal clear."""
-
-        connection = self._connect()
-        try:
-            rows = connection.execute(
-                """
-                SELECT operation_id FROM clear_operation
-                WHERE state IN ('completed', 'aborted')
-                ORDER BY terminal_at, operation_id
-                """
-            ).fetchall()
-        finally:
-            connection.close()
-        return tuple(
-            self.terminal_snapshot_permit(row["operation_id"])
-            for row in rows
-        )
-
     def record_snapshot(
         self,
         operation_id: str,
@@ -530,89 +475,6 @@ class MemoryClearJournal:
             connection.close()
             self._harden_database_files()
         return self._require_operation(identifier)
-
-    @contextmanager
-    def authorize_preparing_snapshot_discard(
-        self,
-        operation_id: str,
-        *,
-        expected_revision: int,
-        execution_token: str,
-    ) -> Iterator[_PreparingSnapshotDiscardPermit]:
-        """Lease removal of an unjournaled snapshot while holding the write lock."""
-
-        identifier = _validated_operation_id(operation_id)
-        connection = self._connect()
-        permit: _PreparingSnapshotDiscardPermit | None = None
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            row = self._cas_row(
-                connection,
-                identifier,
-                expected_revision,
-                execution_token,
-                allowed_states=("preparing",),
-            )
-            nonpending = connection.execute(
-                """
-                SELECT COUNT(*) FROM clear_surface
-                WHERE operation_id = ? AND state != 'pending'
-                """,
-                (identifier,),
-            ).fetchone()[0]
-            if (
-                nonpending
-                or row["snapshot_path"] is not None
-                or row["manifest_sha256"] is not None
-                or row["destructive_started"]
-            ):
-                raise ClearTransitionError(
-                    "only an unrecorded preparing snapshot may be discarded"
-                )
-            relative_path = f"state/memory/clear-snapshots/{identifier}"
-            permit = _issue_preparing_snapshot_discard_permit(
-                snapshot_id=identifier,
-                relative_path=relative_path,
-            )
-            yield permit
-            if not _preparing_snapshot_discard_succeeded(permit):
-                raise ClearTransitionError("Memory snapshot discard did not complete")
-            now = _utc_now()
-            revision = row["revision"] + 1
-            updated = connection.execute(
-                """
-                UPDATE clear_operation
-                SET updated_at = ?, revision = ?
-                WHERE operation_id = ? AND state = 'preparing'
-                    AND revision = ? AND execution_token = ?
-                """,
-                (
-                    now,
-                    revision,
-                    identifier,
-                    row["revision"],
-                    row["execution_token"],
-                ),
-            )
-            if updated.rowcount != 1:
-                raise ClearOperationCASMismatch("Memory clear discard claim is stale")
-            self._append_event(
-                connection,
-                identifier,
-                "snapshot_discarded",
-                row["operator_ref"],
-                occurred_at=now,
-                resulting_revision=revision,
-            )
-            connection.commit()
-        except BaseException:
-            connection.rollback()
-            raise
-        finally:
-            if permit is not None:
-                _revoke_preparing_snapshot_discard_permit(permit)
-            connection.close()
-            self._harden_database_files()
 
     def mark_prepared(
         self,
