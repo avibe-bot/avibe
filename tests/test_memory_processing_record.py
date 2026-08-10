@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 import threading
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -77,6 +78,9 @@ class _RuntimeObservations:
             raise self.maintenance_observation_error
         return self.maintenance_observation
 
+    async def resolve_operator(self, user_key: str) -> str:
+        return f"u-{user_key}"
+
     async def observe_health(
         self,
         maintenance_reason: str | None,
@@ -125,6 +129,7 @@ class _RuntimeObservations:
 
     def port(self) -> MemoryProcessingRecordPort:
         return MemoryProcessingRecordPort(
+            resolve_operator=self.resolve_operator,
             observe_maintenance=self.observe_maintenance,
             observe_health=self.observe_health,
             failure_log=self.failure_log,
@@ -223,12 +228,12 @@ async def test_health_snapshot_falls_back_only_to_its_own_stale_observation(
         lambda: next(times),
     )
 
-    current = await record.read(None)
+    current = await record.read("record")
     observations.health = RuntimeHealthObservation(
         snapshot=None,
         unavailable_reason="memory_provider_timeout",
     )
-    stale = await record.read(None)
+    stale = await record.read("record")
 
     assert current.runtime.source == SourceObservation("available", "current")
     assert stale.runtime.source == SourceObservation(
@@ -274,14 +279,14 @@ async def test_recorder_episode_is_stable_and_rotates_after_recovery_or_reason_c
     )
 
     observations.recorder = {"state": "degraded", "reason": "writer_failures"}
-    first = await record.read(None)
-    second = await record.read(None)
+    first = await record.read("record")
+    second = await record.read("record")
     observations.recorder = {"state": "active", "reason": None}
-    recovered = await record.read(None)
+    recovered = await record.read("record")
     observations.recorder = {"state": "degraded", "reason": "writer_failures"}
-    next_episode = await record.read(None)
+    next_episode = await record.read("record")
     observations.recorder = {"state": "degraded", "reason": "call_log_corrupt"}
-    changed_reason = await record.read(None)
+    changed_reason = await record.read("record")
 
     assert [item.id for item in first.anomalies.items] == [
         "ma_episode_1",
@@ -307,7 +312,10 @@ async def test_sources_anomalies_and_maintenance_degrade_independently() -> None
     observations.maintenance_error = OSError("private maintenance detail")
     observations.recorder = {"state": "degraded", "reason": "writer_failures"}
 
-    summary = await MemoryProcessingRecord(observations.port()).read("u-operator")
+    summary = await MemoryProcessingRecord(observations.port()).read(
+        "record",
+        operator_ref="u-operator",
+    )
 
     assert summary.runtime.health is not None
     assert summary.sources.capture.reason == "busy"
@@ -328,6 +336,34 @@ async def test_sources_anomalies_and_maintenance_degrade_independently() -> None
 
 
 @pytest.mark.asyncio
+async def test_verified_identity_lookup_is_inside_deadline_and_fails_closed() -> None:
+    observations = _RuntimeObservations()
+
+    async def blocked_operator_lookup(_user_key: str) -> str:
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    port = replace(
+        observations.port(),
+        resolve_operator=blocked_operator_lookup,
+    )
+    deadline = asyncio.get_running_loop().time() + 0.01
+
+    summary = await asyncio.wait_for(
+        MemoryProcessingRecord(port).read(
+            "record",
+            verified_user_key="avibe:remote:subject",
+            deadline=deadline,
+        ),
+        timeout=0.2,
+    )
+
+    assert summary.status == "ok"
+    assert observations.operator_refs == []
+    assert summary.maintenance.can_clear is False
+
+
+@pytest.mark.asyncio
 async def test_fenced_anomaly_read_reports_maintenance_reason() -> None:
     observations = _RuntimeObservations()
     observations.maintenance_observation = MaintenanceObservation(
@@ -336,7 +372,7 @@ async def test_fenced_anomaly_read_reports_maintenance_reason() -> None:
         False,
     )
 
-    summary = await MemoryProcessingRecord(observations.port()).read(None)
+    summary = await MemoryProcessingRecord(observations.port()).read("record")
 
     assert summary.anomalies.source == SourceObservation(
         "unavailable",
@@ -352,7 +388,7 @@ async def test_maintenance_observation_failure_marks_only_maintenance_unavailabl
     observations.maintenance_observation_error = OSError("journal unavailable")
     observations.maintenance = MaintenanceResult(False, False, None)
 
-    summary = await MemoryProcessingRecord(observations.port()).read(None)
+    summary = await MemoryProcessingRecord(observations.port()).read("record")
 
     assert summary.runtime.source.reason == "memory_store_unavailable"
     assert summary.sources.everos.reason == "memory_store_unavailable"
@@ -370,9 +406,9 @@ async def test_overlapping_composite_reads_keep_their_own_recorder_episode() -> 
     observations = _OverlappingRecorderObservations()
     record = MemoryProcessingRecord(observations.port())
 
-    first_reading = asyncio.create_task(record.read(None))
+    first_reading = asyncio.create_task(record.read("record"))
     await asyncio.wait_for(observations.first_health_read.wait(), timeout=0.2)
-    second = await asyncio.wait_for(record.read(None), timeout=0.2)
+    second = await asyncio.wait_for(record.read("record"), timeout=0.2)
     observations.release_first_failure_read.set()
     first = await asyncio.wait_for(first_reading, timeout=0.2)
 
@@ -391,7 +427,7 @@ async def test_composite_reads_sources_concurrently_then_merges_recorder_episode
     observations = _ConcurrentRuntimeObservations()
     record = MemoryProcessingRecord(observations.port())
 
-    summary = await asyncio.wait_for(record.read(None), timeout=0.2)
+    summary = await asyncio.wait_for(record.read("record"), timeout=0.2)
 
     assert summary.runtime.health is not None
     assert summary.runtime.health.recorder == {
@@ -555,6 +591,94 @@ async def test_health_probe_releases_reconcile_lock_and_discards_stale_result(
 
 
 @pytest.mark.asyncio
+async def test_health_probe_returns_closed_without_waiting_for_reconcile(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime = MemoryRuntime(MemoryConfig(enabled=True), effective_home=tmp_path)
+    runtime._process = SimpleNamespace(running=True)
+    provider_called = False
+
+    async def unexpected_health() -> ProviderHealthSnapshot:
+        nonlocal provider_called
+        provider_called = True
+        return _health({"state": "active", "reason": None})
+
+    monkeypatch.setattr(runtime._provider, "health_snapshot", unexpected_health)
+    async with runtime._reconcile_lock:
+        observation = await asyncio.wait_for(
+            runtime._processing_record_health(None),
+            timeout=0.1,
+        )
+
+    assert observation.snapshot is None
+    assert observation.unavailable_reason == "busy"
+    assert provider_called is False
+    runtime._process = None
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_health_probe_discards_result_after_same_process_lifecycle_transition(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime = MemoryRuntime(MemoryConfig(enabled=True), effective_home=tmp_path)
+    runtime._process = SimpleNamespace(running=True)
+    probe_entered = asyncio.Event()
+    release_probe = asyncio.Event()
+
+    async def blocked_health() -> ProviderHealthSnapshot:
+        probe_entered.set()
+        await release_probe.wait()
+        return _health({"state": "active", "reason": None})
+
+    monkeypatch.setattr(runtime._provider, "health_snapshot", blocked_health)
+    probing = asyncio.create_task(runtime._processing_record_health(None))
+    await asyncio.wait_for(probe_entered.wait(), timeout=0.2)
+    async with runtime._reconcile_lock:
+        pass
+    release_probe.set()
+
+    observation = await probing
+
+    assert observation == RuntimeHealthObservation(
+        snapshot=None,
+        unavailable_reason="memory_sidecar_unavailable",
+    )
+    runtime._process = None
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_status_projection_never_reads_maintenance_journals(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime = MemoryRuntime(MemoryConfig(enabled=False), effective_home=tmp_path)
+
+    async def unexpected_read(*_args: object) -> object:
+        raise AssertionError("status compatibility reads must stay runtime-only")
+
+    runtime._processing_record._runtime = replace(
+        runtime._processing_record._runtime,
+        resolve_operator=unexpected_read,
+        observe_maintenance=unexpected_read,
+        failure_log=unexpected_read,
+        observe_sources=unexpected_read,
+        maintenance=unexpected_read,
+    )
+
+    payload = await runtime.status_payload()
+
+    assert payload["source"]["reason"] == "memory_disabled"
+    await runtime.close()
+
+
+@pytest.mark.asyncio
 async def test_processing_record_keeps_event_loop_responsive_during_journal_read(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -596,7 +720,7 @@ async def test_processing_record_keeps_event_loop_responsive_during_journal_read
         assert watchdog_released.is_set() is False
         release_journal.set()
         await asyncio.wait_for(reading, timeout=1)
-        assert journal_reads == 1
+        assert journal_reads == 2
     finally:
         release_journal.set()
         watchdog.cancel()

@@ -330,13 +330,29 @@ class MemoryMaintenance:
                 clear_recovery=observation.clear_recovery,
                 error="memory_store_unavailable",
             )
+        try:
+            latest = await self.observe(operator_ref=operator_ref)
+        except Exception:
+            return MaintenanceResult(
+                data_exists=bool(history or (meta is not None and meta.last_success_at)),
+                can_clear=False,
+                clear_recovery=None,
+                error="memory_store_unavailable",
+            )
+        changed = latest != observation
         return MaintenanceResult(
             data_exists=bool(history or (meta is not None and meta.last_success_at)),
             can_clear=(
-                observation.can_clear
+                not changed
+                and latest.can_clear
                 and not manual_required
             ),
-            clear_recovery=observation.clear_recovery,
+            clear_recovery=latest.clear_recovery,
+            error=(
+                "memory_store_unavailable"
+                if latest.block_reason == "memory_store_unavailable"
+                else None
+            ),
         )
 
     async def create_backup(self, backup_id: str | None = None) -> MemorySnapshot:

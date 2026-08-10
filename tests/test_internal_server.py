@@ -502,8 +502,12 @@ def test_memory_recovery_reads_resolve_only_signed_ui_operators() -> None:
                 "avibe:remote:subject-2": "u-remote-principal",
             }[user_key]
 
-        async def processing_record_payload(self, *, operator_ref: str | None = None):
-            calls.append(("processing-record", operator_ref))
+        async def processing_record_payload(
+            self,
+            *,
+            verified_user_key: str | None = None,
+        ):
+            calls.append(("processing-record", verified_user_key))
             return {
                 "status": "ok",
                 "runtime": {"source": {"status": "unavailable"}, "health": None},
@@ -512,12 +516,20 @@ def test_memory_recovery_reads_resolve_only_signed_ui_operators() -> None:
                 "maintenance": {"source": {"status": "available"}},
             }
 
-        async def failure_log_payload(self, *, operator_ref: str | None = None):
-            calls.append(("failures", operator_ref))
+        async def failure_log_payload(
+            self,
+            *,
+            verified_user_key: str | None = None,
+        ):
+            calls.append(("failures", verified_user_key))
             return {"status": "ok", "items": [], "recovery": None}
 
-        async def maintenance_payload(self, *, operator_ref: str | None = None):
-            calls.append(("maintenance", operator_ref))
+        async def maintenance_payload(
+            self,
+            *,
+            verified_user_key: str | None = None,
+        ):
+            calls.append(("maintenance", verified_user_key))
             return {
                 "status": "ok",
                 "data_exists": False,
@@ -570,9 +582,9 @@ def test_memory_recovery_reads_resolve_only_signed_ui_operators() -> None:
     assert "avibe:remote:subject-2" not in composite.text
     assert "u-remote-principal" not in composite.text
     assert calls == [
-        ("processing-record", "u-remote-principal"),
-        ("failures", "u-local-principal"),
-        ("maintenance", "u-remote-principal"),
+        ("processing-record", "avibe:remote:subject-2"),
+        ("failures", "avibe:local"),
+        ("maintenance", "avibe:remote:subject-2"),
         ("failures", None),
     ]
 
@@ -582,7 +594,7 @@ def test_processing_record_degrades_signed_operator_lookup_failure() -> None:
     from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
 
     secret = "test-memory-ui-secret"
-    operator_refs: list[str | None] = []
+    verified_user_keys: list[str | None] = []
 
     class Runtime:
         def principal_for_user_key(self, _user_key: str) -> str:
@@ -591,9 +603,9 @@ def test_processing_record_degrades_signed_operator_lookup_failure() -> None:
         async def processing_record_payload(
             self,
             *,
-            operator_ref: str | None = None,
+            verified_user_key: str | None = None,
         ) -> dict[str, object]:
-            operator_refs.append(operator_ref)
+            verified_user_keys.append(verified_user_key)
             return {
                 "status": "ok",
                 "runtime": {"source": {"status": "unavailable"}, "health": None},
@@ -635,31 +647,26 @@ def test_processing_record_degrades_signed_operator_lookup_failure() -> None:
 
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
-    assert operator_refs == [None]
+    assert verified_user_keys == [user_key]
 
 
-def test_processing_record_operator_lookup_does_not_block_event_loop() -> None:
+def test_processing_record_route_leaves_operator_lookup_to_runtime() -> None:
     from core.memory.http_headers import MEMORY_USER_KEY_HEADER
     from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
 
     secret = "test-memory-ui-secret"
-    lookup_started = threading.Event()
-    event_loop_progressed = threading.Event()
-    operator_refs: list[str | None] = []
+    verified_user_keys: list[str | None] = []
 
     class Runtime:
         def principal_for_user_key(self, _user_key: str) -> str:
-            lookup_started.set()
-            if not event_loop_progressed.wait(timeout=1):
-                raise AssertionError("principal lookup blocked the ASGI event loop")
-            return "u-remote-principal"
+            raise AssertionError("the socket route must not resolve Memory operators")
 
         async def processing_record_payload(
             self,
             *,
-            operator_ref: str | None = None,
+            verified_user_key: str | None = None,
         ) -> dict[str, object]:
-            operator_refs.append(operator_ref)
+            verified_user_keys.append(verified_user_key)
             return {
                 "status": "ok",
                 "runtime": {"source": {"status": "unavailable"}, "health": None},
@@ -675,37 +682,28 @@ def test_processing_record_operator_lookup_does_not_block_event_loop() -> None:
     user_key = "avibe:remote:subject-2"
 
     async def _exercise() -> httpx.Response:
-        async def mark_event_loop_progress() -> None:
-            while not lookup_started.is_set():
-                await asyncio.sleep(0)
-            event_loop_progressed.set()
-
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(
             transport=transport,
             base_url="http://test",
         ) as client:
-            response, _ = await asyncio.gather(
-                client.get(
-                    path,
-                    headers={
-                        MEMORY_USER_KEY_HEADER: user_key,
-                        MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
-                            secret,
-                            method="GET",
-                            path=path,
-                            user_key=user_key,
-                        ),
-                    },
-                ),
-                mark_event_loop_progress(),
+            return await client.get(
+                path,
+                headers={
+                    MEMORY_USER_KEY_HEADER: user_key,
+                    MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
+                        secret,
+                        method="GET",
+                        path=path,
+                        user_key=user_key,
+                    ),
+                },
             )
-            return response
 
     response = asyncio.run(_exercise())
 
     assert response.status_code == 200
-    assert operator_refs == ["u-remote-principal"]
+    assert verified_user_keys == [user_key]
 
 
 @pytest.mark.parametrize(

@@ -27,6 +27,9 @@ from typing import Any, AsyncIterator, Optional
 import httpx
 
 from config import paths
+from core.memory.processing_record import (
+    PROCESSING_RECORD_TRANSPORT_TIMEOUT_SECONDS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -48,10 +51,13 @@ _OWNER_ONLY_SOCKET_MODES = frozenset({0o600, 0o700})
 MEMORY_READ_TIMEOUT_SECONDS = 25.0
 MEMORY_SEARCH_TIMEOUT_SECONDS = 45.0
 MEMORY_STATUS_TIMEOUT_SECONDS = MEMORY_READ_TIMEOUT_SECONDS
-# Processing Record first reads a private SQLite maintenance journal (up to 5s)
-# before its provider health probe (up to 20s). Retain the same 5s transport
-# margin as an ordinary Memory read around those sequential bounds.
-MEMORY_PROCESSING_RECORD_TIMEOUT_SECONDS = 30.0
+# Processing Record owns its complete identity/journal/provider/store work
+# budget; the transport imports that bound so the two processes cannot drift.
+MEMORY_PROCESSING_RECORD_TIMEOUT_SECONDS = (
+    PROCESSING_RECORD_TRANSPORT_TIMEOUT_SECONDS
+)
+MEMORY_FAILURES_TIMEOUT_SECONDS = MEMORY_PROCESSING_RECORD_TIMEOUT_SECONDS
+MEMORY_MAINTENANCE_TIMEOUT_SECONDS = MEMORY_PROCESSING_RECORD_TIMEOUT_SECONDS
 # Reconcile can probe processing (20s), drain an active add (30s), stop the
 # prior child (10s), and wait for replacement readiness (30s). Keep transport
 # outside the whole sequence so a slow success cannot race a settings rollback.
@@ -437,7 +443,7 @@ async def memory_failures(
     *,
     user_key: str,
     socket_path: Optional[Path] = None,
-    timeout: float = 10.0,
+    timeout: float = MEMORY_FAILURES_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     path = "/internal/memory/failures"
     return await _memory_request(
@@ -453,7 +459,7 @@ async def memory_maintenance(
     *,
     user_key: str,
     socket_path: Optional[Path] = None,
-    timeout: float = MEMORY_STATUS_TIMEOUT_SECONDS,
+    timeout: float = MEMORY_MAINTENANCE_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     path = "/internal/memory/maintenance"
     return await _memory_request(

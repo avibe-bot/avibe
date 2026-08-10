@@ -12,7 +12,7 @@ from concurrent.futures import Future as ThreadFuture
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -96,6 +96,72 @@ ARTIFACT_ACTIVATION_TIMEOUT_SECONDS = 90.0
 _CALL_LOG_RETENTION_INTERVAL_SECONDS = 6 * 60 * 60
 _RECORDER_DISABLED = {"state": "disabled", "reason": None}
 _RECORDER_DEGRADED = {"state": "degraded", "reason": "writer_failures"}
+
+
+@dataclass(frozen=True, slots=True)
+class _ProcessingRuntimeSnapshot:
+    generation: int
+    transition_active: bool
+    enabled: bool
+    store_available: bool
+    maintenance_active: bool
+    closing: bool
+    process: EverOSProcessPort | None
+    process_running: bool
+    runtime_error: str | None
+
+    def unavailable_reason(self, maintenance_reason: str | None) -> str | None:
+        if not self.enabled:
+            return "memory_disabled"
+        if not self.store_available:
+            return "memory_sidecar_unavailable"
+        if maintenance_reason is not None:
+            return maintenance_reason
+        if self.maintenance_active or self.transition_active or self.closing:
+            return "busy"
+        if self.process is None or not self.process_running:
+            return self.runtime_error or "memory_sidecar_unavailable"
+        return None
+
+    def same_lifecycle(self, other: _ProcessingRuntimeSnapshot) -> bool:
+        return (
+            self.generation == other.generation
+            and self.transition_active == other.transition_active
+            and self.enabled == other.enabled
+            and self.store_available == other.store_available
+            and self.maintenance_active == other.maintenance_active
+            and self.closing == other.closing
+            and self.process is other.process
+            and self.process_running == other.process_running
+            and self.runtime_error == other.runtime_error
+        )
+
+
+class _LifecycleGenerationLock:
+    """Publish reconcile transitions without making health readers wait."""
+
+    def __init__(self, on_transition: Callable[[], None]) -> None:
+        self._lock = asyncio.Lock()
+        self._on_transition = on_transition
+
+    async def acquire(self) -> bool:
+        acquired = await self._lock.acquire()
+        self._on_transition()
+        return acquired
+
+    def release(self) -> None:
+        self._lock.release()
+        self._on_transition()
+
+    def locked(self) -> bool:
+        return self._lock.locked()
+
+    async def __aenter__(self) -> _LifecycleGenerationLock:
+        await self.acquire()
+        return self
+
+    async def __aexit__(self, *_exc: object) -> None:
+        self.release()
 
 
 def _clear_recovery_payload(
@@ -257,7 +323,10 @@ class MemoryRuntime:
         # enter an EverOSPort only inside the owned child probe/sidecar.
         self._provider = EverOSPort(self._socket_path)
         self._runtime_error: str | None = None
-        self._reconcile_lock = asyncio.Lock()
+        self._processing_lifecycle_generation = 0
+        self._reconcile_lock = _LifecycleGenerationLock(
+            self._advance_processing_lifecycle
+        )
         self._restart_task: asyncio.Task[dict[str, Any]] | None = None
         self._ready_activation_task: asyncio.Task[None] | None = None
         self._closing = False
@@ -391,12 +460,36 @@ class MemoryRuntime:
 
     def _processing_record_port(self) -> MemoryProcessingRecordPort:
         return MemoryProcessingRecordPort(
+            resolve_operator=self._processing_record_operator,
             observe_maintenance=self._processing_record_maintenance_observation,
             observe_health=self._processing_record_health,
             failure_log=self._processing_record_failure_log,
             recorder_health=lambda: dict(self._recorder_health),
             observe_sources=self._processing_record_sources,
             maintenance=self._processing_record_maintenance,
+        )
+
+    async def _processing_record_operator(self, user_key: str) -> str:
+        if not self.available:
+            raise self._unavailable()
+        return await run_blocking(self._store.principal_for_user_key, user_key)
+
+    def _advance_processing_lifecycle(self) -> None:
+        self._processing_lifecycle_generation += 1
+
+    def _processing_runtime_snapshot(self) -> _ProcessingRuntimeSnapshot:
+        process = self._process
+        module = self._module
+        return _ProcessingRuntimeSnapshot(
+            generation=self._processing_lifecycle_generation,
+            transition_active=self._reconcile_lock.locked(),
+            enabled=self._config.enabled,
+            store_available=module is not None,
+            maintenance_active=bool(module and module._clear_active),
+            closing=self._closing,
+            process=process,
+            process_running=bool(process and process.running),
+            runtime_error=self._runtime_error,
         )
 
     @asynccontextmanager
@@ -422,10 +515,12 @@ class MemoryRuntime:
     def _enter_maintenance(self) -> None:
         if self._module is not None:
             self._module._clear_active = True
+        self._advance_processing_lifecycle()
 
     def _leave_maintenance(self) -> None:
         if self._module is not None:
             self._module._clear_active = False
+        self._advance_processing_lifecycle()
 
     def _resume_maintenance_claims(self) -> None:
         if self._module is not None:
@@ -805,24 +900,8 @@ class MemoryRuntime:
     ) -> RuntimeHealthObservation:
         snapshot: ProviderHealthSnapshot | None = None
         reason: str | None = None
-        if not self._config.enabled:
-            return RuntimeHealthObservation(
-                snapshot=None,
-                unavailable_reason="memory_disabled",
-            )
-        if not self.available:
-            return RuntimeHealthObservation(
-                snapshot=None,
-                unavailable_reason="memory_sidecar_unavailable",
-            )
-        if maintenance_reason is not None:
-            return RuntimeHealthObservation(
-                snapshot=None,
-                unavailable_reason=maintenance_reason,
-            )
-        async with self._reconcile_lock:
-            reason = self._processing_record_state_reason(maintenance_reason)
-            process = self._process
+        before = self._processing_runtime_snapshot()
+        reason = before.unavailable_reason(maintenance_reason)
         if reason is not None:
             return RuntimeHealthObservation(snapshot=None, unavailable_reason=reason)
         try:
@@ -831,30 +910,16 @@ class MemoryRuntime:
             reason = failure.error
         except Exception:
             reason = "memory_sidecar_unavailable"
-        async with self._reconcile_lock:
-            current_reason = self._processing_record_state_reason(maintenance_reason)
-            if self._process is not process or current_reason is not None:
-                return RuntimeHealthObservation(
-                    snapshot=None,
-                    unavailable_reason=current_reason or "memory_sidecar_unavailable",
-                )
-            if snapshot is not None:
-                self._update_recorder_health(snapshot.recorder)
+        after = self._processing_runtime_snapshot()
+        current_reason = after.unavailable_reason(maintenance_reason)
+        if not after.same_lifecycle(before) or current_reason is not None:
+            return RuntimeHealthObservation(
+                snapshot=None,
+                unavailable_reason=current_reason or "memory_sidecar_unavailable",
+            )
+        if snapshot is not None:
+            self._update_recorder_health(snapshot.recorder)
         return RuntimeHealthObservation(snapshot=snapshot, unavailable_reason=reason)
-
-    def _processing_record_state_reason(
-        self,
-        maintenance_reason: str | None,
-    ) -> str | None:
-        if not self._config.enabled:
-            return "memory_disabled"
-        if not self.available:
-            return "memory_sidecar_unavailable"
-        if maintenance_reason is not None:
-            return maintenance_reason
-        if self._process is None or not self._process.running:
-            return self._runtime_error or "memory_sidecar_unavailable"
-        return None
 
     async def _processing_record_failure_log(
         self,
@@ -917,22 +982,37 @@ class MemoryRuntime:
         self,
         *,
         operator_ref: str | None = None,
+        verified_user_key: str | None = None,
     ) -> dict[str, Any]:
-        summary = await self._processing_record.read(operator_ref)
+        summary = await self._processing_record.read(
+            "record",
+            verified_user_key=verified_user_key,
+            operator_ref=operator_ref,
+        )
+        if not isinstance(summary, ProcessingRecordSummary):
+            raise RuntimeError("invalid Processing Record projection")
         return _processing_record_payload(summary)
 
     async def status_payload(self) -> dict[str, Any]:
-        runtime = await self._processing_record.read_runtime()
+        runtime = await self._processing_record.read("status")
+        if not isinstance(runtime, RuntimeHealthProjection):
+            raise RuntimeError("invalid Memory status projection")
         return _runtime_health_payload(runtime)
 
     async def failure_log_payload(
         self,
         *,
         operator_ref: str | None = None,
+        verified_user_key: str | None = None,
     ) -> dict[str, Any]:
-        anomalies, maintenance = await self._processing_record.read_failures(
-            operator_ref
+        projection = await self._processing_record.read(
+            "failures",
+            verified_user_key=verified_user_key,
+            operator_ref=operator_ref,
         )
+        if not isinstance(projection, tuple):
+            raise RuntimeError("invalid Memory failures projection")
+        anomalies, maintenance = projection
         if anomalies.source.status == "unavailable":
             raise self._unavailable()
         return {
@@ -945,10 +1025,17 @@ class MemoryRuntime:
         self,
         *,
         operator_ref: str | None = None,
+        verified_user_key: str | None = None,
     ) -> dict[str, Any]:
         """Return cheap local maintenance facts without probing or scanning EverOS."""
 
-        result = await self._processing_record.read_maintenance(operator_ref)
+        result = await self._processing_record.read(
+            "maintenance",
+            verified_user_key=verified_user_key,
+            operator_ref=operator_ref,
+        )
+        if not isinstance(result, MaintenanceProjection):
+            raise RuntimeError("invalid Memory maintenance projection")
         return {
             "status": "ok",
             "data_exists": result.data_exists,
@@ -1684,6 +1771,7 @@ class MemoryRuntime:
 
     async def close(self) -> None:
         self._closing = True
+        self._advance_processing_lifecycle()
         if self._maintenance is not None:
             await self._maintenance.close()
         restart_task = self._restart_task
@@ -1718,6 +1806,7 @@ class MemoryRuntime:
         self._process_records_calls = False
         await self._stop_call_log_retention()
         self._artifact_manager.set_activation_coordinator(None)
+        self._advance_processing_lifecycle()
 
     def _active_provider_root_metadata(self) -> ProviderRootMetadata:
         provider_root_format = (

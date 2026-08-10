@@ -22,6 +22,7 @@ from core.memory.process import SidecarOwnership
 from core.memory.maintenance import (
     ClearRecoveryResult,
     ClearResult,
+    MaintenanceObservation,
     MemoryMaintenance,
 )
 from core.memory.runtime import MemoryRuntime
@@ -188,6 +189,66 @@ async def test_maintenance_advertises_clear_only_for_a_healthy_runtime(
 
     assert runtime.available is True
     assert (await runtime.maintenance_payload())["can_clear"] is True
+    await runtime.close()
+
+
+async def test_maintenance_revalidates_journals_after_store_metadata_reads(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    maintenance = runtime._maintenance
+    assert maintenance is not None
+    initial = MaintenanceObservation(None, None, True)
+    latest = MaintenanceObservation("busy", None, False)
+    observations = iter((initial, latest))
+
+    async def observe(*, operator_ref: str | None = None) -> MaintenanceObservation:
+        del operator_ref
+        return next(observations)
+
+    monkeypatch.setattr(maintenance, "observe", observe)
+
+    result = await maintenance.maintenance_payload(operator_ref="user:owner")
+
+    assert result.can_clear is False
+    assert result.clear_recovery is latest.clear_recovery
+    await runtime.close()
+
+
+async def test_maintenance_drops_old_recovery_when_freshness_check_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    maintenance = runtime._maintenance
+    assert maintenance is not None
+    recovery = ClearRecoveryResult(
+        state="recovery_needed",
+        operation_id="clear-stale",
+        occurred_at="2026-08-10T00:00:00.000Z",
+        error_code="memory_clear_failed",
+        can_resume=True,
+        can_abort=True,
+    )
+    initial = MaintenanceObservation("memory_clear_failed", recovery, False)
+
+    async def failed_observe(*, operator_ref: str | None = None) -> MaintenanceObservation:
+        del operator_ref
+        raise OSError("journal unavailable")
+
+    monkeypatch.setattr(maintenance, "observe", failed_observe)
+
+    result = await maintenance.maintenance_payload(
+        operator_ref="user:owner",
+        observation=initial,
+    )
+
+    assert result.can_clear is False
+    assert result.clear_recovery is None
+    assert result.error == "memory_store_unavailable"
     await runtime.close()
 
 
