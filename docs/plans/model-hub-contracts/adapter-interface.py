@@ -222,6 +222,29 @@ class EngineAdapter(Protocol):
         remains CLI-owned and has no ref on this seam."""
         ...
 
+    async def retarget_api_key_credential(
+        self,
+        credential_ref: str,
+        vendor: str,
+        protocol: str,
+        base_url: str | None,
+    ) -> str:
+        """Copy an API-key credential to a fresh ref with a new target.
+
+        The old ref remains valid until L2 commits the Source mutation and
+        explicitly revokes it. The secret never crosses this adapter boundary,
+        so Base URL replacement can be staged and rolled back transactionally.
+        """
+        ...
+
+    async def credential_supports_refresh(self, credential_ref: str) -> bool:
+        """Return the credential's actual engine-side refresh capability.
+
+        This is a property of the stored credential, not an inference from
+        vendor, Source kind, or an HTTP status.
+        """
+        ...
+
     async def revoke_credential(self, credential_ref: str) -> None:
         """Release the stored credential (source deletion / key replacement)."""
         ...

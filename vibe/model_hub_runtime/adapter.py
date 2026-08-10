@@ -342,6 +342,43 @@ class CLIProxyEngineAdapter:
             base_url=base_url,
         )
 
+    async def retarget_api_key_credential(
+        self,
+        credential_ref: str,
+        vendor: str,
+        protocol: str,
+        base_url: str | None,
+    ) -> str:
+        metadata = await asyncio.to_thread(
+            self.state_store.credential_metadata,
+            credential_ref,
+        )
+        normalized_vendor = vendor.strip().lower()
+        if (
+            metadata.get("kind") != "api_key"
+            or metadata.get("vendor") != normalized_vendor
+            or metadata.get("protocol") != protocol
+        ):
+            raise EngineStateError("credential does not match retarget request")
+        secret = await asyncio.to_thread(
+            self.state_store.read_api_key,
+            credential_ref,
+        )
+        return await asyncio.to_thread(
+            self.state_store.store_api_key,
+            secret,
+            vendor=normalized_vendor,
+            protocol=protocol,
+            base_url=base_url,
+        )
+
+    async def credential_supports_refresh(self, credential_ref: str) -> bool:
+        metadata = await asyncio.to_thread(
+            self.state_store.credential_metadata,
+            credential_ref,
+        )
+        return metadata.get("kind") == "oauth"
+
     async def provision_transient_credential(
         self,
         vendor: str,

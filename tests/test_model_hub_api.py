@@ -116,6 +116,9 @@ class FakeAdapter:
         self.credential_count = 0
         self.observation: SourceObservation | None = None
         self.observed_protocol_orders: list[tuple[str, ...]] = []
+        self.retargeted_credentials: list[tuple[str, str, str, str | None, str]] = []
+        self.refreshable_credential_refs: set[str] = set()
+        self.discovery_credential_refs: list[str] = []
 
     async def ensure_installed(self):
         return await self.status()
@@ -145,6 +148,23 @@ class FakeAdapter:
         self.credential_count += 1
         return f"cred_test{self.credential_count:03d}"
 
+    async def retarget_api_key_credential(
+        self,
+        credential_ref,
+        vendor,
+        protocol,
+        base_url,
+    ):
+        self.credential_count += 1
+        replacement_ref = f"cred_test{self.credential_count:03d}"
+        self.retargeted_credentials.append(
+            (credential_ref, vendor, protocol, base_url, replacement_ref)
+        )
+        return replacement_ref
+
+    async def credential_supports_refresh(self, credential_ref):
+        return credential_ref in self.refreshable_credential_refs
+
     async def provision_transient_credential(self, vendor, secret, base_url):
         self.secret_lengths.append(len(secret))
         self.credential_count += 1
@@ -163,6 +183,7 @@ class FakeAdapter:
             raise RuntimeError("upstream failure with sk-secret-material")
 
     async def discover_models(self, vendor, protocol, base_url, credential_ref):
+        self.discovery_credential_refs.append(credential_ref)
         return ("claude-opus-4-6", "claude-sonnet-4-6")
 
     async def observe_source(self, vendor, base_url, credential_ref, protocol_order):
@@ -263,9 +284,9 @@ class FakeAdapter:
         )
 
 
-def _service(tmp_path):
+def _service(tmp_path, adapter=None):
     store = MemoryStore()
-    adapter = FakeAdapter()
+    adapter = adapter or FakeAdapter()
     service = ModelHubService(
         store=store,
         adapter=adapter,
@@ -3490,8 +3511,11 @@ def test_base_url_change_guards_and_prunes_invalid_exact_hops(
             },
         )
     )
+    old_credential_ref = source["credential_ref"]
+    discovery_refs: list[str] = []
 
     async def discover_narrower(vendor, protocol, base_url, credential_ref):
+        discovery_refs.append(credential_ref)
         return ("replacement-only-model",)
 
     adapter.discover_models = discover_narrower
@@ -3513,6 +3537,15 @@ def test_base_url_change_guards_and_prunes_invalid_exact_hops(
     assert refusal["error"] == "source_model_in_route_chain"
     assert refusal["would_remove_hops"]
     assert store.config.sources[0].base_url is None
+    refused_retarget = adapter.retargeted_credentials[0]
+    assert refused_retarget[:4] == (
+        old_credential_ref,
+        "anthropic",
+        "anthropic",
+        replacement_url,
+    )
+    assert discovery_refs == [refused_retarget[4]]
+    assert refused_retarget[4] in adapter.revoked
 
     committed = client.patch(
         f"/api/models/sources/{source['id']}",
@@ -3522,6 +3555,11 @@ def test_base_url_change_guards_and_prunes_invalid_exact_hops(
     ).get_json()
 
     assert committed["source"]["base_url"] == replacement_url
+    committed_retarget = adapter.retargeted_credentials[1]
+    assert committed_retarget[:4] == refused_retarget[:4]
+    assert committed["source"]["credential_ref"] == committed_retarget[4]
+    assert discovery_refs == [refused_retarget[4], committed_retarget[4]]
+    assert old_credential_ref in adapter.revoked
     assert committed["removed_hops"] == refusal["would_remove_hops"]
     assert committed["interrupted"] == refusal["would_interrupt"]
     assert store.config.sources[0].base_url == replacement_url
@@ -3535,6 +3573,66 @@ def test_base_url_change_guards_and_prunes_invalid_exact_hops(
         for menu_model, route in agent.routes.items()
         for hop in route.hops
     )
+
+
+def test_base_url_retarget_cancellation_revokes_only_the_uncommitted_ref(
+    tmp_path,
+):
+    class BlockingRetargetAdapter(FakeAdapter):
+        def __init__(self):
+            super().__init__()
+            self.retarget_started = asyncio.Event()
+            self.release_retarget = asyncio.Event()
+
+        async def retarget_api_key_credential(
+            self,
+            credential_ref,
+            vendor,
+            protocol,
+            base_url,
+        ):
+            self.retarget_started.set()
+            await self.release_retarget.wait()
+            return await super().retarget_api_key_credential(
+                credential_ref,
+                vendor,
+                protocol,
+                base_url,
+            )
+
+    async def scenario():
+        adapter = BlockingRetargetAdapter()
+        service, store, _ = _service(tmp_path, adapter=adapter)
+        source = await _create_source(
+            service,
+            {
+                "kind": "api_key",
+                "vendor": "custom",
+                "display_name": "Retarget cancellation",
+                "base_url": "https://old-relay.example/v1",
+                "key": "sk-test-transient-only",
+            },
+        )
+        old_ref = source["credential_ref"]
+        revoked_before = list(adapter.revoked)
+        task = asyncio.create_task(
+            service.patch_source(
+                source["id"],
+                {"base_url": "https://new-relay.example/v1"},
+            )
+        )
+        await adapter.retarget_started.wait()
+        task.cancel()
+        adapter.release_retarget.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        [persisted] = store.config.sources
+        replacement_ref = adapter.retargeted_credentials[0][4]
+        assert persisted.credential_ref == old_ref
+        assert persisted.base_url == "https://old-relay.example/v1"
+        assert adapter.revoked == [*revoked_before, replacement_ref]
+
+    asyncio.run(scenario())
 
 
 def test_metadata_only_source_patch_does_not_require_engine_sync(tmp_path):

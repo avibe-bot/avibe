@@ -158,12 +158,18 @@ class ProbeAdapter:
         self.outcomes = deque(outcomes)
         self.invocations: list[tuple[str, str, str]] = []
         self.requests: list[ModelHubRequest] = []
+        self.refreshable_credential_refs: set[str] = set()
+        self.capability_queries: list[str] = []
 
     async def sync_sources(self, _bindings) -> None:
         return None
 
     async def revoke_credential(self, _credential_ref: str) -> None:
         return None
+
+    async def credential_supports_refresh(self, credential_ref: str) -> bool:
+        self.capability_queries.append(credential_ref)
+        return credential_ref in self.refreshable_credential_refs
 
     async def invoke(self, source_id, model_id, request, _stream, origin):
         self.invocations.append((source_id, model_id, origin))
@@ -1277,6 +1283,48 @@ def test_opencode_overlay_preserves_checked_route_with_stale_exact_hop(
     assert overlay.launches == ()
 
 
+def test_production_adapter_retargets_api_keys_without_exposing_or_mutating_them(
+    tmp_path: Path,
+) -> None:
+    state_store = EngineStateStore(tmp_path / "engine-state")
+    old_ref = state_store.store_api_key(
+        "test-retarget-secret",
+        vendor="custom",
+        protocol="openai_chat",
+        base_url="https://old-relay.example/v1",
+    )
+    oauth_ref = state_store.bind_oauth_credential(
+        "src_oauthrefresh",
+        "openai",
+        "codex-test.json",
+    )
+    adapter = CLIProxyEngineAdapter(
+        supervisor=Mock(),
+        state_store=state_store,
+    )
+
+    replacement_ref = asyncio.run(
+        adapter.retarget_api_key_credential(
+            old_ref,
+            "custom",
+            "openai_chat",
+            "https://new-relay.example/v1?api-version=2026-08-10",
+        )
+    )
+
+    assert replacement_ref != old_ref
+    assert state_store.credential_metadata(old_ref)["base_url"] == (
+        "https://old-relay.example/v1"
+    )
+    assert state_store.credential_metadata(replacement_ref)["base_url"] == (
+        "https://new-relay.example/v1?api-version=2026-08-10"
+    )
+    assert state_store.read_api_key(old_ref) == "test-retarget-secret"
+    assert state_store.read_api_key(replacement_ref) == "test-retarget-secret"
+    assert asyncio.run(adapter.credential_supports_refresh(old_ref)) is False
+    assert asyncio.run(adapter.credential_supports_refresh(oauth_ref)) is True
+
+
 def test_source_observation_stops_at_the_first_response_backed_proof(
     tmp_path: Path,
 ) -> None:
@@ -1877,6 +1925,80 @@ def test_chain_projection_and_probe_latency_partition(tmp_path: Path) -> None:
     assert anthropic_not_found.store.load().sources[0].state.status == "standby"
     assert anthropic_not_found.events.list(limit=10) == []
     _assert_valid("probe-result.schema.json", not_found)
+
+
+def test_probe_401_uses_exact_credential_refresh_capability(tmp_path: Path) -> None:
+    static_source = _source("src_staticprobe", "Static")
+    static_service = _service(
+        tmp_path / "static",
+        sources=[static_source],
+        outcomes=[
+            _outcome(
+                RawOutcomeKind.HTTP_ERROR,
+                status=401,
+                code="unauthorized",
+                source_id=static_source.id,
+            )
+        ],
+    )
+    static_model = _canonicalize_fixed_test_routes(static_service)["claude"]
+    static_adapter = cast(ProbeAdapter, static_service.adapter)
+
+    static_probe = asyncio.run(
+        static_service.probe_agent("claude", static_model)
+    )
+
+    assert static_probe["reachable"] is False
+    assert static_probe["error"] == (
+        "models.source.needs_action.credential_revoked"
+    )
+    assert static_adapter.invocations == [
+        (static_source.id, "shared-model", "claude")
+    ]
+    assert static_adapter.capability_queries == [static_source.credential_ref]
+    assert static_service.store.load().sources[0].state.detail_key == (
+        "models.source.needs_action.credential_revoked"
+    )
+
+    refreshable_source = _source("src_refreshprobe", "Refreshable")
+    refreshable_service = _service(
+        tmp_path / "refreshable",
+        sources=[refreshable_source],
+        outcomes=[
+            _outcome(
+                RawOutcomeKind.HTTP_ERROR,
+                status=401,
+                code="unauthorized",
+                source_id=refreshable_source.id,
+            ),
+            _outcome(
+                RawOutcomeKind.SUCCESS,
+                status=200,
+                source_id=refreshable_source.id,
+            ),
+        ],
+    )
+    refreshable_model = _canonicalize_fixed_test_routes(refreshable_service)[
+        "claude"
+    ]
+    refreshable_adapter = cast(ProbeAdapter, refreshable_service.adapter)
+    assert refreshable_source.credential_ref is not None
+    refreshable_adapter.refreshable_credential_refs.add(
+        refreshable_source.credential_ref
+    )
+
+    refreshable_probe = asyncio.run(
+        refreshable_service.probe_agent("claude", refreshable_model)
+    )
+
+    assert refreshable_probe["reachable"] is True
+    assert refreshable_adapter.invocations == [
+        (refreshable_source.id, "shared-model", "claude"),
+        (refreshable_source.id, "shared-model", "claude"),
+    ]
+    assert refreshable_adapter.capability_queries == [
+        refreshable_source.credential_ref
+    ]
 
 
 @pytest.mark.parametrize(

@@ -89,6 +89,8 @@ class FakeAdapter:
         self.outcomes = deque()
         self.invocations: list[tuple[str, str]] = []
         self.invocation_requests: list[Mapping[str, object]] = []
+        self.refreshable_credential_refs: set[str] = set()
+        self.capability_queries: list[str] = []
 
     async def ensure_installed(self):
         return await self.status()
@@ -125,6 +127,10 @@ class FakeAdapter:
         if self.revoke_block is not None:
             await self.revoke_block.wait()
         self.revoked.append(credential_ref)
+
+    async def credential_supports_refresh(self, credential_ref):
+        self.capability_queries.append(credential_ref)
+        return credential_ref in self.refreshable_credential_refs
 
     async def sync_sources(self, bindings):
         self.synced.append(tuple(bindings))
@@ -472,6 +478,111 @@ def test_runtime_skips_later_hops_after_a_source_global_failure(tmp_path):
         (second.id, "upstream-third"),
     ]
     assert resolved.model_id == "upstream-third"
+
+
+def test_static_api_key_401_falls_through_without_retry(tmp_path):
+    first = _source(
+        "src_static401a",
+        credential_ref="cred_static401",
+    )
+    second = _source(
+        "src_static401b",
+        credential_ref="cred_fallback401",
+    )
+    config = _config([first, second])
+    adapter = FakeAdapter()
+    adapter.outcomes.extend(
+        (
+            RawCallOutcome(
+                kind=RawOutcomeKind.HTTP_ERROR,
+                http_status=401,
+                error_code="unauthorized",
+                redacted_message=None,
+                stream_started=False,
+                model_id="claude-opus-4-6",
+                source_id=first.id,
+            ),
+            RawCallOutcome(
+                kind=RawOutcomeKind.SUCCESS,
+                http_status=200,
+                error_code=None,
+                redacted_message=None,
+                stream_started=False,
+                model_id="claude-opus-4-6",
+                source_id=second.id,
+            ),
+        )
+    )
+    service, store, _ = _service(tmp_path, config, adapter)
+
+    resolved = asyncio.run(
+        service.resolve(
+            backend="claude",
+            model_id="claude-opus-4-6",
+            request={},
+        )
+    )
+
+    assert adapter.invocations == [
+        (first.id, "claude-opus-4-6"),
+        (second.id, "claude-opus-4-6"),
+    ]
+    assert adapter.capability_queries == ["cred_static401"]
+    assert resolved.source_id == second.id
+    persisted = next(item for item in store.load().sources if item.id == first.id)
+    assert persisted.state.status == "needs_action"
+    assert persisted.state.detail_key == (
+        "models.source.needs_action.credential_revoked"
+    )
+
+
+def test_401_retry_depends_on_credential_capability_not_source_kind(tmp_path):
+    source = _source(
+        "src_refresh401",
+        credential_ref="cred_refresh401",
+    )
+    config = _config([source])
+    adapter = FakeAdapter()
+    adapter.refreshable_credential_refs.add("cred_refresh401")
+    adapter.outcomes.extend(
+        (
+            RawCallOutcome(
+                kind=RawOutcomeKind.HTTP_ERROR,
+                http_status=401,
+                error_code="unauthorized",
+                redacted_message=None,
+                stream_started=False,
+                model_id="claude-opus-4-6",
+                source_id=source.id,
+            ),
+            RawCallOutcome(
+                kind=RawOutcomeKind.SUCCESS,
+                http_status=200,
+                error_code=None,
+                redacted_message=None,
+                stream_started=False,
+                model_id="claude-opus-4-6",
+                source_id=source.id,
+            ),
+        )
+    )
+    service, store, _ = _service(tmp_path, config, adapter)
+
+    resolved = asyncio.run(
+        service.resolve(
+            backend="claude",
+            model_id="claude-opus-4-6",
+            request={},
+        )
+    )
+
+    assert adapter.invocations == [
+        (source.id, "claude-opus-4-6"),
+        (source.id, "claude-opus-4-6"),
+    ]
+    assert adapter.capability_queries == ["cred_refresh401"]
+    assert resolved.source_id == source.id
+    assert store.load().sources[0].state.status == "standby"
 
 
 def test_runtime_filters_reasoning_effort_for_each_exact_hop(tmp_path):
@@ -1617,6 +1728,45 @@ def test_all_interruption_guards_use_the_shared_baseline_comparator():
     for name in direct_baseline_guards:
         assert "_introduced_interruptions" in calls(methods[name])
         assert "_would_interrupt" not in calls(methods[name])
+
+
+def test_credential_target_and_refresh_capability_have_single_service_consumers():
+    from ast import AsyncFunctionDef, Attribute, Call, Name, parse, walk
+    from pathlib import Path
+
+    tree = parse(
+        (Path(__file__).parents[1] / "core/handlers/model_hub/service.py").read_text(
+            encoding="utf-8"
+        )
+    )
+    methods = {
+        node.name: node
+        for node in walk(tree)
+        if isinstance(node, AsyncFunctionDef)
+    }
+
+    def calls(method: AsyncFunctionDef) -> set[str]:
+        return {
+            node.func.id
+            if isinstance(node.func, Name)
+            else node.func.attr
+            for node in walk(method)
+            if isinstance(node, Call)
+            and isinstance(node.func, (Name, Attribute))
+        }
+
+    assert "retarget_api_key_credential" in calls(methods["patch_source"])
+    assert "credential_supports_refresh" in calls(
+        methods["_classify_source_outcome"]
+    )
+    assert "_classify_source_outcome" in calls(methods["probe_agent"])
+    assert "_classify_source_outcome" in calls(methods["resolve"])
+    capability_callers = {
+        name
+        for name, method in methods.items()
+        if "credential_supports_refresh" in calls(method)
+    }
+    assert capability_callers == {"_classify_source_outcome"}
 
 
 def test_direct_mode_refuses_chain_and_probe(tmp_path):

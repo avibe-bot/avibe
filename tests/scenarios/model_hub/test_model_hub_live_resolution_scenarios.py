@@ -88,10 +88,16 @@ class InvokeHandle:
 
 
 class AdapterBoundaryFake:
-    def __init__(self, results: list[AdapterResult]) -> None:
+    def __init__(
+        self,
+        results: list[AdapterResult],
+        *,
+        refreshable_credential_refs: tuple[str, ...] = (),
+    ) -> None:
         self.results = deque(results)
         self.invocations: list[tuple[str, str, str]] = []
         self.requests: list[object] = []
+        self.refreshable_credential_refs = frozenset(refreshable_credential_refs)
 
     async def start(self) -> EngineStatus:
         return EngineStatus(EngineHealth.OK, "test", True, "127.0.0.1", 18443, None)
@@ -104,6 +110,9 @@ class AdapterBoundaryFake:
 
     async def revoke_credential(self, credential_ref: str) -> None:
         return None
+
+    async def credential_supports_refresh(self, credential_ref: str) -> bool:
+        return credential_ref in self.refreshable_credential_refs
 
     async def invoke(self, source_id, model_id, request, stream, origin) -> InvokeHandle:
         self.invocations.append((source_id, model_id, origin))
@@ -329,9 +338,15 @@ def test_mh_res_live_002_401_refreshes_once_in_live_turn(tmp_path: Path) -> None
             [
                 AdapterResult(RawOutcomeKind.HTTP_ERROR, status=401),
                 AdapterResult(RawOutcomeKind.SUCCESS, status=200, body=b'{"ok":true}'),
-            ]
+            ],
+            refreshable_credential_refs=("cred_src_primary1",),
         )
-        store = MemoryStore(_config(_source("src_primary1"), _source("src_backup01")))
+        store = MemoryStore(
+            _config(
+                _source("src_primary1", kind="subscription"),
+                _source("src_backup01", kind="subscription"),
+            )
+        )
         service = _service(
             tmp_path,
             store,
@@ -365,9 +380,15 @@ def test_mh_res_live_002_second_401_blocks_source_and_falls_back(
                 AdapterResult(RawOutcomeKind.HTTP_ERROR, status=401),
                 AdapterResult(RawOutcomeKind.HTTP_ERROR, status=401),
                 AdapterResult(RawOutcomeKind.SUCCESS, status=200, body=b'{"backup":true}'),
-            ]
+            ],
+            refreshable_credential_refs=("cred_src_primary1", "cred_src_backup01"),
         )
-        store = MemoryStore(_config(_source("src_primary1"), _source("src_backup01")))
+        store = MemoryStore(
+            _config(
+                _source("src_primary1", kind="subscription"),
+                _source("src_backup01", kind="subscription"),
+            )
+        )
         service = _service(
             tmp_path,
             store,

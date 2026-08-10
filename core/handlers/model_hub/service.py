@@ -8,7 +8,7 @@ import time
 import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Literal, Mapping, Optional, Protocol, cast
+from typing import Any, Awaitable, Callable, Literal, Mapping, Optional, Protocol, cast
 
 from sqlalchemy import func, select
 
@@ -290,18 +290,15 @@ def _native_model_ids(vendor: str) -> tuple[str, ...]:
     return _builtin_model_ids(backend)
 
 
-async def _provision_transient_credential_with_cancellation_ownership(
+async def _acquire_credential_ref_with_cancellation_ownership(
     service: "ModelHubService",
-    vendor: str,
-    key: str,
-    base_url: str | None,
+    operation: Awaitable[str],
+    rollback_source_id: str,
 ) -> str:
     """Keep ownership of an engine ref when the caller is cancelled mid-provision."""
 
     provision_task = asyncio.create_task(
-        service._engine_call(
-            service.adapter.provision_transient_credential(vendor, key, base_url)
-        )
+        service._engine_call(operation)
     )
     try:
         return await asyncio.shield(provision_task)
@@ -314,8 +311,25 @@ async def _provision_transient_credential_with_cancellation_ownership(
                 break
             except asyncio.CancelledError:
                 continue
-        await _rollback_credential_before_settling(service, "observation", transient_ref)
+        await _rollback_credential_before_settling(
+            service,
+            rollback_source_id,
+            transient_ref,
+        )
         raise cancelled
+
+
+async def _provision_transient_credential_with_cancellation_ownership(
+    service: "ModelHubService",
+    vendor: str,
+    key: str,
+    base_url: str | None,
+) -> str:
+    return await _acquire_credential_ref_with_cancellation_ownership(
+        service,
+        service.adapter.provision_transient_credential(vendor, key, base_url),
+        "observation",
+    )
 
 
 async def _rollback_credential_before_settling(
@@ -2173,6 +2187,8 @@ class ModelHubService:
             previous = self.store.load()
             config = self._clone_config(previous)
             source = self._source(config, source_id)
+            removed_hops: list[dict] = []
+            interrupted: list[dict] = []
             if "display_name" in payload:
                 display_name = payload["display_name"]
                 if (
@@ -2183,25 +2199,87 @@ class ModelHubService:
                 ):
                     raise ModelHubError("discovery_failed")
                 source.display_name = display_name
-            if "base_url" in payload:
-                if source.kind != "api_key":
+            base_url_changed = (
+                "base_url" in payload and source.base_url != base_url
+            )
+            if base_url_changed:
+                if (
+                    source.kind != "api_key"
+                    or source.supply_channel != "hub"
+                    or not source.credential_ref
+                ):
                     raise ModelHubError("discovery_failed")
-                source.base_url = base_url
-                discovered = await self._discover(source)
-                manual = [model for model in source.models if model.provenance == "manual"]
-                self._apply_discovered_models(source, manual, discovered)
-                removed_hops, interrupted = self._guard_inventory_mutation(
-                    previous,
-                    config,
-                    source.id,
-                    force=force,
+                old_credential_ref = source.credential_ref
+                replacement_ref = await (
+                    _acquire_credential_ref_with_cancellation_ownership(
+                        self,
+                        self.adapter.retarget_api_key_credential(
+                            old_credential_ref,
+                            source.vendor,
+                            source.protocol,
+                            base_url,
+                        ),
+                        source.id,
+                    )
                 )
-            if "base_url" in payload:
-                await self._commit_synced(previous, config)
+                committed = False
+                old_revocation_recorded = False
+                try:
+                    source.credential_ref = replacement_ref
+                    source.base_url = base_url
+                    discovered = await self._discover(source)
+                    manual = [
+                        model
+                        for model in source.models
+                        if model.provenance == "manual"
+                    ]
+                    self._apply_discovered_models(source, manual, discovered)
+                    removed_hops, interrupted = self._guard_inventory_mutation(
+                        previous,
+                        config,
+                        source.id,
+                        force=force,
+                    )
+                    self.revocations.add(source.id, old_credential_ref)
+                    old_revocation_recorded = True
+                    await self._commit_synced(previous, config)
+                    committed = True
+                except asyncio.CancelledError:
+                    committed = self._persisted_credential(
+                        self.store.load(),
+                        source.id,
+                        replacement_ref,
+                    )
+                    if not committed:
+                        await _rollback_replacement_before_settling(
+                            self,
+                            source.id,
+                            replacement_ref,
+                            old_credential_ref,
+                            old_revocation_recorded=old_revocation_recorded,
+                        )
+                    raise
+                except Exception:
+                    if not committed:
+                        await self._rollback_replacement(
+                            source.id,
+                            replacement_ref,
+                            old_credential_ref,
+                            old_revocation_recorded=old_revocation_recorded,
+                        )
+                    raise
+
+                try:
+                    await self.adapter.revoke_credential(old_credential_ref)
+                except Exception:
+                    pass
+                else:
+                    try:
+                        self.revocations.remove(source.id, old_credential_ref)
+                    except OSError:
+                        pass
             else:
                 self._save_config(config)
-                removed_hops = []
-                interrupted = []
             return {
                 "source": source.to_payload(),
                 "removed_hops": removed_hops,
@@ -3091,8 +3169,15 @@ class ModelHubService:
             for value in (outcome.error_code, outcome.redacted_message)
             if isinstance(value, str)
         ).lower()
-        if outcome.http_status == 401:
-            return "models.source.needs_action.oauth_expired", "credential_expired"
+        if outcome.http_status == 401 and decision.reason in {
+            "credential_expired",
+            "credential_revoked",
+        }:
+            detail_key = {
+                "credential_expired": "models.source.needs_action.oauth_expired",
+                "credential_revoked": "models.source.needs_action.credential_revoked",
+            }[decision.reason]
+            return detail_key, cast(EventReason, decision.reason)
         if outcome.http_status == 402 or "balance" in text:
             return "models.source.needs_action.balance_exhausted", "balance_exhausted"
         if outcome.http_status == 403 and any(
@@ -3222,7 +3307,7 @@ class ModelHubService:
             async for _chunk in handle.stream:
                 pass
         outcome = await self._engine_call(handle.outcome())
-        decision = classify_outcome(outcome)
+        decision = await self._classify_source_outcome(source, outcome)
         if decision.action == "refresh":
             handle = await self._engine_call(
                 self.adapter.invoke(
@@ -3854,6 +3939,26 @@ class ModelHubService:
             return handle, None
         return handle, await self._engine_call(handle.outcome())
 
+    async def _classify_source_outcome(
+        self,
+        source: ModelHubSourceConfig,
+        outcome: RawCallOutcome,
+    ) -> ResolutionDecision:
+        """Apply the credential-capability branch of the section 4.3 matrix once."""
+
+        decision = classify_outcome(outcome)
+        if decision.action != "refresh":
+            return decision
+        credential_ref = source.credential_ref
+        if not credential_ref:
+            raise ModelHubError("engine_down", status=503)
+        refreshable = await self._engine_call(
+            self.adapter.credential_supports_refresh(credential_ref)
+        )
+        if refreshable:
+            return decision
+        return ResolutionDecision("fallback", reason="credential_revoked")
+
     @staticmethod
     def _request_reasoning_effort(request: Mapping[str, Any]) -> str | None:
         direct = request.get("reasoning_effort")
@@ -4022,7 +4127,7 @@ class ModelHubService:
                     source=source,
                 )
                 return ResolvedInvocation(source.id, target_model, handle, None)
-            decision = classify_outcome(outcome)
+            decision = await self._classify_source_outcome(source, outcome)
             if decision.action == "refresh":
                 # The engine refreshes its credential internally; L2 retries the
                 # exact same source once and never falls through on a second 401.
