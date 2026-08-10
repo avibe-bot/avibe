@@ -34,6 +34,7 @@ from core.memory.everos import (
     AddAck,
     FakeMemoryProvider,
     FlushSucceeded,
+    ProviderCapture,
     ProviderHealthSnapshot,
 )
 import core.memory.runtime as memory_runtime
@@ -98,9 +99,10 @@ def _installed_artifact(**overrides) -> FakeMemoryArtifactManager:
 async def test_memory_drain_task_reactivates_recovery_after_an_unexpected_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    runtime = MemoryRuntime(
+    runtime = memory_runtime_factory(
         MemoryConfig(enabled=True),
         store=MemoryStore(),
         artifact_manager=MemoryArtifactManager(runtime_dir=tmp_path / "runtime", offline=True),
@@ -133,9 +135,10 @@ async def test_memory_drain_task_reactivates_recovery_after_an_unexpected_failur
 async def test_memory_drain_recovery_waits_for_scheduled_flush_settlement(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    runtime = MemoryRuntime(
+    runtime = memory_runtime_factory(
         MemoryConfig(enabled=True),
         store=MemoryStore(),
         artifact_manager=MemoryArtifactManager(runtime_dir=tmp_path / "runtime", offline=True),
@@ -241,7 +244,7 @@ async def test_memory_drain_recovery_waits_for_scheduled_flush_settlement(
     assert state is not None
     assert (state.state, state.unflushed_count) == ("idle", 0)
     assert store.has_manual_required_fence() is False
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
 
 def _settings() -> EverOSProcessSettings:
@@ -285,9 +288,10 @@ def test_memory_runtime_factory_degrades_when_private_modes_cannot_be_enforced(
     }
 
 
-def test_memory_runtime_reopens_the_store_after_initialization_failure(
+async def test_memory_runtime_reopens_the_store_after_initialization_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     """An unavailable runtime is a state, not a permanent identity.
 
@@ -309,13 +313,18 @@ def test_memory_runtime_reopens_the_store_after_initialization_failure(
 
     monkeypatch.setattr("core.memory.runtime.MemoryStore", open_store)
 
-    runtime = create_memory_runtime(
-        MemoryConfig(enabled=True),
-        artifact_manager=_installed_artifact(python=None, status_payload={"reason": "memory_runtime_missing"}),
+    runtime = memory_runtime_factory.register(
+        create_memory_runtime(
+            MemoryConfig(enabled=True),
+            artifact_manager=_installed_artifact(
+                python=None,
+                status_payload={"reason": "memory_runtime_missing"},
+            ),
+        )
     )
     assert runtime.available is False
     # Reads stay closed, and capture is absorbed rather than raising.
-    assert asyncio.run(runtime.profile_payload("u-" + "0" * 32, PROJECT)) == {
+    assert await runtime.profile_payload("u-" + "0" * 32, PROJECT) == {
         "status": "failed",
         "error": "memory_store_unavailable",
     }
@@ -323,13 +332,14 @@ def test_memory_runtime_reopens_the_store_after_initialization_failure(
         runtime.principal_for_user_key("avibe:local")
 
     # An enabled reconciliation reopens it; the runtime is the same object.
-    result = asyncio.run(runtime.reconcile(MemoryConfig(enabled=True)))
+    result = await runtime.reconcile(MemoryConfig(enabled=True))
     assert runtime.available is True
     # The artifact is still missing, so enablement fails for that reason, not
     # for the store.
     assert result["ok"] is False
     assert result["error"] != "memory_store_unavailable"
     assert runtime.principal_for_user_key("avibe:local").startswith("u-")
+    await memory_runtime_factory.close(runtime)
 
 
 
@@ -670,7 +680,11 @@ def test_memory_artifact_coordinator_rolls_back_the_active_pointer(tmp_path: Pat
     assert manager.provider_root_format() == "everos-1.0"
 
 
-async def test_memory_artifact_rollback_resolves_old_active_binary(monkeypatch, tmp_path: Path) -> None:
+async def test_memory_artifact_rollback_resolves_old_active_binary(
+    monkeypatch,
+    tmp_path: Path,
+    memory_runtime_factory,
+) -> None:
     manager = MemoryArtifactManager(
         runtime_dir=tmp_path / "runtime",
         offline=True,
@@ -734,7 +748,7 @@ async def test_memory_artifact_rollback_resolves_old_active_binary(monkeypatch, 
     )
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
-    runtime = MemoryRuntime(
+    runtime = memory_runtime_factory(
         MemoryConfig(enabled=True, processing=processing),
         artifact_manager=manager,
         process_factory=factory,
@@ -742,15 +756,18 @@ async def test_memory_artifact_rollback_resolves_old_active_binary(monkeypatch, 
     )
     assert (await runtime.reconcile(runtime._config))["ok"] is True
     assert [process.python for process in factory.supervised] == [old_binary]
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
 
-async def test_runtime_controller_port_never_copies_processing_credentials(tmp_path: Path) -> None:
+async def test_runtime_controller_port_never_copies_processing_credentials(
+    tmp_path: Path,
+    memory_runtime_factory,
+) -> None:
     processing = MemoryProcessingConfig(
         llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-secret"),
         embedding=MemoryEndpointConfig("https://embed.example.test/v1", "embed", "embedding-secret"),
     )
-    runtime = MemoryRuntime(
+    runtime = memory_runtime_factory(
         MemoryConfig(enabled=True, processing=processing),
         artifact_manager=MemoryArtifactManager(runtime_dir=tmp_path / "runtime", offline=True),
     )
@@ -764,6 +781,7 @@ async def test_runtime_controller_port_never_copies_processing_credentials(tmp_p
     }
     assert runtime._provider._llm_api_key is None
     assert runtime._provider._embedding_api_key is None
+    await memory_runtime_factory.close(runtime)
 
 
 @pytest.mark.parametrize(
@@ -774,6 +792,7 @@ async def test_disable_stops_live_runtime_when_maintenance_journal_is_unreadable
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     journal_attribute: str,
+    memory_runtime_factory,
 ) -> None:
     processing = MemoryProcessingConfig(
         llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-key"),
@@ -787,7 +806,7 @@ async def test_disable_stops_live_runtime_when_maintenance_journal_is_unreadable
     disabled = replace(enabled, enabled=False)
     factory = FakeEverOSProcessFactory()
 
-    runtime = MemoryRuntime(
+    runtime = memory_runtime_factory(
         enabled,
         artifact_manager=_installed_artifact(),
         process_factory=factory,
@@ -855,10 +874,13 @@ async def test_disable_stops_live_runtime_when_maintenance_journal_is_unreadable
     assert sidecar.stopped is True
     assert sidecar.running is False
     assert len(factory.supervised) == 1
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
 
-async def test_reconcile_never_downloads_a_missing_runtime(tmp_path: Path) -> None:
+async def test_reconcile_never_downloads_a_missing_runtime(
+    tmp_path: Path,
+    memory_runtime_factory,
+) -> None:
     def _artifact() -> FakeMemoryArtifactManager:
         return FakeMemoryArtifactManager(
             python=None,
@@ -870,12 +892,12 @@ async def test_reconcile_never_downloads_a_missing_runtime(tmp_path: Path) -> No
         )
 
     artifact = _artifact()
-    disabled = MemoryRuntime(
+    disabled = memory_runtime_factory(
         MemoryConfig(enabled=False),
         artifact_manager=artifact,
         effective_home=tmp_path / "disabled",
     )
-    enabled = MemoryRuntime(
+    enabled = memory_runtime_factory(
         MemoryConfig(enabled=True),
         artifact_manager=artifact,
         effective_home=tmp_path / "enabled",
@@ -889,6 +911,8 @@ async def test_reconcile_never_downloads_a_missing_runtime(tmp_path: Path) -> No
         "ok": False,
         "error": "memory_runtime_missing",
     }
+    await memory_runtime_factory.close(disabled)
+    await memory_runtime_factory.close(enabled)
 
 
 def _recording_ownership(
@@ -918,10 +942,11 @@ def _recording_ownership(
 
 
 @pytest.mark.parametrize("boot", ["disabled", "runtime_missing", "store_unavailable"])
-def test_recorded_orphan_recovery_runs_on_boots_that_never_launch_a_sidecar(
+async def test_recorded_orphan_recovery_runs_on_boots_that_never_launch_a_sidecar(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     boot: str,
+    memory_runtime_factory,
 ) -> None:
     """The reap used to live only on the way to spawning a replacement.
 
@@ -940,12 +965,12 @@ def test_recorded_orphan_recovery_runs_on_boots_that_never_launch_a_sidecar(
         else _installed_artifact()
     )
     config = MemoryConfig(enabled=boot == "runtime_missing")
-    runtime = MemoryRuntime(config, artifact_manager=artifact, effective_home=home)
+    runtime = memory_runtime_factory(config, artifact_manager=artifact, effective_home=home)
     if boot == "store_unavailable":
         # The store never opened, which returns before the reconcile lock.
         runtime._module = None
 
-    result = asyncio.run(runtime.reconcile(config))
+    result = await runtime.reconcile(config)
 
     expected = (
         {"ok": False, "error": "memory_runtime_missing"}
@@ -962,11 +987,13 @@ def test_recorded_orphan_recovery_runs_on_boots_that_never_launch_a_sidecar(
             "provider_root": home / "memory" / "everos-root",
         }
     ]
+    await memory_runtime_factory.close(runtime)
 
 
 async def test_store_reopen_failure_maintains_call_log_after_orphan_handoff(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     db_path = tmp_path / "memory" / "call-log" / "call-log.db"
@@ -982,7 +1009,7 @@ async def test_store_reopen_failure_maintains_call_log_after_orphan_handoff(
     _recording_ownership(monkeypatch)
     config = MemoryConfig(enabled=True)
 
-    runtime = MemoryRuntime(config, effective_home=tmp_path)
+    runtime = memory_runtime_factory(config, effective_home=tmp_path)
     runtime._module = None
     monkeypatch.setattr(runtime, "_open_store", lambda: False)
 
@@ -991,12 +1018,13 @@ async def test_store_reopen_failure_maintains_call_log_after_orphan_handoff(
         "error": "memory_store_unavailable",
     }
     assert await asyncio.to_thread(maintained.wait, 1)
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
 
 async def test_store_reopen_failure_does_not_maintain_call_log_beside_unreaped_orphan(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     db_path = tmp_path / "memory" / "call-log" / "call-log.db"
@@ -1005,7 +1033,7 @@ async def test_store_reopen_failure_does_not_maintain_call_log_beside_unreaped_o
     _recording_ownership(monkeypatch, failure=RuntimeError("orphan still owns call log"))
     config = MemoryConfig(enabled=True)
 
-    runtime = MemoryRuntime(config, effective_home=tmp_path)
+    runtime = memory_runtime_factory(config, effective_home=tmp_path)
     runtime._module = None
     monkeypatch.setattr(runtime, "_open_store", lambda: False)
 
@@ -1014,11 +1042,12 @@ async def test_store_reopen_failure_does_not_maintain_call_log_beside_unreaped_o
         "error": "memory_store_unavailable",
     }
     assert runtime._call_log_retention_task is None
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
 
-def test_disabled_boot_retires_the_record_of_a_sidecar_that_is_already_gone(
+async def test_disabled_boot_retires_the_record_of_a_sidecar_that_is_already_gone(
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     """The same recovery, observed through its effect rather than a stub.
 
@@ -1045,15 +1074,17 @@ def test_disabled_boot_retires_the_record_of_a_sidecar_that_is_already_gone(
         encoding="utf-8",
     )
     config = MemoryConfig(enabled=False)
-    runtime = MemoryRuntime(config, artifact_manager=_installed_artifact(), effective_home=tmp_path)
+    runtime = memory_runtime_factory(config, artifact_manager=_installed_artifact(), effective_home=tmp_path)
 
-    assert asyncio.run(runtime.reconcile(config)) == {"ok": True, "state": "disabled"}
+    assert await runtime.reconcile(config) == {"ok": True, "state": "disabled"}
 
     assert not record_path.exists()
+    await memory_runtime_factory.close(runtime)
 
 
 async def test_recorded_orphan_recovery_never_reaps_a_child_this_runtime_owns(
     monkeypatch: pytest.MonkeyPatch,
+    memory_runtime_factory,
 ) -> None:
     """The one way this fix could be worse than the bug it closes.
 
@@ -1074,7 +1105,7 @@ async def test_recorded_orphan_recovery_never_reaps_a_child_this_runtime_owns(
         ),
     )
 
-    runtime = MemoryRuntime(config, artifact_manager=_installed_artifact(), process_factory=factory)
+    runtime = memory_runtime_factory(config, artifact_manager=_installed_artifact(), process_factory=factory)
     # First reconciliation: no child exists yet, so recovery is free to run.
     assert (await runtime.reconcile(config))["ok"] is True
     assert len(reaps) == 1
@@ -1085,11 +1116,12 @@ async def test_recorded_orphan_recovery_never_reaps_a_child_this_runtime_owns(
         assert (await runtime.reconcile(config))["ok"] is True
     assert len(reaps) == 1
     assert factory.supervised[-1].stopped is False
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
 
 async def test_recorded_orphan_recovery_cannot_overlap_a_concurrent_launch(
     monkeypatch: pytest.MonkeyPatch,
+    memory_runtime_factory,
 ) -> None:
     """A reap in flight must not be able to retire a record a launch just wrote.
 
@@ -1127,7 +1159,7 @@ async def test_recorded_orphan_recovery_cannot_overlap_a_concurrent_launch(
         ),
     )
 
-    runtime = MemoryRuntime(config, artifact_manager=_installed_artifact(), process_factory=factory)
+    runtime = memory_runtime_factory(config, artifact_manager=_installed_artifact(), process_factory=factory)
     try:
         reaping = asyncio.create_task(runtime.reconcile(config))
         await started.wait()
@@ -1148,7 +1180,7 @@ async def test_recorded_orphan_recovery_cannot_overlap_a_concurrent_launch(
         # Nothing is asserted while those tasks are in flight: a failure has
         # to leave a closed runtime behind, not a hung event loop.
         release.set()
-        await runtime.close()
+        await memory_runtime_factory.close(runtime)
 
     assert overlapped == [], "a launch overlapped a reap that was still running"
     assert [result["ok"] for result in results] == [True, True]
@@ -1156,10 +1188,11 @@ async def test_recorded_orphan_recovery_cannot_overlap_a_concurrent_launch(
     assert len(factory.supervised) == 2
 
 
-def test_recorded_orphan_recovery_failure_still_applies_a_disable(
+async def test_recorded_orphan_recovery_failure_still_applies_a_disable(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     caplog,
+    memory_runtime_factory,
 ) -> None:
     """A reap that will not finish must not block a disable the user saved.
 
@@ -1173,15 +1206,16 @@ def test_recorded_orphan_recovery_failure_still_applies_a_disable(
         failure=RuntimeError(f"orphaned sidecar did not exit (pid {_ORPHAN_PID}, record /x/everos.sidecar.json)"),
     )
     config = MemoryConfig(enabled=False)
-    runtime = MemoryRuntime(config, artifact_manager=_installed_artifact(), effective_home=tmp_path)
+    runtime = memory_runtime_factory(config, artifact_manager=_installed_artifact(), effective_home=tmp_path)
 
     with caplog.at_level(logging.WARNING, logger=memory_runtime.logger.name):
-        result = asyncio.run(runtime.reconcile(config))
+        result = await runtime.reconcile(config)
 
     assert result == {"ok": True, "state": "disabled"}
     assert len(reaps) == 1
     assert "Recorded EverOS sidecar recovery did not finish" in caplog.text
     assert str(_ORPHAN_PID) in caplog.text
+    await memory_runtime_factory.close(runtime)
 
 
 
@@ -1189,11 +1223,12 @@ def test_recorded_orphan_recovery_failure_still_applies_a_disable(
 async def test_final_flush_fences_capture_before_queue_visibility(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     runtime_home = tmp_path / "runtime-home"
     monkeypatch.setenv("AVIBE_HOME", str(runtime_home))
     store = MemoryStore()
-    runtime = MemoryRuntime(
+    runtime = memory_runtime_factory(
         MemoryConfig(enabled=True),
         store=store,
         artifact_manager=_installed_artifact(),
@@ -1301,16 +1336,17 @@ async def test_final_flush_fences_capture_before_queue_visibility(
     ]
     assert len(later_rows) == 1
     assert later_rows[0].state == "pending"
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
 
 async def test_session_lifecycle_fences_capture_through_reset(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     store = MemoryStore()
-    runtime = MemoryRuntime(
+    runtime = memory_runtime_factory(
         MemoryConfig(enabled=True),
         store=store,
         artifact_manager=_installed_artifact(),
@@ -1382,15 +1418,16 @@ async def test_session_lifecycle_fences_capture_through_reset(
         "reset-committed",
         "capture-enqueued",
     ]
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
 
 async def test_multi_scope_session_lifecycle_holds_every_fence_through_operation(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    runtime = MemoryRuntime(
+    runtime = memory_runtime_factory(
         MemoryConfig(enabled=True),
         store=MemoryStore(),
         artifact_manager=_installed_artifact(),
@@ -1434,15 +1471,16 @@ async def test_multi_scope_session_lifecycle_holds_every_fence_through_operation
     ) == "archived"
     assert flushes == [first_scope, second_scope]
     assert all(not lock.locked() for lock in locks)
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
 
 async def test_cancelled_multi_scope_lifecycle_releases_partially_acquired_fences(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    runtime = MemoryRuntime(
+    runtime = memory_runtime_factory(
         MemoryConfig(enabled=True),
         store=MemoryStore(),
         artifact_manager=_installed_artifact(),
@@ -1497,15 +1535,16 @@ async def test_cancelled_multi_scope_lifecycle_releases_partially_acquired_fence
         await lifecycle
     assert not first_lock.locked()
     second_lock.release()
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
 
 async def test_session_lifecycle_does_not_reset_when_capture_fence_times_out(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    runtime = MemoryRuntime(
+    runtime = memory_runtime_factory(
         MemoryConfig(enabled=True),
         store=MemoryStore(),
         artifact_manager=_installed_artifact(),
@@ -1541,7 +1580,7 @@ async def test_session_lifecycle_does_not_reset_when_capture_fence_times_out(
         assert operation_called is False
     finally:
         admission_lock.release()
-        await runtime.close()
+        await memory_runtime_factory.close(runtime)
 
 
 @pytest.mark.parametrize("outcome", ["exception", "cancellation"])
@@ -1549,9 +1588,10 @@ async def test_session_lifecycle_releases_capture_fence_after_aborted_reset(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     outcome: str,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    runtime = MemoryRuntime(
+    runtime = memory_runtime_factory(
         MemoryConfig(enabled=True),
         store=MemoryStore(),
         artifact_manager=_installed_artifact(),
@@ -1602,15 +1642,16 @@ async def test_session_lifecycle_releases_capture_fence_after_aborted_reset(
 
     receipt = await asyncio.wait_for(runtime.module.capture(request), timeout=1.0)
     assert isinstance(receipt, CaptureAccepted)
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
 
 async def test_final_flush_deadline_includes_capture_admission_wait(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    runtime = MemoryRuntime(
+    runtime = memory_runtime_factory(
         MemoryConfig(enabled=True),
         store=MemoryStore(),
         artifact_manager=_installed_artifact(),
@@ -1636,12 +1677,15 @@ async def test_final_flush_deadline_includes_capture_admission_wait(
         assert asyncio.get_running_loop().time() - started < 0.5
     finally:
         admission_lock.release()
-        await runtime.close()
+        await memory_runtime_factory.close(runtime)
 
 
 
 
-async def test_runtime_exposes_interrupted_clear_without_starting_sidecar(tmp_path: Path) -> None:
+async def test_runtime_exposes_interrupted_clear_without_starting_sidecar(
+    tmp_path: Path,
+    memory_runtime_factory,
+) -> None:
     started: list[object] = []
 
     def _Artifact() -> FakeMemoryArtifactManager:
@@ -1661,7 +1705,7 @@ async def test_runtime_exposes_interrupted_clear_without_starting_sidecar(tmp_pa
         pre_epoch=0,
         target_epoch=1,
     )
-    runtime = MemoryRuntime(
+    runtime = memory_runtime_factory(
         MemoryConfig(enabled=True, processing=processing),
         artifact_manager=_Artifact(),
         process_factory=factory,
@@ -1674,9 +1718,13 @@ async def test_runtime_exposes_interrupted_clear_without_starting_sidecar(tmp_pa
     assert recovery is not None
     assert recovery.operation_id == "interrupted-clear"
     assert recovery.state == "recovery_needed"
+    await memory_runtime_factory.close(runtime)
 
 
-async def test_runtime_install_artifact_uses_controller_owned_manager(tmp_path: Path) -> None:
+async def test_runtime_install_artifact_uses_controller_owned_manager(
+    tmp_path: Path,
+    memory_runtime_factory,
+) -> None:
     calls: list[bool] = []
 
     artifact = FakeMemoryArtifactManager(
@@ -1686,7 +1734,11 @@ async def test_runtime_install_artifact_uses_controller_owned_manager(tmp_path: 
         ensure_payload={"ok": False, "reason": "memory_runtime_unpublished", "download_error": None},
     )
     calls = artifact.ensure_calls
-    runtime = MemoryRuntime(MemoryConfig(enabled=False), artifact_manager=artifact, effective_home=tmp_path)
+    runtime = memory_runtime_factory(
+        MemoryConfig(enabled=False),
+        artifact_manager=artifact,
+        effective_home=tmp_path,
+    )
 
     assert await runtime.install_artifact() == {
         "ok": False,
@@ -1696,13 +1748,15 @@ async def test_runtime_install_artifact_uses_controller_owned_manager(tmp_path: 
     assert callable(artifact.activation_coordinator)
     assert calls == [True]
     assert runtime._config.enabled is False
+    await memory_runtime_factory.close(runtime)
 
 
 async def test_runtime_install_artifact_converts_background_ensure_exception(
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     artifact = _installed_artifact(ensure_failure=RuntimeError("install failed"))
-    runtime = MemoryRuntime(
+    runtime = memory_runtime_factory(
         MemoryConfig(enabled=False),
         artifact_manager=artifact,
         effective_home=tmp_path,
@@ -1712,7 +1766,7 @@ async def test_runtime_install_artifact_converts_background_ensure_exception(
         "reason": "memory_runtime_install_failed",
         "download_error": None,
     }
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
 
 def test_distribution_metadata_bundles_only_the_memory_runtime_manifest() -> None:
@@ -1740,7 +1794,11 @@ def test_distribution_metadata_bundles_only_the_memory_runtime_manifest() -> Non
     assert not list((project_root / "vibe").glob("memory_runtime*.zip"))
 
 
-def test_runtime_repair_stops_retained_down_supervisor_before_replacing_artifact(monkeypatch, tmp_path: Path) -> None:
+async def test_runtime_repair_stops_retained_down_supervisor_before_replacing_artifact(
+    monkeypatch,
+    tmp_path: Path,
+    memory_runtime_factory,
+) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     events: list[str] = []
 
@@ -1766,7 +1824,7 @@ def test_runtime_repair_stops_retained_down_supervisor_before_replacing_artifact
         llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-key"),
         embedding=MemoryEndpointConfig("https://embed.example.test/v1", "embed", "embed-key"),
     )
-    runtime = MemoryRuntime(
+    runtime = memory_runtime_factory(
         MemoryConfig(enabled=True, processing=processing),
         artifact_manager=_Artifact(root_format=None, fingerprint=None),
         effective_home=tmp_path,
@@ -1779,16 +1837,21 @@ def test_runtime_repair_stops_retained_down_supervisor_before_replacing_artifact
 
     monkeypatch.setattr(runtime.module._worker, "pause_and_wait", pause_and_wait)
 
-    assert asyncio.run(runtime.install_artifact()) == {
+    assert await runtime.install_artifact() == {
         "ok": True,
         "reason": None,
         "download_error": None,
     }
     assert events == ["pause", "stop", "ensure"]
     assert runtime._process is None
+    await memory_runtime_factory.close(runtime)
 
 
-def test_runtime_repair_rejects_healthy_running_sidecar(monkeypatch, tmp_path: Path) -> None:
+async def test_runtime_repair_rejects_healthy_running_sidecar(
+    monkeypatch,
+    tmp_path: Path,
+    memory_runtime_factory,
+) -> None:
     """A healthy running sidecar must not be force-stopped/replaced via Repair.
 
     Only a retained down supervisor (no live child) may be stopped for Repair; a
@@ -1814,14 +1877,14 @@ def test_runtime_repair_rejects_healthy_running_sidecar(monkeypatch, tmp_path: P
         llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-key"),
         embedding=MemoryEndpointConfig("https://embed.example.test/v1", "embed", "embed-key"),
     )
-    runtime = MemoryRuntime(
+    runtime = memory_runtime_factory(
         MemoryConfig(enabled=True, processing=processing),
         artifact_manager=_Artifact(root_format=None, fingerprint=None),
         effective_home=tmp_path,
     )
     runtime._process = _LiveProcess()
 
-    result = asyncio.run(runtime.install_artifact())
+    result = await runtime.install_artifact()
     assert result == {
         "ok": False,
         "reason": "memory_runtime_install_requires_disabled_memory",
@@ -1830,6 +1893,7 @@ def test_runtime_repair_rejects_healthy_running_sidecar(monkeypatch, tmp_path: P
     # The healthy sidecar was neither stopped nor replaced.
     assert events == []
     assert runtime._process is not None
+    await memory_runtime_factory.close(runtime)
 
 
 async def test_runtime_activation_timeout_cancels_and_settles_submitted_coroutine(tmp_path: Path, monkeypatch) -> None:
@@ -1876,7 +1940,11 @@ async def test_runtime_activation_timeout_cancels_and_settles_submitted_coroutin
         await asyncio.wait_for(coordinate, timeout=1.0)
 
 
-async def test_runtime_rejects_embedding_change_when_root_inspection_fails_under_lifecycle_lock(monkeypatch, tmp_path: Path) -> None:
+async def test_runtime_rejects_embedding_change_when_root_inspection_fails_under_lifecycle_lock(
+    monkeypatch,
+    tmp_path: Path,
+    memory_runtime_factory,
+) -> None:
     instances: list[object] = []
 
     def _Artifact() -> FakeMemoryArtifactManager:
@@ -1891,7 +1959,7 @@ async def test_runtime_rejects_embedding_change_when_root_inspection_fails_under
     )
     initial = MemoryConfig(enabled=True, processing=processing)
 
-    runtime = MemoryRuntime(
+    runtime = memory_runtime_factory(
         initial,
         artifact_manager=_Artifact(),
         process_factory=factory,
@@ -1919,10 +1987,14 @@ async def test_runtime_rejects_embedding_change_when_root_inspection_fails_under
     assert instances[0].stopped is False
     assert runtime._config is initial
     assert runtime.module._worker._claims_paused is False
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
 
-async def test_runtime_restart_rechecks_persisted_embedding_candidate(monkeypatch, tmp_path: Path) -> None:
+async def test_runtime_restart_rechecks_persisted_embedding_candidate(
+    monkeypatch,
+    tmp_path: Path,
+    memory_runtime_factory,
+) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
     def _Artifact() -> FakeMemoryArtifactManager:
@@ -1948,7 +2020,7 @@ async def test_runtime_restart_rechecks_persisted_embedding_candidate(monkeypatc
     inspected: list[bool] = []
     factory = FakeEverOSProcessFactory()
 
-    runtime = MemoryRuntime(
+    runtime = memory_runtime_factory(
         restarted,
         artifact_manager=_Artifact(),
         process_factory=factory,
@@ -1963,13 +2035,17 @@ async def test_runtime_restart_rechecks_persisted_embedding_candidate(monkeypatc
     assert await runtime.reconcile(restarted) == {"ok": False, "error": "memory_clear_failed"}
     assert runtime._config is restarted
     assert runtime.module._worker._claims_paused is False
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
     assert inspected == [True]
     # The rejection must land before any child is launched.
     assert factory.created == []
 
 
-async def test_runtime_settles_embedding_candidate_before_resuming_claims(monkeypatch, tmp_path: Path) -> None:
+async def test_runtime_settles_embedding_candidate_before_resuming_claims(
+    monkeypatch,
+    tmp_path: Path,
+    memory_runtime_factory,
+) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
     def _Artifact() -> FakeMemoryArtifactManager:
@@ -2011,7 +2087,7 @@ async def test_runtime_settles_embedding_candidate_before_resuming_claims(monkey
     ).save()
     restarted = V2Config.load().memory
 
-    runtime = MemoryRuntime(
+    runtime = memory_runtime_factory(
         restarted,
         artifact_manager=_Artifact(),
         process_factory=factory,
@@ -2021,12 +2097,16 @@ async def test_runtime_settles_embedding_candidate_before_resuming_claims(monkey
     assert (await runtime.reconcile(restarted))["ok"] is True
     assert runtime._config.embedding_change_pending is False
     assert runtime.module._worker._claims_paused is False
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
     assert observed_before_ready == [(False, True)]
     assert V2Config.load().memory.embedding_change_pending is False
 
 
-async def test_runtime_artifact_activation_rolls_back_root_and_sidecar(monkeypatch, tmp_path: Path) -> None:
+async def test_runtime_artifact_activation_rolls_back_root_and_sidecar(
+    monkeypatch,
+    tmp_path: Path,
+    memory_runtime_factory,
+) -> None:
     instances: list[object] = []
     manager = MemoryArtifactManager(
         runtime_dir=tmp_path / "runtime",
@@ -2070,7 +2150,7 @@ async def test_runtime_artifact_activation_rolls_back_root_and_sidecar(monkeypat
     initial = MemoryConfig(enabled=True, processing=processing)
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
-    runtime = MemoryRuntime(
+    runtime = memory_runtime_factory(
         initial,
         store=MemoryStore(tmp_path / "state" / "memory" / "memory.sqlite"),
         artifact_manager=manager,
@@ -2093,10 +2173,14 @@ async def test_runtime_artifact_activation_rolls_back_root_and_sidecar(monkeypat
     assert instances[1].stopped is True
     assert instances[2].stopped is False
     assert runtime.module._worker._claims_paused is False
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
 
-async def test_runtime_artifact_activation_switches_incompatible_empty_root(monkeypatch, tmp_path: Path) -> None:
+async def test_runtime_artifact_activation_switches_incompatible_empty_root(
+    monkeypatch,
+    tmp_path: Path,
+    memory_runtime_factory,
+) -> None:
     instances: list[object] = []
     manager = MemoryArtifactManager(
         runtime_dir=tmp_path / "runtime",
@@ -2132,7 +2216,7 @@ async def test_runtime_artifact_activation_switches_incompatible_empty_root(monk
     initial = MemoryConfig(enabled=True, processing=processing)
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
-    runtime = MemoryRuntime(
+    runtime = memory_runtime_factory(
         initial,
         store=MemoryStore(tmp_path / "state" / "memory" / "memory.sqlite"),
         artifact_manager=manager,
@@ -2152,10 +2236,13 @@ async def test_runtime_artifact_activation_switches_incompatible_empty_root(monk
     assert instances[0].stopped is True
     assert instances[1].stopped is False
     assert runtime.module._worker._claims_paused is False
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
 
-async def test_runtime_reconciliation_restarts_sidecar_with_fresh_child_settings(monkeypatch) -> None:
+async def test_runtime_reconciliation_restarts_sidecar_with_fresh_child_settings(
+    monkeypatch,
+    memory_runtime_factory,
+) -> None:
     instances: list[object] = []
 
     def _Artifact() -> FakeMemoryArtifactManager:
@@ -2170,7 +2257,7 @@ async def test_runtime_reconciliation_restarts_sidecar_with_fresh_child_settings
     )
     initial = MemoryConfig(enabled=True, processing=processing)
 
-    runtime = MemoryRuntime(initial, artifact_manager=_Artifact(), process_factory=factory)
+    runtime = memory_runtime_factory(initial, artifact_manager=_Artifact(), process_factory=factory)
     assert (await runtime.reconcile(initial))["ok"] is True
     updated = replace(
         initial,
@@ -2183,10 +2270,13 @@ async def test_runtime_reconciliation_restarts_sidecar_with_fresh_child_settings
     assert len(instances) == 2
     assert instances[0].stopped is True
     assert runtime.module._worker._provider is runtime._provider
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
 
-async def test_runtime_preflight_failure_keeps_existing_sidecar_running(monkeypatch) -> None:
+async def test_runtime_preflight_failure_keeps_existing_sidecar_running(
+    monkeypatch,
+    memory_runtime_factory,
+) -> None:
     instances: list[object] = []
 
     def _Artifact() -> FakeMemoryArtifactManager:
@@ -2207,7 +2297,7 @@ async def test_runtime_preflight_failure_keeps_existing_sidecar_running(monkeypa
     )
     initial = MemoryConfig(enabled=True, processing=processing)
 
-    runtime = MemoryRuntime(initial, artifact_manager=_Artifact(), process_factory=factory)
+    runtime = memory_runtime_factory(initial, artifact_manager=_Artifact(), process_factory=factory)
     assert (await runtime.reconcile(initial))["ok"] is True
     rejected = replace(
         initial,
@@ -2217,12 +2307,13 @@ async def test_runtime_preflight_failure_keeps_existing_sidecar_running(monkeypa
     assert len(instances) == 1
     assert instances[0].stopped is False
     assert runtime._config is initial
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
 
 async def test_runtime_passes_call_log_only_to_the_supervised_recorder_child(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     factory = FakeEverOSProcessFactory()
@@ -2232,7 +2323,7 @@ async def test_runtime_passes_call_log_only_to_the_supervised_recorder_child(
         diagnostics=MemoryDiagnosticsConfig(log_provider_calls=True),
     )
 
-    runtime = MemoryRuntime(
+    runtime = memory_runtime_factory(
         config,
         artifact_manager=_installed_artifact(),
         process_factory=factory,
@@ -2246,12 +2337,13 @@ async def test_runtime_passes_call_log_only_to_the_supervised_recorder_child(
     assert supervised.settings.call_log_db_path == (
         tmp_path / "memory" / "call-log" / "call-log.db"
     )
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
 
 async def test_legacy_disabled_diagnostics_still_records_provider_calls(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     factory = FakeEverOSProcessFactory()
@@ -2261,7 +2353,7 @@ async def test_legacy_disabled_diagnostics_still_records_provider_calls(
         diagnostics=MemoryDiagnosticsConfig(log_provider_calls=False),
     )
 
-    runtime = MemoryRuntime(
+    runtime = memory_runtime_factory(
         config,
         artifact_manager=_installed_artifact(),
         process_factory=factory,
@@ -2273,12 +2365,13 @@ async def test_legacy_disabled_diagnostics_still_records_provider_calls(
 
     assert await runtime.restart() == {"ok": True, "state": "ready"}
     assert factory.supervised[-1].settings.call_log_db_path == expected
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
 
 async def test_status_preserves_everos_disabled_recorder_state(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = MemoryConfig(
@@ -2287,7 +2380,7 @@ async def test_status_preserves_everos_disabled_recorder_state(
         diagnostics=MemoryDiagnosticsConfig(log_provider_calls=True),
     )
 
-    runtime = MemoryRuntime(
+    runtime = memory_runtime_factory(
         config,
         artifact_manager=_installed_artifact(),
         process_factory=FakeEverOSProcessFactory(),
@@ -2318,12 +2411,13 @@ async def test_status_preserves_everos_disabled_recorder_state(
         "state": "disabled",
         "reason": None,
     }
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
 
 async def test_recorder_reap_hands_call_log_to_host_until_restart(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     """A crashed recorder has no DB-owner overlap with its supervised restart."""
 
@@ -2348,7 +2442,7 @@ async def test_recorder_reap_hands_call_log_to_host_until_restart(
         diagnostics=MemoryDiagnosticsConfig(log_provider_calls=True),
     )
 
-    runtime = MemoryRuntime(
+    runtime = memory_runtime_factory(
         config,
         artifact_manager=_installed_artifact(),
         process_factory=factory,
@@ -2382,12 +2476,13 @@ async def test_recorder_reap_hands_call_log_to_host_until_restart(
             await asyncio.sleep(0)
     assert runtime._process_records_calls is True
     assert runtime._call_log_retention_task is None
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
 
 async def test_stale_recorder_supervisor_cannot_release_host_ownership(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     factory = FakeEverOSProcessFactory()
@@ -2397,7 +2492,7 @@ async def test_stale_recorder_supervisor_cannot_release_host_ownership(
         diagnostics=MemoryDiagnosticsConfig(log_provider_calls=True),
     )
 
-    runtime = MemoryRuntime(
+    runtime = memory_runtime_factory(
         config,
         artifact_manager=_installed_artifact(),
         process_factory=factory,
@@ -2409,12 +2504,13 @@ async def test_stale_recorder_supervisor_cannot_release_host_ownership(
     runtime._process = FakeEverOSProcess()
     with pytest.raises(RuntimeError, match="stale EverOS recorder supervisor"):
         await stale.before_start()
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
 
 async def test_disabled_runtime_maintains_retained_call_log_and_reports_corruption(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     db_path = tmp_path / "memory" / "call-log" / "call-log.db"
@@ -2434,7 +2530,7 @@ async def test_disabled_runtime_maintains_retained_call_log_and_reports_corrupti
 
     monkeypatch.setattr(memory_runtime, "maintain_call_log", maintain)
 
-    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    runtime = memory_runtime_factory(MemoryConfig(), effective_home=tmp_path)
     assert await runtime.reconcile(MemoryConfig()) == {
         "ok": True,
         "state": "disabled",
@@ -2457,13 +2553,14 @@ async def test_disabled_runtime_maintains_retained_call_log_and_reports_corrupti
     runtime._ensure_call_log_retention()
     assert runtime._call_log_retention_task is None
     assert maintenance_calls == 1
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
     assert task.done()
 
 
 async def test_runtime_close_waits_for_active_call_log_maintenance(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     db_path = tmp_path / "memory" / "call-log" / "call-log.db"
@@ -2479,20 +2576,35 @@ async def test_runtime_close_waits_for_active_call_log_maintenance(
 
     monkeypatch.setattr(memory_runtime, "maintain_call_log", maintain)
 
-    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    runtime = memory_runtime_factory(MemoryConfig(), effective_home=tmp_path)
     await runtime.reconcile(MemoryConfig())
     assert await asyncio.to_thread(entered.wait, 1)
 
-    closing = asyncio.create_task(runtime.close())
-    await asyncio.sleep(0)
-    assert not closing.done()
-    release.set()
-    await asyncio.wait_for(closing, timeout=1)
+    retention_stop_entered = asyncio.Event()
+    original_stop_retention = runtime._stop_call_log_retention
+
+    async def observed_stop_retention() -> None:
+        retention_stop_entered.set()
+        await original_stop_retention()
+
+    monkeypatch.setattr(runtime, "_stop_call_log_retention", observed_stop_retention)
+    closing = asyncio.create_task(memory_runtime_factory.close(runtime))
+    close_results: list[object] = []
+    try:
+        await asyncio.wait_for(retention_stop_entered.wait(), timeout=1.0)
+        assert not closing.done()
+    finally:
+        release.set()
+        close_results.extend(
+            await asyncio.gather(closing, return_exceptions=True)
+        )
+    assert close_results == [None]
 
 
 async def test_clear_quiesce_does_not_delete_call_log_files(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     db_path = tmp_path / "memory" / "call-log" / "call-log.db"
@@ -2502,13 +2614,13 @@ async def test_clear_quiesce_does_not_delete_call_log_files(
     unexpected.write_text("keep", encoding="utf-8")
     os.chmod(unexpected, 0o600)
 
-    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    runtime = memory_runtime_factory(MemoryConfig(), effective_home=tmp_path)
     await runtime._stop_sidecar_for_clear()
 
     assert db_path.exists()
     assert unexpected.read_text(encoding="utf-8") == "keep"
     assert runtime._recorder_health == {"state": "disabled", "reason": None}
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
 
 
@@ -2650,9 +2762,10 @@ def test_status_payload_carries_no_principal_scoped_profile_warning(
 async def test_maintenance_data_exists_ignores_an_empty_diagnostic_call_log(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    runtime = memory_runtime_factory(MemoryConfig(), effective_home=tmp_path)
     db_path = tmp_path / "memory" / "call-log" / "call-log.db"
     db_path.parent.mkdir(parents=True, mode=0o700)
     initialize_call_log(db_path)
@@ -2660,7 +2773,7 @@ async def test_maintenance_data_exists_ignores_an_empty_diagnostic_call_log(
 
     assert (await runtime.maintenance_payload())["data_exists"] is False
     assert "data_exists" not in await runtime.status_payload()
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
 
 def test_runtime_builds_insight_reader_from_injected_paths(
@@ -2703,6 +2816,7 @@ def test_runtime_builds_insight_reader_from_injected_paths(
 async def test_cancelled_insight_read_keeps_lifecycle_lock_until_thread_finishes(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     principal_id = "u-11111111111111111111111111111111"
@@ -2718,7 +2832,7 @@ async def test_cancelled_insight_read_keeps_lifecycle_lock_until_thread_finishes
             assert release.wait(2)
             return {"status": "ok", "entries": [], "next_cursor": None}
 
-    runtime = MemoryRuntime(
+    runtime = memory_runtime_factory(
         MemoryConfig(),
         store=MemoryStore(tmp_path / "state" / "memory" / "memory.sqlite"),
         effective_home=tmp_path,
@@ -2746,7 +2860,7 @@ async def test_cancelled_insight_read_keeps_lifecycle_lock_until_thread_finishes
         await reading
     await asyncio.wait_for(acquired.wait(), timeout=1)
     await waiter
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
 
 def test_runtime_forwards_scoped_insight_detail(
@@ -2813,9 +2927,12 @@ def _processing_config() -> MemoryProcessingConfig:
     )
 
 
-async def test_runtime_restart_replaces_process_without_processing_preflight(tmp_path: Path) -> None:
+async def test_runtime_restart_replaces_process_without_processing_preflight(
+    tmp_path: Path,
+    memory_runtime_factory,
+) -> None:
     factory = FakeEverOSProcessFactory()
-    runtime = MemoryRuntime(
+    runtime = memory_runtime_factory(
         MemoryConfig(enabled=True, processing=_processing_config()),
         artifact_manager=_installed_artifact(),
         process_factory=factory,
@@ -2828,10 +2945,15 @@ async def test_runtime_restart_replaces_process_without_processing_preflight(tmp
     assert old.stops == 1
     assert len(factory.created) == 1
     assert factory.supervised[0].starts == 1
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
 
-async def test_runtime_restart_is_retained_when_one_caller_is_cancelled(tmp_path: Path) -> None:
+@pytest.mark.parametrize("force_pending_assertion_failure", [False, True])
+async def test_runtime_restart_is_retained_when_one_caller_is_cancelled(
+    tmp_path: Path,
+    memory_runtime_factory,
+    force_pending_assertion_failure: bool,
+) -> None:
     entered = asyncio.Event()
     release = asyncio.Event()
 
@@ -2844,7 +2966,7 @@ async def test_runtime_restart_is_retained_when_one_caller_is_cancelled(tmp_path
             self._running = False
 
     factory = FakeEverOSProcessFactory()
-    runtime = MemoryRuntime(
+    runtime = memory_runtime_factory(
         MemoryConfig(enabled=True, processing=_processing_config()),
         artifact_manager=_installed_artifact(),
         process_factory=factory,
@@ -2860,20 +2982,44 @@ async def test_runtime_restart_is_retained_when_one_caller_is_cancelled(tmp_path
         await detached
 
     joined = asyncio.create_task(runtime.restart())
-    await asyncio.sleep(0)
-    assert joined.done() is False
-    release.set()
-    assert await joined == {"ok": True, "state": "ready"}
+    restart_results: list[object] = []
+
+    async def verify_joined_restart_is_retained() -> None:
+        try:
+            await asyncio.sleep(0)
+            joined_done = joined.done()
+            if force_pending_assertion_failure:
+                joined_done = True
+            assert joined_done is False
+        finally:
+            release.set()
+            restart_results.extend(
+                await asyncio.gather(
+                    detached,
+                    joined,
+                    return_exceptions=True,
+                )
+            )
+
+    if force_pending_assertion_failure:
+        with pytest.raises(AssertionError):
+            await verify_joined_restart_is_retained()
+    else:
+        await verify_joined_restart_is_retained()
+
+    assert isinstance(restart_results[0], asyncio.CancelledError)
+    assert restart_results[1] == {"ok": True, "state": "ready"}
     assert old.stops == 1
     assert len(factory.created) == 1
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
 
 async def test_stop_worker_supports_python_310_task_api(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
-    runtime = MemoryRuntime(
+    runtime = memory_runtime_factory(
         MemoryConfig(enabled=True),
         artifact_manager=_installed_artifact(),
         effective_home=tmp_path,
@@ -2902,12 +3048,14 @@ async def test_stop_worker_supports_python_310_task_api(
 
     assert task.cancelled()
     assert runtime._worker_task is None
+    await memory_runtime_factory.close(runtime)
 
 
 async def test_stop_worker_settles_worker_before_propagating_caller_cancellation(
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
-    runtime = MemoryRuntime(
+    runtime = memory_runtime_factory(
         MemoryConfig(enabled=True),
         artifact_manager=_installed_artifact(),
         effective_home=tmp_path,
@@ -2931,23 +3079,31 @@ async def test_stop_worker_settles_worker_before_propagating_caller_cancellation
     await started.wait()
 
     stopping = asyncio.create_task(runtime._stop_worker())
-    await cancellation_started.wait()
-    stopping.cancel()
-    await asyncio.sleep(0)
+    try:
+        await asyncio.wait_for(cancellation_started.wait(), timeout=1.0)
+        stopping.cancel()
+        await asyncio.sleep(0)
 
-    assert stopping.done() is False
-    assert runtime._worker_task is worker_task
-
-    release_cancellation.set()
-    with pytest.raises(asyncio.CancelledError):
-        await stopping
+        assert stopping.done() is False
+        assert runtime._worker_task is worker_task
+        release_cancellation.set()
+        with pytest.raises(asyncio.CancelledError):
+            await stopping
+    finally:
+        release_cancellation.set()
+        if not stopping.done():
+            await asyncio.gather(stopping, return_exceptions=True)
 
     assert worker_task.cancelled()
     assert runtime._worker_task is None
+    await memory_runtime_factory.close(runtime)
 
 
-async def test_stop_worker_propagates_worker_cleanup_failure(tmp_path: Path) -> None:
-    runtime = MemoryRuntime(
+async def test_stop_worker_propagates_worker_cleanup_failure(
+    tmp_path: Path,
+    memory_runtime_factory,
+) -> None:
+    runtime = memory_runtime_factory(
         MemoryConfig(enabled=True),
         artifact_manager=_installed_artifact(),
         effective_home=tmp_path,
@@ -2970,16 +3126,18 @@ async def test_stop_worker_propagates_worker_cleanup_failure(tmp_path: Path) -> 
         await runtime._stop_worker()
 
     assert runtime._worker_task is None
+    await memory_runtime_factory.close(runtime)
 
 
 async def test_restart_aborts_when_worker_cannot_pause_before_process_handoff(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     entered = threading.Event()
     release = threading.Event()
     factory = FakeEverOSProcessFactory()
-    runtime = MemoryRuntime(
+    runtime = memory_runtime_factory(
         MemoryConfig(enabled=True, processing=_processing_config()),
         artifact_manager=_installed_artifact(),
         process_factory=factory,
@@ -3043,12 +3201,13 @@ async def test_restart_aborts_when_worker_cannot_pause_before_process_handoff(
     assert factory.created == []
     assert worker._boot_id == old_lease
     assert store.list_queue_rows()[0].state == "processing"
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
 
 async def test_runtime_restart_preserves_drain_completed_inside_grace_window(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     add_entered = asyncio.Event()
     release_add = asyncio.Event()
@@ -3059,7 +3218,7 @@ async def test_runtime_restart_preserves_drain_completed_inside_grace_window(
         await release_add.wait()
 
     factory = FakeEverOSProcessFactory()
-    runtime = MemoryRuntime(
+    runtime = memory_runtime_factory(
         MemoryConfig(enabled=True, processing=_processing_config()),
         artifact_manager=_installed_artifact(),
         process_factory=factory,
@@ -3095,26 +3254,33 @@ async def test_runtime_restart_preserves_drain_completed_inside_grace_window(
     runtime._worker_task = asyncio.create_task(worker.drain_once())
     await asyncio.wait_for(add_entered.wait(), timeout=1.0)
     restarting = asyncio.create_task(runtime.restart())
-    await asyncio.sleep(0)
-    assert old.stops == 0
+    restart_results: list[object] = []
+    try:
+        await asyncio.sleep(0)
+        assert old.stops == 0
+    finally:
+        release_add.set()
+        restart_results.extend(
+            await asyncio.gather(restarting, return_exceptions=True)
+        )
 
-    release_add.set()
-    assert await restarting == {"ok": True, "state": "ready"}
+    assert restart_results == [{"ok": True, "state": "ready"}]
     assert pause_timeouts == [5.0]
     assert old.stops == 1
     row = store.list_queue_rows()[0]
     assert row.state == "delivered"
     assert row.payload_text is None
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
 
 async def test_runtime_restart_returns_closed_errors_when_not_eligible(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     disabled_home = tmp_path / "disabled"
     monkeypatch.setenv("AVIBE_HOME", str(disabled_home))
-    disabled = MemoryRuntime(
+    disabled = memory_runtime_factory(
         MemoryConfig(enabled=False),
         artifact_manager=_installed_artifact(),
         effective_home=disabled_home,
@@ -3124,7 +3290,7 @@ async def test_runtime_restart_returns_closed_errors_when_not_eligible(
         raise OSError("store unavailable")
 
     monkeypatch.setattr(memory_runtime, "MemoryStore", unavailable_store)
-    unavailable = MemoryRuntime(
+    unavailable = memory_runtime_factory(
         MemoryConfig(enabled=True, processing=_processing_config()),
         artifact_manager=_installed_artifact(),
         effective_home=tmp_path / "unavailable",
@@ -3138,11 +3304,14 @@ async def test_runtime_restart_returns_closed_errors_when_not_eligible(
         "ok": False,
         "error": "memory_store_unavailable",
     }
-    await disabled.close()
-    await unavailable.close()
+    await memory_runtime_factory.close(disabled)
+    await memory_runtime_factory.close(unavailable)
 
 
-async def test_runtime_restart_replays_last_success_after_failed_candidate(tmp_path: Path) -> None:
+async def test_runtime_restart_replays_last_success_after_failed_candidate(
+    tmp_path: Path,
+    memory_runtime_factory,
+) -> None:
     class ConfigAwareProcess(FakeEverOSProcess):
         async def processing_healthy(self) -> bool:
             return self.settings is not None and self.settings.llm_model != "rejected"
@@ -3156,7 +3325,7 @@ async def test_runtime_restart_replays_last_success_after_failed_candidate(tmp_p
             llm=replace(applied.processing.llm, model="rejected"),
         ),
     )
-    runtime = MemoryRuntime(
+    runtime = memory_runtime_factory(
         applied,
         artifact_manager=_installed_artifact(),
         process_factory=factory,
@@ -3171,12 +3340,13 @@ async def test_runtime_restart_replays_last_success_after_failed_candidate(tmp_p
     assert await runtime.restart() == {"ok": True, "state": "ready"}
     assert factory.supervised[-1].settings is not None
     assert factory.supervised[-1].settings.llm_model == "chat"
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
 
 async def test_marker_settlement_updates_only_replay_marker_after_candidate_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
@@ -3206,7 +3376,7 @@ async def test_marker_settlement_updates_only_replay_marker_after_candidate_fail
         memory=candidate,
     ).save()
     factory = FakeEverOSProcessFactory(template=ConfigAwareProcess)
-    runtime = MemoryRuntime(
+    runtime = memory_runtime_factory(
         startup,
         artifact_manager=_installed_artifact(),
         process_factory=factory,
@@ -3231,14 +3401,15 @@ async def test_marker_settlement_updates_only_replay_marker_after_candidate_fail
     assert replacement.settings.llm_model == "chat"
     assert replacement.settings.embedding_model == "embed"
     assert (tmp_path / "config" / "config.json").read_bytes() == persisted_after_failure
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
 
 async def test_runtime_restart_stop_failure_retains_old_process_and_paused_claims(
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     factory = FakeEverOSProcessFactory()
-    runtime = MemoryRuntime(
+    runtime = memory_runtime_factory(
         MemoryConfig(enabled=True, processing=_processing_config()),
         artifact_manager=_installed_artifact(),
         process_factory=factory,
@@ -3255,14 +3426,15 @@ async def test_runtime_restart_stop_failure_retains_old_process_and_paused_claim
     assert factory.created == []
     assert runtime.module._worker._claims_paused is True
     old.stop_failure = None
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
 
 async def test_runtime_restart_fails_closed_before_launch_for_marker_or_clear_recovery(
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     marked_factory = FakeEverOSProcessFactory()
-    marked = MemoryRuntime(
+    marked = memory_runtime_factory(
         MemoryConfig(
             enabled=True,
             processing=_processing_config(),
@@ -3273,7 +3445,7 @@ async def test_runtime_restart_fails_closed_before_launch_for_marker_or_clear_re
         effective_home=tmp_path / "marked",
     )
     recovery_factory = FakeEverOSProcessFactory()
-    recovering = MemoryRuntime(
+    recovering = memory_runtime_factory(
         MemoryConfig(enabled=True, processing=_processing_config()),
         artifact_manager=_installed_artifact(),
         process_factory=recovery_factory,
@@ -3298,13 +3470,14 @@ async def test_runtime_restart_fails_closed_before_launch_for_marker_or_clear_re
     }
     assert marked_factory.created == []
     assert recovery_factory.created == []
-    await marked.close()
-    await recovering.close()
+    await memory_runtime_factory.close(marked)
+    await memory_runtime_factory.close(recovering)
 
 
 async def test_ready_callback_activates_only_the_current_process(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     starts = deque((False, True))
 
@@ -3312,7 +3485,7 @@ async def test_ready_callback_activates_only_the_current_process(
         return FakeEverOSProcess(start_results=deque((starts.popleft(),)))
 
     factory = FakeEverOSProcessFactory(template=process_template)
-    runtime = MemoryRuntime(
+    runtime = memory_runtime_factory(
         MemoryConfig(enabled=True, processing=_processing_config()),
         artifact_manager=_installed_artifact(),
         process_factory=factory,
@@ -3345,15 +3518,16 @@ async def test_ready_callback_activates_only_the_current_process(
     await recovering.ready()
     await asyncio.sleep(0.05)
     assert len(activations) == 2
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
 
 async def test_ready_callback_survives_rejected_artifact_install(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     config = MemoryConfig(enabled=True, processing=_processing_config())
-    runtime = MemoryRuntime(
+    runtime = memory_runtime_factory(
         config,
         artifact_manager=_installed_artifact(),
         effective_home=tmp_path,
@@ -3375,7 +3549,7 @@ async def test_ready_callback_survives_rejected_artifact_install(
 
     await asyncio.wait_for(activated.wait(), timeout=1.0)
     assert runtime.module._worker._claims_paused is False
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
 
 @pytest.mark.parametrize("lifecycle", ["clear", "reconcile", "artifact"])
@@ -3383,11 +3557,12 @@ async def test_ready_callback_waits_for_runtime_lifecycle_and_revalidates_proces
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     lifecycle: str,
+    memory_runtime_factory,
 ) -> None:
     entered = asyncio.Event()
     release = asyncio.Event()
     config = MemoryConfig(enabled=True, processing=_processing_config())
-    runtime = MemoryRuntime(
+    runtime = memory_runtime_factory(
         config,
         artifact_manager=_installed_artifact(),
         effective_home=tmp_path / lifecycle,
@@ -3453,12 +3628,15 @@ async def test_ready_callback_waits_for_runtime_lifecycle_and_revalidates_proces
     if ready_task is not None:
         await asyncio.wait_for(asyncio.shield(ready_task), timeout=1.0)
     assert activations == ([] if lifecycle in {"clear", "artifact"} else [None])
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
 
+@pytest.mark.parametrize("unexpected_activation", [False, True])
 async def test_runtime_close_rejects_ready_callback_during_process_shutdown(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    memory_runtime_factory,
+    unexpected_activation: bool,
 ) -> None:
     stop_entered = asyncio.Event()
     release_stop = asyncio.Event()
@@ -3471,7 +3649,7 @@ async def test_runtime_close_rejects_ready_callback_during_process_shutdown(
             self.stopped = True
             self._running = False
 
-    runtime = MemoryRuntime(
+    runtime = memory_runtime_factory(
         MemoryConfig(enabled=True, processing=_processing_config()),
         artifact_manager=_installed_artifact(),
         effective_home=tmp_path,
@@ -3483,21 +3661,38 @@ async def test_runtime_close_rejects_ready_callback_during_process_shutdown(
 
     runtime._activation_loop = asyncio.get_running_loop()
     process.on_ready = lambda: runtime._schedule_sidecar_ready(process)
-    closing = asyncio.create_task(runtime.close())
-    await stop_entered.wait()
+    closing = asyncio.create_task(memory_runtime_factory.close(runtime))
+    close_results: list[object] = []
 
-    await process.ready()
-    await asyncio.sleep(0.01)
-    assert activations == []
+    async def verify_readiness_stays_closed() -> None:
+        try:
+            await asyncio.wait_for(stop_entered.wait(), timeout=1.0)
+            await process.ready()
+            await asyncio.sleep(0.01)
+            if unexpected_activation:
+                activations.append(None)
+            assert activations == []
+        finally:
+            release_stop.set()
+            close_results.extend(
+                await asyncio.gather(closing, return_exceptions=True)
+            )
 
-    release_stop.set()
-    await closing
-    assert activations == []
+    if unexpected_activation:
+        with pytest.raises(AssertionError):
+            await verify_readiness_stays_closed()
+    else:
+        await verify_readiness_stays_closed()
+        assert activations == []
+    assert close_results == [None]
+    assert closing.done()
+    assert process.stops == 1
 
 
 async def test_cancelled_artifact_install_owns_ensure_until_restart_can_enter(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     entered = threading.Event()
     release = threading.Event()
@@ -3510,7 +3705,7 @@ async def test_cancelled_artifact_install_owns_ensure_until_restart_can_enter(
             return dict(self.ensure_payload)
 
     artifact = BlockingArtifact(python=Path(sys.executable))
-    runtime = MemoryRuntime(
+    runtime = memory_runtime_factory(
         MemoryConfig(enabled=True, processing=_processing_config()),
         artifact_manager=artifact,
         process_factory=FakeEverOSProcessFactory(),
@@ -3548,7 +3743,7 @@ async def test_cancelled_artifact_install_owns_ensure_until_restart_can_enter(
         await installing
     assert await runtime.restart() == {"ok": True, "state": "ready"}
     assert activations == [None]
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
 
 
 class _BlockingProbeProcess:
@@ -3690,10 +3885,11 @@ async def test_drain_health_gate_reuses_the_last_verdict_instead_of_queueing(
 
 
 @pytest.mark.parametrize("changes_embedding", [False, True])
-def test_reconcile_releases_the_claim_fence_when_the_worker_pause_times_out(
+async def test_reconcile_releases_the_claim_fence_when_the_worker_pause_times_out(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     changes_embedding: bool,
+    memory_runtime_factory,
 ) -> None:
     """A failed settings save must never leave the drain loop fenced forever.
 
@@ -3705,7 +3901,7 @@ def test_reconcile_releases_the_claim_fence_when_the_worker_pause_times_out(
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     processing = _processing_config()
-    runtime = MemoryRuntime(
+    runtime = memory_runtime_factory(
         MemoryConfig(enabled=True, processing=processing),
         artifact_manager=_installed_artifact(),
         process_factory=FakeEverOSProcessFactory(),
@@ -3727,10 +3923,11 @@ def test_reconcile_releases_the_claim_fence_when_the_worker_pause_times_out(
         )
     candidate = MemoryConfig(enabled=True, processing=candidate_processing)
 
-    result = asyncio.run(runtime.reconcile(candidate))
+    result = await runtime.reconcile(candidate)
 
     assert result == {"ok": False, "error": "memory_clear_failed"}
     assert worker._claims_paused is False
+    await memory_runtime_factory.close(runtime)
 
 
 _ORPHAN_PID = 424_242
@@ -3743,7 +3940,9 @@ _ORPHAN_CREATE_TIME = 1_700_000_000.5
 
 
 async def test_runtime_effective_home_owns_the_attachment_pipeline(
-    monkeypatch, tmp_path: Path
+    monkeypatch,
+    tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     global_home = tmp_path / "global-home"
     runtime_home = tmp_path / "runtime-home"
@@ -3756,7 +3955,7 @@ async def test_runtime_effective_home_owns_the_attachment_pipeline(
     source.write_bytes(b"runtime-owned attachment")
     source.chmod(0o600)
 
-    runtime = MemoryRuntime(
+    runtime = memory_runtime_factory(
         MemoryConfig(enabled=True),
         store=store,
         artifact_manager=_installed_artifact(),
@@ -3805,7 +4004,7 @@ async def test_runtime_effective_home_owns_the_attachment_pipeline(
             )
         )
     finally:
-        await runtime.close()
+        await memory_runtime_factory.close(runtime)
     assert isinstance(result, CaptureAccepted)
     pinned_files = tuple((expected_pin_root / "bundles").glob("*/*"))
     assert len(pinned_files) == 1

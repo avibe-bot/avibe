@@ -1174,10 +1174,11 @@ def _enqueue(runtime: MemoryRuntime, source: str) -> None:
 async def test_processing_record_does_not_compact_queue_during_clear_snapshot(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     monkeypatch.setattr("core.memory.store.TERMINAL_TOMBSTONE_LIMIT", 0)
-    runtime = MemoryRuntime(MemoryConfig(), effective_home=tmp_path)
+    runtime = memory_runtime_factory(MemoryConfig(), effective_home=tmp_path)
     _enqueue(runtime, "terminal-before-clear")
     row = runtime._store.claim_due(
         lease_owner="boot",
@@ -1250,4 +1251,4 @@ async def test_processing_record_does_not_compact_queue_during_clear_snapshot(
     ]
     assert result.status == "completed"
     assert maintenance._clear_journal.get_open_operation() is None
-    await runtime.close()
+    await memory_runtime_factory.close(runtime)
