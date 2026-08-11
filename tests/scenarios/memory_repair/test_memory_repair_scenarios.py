@@ -14,6 +14,7 @@ from tests.scenario_harness.memory_repair import (
     completed_repair,
     repair_health,
 )
+from vibe import ui_memory_routes
 
 
 def assert_confirmed_repair_post(response) -> None:
@@ -116,6 +117,17 @@ async def test_memory_repair_003_retains_owner_and_rejects_conflicting_mutation(
         assert given_status.json()["source"]["status"] == "available"
         assert runtime.repair_state == "idle"
 
+        second_request_entered = asyncio.Event()
+        user_key_calls = 0
+
+        def user_key() -> str:
+            nonlocal user_key_calls
+            user_key_calls += 1
+            if user_key_calls == 2:
+                second_request_entered.set()
+            return "avibe:local"
+
+        monkeypatch.setattr(ui_memory_routes, "_memory_ui_user_key", user_key)
         abandoned = asyncio.create_task(
             client.post(REPAIR_PATH, json={"confirm": True}, headers=harness.headers)
         )
@@ -123,7 +135,7 @@ async def test_memory_repair_003_retains_owner_and_rejects_conflicting_mutation(
         joined = asyncio.create_task(
             client.post(REPAIR_PATH, json={"confirm": True}, headers=harness.headers)
         )
-        await asyncio.sleep(0)
+        await second_request_entered.wait()
         abandoned.cancel()
         with pytest.raises(asyncio.CancelledError):
             await abandoned

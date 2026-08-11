@@ -820,6 +820,51 @@ def test_memory_repair_requires_signed_user_and_exact_confirmation() -> None:
     runtime.repair.assert_awaited_once_with()
 
 
+@pytest.mark.parametrize("runtime_available", [False, True])
+def test_memory_repair_validates_confirmation_before_runtime_state(runtime_available: bool) -> None:
+    from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+    from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+
+    secret = "test-memory-ui-secret"
+    path = "/internal/memory/repair"
+    user_key = "avibe:local"
+    controller = _build_controller_double()
+    if runtime_available:
+        controller.memory_runtime = SimpleNamespace(repair=AsyncMock())
+        controller._memory_factory_reset_task = SimpleNamespace(done=lambda: False)
+    else:
+        controller.memory_runtime = None
+    app = internal_server.create_app(controller, memory_ui_secret=secret)
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post(
+                path,
+                json={"confirm": False},
+                headers={
+                    MEMORY_USER_KEY_HEADER: user_key,
+                    MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
+                        secret,
+                        method="POST",
+                        path=path,
+                        user_key=user_key,
+                    ),
+                },
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "ok": False,
+        "error": "memory_invalid_input",
+        "result": "failed",
+    }
+    if runtime_available:
+        controller.memory_runtime.repair.assert_not_awaited()
+
+
 @pytest.mark.parametrize(
     ("result", "expected_status"),
     [

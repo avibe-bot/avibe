@@ -373,22 +373,6 @@ export const MemoryStatusPanel: React.FC<{
                         emptyLabel={t('memory.processingRecord.runtime.noFacts')}
                         group="cascade"
                       />
-                      {repairError ? (
-                        <div className="mt-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-[11.5px] text-destructive">
-                          {repairError}
-                        </div>
-                      ) : null}
-                      {repairHealth ? (
-                        <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-muted">
-                          <CheckCircle2 className={repairHealth.healthy ? 'size-3.5 text-mint' : 'size-3.5 text-gold'} />
-                          <span>{t('memory.processingRecord.repair.healthResult')}</span>
-                          <Badge variant={repairHealth.healthy ? 'success' : 'warning'}>
-                            {repairHealth.healthy
-                              ? t('memory.processingRecord.repair.healthy')
-                              : t('memory.processingRecord.repair.completedWithWarnings')}
-                          </Badge>
-                        </div>
-                      ) : null}
                     </div>
                     <div className="mt-3 min-w-0 lg:mt-0">
                       <div className="mb-2 flex items-center gap-1.5 text-[11.5px] font-semibold text-foreground">
@@ -413,6 +397,22 @@ export const MemoryStatusPanel: React.FC<{
                 {t('memory.processingRecord.runtime.unavailable')}
               </div>
             )}
+            {repairError ? (
+              <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-[11.5px] text-destructive">
+                {repairError}
+              </div>
+            ) : null}
+            {repairHealth ? (
+              <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted">
+                <CheckCircle2 className={repairHealth.healthy ? 'size-3.5 text-mint' : 'size-3.5 text-gold'} />
+                <span>{t('memory.processingRecord.repair.healthResult')}</span>
+                <Badge variant={repairHealth.healthy ? 'success' : 'warning'}>
+                  {repairHealth.healthy
+                    ? t('memory.processingRecord.repair.healthy')
+                    : t('memory.processingRecord.repair.completedWithWarnings')}
+                </Badge>
+              </div>
+            ) : null}
           </CardContent>
         </Card>
       </section>
