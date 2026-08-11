@@ -194,18 +194,12 @@ def _legacy_model_hub_sources(
     service starts, and the user re-adds it. Keeping it would fail the very load
     this function is here to rescue, and re-implementing the invariants here
     would rot the moment another one is added.
-
-    A second native source for one backend is the same kind of shape: legal
-    before v5 — the old OAuth path could append one — and rejected now by an
-    aggregate rule no single source can satisfy on its own, so the duplicates
-    are collapsed onto the first one persisted.
     """
 
     if not isinstance(sources_payload, list):
         return [], []
     payloads: list = []
     parsed: list[ModelHubSourceConfig] = []
-    native_backends: set[str] = set()
     for raw_source in sources_payload:
         source_payload = (
             {key: value for key, value in raw_source.items() if key != "experimental_consent_at"}
@@ -225,33 +219,82 @@ def _legacy_model_hub_sources(
                 source_id,
             )
             continue
-        # A native source serves exactly one backend, and v5 allows one of them
-        # per backend. The first one persisted wins, matching the first-wins
-        # rule the rest of this migration reads legacy state by.
-        native_backend = (
-            next(
-                (
-                    candidate
-                    for candidate in MODEL_HUB_BACKENDS
-                    if ModelHubConfig.source_eligible_for_backend(source, candidate)
-                ),
-                None,
-            )
-            if source.supply_channel == "native_cli"
-            else None
-        )
-        if native_backend is not None:
-            if native_backend in native_backends:
-                logger.warning(
-                    "Model Hub migration dropped source '%s': '%s' already has a native source",
-                    source.id,
-                    native_backend,
-                )
-                continue
-            native_backends.add(native_backend)
         payloads.append(source_payload)
         parsed.append(source)
     return payloads, parsed
+
+
+def _legacy_source_eligible_for_backend(source: "ModelHubSourceConfig", backend: str) -> bool:
+    """Report eligibility by the pre-v5 rule, frozen as of the config being read.
+
+    Migration reproduces the walk the *old* resolver took, so this one rule is
+    deliberately a copy rather than a call into the live rule: v5 made every hub
+    source eligible for every backend, while pre-v5 made only API-key hub
+    sources universal and kept hub subscriptions to their vendor's backend.
+    Reading a pre-v5 config with the live rule would invent supply paths that
+    installation never had.
+
+    The frozen rule is strictly narrower than the live one, which is what keeps
+    a migrated ``sources.order`` valid — v5 validates every entry against its
+    own eligibility rule on the way back in.
+    """
+
+    if backend not in MODEL_HUB_BACKENDS:
+        return False
+    if source.kind == "api_key":
+        return source.supply_channel == "hub"
+    return {"anthropic": "claude", "openai": "codex"}.get(source.vendor) == backend
+
+
+def _legacy_model_hub_native_sources(
+    payloads: list,
+    sources: list["ModelHubSourceConfig"],
+    agents: dict,
+) -> tuple[list, list["ModelHubSourceConfig"]]:
+    """Collapse duplicate native sources, keeping the one the agent resolved through.
+
+    A second native source for one backend was legal before v5 — the old OAuth
+    path could append one — and is rejected now by an aggregate rule no single
+    source can satisfy on its own. Which duplicate survives is not arbitrary: a
+    legacy ``custom`` order could name the second one and ignore the first, so
+    the keeper is whichever the backend's own legacy walk reached first, and the
+    walk is computed here over the uncollapsed list precisely because that is
+    what the old resolver saw.
+    """
+
+    dropped: dict[str, str] = {}
+    for backend in MODEL_HUB_BACKENDS:
+        natives = [
+            source.id
+            for source in sources
+            if source.supply_channel == "native_cli"
+            and _legacy_source_eligible_for_backend(source, backend)
+        ]
+        if len(natives) < 2:
+            continue
+        raw_agent = agents.get(backend)
+        walk = _legacy_model_hub_ordered_sources(
+            raw_agent if isinstance(raw_agent, dict) else {},
+            backend,
+            sources,
+        )
+        keeper = next(
+            (source.id for source in walk if source.id in set(natives)),
+            natives[0],
+        )
+        for source_id in natives:
+            if source_id != keeper:
+                dropped[source_id] = backend
+    if not dropped:
+        return payloads, sources
+    for source_id, backend in dropped.items():
+        logger.warning(
+            "Model Hub migration dropped source '%s': '%s' already has a native source",
+            source_id,
+            backend,
+        )
+    kept = [(payload, source) for payload, source in zip(payloads, sources) if source.id not in dropped]
+    return [payload for payload, _ in kept], [source for _, source in kept]
 
 
 def _legacy_model_hub_ordered_sources(
@@ -268,17 +311,20 @@ def _legacy_model_hub_ordered_sources(
     here exactly as the load path did. A ``custom`` policy kept its order and
     keeps it here.
 
-    Eligibility is decided by the live rule rather than a copy of it, so a
-    migrated hop can never reference a source the parser then rejects.
+    An omitted ``sources`` section is a ``follow`` agent, not an empty one: the
+    legacy parser built the default ``ModelHubAgentSourcesConfig``, whose policy
+    was ``follow``, so reading the absent section as a missing order would take
+    a fully routable Hub agent and migrate it to nothing.
     """
 
     eligible = {
         source.id: source
         for source in sources
-        if ModelHubConfig.source_eligible_for_backend(source, backend)
+        if _legacy_source_eligible_for_backend(source, backend)
     }
     raw_sources = raw_agent.get("sources")
-    raw_sources = raw_sources if isinstance(raw_sources, dict) else {}
+    if not isinstance(raw_sources, dict):
+        raw_sources = {"policy": "follow"}
     if raw_sources.get("policy") == "follow":
         recommended = ModelHubConfig(sources=list(eligible.values())).recommended_source_order(backend)
         return [eligible[source_id] for source_id in recommended]
@@ -484,15 +530,6 @@ def _migrate_legacy_model_hub_on_load(payload: dict) -> dict:
         key: value for key, value in model_hub.items() if key in {"sources", "agents"}
     }
 
-    # Sources are sanitized before routes are built: a source the current
-    # contract cannot hold is not eligible to supply anything, and a route hop
-    # onto it would be rejected by the same parser it was migrated for.
-    if "sources" in model_hub:
-        sources_payload, sources = _legacy_model_hub_sources(model_hub["sources"])
-        migrated_model_hub["sources"] = sources_payload
-    else:
-        sources = []
-
     # An agent for a backend this build no longer has is dropped rather than
     # copied: the pre-v5 parser only ever constructed the supported three and
     # ignored the rest, while v5 rejects the whole config over the extra key.
@@ -507,17 +544,44 @@ def _migrate_legacy_model_hub_on_load(payload: dict) -> dict:
         for backend, agent in agents.items()
         if backend in MODEL_HUB_BACKENDS and agent
     }
+    # Sources are sanitized before routes are built: a source the current
+    # contract cannot hold is not eligible to supply anything, and a route hop
+    # onto it would be rejected by the same parser it was migrated for. The
+    # agents are read first because collapsing duplicate native sources depends
+    # on the order each agent walked them in.
+    if "sources" in model_hub:
+        sources_payload, sources = _legacy_model_hub_sources(model_hub["sources"])
+        sources_payload, sources = _legacy_model_hub_native_sources(
+            sources_payload,
+            sources,
+            supported_agents,
+        )
+        migrated_model_hub["sources"] = sources_payload
+    else:
+        sources = []
+
     migrated_agents = dict(supported_agents)
     for backend, raw_agent in supported_agents.items():
         if not isinstance(raw_agent, dict):
             continue
-        migrated_agent = dict(raw_agent)
-        migrated_agent.pop("mappings", None)
+        # Agent keys are narrowed to the v5 contract for the same reason the
+        # root is: the pre-v5 agent parser read the fields it knew and ignored
+        # everything else, so an install can carry agent metadata this build has
+        # never heard of, and v5 rejects the config over it.
+        migrated_agent = {
+            key: value
+            for key, value in raw_agent.items()
+            if key in {"backend", "mode", "menu_kind", "sources", "routes", "menu"}
+        }
 
         raw_sources = migrated_agent.get("sources")
         raw_sources = raw_sources if isinstance(raw_sources, dict) else {}
         migrated_sources = {key: value for key, value in raw_sources.items() if key != "policy"}
-        migrated_agent["sources"] = migrated_sources
+        # An absent section stays absent unless routes are rebuilt below: v5
+        # reads a missing `sources` as the default empty order but rejects an
+        # explicit `{}`.
+        if "sources" in migrated_agent:
+            migrated_agent["sources"] = migrated_sources
 
         if "routes" not in migrated_agent:
             menu_ids = _legacy_model_hub_menu_ids(raw_agent, backend)

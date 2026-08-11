@@ -13,6 +13,7 @@ from jsonschema import Draft7Validator, FormatChecker, ValidationError
 
 from config.v2_config import (
     MODEL_HUB_BACKENDS,
+    _legacy_source_eligible_for_backend,
     MODEL_HUB_ENABLED_ENV,
     MODEL_HUB_LEGACY_CREATED_AT,
     ModelHubAgentSourcesConfig,
@@ -1593,13 +1594,17 @@ def test_mh_cfg_mig_001_pre_v5_unreadable_source_is_dropped_without_logging_its_
     assert not any("sk-live" in record.getMessage() for record in caplog.records)
 
 
-def test_mh_cfg_mig_001_pre_v5_duplicate_native_sources_collapse_to_the_first(tmp_path, caplog):
+def test_mh_cfg_mig_001_pre_v5_duplicate_native_sources_collapse_under_a_follow_walk(
+    tmp_path,
+    caplog,
+):
     """v5 allows one native source per backend; the pre-v5 shape allowed several.
 
     The old OAuth creation path could append a second native source, so this is
     a shape a running install can hold. Neither source is invalid on its own —
     only the aggregate is — so the duplicate is collapsed here instead of
-    failing the load.
+    failing the load. A `follow` agent recomputed its walk, and its
+    recommendation ordered the two natives by id.
     """
 
     legacy = _legacy_model_hub_payload(api.config_to_payload(default_config()))
@@ -1625,6 +1630,149 @@ def test_mh_cfg_mig_001_pre_v5_duplicate_native_sources_collapse_to_the_first(tm
         f"Model Hub migration dropped source '{duplicate['id']}': "
         "'claude' already has a native source"
     ]
+
+
+def test_mh_cfg_mig_001_pre_v5_duplicate_natives_keep_the_one_the_agent_walked(tmp_path):
+    """Which duplicate survives is decided by the legacy walk, not by position.
+
+    A ``custom`` order could name the second native source and ignore the
+    first, so collapsing onto the first persisted would drop the source that
+    actually served every turn and migrate the agent to empty routes.
+    """
+
+    legacy = _legacy_model_hub_payload(api.config_to_payload(default_config()))
+    ignored = copy.deepcopy(_schema("source.schema.json")["examples"][0])
+    kept = copy.deepcopy(ignored) | {"id": "src_claudepro2", "account_label": "other@gmail.com"}
+    supplied_id = kept["models"][0]["id"]
+    legacy["model_hub"]["sources"] = [ignored, kept]
+    legacy["model_hub"]["agents"]["claude"]["sources"] = {
+        "policy": "custom",
+        "order": [kept["id"]],
+    }
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert [source.id for source in loaded.model_hub.sources] == [kept["id"]]
+    assert [
+        (hop.source_id, hop.model_id)
+        for hop in loaded.model_hub.agents["claude"].routes[supplied_id].hops
+    ] == [(kept["id"], supplied_id)]
+
+
+def test_mh_cfg_mig_001_pre_v5_agent_without_a_sources_section_follows(tmp_path):
+    """An omitted ``sources`` section was the legacy ``follow`` default.
+
+    The pre-v5 parser built the default `ModelHubAgentSourcesConfig`, whose
+    policy was `follow`, so reading the absent section as a missing order would
+    migrate a fully routable Hub agent to nothing.
+    """
+
+    legacy = _legacy_model_hub_payload(api.config_to_payload(default_config()))
+    source = copy.deepcopy(_schema("source.schema.json")["examples"][0])
+    supplied_id = source["models"][0]["id"]
+    legacy["model_hub"]["sources"] = [source]
+    legacy["model_hub"]["agents"]["claude"].pop("sources")
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    claude = V2Config.load(config_path=config_path).model_hub.agents["claude"]
+
+    assert list(claude.sources.order) == [source["id"]]
+    assert [(hop.source_id, hop.model_id) for hop in claude.routes[supplied_id].hops] == [
+        (source["id"], supplied_id)
+    ]
+
+
+def test_mh_cfg_mig_001_pre_v5_agent_fields_the_v5_contract_dropped_never_block_startup(tmp_path):
+    """The pre-v5 agent parser read the fields it knew and ignored the rest.
+
+    An install can therefore carry agent metadata this build has never heard
+    of, which v5 rejects, so agent objects are narrowed to the v5 keys just as
+    the root is.
+    """
+
+    legacy = _legacy_model_hub_payload(api.config_to_payload(default_config()))
+    legacy["model_hub"]["agents"]["claude"]["a_key_this_build_never_heard_of"] = ["anything"]
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert set(loaded.model_hub.agents["claude"].to_payload()) == {
+        "backend",
+        "mode",
+        "menu_kind",
+        "sources",
+        "routes",
+        "menu",
+    }
+
+
+def test_mh_cfg_mig_001_pre_v5_hub_subscription_stays_on_its_own_backend(tmp_path):
+    """Migration walks the sources the *old* eligibility rule offered.
+
+    v5 makes every hub source eligible for every backend; pre-v5 made only
+    API-key hub sources universal and kept hub subscriptions to their vendor's
+    backend. Reading the old config with the new rule would invent supply paths
+    that installation never had.
+    """
+
+    legacy = _legacy_model_hub_payload(api.config_to_payload(default_config()))
+    source = copy.deepcopy(_schema("source.schema.json")["examples"][0]) | {
+        "supply_channel": "hub",
+        "credential_ref": "cred_hubsub01",
+    }
+    supplied_id = source["models"][0]["id"]
+    legacy["model_hub"]["sources"] = [source]
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert list(loaded.model_hub.agents["claude"].sources.order) == [source["id"]]
+    assert [
+        (hop.source_id, hop.model_id)
+        for hop in loaded.model_hub.agents["claude"].routes[supplied_id].hops
+    ] == [(source["id"], supplied_id)]
+    for backend in ("codex", "opencode"):
+        agent = loaded.model_hub.agents[backend]
+        assert list(agent.sources.order) == []
+        assert all(route.hops == () for route in agent.routes.values())
+
+
+def test_legacy_source_eligibility_is_narrower_than_the_live_rule():
+    """The frozen pre-v5 rule must never admit what the live rule refuses.
+
+    A migrated `sources.order` is validated on the way back in by the live
+    eligibility rule, so the moment the frozen copy is wider than it, migration
+    writes an order that fails the load it was rescuing.
+    """
+
+    sources = [
+        _ordering_source(
+            f"src_probe{index:04d}",
+            kind=kind,
+            vendor=vendor,
+            channel=channel,
+        )
+        for index, (kind, vendor, channel) in enumerate(
+            product(
+                ("subscription", "api_key"),
+                ("anthropic", "openai", "custom"),
+                ("native_cli", "hub"),
+            )
+        )
+    ]
+    admitted = [
+        (source.id, backend)
+        for source, backend in product(sources, MODEL_HUB_BACKENDS)
+        if _legacy_source_eligible_for_backend(source, backend)
+        and not ModelHubConfig.source_eligible_for_backend(source, backend)
+    ]
+
+    assert admitted == []
 
 
 def test_mh_cfg_mig_001_pre_v5_falsy_agent_entry_loads_the_default_agent(tmp_path):
