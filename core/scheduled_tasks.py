@@ -94,6 +94,7 @@ from core.process_isolation import (
 )
 from core.watch_worker import decode_watch_worker_error, localize_worker_error
 from storage.background import (
+    CALLBACK_TERMINAL_TURN_ID_METADATA_KEY,
     COMMAND_SNAPSHOT_METADATA_KEY,
     COMMAND_TIMED_OUT_METADATA_KEY,
     COMMAND_WORKER_METADATA_KEY,
@@ -2574,9 +2575,14 @@ class TaskExecutionStore:
             stored = self._sqlite.get_run(callback_run_id)
             return TaskExecutionRequest.from_dict(stored) if stored is not None else request
         if normalized_callback_parent:
+            terminal_turn_id = str(
+                run_metadata.get(CALLBACK_TERMINAL_TURN_ID_METADATA_KEY) or ""
+            ).strip()
             existing = self.find_callback_run(
                 parent_run_id=normalized_callback_parent,
                 source_actor=str(source_actor or ""),
+                terminal_turn_id=terminal_turn_id or None,
+                callback_session_id=session_id,
             )
             if existing is not None:
                 self.update_callback_status(
@@ -2784,13 +2790,30 @@ class TaskExecutionStore:
         *,
         parent_run_id: str,
         source_actor: str,
+        terminal_turn_id: Optional[str] = None,
+        callback_session_id: Optional[str] = None,
     ) -> Optional[dict[str, Any]]:
         if self._sqlite is not None:
             return self._sqlite.find_callback_run(
                 parent_run_id=parent_run_id,
                 source_actor=source_actor,
+                terminal_turn_id=terminal_turn_id,
+                callback_session_id=callback_session_id,
             )
+        normalized_turn_id = str(terminal_turn_id or "").strip()
+        normalized_session_id = str(callback_session_id or "").strip()
         for run in self._list_file_runs():
+            metadata = run.get("metadata")
+            if (
+                normalized_turn_id
+                and normalized_session_id
+                and run.get("request_type") == "agent_run"
+                and run.get("source_kind") == "callback"
+                and run.get("session_id") == normalized_session_id
+                and isinstance(metadata, dict)
+                and metadata.get(CALLBACK_TERMINAL_TURN_ID_METADATA_KEY) == normalized_turn_id
+            ):
+                return run
             if (
                 run.get("request_type") == "agent_run"
                 and run.get("source_kind") == "callback"
@@ -7247,6 +7270,17 @@ class ScheduledTaskService:
         status = _normalize_requested_run_status(run.get("status")) or str(
             run.get("status") or ""
         )
+        run_metadata = run.get("metadata")
+        terminal_turn_id = (
+            str(run_metadata.get("turn_id") or "").strip()
+            if isinstance(run_metadata, dict)
+            else ""
+        )
+        callback_metadata = (
+            {CALLBACK_TERMINAL_TURN_ID_METADATA_KEY: terminal_turn_id}
+            if terminal_turn_id
+            else None
+        )
         if status in {"failed", "canceled"}:
             terminal_message = self._fallback_callback_result(run, status=status)
             terminal_callback = enqueue_session_callback(
@@ -7256,6 +7290,7 @@ class ScheduledTaskService:
                 source_actor=f"{run_id}:terminal:{status}",
                 source_session_id=str(run.get("session_id") or "").strip() or None,
                 parent_run_id=run_id or None,
+                metadata=callback_metadata,
             )
             if terminal_callback is not None:
                 return terminal_callback
@@ -7266,6 +7301,7 @@ class ScheduledTaskService:
             source_actor=run_id,
             source_session_id=str(run.get("session_id") or "").strip() or None,
             parent_run_id=run_id or None,
+            metadata=callback_metadata,
         )
 
     def _build_callback_message(self, run: dict[str, Any]) -> str:

@@ -31,7 +31,7 @@ from vibe.message_types import build_partial_index_predicate
 pytestmark = pytest.mark.no_sqlite_template
 
 
-HEAD_REVISION = "20260811_0050"
+HEAD_REVISION = "20260811_0051"
 MESSAGE_PARTIAL_INDEX_PREDICATES = {
     "ix_messages_inbox_activity": (
         "session_id is not null and type in "
@@ -241,6 +241,85 @@ def test_accepted_steer_receipt_migration_preserves_upgrade_and_downgrade_invari
                 "update message_deliveries set current_receipt_outcome = 'accepted' "
                 "where id = 'msg_receipt_candidate'"
             )
+
+
+def test_callback_terminal_turn_identity_migration_preserves_rows_and_scope(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision="20260811_0050")
+    command.upgrade(migrations.alembic_config(db_path), "head")
+    now = "2026-08-11T00:00:00Z"
+
+    def insert_callback(
+        conn,
+        *,
+        run_id: str,
+        terminal_turn_id: str,
+        session_id: str,
+    ) -> None:
+        conn.execute(
+            """
+            insert into agent_runs (
+                id, run_type, status, source_kind, session_id,
+                callback_terminal_turn_id, cancel_requested,
+                created_at, updated_at, metadata_json
+            ) values (?, 'agent_run', 'queued', 'callback', ?, ?, 0, ?, ?, '{}')
+            """,
+            (run_id, session_id, terminal_turn_id, now, now),
+        )
+
+    with sqlite3.connect(db_path) as conn:
+        columns = {row[1] for row in conn.execute("pragma table_info('agent_runs')")}
+        assert "callback_terminal_turn_id" in columns
+        assert "where run_type = 'agent_run'" in _index_sql(
+            conn, "uq_agent_runs_callback_terminal_turn_session"
+        ).lower()
+        insert_callback(
+            conn,
+            run_id="callback-one",
+            terminal_turn_id="turn-one",
+            session_id="session-one",
+        )
+        conn.commit()
+
+    with pytest.raises(sqlite3.IntegrityError):
+        with sqlite3.connect(db_path) as conn:
+            insert_callback(
+                conn,
+                run_id="callback-duplicate",
+                terminal_turn_id="turn-one",
+                session_id="session-one",
+            )
+
+    with sqlite3.connect(db_path) as conn:
+        insert_callback(
+            conn,
+            run_id="callback-other-turn",
+            terminal_turn_id="turn-two",
+            session_id="session-one",
+        )
+        insert_callback(
+            conn,
+            run_id="callback-other-session",
+            terminal_turn_id="turn-one",
+            session_id="session-two",
+        )
+        conn.commit()
+
+    command.downgrade(migrations.alembic_config(db_path), "20260811_0050")
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute(
+            "select name from sqlite_master where type = 'index' and name = ?",
+            ("uq_agent_runs_callback_terminal_turn_session",),
+        ).fetchone() is None
+        assert conn.execute(
+            "select id from agent_runs where source_kind = 'callback' order by id"
+        ).fetchall() == [
+            ("callback-one",),
+            ("callback-other-session",),
+            ("callback-other-turn",),
+        ]
 
 
 def test_agent_lifecycle_message_index_migration_upgrades_and_downgrades(

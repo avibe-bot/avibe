@@ -6728,22 +6728,25 @@ def test_agent_run_callback_enqueues_only_result_to_caller_session(tmp_path: Pat
     assert callback_run["metadata"]["source_session_id"] == "target-session"
 
 
-def test_one_terminal_turn_fans_out_each_accepted_run_callback_once(
+def test_one_terminal_turn_callbacks_once_per_callback_session(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    """Scenario: MESSAGE-DELIVERY-008 closed-loop subscriber fan-out."""
+    """Scenario: MESSAGE-DELIVERY-314 terminal Turn callback identity."""
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    caller_session_id = _make_avibe_session(
-        monkeypatch,
-        tmp_path,
-        scope_native_id="callback-fanout-caller",
-    )
+    caller_session_ids = [
+        _make_avibe_session(
+            monkeypatch,
+            tmp_path,
+            scope_native_id=f"callback-turn-caller-{index}",
+        )
+        for index in range(2)
+    ]
     target_session_id = _make_avibe_session(
         monkeypatch,
         tmp_path,
-        scope_native_id="callback-fanout-target",
+        scope_native_id="callback-turn-target",
     )
     request_store = TaskExecutionStore()
     requests = [
@@ -6751,9 +6754,13 @@ def test_one_terminal_turn_fans_out_each_accepted_run_callback_once(
             session_id=target_session_id,
             message=message,
             agent_name="codex",
-            callback_session_id=caller_session_id,
+            callback_session_id=callback_session_id,
         )
-        for message in ("participant one", "participant two")
+        for message, callback_session_id in (
+            ("participant one", caller_session_ids[0]),
+            ("participant two", caller_session_ids[0]),
+            ("participant three", caller_session_ids[1]),
+        )
     ]
     for request in requests:
         assert request_store.claim(request.id) is not None
@@ -6761,7 +6768,7 @@ def test_one_terminal_turn_fans_out_each_accepted_run_callback_once(
     service = _callback_service(tmp_path=tmp_path, request_store=request_store)
     service.settle_agent_runs_from_terminal_turn(
         [request.id for request in requests],
-        turn_id="turn-shared-by-two-runs",
+        turn_id="turn-shared-by-three-runs",
         outcome="completed",
         settled_by="terminal_result",
         evidence_kind="terminal_result",
@@ -6782,15 +6789,81 @@ def test_one_terminal_turn_fans_out_each_accepted_run_callback_once(
         if run.get("source_kind") == "callback"
     ]
     assert len(callbacks) == 2
-    assert {run["parent_run_id"] for run in callbacks} == {
-        request.id for request in requests
-    }
+    assert {run["session_id"] for run in callbacks} == set(caller_session_ids)
     assert {run["message"] for run in callbacks} == {
         "shared immutable terminal result"
     }
     assert {
         run["metadata"]["delivery_intent"] for run in callbacks
     } == {"steer"}
+    assert {
+        run["metadata"]["callback_terminal_turn_id"] for run in callbacks
+    } == {"turn-shared-by-three-runs"}
+
+    callback_ids_by_parent = {
+        str(row["id"]): str(row["callback_run_id"]) for row in originals
+    }
+    assert callback_ids_by_parent[requests[0].id] == callback_ids_by_parent[requests[1].id]
+    assert callback_ids_by_parent[requests[2].id] != callback_ids_by_parent[requests[0].id]
+
+
+def test_distinct_terminal_turns_callback_same_session_independently(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    caller_session_id = _make_avibe_session(
+        monkeypatch,
+        tmp_path,
+        scope_native_id="callback-distinct-turn-caller",
+    )
+    target_session_id = _make_avibe_session(
+        monkeypatch,
+        tmp_path,
+        scope_native_id="callback-distinct-turn-target",
+    )
+    request_store = TaskExecutionStore()
+    requests = [
+        request_store.enqueue_agent_run(
+            session_id=target_session_id,
+            message=f"participant {index}",
+            agent_name="codex",
+            callback_session_id=caller_session_id,
+        )
+        for index in range(2)
+    ]
+    service = _callback_service(tmp_path=tmp_path, request_store=request_store)
+
+    for index, request in enumerate(requests):
+        assert request_store.claim(request.id) is not None
+        service.settle_agent_runs_from_terminal_turn(
+            [request.id],
+            turn_id=f"turn-distinct-{index}",
+            outcome="completed",
+            settled_by="terminal_result",
+            evidence_kind="terminal_result",
+            evidence={
+                "settles_run": True,
+                "result_text": f"terminal result {index}",
+            },
+        )
+
+    asyncio.run(service._drain_callbacks())
+    callbacks = [
+        run
+        for run in request_store.list_runs()
+        if run.get("source_kind") == "callback"
+    ]
+
+    assert len(callbacks) == 2
+    assert {run["session_id"] for run in callbacks} == {caller_session_id}
+    assert {run["message"] for run in callbacks} == {
+        "terminal result 0",
+        "terminal result 1",
+    }
+    assert {
+        run["metadata"]["callback_terminal_turn_id"] for run in callbacks
+    } == {"turn-distinct-0", "turn-distinct-1"}
 
 
 def test_hfr_439_turn_failure_metadata_reaches_every_linked_run(
