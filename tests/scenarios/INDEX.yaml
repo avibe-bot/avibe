@@ -8,6 +8,18 @@ navigation:
   - Read that capability's observations.yaml.
   - Read the listed scenario test files before changing production code.
 capabilities:
+  - id: memory_rebuild_recovery
+    name: Confirmed Memory embedding rebuild recovery
+    status: active
+    catalog: tests/scenarios/memory_rebuild_recovery/catalog.yaml
+    observations: tests/scenarios/memory_rebuild_recovery/observations.yaml
+    scenario_tests:
+      - tests/test_ui_memory_routes.py
+    unit_or_contract_tests:
+      - tests/test_memory_config.py
+      - tests/test_memory_runtime.py
+      - tests/test_internal_client.py
+      - tests/test_internal_server.py
   - id: model_hub
     name: Model Hub source resolution and supply configuration
     status: active

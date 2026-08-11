@@ -52,6 +52,12 @@ recorder reports a transient failure. If the call-log database is corrupt,
 recording remains degraded across restarts; use **Clear all** to remove the
 corrupt owned files before recording can resume.
 
+Changing the embedding endpoint or model requires confirmation because Avibe
+must rebuild the local vector index. The confirmed settings are saved first,
+Markdown memory is preserved, and **Restart engine** stays unavailable until
+the rebuild completes. If rebuilding fails, correct the API key if needed and
+select **Retry rebuild**; the warning remains until a retry succeeds.
+
 Clear all first creates and verifies a private snapshot of the queue, provider
 root, call log, and pinned attachments. It then removes those four owned
 surfaces under a maintenance fence and records each step in an independent
