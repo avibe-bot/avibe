@@ -460,6 +460,8 @@ def _migrate_legacy_model_hub_payload(payload: dict) -> tuple[dict, bool, tuple[
     agents = model_hub.get("agents")
     if not isinstance(agents, dict):
         return payload, False, ()
+    if set(agents) - set(MODEL_HUB_BACKENDS):
+        return payload, False, ()
     raw_sources = model_hub.get("sources")
     if raw_sources is not None and not isinstance(raw_sources, list):
         return payload, False, ()
@@ -674,13 +676,21 @@ def _reset_recoverable_config_section(payload: dict, section: str) -> bool:
     if section in {
         "model_hub",
         "memory",
-        "agents",
         "ui",
         "remote_access",
         "audio_asr",
         "update",
     }:
         payload[section] = {}
+        return True
+    if section == "agents":
+        defaults = V2Config.default().agents
+        payload[section] = {
+            "opencode": dict(defaults.opencode.__dict__),
+            "claude": dict(defaults.claude.__dict__),
+            "codex": dict(defaults.codex.__dict__),
+            "avault": dict(defaults.avault.__dict__),
+        }
         return True
     if section == "gateway":
         payload[section] = None
@@ -2187,6 +2197,7 @@ class V2Config:
                 codex=CodexConfig(enabled=False, cli_path="codex"),
             ),
             model_hub=ModelHubConfig(),
+            platform=WORKBENCH_PLATFORM_ID,
         )
 
     @classmethod

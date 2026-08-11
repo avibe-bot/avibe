@@ -8883,6 +8883,9 @@ async def start_oauth_web_async(
         return {"ok": False, "error": "unsupported_backend"}
     if backend == "opencode" and not (isinstance(provider_id, str) and provider_id.strip()):
         return {"ok": False, "error": "opencode_provider_id_required"}
+    recovery_message = _config_recovery_message()
+    if recovery_message:
+        return {"ok": False, "error": "config_recovery", "message": recovery_message}
     service = _get_oauth_service()
     try:
         flow = await service.start_web_setup(
@@ -8945,6 +8948,9 @@ async def remove_backend_auth_async(backend: str) -> dict:
     backend = (backend or "").strip().lower()
     if not supports_web_oauth(backend):
         return {"ok": False, "error": "unsupported_backend"}
+    recovery_message = _config_recovery_message()
+    if recovery_message:
+        return {"ok": False, "error": "config_recovery", "message": recovery_message}
     service = _get_oauth_service()
     try:
         return await service.remove_web_auth(backend)

@@ -1323,6 +1323,7 @@ def test_config_reload_recovers_runtime_with_the_canonical_default(
             }
         ),
         lambda hub: hub["agents"]["claude"].update({"mode": "hbu"}),
+        lambda hub: hub["agents"].update({"future-backend": {"mode": "hub"}}),
         lambda hub: hub["agents"]["claude"].update(
             {"mappings": [{"builtin_id": "opus", "enabled": True}]}
         ),
@@ -1347,6 +1348,7 @@ def test_config_reload_recovers_runtime_with_the_canonical_default(
         "mapping-missing-target",
         "mapping-enabled-not-boolean",
         "agent-invalid-mode",
+        "agent-unknown-backend",
     ],
 )
 def test_config_reload_does_not_infer_malformed_legacy_source_order(
@@ -1389,6 +1391,26 @@ def test_config_reload_recovers_invalid_codex_agent_with_disabled_default(monkey
     assert config_path.read_text(encoding="utf-8") == original
 
 
+def test_config_reload_recovers_invalid_agents_with_canonical_defaults(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    payload = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    payload["show_duration"] = True
+    payload["agents"] = "invalid"
+    config_path = tmp_path / "config.json"
+    original = json.dumps(payload)
+    config_path.write_text(original, encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert loaded.show_duration is True
+    assert loaded.agents.opencode.enabled is True
+    assert loaded.agents.claude.enabled is True
+    assert loaded.agents.codex.enabled is False
+    assert loaded.agents.avault.cli_path == "avault"
+    assert loaded.load_warnings and "agents" in loaded.load_warnings[0]
+    assert config_path.read_text(encoding="utf-8") == original
+
+
 def test_config_reload_recovers_invalid_json_with_backup(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config_path = tmp_path / "config.json"
@@ -1397,6 +1419,7 @@ def test_config_reload_recovers_invalid_json_with_backup(monkeypatch, tmp_path):
     loaded = V2Config.load(config_path=config_path)
 
     assert loaded.mode == "self_host"
+    assert loaded.platform == "avibe"
     assert loaded.load_warnings and "JSON" in loaded.load_warnings[0]
     assert config_path.read_text(encoding="utf-8") == '{"mode": '
     assert list(config_path.parent.glob("config.json.bak-invalid-json-*"))
