@@ -16,7 +16,7 @@ import pytest
 from config.v2_config import MemoryConfig, MemoryEndpointConfig, MemoryProcessingConfig
 from core.controller import Controller
 from core.handlers.message_handler import MessageHandler
-from core.memory import CaptureAccepted, CaptureDuplicate
+from core.memory import CaptureAccepted, CaptureDuplicate, CaptureRequest, CaptureSkipped
 from core.memory.artifact import FakeMemoryArtifactManager
 from core.memory.everos import FakeMemoryProvider
 from core.memory.runtime import MemoryRuntime
@@ -270,6 +270,32 @@ def test_capture_user_memory_rejects_fresh_runtime_after_reset_gate() -> None:
         assert fresh_module.accepted == []
 
     asyncio.run(run())
+
+
+def test_capture_paths_reject_a_settled_factory_reset_marker() -> None:
+    controller = _controller()
+    controller.config.memory.recovery_intent = "factory_reset"
+    controller.memory_runtime._config = SimpleNamespace(recovery_intent="factory_reset")
+    controller.memory_runtime._restart_config = SimpleNamespace(recovery_intent="factory_reset")
+
+    direct = asyncio.run(
+        controller.capture_memory(
+            CaptureRequest(
+                source_message_id="direct-source",
+                session_id="stable-session",
+                principal_id="u-" + ("1" * 32),
+                project_id=PROJECT,
+                provenance="agent",
+                text="remember this",
+                occurred_at_ms=1,
+            )
+        )
+    )
+    asyncio.run(controller.capture_user_memory(_context("telegram"), "remember this", "stable-session"))
+
+    assert isinstance(direct, CaptureSkipped)
+    assert direct.reason == "memory_operation_in_progress"
+    assert controller.memory_module.accepted == []
 
 
 def test_final_flush_memory_session_reuses_capture_scope_and_raw_anchor() -> None:

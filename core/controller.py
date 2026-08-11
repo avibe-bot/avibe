@@ -655,14 +655,14 @@ class Controller:
         """Capture through the replacement gate so stale modules cannot write."""
 
         observed_runtime = getattr(self, "memory_runtime", None)
-        if self._memory_factory_reset_running():
+        if self._memory_factory_reset_pending(observed_runtime):
             return CaptureSkipped(reason="memory_operation_in_progress")
         if observed_runtime is None or getattr(observed_runtime, "retired", False):
             return CaptureSkipped(reason="memory_operation_in_progress")
         async with self._memory_replacement_lock():
             runtime = getattr(self, "memory_runtime", None)
             if (
-                self._memory_factory_reset_running()
+                self._memory_factory_reset_pending(runtime)
                 or runtime is not observed_runtime
                 or runtime is None
                 or getattr(runtime, "retired", False)
@@ -802,11 +802,12 @@ class Controller:
                 except Exception:
                     logger.exception("Memory factory reset could not activate fresh Runtime")
                     if fresh is not None:
-                        fresh.retire()
-                        try:
-                            await fresh.close()
-                        except Exception:
-                            logger.exception("Failed fresh Memory Runtime could not close")
+                        if not await self._retain_failed_factory_reset_runtime(fresh, candidate):
+                            fresh.retire()
+                            try:
+                                await fresh.close()
+                            except Exception:
+                                logger.exception("Failed fresh Memory Runtime could not close")
                     return {
                         "ok": False,
                         "error": "memory_factory_reset_failed",
@@ -816,11 +817,12 @@ class Controller:
                 self.memory_runtime = fresh
                 self.memory_module = fresh.module
                 if activation.get("ok") is not True:
-                    fresh.retire()
-                    try:
-                        await fresh.close()
-                    except Exception:
-                        logger.exception("Failed fresh Memory Runtime could not close")
+                    if not await self._retain_failed_factory_reset_runtime(fresh, candidate):
+                        fresh.retire()
+                        try:
+                            await fresh.close()
+                        except Exception:
+                            logger.exception("Failed fresh Memory Runtime could not close")
                     return {
                         "ok": False,
                         "error": "memory_factory_reset_failed",
@@ -871,6 +873,51 @@ class Controller:
             gate = asyncio.Lock()
             self._memory_replacement_gate = gate
         return gate
+
+    def _memory_factory_reset_pending(self, runtime: object | None = None) -> bool:
+        """Reject captures while an in-flight or durable reset fence remains."""
+
+        if self._memory_factory_reset_running():
+            return True
+        runtime = runtime if runtime is not None else getattr(self, "memory_runtime", None)
+        if getattr(runtime, "factory_reset_pending", False) is True:
+            return True
+        for snapshot in (
+            getattr(runtime, "_config", None),
+            getattr(runtime, "_restart_config", None),
+            getattr(getattr(self, "config", None), "memory", None),
+        ):
+            if getattr(snapshot, "recovery_intent", None) == "factory_reset":
+                return True
+        return False
+
+    async def _retain_failed_factory_reset_runtime(
+        self,
+        runtime: object,
+        candidate: MemoryConfig,
+    ) -> bool:
+        """Publish a fenced fresh Runtime so Repair can recover it in place."""
+
+        try:
+            retain = getattr(runtime, "retain_factory_reset_recovery", None)
+            if callable(retain):
+                result = retain(candidate)
+                if hasattr(result, "__await__"):
+                    await result
+            else:
+                adopt = getattr(runtime, "adopt_recovery_intent", None)
+                if not callable(adopt):
+                    return False
+                adopt(candidate)
+                pause_claims = getattr(getattr(runtime, "module", None), "pause_claims", None)
+                if callable(pause_claims):
+                    pause_claims()
+            self.memory_runtime = runtime
+            self.memory_module = getattr(runtime, "module", getattr(self, "memory_module", None))
+            return True
+        except Exception:
+            logger.exception("Failed to retain fresh Memory Runtime for factory-reset repair")
+            return False
 
     def _memory_factory_reset_running(self) -> bool:
         """Return whether the retained factory-reset task still owns admission."""
@@ -2126,14 +2173,14 @@ class Controller:
         platform = CaptureAdmission.platform_of(facts)
         started_at = time.monotonic()
         try:
-            if self._memory_factory_reset_running() or observed_runtime is None:
+            if self._memory_factory_reset_pending(observed_runtime) or observed_runtime is None:
                 return
             if getattr(observed_runtime, "retired", False):
                 return
             async with self._memory_replacement_lock():
                 runtime = getattr(self, "memory_runtime", None)
                 if (
-                    self._memory_factory_reset_running()
+                    self._memory_factory_reset_pending(runtime)
                     or runtime is not observed_runtime
                     or runtime is None
                     or getattr(runtime, "retired", False)

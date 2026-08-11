@@ -2348,6 +2348,33 @@ async def test_runtime_repairs_artifact_without_activating_pending_factory_reset
     await memory_runtime_factory.close(runtime)
 
 
+async def test_failed_fresh_runtime_stays_available_for_pending_reset_repair(
+    tmp_path: Path,
+    memory_runtime_factory,
+) -> None:
+    runtime = memory_runtime_factory(
+        MemoryConfig(enabled=True, processing=_processing_config()),
+        artifact_manager=_installed_artifact(),
+        effective_home=tmp_path,
+    )
+    pending = replace(runtime._config, recovery_intent="factory_reset")
+
+    await runtime.retain_factory_reset_recovery(pending)
+
+    assert runtime.available is True
+    assert runtime.retired is False
+    assert runtime.closed is False
+    assert runtime.factory_reset_pending is True
+    assert runtime.module._worker._claims_paused is True
+    assert await runtime.install_artifact() == {
+        "ok": True,
+        "reason": None,
+        "download_error": None,
+    }
+
+    await memory_runtime_factory.close(runtime)
+
+
 async def test_pending_factory_reset_repair_reports_pointer_commit_failure(
     tmp_path: Path,
     memory_runtime_factory,

@@ -309,6 +309,38 @@ async def test_memory_factory_301_post_delete_activation_failure_retains_recover
             {"path": "state/memory", "existed": True, "deleted": True},
         ],
     }
-    assert fresh.retired is True
+    assert controller.memory_runtime is fresh
+    assert fresh.retired is False
+    assert fresh.closed is False
     assert fresh.module.claims_paused is True
     assert controller.config.memory.recovery_intent == "factory_reset"
+
+
+@pytest.mark.asyncio
+async def test_memory_factory_302_durable_reset_marker_blocks_capture_after_preflight() -> None:
+    """MEMORY-FACTORY-302: a settled pending marker fences direct captures."""
+
+    class Module:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def capture(self, _request: CaptureRequest):
+            self.calls += 1
+            return CaptureAccepted()
+
+    runtime = SimpleNamespace(
+        retired=False,
+        available=True,
+        module=Module(),
+        _config=SimpleNamespace(recovery_intent="factory_reset"),
+        _restart_config=SimpleNamespace(recovery_intent="factory_reset"),
+    )
+    controller = Controller.__new__(Controller)
+    controller.memory_runtime = runtime
+    controller.config = SimpleNamespace(memory=MemoryConfig(enabled=True))
+
+    result = await controller.capture_memory(_request())
+
+    assert isinstance(result, CaptureSkipped)
+    assert result.reason == "memory_operation_in_progress"
+    assert runtime.module.calls == 0

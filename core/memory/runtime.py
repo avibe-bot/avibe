@@ -411,7 +411,7 @@ class MemoryRuntime:
         self._store = opened
         self._module = module
         self._require_maintenance().attach_store(opened)
-        if self._maintenance_open():
+        if self._maintenance_open() or self.factory_reset_pending:
             module.pause_claims()
         self._store_error = None
         self._configure_insight_reader(self._config)
@@ -423,6 +423,15 @@ class MemoryRuntime:
         """Whether the local store opened. False keeps every read closed."""
 
         return self._module is not None and not self._retired
+
+    @property
+    def factory_reset_pending(self) -> bool:
+        """Whether this aggregate is fenced by a durable factory-reset intent."""
+
+        return any(
+            getattr(config, "recovery_intent", None) == "factory_reset"
+            for config in (self._config, self._restart_config)
+        )
 
     @property
     def retired(self) -> bool:
@@ -503,6 +512,26 @@ class MemoryRuntime:
                     # settled recovery must leave ordinary capture admission open.
                     self.module.resume_claims()
                 return result
+
+    async def retain_factory_reset_recovery(self, config: MemoryConfig) -> None:
+        """Keep a failed fresh aggregate available for pending-reset repair.
+
+        Factory reset has already removed the mutable roots at this point. A
+        failed activation therefore must stop any partially-started sidecar and
+        leave the aggregate fenced, but it must not tombstone the object: the
+        Dependencies Repair path needs its artifact coordinator and store.
+        """
+
+        if self._retired:
+            return
+        async with self._reconcile_lock:
+            async with self.module.lifecycle():
+                self.module.pause_claims()
+                await self._stop_worker()
+                await self._sidecar.stop()
+                self.adopt_recovery_intent(config)
+                self._runtime_error = "memory_factory_reset_failed"
+                self._advance_processing_lifecycle()
 
     @property
     def module(self) -> MemoryModule | _UnavailableMemoryModule:

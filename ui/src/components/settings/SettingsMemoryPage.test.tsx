@@ -385,6 +385,33 @@ describe('SettingsMemoryPage restart action', () => {
     await waitFor(() => expect(api.getMemorySettings).toHaveBeenCalledTimes(2));
   });
 
+  it('closes confirmation before exposing a terminal partial reset result', async () => {
+    api.listDependencies.mockResolvedValue({
+      ok: true,
+      deps: [{ id: 'memory-runtime', kind: 'runtime', required: false, installed: true, status: 'ready', version: '1.0.0' }],
+    });
+    api.factoryResetMemory.mockResolvedValue({
+      ok: false,
+      result: 'partial',
+      error: 'memory_factory_reset_failed',
+      data_deleted: true,
+      data_remaining: true,
+      roots: [
+        { path: 'memory', existed: true, deleted: true },
+        { path: 'state/memory', existed: true, deleted: false, error: 'PermissionError' },
+      ],
+    });
+    const user = userEvent.setup();
+    renderPage();
+
+    await user.click(await screen.findByRole('radio', { name: 'memory.tabs.settings' }));
+    await user.click(await screen.findByRole('button', { name: 'open-factory' }));
+    await user.click(screen.getByRole('button', { name: 'confirm-factory' }));
+
+    await waitFor(() => expect(api.factoryResetMemory).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'confirm-factory' })).toBeNull());
+  });
+
   it('shows Retry while a durable factory reset intent remains pending', async () => {
     api.listDependencies.mockResolvedValue({
       ok: true,

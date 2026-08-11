@@ -151,6 +151,10 @@ export const SettingsMemoryPage: React.FC = () => {
         showToast(t('memory.factoryReset.completed'), 'success');
         setFactoryResetOpen(false);
       } else {
+        // The result panel owns the authoritative per-root outcome. Close the
+        // confirmation so partial or activation-failed resets are visible
+        // before the Retry action becomes available again.
+        setFactoryResetOpen(false);
         showToast(memoryErrorMessage(t, res.error || 'memory_factory_reset_failed'), 'error');
       }
       await Promise.all([loadSettings(), loadProcessingRecord(), loadMaintenance()]);
