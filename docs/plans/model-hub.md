@@ -282,6 +282,10 @@ These rules add no endpoint, receipt, digest, or server-side response snapshot.
 **OAuth-start nonce state machine (authoritative and exhaustive; owner ruling
 2026-08-11 19:42).** The key is the exact `(client_nonce, vendor, channel)` tuple and is
 claimed before provider work. A different tuple never resolves to this claim or flow.
+Every flow created from a nonce-bearing request has a non-null date-time `expires_at`
+from its first response through every terminal replay, which bounds both reconciliation
+and retained cancellation. A flow without a nonce keeps the existing nullable expiry
+branch for ordinary or presentation-only lifetime handling.
 
 | Decision | Tuple condition | Server action and HTTP/API result | Provider starts | First consumer |
 | --- | --- | --- | --- | --- |

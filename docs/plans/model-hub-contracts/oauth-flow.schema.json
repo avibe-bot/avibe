@@ -34,8 +34,18 @@
       }
     },
     "error_key": { "type": ["string", "null"], "description": "i18n key; raw upstream errors never surface" },
-    "expires_at": { "type": ["string", "null"], "format": "date-time" }
+    "expires_at": { "type": ["string", "null"], "format": "date-time", "description": "Flow expiry. A flow without client_nonce may use null for ordinary or presentation-only lifetime handling; a nonce-bearing flow always carries a non-null date-time that bounds reconciliation and retained cancellation." }
   },
+  "allOf": [
+    {
+      "if": { "required": ["client_nonce"] },
+      "then": {
+        "properties": {
+          "expires_at": { "type": "string", "format": "date-time" }
+        }
+      }
+    }
+  ],
   "examples": [
     {
       "flow_id": "oaf_claude01",

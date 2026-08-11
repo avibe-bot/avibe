@@ -194,7 +194,7 @@ every other existing field and enum meaning remains unchanged.
 | `RuntimeDependency.status.error_key` | runtime installer | install-failed runtime state | Closed persisted i18n key: `settings.models.install.fail.detail` after installation fails; null after a new attempt begins and in every non-failure state. |
 | `RouteHopRef.position` | guarded mutation planner | guarded-change hop row | One-based position in the named Route before the attempted mutation. |
 | `OAuthStart.client_nonce` | OAuth client before send | OAuth start idempotency | Optional client-generated correlation; the server claims its exact tuple with vendor and channel before provider work, coalesces an in-flight retry, releases after failure or task cancellation before a flow exists, and converts success atomically to the flow. Explicitly canceling that committed flow retains its terminal `cancelled` correlation until the existing expiry. |
-| `OAuthFlow.client_nonce` | OAuth start echo | lost-start reconciliation | When the request supplied the nonce, every flow response echoes it unchanged. |
+| `OAuthFlow.client_nonce` | OAuth start echo | lost-start reconciliation | When the request supplied the nonce, every flow response echoes it unchanged and carries a non-null date-time `expires_at`; flows without a nonce retain the existing nullable expiry branch. |
 | `AgentChain.chain[].health: backoff` | configured-chain live annotator | chain/AgentSupply health reads | Source-scoped in-memory connection throttle before the first user-visible model-output byte, with `retry_at` strictly later than the assembler's captured read time, never persisted in Source/config. It overlays only an otherwise healthy hop whose exact Source/model capability is present. Cooldown, durable Source health, missing Source, or unsupported model suppresses it and keeps the stronger blocker's established projection; simultaneous native-process unavailability is the sole exception and takes the reason slot without erasing the deadline. Before serialization, an expired overlay is normalized to the underlying non-backoff facts. Ordinary backoff rolls up `waiting`; every durable/capability/process blocker rolls up `interrupted`. |
 
 ## AgentSupply read projection
@@ -666,7 +666,10 @@ existing remove-row semantics.
 `POST /api/models/oauth/start` optionally accepts a client-generated `client_nonce`
 matching `^ofn_[a-z0-9]{16,64}$`. The claim key is the exact
 `(client_nonce, vendor, channel)` tuple; a different vendor or channel is a different key
-and never resolves to another tuple's flow. Before invoking the provider, the server
+and never resolves to another tuple's flow. Every flow produced from a nonce-bearing
+request carries a non-null date-time `expires_at` from its first response through every
+terminal replay; an ordinary or presentation-only flow without a nonce may retain
+`expires_at: null`. Before invoking the provider, the server
 atomically claims the tuple and applies this total state/action table:
 
 | Decision | Tuple state at start | Server action and HTTP/API result | Provider starts |

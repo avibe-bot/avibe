@@ -2290,7 +2290,10 @@ released claims start exactly once, including after cleanup from a provider-star
 failure/task cancellation before a flow exists; an in-flight same-tuple retry coalesces
 to the same pending terminal result without a second provider invocation; and committed
 retries return the same `flow_id`, state, and presentation. Provider success atomically
-converts the claim to the flow. Explicitly canceling a nonce-bearing committed flow
+converts the claim to a flow with a non-null date-time `expires_at`, and every later
+response for that flow preserves the same bounded deadline. An ordinary or
+presentation-only flow without a nonce retains the existing nullable expiry branch.
+Explicitly canceling a nonce-bearing committed flow
 cancels provider work but retains that same bounded terminal flow as `state: "cancelled"`
 until its existing `expires_at`; a same-tuple retry inside that window returns the
 canceled flow with zero provider starts. Clocked expiry releases the tuple, and the first
@@ -2298,6 +2301,11 @@ same-tuple retry afterward starts exactly one fresh flow. Explicit cancellation 
 a nonce forgets the flow. A different tuple cannot resolve to the retained flow, and a
 new user action always generates a new nonce. This zero-new-concept closure keeps
 `contract_version: 5` under the PM ruling of 2026-08-12 00:37.
+
+The contract fixture accepts a nonce-bearing flow with a date-time expiry, rejects that
+same flow with `expires_at: null`, and accepts the null expiry after `client_nonce` is
+omitted. These three cells mechanically prove both the nonce implication and preservation
+of the pre-existing non-nonce branch.
 
 **Binding handoff (owner / files / activation).** After K4 and #1312 merge, I3 owns
 `core/handlers/model_hub/oauth.py`, `tests/test_model_hub_oauth.py`,

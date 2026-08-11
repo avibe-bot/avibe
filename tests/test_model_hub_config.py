@@ -721,6 +721,20 @@ def test_oauth_nonce_explicit_cancel_totality_is_closed():
     assert "Explicit cancellation retains that committed flow" in nonce_description
     assert "starts no provider on a same-tuple retry" in nonce_description
 
+    oauth_schema = _schema("oauth-flow.schema.json")
+    oauth_validator = Draft7Validator(oauth_schema, format_checker=FormatChecker())
+    nonce_with_expiry = copy.deepcopy(oauth_schema["examples"][0])
+    oauth_validator.validate(nonce_with_expiry)
+
+    nonce_without_expiry = copy.deepcopy(nonce_with_expiry)
+    nonce_without_expiry["expires_at"] = None
+    with pytest.raises(ValidationError):
+        oauth_validator.validate(nonce_without_expiry)
+
+    ordinary_without_expiry = copy.deepcopy(nonce_without_expiry)
+    ordinary_without_expiry.pop("client_nonce")
+    oauth_validator.validate(ordinary_without_expiry)
+
     ac_48 = implementation_plan.split("### AC-48", 1)[1].split("### AC-49", 1)[0]
     for fixture_pattern in (
         r"same-tuple canceled replay with zero provider calls",
