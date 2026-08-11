@@ -20,6 +20,7 @@ import {
   checkRemoteAuthForPath,
   deferRemoteAuthRedirect,
   remoteLoginPath,
+  shouldBypassSetupForRemoteOwner,
   REMOTE_AUTH_REQUIRED_EVENT,
   shouldDeferRemoteAuthRedirect,
 } from './remoteAuth';
@@ -130,5 +131,31 @@ describe('remote auth navigation', () => {
     expect(dispatchEvent).toHaveBeenCalledOnce();
     expect(dispatchEvent.mock.calls[0]?.[0]).toBeInstanceOf(Event);
     expect(dispatchEvent.mock.calls[0]?.[0].type).toBe(REMOTE_AUTH_REQUIRED_EVENT);
+  });
+});
+
+describe('setup bypass for remote owners', () => {
+  it('bypasses the setup wizard only for an authenticated remote owner', () => {
+    expect(
+      shouldBypassSetupForRemoteOwner({
+        remote: true,
+        authenticated: true,
+        capabilities: { can_manage_instance: true },
+      }),
+    ).toBe(true);
+    expect(
+      shouldBypassSetupForRemoteOwner({
+        remote: true,
+        authenticated: true,
+        capabilities: { can_manage_instance: false },
+      }),
+    ).toBe(false);
+    expect(
+      shouldBypassSetupForRemoteOwner({
+        remote: false,
+        authenticated: true,
+        capabilities: { can_manage_instance: true },
+      }),
+    ).toBe(false);
   });
 });

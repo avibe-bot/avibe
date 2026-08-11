@@ -58,8 +58,16 @@ vi.mock('./memory/MemoryLogPanel', async (loadOriginal) => {
   };
 });
 
-vi.mock('./memory/MemoryProfilePanel', () => ({ MemoryProfilePanel: () => null }));
-vi.mock('./memory/MemorySearchPanel', () => ({ MemorySearchPanel: () => null }));
+vi.mock('./memory/MemoryProfilePanel', () => ({
+  MemoryProfilePanel: ({ enabled }: { enabled: boolean }) => (
+    <div data-testid="memory-profile-enabled">{String(enabled)}</div>
+  ),
+}));
+vi.mock('./memory/MemorySearchPanel', () => ({
+  MemorySearchPanel: ({ enabled }: { enabled: boolean }) => (
+    <div data-testid="memory-search-enabled">{String(enabled)}</div>
+  ),
+}));
 vi.mock('./memory/MemorySettingsPanel', () => ({ MemorySettingsPanel: () => null }));
 
 const endpoint = {
@@ -289,5 +297,26 @@ describe('SettingsMemoryPage remote administration gate', () => {
 
     expect(await screen.findByText('memory.remoteUnavailable.title')).toBeTruthy();
     expect(screen.queryByRole('radio', { name: 'memory.tabs.status' })).toBeNull();
+  });
+
+  it('derives profile/search enablement from the permitted status read when settings stay local-only', async () => {
+    api.getMemorySettings.mockResolvedValue({
+      status: 'failed',
+      error: 'remote_execution_disabled',
+    });
+    api.getMemoryStatus.mockResolvedValue(readyStatus());
+    api.listDependencies.mockResolvedValue({ ok: true, deps: [{ id: 'memory-runtime', installed: true, status: 'ready' }] });
+    const user = userEvent.setup();
+
+    renderRemoteOwner();
+
+    expect(await screen.findByRole('radio', { name: 'memory.tabs.profile' })).toBeTruthy();
+    expect(screen.queryByText('memory.remoteUnavailable.title')).toBeNull();
+
+    await user.click(screen.getByRole('radio', { name: 'memory.tabs.profile' }));
+    expect(screen.getByTestId('memory-profile-enabled').textContent).toBe('true');
+
+    await user.click(screen.getByRole('radio', { name: 'memory.tabs.search' }));
+    expect(screen.getByTestId('memory-search-enabled').textContent).toBe('true');
   });
 });

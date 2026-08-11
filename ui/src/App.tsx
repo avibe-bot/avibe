@@ -56,6 +56,7 @@ import {
     isSetupCheckBypassed,
     remoteLoginPath,
     REMOTE_AUTH_REQUIRED_EVENT,
+    shouldBypassSetupForRemoteOwner,
     shouldDeferRemoteAuthRedirect,
 } from './lib/remoteAuth';
 import { useIsDesktop } from './lib/useIsDesktop';
@@ -318,7 +319,15 @@ const AuthGuard = ({ children }: { children: ReactNode }) => {
                 const setupReady = typeof setupState?.needs_setup === 'boolean'
                     ? setupState.needs_setup === false
                     : hasConfiguredPlatformCredentials(config);
-                setGuardStatus(!config || !config.mode || !setupReady ? 'needs-setup' : 'ready');
+                if (!config || !config.mode || !setupReady) {
+                    if (shouldBypassSetupForRemoteOwner(session)) {
+                        setGuardStatus('ready');
+                        return;
+                    }
+                    setGuardStatus('needs-setup');
+                    return;
+                }
+                setGuardStatus('ready');
             });
         }).catch(async (error) => {
             if (cancelled) return;

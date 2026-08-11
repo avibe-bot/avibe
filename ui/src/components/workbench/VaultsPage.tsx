@@ -861,7 +861,7 @@ export const VaultsPage: React.FC = () => {
           ))}
         </div>
       )}
-      {canManage && showAudit && (
+      {canReadVaultState && showAudit && (
         <div className="rounded-2xl border border-border bg-surface p-4">
           <div className="mb-2 text-sm font-semibold">{t('vaults.audit.title')}</div>
           {audit.length === 0 ? (

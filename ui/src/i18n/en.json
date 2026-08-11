@@ -3642,7 +3642,13 @@
     "subtitle": "A personal memory distilled from your Workbench and private-IM messages — plus durable facts your Agent records while working for you. Review it, search it, or clear it here.",
     "setup": {
       "runtimeRequired": "Install the Memory runtime first",
-      "runtimeRequiredHint": "Install or repair Memory from Dependencies. You can still disable Memory or clear stored data below."
+      "runtimeRequiredHint": "Install or repair Memory from Dependencies. You can still disable Memory or clear stored data below.",
+      "remoteOwner": {
+        "title": "Finish setup on the local machine",
+        "body": "This instance still needs a local setup pass. Remote owners can't use the wizard here because it needs direct access to the machine.",
+        "hint": "Open the Control Panel to keep working, or complete setup on the machine itself.",
+        "action": "Open Control Panel"
+      }
     },
     "tabs": {
       "status": "Status",

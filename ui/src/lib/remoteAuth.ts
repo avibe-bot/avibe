@@ -41,6 +41,10 @@ export function isSetupCheckBypassed(path: string): boolean {
  * (`can_use_system` = not remote and owner).
  */
 type RemoteContext = { remote: boolean };
+type RemoteSetupSession = RemoteContext & {
+  authenticated?: boolean;
+  capabilities?: { can_manage_instance?: boolean };
+};
 
 function isTrustedLocal(context: RemoteContext): boolean {
   return !context.remote;
@@ -126,6 +130,14 @@ export function canEditProjectDefaultAgent(context: RemoteContext): boolean {
  */
 export function canAdministerMemory(context: RemoteContext): boolean {
   return isTrustedLocal(context);
+}
+
+/**
+ * Remote owners can skip the global setup wizard: the wizard is a local-only
+ * flow, while the remote shell has its own recovery surface.
+ */
+export function shouldBypassSetupForRemoteOwner(session: RemoteSetupSession | null | undefined): boolean {
+  return !!session?.remote && session.authenticated === true && session.capabilities?.can_manage_instance === true;
 }
 
 /**
