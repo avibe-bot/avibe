@@ -5,6 +5,7 @@ export type SessionDraftCacheRecord = {
   dirty: boolean;
   mutationId: string;
   savedAt: number;
+  rebaseOnConflict?: boolean;
 };
 
 type DraftStorage = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>
@@ -13,6 +14,7 @@ type CreateId = () => string;
 type Now = () => number;
 
 export const SESSION_DRAFT_STORAGE_PREFIX = 'avibe.session-draft.v1.';
+export const SESSION_DRAFT_MUTATION_PREFIX = 'avibe.session-draft-mutation.v1.';
 export const SESSION_DRAFT_INVALIDATION_PREFIX = 'avibe.session-draft-invalidation.v1.';
 
 function browserStorage(storage?: DraftStorage): DraftStorage | undefined {
@@ -41,6 +43,7 @@ function parseRecord(raw: string | null): SessionDraftCacheRecord | null {
       || !value.mutationId
       || typeof value.savedAt !== 'number'
       || !Number.isFinite(value.savedAt)
+      || (value.rebaseOnConflict !== undefined && typeof value.rebaseOnConflict !== 'boolean')
     ) {
       return null;
     }
@@ -69,12 +72,19 @@ export class SessionDraftLocalCache {
   read(sessionId: string): SessionDraftCacheRecord | null {
     const target = browserStorage(this.storage);
     if (!target) return null;
-    const key = this.key(sessionId);
     try {
-      const raw = target.getItem(key);
-      const record = parseRecord(raw);
-      if (raw && !record) target.removeItem(key);
-      return record;
+      const dirty = this.readDirtyMutations(target, sessionId);
+      const stored = this.readRecord(target, this.key(sessionId));
+      if (stored?.dirty) dirty.push(stored); // Legacy single-record cache.
+      if (dirty.length) {
+        return dirty.reduce((latest, record) => (
+          record.savedAt > latest.savedAt
+          || (record.savedAt === latest.savedAt && record.mutationId > latest.mutationId)
+            ? record
+            : latest
+        ));
+      }
+      return stored;
     } catch {
       return null;
     }
@@ -114,18 +124,25 @@ export class SessionDraftLocalCache {
     if (!target || typeof target.length !== 'number' || typeof target.key !== 'function') return [];
     const sessionIds = new Set<string>();
     try {
-      const keys = Array.from(
-        { length: target.length },
-        (_, index) => target.key!(index),
-      );
+      const keys = this.keys(target);
       for (const key of keys) {
-        if (!key?.startsWith(SESSION_DRAFT_STORAGE_PREFIX)) continue;
-        const raw = target.getItem(key);
-        const record = parseRecord(raw);
-        if (raw && !record) {
-          target.removeItem(key);
+        if (key.startsWith(SESSION_DRAFT_MUTATION_PREFIX)) {
+          const separator = key.indexOf(':', SESSION_DRAFT_MUTATION_PREFIX.length);
+          if (separator < 0) continue;
+          const record = this.readRecord(target, key);
+          if (!record?.dirty) continue;
+          try {
+            sessionIds.add(decodeURIComponent(key.slice(
+              SESSION_DRAFT_MUTATION_PREFIX.length,
+              separator,
+            )));
+          } catch {
+            // Ignore malformed keys that were not written by this cache.
+          }
           continue;
         }
+        if (!key.startsWith(SESSION_DRAFT_STORAGE_PREFIX)) continue;
+        const record = this.readRecord(target, key);
         if (!record?.dirty) continue;
         try {
           sessionIds.add(decodeURIComponent(key.slice(SESSION_DRAFT_STORAGE_PREFIX.length)));
@@ -139,20 +156,41 @@ export class SessionDraftLocalCache {
     return [...sessionIds];
   }
 
-  writeDirty(sessionId: string, text: string, serverUpdatedAt: string | null): SessionDraftCacheRecord {
-    return this.write(sessionId, {
+  writeDirty(
+    sessionId: string,
+    text: string,
+    serverUpdatedAt: string | null,
+    previousMutationId?: string,
+    rebaseOnConflict = false,
+  ): SessionDraftCacheRecord {
+    const record: SessionDraftCacheRecord = {
       version: 1,
       text,
       serverUpdatedAt,
       dirty: true,
       mutationId: this.createId(),
       savedAt: this.now(),
-    });
+      ...(rebaseOnConflict ? { rebaseOnConflict: true } : {}),
+    };
+    try {
+      const target = browserStorage(this.storage);
+      target?.setItem(this.mutationKey(sessionId, record.mutationId), JSON.stringify(record));
+      if (target && previousMutationId) {
+        target.removeItem(this.mutationKey(sessionId, previousMutationId));
+      }
+    } catch {
+      // The in-memory persistence layer still protects this tab when storage is unavailable.
+    }
+    return record;
   }
 
   writeClean(sessionId: string, text: string, serverUpdatedAt: string | null): SessionDraftCacheRecord | null {
     if (!text) {
-      this.clear(sessionId);
+      try {
+        browserStorage(this.storage)?.removeItem(this.key(sessionId));
+      } catch {
+        // Concurrent dirty mutations use separate keys and remain recoverable.
+      }
       return null;
     }
     return this.write(sessionId, {
@@ -165,10 +203,55 @@ export class SessionDraftLocalCache {
     });
   }
 
-  rebaseDirty(sessionId: string, mutationId: string, serverUpdatedAt: string | null): void {
-    const current = this.read(sessionId);
-    if (!current || current.mutationId !== mutationId || !current.dirty) return;
-    this.write(sessionId, { ...current, serverUpdatedAt });
+  rebaseDirty(
+    sessionId: string,
+    mutationId: string,
+    serverUpdatedAt: string | null,
+    rebaseOnConflict = false,
+  ): void {
+    const target = browserStorage(this.storage);
+    if (!target) return;
+    try {
+      const mutationKey = this.mutationKey(sessionId, mutationId);
+      const mutation = this.readRecord(target, mutationKey);
+      if (mutation?.dirty && mutation.mutationId === mutationId) {
+        target.setItem(mutationKey, JSON.stringify({
+          ...mutation,
+          serverUpdatedAt,
+          rebaseOnConflict: rebaseOnConflict || undefined,
+        }));
+        return;
+      }
+      // Compatibility with dirty records created before mutations used
+      // independent keys.
+      const legacy = this.readRecord(target, this.key(sessionId));
+      if (!legacy?.dirty || legacy.mutationId !== mutationId) return;
+      target.setItem(this.key(sessionId), JSON.stringify({
+        ...legacy,
+        serverUpdatedAt,
+        rebaseOnConflict: rebaseOnConflict || undefined,
+      }));
+    } catch {
+      // Best-effort cache metadata; the live in-memory entry remains authoritative.
+    }
+  }
+
+  markRebaseOnConflict(sessionId: string, mutationId: string): void {
+    const target = browserStorage(this.storage);
+    if (!target) return;
+    try {
+      const mutationKey = this.mutationKey(sessionId, mutationId);
+      const mutation = this.readRecord(target, mutationKey);
+      if (mutation?.dirty && mutation.mutationId === mutationId) {
+        target.setItem(mutationKey, JSON.stringify({ ...mutation, rebaseOnConflict: true }));
+        return;
+      }
+      const legacy = this.readRecord(target, this.key(sessionId));
+      if (!legacy?.dirty || legacy.mutationId !== mutationId) return;
+      target.setItem(this.key(sessionId), JSON.stringify({ ...legacy, rebaseOnConflict: true }));
+    } catch {
+      // The live entry still carries the recovery marker in this tab.
+    }
   }
 
   acknowledge(
@@ -177,24 +260,59 @@ export class SessionDraftLocalCache {
     text: string,
     serverUpdatedAt: string | null,
   ): void {
-    const current = this.read(sessionId);
-    if (!current || current.mutationId !== mutationId) return;
-    if (!text) {
-      this.clear(sessionId);
-      return;
+    const target = browserStorage(this.storage);
+    if (!target) return;
+    try {
+      const mutationKey = this.mutationKey(sessionId, mutationId);
+      const mutation = this.readRecord(target, mutationKey);
+      if (mutation?.dirty && mutation.mutationId === mutationId) {
+        // Dirty mutations use independent keys, so acknowledging this tab can
+        // never replace another tab's concurrently-written text.
+        target.removeItem(mutationKey);
+        if (!text) {
+          target.removeItem(this.key(sessionId));
+          return;
+        }
+        this.write(sessionId, {
+          ...mutation,
+          text,
+          serverUpdatedAt,
+          dirty: false,
+          savedAt: this.now(),
+          rebaseOnConflict: undefined,
+        });
+        return;
+      }
+
+      // Compatibility with the former single-record cache. New mutations never
+      // use this path, so current tabs retain atomic cross-tab ownership.
+      const legacy = this.readRecord(target, this.key(sessionId));
+      if (!legacy || legacy.mutationId !== mutationId) return;
+      if (!text) {
+        target.removeItem(this.key(sessionId));
+        return;
+      }
+      this.write(sessionId, {
+        ...legacy,
+        text,
+        serverUpdatedAt,
+        dirty: false,
+        savedAt: this.now(),
+        rebaseOnConflict: undefined,
+      });
+    } catch {
+      // The cloud acknowledgement succeeded; a blocked cache is non-fatal.
     }
-    this.write(sessionId, {
-      ...current,
-      text,
-      serverUpdatedAt,
-      dirty: false,
-      savedAt: this.now(),
-    });
   }
 
   clear(sessionId: string): void {
     try {
-      browserStorage(this.storage)?.removeItem(this.key(sessionId));
+      const target = browserStorage(this.storage);
+      if (!target) return;
+      target.removeItem(this.key(sessionId));
+      for (const key of this.keys(target)) {
+        if (key.startsWith(this.mutationPrefix(sessionId))) target.removeItem(key);
+      }
     } catch {
       // Draft caching is best-effort when storage is blocked or full.
     }
@@ -213,7 +331,39 @@ export class SessionDraftLocalCache {
     return `${SESSION_DRAFT_STORAGE_PREFIX}${encodeURIComponent(sessionId)}`;
   }
 
+  private mutationPrefix(sessionId: string): string {
+    return `${SESSION_DRAFT_MUTATION_PREFIX}${encodeURIComponent(sessionId)}:`;
+  }
+
+  private mutationKey(sessionId: string, mutationId: string): string {
+    return `${this.mutationPrefix(sessionId)}${encodeURIComponent(mutationId)}`;
+  }
+
   private invalidationKey(sessionId: string): string {
     return `${SESSION_DRAFT_INVALIDATION_PREFIX}${encodeURIComponent(sessionId)}`;
+  }
+
+  private keys(target: DraftStorage): string[] {
+    if (typeof target.length !== 'number' || typeof target.key !== 'function') return [];
+    return Array.from({ length: target.length }, (_, index) => target.key!(index))
+      .filter((key): key is string => Boolean(key));
+  }
+
+  private readRecord(target: DraftStorage, key: string): SessionDraftCacheRecord | null {
+    const raw = target.getItem(key);
+    const record = parseRecord(raw);
+    if (raw && !record) target.removeItem(key);
+    return record;
+  }
+
+  private readDirtyMutations(
+    target: DraftStorage,
+    sessionId: string,
+  ): SessionDraftCacheRecord[] {
+    const prefix = this.mutationPrefix(sessionId);
+    return this.keys(target)
+      .filter((key) => key.startsWith(prefix))
+      .map((key) => this.readRecord(target, key))
+      .filter((record): record is SessionDraftCacheRecord => Boolean(record?.dirty));
   }
 }

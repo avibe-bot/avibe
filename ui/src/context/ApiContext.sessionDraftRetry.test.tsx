@@ -1,6 +1,7 @@
 /* @vitest-environment jsdom */
 
 import { act, cleanup, render, waitFor } from '@testing-library/react';
+import { useEffect } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const apiFetch = vi.hoisted(() => vi.fn());
@@ -13,12 +14,23 @@ vi.mock('react-i18next', () => ({
 }));
 
 import { SessionDraftLocalCache } from '../lib/sessionDraftLocalCache';
-import { ApiProvider } from './ApiContext';
+import { ApiProvider, useApi } from './ApiContext';
+
+let capturedApi: ReturnType<typeof useApi> | null = null;
+
+const CaptureApi = () => {
+  const api = useApi();
+  useEffect(() => {
+    capturedApi = api;
+  }, [api]);
+  return null;
+};
 
 beforeEach(() => {
   window.localStorage.clear();
   apiFetch.mockReset();
   showToast.mockReset();
+  capturedApi = null;
   Object.defineProperty(document, 'visibilityState', {
     configurable: true,
     value: 'visible',
@@ -27,6 +39,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   window.localStorage.clear();
 });
 
@@ -95,5 +108,84 @@ describe('ApiProvider session draft reconnect', () => {
     expect(cache.read('session-a')?.dirty).toBe(false);
     expect(cache.read('session-b')?.dirty).toBe(false);
     expect(cache.read('session-c')).toMatchObject({ text: 'already synced', dirty: false });
+  });
+
+  it('bounds a stalled write and releases its reconciled successor', async () => {
+    vi.useFakeTimers();
+    let putCount = 0;
+    apiFetch.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (init?.method === 'PUT' && ++putCount === 1) {
+        return new Promise<Response>((_resolve, reject) => {
+          init.signal?.addEventListener('abort', () => {
+            reject(new DOMException('aborted', 'AbortError'));
+          }, { once: true });
+        });
+      }
+      if (!init?.method) {
+        return new Response(JSON.stringify({ text: '', updated_at: null }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      const body = JSON.parse(String(init.body)) as { text: string };
+      return new Response(JSON.stringify({
+        ok: true,
+        draft: { text: body.text, updated_at: 'second-revision' },
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+
+    render(<ApiProvider><CaptureApi /></ApiProvider>);
+    capturedApi!.cacheSessionDraft('session-a', 'first');
+    const first = capturedApi!.setSessionDraft('session-a', 'first');
+    await Promise.resolve();
+    capturedApi!.cacheSessionDraft('session-a', 'second');
+    const second = capturedApi!.setSessionDraft('session-a', 'second');
+
+    await vi.advanceTimersByTimeAsync(12_000);
+    await expect(first).resolves.toMatchObject({ ok: false });
+    await expect(second).resolves.toMatchObject({ ok: true });
+    const writes = apiFetch.mock.calls
+      .filter(([, init]) => init?.method === 'PUT')
+      .map(([, init]) => JSON.parse(String(init?.body)));
+    expect(writes).toEqual([
+      { text: 'first', expected_updated_at: null },
+      { text: 'second', expected_updated_at: null },
+    ]);
+  });
+
+  it('rebases and retries text restored after a rejected send', async () => {
+    let resolveDraft!: (response: Response) => void;
+    const draft = new Promise<Response>((resolve) => { resolveDraft = resolve; });
+    apiFetch.mockImplementation(async (_path: string, init?: RequestInit) => {
+      if (!init?.method) return draft;
+      const body = JSON.parse(String(init.body)) as { text: string };
+      return new Response(JSON.stringify({
+        ok: true,
+        draft: { text: body.text, updated_at: 'restored-revision' },
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+
+    render(<ApiProvider><CaptureApi /></ApiProvider>);
+    capturedApi!.cacheSessionDraft('session-a', 'submitted');
+    capturedApi!.cacheSessionDraft('session-a', '');
+    const recovery = capturedApi!.recoverSessionDraftAfterRejectedSend('session-a');
+    capturedApi!.cacheSessionDraft('session-a', 'submitted');
+    resolveDraft(new Response(JSON.stringify({ text: '', updated_at: 'clear-revision' }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }));
+    await recovery;
+
+    const write = apiFetch.mock.calls.find(([, init]) => init?.method === 'PUT');
+    expect(JSON.parse(String(write?.[1]?.body))).toEqual({
+      text: 'submitted',
+      expected_updated_at: 'clear-revision',
+    });
   });
 });

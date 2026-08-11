@@ -725,6 +725,7 @@ export type ApiContextType = {
   cacheSessionDraft: (sessionId: string, text: string) => void;
   getSessionDraft: (sessionId: string) => Promise<{ text: string }>;
   setSessionDraft: (sessionId: string, text: string) => Promise<{ ok: boolean }>;
+  recoverSessionDraftAfterRejectedSend: (sessionId: string) => Promise<void>;
   listInbox: (params?: { platform?: string; unreadOnly?: boolean; limit?: number; before?: string; onlySession?: string; cache?: boolean; handleError?: boolean }) => Promise<InboxFeedResult>;
   connectWorkbenchEvents: (handlers: WorkbenchEventHandlers) => () => void;
   listVibeAgents: (params?: {
@@ -1268,6 +1269,9 @@ function sessionDraftServerState(payload: unknown): SessionDraftServerState {
     updatedAt: typeof draft.updated_at === 'string' ? draft.updated_at : null,
   };
 }
+
+const SESSION_DRAFT_WRITE_TIMEOUT_MS = 12_000;
+const SESSION_DRAFT_RECONCILE_TIMEOUT_MS = 5_000;
 
 // One row of the per-session ("Slack-like") inbox feed from ``GET /api/inbox``.
 // Aggregated per session at query time: ``preview_text`` is the session's latest
@@ -2759,31 +2763,73 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return { res, payloadJson };
   };
 
+  const readSessionDraftServer = async (
+    sessionId: string,
+    timeoutMs = SESSION_DRAFT_RECONCILE_TIMEOUT_MS,
+  ): Promise<SessionDraftServerState | null> => {
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await apiFetch(
+        `/api/sessions/${encodeURIComponent(sessionId)}/draft`,
+        { signal: controller.signal },
+      );
+      if (!res.ok) return null;
+      return sessionDraftServerState(await res.json().catch(() => null));
+    } catch {
+      return null;
+    } finally {
+      window.clearTimeout(timeout);
+    }
+  };
+
   const writeSessionDraft = async (
     sessionId: string,
     draft: SessionDraftWrite,
   ): Promise<SessionDraftSaveResult> => {
-    const { res, payloadJson } = await requestJson(
-      `/api/sessions/${encodeURIComponent(sessionId)}/draft`,
-      {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          text: draft.text,
-          expected_updated_at: draft.expectedUpdatedAt,
-        }),
-      },
-      `/api/sessions/${sessionId}/draft`,
-      { handleError: false },
-    );
-    const hasServerDraft = payloadJson?.draft && typeof payloadJson.draft === 'object';
-    const server = sessionDraftServerState(payloadJson?.draft);
-    if (res.status === 409 && payloadJson?.code === 'draft_conflict') {
-      return { ok: false, conflict: true, server };
+    const controller = new AbortController();
+    let timedOut = false;
+    const timeout = window.setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, SESSION_DRAFT_WRITE_TIMEOUT_MS);
+    try {
+      const { res, payloadJson } = await requestJson(
+        `/api/sessions/${encodeURIComponent(sessionId)}/draft`,
+        {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            text: draft.text,
+            expected_updated_at: draft.expectedUpdatedAt,
+          }),
+          signal: controller.signal,
+        },
+        `/api/sessions/${sessionId}/draft`,
+        { handleError: false },
+      );
+      const hasServerDraft = payloadJson?.draft && typeof payloadJson.draft === 'object';
+      const server = sessionDraftServerState(payloadJson?.draft);
+      if (res.status === 409 && payloadJson?.code === 'draft_conflict') {
+        return { ok: false, conflict: true, server };
+      }
+      return res.ok
+        ? { ok: true, ...(hasServerDraft ? { server } : {}) }
+        : { ok: false };
+    } catch (error) {
+      if (!timedOut) throw error;
+      // The request may have committed before its response stalled. Reconcile
+      // once before releasing queued successors so they inherit the actual
+      // cloud revision instead of manufacturing a conflict from uncertainty.
+      const server = await readSessionDraftServer(sessionId);
+      if (!server) return { ok: false };
+      if (server.text === draft.text) return { ok: true, server };
+      return server.updatedAt !== draft.expectedUpdatedAt
+        ? { ok: false, conflict: true, server }
+        : { ok: false, server };
+    } finally {
+      window.clearTimeout(timeout);
     }
-    return res.ok
-      ? { ok: true, ...(hasServerDraft ? { server } : {}) }
-      : { ok: false };
   };
   syncSessionDraftsRef.current = () => {
     void sessionDraftPersistence.retryAll(writeSessionDraft);
@@ -3327,6 +3373,19 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       text,
       (draft) => writeSessionDraft(sessionId, draft),
     ),
+    recoverSessionDraftAfterRejectedSend: async (sessionId) => {
+      // The message reservation clears the cloud draft before dispatch. A
+      // rejected/unknown dispatch therefore needs an authoritative revision
+      // before the composer's optimistic text restoration is replayed.
+      sessionDraftPersistence.markRejectedSend(sessionId);
+      const server = await readSessionDraftServer(sessionId);
+      if (!server) return;
+      sessionDraftPersistence.rebase(sessionId, server);
+      await sessionDraftPersistence.retry(
+        sessionId,
+        (draft) => writeSessionDraft(sessionId, draft),
+      );
+    },
     listInbox: (params) => {
       const search = new URLSearchParams();
       if (params?.platform) search.set('platform', params.platform);

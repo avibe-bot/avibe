@@ -1841,13 +1841,14 @@ export const ChatPage: React.FC = () => {
           void syncTurnStateRef.current?.();
           setWorking(false);
           setError(errorMessage(err) ?? String(err));
+          void api.recoverSessionDraftAfterRejectedSend(sessionId);
           // Signal the composer the send didn't start so it restores the text +
           // uploaded chips — the user can retry without re-uploading (Codex r5).
           return false;
         }
       }
     },
-    [sessionId, appendMessage, refreshQueue, markWorking, reloadLatestMessages, convergeSessionArchived, t],
+    [sessionId, api, appendMessage, refreshQueue, markWorking, reloadLatestMessages, convergeSessionArchived, t],
   );
 
   // @ mention source: all enabled Agents, filtered client-side (the set is small

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   SESSION_DRAFT_INVALIDATION_PREFIX,
+  SESSION_DRAFT_MUTATION_PREFIX,
   SESSION_DRAFT_STORAGE_PREFIX,
   SessionDraftLocalCache,
 } from './sessionDraftLocalCache';
@@ -39,7 +40,7 @@ describe('SessionDraftLocalCache', () => {
       () => 100 + sequence,
     );
 
-    cache.writeDirty('session/a', 'typing', 'server-1');
+    const dirty = cache.writeDirty('session/a', 'typing', 'server-1');
     expect(cache.read('session/a')).toEqual({
       version: 1,
       text: 'typing',
@@ -48,13 +49,16 @@ describe('SessionDraftLocalCache', () => {
       mutationId: 'id-1',
       savedAt: 101,
     });
+    expect([...storage.values.keys()]).toEqual([
+      `${SESSION_DRAFT_MUTATION_PREFIX}session%2Fa:id-1`,
+    ]);
 
-    cache.writeClean('session/a', 'typing', 'server-2');
+    cache.acknowledge('session/a', dirty.mutationId, 'typing', 'server-2');
     expect(cache.read('session/a')).toMatchObject({
       text: 'typing',
       serverUpdatedAt: 'server-2',
       dirty: false,
-      mutationId: 'id-2',
+      mutationId: 'id-1',
     });
     expect([...storage.values.keys()]).toEqual([
       `${SESSION_DRAFT_STORAGE_PREFIX}session%2Fa`,
@@ -94,6 +98,37 @@ describe('SessionDraftLocalCache', () => {
 
     expect(cache.dirtySessionIds()).toEqual(['session/a', 'session-c']);
     expect(storage.getItem(`${SESSION_DRAFT_STORAGE_PREFIX}broken`)).toBeNull();
+  });
+
+  it('acknowledges one tab without replacing another tab mutation', () => {
+    const storage = new MemoryStorage();
+    const first = new SessionDraftLocalCache(storage, () => 'tab-a', () => 1);
+    const second = new SessionDraftLocalCache(storage, () => 'tab-b', () => 2);
+
+    first.writeDirty('session-a', 'from tab A', null);
+    const removeItem = storage.removeItem.bind(storage);
+    storage.removeItem = (key) => {
+      if (key === `${SESSION_DRAFT_MUTATION_PREFIX}session-a:tab-a`) {
+        second.writeDirty('session-a', 'from tab B', null);
+      }
+      removeItem(key);
+    };
+    first.acknowledge('session-a', 'tab-a', 'from tab A', 'rev-a');
+
+    expect(second.read('session-a')).toMatchObject({
+      text: 'from tab B',
+      dirty: true,
+      mutationId: 'tab-b',
+    });
+    expect(storage.getItem(
+      `${SESSION_DRAFT_MUTATION_PREFIX}session-a:tab-b`,
+    )).not.toBeNull();
+    first.writeClean('session-a', '', 'clear-revision');
+    expect(second.read('session-a')).toMatchObject({
+      text: 'from tab B',
+      dirty: true,
+      mutationId: 'tab-b',
+    });
   });
 
   it('persists archive invalidation across cache instances', () => {

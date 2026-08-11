@@ -31,6 +31,8 @@ type DraftEntry = {
   pendingRevision: number | null;
   dirty: boolean;
   conflict: boolean;
+  localOwned: boolean;
+  rebaseOnConflict: boolean;
 };
 
 type DraftSave = (draft: SessionDraftWrite) => Promise<SessionDraftSaveResult>;
@@ -67,7 +69,13 @@ export class SessionDraftPersistence {
         ?? cached?.serverUpdatedAt
         ?? this.serverVersions.get(sessionId)
         ?? null;
-    const local = this.localCache.writeDirty(sessionId, text, baseUpdatedAt);
+    const local = this.localCache.writeDirty(
+      sessionId,
+      text,
+      baseUpdatedAt,
+      current?.localOwned ? current.localId : undefined,
+      current?.rebaseOnConflict ?? false,
+    );
     this.entries.set(sessionId, {
       revision: (current?.revision ?? 0) + 1,
       text,
@@ -79,6 +87,8 @@ export class SessionDraftPersistence {
       // A new keystroke after a conflict is explicit user intent. Rebase that
       // edit onto the revision returned by the conflict and resume CAS writes.
       conflict: resolvesConflict ? false : current?.conflict ?? false,
+      localOwned: true,
+      rebaseOnConflict: current?.rebaseOnConflict ?? false,
     });
   }
 
@@ -166,7 +176,7 @@ export class SessionDraftPersistence {
     const dirty = current?.dirty ? current : cached?.dirty ? this.hydrateDirty(sessionId) : null;
     if (dirty) {
       if (dirty.text === server.text) {
-        this.acceptServer(sessionId, server);
+        this.acceptServer(sessionId, server, dirty.localId);
         return server.text;
       }
 
@@ -208,6 +218,23 @@ export class SessionDraftPersistence {
     this.localCache.clear(sessionId);
   }
 
+  rebase(sessionId: string, server: SessionDraftServerState): void {
+    this.serverVersions.set(sessionId, server.updatedAt);
+    const current = this.hydrateDirty(sessionId);
+    if (!current) return;
+    current.baseUpdatedAt = server.updatedAt;
+    current.conflict = false;
+    current.rebaseOnConflict = false;
+    this.localCache.rebaseDirty(sessionId, current.localId, server.updatedAt, false);
+  }
+
+  markRejectedSend(sessionId: string): void {
+    const current = this.hydrateDirty(sessionId);
+    if (!current) return;
+    current.rebaseOnConflict = true;
+    this.localCache.markRebaseOnConflict(sessionId, current.localId);
+  }
+
   private startSync(
     sessionId: string,
     entry: DraftEntry,
@@ -225,21 +252,21 @@ export class SessionDraftPersistence {
       );
       const beforeWrite = this.entries.get(sessionId);
       if (!beforeWrite || beforeWrite.revision !== revision) return { ok: true };
-      if (predecessorResult?.conflict) {
-        if (predecessorResult.server) {
-          beforeWrite.baseUpdatedAt = predecessorResult.server.updatedAt;
-          beforeWrite.conflict = false;
-          this.localCache.rebaseDirty(
-            sessionId,
-            beforeWrite.localId,
-            predecessorResult.server.updatedAt,
-          );
-        } else {
-          beforeWrite.pending = null;
-          beforeWrite.pendingRevision = null;
-          beforeWrite.conflict = true;
-          return { ok: false, conflict: true };
-        }
+      if (predecessorResult?.server) {
+        beforeWrite.baseUpdatedAt = predecessorResult.server.updatedAt;
+        beforeWrite.conflict = false;
+        beforeWrite.rebaseOnConflict = false;
+        this.localCache.rebaseDirty(
+          sessionId,
+          beforeWrite.localId,
+          predecessorResult.server.updatedAt,
+        );
+      }
+      if (predecessorResult?.conflict && !predecessorResult.server) {
+        beforeWrite.pending = null;
+        beforeWrite.pendingRevision = null;
+        beforeWrite.conflict = true;
+        return { ok: false, conflict: true };
       }
       if (beforeWrite.conflict) {
         beforeWrite.pending = null;
@@ -261,7 +288,19 @@ export class SessionDraftPersistence {
       if (result.conflict && result.server?.text === text) {
         result = { ok: true, server: result.server };
       }
+      const shouldRetryRecoveredConflict = Boolean(
+        result.conflict
+        && result.server
+        && beforeWrite.revision === revision
+        && beforeWrite.rebaseOnConflict,
+      );
       this.applyWriteResult(sessionId, revision, result);
+      if (shouldRetryRecoveredConflict) {
+        const retry = this.entries.get(sessionId);
+        if (retry?.dirty && !retry.conflict && !retry.pending) {
+          return this.startSync(sessionId, retry, write);
+        }
+      }
       return result;
     })();
 
@@ -289,6 +328,7 @@ export class SessionDraftPersistence {
         current.pendingRevision = null;
         current.dirty = false;
         current.conflict = false;
+        current.rebaseOnConflict = false;
         current.baseUpdatedAt = server.updatedAt;
         this.localCache.acknowledge(
           sessionId,
@@ -315,7 +355,13 @@ export class SessionDraftPersistence {
       if (current.revision !== revision && result.server) {
         current.baseUpdatedAt = result.server.updatedAt;
         current.conflict = false;
-        this.localCache.rebaseDirty(sessionId, current.localId, result.server.updatedAt);
+        current.rebaseOnConflict = false;
+        this.localCache.rebaseDirty(sessionId, current.localId, result.server.updatedAt, false);
+      } else if (current.rebaseOnConflict && result.server) {
+        current.baseUpdatedAt = result.server.updatedAt;
+        current.conflict = false;
+        current.rebaseOnConflict = false;
+        this.localCache.rebaseDirty(sessionId, current.localId, result.server.updatedAt, false);
       } else {
         current.conflict = true;
       }
@@ -346,15 +392,25 @@ export class SessionDraftPersistence {
       pendingRevision: current?.pendingRevision ?? null,
       dirty: true,
       conflict: false,
+      localOwned: false,
+      rebaseOnConflict: cached.rebaseOnConflict ?? false,
     };
     this.entries.set(sessionId, hydrated);
     return hydrated;
   }
 
-  private acceptServer(sessionId: string, server: SessionDraftServerState): void {
+  private acceptServer(
+    sessionId: string,
+    server: SessionDraftServerState,
+    mutationId?: string,
+  ): void {
     this.serverVersions.set(sessionId, server.updatedAt);
     this.entries.delete(sessionId);
-    this.localCache.writeClean(sessionId, server.text, server.updatedAt);
+    if (mutationId) {
+      this.localCache.acknowledge(sessionId, mutationId, server.text, server.updatedAt);
+    } else {
+      this.localCache.writeClean(sessionId, server.text, server.updatedAt);
+    }
   }
 
   private observeInvalidation(sessionId: string): void {

@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
-import { SessionDraftLocalCache } from './sessionDraftLocalCache';
+import {
+  SESSION_DRAFT_MUTATION_PREFIX,
+  SessionDraftLocalCache,
+} from './sessionDraftLocalCache';
 import {
   SessionDraftPersistence,
   type SessionDraftSaveResult,
@@ -138,6 +141,24 @@ describe('SessionDraftPersistence', () => {
       dirty: true,
       mutationId: 'tab-b',
     });
+  });
+
+  it('does not delete an adopted mutation when this tab starts editing', () => {
+    const storage = new MemoryStorage();
+    const firstCache = new SessionDraftLocalCache(storage, () => 'tab-a', () => 1);
+    const secondCache = new SessionDraftLocalCache(storage, () => 'tab-b', () => 2);
+    secondCache.writeDirty('session-a', 'from tab B', null);
+    const first = new SessionDraftPersistence(firstCache);
+
+    first.beginRead('session-a');
+    first.cache('session-a', 'from tab A');
+
+    expect(storage.getItem(
+      `${SESSION_DRAFT_MUTATION_PREFIX}session-a:tab-b`,
+    )).not.toBeNull();
+    expect(storage.getItem(
+      `${SESSION_DRAFT_MUTATION_PREFIX}session-a:tab-a`,
+    )).not.toBeNull();
   });
 
   it('keeps local text when a read starts during a pending write', async () => {
@@ -347,6 +368,80 @@ describe('SessionDraftPersistence', () => {
       text: 'typed after send',
       expectedUpdatedAt: 'clear-revision',
     });
+  });
+
+  it('rebases a successor from the authoritative state after an uncertain write', async () => {
+    const persistence = new SessionDraftPersistence(localCache());
+    const first = deferred<SessionDraftSaveResult>();
+    const firstSave = persistence.save('session-a', 'first', async () => first.promise);
+    await Promise.resolve();
+
+    persistence.cache('session-a', 'second');
+    const successor = vi.fn(async (draft: SessionDraftWrite): Promise<SessionDraftSaveResult> => ({
+      ok: true,
+      server: { text: draft.text, updatedAt: 'rev-2' },
+    }));
+    const secondSave = persistence.save('session-a', 'second', successor);
+    first.resolve({
+      ok: false,
+      server: { text: '', updatedAt: 'reconciled-revision' },
+    });
+
+    await expect(firstSave).resolves.toMatchObject({ ok: false });
+    await expect(secondSave).resolves.toMatchObject({ ok: true });
+    expect(successor).toHaveBeenCalledWith({
+      text: 'second',
+      expectedUpdatedAt: 'reconciled-revision',
+    });
+  });
+
+  it('rebases and retries a rejected-send restoration without another edit', async () => {
+    const persistence = new SessionDraftPersistence(localCache());
+    persistence.cache('session-a', 'submitted');
+    persistence.cache('session-a', '');
+    persistence.cache('session-a', 'submitted');
+
+    persistence.rebase('session-a', { text: '', updatedAt: 'clear-revision' });
+    const write = vi.fn(async (draft: SessionDraftWrite): Promise<SessionDraftSaveResult> => ({
+      ok: true,
+      server: { text: draft.text, updatedAt: 'restored-revision' },
+    }));
+    await persistence.retry('session-a', write);
+
+    expect(write).toHaveBeenCalledWith({
+      text: 'submitted',
+      expectedUpdatedAt: 'clear-revision',
+    });
+  });
+
+  it('persists rejected-send recovery and retries its first conflict after reload', async () => {
+    const storage = new MemoryStorage();
+    const first = new SessionDraftPersistence(localCache(storage));
+    first.cache('session-a', 'submitted');
+    first.markRejectedSend('session-a');
+
+    const restored = new SessionDraftPersistence(localCache(storage));
+    const writes: SessionDraftWrite[] = [];
+    const result = await restored.retry('session-a', async (draft) => {
+      writes.push(draft);
+      if (writes.length === 1) {
+        return {
+          ok: false,
+          conflict: true,
+          server: { text: '', updatedAt: 'clear-revision' },
+        };
+      }
+      return {
+        ok: true,
+        server: { text: draft.text, updatedAt: 'restored-revision' },
+      };
+    });
+
+    expect(result).toMatchObject({ ok: true });
+    expect(writes).toEqual([
+      { text: 'submitted', expectedUpdatedAt: null },
+      { text: 'submitted', expectedUpdatedAt: 'clear-revision' },
+    ]);
   });
 
   it('treats a same-text conflict as convergence and cleans the local record', async () => {
