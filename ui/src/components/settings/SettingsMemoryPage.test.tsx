@@ -7,6 +7,8 @@ import { MemoryRouter } from 'react-router-dom';
 
 import { SettingsMemoryPage } from './SettingsMemoryPage';
 import type { MemoryStatus } from '../../context/ApiContext';
+import { InstanceAuthorizationContext } from '../../context/InstanceAuthorizationContext';
+import { DENIED_INSTANCE_CAPABILITIES } from '../../lib/sessionInfo';
 
 const api = vi.hoisted(() => ({
   clearMemory: vi.fn(),
@@ -245,5 +247,47 @@ describe('SettingsMemoryPage disabled recorder health', () => {
     expect(await screen.findByText('memory.setup.runtimeRequired')).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'memory.log.restartAction' })).toBeNull();
     expect(screen.getByRole('button', { name: 'memory.status.restartEngine' })).toBeTruthy();
+  });
+});
+
+describe('SettingsMemoryPage remote administration gate', () => {
+  // A remote Instance owner keeps `can_manage_instance`, so only the locality
+  // half of the gate can keep the local-only administration routes off screen.
+  const renderRemoteOwner = () =>
+    render(
+      <MemoryRouter>
+        <InstanceAuthorizationContext.Provider
+          value={{
+            remote: true,
+            instanceRole: 'owner',
+            capabilities: { ...DENIED_INSTANCE_CAPABILITIES, can_manage_instance: true },
+          }}
+        >
+          <SettingsMemoryPage />
+        </InstanceAuthorizationContext.Provider>
+      </MemoryRouter>,
+    );
+
+  it('hides the admin log, the settings tab and the engine restart from a remote owner', async () => {
+    renderRemoteOwner();
+
+    expect(await screen.findByRole('radio', { name: 'memory.tabs.status' })).toBeTruthy();
+    expect(screen.getByRole('radio', { name: 'memory.tabs.search' })).toBeTruthy();
+    expect(screen.queryByRole('radio', { name: 'memory.tabs.log' })).toBeNull();
+    expect(screen.queryByRole('radio', { name: 'memory.tabs.settings' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'memory.status.restartEngine' })).toBeNull();
+  });
+
+  it('replaces the remote setup flow with the unavailable notice', async () => {
+    api.getMemorySettings.mockResolvedValue({
+      status: 'ok',
+      enabled: false,
+      processing: { llm: endpoint, embedding: endpoint },
+    });
+
+    renderRemoteOwner();
+
+    expect(await screen.findByText('memory.remoteUnavailable.title')).toBeTruthy();
+    expect(screen.queryByRole('radio', { name: 'memory.tabs.status' })).toBeNull();
   });
 });

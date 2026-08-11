@@ -49,7 +49,9 @@ export const MemoryStatusPanel: React.FC<{
   loading: boolean;
   error: string | null;
   onRefresh: () => void;
-  onOpenSettings: () => void;
+  /** Absent when the viewer cannot administer Memory (remote), which hides the
+   *  credential fault's settings shortcut. */
+  onOpenSettings?: () => void;
 }> = ({
   status,
   failures,
@@ -122,7 +124,7 @@ export const MemoryStatusPanel: React.FC<{
             <AlertTriangle className="mt-0.5 size-4 shrink-0 text-gold" />
             <div className="flex min-w-0 flex-col gap-2">
               <span>{t(`memory.status.fault.${faultKind}`)}</span>
-              {faultKind === 'credential' ? (
+              {faultKind === 'credential' && onOpenSettings ? (
                 <Button variant="secondary" size="xs" className="w-fit" onClick={onOpenSettings}>
                   {t('memory.status.faultAction.credential')}
                 </Button>

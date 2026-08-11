@@ -245,23 +245,23 @@ def test_local_descriptor_title_revision_and_safe_fallback() -> None:
             update(agent_sessions)
             .where(agent_sessions.c.id == resource_ids["show_page"])
             .values(
-                title=None,
+                title="Q3 / Launch: Ops",
                 updated_at="2026-07-27T20:00:00.000003+00:00",
             )
         )
-    untitled = {
+    separated = {
         item["resource_kind"]: item
         for item in remote_access._local_policy_resource_descriptors("org-1")
     }["show_page"]
-    assert untitled["display_name"] == resource_ids["show_page"]
-    assert untitled["metadata_revision"] > renamed["metadata_revision"]
+    assert separated["display_name"] == "Q3 / Launch: Ops"
+    assert separated["metadata_revision"] > renamed["metadata_revision"]
 
     with engine.begin() as connection:
         connection.execute(
             update(agent_sessions)
             .where(agent_sessions.c.id == resource_ids["show_page"])
             .values(
-                title="/private/show/title",
+                title="Quarterly\nResults",
                 updated_at="2026-07-27T20:00:00.000004+00:00",
             )
         )
@@ -270,8 +270,8 @@ def test_local_descriptor_title_revision_and_safe_fallback() -> None:
         for item in remote_access._local_policy_resource_descriptors("org-1")
     }["show_page"]
     assert unsafe["display_name"] == resource_ids["show_page"]
-    assert unsafe["metadata_revision"] > untitled["metadata_revision"]
-    assert "/private/show/title" not in repr(unsafe)
+    assert unsafe["metadata_revision"] > separated["metadata_revision"]
+    assert "Quarterly\nResults" not in repr(unsafe)
 
 
 def test_local_descriptors_omit_missing_source_rows() -> None:

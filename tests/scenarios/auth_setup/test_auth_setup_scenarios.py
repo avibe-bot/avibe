@@ -4,6 +4,7 @@ import os
 import sys
 import tempfile
 import unittest
+import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
@@ -136,6 +137,12 @@ class OrganizationManagementAuthScenarioTests(unittest.TestCase):
         self.harness = OrganizationManagementScenarioHarness()
         self.addCleanup(self.harness.close)
 
+    @staticmethod
+    def _authorize_state(authorize_url: str) -> str:
+        """The `state` the browser was actually handed, read back off its own URL."""
+        query = urllib.parse.urlparse(authorize_url).query
+        return urllib.parse.parse_qs(query)["state"][0]
+
     def test_explicit_management_sign_in_starts_interactive_handoff(self):
         """Scenario: AUTH-SETUP-301"""
         client = self.harness.remote_client()
@@ -160,10 +167,14 @@ class OrganizationManagementAuthScenarioTests(unittest.TestCase):
     def test_silent_reauthorization_stops_after_login_required(self):
         """Scenarios: AUTH-SETUP-302, AUTH-SETUP-306"""
         client = self.harness.remote_client()
+        # The real handshake store, not a stub: the callback only tears a browser's
+        # session down when it proves it belongs to that browser's own live
+        # handshake, so a stubbed `begin_authorization` that registers nothing would
+        # exercise a forged callback rather than this browser's failed silent retry.
         with patch.object(
             cloud_management,
             "begin_authorization",
-            return_value=("https://avibe.bot/oauth/management/authorize?prompt=none", "state-1"),
+            wraps=cloud_management.begin_authorization,
         ) as begin:
             first = client.post(
                 "/api/cloud-management/session/start",
@@ -173,16 +184,12 @@ class OrganizationManagementAuthScenarioTests(unittest.TestCase):
             )
         self.assertEqual(first.status_code, 202)
         self.assertTrue(begin.call_args.kwargs["silent"])
+        state = self._authorize_state(first.get_json()["authorize_url"])
 
-        with patch.object(
-            cloud_management,
-            "fail_handshake",
-            return_value="/admin/organization/overview",
-        ):
-            callback = client.get(
-                "/auth/organization/callback?error=login_required&state=state-1",
-                base_url=REMOTE_ORIGIN,
-            )
+        callback = client.get(
+            f"/auth/organization/callback?error=login_required&state={state}",
+            base_url=REMOTE_ORIGIN,
+        )
         self.assertEqual(callback.status_code, 302)
         self.assertIn("cloud_management_error=login_required", callback.headers["location"])
 
@@ -227,6 +234,17 @@ class OrganizationManagementAuthScenarioTests(unittest.TestCase):
         """Scenario: AUTH-SETUP-305"""
         client = self.harness.remote_client()
         client.set_cookie(cloud_management.BROWSER_COOKIE_NAME, "browser-1", domain="alex.avibe.bot")
+        # A real handshake for this browser: the token exchange has to fail on a
+        # flow the browser actually started, otherwise this asserts what a forged
+        # cross-site callback does rather than what a broken sign-in does.
+        _, state = cloud_management.begin_authorization(
+            self.harness.config,
+            browser_id="browser-1",
+            remote_subject="user-1",
+            callback_origin=REMOTE_ORIGIN,
+            next_path="/admin/organization/overview",
+            silent=False,
+        )
         with patch.object(
             cloud_management,
             "complete_authorization",
@@ -236,7 +254,7 @@ class OrganizationManagementAuthScenarioTests(unittest.TestCase):
             ),
         ):
             response = client.get(
-                "/auth/organization/callback?code=bad-code&state=bad-state",
+                f"/auth/organization/callback?code=bad-code&state={state}",
                 base_url=REMOTE_ORIGIN,
             )
         self.assertEqual(response.status_code, 302)

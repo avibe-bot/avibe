@@ -723,7 +723,7 @@ export type ApiContextType = {
     opts?: { limit?: number; includeArchived?: boolean },
   ) => Promise<MessageSearchResult>;
   sendSessionMessage: (sessionId: string, payload: { text?: string; content?: Record<string, unknown>; metadata?: Record<string, unknown>; author_id?: string; author_name?: string }) => Promise<WorkbenchMessage>;
-  markSessionRead: (sessionId: string, untilMessageId?: string) => Promise<{ updated: number; unread_counts: Record<string, number>; unread_by_session: Record<string, number> }>;
+  markSessionRead: (sessionId: string, untilMessageId?: string, opts?: { handleError?: boolean }) => Promise<{ updated: number; unread_counts: Record<string, number>; unread_by_session?: Record<string, number> }>;
   cancelSession: (
     sessionId: string,
   ) => Promise<{
@@ -3305,10 +3305,11 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     },
     sendSessionMessage: (sessionId, payload) =>
       postJson(`/api/sessions/${encodeURIComponent(sessionId)}/messages`, payload),
-    markSessionRead: (sessionId, untilMessageId) =>
+    markSessionRead: (sessionId, untilMessageId, opts) =>
       postJson(
         `/api/sessions/${encodeURIComponent(sessionId)}/mark-read`,
         untilMessageId ? { until_message_id: untilMessageId } : {},
+        opts,
       ),
     cancelSession: async (sessionId) => {
       const { res, payloadJson } = await requestJson(`/api/sessions/${encodeURIComponent(sessionId)}/cancel`, {

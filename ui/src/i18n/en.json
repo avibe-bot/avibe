@@ -1723,6 +1723,7 @@
       "notifications": {
         "checking": "Checking notifications",
         "unsupported": "Notifications unavailable",
+        "localOnly": "Enable notifications on this device locally",
         "installFirst": "Add to Home Screen first",
         "enable": "Enable notifications",
         "enabled": "Notifications on",
@@ -2838,6 +2839,8 @@
     "discardConfirm": "You have unsaved changes. Close and discard them?"
   },
   "skills": {
+    "remoteReadOnly": "Read-only",
+    "remoteReadOnlyHint": "The Skill catalog is read-only over remote access. Open Avibe on the machine to add, update, or remove Skills.",
     "title": "Skills",
     "subtitle": "Manage global and project skills across your agent backends · powered by askill.",
     "scopeGlobal": "Global",
@@ -3330,6 +3333,12 @@
       "voicePermissionFailed": "Microphone access failed. Check your browser permission and try again.",
       "voiceStartFailed": "Voice recording could not start in this browser. Reload the page or try a supported browser.",
       "voiceDraftChanged": "The draft changed during voice input. The recovered transcript is available to copy.",
+      "attachmentTooLarge": "This file exceeds the 100 MB attachment limit.",
+      "attachmentEmpty": "Empty files cannot be attached.",
+      "attachmentSessionUnavailable": "This session is no longer available.",
+      "attachmentNetwork": "The upload connection failed. Try again.",
+      "attachmentFailed": "The file could not be uploaded. Try again.",
+      "retryAttachment": "Retry upload",
       "removeAttachment": "Remove",
       "dropOverlay": "Drop files to attach",
       "voicePreview": "Live transcription preview"
@@ -3403,6 +3412,8 @@
     }
   },
   "vaults": {
+    "remoteReadOnly": "Read-only",
+    "remoteReadOnlyHint": "The Vault is read-only over remote access. Open Avibe on the machine to add, edit, reveal, or approve secrets.",
     "title": "Vaults",
     "subtitle": "Give your AI agents secrets — their values never enter the context.",
     "add": "Add secret",

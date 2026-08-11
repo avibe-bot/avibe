@@ -113,6 +113,7 @@ from storage.background import (
     SWEEP_REASON_QUEUE_HOLD_EXPIRED,
     SWEEP_REASON_TRANSPORT_UNAVAILABLE,
     SweptRun,
+    WATCH_HOOK_OUTCOME_CIRCUIT_REPAIR,
     WATCH_HOOK_OUTCOME_EVENT,
     WATCH_HOOK_OUTCOME_METADATA_KEY,
     WATCH_HOOK_OUTCOME_WAITER_FAILURE,
@@ -920,6 +921,7 @@ def enqueue_session_callback(
     session_id: str,
     message: str,
     source_actor: str,
+    source_session_id: Optional[str] = None,
     parent_run_id: Optional[str] = None,
     metadata: Optional[dict[str, Any]] = None,
 ) -> Optional["TaskExecutionRequest"]:
@@ -934,6 +936,10 @@ def enqueue_session_callback(
         return None
     target = resolve_session_id_target(session_id)
     from core.message_priority import delivery_intent_for_trigger
+
+    callback_metadata = dict(metadata or {})
+    if source_session_id:
+        callback_metadata["source_session_id"] = str(source_session_id)
 
     return request_store.enqueue_agent_run(
         session_id=session_id,
@@ -950,7 +956,7 @@ def enqueue_session_callback(
         parent_run_id=parent_run_id,
         delivery_intent=delivery_intent_for_trigger("callback"),
         metadata={
-            **(metadata or {}),
+            **callback_metadata,
             **({"callback_parent_run_id": parent_run_id} if parent_run_id else {}),
         },
         callback_parent_to_arm=parent_run_id,
@@ -2693,6 +2699,23 @@ class TaskExecutionStore:
         if self._sqlite is not None:
             return self._sqlite.list_runs(status=status)
         return self._list_file_runs(status=status)
+
+    def get_unsettled_watch_run(self, definition_id: str) -> Optional[dict[str, Any]]:
+        """Return the oldest queued/running Watch follow-up for the admission fence."""
+
+        if self._sqlite is not None:
+            return self._sqlite.get_unsettled_watch_run(definition_id)
+        for run in self._list_file_runs():
+            if str(run.get("task_id") or run.get("definition_id") or "") != str(
+                definition_id
+            ):
+                continue
+            if str(run.get("request_type") or run.get("run_type") or "") != "watch":
+                continue
+            status = _normalize_requested_run_status(run.get("status"))
+            if status in {"queued", "running"}:
+                return run
+        return None
 
     def consecutive_definition_failures_with_code(
         self,
@@ -6732,6 +6755,18 @@ class ScheduledTaskService:
             )
         elif is_watch and str(
             ((run.get("metadata") or {}).get(WATCH_HOOK_OUTCOME_METADATA_KEY) or "")
+        ).strip() == WATCH_HOOK_OUTCOME_CIRCUIT_REPAIR:
+            if watch is not None and not watch.get("enabled") and not watch.get(
+                "retired_at"
+            ):
+                headline = self._t(
+                    "harness.notice.watchCircuitRepairFailed",
+                    name=name,
+                )
+            else:
+                headline = self._t("harness.notice.watchFollowUpFailed", name=name)
+        elif is_watch and str(
+            ((run.get("metadata") or {}).get(WATCH_HOOK_OUTCOME_METADATA_KEY) or "")
         ).strip() == WATCH_HOOK_OUTCOME_EVENT:
             headline = self._t("harness.notice.watchProcessingFailed", name=name)
         elif is_watch and str(
@@ -7243,6 +7278,7 @@ class ScheduledTaskService:
                 session_id=callback_session_id,
                 message=terminal_message,
                 source_actor=f"{run_id}:terminal:{status}",
+                source_session_id=str(run.get("session_id") or "").strip() or None,
                 parent_run_id=run_id or None,
             )
             if terminal_callback is not None:
@@ -7252,6 +7288,7 @@ class ScheduledTaskService:
             session_id=callback_session_id,
             message=self._build_callback_message(run),
             source_actor=run_id,
+            source_session_id=str(run.get("session_id") or "").strip() or None,
             parent_run_id=run_id or None,
         )
 
@@ -10265,6 +10302,7 @@ class ScheduledTaskService:
                 "vibe_agent_id": agent_id,
                 "source_kind": (metadata or {}).get("source_kind"),
                 "source_actor": (metadata or {}).get("source_actor"),
+                "source_session_id": (metadata or {}).get("source_session_id"),
                 "vault_request_type": (metadata or {}).get("vault_request_type"),
                 "vault_request_status": (metadata or {}).get("vault_request_status"),
                 "parent_run_id": (metadata or {}).get("parent_run_id"),

@@ -6,7 +6,7 @@ from sqlalchemy import select
 from config import paths
 from core.dock_store import BUILTIN_DOCK_IDS, DockError
 from core.show_pages import ShowPageError, ShowPageStore, public_url
-from storage import projects_service, resource_access_service
+from storage import media_service, projects_service, resource_access_service
 from storage import workbench_sessions_service as sessions_service
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
@@ -217,6 +217,7 @@ def test_remote_show_page_list_and_direct_requests_enforce_policy(monkeypatch, t
         "/show/ses-private/",
         base_url="https://alex.avibe.bot",
         environ_base=_remote_peer(),
+        headers={"Accept": "text/html"},
         follow_redirects=False,
     )
 
@@ -232,6 +233,7 @@ def test_remote_show_page_list_and_direct_requests_enforce_policy(monkeypatch, t
         "/show/ses-private/?__vibe_show_page_reauth=1",
         base_url="https://alex.avibe.bot",
         environ_base=_remote_peer(),
+        headers={"Accept": "text/html"},
         follow_redirects=False,
     )
     assert reauth_result.status_code == 403
@@ -861,7 +863,12 @@ def test_remote_dock_filters_private_pins_and_authorizes_mutations(monkeypatch, 
         environ_base=_remote_peer(),
     )
     assert response.status_code == 403
-    assert response.get_json()["code"] == "resource_access_forbidden"
+    # The Dock record is process-global rather than keyed by the authenticated
+    # subject, so every remote mutation now stops at the transport boundary
+    # before the resource ACL is consulted - a stricter refusal than the
+    # per-page `resource_access_forbidden` this once returned. The ACL itself is
+    # unchanged and still enforced in-process, as the `api.*` calls above assert.
+    assert response.get_json()["code"] == "remote_execution_disabled"
 
 
 def test_remote_admin_dock_order_preserves_hidden_private_pins(monkeypatch, tmp_path) -> None:
@@ -971,5 +978,108 @@ def test_remote_member_cannot_archive_session_with_another_owners_page(monkeypat
             assert connection.execute(
                 select(show_pages.c.visibility).where(show_pages.c.session_id == session_id)
             ).scalar_one() == "private"
+    finally:
+        engine.dispose()
+
+
+def test_remote_show_annotation_media_follows_the_page_acl(monkeypatch, tmp_path) -> None:
+    """A screenshot token does not outlive access to the page it was drawn on.
+
+    `/api/media/<token>` authorizes Project/session role and short-circuits for
+    the Instance owner, so without a page check a caller who once saw a private
+    Show Page keeps its annotation screenshot readable after the page policy
+    stops naming them - and a remote Instance owner reads one they were never
+    allowed to open. The caller below is exactly that: Instance owner, but not
+    the subject the private page's policy names.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    ensure_sqlite_state()
+    engine = create_sqlite_engine(paths.get_sqlite_state_path())
+    try:
+        with engine.begin() as connection:
+            project = projects_service.create_project(connection, str(project_dir))
+            sessions = {
+                access_level: sessions_service.create_session(
+                    connection,
+                    scope_id=project["scope_id"],
+                    agent_backend="claude",
+                )["id"]
+                for access_level in ("private", "public")
+            }
+
+        store = ShowPageStore()
+        try:
+            for access_level, session_id in sessions.items():
+                store.ensure(session_id)
+                with store.engine.begin() as connection:
+                    resource_access_service.ensure_resource_policy(
+                        connection,
+                        resource_kind="show_page",
+                        resource_id=session_id,
+                        organization_id="org-1",
+                        owner_user_id="owner-1",
+                        access_level=access_level,
+                    )
+        finally:
+            store.close()
+
+        def _screenshot(name: str) -> str:
+            path = tmp_path / f"{name}.png"
+            path.write_bytes(b"\x89PNG\r\n\x1a\n" + name.encode("ascii"))
+            return str(path.resolve())
+
+        with engine.begin() as connection:
+            tokens = {
+                f"{source}:{access_level}": media_service.register(
+                    connection,
+                    scope_id=project["scope_id"],
+                    session_id=session_id,
+                    kind="image",
+                    source=source,
+                    local_path=_screenshot(f"{source}-{access_level}"),
+                )
+                for source in ("show_annotation", "agent_reply")
+                for access_level, session_id in sessions.items()
+            }
+            orphan_token = media_service.register(
+                connection,
+                scope_id=None,
+                session_id=None,
+                kind="image",
+                source="show_annotation",
+                local_path=_screenshot("orphan"),
+            )
+
+        client = app.test_client()
+        client.set_cookie(
+            remote_access.SESSION_COOKIE_NAME,
+            _organization_cookie(
+                config,
+                subject="member-1",
+                groups=["group-engineering"],
+                instance_role="owner",
+            ),
+            domain="alex.avibe.bot",
+        )
+
+        def _media(token: str):
+            return client.get(
+                f"/api/media/{token}",
+                base_url="https://alex.avibe.bot",
+                environ_base=_remote_peer(),
+            )
+
+        # The page ACL decides, not the Instance-owner shortcut.
+        assert _media(tokens["show_annotation:private"]).status_code == 404
+        assert _media(tokens["show_annotation:public"]).status_code == 200
+        # An annotation with no page to check against cannot be authorized.
+        assert _media(orphan_token).status_code == 404
+        # Only Show annotations gained the page check; other media keeps the
+        # Project/session authorization it already had as its only gate.
+        assert _media(tokens["agent_reply:private"]).status_code == 200
     finally:
         engine.dispose()

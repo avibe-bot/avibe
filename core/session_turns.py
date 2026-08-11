@@ -15,6 +15,7 @@ owners for live tasks and streaming only.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import uuid
@@ -27,7 +28,10 @@ from sqlalchemy import and_, exists, literal, or_, select, update
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import IntegrityError
 
-from core.message_context import resolve_turn_sink_key
+from core.message_context import (
+    SCHEDULED_DISPATCH_METADATA_APPLIED_KEY,
+    resolve_turn_sink_key,
+)
 from core.web_push_notifications import (
     WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA,
     WEB_PUSH_USER_KEY_METADATA,
@@ -49,6 +53,7 @@ from core.services.agent_steering import (
     SteerOutcome,
     SteerReconcileRequest,
     SteerRequest,
+    SteerResult,
     active_steer_identity,
     reconcile_steer_attempt,
     result as steer_result,
@@ -83,6 +88,29 @@ logger = logging.getLogger(__name__)
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _accepted_steer_receipt(delivery: dict[str, Any]) -> SteerResult:
+    """Rebuild a typed accepted receipt from durable evidence."""
+
+    try:
+        payload = json.loads(str(delivery.get("current_receipt_json") or "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    details = payload.get("details")
+    if not isinstance(details, dict):
+        details = {}
+    return steer_result(
+        SteerOutcome.ACCEPTED,
+        reason=(
+            str(payload.get("reason"))
+            if payload.get("reason") is not None
+            else None
+        ),
+        **details,
+    )
 
 
 def _turn_event_payload(session_id: str, turn_id: str | None = None) -> dict[str, str]:
@@ -310,10 +338,14 @@ def _scheduled_merge_key(row: dict[str, Any]) -> Optional[tuple[str, ...]]:
             or spec.get(SCHEDULED_TARGET_AGENT_KEY)
             or ""
         )
+    source_session_id = str(spec.get("source_session_id") or "").strip()
+    if not source_session_id and str(spec.get("source_kind") or "").strip() == "agent":
+        source_session_id = str(spec.get("source_actor") or "").strip()
     return (
         trigger_kind,
         definition_id,
         stable_agent_key,
+        source_session_id,
         str(spec.get("delivery_key_external") or ""),
         str(spec.get("delivery_scope_session_key") or ""),
         str(delivery_override.get("platform") or ""),
@@ -1000,6 +1032,52 @@ class SessionTurnManager:
         if self._build_context is None:
             raise RuntimeError("Session delivery context builder is not bound")
         return self._build_context(session_id)
+
+    async def prepare_scheduled_dispatch(
+        self,
+        context: "MessageContext",
+        text: str,
+        *,
+        delivery: Optional[dict[str, Any]] = None,
+        decorate: bool = True,
+    ) -> str:
+        """Restore scheduled provenance and optionally decorate backend text."""
+        if delivery is not None:
+            self._restore_scheduled_dispatch_context(context, delivery)
+        if not decorate:
+            return text
+        spec = dict(getattr(context, "platform_specific", None) or {})
+        if spec.get(SCHEDULED_DISPATCH_METADATA_APPLIED_KEY):
+            return text
+        handler = getattr(self.controller, "message_handler", None)
+        decorator = getattr(handler, "_prepend_message_metadata", None)
+        if not callable(decorator) or not inspect.iscoroutinefunction(decorator):
+            return text
+        return await decorator(context, text, include_user_info=False)
+
+    @staticmethod
+    def _restore_scheduled_dispatch_context(
+        context: "MessageContext",
+        delivery: dict[str, Any],
+    ) -> None:
+        payload = delivery_store.delivery_payload(delivery)
+        provenance = (payload.get("metadata") or {}).get(SCHEDULED_PROVENANCE_KEY)
+        preserved = (
+            provenance.get("platform_specific")
+            if isinstance(provenance, dict)
+            else None
+        )
+        if not isinstance(preserved, dict):
+            return
+        spec = dict(getattr(context, "platform_specific", None) or {})
+        spec.update(
+            {
+                key: value
+                for key, value in preserved.items()
+                if key not in _EXECUTION_ROUTING_KEYS
+            }
+        )
+        context.platform_specific = spec
 
     @staticmethod
     def _apply_delivery_binding_provenance(
@@ -2677,13 +2755,22 @@ class SessionTurnManager:
                 attempted_turn_id=turn_id,
             )
         elif delivery["state"] == "steering" and turn_id and attempt_id and native_id:
+            raw_steer_text = str(delivery.get("dispatch_text") or "")
+            if request.source == "harness" or _scheduled_provenance(delivery) is not None:
+                steer_text = await self.prepare_scheduled_dispatch(
+                    context,
+                    raw_steer_text,
+                    delivery=delivery,
+                )
+            else:
+                steer_text = raw_steer_text
             receipt = await self._attempt_steer(
                 steer_backend,
                 SteerRequest(
                     target_session_id=request.session_id,
                     expected_logical_turn_id=turn_id,
                     expected_native_turn_id=native_id,
-                    text=str(delivery.get("dispatch_text") or ""),
+                    text=steer_text,
                     attempt_id=attempt_id,
                 ),
             )
@@ -2849,13 +2936,18 @@ class SessionTurnManager:
                 attempted_turn_id=turn_id,
             )
         elif leader["state"] == "steering" and turn_id and attempt_id and native_id:
+            steer_text = await self.prepare_scheduled_dispatch(
+                context,
+                dispatch_text,
+                delivery=leader,
+            ) if _scheduled_provenance(leader) is not None else dispatch_text
             receipt = await self._attempt_steer(
                 steer_backend,
                 SteerRequest(
                     target_session_id=session_id,
                     expected_logical_turn_id=turn_id,
                     expected_native_turn_id=native_id,
-                    text=dispatch_text,
+                    text=steer_text,
                     attempt_id=attempt_id,
                 ),
             )
@@ -2933,17 +3025,12 @@ class SessionTurnManager:
                     ):
                         terminal_target = target_turn
                 if outcome_value == SteerOutcome.UNKNOWN.value:
-                    unknown_rows = [
-                        row
-                        if row["state"] == "reconciling_steer"
-                        else delivery_store.mark_attempt_unknown(
-                            conn,
-                            str(row["id"]),
-                            expected_version=int(row["version"]),
-                            receipt=body,
-                        )
-                        for row in attempt_rows
-                    ]
+                    unknown_rows = delivery_store.mark_attempt_receipt_batch(
+                        conn,
+                        leader_delivery_id=delivery_id,
+                        outcome="unknown",
+                        receipt=body,
+                    )
                     saved = unknown_rows[0] if unknown_rows else None
                     return DeliveryResult(
                         delivery_id,
@@ -2987,19 +3074,26 @@ class SessionTurnManager:
             try:
                 with self._sqlite_engine().begin() as conn:
                     reserve_write_lock(conn)
-                    leader = delivery_store.get_delivery(conn, delivery_id)
-                    lost_attempt_id = str((leader or {}).get("current_attempt_id") or "")
-                    for row in delivery_store.attempt_deliveries(conn, lost_attempt_id):
-                        if row["state"] == "steering":
-                            delivery_store.mark_attempt_unknown(
-                                conn,
-                                str(row["id"]),
-                                expected_version=int(row["version"]),
-                                receipt={"reason": "receipt_persistence_lost"},
-                            )
+                    persisted_outcome = (
+                        "accepted"
+                        if outcome_value == SteerOutcome.ACCEPTED.value
+                        else "unknown"
+                    )
+                    persisted_rows = delivery_store.mark_attempt_receipt_batch(
+                        conn,
+                        leader_delivery_id=delivery_id,
+                        outcome=persisted_outcome,
+                        receipt=(
+                            body
+                            if persisted_outcome == "accepted"
+                            else {"reason": "receipt_persistence_lost"}
+                        ),
+                    )
+                    if not persisted_rows:
+                        raise RuntimeError("steer receipt batch is no longer recoverable")
             except Exception:
                 logger.exception(
-                    "failed to persist unknown steer fence for delivery=%s",
+                    "failed to persist steer receipt recovery fence for delivery=%s",
                     delivery_id,
                 )
             return DeliveryResult(
@@ -3774,6 +3868,17 @@ class SessionTurnManager:
                     else str(delivery["id"])
                 )
             text = str(turn.get("dispatch_text") or "")
+            if source == SOURCE_SCHEDULED:
+                # Keep the raw prompt until MessageHandler parses an explicit
+                # ``subagent: prompt`` prefix. The handler adds metadata to the
+                # final backend request after routing; decorating here would make
+                # the metadata line hide that prefix from the parser.
+                await self.prepare_scheduled_dispatch(
+                    resolved,
+                    text,
+                    delivery=delivery,
+                    decorate=False,
+                )
         except Exception:
             logger.exception(
                 "durable native start failed during pre-dispatch preparation for Turn=%s",
@@ -4742,6 +4847,11 @@ class SessionTurnManager:
                 )
                 backend = str(turn["backend"])
                 delivery_id = str(claimed_batch[0]["id"])
+            steer_text = await self.prepare_scheduled_dispatch(
+                context,
+                steer_text,
+                delivery=claimed_batch[0],
+            ) if _scheduled_provenance(claimed_batch[0]) is not None else steer_text
             receipt = await self._attempt_steer(
                 backend,
                 SteerRequest(
@@ -5514,6 +5624,16 @@ class SessionTurnManager:
             )
             return True
         if delivery["state"] in {"steering", "reconciling_steer"}:
+            if (
+                delivery["state"] == "reconciling_steer"
+                and delivery.get("current_receipt_outcome") == "accepted"
+            ):
+                result = await self._finish_steer(
+                    str(delivery["id"]),
+                    _accepted_steer_receipt(delivery),
+                    context=None,
+                )
+                return result.state != "reconciling_steer"
             attempt_id = str(delivery.get("current_attempt_id") or "")
             expected_native = str(
                 delivery.get("current_expected_native_turn_id") or ""
@@ -5756,6 +5876,7 @@ class SessionTurnManager:
 
         with self._sqlite_engine().connect() as conn:
             unresolved = delivery_store.unresolved_deliveries(conn, session_id)
+            accepted_steer_attempts: list[dict[str, Any]] = []
             steer_attempts: list[tuple[dict[str, Any], str]] = []
             seen_attempt_ids: set[str] = set()
             for attempt in unresolved:
@@ -5770,14 +5891,30 @@ class SessionTurnManager:
                     not attempt_id
                     or attempt_id in seen_attempt_ids
                     or not target_turn_id
-                    or not expected_native_id
                 ):
                     continue
                 target_turn = delivery_store.get_turn(conn, target_turn_id)
                 if target_turn is None:
                     continue
                 seen_attempt_ids.add(attempt_id)
+                if (
+                    attempt["state"] == "reconciling_steer"
+                    and attempt.get("current_receipt_outcome") == "accepted"
+                ):
+                    accepted_steer_attempts.append(attempt)
+                    continue
+                if not expected_native_id:
+                    continue
                 steer_attempts.append((attempt, str(target_turn["backend"])))
+
+        for attempt in accepted_steer_attempts:
+            result = await self._finish_steer(
+                str(attempt["id"]),
+                _accepted_steer_receipt(attempt),
+                context=None,
+            )
+            if result.state != "reconciling_steer":
+                recovered.append(str(attempt["session_id"]))
 
         for attempt, backend in steer_attempts:
             attempt_id = str(attempt["current_attempt_id"])
@@ -6217,6 +6354,16 @@ class SessionTurnManager:
             )
 
         spec = dict(getattr(context, "platform_specific", None) or {})
+        dispatch_text = text
+        scheduled_metadata = (
+            dict(spec.get("message_metadata") or {})
+            if isinstance(spec.get("message_metadata"), dict)
+            else {}
+        )
+        if source == SOURCE_SCHEDULED:
+            scheduled_metadata[SCHEDULED_PROVENANCE_KEY] = capture_scheduled_provenance(
+                context
+            )
         with self._sqlite_engine().connect() as conn:
             busy = delivery_store.active_turn(conn, session_id) is not None
         source_value = "harness" if source == SOURCE_SCHEDULED else "user"
@@ -6231,7 +6378,7 @@ class SessionTurnManager:
         request = DeliveryRequest(
             session_id=session_id,
             priority=priority,
-            content=text,
+            content=dispatch_text,
             has_content=delivery_store.has_substantive_input(
                 text,
                 has_attachments=bool(getattr(context, "files", None)),
@@ -6244,7 +6391,7 @@ class SessionTurnManager:
             message_type="harness" if source == SOURCE_SCHEDULED else "user",
             display_text=str(spec.get("display_text") or text),
             content_json=spec.get("message_content") if isinstance(spec.get("message_content"), dict) else None,
-            metadata=spec.get("message_metadata") if isinstance(spec.get("message_metadata"), dict) else {},
+            metadata=scheduled_metadata,
             author_id=str(
                 spec.get("author_id")
                 or (spec.get("task_definition_id") if source == SOURCE_SCHEDULED else "")

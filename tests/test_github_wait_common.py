@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import http.client
 import importlib.util
 import json
 import urllib.error
@@ -47,6 +48,90 @@ def _not_modified() -> urllib.error.HTTPError:
     )
 
 
+def test_retry_initial_request_recovers_with_bounded_backoff() -> None:
+    module = _load_module()
+    attempts = 0
+
+    def _operation() -> str:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise urllib.error.URLError("temporary network failure")
+        return "ok"
+
+    with patch.object(module.time, "sleep", return_value=None) as sleep:
+        result = module.retry_initial_request(
+            _operation,
+            description="test request",
+        )
+
+    assert result.value == "ok"
+    assert result.error is None
+    assert attempts == 3
+    assert [call.args[0] for call in sleep.call_args_list] == [1.0, 2.0]
+
+
+def test_retry_initial_request_does_not_retry_terminal_failure() -> None:
+    module = _load_module()
+    attempts = 0
+    error = urllib.error.HTTPError(
+        "https://api.github.com/example",
+        404,
+        "Not Found",
+        hdrs=None,
+        fp=None,
+    )
+
+    def _operation() -> None:
+        nonlocal attempts
+        attempts += 1
+        raise error
+
+    with patch.object(module.time, "sleep", return_value=None) as sleep:
+        result = module.retry_initial_request(
+            _operation,
+            description="test request",
+        )
+
+    assert result.value is None
+    assert result.error is not None
+    assert result.error.retryable is False
+    assert attempts == 1
+    sleep.assert_not_called()
+
+
+def test_unauthenticated_rate_limit_is_terminal() -> None:
+    module = _load_module()
+    error = urllib.error.HTTPError(
+        "https://api.github.com/example",
+        429,
+        "Too Many Requests",
+        hdrs=None,
+        fp=None,
+    )
+
+    result = module.github_request(
+        lambda: (_ for _ in ()).throw(error),
+        unauthenticated=True,
+    )
+
+    assert result.error is not None
+    assert result.error.retryable is False
+    assert result.error.status_code == 429
+
+
+def test_http_incomplete_read_is_transient() -> None:
+    module = _load_module()
+
+    result = module.github_request(
+        lambda: (_ for _ in ()).throw(http.client.IncompleteRead(b"partial", 12))
+    )
+
+    assert result.error is not None
+    assert result.error.retryable is True
+    assert "IncompleteRead" in str(result.error)
+
+
 def test_github_get_without_cache_sends_no_conditional_header() -> None:
     module = _load_module()
     requests: list[object] = []
@@ -60,6 +145,15 @@ def test_github_get_without_cache_sends_no_conditional_header() -> None:
 
     assert payload == [{"id": 1}]
     assert requests[0].get_header("If-none-match") is None
+
+
+def test_get_token_prefers_gh_token_like_github_cli(monkeypatch) -> None:
+    module = _load_module()
+    monkeypatch.setenv("GH_TOKEN", "preferred")
+    monkeypatch.setenv("GITHUB_TOKEN", "stale")
+    monkeypatch.setattr(module.shutil, "which", lambda _name: None)
+
+    assert module.get_token() == "preferred"
 
 
 def test_github_get_revalidates_with_etag_and_reuses_the_cached_body() -> None:
@@ -210,3 +304,28 @@ def test_get_authenticated_login_still_works_uncached() -> None:
 
     with patch.object(module, "github_get", return_value={"login": "qiqi"}):
         assert module.get_authenticated_login("token") == "qiqi"
+
+
+def test_get_authenticated_login_strict_mode_preserves_request_failures() -> None:
+    module = _load_module()
+    error = TimeoutError("viewer lookup timed out")
+
+    with patch.object(module, "github_get", side_effect=error):
+        try:
+            module.get_authenticated_login("token", raise_on_error=True)
+        except TimeoutError as raised:
+            assert raised is error
+        else:  # pragma: no cover - strict mode must preserve the failure taxonomy
+            raise AssertionError("expected viewer failure to propagate")
+
+
+def test_get_authenticated_login_strict_mode_rejects_missing_login() -> None:
+    module = _load_module()
+
+    with patch.object(module, "github_get", return_value={}):
+        try:
+            module.get_authenticated_login("token", raise_on_error=True)
+        except module.GitHubProtocolError as error:
+            assert "no login" in str(error)
+        else:  # pragma: no cover - unusable identity must fail closed
+            raise AssertionError("expected missing login to fail")

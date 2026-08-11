@@ -1647,6 +1647,15 @@ def _safe_resource_acl_identifier(value: Any, *, code: str = "invalid_resource_m
     return cleaned
 
 
+def _safe_resource_acl_display_name(value: Any, *, code: str = "invalid_resource_metadata", limit: int = 240) -> str:
+    if not isinstance(value, str):
+        raise ValueError(code)
+    cleaned = value.strip()
+    if not cleaned or len(cleaned) > limit or any(ord(char) < 32 or ord(char) == 127 for char in cleaned):
+        raise ValueError(code)
+    return cleaned
+
+
 def _safe_resource_acl_revision(value: Any) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
         raise ValueError("invalid_resource_metadata")
@@ -1673,7 +1682,7 @@ def _normalize_resource_index_descriptor(resource: Mapping[str, Any]) -> dict[st
     descriptor = {
         "resource_id": _safe_resource_acl_identifier(resource.get("resource_id")),
         "resource_kind": resource_kind,
-        "display_name": _safe_resource_acl_identifier(resource.get("display_name"), limit=240),
+        "display_name": _safe_resource_acl_display_name(resource.get("display_name")),
         "metadata_revision": _safe_resource_acl_revision(resource.get("metadata_revision")),
         "applied_acl_revision": _safe_resource_acl_revision(resource.get("applied_acl_revision")),
         # T5a's baseline endpoint requires access metadata on the first
@@ -1795,7 +1804,7 @@ def _local_resource_metadata(connection, resource_kind: str, resource_id: str) -
 
 def _safe_resource_display_name(value: Any, fallback: str) -> str:
     try:
-        return _safe_resource_acl_identifier(value, limit=240)
+        return _safe_resource_acl_display_name(value)
     except ValueError:
         return _safe_resource_acl_identifier(fallback, limit=240)
 

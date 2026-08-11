@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { Activity, Bot, KeyRound, WandSparkles } from 'lucide-react';
 import clsx from 'clsx';
 import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
+import { canUseHarness } from '../../lib/remoteAuth';
 
 const TABS = [
   { to: '/agents', icon: Bot, key: 'workbench.modules.agents.title' },
@@ -20,9 +21,15 @@ export const CapabilityTabs: React.FC = () => {
   const { t } = useTranslation();
   const { pathname } = useLocation();
   const activeTabRef = useRef<HTMLAnchorElement | null>(null);
-  const { capabilities } = useInstanceAuthorization();
+  const { capabilities, remote } = useInstanceAuthorization();
   const tabs = TABS.filter(({ to }) => {
-    if (to === '/agents' || to === '/harness') return capabilities.can_manage_agents;
+    // Harness is the exception to the owner check: its page opens entirely on
+    // local-only routes (`/api/harness/bootstrap`), so `can_manage_agents`
+    // (which stays true for a remote owner) would navigate a remote owner into
+    // the AppShell local-only redirect. The trusted-local `canUseHarness`
+    // predicate keeps the tab local-only, matching the desktop sidebar.
+    if (to === '/harness') return capabilities.can_manage_agents && canUseHarness({ remote });
+    if (to === '/agents') return capabilities.can_manage_agents;
     if (to === '/skills') return capabilities.can_use_skills;
     if (to === '/vaults') return capabilities.can_use_vault_secrets;
     return false;

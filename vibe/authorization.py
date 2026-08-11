@@ -6,6 +6,8 @@ from dataclasses import dataclass
 import re
 from typing import Any, Mapping
 
+from core.inbox_events import RUNS_UPDATED_EVENT
+
 
 INSTANCE_ROLES = frozenset({"owner", "editor", "viewer"})
 INSTANCE_ACCESS_SOURCES = frozenset(
@@ -42,6 +44,7 @@ _VIEWER_WORKBENCH_EVENTS = frozenset(
     }
 )
 _EDITOR_WORKBENCH_EVENTS = frozenset({"queue.updated", "show.event"})
+_REMOTE_LOCAL_ONLY_WORKBENCH_EVENTS = frozenset({RUNS_UPDATED_EVENT})
 
 REMOTE_HTTP_ALLOWED = "allowed"
 REMOTE_HTTP_LOCAL_ONLY = "local_only"
@@ -306,6 +309,8 @@ def can_receive_workbench_event(
         require_instance_role(context, required_workbench_event_role(event_type))
     except InstanceAuthorizationError:
         return False
+    if getattr(context, "is_remote", False) and event_type in _REMOTE_LOCAL_ONLY_WORKBENCH_EVENTS:
+        return False
     return True
 
 
@@ -444,31 +449,38 @@ _REMOTE_OWNER_ALLOWED_HTTP_RULES = tuple(
             frozenset({"GET", "HEAD", "PUT"}),
             r"^/api/show-pages/[^/]+/authorized-emails$",
         ),
+        # Reading the Dock is safe, but its pins/order and the Workbench prefs
+        # are one process-global record shared by the local owner and every
+        # remote principal. Until they are keyed by the authenticated subject a
+        # remote write would reorder and re-pin everyone else's Dock and flip
+        # another principal's banner preference, so the mutations stay local.
         (frozenset({"GET", "HEAD"}), r"^/api/dock$"),
-        (frozenset({"POST"}), r"^/api/dock/pins$"),
-        (frozenset({"DELETE"}), r"^/api/dock/pins/[^/]+$"),
-        (frozenset({"PUT"}), r"^/api/dock/order$"),
-        (frozenset({"PUT"}), r"^/api/workbench/prefs$"),
+        # Reading push status stays remote, and so does the `POST` form of it:
+        # it reports this principal's own subscription count and can only
+        # re-attach a device id to an endpoint that is already stored and
+        # enabled for that same principal, so it can neither introduce an
+        # endpoint nor send to one.
+        #
+        # Registering and testing a subscription are different: the endpoint is
+        # caller-supplied data that `send_web_push()` later fetches from the
+        # Avibe host, and nothing between the payload and the request restricts
+        # it to a real push service. A remote caller could register an HTTPS
+        # endpoint aimed at loopback, a private LAN host or a rebinding name and
+        # then have this host issue the request from inside the network, so the
+        # write and the test stay local until the endpoint is checked against
+        # its resolved addresses.
         (
             frozenset({"GET", "HEAD"}),
             r"^/api/web-push/(?:status|vapid-public-key)$",
         ),
-        (
-            frozenset({"POST"}),
-            r"^/api/web-push/(?:status|subscriptions|test)$",
-        ),
-        (frozenset({"DELETE"}), r"^/api/web-push/subscriptions$"),
+        (frozenset({"POST"}), r"^/api/web-push/status$"),
         (
             frozenset({"PUT"}),
             r"^/api/resource-policies/[^/]+/[^/]+$",
         ),
         (
             frozenset({"GET", "HEAD"}),
-            r"^/api/projects/[^/]+/agents-md$",
-        ),
-        (
-            frozenset({"GET", "HEAD"}),
-            r"^/api/models/(?:agents|events|runtime/status)$",
+            r"^/api/models/(?:agents|events)$",
         ),
         (
             frozenset({"GET", "HEAD"}),
@@ -476,12 +488,15 @@ _REMOTE_OWNER_ALLOWED_HTTP_RULES = tuple(
         ),
         (
             frozenset({"GET", "HEAD"}),
-            r"^/api/models/(?:turns/[^/]+/provenance|oauth/status/[^/]+)$",
+            r"^/api/models/turns/[^/]+/provenance$",
         ),
-        (
-            frozenset({"GET", "HEAD"}),
-            r"^/api/backend/[^/]+/auth/oauth/status/[^/]+$",
-        ),
+        # OAuth polling follows its flow: `oauth/start` and the Settings
+        # `auth/oauth/start` are local-only, so only the local owner can open a
+        # flow, while a status poll returns that flow's authorization URL and
+        # device code and - once the Model Hub flow succeeds - the same
+        # credential and account payload `/api/models/sources` deliberately
+        # keeps local. A remote caller holding a flow id would read the local
+        # owner's in-flight login, so both status routes stay local too.
         (
             frozenset({"GET", "HEAD"}),
             r"^/api/remote-access/status$",
@@ -490,15 +505,16 @@ _REMOTE_OWNER_ALLOWED_HTTP_RULES = tuple(
             frozenset({"GET", "HEAD"}),
             r"^/api/harness/counts$",
         ),
-        (
-            frozenset({"GET", "HEAD"}),
-            r"^/api/memory/(?:settings|status|failures|profile|log|log/entry)$",
-        ),
-        (frozenset({"PATCH"}), r"^/api/memory/settings$"),
-        (
-            frozenset({"POST"}),
-            r"^/api/memory/(?:search|runtime/restart|clear)$",
-        ),
+        # Memory reads that describe this principal's own view stay remote, and
+        # search is scoped to the caller. Shared provider settings and the
+        # process-global failure log do not: both expose data across principals,
+        # so they stay trusted-local with the admin log and other sidecar-wide
+        # operations. Memory administration is absent for the same reason: a
+        # settings PATCH repoints the shared provider endpoints, and
+        # `runtime/restart` / `clear` act on the whole local sidecar rather than
+        # one principal.
+        (frozenset({"GET", "HEAD"}), r"^/api/memory/(?:status|profile)$"),
+        (frozenset({"POST"}), r"^/api/memory/search$"),
     )
 )
 

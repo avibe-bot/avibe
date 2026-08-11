@@ -113,11 +113,19 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
 
   const markRead = useCallback(
     async (sessionId: string, untilMessageId?: string) => {
-      const result = await api.markSessionRead(sessionId, untilMessageId);
+      // Clearing unread is best-effort, so a failure must not raise an error
+      // toast: `POST /api/sessions/{id}/mark-read` is local-only, and a remote
+      // viewer reading a session it is allowed to read auto-clears unread on
+      // view. The mark-read CONTROLS are already trusted-local (`can_chat`);
+      // this keeps the automatic write from surfacing
+      // `remote_execution_disabled` to a legitimate remote reader.
+      const result = await api.markSessionRead(sessionId, untilMessageId, { handleError: false });
       // The unread map is authoritative for badges; the card's unread styling
       // derives from it, so clearing here clears the dot without touching the
-      // feed order (a read doesn't change last activity).
-      applyUnreadMap(result.unread_by_session ?? {});
+      // feed order (a read doesn't change last activity). A rejected write
+      // carries no map — leave the badges as they are rather than blanking them.
+      if (!result?.unread_by_session) return;
+      applyUnreadMap(result.unread_by_session);
     },
     [api, applyUnreadMap],
   );

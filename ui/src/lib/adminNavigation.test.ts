@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
-import { isAdvancedSettingsPath, isMemorySettingsPath } from './adminNavigation';
+import {
+  adminLandingPath,
+  isAdvancedSettingsPath,
+  isLocalOnlyMessagingField,
+  isLocalSystemPath,
+  isMemorySettingsPath,
+} from './adminNavigation';
 
 describe('isAdvancedSettingsPath', () => {
   it('defers to the standalone Memory item when that item is visible', () => {
@@ -24,6 +30,67 @@ describe('isAdvancedSettingsPath', () => {
     expect(isAdvancedSettingsPath('/admin/settings/platforms', true)).toBe(false);
     expect(isAdvancedSettingsPath('/admin/settings/backends', true)).toBe(false);
     expect(isAdvancedSettingsPath('/admin/settings/models', true)).toBe(false);
+  });
+});
+
+describe('isLocalSystemPath', () => {
+  it('covers every destination whose page runs entirely on local-only routes', () => {
+    expect(isLocalSystemPath('/admin/dashboard')).toBe(true);
+    expect(isLocalSystemPath('/admin/remote-access')).toBe(true);
+    expect(isLocalSystemPath('/admin/users')).toBe(true);
+    expect(isLocalSystemPath('/admin/logs')).toBe(true);
+    expect(isLocalSystemPath('/admin/settings/service')).toBe(true);
+    expect(isLocalSystemPath('/admin/settings/platforms')).toBe(true);
+    expect(isLocalSystemPath('/admin/settings/backends')).toBe(true);
+    expect(isLocalSystemPath('/admin/settings/models')).toBe(true);
+    expect(isLocalSystemPath('/admin/settings/dependencies')).toBe(true);
+    expect(isLocalSystemPath('/admin/settings/diagnostics')).toBe(true);
+    expect(isLocalSystemPath('/admin/settings/logs')).toBe(true);
+    expect(isLocalSystemPath('/harness')).toBe(true);
+    expect(isLocalSystemPath('/apps/library')).toBe(true);
+  });
+
+  it('matches nested paths under a gated destination', () => {
+    expect(isLocalSystemPath('/admin/settings/platforms/slack')).toBe(true);
+    expect(isLocalSystemPath('/harness/')).toBe(true);
+  });
+
+  it('leaves remotely usable destinations open', () => {
+    expect(isLocalSystemPath('/admin/settings/messaging')).toBe(false);
+    expect(isLocalSystemPath('/admin/organization/overview')).toBe(false);
+    expect(isLocalSystemPath('/')).toBe(false);
+  });
+
+  it('does not match a route that only shares a gated prefix', () => {
+    expect(isLocalSystemPath('/admin/dashboards')).toBe(false);
+    expect(isLocalSystemPath('/harness-status')).toBe(false);
+    expect(isLocalSystemPath('/apps/library-picker')).toBe(false);
+  });
+});
+
+describe('adminLandingPath', () => {
+  it('opens the Dashboard for a trusted-local caller', () => {
+    expect(adminLandingPath(true)).toBe('/admin/dashboard');
+  });
+
+  it('sends a remote owner to an admin page they can actually use', () => {
+    const destination = adminLandingPath(false);
+    expect(destination).toBe('/admin/settings/messaging');
+    expect(isLocalSystemPath(destination)).toBe(false);
+  });
+});
+
+describe('isLocalOnlyMessagingField', () => {
+  it('marks only the protected messaging controls as trusted-local', () => {
+    expect(isLocalOnlyMessagingField('agents.opencode.error_retry_limit')).toBe(true);
+    expect(isLocalOnlyMessagingField('agents.opencode.active_turn_timeout_seconds')).toBe(true);
+    expect(isLocalOnlyMessagingField('show_pages_prompt')).toBe(true);
+  });
+
+  it('leaves remote-safe messaging preferences available remotely', () => {
+    expect(isLocalOnlyMessagingField('ack_mode')).toBe(false);
+    expect(isLocalOnlyMessagingField('show_duration')).toBe(false);
+    expect(isLocalOnlyMessagingField('reply_enhancements')).toBe(false);
   });
 });
 

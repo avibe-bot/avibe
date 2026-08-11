@@ -681,6 +681,92 @@ def test_callback_state_and_code_fail_with_distinct_errors(monkeypatch, tmp_path
     assert invalid_code.value.code == "invalid_cloud_management_code"
 
 
+def _connected_callback_client(config: V2Config):
+    """A browser that already holds a live management grant."""
+
+    client = _remote_client(config)
+    client.set_cookie(cloud_management.HANDLE_COOKIE_NAME, "grant-1", domain="alex.avibe.bot")
+    client.set_cookie(cloud_management.BROWSER_COOKIE_NAME, "browser-1", domain="alex.avibe.bot")
+    cloud_management._grants["grant-1"] = _grant()
+    return client
+
+
+def _handle_cookie_cleared(response) -> bool:
+    return any(
+        value.startswith(f"{cloud_management.HANDLE_COOKIE_NAME}=") and "Max-Age=0" in value
+        for value in response.headers.getlist("set-cookie")
+    )
+
+
+def _manual_sign_in_required(response) -> bool:
+    """Whether this response tells the browser to stop reauthorizing silently."""
+
+    return any(
+        value.startswith(f"{cloud_management.MANUAL_COOKIE_NAME}=") and "Max-Age=0" not in value
+        for value in response.headers.getlist("set-cookie")
+    )
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        # Forged authorization response: no handshake matches this state.
+        "?code=code-1&state=forged-state",
+        # Forged upstream failure on the same unrelated state.
+        "?error=access_denied&state=forged-state",
+        # No state at all, as a bare cross-site link would send.
+        "",
+    ],
+)
+def test_unrelated_callback_never_revokes_an_active_grant(monkeypatch, tmp_path, query: str) -> None:
+    """The callback is unauthenticated and CSRF-exempt, so a cross-site link
+    reaches it with the `SameSite=Lax` management cookies attached. A failure
+    that cannot be tied to this browser's own handshake must leave the existing
+    grant intact instead of letting any site force a logout."""
+
+    config = _save_config(monkeypatch, tmp_path)
+    client = _connected_callback_client(config)
+
+    response = client.get(f"/auth/organization/callback{query}", base_url=REMOTE_ORIGIN)
+
+    assert response.status_code == 302
+    assert not _handle_cookie_cleared(response)
+    # Nor may it downgrade the browser to manual sign-in: that is the same
+    # cross-site nuisance in a milder form.
+    assert not _manual_sign_in_required(response)
+    assert cloud_management.resolve_grant("grant-1", "browser-1", None)[0] is not None
+
+
+def test_own_flow_callback_failure_still_revokes_the_grant(monkeypatch, tmp_path) -> None:
+    """A failure on a handshake this browser actually started is a real
+    reauthorization signal, so the stale grant is still torn down."""
+
+    config = _save_config(monkeypatch, tmp_path)
+    client = _connected_callback_client(config)
+    monkeypatch.setattr(
+        cloud_management,
+        "_validated_backend",
+        lambda _config: SimpleNamespace(base_url="https://avibe.bot"),
+    )
+    _, state = cloud_management.begin_authorization(
+        config,
+        browser_id="browser-1",
+        remote_subject=None,
+        callback_origin=REMOTE_ORIGIN,
+        next_path="/admin/organization/overview",
+        silent=False,
+    )
+
+    response = client.get(f"/auth/organization/callback?state={state}", base_url=REMOTE_ORIGIN)
+
+    assert response.status_code == 302
+    assert _handle_cookie_cleared(response)
+    # AUTH-SETUP-305/306: a failure on the browser's own flow must also stop the
+    # silent-reauthorization retries, or the UI loops on the same failure.
+    assert _manual_sign_in_required(response)
+    assert cloud_management.resolve_grant("grant-1", "browser-1", None)[0] is None
+
+
 def test_management_token_is_verified_with_real_rsa_jwks(monkeypatch, tmp_path) -> None:
     config = _save_config(monkeypatch, tmp_path)
     private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)

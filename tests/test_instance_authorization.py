@@ -239,15 +239,35 @@ def test_remote_http_policy_defaults_local_machine_and_unknown_routes_to_local_o
     [
         ("GET", "/api/projects", REMOTE_HTTP_ALLOWED),
         ("POST", "/api/sessions/ses-1/messages", REMOTE_HTTP_ALLOWED),
-        ("PUT", "/api/workbench/prefs", REMOTE_HTTP_ALLOWED),
+        ("GET", "/api/workbench/prefs", REMOTE_HTTP_ALLOWED),
+        ("PUT", "/api/workbench/prefs", REMOTE_HTTP_LOCAL_ONLY),
         ("PUT", "/api/resource-policies/agent/agent-1", REMOTE_HTTP_ALLOWED),
-        ("GET", "/api/models/runtime/status", REMOTE_HTTP_ALLOWED),
+        ("GET", "/api/models/runtime/status", REMOTE_HTTP_LOCAL_ONLY),
         ("GET", "/api/models/agents/codex/chain", REMOTE_HTTP_ALLOWED),
+        ("GET", "/api/models/turns/turn-1/provenance", REMOTE_HTTP_ALLOWED),
+        # Only the local owner can start an OAuth flow, and a status poll hands
+        # back that flow's authorization URL and device code - plus, once a Model
+        # Hub flow succeeds, the credential and account payload `/api/models/
+        # sources` keeps local. Polling follows its flow and stays local too.
+        ("GET", "/api/models/oauth/status/oaf_test0001", REMOTE_HTTP_LOCAL_ONLY),
+        ("GET", "/api/backend/codex/auth/oauth/status/flow-1", REMOTE_HTTP_LOCAL_ONLY),
         ("GET", "/api/backend/codex/runtime", REMOTE_HTTP_LOCAL_ONLY),
         ("GET", "/api/opencode/permission-status", REMOTE_HTTP_LOCAL_ONLY),
         ("GET", "/api/vault/audit", REMOTE_HTTP_ALLOWED),
-        ("POST", "/api/dock/pins", REMOTE_HTTP_ALLOWED),
-        ("POST", "/api/web-push/subscriptions", REMOTE_HTTP_ALLOWED),
+        ("GET", "/api/dock", REMOTE_HTTP_ALLOWED),
+        ("POST", "/api/dock/pins", REMOTE_HTTP_LOCAL_ONLY),
+        ("PUT", "/api/dock/order", REMOTE_HTTP_LOCAL_ONLY),
+        # A push endpoint is caller-supplied and `send_web_push()` fetches it
+        # from this host, so registering or testing one from across the tunnel
+        # would let a remote caller aim an outbound request at loopback, a
+        # private LAN host or a rebinding name. Status reads stay remote: they
+        # report the caller's own subscription and reach no endpoint.
+        ("GET", "/api/web-push/status", REMOTE_HTTP_ALLOWED),
+        ("POST", "/api/web-push/status", REMOTE_HTTP_ALLOWED),
+        ("GET", "/api/web-push/vapid-public-key", REMOTE_HTTP_ALLOWED),
+        ("POST", "/api/web-push/subscriptions", REMOTE_HTTP_LOCAL_ONLY),
+        ("DELETE", "/api/web-push/subscriptions", REMOTE_HTTP_LOCAL_ONLY),
+        ("POST", "/api/web-push/test", REMOTE_HTTP_LOCAL_ONLY),
         ("GET", "/api/harness/runs/run-1", REMOTE_HTTP_LOCAL_ONLY),
         ("GET", "/api/users", REMOTE_HTTP_LOCAL_ONLY),
         ("HEAD", "/api/users", REMOTE_HTTP_LOCAL_ONLY),
@@ -264,12 +284,14 @@ def test_remote_http_policy_defaults_local_machine_and_unknown_routes_to_local_o
         ("GET", "/status", REMOTE_HTTP_LOCAL_ONLY),
         ("HEAD", "/status", REMOTE_HTTP_LOCAL_ONLY),
         ("POST", "/api/show-pages/ses-1/ensure", REMOTE_HTTP_ALLOWED),
-        ("GET", "/api/memory/settings", REMOTE_HTTP_ALLOWED),
-        ("HEAD", "/api/memory/log/entry", REMOTE_HTTP_ALLOWED),
-        ("PATCH", "/api/memory/settings", REMOTE_HTTP_ALLOWED),
+        ("GET", "/api/memory/settings", REMOTE_HTTP_LOCAL_ONLY),
+        ("GET", "/api/memory/failures", REMOTE_HTTP_LOCAL_ONLY),
+        ("HEAD", "/api/memory/log/entry", REMOTE_HTTP_LOCAL_ONLY),
+        ("PATCH", "/api/memory/settings", REMOTE_HTTP_LOCAL_ONLY),
         ("POST", "/api/memory/search", REMOTE_HTTP_ALLOWED),
-        ("POST", "/api/memory/runtime/restart", REMOTE_HTTP_ALLOWED),
-        ("POST", "/api/memory/clear", REMOTE_HTTP_ALLOWED),
+        ("POST", "/api/memory/runtime/restart", REMOTE_HTTP_LOCAL_ONLY),
+        ("POST", "/api/memory/clear", REMOTE_HTTP_LOCAL_ONLY),
+        ("GET", "/api/projects/proj-1/agents-md", REMOTE_HTTP_LOCAL_ONLY),
         ("GET", "/show/ses-1/", REMOTE_HTTP_ALLOWED),
         ("POST", "/show/ses-1/__show/events", REMOTE_HTTP_ALLOWED),
         ("POST", "/api/config", REMOTE_HTTP_PAYLOAD_FILTERED),
@@ -294,10 +316,135 @@ def test_remote_http_policy_keeps_approved_management_and_read_surfaces(
     assert http_authorization_policy(method, path).remote_access == expected
 
 
+@pytest.mark.parametrize(
+    ("gate", "method", "path", "expected"),
+    [
+        # canManageSkills: read-only catalog remotely, every mutation local.
+        ("canManageSkills", "GET", "/api/skills", REMOTE_HTTP_ALLOWED),
+        ("canManageSkills", "POST", "/api/skills", REMOTE_HTTP_LOCAL_ONLY),
+        ("canManageSkills", "POST", "/api/skills/askill/update", REMOTE_HTTP_LOCAL_ONLY),
+        ("canManageSkills", "DELETE", "/api/skills/askill", REMOTE_HTTP_LOCAL_ONLY),
+        (
+            "canManageSkills",
+            "POST",
+            "/api/dependencies/askill/install",
+            REMOTE_HTTP_LOCAL_ONLY,
+        ),
+        # canManageVaultSecrets: inventory and audit reads stay remote, mutations
+        # and key material do not.
+        ("canManageVaultSecrets", "GET", "/api/vault/secrets", REMOTE_HTTP_ALLOWED),
+        ("canManageVaultSecrets", "GET", "/api/vault/settings", REMOTE_HTTP_ALLOWED),
+        ("canManageVaultSecrets", "GET", "/api/vault/grants", REMOTE_HTTP_ALLOWED),
+        ("canManageVaultSecrets", "POST", "/api/vault/secrets", REMOTE_HTTP_LOCAL_ONLY),
+        (
+            "canManageVaultSecrets",
+            "PATCH",
+            "/api/vault/secrets/prod",
+            REMOTE_HTTP_LOCAL_ONLY,
+        ),
+        (
+            "canManageVaultSecrets",
+            "DELETE",
+            "/api/vault/secrets/prod",
+            REMOTE_HTTP_LOCAL_ONLY,
+        ),
+        ("canManageVaultSecrets", "POST", "/api/vault/vmk", REMOTE_HTTP_LOCAL_ONLY),
+        # canUseHarness: the page cannot even bootstrap remotely.
+        ("canUseHarness", "GET", "/api/harness/bootstrap", REMOTE_HTTP_LOCAL_ONLY),
+        # canArchiveProjects: list and rename stay remote, archive does not.
+        ("canArchiveProjects", "GET", "/api/projects", REMOTE_HTTP_ALLOWED),
+        (
+            "canArchiveProjects",
+            "PATCH",
+            "/api/projects/proj-1",
+            REMOTE_HTTP_PAYLOAD_FILTERED,
+        ),
+        ("canArchiveProjects", "DELETE", "/api/projects/proj-1", REMOTE_HTTP_LOCAL_ONLY),
+        # canEditProjectInstructions: local in both directions, because an
+        # AGENTS.md / CLAUDE.md symlink can resolve outside the Project.
+        (
+            "canEditProjectInstructions",
+            "GET",
+            "/api/projects/proj-1/agents-md",
+            REMOTE_HTTP_LOCAL_ONLY,
+        ),
+        (
+            "canEditProjectInstructions",
+            "PUT",
+            "/api/projects/proj-1/agents-md",
+            REMOTE_HTTP_LOCAL_ONLY,
+        ),
+        # canEditAgentDefinitions: catalog reads remotely, definition writes locally.
+        ("canEditAgentDefinitions", "GET", "/api/agents", REMOTE_HTTP_ALLOWED),
+        ("canEditAgentDefinitions", "POST", "/api/agents", REMOTE_HTTP_LOCAL_ONLY),
+        # canAdministerMemory: principal-scoped reads and search stay remote,
+        # the cross-principal admin log and the sidecar administration do not.
+        ("canAdministerMemory", "GET", "/api/memory/status", REMOTE_HTTP_ALLOWED),
+        ("canAdministerMemory", "GET", "/api/memory/profile", REMOTE_HTTP_ALLOWED),
+        ("canAdministerMemory", "POST", "/api/memory/search", REMOTE_HTTP_ALLOWED),
+        ("canAdministerMemory", "GET", "/api/memory/log", REMOTE_HTTP_LOCAL_ONLY),
+        ("canAdministerMemory", "GET", "/api/memory/log/entry", REMOTE_HTTP_LOCAL_ONLY),
+        ("canAdministerMemory", "PATCH", "/api/memory/settings", REMOTE_HTTP_LOCAL_ONLY),
+        (
+            "canAdministerMemory",
+            "POST",
+            "/api/memory/runtime/restart",
+            REMOTE_HTTP_LOCAL_ONLY,
+        ),
+        ("canAdministerMemory", "POST", "/api/memory/clear", REMOTE_HTTP_LOCAL_ONLY),
+        # Dock/Workbench prefs: the read is remote, the process-global writes
+        # are local until the records are keyed by the authenticated subject.
+        ("dockAndWorkbenchPrefs", "GET", "/api/dock", REMOTE_HTTP_ALLOWED),
+        ("dockAndWorkbenchPrefs", "GET", "/api/workbench/prefs", REMOTE_HTTP_ALLOWED),
+        ("dockAndWorkbenchPrefs", "POST", "/api/dock/pins", REMOTE_HTTP_LOCAL_ONLY),
+        (
+            "dockAndWorkbenchPrefs",
+            "DELETE",
+            "/api/dock/pins/ses-1",
+            REMOTE_HTTP_LOCAL_ONLY,
+        ),
+        ("dockAndWorkbenchPrefs", "PUT", "/api/dock/order", REMOTE_HTTP_LOCAL_ONLY),
+        ("dockAndWorkbenchPrefs", "PUT", "/api/workbench/prefs", REMOTE_HTTP_LOCAL_ONLY),
+        # canRegisterWebPush: status reads stay remote, but registering or
+        # testing an endpoint this host will call does not.
+        ("canRegisterWebPush", "GET", "/api/web-push/status", REMOTE_HTTP_ALLOWED),
+        ("canRegisterWebPush", "POST", "/api/web-push/status", REMOTE_HTTP_ALLOWED),
+        (
+            "canRegisterWebPush",
+            "POST",
+            "/api/web-push/subscriptions",
+            REMOTE_HTTP_LOCAL_ONLY,
+        ),
+        (
+            "canRegisterWebPush",
+            "DELETE",
+            "/api/web-push/subscriptions",
+            REMOTE_HTTP_LOCAL_ONLY,
+        ),
+        ("canRegisterWebPush", "POST", "/api/web-push/test", REMOTE_HTTP_LOCAL_ONLY),
+    ],
+)
+def test_local_only_workbench_gates_match_the_remote_http_policy(
+    gate,
+    method,
+    path,
+    expected,
+) -> None:
+    """Pin the endpoint classifications the Workbench UI gates are derived from.
+
+    `can_manage_instance` / `can_manage_agents` / `can_manage_projects` stay true
+    for a remote Instance owner, so `ui/src/lib/remoteAuth.ts` adds a locality
+    check for every control whose endpoint is local-only. If one of these routes
+    is reclassified, that UI gate is stale and must be revisited with it.
+    """
+    assert http_authorization_policy(method, path).remote_access == expected, gate
+
+
 def test_workbench_event_policy_filters_privileged_and_unknown_events() -> None:
     viewer = _remote_context("viewer")
     editor = _remote_context("editor")
     owner = _remote_context("owner")
+    local = trusted_local_context()
 
     assert can_receive_workbench_event(viewer, "authorization.changed") is True
     assert can_receive_workbench_event(viewer, "message.new") is True
@@ -306,6 +453,10 @@ def test_workbench_event_policy_filters_privileged_and_unknown_events() -> None:
     assert can_receive_workbench_event(editor, "queue.updated") is True
     assert can_receive_workbench_event(editor, "vaults.updated") is False
     assert can_receive_workbench_event(owner, "vaults.updated") is True
+    assert can_receive_workbench_event(local, "runs.updated") is True
+    assert can_receive_workbench_event(viewer, "runs.updated") is False
+    assert can_receive_workbench_event(editor, "runs.updated") is False
+    assert can_receive_workbench_event(owner, "runs.updated") is False
     assert can_receive_workbench_event(viewer, "future.management.event") is False
     assert can_receive_workbench_event(owner, "future.management.event") is True
 

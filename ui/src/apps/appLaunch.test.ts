@@ -5,6 +5,7 @@ import {
   appTabHref,
   appTabHrefForDockId,
   isAppleContextClick,
+  isStandaloneAppRoutePath,
   isStandaloneAppTab,
   tabModifierLabel,
 } from './appLaunch';
@@ -143,6 +144,36 @@ describe('isStandaloneAppTab', () => {
     // The sidebar Apps launcher and a chat's "open in editor" land on /apps/editor
     // WITHOUT the flag; those must keep the workbench windows they navigated from.
     expect(isStandaloneAppTab(new URL('http://x/apps/editor').search)).toBe(false);
+  });
+});
+
+describe('isStandaloneAppRoutePath', () => {
+  it('matches exactly the built-ins that own a standalone route', () => {
+    expect(isStandaloneAppRoutePath('/apps/terminal')).toBe(true);
+    expect(isStandaloneAppRoutePath('/apps/files')).toBe(true);
+    expect(isStandaloneAppRoutePath('/apps/editor')).toBe(true);
+    // The Library opens a WINDOW (and redirects the tab), so it never goes chromeless.
+    expect(isStandaloneAppRoutePath('/apps/library')).toBe(false);
+    expect(isStandaloneAppRoutePath('/apps/show/sess42')).toBe(false);
+  });
+
+  it('accepts the route variants React Router still mounts', () => {
+    // Trailing slashes and casing are both matched loosely by the router, so the layout
+    // must agree with what mounted rather than with the literal URL.
+    expect(isStandaloneAppRoutePath('/apps/terminal/')).toBe(true);
+    expect(isStandaloneAppRoutePath('/apps/files//')).toBe(true);
+    expect(isStandaloneAppRoutePath('/Apps/Files')).toBe(true);
+    expect(isStandaloneAppRoutePath('/APPS/TERMINAL/')).toBe(true);
+    expect(isStandaloneAppRoutePath('/apps/library/')).toBe(false);
+    expect(isStandaloneAppRoutePath('/Apps/Library')).toBe(false);
+  });
+
+  it('is false off the app routes', () => {
+    // A standalone tab that navigates away is an ordinary page again — chrome comes back.
+    expect(isStandaloneAppRoutePath('/')).toBe(false);
+    expect(isStandaloneAppRoutePath('/chat/sess42')).toBe(false);
+    expect(isStandaloneAppRoutePath('/apps')).toBe(false);
+    expect(isStandaloneAppRoutePath('/apps/terminal/extra')).toBe(false);
   });
 });
 

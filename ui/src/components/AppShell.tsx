@@ -4,7 +4,8 @@ import { ArrowLeft, Bot, Brain, Building2, ChevronDown, Cpu, FolderTree, Globe, 
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
-import { isStandaloneAppTab } from '../apps/appLaunch';
+import { APP_TAB_PARAM, isStandaloneAppRoutePath, isStandaloneAppTab } from '../apps/appLaunch';
+import { StandaloneAppTabContext } from '../context/StandaloneAppTabContext';
 import { modelHubEnabledFromConfig } from './settings/models/featureFlags';
 import { memoryNavShouldBeVisible } from '../lib/memorySettings';
 import { useApi } from '../context/ApiContext';
@@ -31,7 +32,12 @@ import logoImg from '../assets/logo.png';
 import { getEnabledPlatforms, platformSupportsChannels } from '../lib/platforms';
 import { useViewportHeightVar } from '../lib/useViewportHeightVar';
 import { OrganizationShell } from '../features/organization/OrganizationShell';
-import { isAdvancedSettingsPath, isMemorySettingsPath } from '../lib/adminNavigation';
+import {
+  adminLandingPath,
+  isAdvancedSettingsPath,
+  isLocalSystemPath,
+  isMemorySettingsPath,
+} from '../lib/adminNavigation';
 
 type ShellNavItem = {
   // Optional: a parent that only groups children (no page of its own) omits `to`
@@ -293,6 +299,40 @@ export const AppShell: React.FC = () => {
     setAppsDrawerOpen(false);
   }, [location.pathname]);
 
+  // A single-app tab sitting on the app's own route (⌘/Ctrl-clicked Terminal / Files /
+  // Editor, or that URL bookmarked): the tab exists to show ONE app, so it drops EVERY
+  // piece of shell chrome — sidebar, mobile brand header, bottom tab bar, page padding —
+  // and hands the whole viewport to the app. Both halves matter: the flag alone would
+  // strip the chrome off any page such a tab later navigates to, and the route alone
+  // would strip it inside the normal workbench.
+  //
+  // Route-scoped, and therefore LOCAL to the layout: what `StandaloneAppTabContext`
+  // publishes is the mount-frozen document flag instead, because the window controls
+  // that read it must stay decided for the tab's whole life (see the context doc). The
+  // app pages read the same context and mount only on these routes, so for them the two
+  // agree anyway.
+  const chromeless = standaloneAppTab && isStandaloneAppRoutePath(location.pathname);
+
+  // Keep the visible URL honest about standalone mode. An in-tab app-to-app navigation
+  // (Files → "Open in Editor" / "Open Terminal Here") lands on `/apps/editor` WITHOUT the
+  // marker, while the document is still the single-app tab — `standaloneAppTab` is frozen
+  // at mount by design. Reloading, bookmarking, or copying that URL would otherwise bring
+  // back the full workbench chrome and the restored window layout the tab exists to avoid.
+  //
+  // `history.replaceState` rather than a router navigate: this only corrects what the
+  // address bar shows, and leaving the router's own location (and `location.key`) untouched
+  // keeps launch effects keyed on it — the Terminal's "open one tab per launch" — from
+  // firing a second time for the same navigation.
+  useEffect(() => {
+    if (!chromeless) return;
+    const url = new URL(window.location.href);
+    if (url.searchParams.get(APP_TAB_PARAM) === '1') return;
+    url.searchParams.set(APP_TAB_PARAM, '1');
+    window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`);
+  }, [chromeless, location.pathname, location.search]);
+
+  // Organization takes over the whole shell, so it returns after every hook above
+  // has run — an early return before them would make those hooks conditional.
   if (location.pathname.startsWith('/admin/organization')) {
     return <OrganizationShell />;
   }
@@ -307,7 +347,11 @@ export const AppShell: React.FC = () => {
     ['/agents', '/harness', '/apps/library'].some(
       (path) => location.pathname === path || location.pathname.startsWith(`${path}/`),
     );
-  const localSystemPath = location.pathname.startsWith('/admin/settings/service');
+  // Owner is not enough for these: `can_manage_instance` stays true for a remote
+  // Instance owner, but every one of them runs on local-only routes. The list
+  // and its rationale live in `isLocalSystemPath` so this redirect and the
+  // navigation entries below cannot drift apart.
+  const localSystemPath = isLocalSystemPath(location.pathname);
   const resourceUseDenied =
     (location.pathname.startsWith('/skills') && !capabilities.can_use_skills) ||
     (location.pathname.startsWith('/vaults') && !capabilities.can_use_vault_secrets);
@@ -397,13 +441,28 @@ export const AppShell: React.FC = () => {
     },
   ];
 
-  const items: ShellNavItem[] = shellMode === 'admin' ? adminItems : [];
+  // Second half of the trusted-local gate: a page the redirect above withholds
+  // must not still be advertised, or a remote owner taps a nav entry and lands
+  // back on the Workbench. Recurses into groups (平台凭据 is a child) and drops a
+  // group left with nothing to open.
+  const withoutLocalSystemEntries = (navItems: ShellNavItem[]): ShellNavItem[] =>
+    navItems
+      .filter((item) => !item.to || !isLocalSystemPath(item.to))
+      .map((item) =>
+        item.children ? { ...item, children: withoutLocalSystemEntries(item.children) } : item,
+      )
+      .filter((item) => item.to || item.onClick || (item.children?.length ?? 0) > 0);
+  const visibleAdminItems = capabilities.can_use_system
+    ? adminItems
+    : withoutLocalSystemEntries(adminItems);
+
+  const items: ShellNavItem[] = shellMode === 'admin' ? visibleAdminItems : [];
 
   // A bottom tab bar can't hold the nested admin nav, so mobile keeps a trimmed
   // bar with Workbench, Control Panel, and More (which opens the full nested nav
   // sheet). The Organization tab follows the same temporary visibility switch
   // as every other shell entry point. See ``adminMenuOpen``.
-  const adminMobileTabs: ShellNavItem[] = [
+  const adminMobileTabsAll: ShellNavItem[] = [
     { to: '/', label: t('nav.workbench'), icon: Sparkles, variant: 'workbench' },
     { to: '/admin/dashboard', label: t('nav.dashboard'), icon: LayoutDashboard },
     ...(ORGANIZATION_NAV_ENABLED
@@ -417,14 +476,15 @@ export const AppShell: React.FC = () => {
       match: (pathname) => isAdvancedSettingsPath(pathname, memoryNavVisible),
     },
   ];
+  const adminMobileTabs = capabilities.can_use_system
+    ? adminMobileTabsAll
+    : withoutLocalSystemEntries(adminMobileTabsAll);
   // The More sheet shows the overflow: admin sections not already on the bottom
   // bar. Keep its filtering aligned with the currently visible primary tabs.
-  const adminBottomBarPaths = new Set([
-    '/admin/dashboard',
-    ...(ORGANIZATION_NAV_ENABLED ? ['/admin/organization/overview'] : []),
-    '/admin/settings/messaging',
-  ]);
-  const adminSheetItems = adminItems
+  const adminBottomBarPaths = new Set(
+    adminMobileTabs.map((item) => item.to).filter((to): to is string => !!to && to !== '/'),
+  );
+  const adminSheetItems = visibleAdminItems
     .filter((item) => !item.to || !adminBottomBarPaths.has(item.to))
     // Groups start expanded in the sheet (the sheet is transient — show the
     // children up front). The desktop sidebar keeps its collapse-by-default.
@@ -458,7 +518,8 @@ export const AppShell: React.FC = () => {
   const isChat = location.pathname.startsWith('/chat/');
   const isSearch = location.pathname === '/search';
   const isFullScreenMobile = isChat || isSearch;
-  const showBottomNav = !isFullScreenMobile && location.pathname !== '/setup';
+
+  const showBottomNav = !isFullScreenMobile && !chromeless && location.pathname !== '/setup';
 
   return (
     // Mobile: a LOCKED, full-viewport flex column (overflow-hidden) so the
@@ -470,13 +531,22 @@ export const AppShell: React.FC = () => {
     // pans the locked page to lift the focused composer above the keyboard.
     // Desktop: normal document flow.
     <WindowManagerProvider standalone={standaloneAppTab}>
+    <StandaloneAppTabContext.Provider value={standaloneAppTab}>
     <DockProvider enabled={capabilities.can_use_system}>
     <ShowPageDragProvider>
-    <div className="flex h-[var(--app-shell-h)] flex-col overflow-hidden bg-background text-foreground md:block md:h-auto md:min-h-screen md:overflow-visible">
+    {/* Chromeless (single-app tab): the locked full-viewport column applies on DESKTOP too —
+        the app fills the browser area exactly, with nothing to scroll around it. */}
+    <div
+      className={clsx(
+        'flex h-[var(--app-shell-h)] flex-col overflow-hidden bg-background text-foreground',
+        !chromeless && 'md:block md:h-auto md:min-h-screen md:overflow-visible'
+      )}
+    >
       {/* The sidebar forms its own stacking context BELOW the window layer (aside z-10 < window
           layer z-20), so a maximized window covers the WHOLE sidebar — including the Apps launcher.
           The Apps button no longer floats on top in full-screen (a Dock redesign comes later);
           un-maximize to reach it. */}
+      {!chromeless && (
       <aside className="fixed inset-y-0 left-0 z-10 hidden w-[240px] flex-col border-r border-border bg-surface md:flex">
         {/* Workbench packs more rows (search/inbox/capabilities/projects) into the
             sidebar, so it runs a tighter vertical rhythm than admin — less outer
@@ -546,7 +616,7 @@ export const AppShell: React.FC = () => {
               )}
               {shellMode === 'workbench' && capabilities.can_manage_instance && (
                 <Link
-                  to="/admin/dashboard"
+                  to={adminLandingPath(capabilities.can_use_system)}
                   title={t('appShell.openControlPanel')}
                   aria-label={t('appShell.openControlPanel')}
                   className="group flex w-11 shrink-0 items-center justify-center rounded-lg border border-border-strong text-foreground transition-colors hover:bg-foreground/[0.04]"
@@ -604,11 +674,13 @@ export const AppShell: React.FC = () => {
           </div>
         </div>
       </aside>
+      )}
 
       {/* Chat and Search are fixed full-screen surfaces with their own header
           bars, so the brand header is hidden there (otherwise it would sit
-          behind them). */}
-      {!isFullScreenMobile && (
+          behind them). A chromeless single-app tab hides it for the same
+          reason: the app owns the viewport. */}
+      {!isFullScreenMobile && !chromeless && (
         <header className="sticky top-0 z-40 flex h-[calc(4rem+env(safe-area-inset-top))] shrink-0 items-center justify-between gap-2 border-b border-border bg-background/92 px-4 pt-[env(safe-area-inset-top)] backdrop-blur md:hidden">
           <Link
             to="/"
@@ -645,12 +717,17 @@ export const AppShell: React.FC = () => {
           // Mobile: the internal scroll area of the locked flex-column shell, so
           // the document itself never scrolls. Desktop: normal flow (min-h-screen
           // + sidebar offset).
-          'flex-1 min-h-0 overflow-y-auto md:ml-[240px] md:min-h-screen md:flex-none md:overflow-visible md:pb-0',
-          showBottomNav ? 'pb-[calc(5.5rem+env(safe-area-inset-bottom))]' : 'pb-0',
-          location.pathname.startsWith('/admin/settings') ? 'page-glow-settings' : 'page-glow-console'
+          chromeless
+            // Single-app tab: no sidebar offset, no scroll, no page glow — the app body
+            // is the only thing in the viewport and sizes itself to this box (h-full).
+            ? 'min-h-0 flex-1 overflow-hidden'
+            : 'flex-1 min-h-0 overflow-y-auto md:ml-[240px] md:min-h-screen md:flex-none md:overflow-visible md:pb-0',
+          !chromeless && (showBottomNav ? 'pb-[calc(5.5rem+env(safe-area-inset-bottom))]' : 'pb-0'),
+          !chromeless &&
+            (location.pathname.startsWith('/admin/settings') ? 'page-glow-settings' : 'page-glow-console')
         )}
       >
-        <div className="mx-auto w-full px-4 py-5 md:px-10 md:py-8">
+        <div className={clsx('w-full', chromeless ? 'h-full' : 'mx-auto px-4 py-5 md:px-10 md:py-8')}>
           {/* A crashing page only replaces the content area — the sidebar + chrome stay usable, and
               navigating elsewhere clears the error without a manual retry. Key on location.key (not
               just pathname) so a query-only navigation (e.g. /search?q=…) also resets. */}
@@ -736,6 +813,7 @@ export const AppShell: React.FC = () => {
     </div>
     </ShowPageDragProvider>
     </DockProvider>
+    </StandaloneAppTabContext.Provider>
     </WindowManagerProvider>
   );
 };

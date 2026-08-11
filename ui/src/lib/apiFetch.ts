@@ -77,12 +77,7 @@ const waitForSignal = <Value>(promise: Promise<Value>, signal?: AbortSignal): Pr
   });
 };
 
-export async function ensureCsrfToken(signal?: AbortSignal): Promise<string> {
-  const existing = readCookie(CSRF_COOKIE_NAME);
-  if (existing) {
-    return existing;
-  }
-
+async function acquireCsrfToken(signal?: AbortSignal): Promise<string> {
   if (!csrfTokenPromise) {
     startCsrfTokenFetch();
   }
@@ -99,6 +94,43 @@ export async function ensureCsrfToken(signal?: AbortSignal): Promise<string> {
   }
 }
 
+export async function ensureCsrfToken(signal?: AbortSignal): Promise<string> {
+  const existing = readCookie(CSRF_COOKIE_NAME);
+  if (existing) {
+    return existing;
+  }
+
+  return acquireCsrfToken(signal);
+}
+
+async function refreshRejectedCsrfToken(
+  signal?: AbortSignal,
+): Promise<string> {
+  const current = readCookie(CSRF_COOKIE_NAME);
+  // This is a double-submit token, not server-side session state. A 403 means
+  // the request's header and shared browser cookie crossed; rotating a present
+  // cookie here only creates another race with other tabs.
+  if (current) return current;
+
+  const fetched = await acquireCsrfToken(signal);
+  return readCookie(CSRF_COOKIE_NAME) || fetched;
+}
+
+async function isInvalidCsrfResponse(response: Response): Promise<boolean> {
+  if (response.status !== 403) return false;
+  try {
+    const payload = await response.json();
+    return payload?.message === 'Forbidden: invalid csrf token';
+  } catch {
+    return false;
+  }
+}
+
+function canReplayRequest(input: RequestInfo | URL, body: BodyInit | null | undefined): boolean {
+  if (typeof Request !== 'undefined' && input instanceof Request) return false;
+  return !(typeof ReadableStream !== 'undefined' && body instanceof ReadableStream);
+}
+
 export async function apiFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
   const method = (init.method || 'GET').toUpperCase();
   const nextInit: RequestInit = { ...init };
@@ -111,13 +143,29 @@ export async function apiFetch(input: RequestInfo | URL, init: RequestInit = {})
     headers.set('Accept', 'application/json');
   }
 
+  let csrfToken = '';
   if (MUTATING_METHODS.has(method)) {
-    const token = await ensureCsrfToken(init.signal ?? undefined);
-    headers.set(CSRF_HEADER_NAME, token);
+    csrfToken = await ensureCsrfToken(init.signal ?? undefined);
+    headers.set(CSRF_HEADER_NAME, csrfToken);
   }
 
   nextInit.headers = headers;
-  const response = await fetch(input, nextInit);
+  let response = await fetch(input, nextInit);
+  // The CSRF guard rejects before the endpoint runs, so this exact response is
+  // safe to replay once. It covers a cookie/header race or a stale page without
+  // turning arbitrary 403s or non-replayable request streams into retries.
+  if (
+    csrfToken
+    && canReplayRequest(input, init.body)
+    && await isInvalidCsrfResponse(response.clone())
+  ) {
+    const recoveredToken = await refreshRejectedCsrfToken(init.signal ?? undefined);
+    // Cookies are shared across tabs while the acquisition promise is not.
+    // Read once more at the replay boundary in case another tab won the race.
+    csrfToken = readCookie(CSRF_COOKIE_NAME) || recoveredToken;
+    headers.set(CSRF_HEADER_NAME, csrfToken);
+    response = await fetch(input, { ...nextInit, headers });
+  }
   // Global remote-access auth recovery. The AuthGuard validates the session
   // once and then stops re-running on ordinary navigation (so it doesn't
   // re-mount the shell on every sidebar click). If the Avibe Cloud cookie

@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 
-import { createSessionRowRefreshGate } from './sessionRowRefresh';
+import {
+  createSessionRowRefreshGate,
+  sessionRowWithBootstrapFallback,
+} from './sessionRowRefresh';
 
 describe('Session-row refresh ordering', () => {
   it('accepts only the newest overlapping read', async () => {
@@ -42,5 +45,25 @@ describe('Session-row refresh ordering', () => {
     finishSecond();
     await read;
     expect(readStarted).toBe(true);
+  });
+
+  it('uses bootstrap as a fallback when a superseding recovery produces no row', () => {
+    const bootstrap = { id: 'session-a', title: 'Bootstrap' };
+
+    expect(sessionRowWithBootstrapFallback(null, 'session-a', bootstrap)).toBe(bootstrap);
+  });
+
+  it('preserves a newer row for the current route over the bootstrap fallback', () => {
+    const bootstrap = { id: 'session-a', title: 'Bootstrap' };
+    const recovered = { id: 'session-a', title: 'Recovered' };
+
+    expect(sessionRowWithBootstrapFallback(recovered, 'session-a', bootstrap)).toBe(recovered);
+  });
+
+  it('replaces a stale row from the previous route with the bootstrap fallback', () => {
+    const bootstrap = { id: 'session-b', title: 'Bootstrap' };
+    const previous = { id: 'session-a', title: 'Previous' };
+
+    expect(sessionRowWithBootstrapFallback(previous, 'session-b', bootstrap)).toBe(bootstrap);
   });
 });

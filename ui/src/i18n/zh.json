@@ -1723,6 +1723,7 @@
       "notifications": {
         "checking": "正在检查通知",
         "unsupported": "当前不支持通知",
+        "localOnly": "请在本机开启通知",
         "installFirst": "先添加到主屏幕",
         "enable": "开启通知",
         "enabled": "通知已开启",
@@ -2838,6 +2839,8 @@
     "discardConfirm": "有未保存的修改，确定关闭并丢弃吗？"
   },
   "skills": {
+    "remoteReadOnly": "只读",
+    "remoteReadOnlyHint": "远程访问下技能目录为只读。请在运行 Avibe 的机器上打开以添加、更新或移除技能。",
     "title": "技能",
     "subtitle": "跨各 Agent 后端管理全局与项目级技能 · 基于 askill。",
     "scopeGlobal": "全局",
@@ -3330,6 +3333,12 @@
       "voicePermissionFailed": "无法使用麦克风，请检查浏览器权限后重试。",
       "voiceStartFailed": "当前浏览器无法启动语音录制，请刷新页面或更换支持的浏览器。",
       "voiceDraftChanged": "语音输入期间草稿已变化，已保留整理结果供复制。",
+      "attachmentTooLarge": "文件超过 100 MB 的附件上限。",
+      "attachmentEmpty": "不能上传空文件。",
+      "attachmentSessionUnavailable": "当前会话已不可用。",
+      "attachmentNetwork": "上传连接失败，请重试。",
+      "attachmentFailed": "文件上传失败，请重试。",
+      "retryAttachment": "重试上传",
       "removeAttachment": "移除",
       "dropOverlay": "拖放文件以添加",
       "voicePreview": "实时转写预览"
@@ -3403,6 +3412,8 @@
     }
   },
   "vaults": {
+    "remoteReadOnly": "只读",
+    "remoteReadOnlyHint": "远程访问下 Vault 为只读。请在运行 Avibe 的机器上打开以添加、编辑、查看或审批密钥。",
     "title": "保险库",
     "subtitle": "为你的 AI Agent 提供密钥，永不进入上下文。",
     "add": "添加密钥",

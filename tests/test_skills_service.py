@@ -88,8 +88,16 @@ def _seed_skill_policy(
     access_level: str,
     group_ids: list[str] | None = None,
     backend: str = "codex",
+    project_id: str | None = None,
+    project_dir: str | None = None,
 ) -> str:
-    resource_id = skills.skill_resource_id(backend, scope="global", project_dir=None, name=name)
+    resource_id = skills.skill_resource_id(
+        backend,
+        scope="project" if project_id is not None else "global",
+        project_dir=project_dir,
+        project_id=project_id,
+        name=name,
+    )
     resource_access_service.ensure_resource_policy(
         conn,
         resource_kind="skill",
@@ -225,22 +233,34 @@ def test_update_one_skill(monkeypatch):
 
 def test_skill_resource_id_is_stable_and_backend_scoped(tmp_path) -> None:
     global_id = skills.skill_resource_id("codex", scope="global", project_dir=None, name="Release Tools")
-    project_id = skills.skill_resource_id(
+    legacy_project_id = skills.skill_resource_id(
         "codex",
         scope="project",
         project_dir=str(tmp_path / "project"),
+        name="Release Tools",
+    )
+    stable_project_id = skills.skill_resource_id(
+        "codex",
+        scope="project",
+        project_dir=str(tmp_path / "project"),
+        project_id="proj_123abc",
+        name="Release Tools",
+    )
+    moved_project_id = skills.skill_resource_id(
+        "codex",
+        scope="project",
+        project_dir=str(tmp_path / "project-renamed"),
+        project_id="proj_123abc",
         name="Release Tools",
     )
 
     assert global_id == "codex:global:global:release-tools"
-    assert project_id.startswith("codex:project:project-")
-    assert project_id.endswith(":release-tools")
-    assert project_id == skills.skill_resource_id(
-        "codex",
-        scope="project",
-        project_dir=str(tmp_path / "project"),
-        name="Release Tools",
-    )
+    assert legacy_project_id.startswith("codex:project:project-")
+    assert legacy_project_id.endswith(":release-tools")
+    assert stable_project_id == moved_project_id
+    assert stable_project_id.startswith("codex:project:project-proj_123abc")
+    assert stable_project_id.endswith(":release-tools")
+    assert stable_project_id != legacy_project_id
 
 
 def test_list_skills_filters_private_public_scope_and_missing_group_context(monkeypatch, tmp_path) -> None:
@@ -362,6 +382,7 @@ def test_project_skill_use_requires_editor_access_to_the_project(monkeypatch, tm
                     "codex",
                     scope="project",
                     project_dir=str(project_dir),
+                    project_id=project["id"],
                     name="project-skill",
                 ),
                 organization_id="org-1",
@@ -377,6 +398,7 @@ def test_project_skill_use_requires_editor_access_to_the_project(monkeypatch, tm
                 "askill",
                 scope="project",
                 project_dir=str(project_dir),
+                project_id=project["id"],
                 user_context=_organization_context("member-1"),
             )
         )
@@ -389,6 +411,7 @@ def test_project_skill_use_requires_editor_access_to_the_project(monkeypatch, tm
                 "askill",
                 scope="all",
                 project_dir=str(project_dir),
+                project_id=project["id"],
                 user_context=_organization_context("member-1"),
             )
         )
@@ -402,6 +425,7 @@ def test_project_skill_use_requires_editor_access_to_the_project(monkeypatch, tm
                     "askill",
                     scope="project",
                     project_dir=str(project_dir),
+                    project_id=project["id"],
                     user_context=_organization_context(
                         "member-2",
                         group_ids=frozenset({"group-sales"}),
@@ -418,6 +442,7 @@ def test_project_skill_use_requires_editor_access_to_the_project(monkeypatch, tm
                     "askill",
                     scope="all",
                     project_dir=str(project_dir),
+                    project_id=project["id"],
                     user_context=_organization_context(
                         "member-2",
                         group_ids=frozenset({"group-sales"}),

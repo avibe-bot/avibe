@@ -13,10 +13,12 @@ import pytest
 
 from config.v2_config import AgentsConfig, PlatformsConfig, RemoteAccessConfig, RuntimeConfig, SlackConfig, UiConfig, V2Config
 from config.v2_config import CONFIG_LOCK
+from storage.importer import ensure_sqlite_state
 from tests.ui_server_test_helpers import csrf_headers, remote_session_cookie
 from vibe import api
 from vibe import remote_access
 from vibe import ui_server
+from vibe.ui_compat import g
 from vibe.ui_server import app
 from starlette.websockets import WebSocketDisconnect
 
@@ -212,6 +214,37 @@ def test_private_show_page_login_freezes_target_in_authorize_and_handshake(
     assert asset.get_json()["error"] == "remote_access_login_required"
 
 
+def test_private_show_page_asset_xhr_gets_401_instead_of_show_page_oauth(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    ensure_sqlite_state()
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(
+            config,
+            "guest@example.com",
+            "guest-1",
+            role="viewer",
+            access_source="email",
+        ),
+        domain="alex.avibe.bot",
+    )
+
+    response = client.get(
+        "/show/session-one/asset.js",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+        headers={"Accept": "application/javascript"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 401
+    assert response.get_json()["error"] == "remote_access_login_required"
+
+
 def test_existing_broader_session_reauthorization_stops_when_grant_is_missing(
     monkeypatch,
     tmp_path,
@@ -242,6 +275,7 @@ def test_existing_broader_session_reauthorization_stops_when_grant_is_missing(
         "/show/session-one/__show/me",
         base_url="https://alex.avibe.bot",
         environ_base=_remote_peer(),
+        headers={"Accept": "text/html"},
         follow_redirects=False,
     )
     authorize_params = httpx.URL(start.headers["Location"]).params
@@ -284,7 +318,8 @@ def test_existing_broader_session_reauthorization_stops_when_grant_is_missing(
         environ_base=_remote_peer(),
         follow_redirects=False,
     )
-    assert denied.status_code == 404
+    assert denied.status_code == 401
+    assert denied.get_json()["error"] == "remote_access_login_required"
     assert "Location" not in denied.headers
 
 
@@ -1133,6 +1168,12 @@ def test_remote_config_post_uses_the_safe_projection_for_an_instance_owner(monke
     config = _save_config(tmp_path)
     config.runtime.default_cwd = "/private/local-agent-workdir"
     config.agents.codex.cli_path = "/opt/avibe/bin/codex"
+    config.ack_mode = "reaction"
+    config.show_duration = False
+    config.include_time_info = False
+    config.include_user_info = True
+    config.reply_enhancements = False
+    config.agent_progress_style = "concise"
     config.save()
     client = app.test_client()
     client.set_cookie(
@@ -1152,7 +1193,25 @@ def test_remote_config_post_uses_the_safe_projection_for_an_instance_owner(monke
     assert response.status_code == 200
     payload = response.get_json()
     assert payload["ui"]["instance_name"] == "Remote Workbench"
-    assert set(payload) == {"language", "mode", "setup_state", "ui", "version"}
+    assert set(payload) == {
+        "ack_mode",
+        "agent_progress_style",
+        "include_time_info",
+        "include_user_info",
+        "language",
+        "mode",
+        "reply_enhancements",
+        "setup_state",
+        "show_duration",
+        "ui",
+        "version",
+    }
+    assert payload["ack_mode"] == "reaction"
+    assert payload["show_duration"] is False
+    assert payload["include_time_info"] is False
+    assert payload["include_user_info"] is True
+    assert payload["reply_enhancements"] is False
+    assert payload["agent_progress_style"] == "concise"
     assert "runtime" not in payload
     assert "agents" not in payload
     assert "memory" not in payload
@@ -1345,6 +1404,8 @@ def test_remote_runtime_snapshots_are_blocked_before_controller_access(monkeypat
         {"model": "gpt-5"},
         {"reasoning_effort": "high"},
         {"scope_id": "scope-local"},
+        {"visibility": "background"},
+        {"pinned": True},
     ],
 )
 def test_remote_session_execution_settings_are_blocked_before_store_access(
@@ -1601,9 +1662,63 @@ def test_remote_session_and_project_metadata_predicates_remain_allowed():
     assert not ui_server._is_remote_local_execution_request(
         "PATCH", "/api/sessions/ses-local", {"title": "renamed"}
     )
+    assert ui_server._is_remote_local_execution_request(
+        "PATCH", "/api/sessions/ses-local", {"visibility": "background"}
+    )
+    assert ui_server._is_remote_local_execution_request(
+        "PATCH", "/api/sessions/ses-local", {"pinned": True}
+    )
     assert not ui_server._is_remote_local_execution_request(
         "PATCH", "/api/projects/proj-local", {"display_name": "renamed"}
     )
+
+
+def test_remote_turn_state_filters_harness_activity_labels(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(config, "owner@example.com", "user-owner"),
+        domain="alex.avibe.bot",
+    )
+
+    async def projected(_session_id):
+        return {
+            "status_code": 200,
+            "body": {
+                "in_flight": False,
+                "foreground": "idle",
+                "background_activities": [
+                    {
+                        "id": "backend-1",
+                        "item_kind": "backend_activity",
+                        "label": "Waiting for turn",
+                        "status": "running",
+                    },
+                    {
+                        "id": "task-1",
+                        "item_kind": "task",
+                        "label": "private prompt head",
+                        "status": "scheduled",
+                    },
+                ],
+                "pending_activity_output_count": 1,
+                "connection": "connected",
+            },
+        }
+
+    monkeypatch.setattr("vibe.internal_client.turn_state", projected)
+    response = client.get(
+        "/api/sessions/ses-local/turn-state",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert [item["id"] for item in body["background_activities"]] == ["backend-1"]
+    assert body["background_activities"][0]["label"] == "Waiting for turn"
 
 
 @pytest.mark.parametrize(
@@ -1957,7 +2072,7 @@ def test_remote_show_page_public_link_mutations_reach_resource_authorization(
 @pytest.mark.parametrize(
     ("path", "local_only"),
     [
-        ("/api/models/runtime/status", False),
+        ("/api/models/runtime/status", True),
         ("/api/models/agents", False),
         ("/api/models/sources", True),
         ("/api/backend/codex/runtime", True),
@@ -1966,6 +2081,167 @@ def test_remote_show_page_public_link_mutations_reach_resource_authorization(
 )
 def test_remote_model_and_backend_reads_follow_execution_safety_policy(path, local_only):
     assert ui_server._is_remote_local_execution_request("GET", path) is local_only
+
+
+def _show_event_frame() -> str:
+    return json.dumps(
+        {
+            "type": "show.event",
+            "data": {
+                "id": "evt-1",
+                "session_id": "ses123",
+                "transcript_text": "Annotation at /Users/alex/.avibe/state/media/shot.png",
+                "payload": {
+                    "author": {"kind": "user", "email": "owner@example.com"},
+                    "screenshot": {
+                        "attachmentId": "med_1",
+                        "path": "/Users/alex/.avibe/state/media/shot.png",
+                        "mimeType": "image/png",
+                        "width": 10,
+                        "height": 10,
+                    },
+                },
+            },
+        }
+    )
+
+
+def test_remote_show_event_stream_redacts_local_screenshot_path() -> None:
+    from vibe.authorization import AuthorizationContext
+
+    projected = ui_server._workbench_event_payload_for_context(
+        AuthorizationContext(instance_role="owner", is_remote=True),
+        "show.event",
+        _show_event_frame(),
+    )
+
+    assert projected is not None
+    assert "/Users/alex/.avibe" not in projected
+    data = json.loads(projected)["data"]
+    screenshot = data["payload"]["screenshot"]
+    assert "path" not in screenshot
+    # Everything the remote workbench needs to render the annotation survives.
+    assert screenshot["attachmentId"] == "med_1"
+    assert data["session_id"] == "ses123"
+    assert data["transcript_text"] == "Annotation at med_1"
+
+
+def test_remote_show_event_stream_drops_unprojectable_frame() -> None:
+    from vibe.authorization import AuthorizationContext
+
+    remote_owner = AuthorizationContext(instance_role="owner", is_remote=True)
+
+    assert (
+        ui_server._workbench_event_payload_for_context(remote_owner, "show.event", "not json")
+        is None
+    )
+    assert (
+        ui_server._workbench_event_payload_for_context(
+            remote_owner, "show.event", json.dumps({"type": "show.event", "data": "opaque"})
+        )
+        is None
+    )
+
+
+def test_local_show_event_stream_keeps_the_screenshot_path() -> None:
+    from vibe.authorization import trusted_local_context
+
+    frame = _show_event_frame()
+
+    assert (
+        ui_server._workbench_event_payload_for_context(
+            trusted_local_context(), "show.event", frame
+        )
+        == frame
+    )
+
+
+def _deny_show_page_acl(monkeypatch, *, allowed: bool) -> list[tuple[str, str]]:
+    """Record the Show Page ACL checks the workbench stream makes."""
+
+    from storage import resource_access_service
+
+    checks: list[tuple[str, str]] = []
+
+    def _can_use_resource(context, resource_kind, resource_id, **kwargs):
+        checks.append((resource_kind, resource_id))
+        return allowed
+
+    monkeypatch.setattr(resource_access_service, "can_use_resource", _can_use_resource)
+    return checks
+
+
+def test_remote_owner_show_event_requires_the_show_page_acl(monkeypatch) -> None:
+    """An Instance owner does not override a Show Page's own resource policy.
+
+    Direct reads of a private page whose policy names another subject already
+    deny this owner, so the workbench SSE must not forward the same page's
+    annotation text and attachment metadata either.
+    """
+
+    from vibe.authorization import AuthorizationContext
+
+    checks = _deny_show_page_acl(monkeypatch, allowed=False)
+    remote_owner = AuthorizationContext(
+        instance_role="owner",
+        subject="owner@example.com",
+        is_remote=True,
+    )
+
+    assert (
+        ui_server._workbench_event_visible_to_context(
+            remote_owner, "show.event", _show_event_frame()
+        )
+        is False
+    )
+    assert checks == [("show_page", "ses123")]
+
+
+def test_remote_owner_show_event_passes_the_allowed_show_page(monkeypatch) -> None:
+    from vibe.authorization import AuthorizationContext
+
+    checks = _deny_show_page_acl(monkeypatch, allowed=True)
+    remote_owner = AuthorizationContext(
+        instance_role="owner",
+        subject="owner@example.com",
+        is_remote=True,
+    )
+
+    assert (
+        ui_server._workbench_event_visible_to_context(
+            remote_owner, "show.event", _show_event_frame()
+        )
+        is True
+    )
+    assert checks == [("show_page", "ses123")]
+
+
+def test_show_event_without_a_session_is_dropped(monkeypatch) -> None:
+    from vibe.authorization import AuthorizationContext
+
+    _deny_show_page_acl(monkeypatch, allowed=True)
+    remote_owner = AuthorizationContext(instance_role="owner", is_remote=True)
+
+    assert (
+        ui_server._workbench_event_visible_to_context(
+            remote_owner,
+            "show.event",
+            json.dumps({"type": "show.event", "data": {"id": "evt-1"}}),
+        )
+        is False
+    )
+
+
+def test_local_show_event_skips_the_remote_acl(monkeypatch) -> None:
+    """A trusted-local subscriber has no authorization context to evaluate."""
+
+    checks = _deny_show_page_acl(monkeypatch, allowed=False)
+
+    assert (
+        ui_server._workbench_event_visible_to_context(None, "show.event", _show_event_frame())
+        is True
+    )
+    assert checks == []
 
 
 @pytest.mark.parametrize(
@@ -2056,6 +2332,52 @@ def test_remote_skill_operations_are_blocked_before_api_calls(
 
     assert response.status_code == 403
     assert response.get_json()["code"] == "remote_execution_disabled"
+
+
+def test_remote_project_scoped_skill_reads_require_project_access(
+    monkeypatch,
+    tmp_path,
+):
+    from storage import project_access_service, projects_service
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    folder = tmp_path / "project"
+    folder.mkdir()
+    with engine.begin() as conn:
+        project = projects_service.create_project(conn, str(folder), display_name="Restricted")
+        project_access_service.apply_project_access_intent(
+            conn,
+            {
+                "project_id": project["id"],
+                "revision": 1,
+                "mode": "restricted",
+                "bindings": [],
+            },
+        )
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(config, "owner@example.com", "user-owner", role="editor"),
+        domain="alex.avibe.bot",
+    )
+
+    async def unexpected_list(*args, **kwargs):
+        raise AssertionError("restricted remote skill read reached the Skills API")
+
+    monkeypatch.setattr(api, "list_skills", unexpected_list)
+    response = client.get(
+        f"/api/skills?scope=project&project_id={project['id']}",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+
+    assert response.status_code == 404
+    assert response.get_json()["error"]["code"] == "project_not_found"
 
 
 @pytest.mark.parametrize(
@@ -2295,10 +2617,17 @@ def test_remote_queue_deletion_is_blocked_before_store_access(
     assert response.get_json()["code"] == "remote_execution_disabled"
 
 
-def test_remote_owner_can_still_read_agent_instructions_and_queue(
+def test_remote_owner_instruction_reads_stay_local_while_queue_reads_do_not(
     monkeypatch,
     tmp_path,
 ):
+    """Project and global instructions are local reads; the queue is not.
+
+    A checked-out ``AGENTS.md`` / ``CLAUDE.md`` can be a symlink pointing
+    outside the Project, and a remote caller holds no file capability to
+    follow it, so the read stays trusted-local like the global prompts.
+    """
+
     from storage.importer import ensure_sqlite_state
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
@@ -2332,13 +2661,86 @@ def test_remote_owner_can_still_read_agent_instructions_and_queue(
         environ_base=_remote_peer(),
     )
 
-    assert project_response.status_code == 200
-    assert project_response.get_json()["source"] == "none"
+    assert project_response.status_code == 403
+    assert project_response.get_json()["code"] == "remote_execution_disabled"
     assert global_response.status_code == 403
     assert global_response.get_json()["code"] == "remote_execution_disabled"
     assert queue_response.status_code == 200
     assert queue_response.get_json() == {"queued": []}
     assert ui_server._is_remote_local_execution_request("POST", "/api/skills/preview")
+
+
+def test_remote_owner_cannot_register_or_test_a_web_push_endpoint(
+    monkeypatch,
+    tmp_path,
+):
+    """Push registration is the SSRF surface; the status read is not.
+
+    A subscription endpoint is caller-supplied and ``send_web_push()`` fetches
+    it from this host, and nothing between the payload and that request keeps
+    it pointed at a real push service - an HTTPS URL naming loopback, a private
+    LAN host or a rebinding name is accepted. A remote caller could therefore
+    register one and use ``/test`` to have the Avibe host issue the request
+    from inside its own network, so both mutations stop at the boundary while
+    the principal-scoped status read still crosses it.
+    """
+
+    from storage.importer import ensure_sqlite_state
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    ensure_sqlite_state()
+    sent: list[dict] = []
+    monkeypatch.setattr(
+        "core.web_push.send_web_push",
+        lambda **kwargs: sent.append(kwargs),
+    )
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(config, "owner@example.com", "user-owner"),
+        domain="alex.avibe.bot",
+    )
+    headers = csrf_headers(client, "https://alex.avibe.bot")
+
+    def _post(path: str, payload: dict):
+        return client.post(
+            path,
+            json=payload,
+            headers=headers,
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+        )
+
+    internal_endpoint = "https://127.0.0.1:8443/push"
+    subscribe = _post(
+        "/api/web-push/subscriptions",
+        {
+            "endpoint": internal_endpoint,
+            "keys": {"p256dh": "public-key", "auth": "auth-secret"},
+        },
+    )
+    test_send = _post("/api/web-push/test", {"endpoint": internal_endpoint})
+    unsubscribe = client.delete(
+        "/api/web-push/subscriptions",
+        json={"endpoint": internal_endpoint},
+        headers=headers,
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+    status = client.get(
+        "/api/web-push/status",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+
+    for response in (subscribe, test_send, unsubscribe):
+        assert response.status_code == 403
+        assert response.get_json()["code"] == "remote_execution_disabled"
+    assert sent == []
+    assert status.status_code == 200
+    # No endpoint was stored, so the status read reports nothing to send to.
+    assert status.get_json()["subscription_count"] == 0
 
 
 def test_remote_show_dispatch_is_rejected_before_event_reservation(
@@ -2373,6 +2775,148 @@ def test_remote_show_dispatch_is_rejected_before_event_reservation(
 
     assert response.status_code == 403
     assert response.get_json()["code"] == "remote_execution_disabled"
+
+
+def _show_event_response_json(response_tuple) -> dict:
+    """Read the JSON body of a `_show_event_response_from_payload` return value.
+
+    The compat `jsonify()` yields a Starlette `JSONResponse` inside a test
+    request context, so read its raw body rather than the Flask `get_json()`.
+    """
+
+    response = response_tuple[0]
+    if hasattr(response, "get_json"):
+        return response.get_json()
+    return json.loads(response.body)
+
+
+async def test_remote_show_write_rejects_agent_provenance_event_types(
+    monkeypatch,
+    tmp_path,
+):
+    """A remote editor may only author human Show events, not Agent/system ones.
+
+    The shared `_show_event_response_from_payload` already blocks events that
+    request Agent dispatch, but a non-dispatching event such as
+    `assistant.mark.created` or `system.runtime.status` still reaches
+    `ShowSessionEventStore.append()`, which derives the actor from the type and
+    would persist it as `author="agent"`. A collaborator could therefore forge
+    Agent or system activity in the shared transcript, so the remote path is
+    restricted to the same human-event / mark-resolution allowlist the public
+    route enforces. This is exercised through the HTML route
+    (`POST /show/<id>/__show/events`, remote-allowed for editors), the surface a
+    remote collaborator with page access actually reaches; the store is stubbed
+    so reaching it would raise, proving rejection happens at the boundary.
+    """
+
+    from vibe.authorization import AuthorizationContext
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    remote_context = AuthorizationContext(instance_role="editor", is_remote=True)
+
+    def unexpected_store():
+        raise AssertionError("an unsupported remote event must not be stored")
+
+    monkeypatch.setattr(ui_server, "_show_session_event_store", unexpected_store)
+
+    async def unexpected_dispatch(event_payload):
+        raise AssertionError("an unsupported remote event must not dispatch")
+
+    monkeypatch.setattr(ui_server, "_run_show_event_dispatch", unexpected_dispatch)
+
+    for event_type in ("assistant.mark.created", "system.runtime.status"):
+        with app.test_request_context(
+            "/show/ses-remote/__show/events",
+            method="POST",
+            base_url="https://alex.avibe.bot",
+        ):
+            g.authorization_context = remote_context
+            response = await ui_server._show_event_response_from_payload(
+                "ses-remote",
+                {"type": event_type, "actor": "agent", "payload": {}},
+            )
+        assert response[1] == 400, event_type
+        assert _show_event_response_json(response)["code"] == "unsupported_event_type"
+
+
+async def test_remote_show_write_accepts_human_event_and_mark_resolution(
+    monkeypatch,
+    tmp_path,
+):
+    """A remote editor may still post the human events and resolve a mark.
+
+    The human-event / mark-resolution allowlist is the surface a collaborator
+    actually needs: typing an intent, annotating, and resolving an Agent-drawn
+    mark. These must still be accepted across the tunnel. A trusted-local caller
+    keeps the full supported set, so `assistant.mark.created` (Agent
+    provenance) is allowed locally.
+    """
+
+    from vibe.authorization import AuthorizationContext, trusted_local_context
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    remote_context = AuthorizationContext(instance_role="editor", is_remote=True)
+
+    accepted: list[tuple[str, str]] = []
+
+    class _StubStore:
+        def __init__(self):
+            self.closed = False
+
+        def append(self, session_id, payload, *, author=None, reserve_dispatch=True):
+            accepted.append(("append", payload["type"]))
+            return {
+                "id": "evt-1",
+                "sessionId": session_id,
+                "type": payload["type"],
+                "actor": "human",
+                "payload": payload.get("payload", {}),
+                "ts": "2026-08-10T10:00:00Z",
+            }
+
+        def close(self):
+            accepted.append(("close", "store"))
+
+    monkeypatch.setattr(ui_server, "_show_session_event_store", _StubStore)
+    monkeypatch.setattr(
+        ui_server, "_publish_show_session_event", lambda event_payload: None
+    )
+
+    # Remote: human intent and mark resolution are accepted.
+    for event_type in ("human.intent.submitted", "assistant.mark.resolved"):
+        with app.test_request_context(
+            "/show/ses-remote/__show/events",
+            method="POST",
+            base_url="https://alex.avibe.bot",
+        ):
+            g.authorization_context = remote_context
+            response = await ui_server._show_event_response_from_payload(
+                "ses-remote",
+                {"type": event_type, "actor": "human", "payload": {}},
+            )
+        assert response[1] == 201, event_type
+        assert _show_event_response_json(response)["ok"] is True
+
+    # Local: Agent provenance is allowed, so the store sees it.
+    with app.test_request_context(
+        "/show/ses-local/__show/events",
+        method="POST",
+        base_url="http://127.0.0.1:5123",
+    ):
+        g.authorization_context = trusted_local_context()
+        response = await ui_server._show_event_response_from_payload(
+            "ses-local",
+            {"type": "assistant.mark.created", "actor": "agent", "payload": {}},
+        )
+    assert response[1] == 201
+    appended_types = [t for op, t in accepted if op == "append"]
+    assert appended_types == [
+        "human.intent.submitted",
+        "assistant.mark.resolved",
+        "assistant.mark.created",
+    ]
 
 
 def test_remote_show_runtime_write_is_rejected_before_runtime_invocation(
@@ -2610,6 +3154,13 @@ def test_remote_instance_role_route_matrix(
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
+    config.ack_mode = "reaction"
+    config.show_duration = False
+    config.include_time_info = False
+    config.include_user_info = True
+    config.reply_enhancements = False
+    config.agent_progress_style = "concise"
+    config.save()
     ensure_sqlite_state()
     client = app.test_client()
     client.set_cookie(
@@ -2653,17 +3204,32 @@ def test_remote_instance_role_route_matrix(
     assert config_response.status_code == 200
     assert prefs_read_response.status_code == 200
     assert prefs_read_response.get_json()["background_work_banner_enabled"] is True
-    assert prefs_write_response.status_code == (200 if role == "owner" else 403)
+    # The prefs record is process-global rather than per-principal, so the read
+    # crosses the tunnel for every role while the write stays trusted-local.
+    assert prefs_write_response.status_code == 403
     # Role grants an authorized remote operation, not trusted-local visibility.
     # All remote callers receive the same explicit safe config projection.
-    assert set(config_response.get_json()) == {
+    config_payload = config_response.get_json()
+    assert set(config_payload) == {
+        "ack_mode",
+        "agent_progress_style",
         "capabilities",
+        "include_time_info",
+        "include_user_info",
         "language",
         "mode",
+        "reply_enhancements",
         "setup_state",
+        "show_duration",
         "ui",
         "version",
     }
+    assert config_payload["ack_mode"] == "reaction"
+    assert config_payload["show_duration"] is False
+    assert config_payload["include_time_info"] is False
+    assert config_payload["include_user_info"] is True
+    assert config_payload["reply_enhancements"] is False
+    assert config_payload["agent_progress_style"] == "concise"
     assert conversation_response.status_code == conversation_status
     assert project_response.status_code == project_status
     if role == "viewer":
@@ -3013,6 +3579,94 @@ def test_ra_tq_026_remote_status_ignores_spoofed_cf_ray(monkeypatch, tmp_path):
     assert observed[0][2] == "local"
     assert observed[0][3] is True
     assert config.remote_access.vibe_cloud.public_url == "https://alex.avibe.bot"
+
+
+def test_remote_status_projects_a_remote_safe_payload(monkeypatch, tmp_path):
+    """A remote caller gets only the connector state the UI shows, not host internals.
+
+    The raw ``remote_access.status()`` payload includes the cloudflared PID, the
+    absolute binary path/version, the edge bind-address settings and the
+    network-path diagnostics. None of that is needed across the tunnel and the
+    host-internal fields fingerprint the machine, so the allowlisted status
+    endpoint projects only the public URL, paired/running state, transport
+    protocol and tunnel quality when the request is remote. A local caller still
+    receives the full payload.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+
+    full_payload = {
+        "ok": True,
+        "provider": "vibe_cloud",
+        "enabled": True,
+        "public_url": "https://alex.avibe.bot",
+        "paired": True,
+        "running": True,
+        "pid": 4711,
+        "pid_state": "cloudflared",
+        "binary_found": True,
+        "binary_path": "/usr/local/bin/cloudflared",
+        "binary_version": "2024.1.0",
+        "transport_protocol": "http2",
+        "settings": {
+            "transport_protocol": "http2",
+            "auto_recovery": True,
+            "optimization_profile": "balanced",
+            "edge_ip_version": "4",
+            "edge_bind_address": "192.168.1.5",
+        },
+        "tunnel_quality": {"sampled_at": "2026-08-10T10:00:00Z", "grade": "good"},
+        "network_path": {"provider": "Cloudflare", "asn": 13335},
+    }
+    monkeypatch.setattr(remote_access, "status", lambda *a, **k: dict(full_payload))
+
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(config, "owner@example.com", "user-owner"),
+        domain="alex.avibe.bot",
+    )
+
+    def _status(base_url, environ):
+        return client.get(
+            "/api/remote-access/status",
+            base_url=base_url,
+            environ_base=environ,
+        )
+
+    remote_response = _status("https://alex.avibe.bot", _remote_peer())
+    local_response = _status("http://127.0.0.1:5123", {"REMOTE_ADDR": "127.0.0.1"})
+
+    assert remote_response.status_code == 200
+    remote_body = remote_response.get_json()
+    assert set(remote_body) == {
+        "ok",
+        "provider",
+        "enabled",
+        "public_url",
+        "paired",
+        "running",
+        "transport_protocol",
+        "tunnel_quality",
+    }
+    # The host-internal and diagnostic fields never cross the tunnel.
+    for sensitive in (
+        "pid",
+        "pid_state",
+        "binary_found",
+        "binary_path",
+        "binary_version",
+        "settings",
+        "network_path",
+    ):
+        assert sensitive not in remote_body
+    assert remote_body["public_url"] == config.remote_access.vibe_cloud.public_url
+    assert remote_body["running"] is True
+
+    # A local caller keeps the full payload, including the host internals.
+    assert local_response.status_code == 200
+    assert local_response.get_json() == full_payload
 
 
 def test_trusted_proxy_missing_forwarded_host_fails_closed(monkeypatch, tmp_path):

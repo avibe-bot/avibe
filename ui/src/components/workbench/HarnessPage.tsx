@@ -2043,7 +2043,9 @@ const DetailAgent: React.FC<{ agentName: string | null; agent?: VibeAgentBrief }
       {meta && <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-muted">{meta}</span>}
       {!agent?.archived && (
         <Link
-          to="/agents"
+          // This opens the agent's definition, so it asks for the Definitions tab
+          // explicitly rather than resuming whichever tab was left on.
+          to="/agents?tab=definitions"
           className="ml-auto inline-flex shrink-0 items-center gap-0.5 text-[11px] font-medium text-violet hover:underline"
         >
           {t('harness.detail.openInAgents')}

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ChevronDown, Compass, Download, Funnel, Info, Loader2, Plus, RefreshCw, Search, Terminal, WandSparkles } from 'lucide-react';
+import { ChevronDown, Compass, Download, Funnel, Info, Loader2, Lock, Plus, RefreshCw, Search, Terminal, WandSparkles } from 'lucide-react';
 import clsx from 'clsx';
 
 import { useApi } from '../../context/ApiContext';
@@ -18,6 +18,8 @@ import { ProjectPicker } from './skills/ProjectPicker';
 import { AddSkillDialog } from './skills/AddSkillDialog';
 import { BrowseRegistryDialog } from './skills/BrowseRegistryDialog';
 import { errorMessage } from '@/lib/errorMessage';
+import { Badge } from '../ui/badge';
+import { canManageSkills } from '../../lib/remoteAuth';
 import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
 
 const skillKey = (s: SkillBrief) => `${s.scope}:${s.name}`;
@@ -26,8 +28,12 @@ export const SkillsPage: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
   const { showToast } = useToast();
-  const { capabilities } = useInstanceAuthorization();
-  const canManage = capabilities.can_manage_instance;
+  const { capabilities, remote } = useInstanceAuthorization();
+  // `can_manage_instance` stays true for a remote Instance owner, but every Skill
+  // mutation (add / upload / registry search / dependency install / update /
+  // remove) and the `askill` update check are local-only, so a remote viewer gets
+  // the read-only catalog `GET /api/skills` already permits.
+  const canManage = capabilities.can_manage_instance && canManageSkills({ remote });
 
   const [scope, setScope] = useState<SkillScope>('global');
   const [projects, setProjects] = useState<WorkbenchProject[]>([]);
@@ -284,14 +290,23 @@ export const SkillsPage: React.FC = () => {
 
         <BackendFilter value={backendFilter} onChange={setBackendFilter} />
 
-        {canManage ? <Button type="button" variant="outline" size="xs" onClick={() => setShowBrowse(true)}>
-          <Compass className="size-3.5 text-cyan" />
-          {t('skills.browseRegistry')}
-        </Button> : null}
-        {canManage ? <Button type="button" variant="brand" size="xs" onClick={() => setShowAdd(true)}>
-          <Plus />
-          {t('skills.addSkill')}
-        </Button> : null}
+        {canManage ? (
+          <>
+            <Button type="button" variant="outline" size="xs" onClick={() => setShowBrowse(true)}>
+              <Compass className="size-3.5 text-cyan" />
+              {t('skills.browseRegistry')}
+            </Button>
+            <Button type="button" variant="brand" size="xs" onClick={() => setShowAdd(true)}>
+              <Plus />
+              {t('skills.addSkill')}
+            </Button>
+          </>
+        ) : remote ? (
+          <Badge variant="secondary" title={t('skills.remoteReadOnlyHint')}>
+            <Lock className="size-3" />
+            {t('skills.remoteReadOnly')}
+          </Badge>
+        ) : null}
       </div>
 
       {scope === 'project' && activeProject?.folder_path ? (

@@ -140,8 +140,8 @@ does not claim that an event was detected.
   complete Turn fallback; pending callback delivery defers it.
 - `HFR-441`: persistence under `suppress_delivery` cannot satisfy or shadow a
   later outward receipt, including in a foreground callback target Session.
-- `HFR-442`: bare Turn provenance without a notification contract does not
-  bypass definition-level failure-notice suppression.
+- `HFR-442`: a visible direct error with bare Turn provenance does not bypass
+  definition-level failure-notice suppression.
 - `HFR-443`: a deferred participant's pending callback remains part of the Turn
   callback aggregate and blocks an immediate sibling fallback.
 - `HFR-444`: a Watch in its first in-flight waiter cycle reports unknown waiter
@@ -174,6 +174,14 @@ does not claim that an event was detected.
   receipt through the shared Turn output even when another Run owns the Message.
 - `HFR-459`: independent Activity completions reserve the SQLite writer before
   reading deferred participants and electing their shared Turn fallback owner.
+- `HFR-472`: an empty failed Harness Turn synthesizes the existing Turn failure
+  contract before its immutable snapshot, even before the first participant is
+  attached, so every accepted Run shares one fallback owner instead of emitting
+  one notice per Run. A primary error already delivered through the shared
+  backend-failure path, the message-handler exception path, or auth recovery
+  carries its acknowledgement into the same monotonic contract. All visible
+  paths resolve the Harness delivery override before sending or persisting, so
+  acknowledgement can never be attributed to a different target.
 
 Residual manual check: trigger two one-shot Watches into one failing Turn and
 confirm that the conversation contains one backend error, both Runs are failed,

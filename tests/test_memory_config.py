@@ -181,6 +181,20 @@ def test_memory_config_rejects_explicit_null_block() -> None:
         V2Config.from_payload(_payload(None))  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize(
+    "memory",
+    [
+        {"processing": None},
+        {"processing": {"llm": None, "embedding": {"base_url": "x", "model": "m"}}},
+        {"processing": {"llm": {"base_url": "x", "model": "m"}, "embedding": None}},
+    ],
+)
+def test_memory_config_rejects_explicit_null_nested_blocks(memory: dict) -> None:
+    """An explicitly null processing/llm/embedding block is corruption, not an omission."""
+    with pytest.raises(ValueError, match="must be an object"):
+        V2Config.from_payload(_payload(memory))
+
+
 def test_generic_config_save_preserves_memory_keys(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     original = V2Config.from_payload(

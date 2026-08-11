@@ -8,7 +8,15 @@ const platform = vi.hoisted(() => ({
 vi.mock('./platform', () => platform);
 
 import {
+  canAdministerMemory,
+  canArchiveProjects,
   canEditAgentDefinitions,
+  canEditProjectDefaultAgent,
+  canEditProjectInstructions,
+  canManageSkills,
+  canManageVaultSecrets,
+  canRegisterWebPush,
+  canUseHarness,
   checkRemoteAuthForPath,
   deferRemoteAuthRedirect,
   remoteLoginPath,
@@ -23,6 +31,31 @@ describe('agent definition editing', () => {
 
   it('renders a read-only catalog on a remote instance', () => {
     expect(canEditAgentDefinitions({ remote: true })).toBe(false);
+  });
+});
+
+// Every Workbench control whose endpoint the remote HTTP policy classifies
+// local-only needs this locality check on top of its capability, because
+// `can_manage_instance` / `can_manage_agents` / `can_manage_projects` stay true
+// for a remote Instance owner.
+describe('local-only workbench controls', () => {
+  const predicates = {
+    canManageSkills,
+    canManageVaultSecrets,
+    canRegisterWebPush,
+    canUseHarness,
+    canArchiveProjects,
+    canEditProjectInstructions,
+    canEditProjectDefaultAgent,
+    canAdministerMemory,
+  };
+
+  it.each(Object.entries(predicates))('keeps %s available on a local instance', (_name, predicate) => {
+    expect(predicate({ remote: false })).toBe(true);
+  });
+
+  it.each(Object.entries(predicates))('withholds %s on a remote instance', (_name, predicate) => {
+    expect(predicate({ remote: true })).toBe(false);
   });
 });
 

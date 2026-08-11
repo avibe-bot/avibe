@@ -14,6 +14,7 @@ import { MemorySettingsPanel } from './memory/MemorySettingsPanel';
 import { MemoryStatusPanel } from './memory/MemoryStatusPanel';
 import { useMemoryResource } from './memory/useMemoryResource';
 import { useApi } from '../../context/ApiContext';
+import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
 import type {
   MemoryFailureLogEntry,
   MemoryFailureLogResult,
@@ -23,6 +24,7 @@ import type {
 import { useToast } from '../../context/ToastContext';
 import { memoryRuntimeRecoveryAvailable, memorySetupStage } from '../../lib/memorySettings';
 import { memoryErrorMessage } from '../../lib/memoryRead';
+import { canAdministerMemory } from '../../lib/remoteAuth';
 
 type MemoryTab = 'status' | 'profile' | 'search' | 'log' | 'settings';
 
@@ -41,6 +43,10 @@ export const SettingsMemoryPage: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
   const { showToast } = useToast();
+  const { remote } = useInstanceAuthorization();
+  // The admin log, the settings save and clear / runtime-restart are local-only
+  // in the remote HTTP policy; status, profile and search stay remote-permitted.
+  const canAdminister = canAdministerMemory({ remote });
 
   const [tab, setTab] = useState<MemoryTab>('status');
   const [clearOpen, setClearOpen] = useState(false);
@@ -163,14 +169,26 @@ export const SettingsMemoryPage: React.FC = () => {
       { id: 'status' as const, label: t('memory.tabs.status') },
       { id: 'profile' as const, label: t('memory.tabs.profile') },
       { id: 'search' as const, label: t('memory.tabs.search') },
-      { id: 'log' as const, label: t('memory.tabs.log') },
-      { id: 'settings' as const, label: t('memory.tabs.settings') },
+      ...(canAdminister
+        ? [
+            { id: 'log' as const, label: t('memory.tabs.log') },
+            { id: 'settings' as const, label: t('memory.tabs.settings') },
+          ]
+        : []),
     ],
-    [t],
+    [canAdminister, t],
   );
+
+  // A remote principal that deep-links to an administration tab lands on status
+  // rather than on a panel whose reads and writes it cannot make.
+  const activeTab = tabs.some((entry) => entry.id === tab) ? tab : 'status';
 
   const setupStage = memorySetupStage(runtimeInstalled, settings?.enabled ?? null);
   const runtimeRecoveryAvailable = memoryRuntimeRecoveryAvailable(runtimeInstalled, settings !== null);
+  // Setup and runtime recovery exist to save settings, so they are unreachable
+  // for a principal that cannot administer Memory at all.
+  const administrationUnavailable =
+    !canAdminister && (setupStage === 'runtime-required' || setupStage === 'setup');
 
   const settingsPanel = settings ? (
     <MemorySettingsPanel
@@ -202,11 +220,12 @@ export const SettingsMemoryPage: React.FC = () => {
       subtitle={t('memory.subtitle')}
     >
       {!remoteUnavailable &&
+        canAdminister &&
         settings?.enabled === false &&
         status?.recorder?.reason === 'call_log_corrupt' ? (
         <MemoryRecorderFaultBanner status={status} onClearAll={() => setClearOpen(true)} />
       ) : null}
-      {!remoteUnavailable && settings?.enabled === true ? (
+      {!remoteUnavailable && canAdminister && settings?.enabled === true ? (
         <div className="flex justify-end">
           <Button
             variant="secondary"
@@ -219,7 +238,7 @@ export const SettingsMemoryPage: React.FC = () => {
           </Button>
         </div>
       ) : null}
-      {remoteUnavailable ? (
+      {remoteUnavailable || administrationUnavailable ? (
         <div className="flex flex-col items-center gap-2 rounded-2xl border border-border bg-surface p-10 text-center">
           <ShieldAlert className="size-6 text-muted" />
           <span className="text-[14px] font-semibold text-foreground">{t('memory.remoteUnavailable.title')}</span>
@@ -259,11 +278,11 @@ export const SettingsMemoryPage: React.FC = () => {
         <>
           <div data-testid="memory-tabs-scroll" className="max-w-full overflow-x-auto pb-1">
             <div className="min-w-max">
-              <SegmentedRadio value={tab} onChange={setTab} options={tabs} ariaLabel={t('memory.title')} tone="mint" />
+              <SegmentedRadio value={activeTab} onChange={setTab} options={tabs} ariaLabel={t('memory.title')} tone="mint" />
             </div>
           </div>
 
-          {tab === 'status' && (
+          {activeTab === 'status' && (
             <MemoryStatusPanel
               status={status}
               failures={failuresRead.data?.items ?? []}
@@ -275,15 +294,15 @@ export const SettingsMemoryPage: React.FC = () => {
                 void loadStatus();
                 void loadFailures();
               }}
-              onOpenSettings={() => setTab('settings')}
+              onOpenSettings={canAdminister ? () => setTab('settings') : undefined}
             />
           )}
 
-          {tab === 'profile' && <MemoryProfilePanel enabled={!!settings?.enabled} />}
+          {activeTab === 'profile' && <MemoryProfilePanel enabled={!!settings?.enabled} />}
 
-          {tab === 'search' && <MemorySearchPanel enabled={!!settings?.enabled} />}
+          {activeTab === 'search' && <MemorySearchPanel enabled={!!settings?.enabled} />}
 
-          {tab === 'log' && settings ? (
+          {activeTab === 'log' && settings ? (
             <MemoryLogPanel
               key={logGeneration}
               enabled={settings.enabled}
@@ -292,7 +311,7 @@ export const SettingsMemoryPage: React.FC = () => {
             />
           ) : null}
 
-          {tab === 'settings' &&
+          {activeTab === 'settings' &&
             (!settingsRead.loaded && !settings ? (
               <div className="flex items-center gap-2 px-1 text-sm text-muted">
                 <Loader2 className="size-4 animate-spin" />

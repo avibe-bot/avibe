@@ -34,7 +34,17 @@ from starlette.datastructures import UploadFile as StarletteUploadFile
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.formparsers import MultiPartException, MultiPartParser
 
-from vibe.ui_compat import CompatApp, Response, TEST_REMOTE_ADDR_HEADER, g, jsonify, redirect, request, send_file
+from vibe.ui_compat import (
+    CompatApp,
+    Response,
+    TEST_REMOTE_ADDR_HEADER,
+    g,
+    is_json_content_type,
+    jsonify,
+    redirect,
+    request,
+    send_file,
+)
 
 from config import paths
 from config.v2_config import CONFIG_LOCK, V2Config
@@ -2297,13 +2307,17 @@ def enforce_remote_access_cookie():
                     show_page_id
                 ) or _show_page_resource_access_allowed(context, show_page_id)
                 reauth_attempted = request.args.get(REMOTE_SHOW_PAGE_REAUTH_PARAM) == "1"
+                wants_html = "text/html" in request.headers.get("Accept", "")
                 raw_next = request.full_path if request.query_string else request.path
-                if reauth_attempted and resource_allowed:
+                if reauth_attempted and resource_allowed and wants_html:
                     return redirect(_strip_show_page_reauth_param(raw_next))
-                if not reauth_attempted and not resource_allowed:
-                    if _auth_rate_limited():
-                        return _auth_rate_limit_response()
-                    return _redirect_to_vibe_cloud_login(config, show_page_reauth=True)
+                if not resource_allowed:
+                    if not wants_html:
+                        return jsonify({"ok": False, "error": "remote_access_login_required"}), 401
+                    if not reauth_attempted:
+                        if _auth_rate_limited():
+                            return _auth_rate_limit_response()
+                        return _redirect_to_vibe_cloud_login(config, show_page_reauth=True)
         g.authorization_context = context
         g.remote_session_payload = payload
         g.remote_authorization_refresh_at = remote_access.session_authorization_refresh_deadline(payload)
@@ -2506,7 +2520,7 @@ def _remote_payload_is_allowed(method: str, path: str, payload: Any) -> bool:
     if normalized_method == "POST" and path == "/api/sessions":
         return _payload_has_only_fields(payload, {"project_id", "title"})
     if normalized_method == "PATCH" and re.fullmatch(r"/api/sessions/[^/]+", path):
-        return _payload_has_only_fields(payload, {"pinned", "title", "visibility"})
+        return _payload_has_only_fields(payload, {"title"})
     if normalized_method == "PATCH" and re.fullmatch(r"/api/projects/[^/]+", path):
         return _payload_has_only_fields(payload, {"display_name"})
     if normalized_method == "POST" and path == "/api/projects":
@@ -5696,14 +5710,36 @@ def remote_access_status():
         # control or route recovery, so a locally spoofed value can at most
         # change the caller's own displayed ingress location.
         client_colo = cloudflare_network.parse_cf_ray_colo(request.headers.get("CF-Ray"))
-    return jsonify(
-        remote_access.status(
-            config,
-            client_colo=client_colo,
-            client_access="remote" if remote_request else "local",
-            include_network_path=True,
-        )
+    status_payload = remote_access.status(
+        config,
+        client_colo=client_colo,
+        client_access="remote" if remote_request else "local",
+        include_network_path=True,
     )
+    if remote_request:
+        # The raw status exposes host internals — cloudflared PID, absolute
+        # binary path/version, the edge bind-address settings, and network-path
+        # diagnostics — none of which a remote caller needs and several of which
+        # fingerprint the host. The remote-visible UI (the Dashboard connector
+        # card) consumes only the public URL, the paired/running connector
+        # state, and the tunnel quality, so project exactly that and drop the
+        # rest at the boundary rather than relying on every future field staying
+        # inert across the tunnel.
+        status_payload = {
+            key: status_payload[key]
+            for key in (
+                "ok",
+                "provider",
+                "enabled",
+                "public_url",
+                "paired",
+                "running",
+                "transport_protocol",
+                "tunnel_quality",
+            )
+            if key in status_payload
+        }
+    return jsonify(status_payload)
 
 
 @app.route("/api/remote-access/vibe-cloud/pair", methods=["POST"])
@@ -6004,7 +6040,16 @@ def cloud_management_auth_callback():
         return _auth_rate_limit_response()
     state = str(request.args.get("state") or "")
     upstream_error = str(request.args.get("error") or "")
+    browser_id = request.cookies.get(cloud_management.BROWSER_COOKIE_NAME) or ""
+    # This route is unauthenticated and CSRF-exempt, so a cross-site top-level
+    # link reaches it with the `SameSite=Lax` management cookies attached. Only
+    # a callback that resolves to this browser's own live handshake may tear
+    # down its existing grant; an unrelated or forged one leaves the current
+    # session exactly as it was instead of forcing a logout.
+    owns_flow = cloud_management.callback_owns_flow(state, browser_id)
     if upstream_error:
+        if not owns_flow:
+            return _cloud_management_redirect("/admin/organization/overview", upstream_error)
         next_path = cloud_management.fail_handshake(state)
         response = _cloud_management_redirect(next_path, upstream_error)
         _delete_cloud_management_cookie(response, cloud_management.HANDLE_COOKIE_NAME)
@@ -6033,6 +6078,8 @@ def cloud_management_auth_callback():
             failure_next_path,
             code,
         )
+        if not owns_flow:
+            return response
         cloud_management.invalidate_grant(
             request.cookies.get(cloud_management.HANDLE_COOKIE_NAME)
         )
@@ -7810,14 +7857,23 @@ def _resolve_project_dir(project_id):
     an unknown id (→ 404) and _ProjectNoFolder when the project's folder is
     unset/blank, so callers can degrade gracefully rather than passing an empty
     cwd to askill (which would surface as a raw ``project folder not found:``).
+
+    Project-scoped skill routes are remote-readable, so the project lookup must
+    carry the current request's authorization context; a resource ACL on the
+    skill is an additional gate, not a substitute for Project access.
     """
     if not project_id:
         return None
     from storage import projects_service
 
+    authorization_context = getattr(g, "authorization_context", None)
     engine = _projects_engine()
     with engine.connect() as conn:
-        project = projects_service.get_project(conn, project_id)
+        project = projects_service.get_project(
+            conn,
+            project_id,
+            authorization_context=authorization_context,
+        )
     folder = (project.get("folder_path") or "").strip()
     if not folder:
         raise _ProjectNoFolder(project_id)
@@ -7841,6 +7897,14 @@ def _project_no_folder_error():
         ),
         400,
     )
+
+
+def _skills_project_id_kwargs(project_dir: str | None, project_id: str | None) -> dict[str, str]:
+    """Thread stable project ids only for real project-scoped skill requests."""
+
+    if project_dir is None or project_id is None:
+        return {}
+    return {"project_id": project_id}
 
 
 @app.route("/api/projects/<project_id>/agents-md", methods=["GET"])
@@ -7929,18 +7993,30 @@ async def skills_list():
 
     scope = request.args.get("scope") or "all"
     backends = [b for b in (request.args.get("backends") or "").split(",") if b]
+    project_id = request.args.get("project_id")
     try:
-        project_dir = _resolve_project_dir(request.args.get("project_id"))
+        project_dir = _resolve_project_dir(project_id)
     except LookupError as err:
         return _project_not_found(err)
     except _ProjectNoFolder:
         # Folderless project: no project-scoped skills are possible — show
         # global skills (with a flag) instead of erroring the whole page.
-        result = await api.list_skills(scope="global", backends=backends or None)
+        result = await api.list_skills(
+            scope="global",
+            backends=backends or None,
+            **_skills_project_id_kwargs(None, project_id),
+        )
         if isinstance(result, dict) and result.get("ok"):
             result = {**result, "project_no_folder": True}
         return jsonify(result)
-    return jsonify(await api.list_skills(scope=scope, project_dir=project_dir, backends=backends or None))
+    return jsonify(
+        await api.list_skills(
+            scope=scope,
+            project_dir=project_dir,
+            backends=backends or None,
+            **_skills_project_id_kwargs(project_dir, project_id),
+        )
+    )
 
 
 @app.route("/api/skills/preview", methods=["POST"])
@@ -7948,13 +8024,20 @@ async def skills_preview():
     from vibe import api
 
     payload = request.json or {}
+    project_id = payload.get("project_id")
     try:
-        project_dir = _resolve_project_dir(payload.get("project_id"))
+        project_dir = _resolve_project_dir(project_id)
     except LookupError as err:
         return _project_not_found(err)
     except _ProjectNoFolder:
         project_dir = None  # preview doesn't need the project folder (gh/zip sources)
-    return jsonify(await api.preview_skill_source(str(payload.get("source") or ""), project_dir=project_dir))
+    return jsonify(
+        await api.preview_skill_source(
+            str(payload.get("source") or ""),
+            project_dir=project_dir,
+            **_skills_project_id_kwargs(project_dir, project_id),
+        )
+    )
 
 
 @app.route("/api/skills", methods=["POST"])
@@ -7962,8 +8045,9 @@ async def skills_add():
     from vibe import api
 
     payload = request.json or {}
+    project_id = payload.get("project_id")
     try:
-        project_dir = _resolve_project_dir(payload.get("project_id"))
+        project_dir = _resolve_project_dir(project_id)
     except LookupError as err:
         return _project_not_found(err)
     except _ProjectNoFolder:
@@ -7973,6 +8057,7 @@ async def skills_add():
             str(payload.get("source") or ""),
             scope=payload.get("scope") or "project",
             project_dir=project_dir,
+            project_id=project_id,
             backends=payload.get("backends") or None,
             all_skills=bool(payload.get("all")),
             skill=payload.get("skill") or None,
@@ -7986,8 +8071,9 @@ async def skills_remove(name):
     from vibe import api
 
     backends = [b for b in (request.args.get("backends") or "").split(",") if b]
+    project_id = request.args.get("project_id")
     try:
-        project_dir = _resolve_project_dir(request.args.get("project_id"))
+        project_dir = _resolve_project_dir(project_id)
     except LookupError as err:
         return _project_not_found(err)
     except _ProjectNoFolder:
@@ -7997,6 +8083,7 @@ async def skills_remove(name):
             name,
             scope=request.args.get("scope") or "project",
             project_dir=project_dir,
+            project_id=project_id,
             backends=backends or None,
         )
     )
@@ -8014,14 +8101,15 @@ async def skills_check():
     from vibe import api
 
     scope = request.args.get("scope") or "project"
+    project_id = request.args.get("project_id")
     try:
-        project_dir = _resolve_project_dir(request.args.get("project_id"))
+        project_dir = _resolve_project_dir(project_id)
     except LookupError as err:
         return _project_not_found(err)
     except _ProjectNoFolder:
         # Folderless project has no project-local skills, so nothing to check.
         return jsonify({"ok": True, "skills": []})
-    return jsonify(await api.check_skills(scope=scope, project_dir=project_dir))
+    return jsonify(await api.check_skills(scope=scope, project_dir=project_dir, project_id=project_id))
 
 
 @app.route("/api/skills/update", methods=["POST"])
@@ -8029,8 +8117,9 @@ async def skills_update():
     from vibe import api
 
     payload = request.json or {}
+    project_id = payload.get("project_id")
     try:
-        project_dir = _resolve_project_dir(payload.get("project_id"))
+        project_dir = _resolve_project_dir(project_id)
     except LookupError as err:
         return _project_not_found(err)
     except _ProjectNoFolder:
@@ -8040,6 +8129,7 @@ async def skills_update():
             str(payload.get("name") or ""),
             scope=payload.get("scope") or "project",
             project_dir=project_dir,
+            project_id=project_id,
         )
     )
 
@@ -8049,15 +8139,22 @@ async def skills_upload():
     from vibe import api
 
     payload = request.json or {}
+    project_id = payload.get("project_id")
     try:
-        project_dir = _resolve_project_dir(payload.get("project_id"))
+        project_dir = _resolve_project_dir(project_id)
     except LookupError as err:
         return _project_not_found(err)
     except _ProjectNoFolder:
         # The zip is unpacked to a temp dir (project-independent); the install
         # step picks the scope. Drop the cwd like preview rather than erroring.
         project_dir = None
-    return jsonify(await api.upload_skill_zip(payload, project_dir=project_dir))
+    return jsonify(
+        await api.upload_skill_zip(
+            payload,
+            project_dir=project_dir,
+            **_skills_project_id_kwargs(project_dir, project_id),
+        )
+    )
 
 
 @app.route("/api/browse/mkdir", methods=["POST"])
@@ -8380,6 +8477,7 @@ def _session_runtime_projection(
     *,
     pending_input_count: int | None = None,
     controller_available: bool | None = True,
+    authorization_context=None,
 ) -> dict[str, Any]:
     """Normalize the controller's orthogonal Session runtime axes for the UI."""
 
@@ -8415,6 +8513,12 @@ def _session_runtime_projection(
         if isinstance(raw_activities, list)
         else []
     )
+    if getattr(authorization_context, "is_remote", False):
+        activities = [
+            item
+            for item in activities
+            if str(item.get("item_kind") or "") == "backend_activity"
+        ]
     projection: dict[str, Any] = {
         # Retained as a read-only compatibility alias for older clients.
         "in_flight": None if foreground == "unknown" else foreground == "running",
@@ -8515,18 +8619,21 @@ async def sessions_bootstrap(session_id: str):
         turn_state = _session_runtime_projection(
             turn_body,
             pending_input_count=len(visible_queued),
+            authorization_context=authorization_context,
         )
     except internal_client.InternalServerUnavailable:
         turn_state = _session_runtime_projection(
             None,
             pending_input_count=len(visible_queued),
             controller_available=False,
+            authorization_context=authorization_context,
         )
     except internal_client.InternalServerTimeout:
         turn_state = _session_runtime_projection(
             None,
             pending_input_count=len(visible_queued),
             controller_available=None,
+            authorization_context=authorization_context,
         )
 
     return jsonify(
@@ -9702,10 +9809,37 @@ def media_get(token: str):
     return _registered_media_response(token)
 
 
+def _media_row_show_page_access_allowed(context: Any, row: dict[str, Any]) -> bool:
+    """Whether *context* may still read a Show annotation's screenshot bytes.
+
+    A `show_annotation` screenshot is part of the page it was drawn on, so it
+    inherits that page's resource ACL rather than only the Project/session role
+    the rest of the media proxy checks. Without this the media token outlives
+    the access that produced it: a caller who saw a private page once keeps its
+    screenshot readable after the page policy stops naming them, and being the
+    Instance owner does not override the page ACL either -- a direct read of a
+    page owned by another subject is denied, so its screenshot must be too.
+
+    Media from any other source is unaffected and keeps the Project/session
+    authorization below as its only gate.
+    """
+
+    if (row.get("source") or "") != "show_annotation":
+        return True
+    session_id = row.get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        # Fail closed: an annotation screenshot with no page to check against
+        # cannot be authorized, and serving it would be the exact bypass above.
+        return False
+    return _show_page_resource_access_allowed(context, session_id)
+
+
 def _request_can_read_media_row(conn, token: str, row: dict[str, Any]) -> bool:
     from storage import media_service, project_access_service
 
     context = getattr(g, "authorization_context", None)
+    if not _media_row_show_page_access_allowed(context, row):
+        return False
     if context is None or context.is_instance_owner:
         return True
     session_ids = media_service.referenced_session_ids(conn, token)
@@ -9814,81 +9948,169 @@ def media_meta(token: str):
     )
 
 
-@app.route("/api/sessions/<session_id>/attachments", methods=["POST"])
-def sessions_attachments_create(session_id: str):
-    """Persist a user-uploaded file (base64 JSON) and register it for the media
-    proxy. Returns an opaque token + proxy URL; the browser never holds a path.
-    base64-over-JSON keeps uploads on the existing auth + CSRF-guarded compat
-    route (the compat layer parses JSON, not multipart)."""
-    import base64
-    import re
-    import uuid
+_WORKBENCH_ATTACHMENT_ERROR_CODES = {
+    "session_not_found",
+    "file_required",
+    "empty_file",
+    "too_large",
+    "invalid_upload",
+    "upload_failed",
+}
 
-    from config import paths
-    from core.services import sessions as workbench_sessions_service
-    from storage import media_service
 
-    payload = request.json or {}
-    name = (payload.get("name") or "upload").strip() or "upload"
-    mime = (payload.get("mime") or payload.get("content_type") or "application/octet-stream").strip()
-    data_b64 = payload.get("data") or ""
-    if not isinstance(data_b64, str) or not data_b64:
-        return jsonify({"error": "data is required"}), 400
-    if data_b64.startswith("data:") and "," in data_b64:
-        data_b64 = data_b64.split(",", 1)[1]
-    try:
-        raw = base64.b64decode(data_b64)
-    except Exception:
-        return jsonify({"error": "invalid base64"}), 400
-    if not raw:
-        return jsonify({"error": "empty file"}), 400
-    if len(raw) > 25 * 1024 * 1024:
-        return jsonify({"error": "file too large"}), 413
+async def _workbench_attachment_error(code: str, status: int):
+    from core.workbench_media import MAX_WORKBENCH_ATTACHMENT_BYTES
+    from core.services import settings as settings_service
 
-    engine = _projects_engine()
-    try:
-        with engine.connect() as conn:
-            session = workbench_sessions_service.get_session(conn, session_id)
-    except LookupError:
-        return jsonify({"error": "session_not_found"}), 404
+    message_code = code if code in _WORKBENCH_ATTACHMENT_ERROR_CODES else "invalid_upload"
+    config = await asyncio.to_thread(settings_service.load_config_or_default)
+    extra: dict[str, Any] = {}
+    if code == "too_large":
+        extra["max_file_bytes"] = MAX_WORKBENCH_ATTACHMENT_BYTES
+    return _coded_error_response(
+        code,
+        t(f"error.workbenchAttachment.{message_code}", config.language),
+        status,
+        **extra,
+    )
 
-    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", name.rsplit("/", 1)[-1]).strip("_") or "upload"
-    upload_dir = paths.get_attachments_dir() / "avibe" / session_id
-    upload_dir.mkdir(parents=True, exist_ok=True)
-    local_path = upload_dir / f"{uuid.uuid4().hex[:8]}_{safe}"
-    local_path.write_bytes(raw)
 
-    kind = "image" if mime.startswith("image/") else "file"
-    with engine.begin() as conn:
-        token = media_service.register(
-            conn,
-            scope_id=session["scope_id"],
-            session_id=session_id,
-            kind=kind,
-            source="user_upload",
-            local_path=str(local_path.resolve()),
-            file_name=name,
-            content_type=mime,
-        )
-        # Read back the pixel dimensions register() captured (NULL for non-images
-        # / unreadable) so the client can reserve the image box and never shift the
-        # transcript when the upload renders.
-        row = media_service.get_by_token(conn, token)
+def _workbench_attachment_response(result: Any):
     return (
         jsonify(
             {
-                "token": token,
-                "name": name,
-                "mime": mime,
-                "size": len(raw),
-                "kind": kind,
-                "url": f"/api/media/{token}",
-                "width": row.get("width_px") if row else None,
-                "height": row.get("height_px") if row else None,
+                "token": result.token,
+                "name": result.name,
+                "mime": result.mime,
+                "size": result.size,
+                "kind": result.kind,
+                "url": f"/api/media/{result.token}",
+                "width": result.width,
+                "height": result.height,
             }
         ),
-        201,
+        201 if result.created else 200,
     )
+
+
+@app.post("/api/sessions/{session_id}/attachments", include_in_schema=False)
+async def sessions_attachments_create(session_id: str, starlette_request: FastAPIRequest):
+    """Stream a user upload into the session's media store.
+
+    Multipart is the current browser contract. Base64 JSON remains accepted so
+    a page opened before a service upgrade can finish uploading without a forced
+    refresh; it should not be used by new clients.
+    """
+
+    async def handler():
+        from core import workbench_media
+        from core.file_browser_service import FileBrowserError
+        from core.services import sessions as workbench_sessions_service
+
+        def load_session():
+            engine = _projects_engine()
+            with engine.connect() as conn:
+                session = workbench_sessions_service.get_session(conn, session_id)
+            return engine, session
+
+        try:
+            engine, session = await asyncio.to_thread(load_session)
+        except LookupError:
+            return await _workbench_attachment_error("session_not_found", 404)
+
+        form = None
+        try:
+            source = None
+            legacy_data_b64 = None
+            content_type = starlette_request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+            if content_type == "multipart/form-data":
+                _validate_file_upload_content_length(
+                    starlette_request.headers,
+                    workbench_media.MAX_WORKBENCH_ATTACHMENT_BYTES,
+                )
+                form = await _parse_file_upload_form(
+                    starlette_request,
+                    max_file_bytes=workbench_media.MAX_WORKBENCH_ATTACHMENT_BYTES,
+                )
+                upload = form.get("file")
+                if not isinstance(upload, StarletteUploadFile):
+                    return await _workbench_attachment_error("file_required", 400)
+                await upload.seek(0)
+                source = upload.file
+                name = upload.filename
+                mime = upload.content_type
+                upload_id = form.get("upload_id")
+            elif is_json_content_type(content_type):
+                payload = request.json or {}
+                data_b64 = payload.get("data") or ""
+                if not isinstance(data_b64, str) or not data_b64:
+                    return await _workbench_attachment_error("file_required", 400)
+                legacy_data_b64 = data_b64
+                name = payload.get("name")
+                mime = payload.get("mime") or payload.get("content_type")
+                upload_id = payload.get("upload_id")
+            else:
+                return await _workbench_attachment_error("invalid_upload", 415)
+
+            stable_upload_id = workbench_media.normalize_workbench_upload_id(upload_id)
+
+            def persist_attachment():
+                attachment_source = source
+                if legacy_data_b64 is not None:
+                    attachment_source = workbench_media.decode_legacy_workbench_attachment(
+                        legacy_data_b64
+                    )
+                if attachment_source is None:
+                    raise workbench_media.WorkbenchAttachmentUploadError(
+                        "file_required",
+                        "File is required",
+                        400,
+                    )
+                with workbench_media.workbench_attachment_upload_lock(
+                    session_id, stable_upload_id
+                ):
+                    result = None
+                    try:
+                        with engine.begin() as conn:
+                            result = workbench_media.materialize_workbench_attachment(
+                                conn,
+                                scope_id=session["scope_id"],
+                                session_id=session_id,
+                                file_name=name,
+                                content_type=mime,
+                                source=attachment_source,
+                                upload_id=stable_upload_id,
+                            )
+                        return result
+                    except Exception:
+                        # Registration and commit are one logical publish. Keep
+                        # rollback under the same key lock so a waiting retry
+                        # cannot recreate this path before cleanup completes.
+                        if result is not None and result.created:
+                            Path(result.path).unlink(missing_ok=True)
+                        raise
+
+            result = await asyncio.to_thread(persist_attachment)
+            return _workbench_attachment_response(result)
+        except workbench_media.WorkbenchAttachmentUploadError as exc:
+            return await _workbench_attachment_error(exc.code, exc.status)
+        except MultiPartException as exc:
+            if "too large" in str(exc).lower():
+                return await _workbench_attachment_error("too_large", 413)
+            return await _workbench_attachment_error("invalid_upload", 400)
+        except FileBrowserError as exc:
+            code = "too_large" if exc.code == "too_large" else "invalid_upload"
+            return await _workbench_attachment_error(code, exc.status_code)
+        except StarletteHTTPException:
+            return await _workbench_attachment_error("invalid_upload", 400)
+        except Exception:
+            logger.exception("workbench attachment upload failed for session %s", session_id)
+            return await _workbench_attachment_error("upload_failed", 500)
+        finally:
+            if form is not None:
+                await form.close()
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
 
 
 @app.route("/api/asr/transcribe", methods=["POST"])
@@ -10560,6 +10782,7 @@ async def sessions_turn_state(session_id: str):
             _session_runtime_projection(
                 None,
                 controller_available=False,
+                authorization_context=getattr(g, "authorization_context", None),
             )
         )
     except internal_client.InternalServerTimeout:
@@ -10575,7 +10798,10 @@ async def sessions_turn_state(session_id: str):
             504,
         )
     body = result.get("body") or {}
-    projection = _session_runtime_projection(body)
+    projection = _session_runtime_projection(
+        body,
+        authorization_context=getattr(g, "authorization_context", None),
+    )
     projection["recovered_agent_status"] = bool(
         body.get("recovered_agent_status", False)
     )
@@ -10669,17 +10895,36 @@ def sessions_draft_set(session_id: str):
     return jsonify({"ok": True})
 
 
-def _workbench_event_visible_to_context(context, event_type: str, payload: str) -> bool:
-    if context is None or context.is_instance_owner:
-        return True
-    if event_type in {"authorization.changed", "workbench.events.bridge.status"}:
-        return True
+def _workbench_event_data(payload: str) -> dict[str, Any] | None:
     try:
         envelope = json.loads(payload)
     except (TypeError, json.JSONDecodeError):
-        return False
+        return None
     data = envelope.get("data") if isinstance(envelope, dict) else None
-    if not isinstance(data, dict):
+    return data if isinstance(data, dict) else None
+
+
+def _workbench_event_visible_to_context(context, event_type: str, payload: str) -> bool:
+    if context is None:
+        return True
+    if event_type == "show.event":
+        # A Show Page carries its own resource ACL, and being the Instance owner
+        # does not override it: a direct read of a page whose policy names
+        # another subject is denied, so the workbench stream must not hand the
+        # same page's annotation text and attachment metadata to that owner
+        # either. Fail closed when the frame has no session to check.
+        data = _workbench_event_data(payload)
+        session_id = data.get("session_id") if data else None
+        if not isinstance(session_id, str) or not session_id:
+            return False
+        if not _show_page_resource_access_allowed(context, session_id):
+            return False
+    if context.is_instance_owner:
+        return True
+    if event_type in {"authorization.changed", "workbench.events.bridge.status"}:
+        return True
+    data = _workbench_event_data(payload)
+    if data is None:
         return False
 
     from storage import project_access_service
@@ -10702,8 +10947,29 @@ def _workbench_event_visible_to_context(context, event_type: str, payload: str) 
     return False
 
 
-def _workbench_event_payload_for_context(context, event_type: str, payload: str) -> str:
-    """Project-filter aggregate payloads whose values depend on the recipient."""
+def _workbench_event_payload_for_context(context, event_type: str, payload: str) -> str | None:
+    """Project-filter aggregate payloads whose values depend on the recipient.
+
+    Returns ``None`` when the event cannot be projected safely for this
+    recipient, in which case the caller drops the frame.
+    """
+    if event_type == "show.event" and context is not None and context.is_remote:
+        # A Show annotation event carries the absolute host path of its
+        # materialized screenshot. Remote subscribers read the image by
+        # attachment id, so drop the path rather than stream the host layout —
+        # and drop the whole frame if it cannot be projected.
+        try:
+            envelope = json.loads(payload)
+        except (TypeError, json.JSONDecodeError):
+            return None
+        data = envelope.get("data") if isinstance(envelope, dict) else None
+        if not isinstance(data, dict):
+            return None
+        return json.dumps(
+            {**envelope, "data": _remote_safe_show_event_payload(data)},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
     if event_type == "vaults.updated" and context is not None and context.is_remote:
         try:
             envelope = json.loads(payload)
@@ -10844,6 +11110,8 @@ async def workbench_events():
                         event_type,
                         payload,
                     )
+                    if payload is None:
+                        continue
                     if (
                         event_type == "authorization.changed"
                         and authorization_context is not None
@@ -11686,7 +11954,12 @@ def _is_show_runtime_sensitive_file_segment(segment: str) -> bool:
     )
 
 
-def _is_show_page_runtime_denied_path(asset_path: str, *, session_id: str, public: bool = False) -> bool:
+def _is_show_page_runtime_denied_path(
+    asset_path: str,
+    *,
+    session_id: str,
+    confine_to_workspace: bool = False,
+) -> bool:
     decoded = _decode_show_page_asset_path(asset_path)
     segments = [segment for segment in decoded.split("/") if segment]
     if any(_is_show_runtime_sensitive_file_segment(segment) for segment in segments):
@@ -11696,7 +11969,11 @@ def _is_show_page_runtime_denied_path(asset_path: str, *, session_id: str, publi
     # Vite `@fs/<abs>` paths can be non-dot (e.g. a workspace symlink `evil.txt`),
     # so classify them fully here rather than through the dot-segment fast path.
     if decoded.startswith("@fs/"):
-        return _is_denied_show_page_at_fs_path(decoded, session_id=session_id, public=public)
+        return _is_denied_show_page_at_fs_path(
+            decoded,
+            session_id=session_id,
+            confine_to_workspace=confine_to_workspace,
+        )
     dot_segments = [index for index, segment in enumerate(segments) if segment.startswith(".")]
     if not dot_segments:
         return False
@@ -11708,7 +11985,7 @@ def _is_show_page_runtime_denied_path(asset_path: str, *, session_id: str, publi
     return not vite_dependency
 
 
-def _is_denied_show_page_at_fs_path(decoded: str, *, session_id: str, public: bool) -> bool:
+def _is_denied_show_page_at_fs_path(decoded: str, *, session_id: str, confine_to_workspace: bool) -> bool:
     # Recover the absolute filesystem path from Vite's `/@fs/<abs>` convention,
     # mirroring Vite's own fsPathFromId. This route stripped the URL's single
     # leading slash, so a POSIX request arrives as `@fs/home/...` (restore the
@@ -11746,14 +12023,17 @@ def _is_denied_show_page_at_fs_path(decoded: str, *, session_id: str, public: bo
     try:
         workspace_relative = target.relative_to(workspace)
     except ValueError:
-        # The resolved target is outside the workspace. On the PUBLIC surface,
-        # untrusted viewers must not read through a workspace file that symlinks OUT
-        # of the workspace (a symlink escape), so confine them to the workspace. The
-        # private authoring surface keeps this — an agent may legitimately symlink a
-        # disk file into its own page — and a genuine dependency path (its parent is
-        # literally outside the workspace) is still deferred to the Show Runtime's
-        # fs allowlist on both surfaces.
-        if public:
+        # The resolved target is outside the workspace. Untrusted viewers must not
+        # read through a workspace file that symlinks OUT of the workspace (a
+        # symlink escape), so confine them to the workspace. That covers the PUBLIC
+        # surface and any REMOTE viewer of the private `/show/` surface: remote
+        # collaborators reach the page over the tunnel and must never be able to
+        # read out-of-Project disk files through an authored symlink. Trusted-local
+        # authoring keeps the escape — an agent may legitimately symlink a disk file
+        # into its own page — and a genuine dependency path (its parent is literally
+        # outside the workspace) is still deferred to the Show Runtime's fs
+        # allowlist on every surface.
+        if confine_to_workspace:
             # Compare the requested path lexically (symlinks NOT followed here;
             # `..` was already rejected): a request ROOTED in the workspace whose
             # real target escapes it is a symlink escape — via a symlinked file OR
@@ -11952,12 +12232,36 @@ async def _show_event_response_from_payload(
     allow_dispatch: bool = True,
 ):
     context = getattr(g, "authorization_context", None)
-    if (
-        context is not None
-        and context.is_remote
-        and show_event_request_requests_dispatch(payload)
-    ):
+    is_remote_caller = context is not None and context.is_remote
+    if is_remote_caller and show_event_request_requests_dispatch(payload):
         return _remote_execution_disabled_response()
+    if is_remote_caller or public:
+        # A remote caller — whether an authenticated editor on the HTML route or
+        # a public share visitor — may only author human input: a typed intent or
+        # an annotation lifecycle event, plus resolving a mark the Agent drew.
+        # Every other supported type (`assistant.mark.*`, `system.*`,
+        # `assistant.page.*`) is Agent/system provenance: `ShowSessionEventStore`
+        # derives the actor from the type and would persist it as `author="agent"`,
+        # so accepting one from across the tunnel lets a collaborator forge Agent
+        # or system activity and corrupt the shared transcript. This is the same
+        # human-event / mark-resolution allowlist the public route enforces; the
+        # local CLI route (`_is_cli_show_event_request`) and trusted-local HTML
+        # callers keep the full supported set.
+        event_type = str(payload.get("type") or "").strip()
+        if event_type not in HUMAN_EVENT_TYPES and event_type != "assistant.mark.resolved":
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "code": "unsupported_event_type",
+                        "error": "Remote Show Page writes require a supported human event or mark resolution type.",
+                    }
+                ),
+                400,
+            )
+    # The echo of the stored event goes back to whoever posted it, so a remote
+    # author must not learn the local screenshot path from its own response.
+    remote = not public and _is_remote_show_page_request()
     if show_event_payload_session_mismatch(session_id, payload):
         return (
             jsonify(
@@ -11998,6 +12302,7 @@ async def _show_event_response_from_payload(
                             event_payload,
                             public=public,
                             public_share_id=public_share_id,
+                            remote=remote,
                         ),
                     }
                 ),
@@ -12015,6 +12320,7 @@ async def _show_event_response_from_payload(
                             event_payload,
                             public=public,
                             public_share_id=public_share_id,
+                            remote=remote,
                         ),
                     }
                 ),
@@ -12028,6 +12334,7 @@ async def _show_event_response_from_payload(
                     event_payload,
                     public=public,
                     public_share_id=public_share_id,
+                    remote=remote,
                 ),
             }
         ),
@@ -12292,14 +12599,43 @@ def _legacy_show_event_dispatch_text(event_payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _remote_safe_show_event_payload(event_payload: dict[str, Any]) -> dict[str, Any]:
+    """Drop the absolute host screenshot path from one Show event.
+
+    ``ShowSessionEventStore`` records ``payload.screenshot.path`` as a local
+    filesystem path so local tooling can read the materialized image. A remote
+    subscriber reads the same bytes through its attachment id, so the path is
+    useless to it and only discloses the host's directory layout — the public
+    Show projection strips it for exactly that reason, and any authorized remote
+    reader (workbench SSE, private Show page events, its own POST echo) must get
+    the same treatment.
+    """
+
+    payload = event_payload.get("payload")
+    if not isinstance(payload, dict):
+        return event_payload
+    screenshot = payload.get("screenshot")
+    if not isinstance(screenshot, dict) or "path" not in screenshot:
+        return event_payload
+    local_path = screenshot.get("path")
+    safe_screenshot = {key: value for key, value in screenshot.items() if key != "path"}
+    safe_event = {**event_payload, "payload": {**payload, "screenshot": safe_screenshot}}
+    transcript_text = safe_event.get("transcript_text")
+    if isinstance(local_path, str) and local_path and isinstance(transcript_text, str):
+        safe_reference = str(safe_screenshot.get("attachmentId") or "screenshot attachment")
+        safe_event["transcript_text"] = transcript_text.replace(local_path, safe_reference)
+    return safe_event
+
+
 def _show_event_response_payload(
     event_payload: dict[str, Any],
     *,
     public: bool = False,
     public_share_id: str | None = None,
+    remote: bool = False,
 ) -> dict[str, Any]:
     if not public:
-        return event_payload
+        return _remote_safe_show_event_payload(event_payload) if remote else event_payload
     public_event = {
         key: value
         for key, value in event_payload.items()
@@ -12388,16 +12724,18 @@ def _show_events_list_payload(
     *,
     public: bool = False,
     public_share_id: str | None = None,
+    remote: bool = False,
 ) -> dict[str, Any]:
-    if not public:
+    if not public and not remote:
         return payload
     return {
         **payload,
         "events": [
             _show_event_response_payload(
                 event_payload,
-                public=True,
+                public=public,
                 public_share_id=public_share_id,
+                remote=remote,
             )
             for event_payload in payload.get("events", [])
             if isinstance(event_payload, dict)
@@ -12411,6 +12749,7 @@ async def _show_events_stream(
     after_id: str | None = None,
     public: bool = False,
     public_share_id: str | None = None,
+    remote: bool = False,
     authorization_refresh_at: float | None = None,
     authorization_context: Any = None,
     remote_session_payload: Mapping[str, Any] | None = None,
@@ -12481,6 +12820,7 @@ async def _show_events_stream(
                                 event_payload,
                                 public=public,
                                 public_share_id=public_share_id,
+                                remote=remote,
                             ),
                         )
                     cursor = batch.get("next_after_id")
@@ -12526,6 +12866,7 @@ async def _show_events_stream(
                                 event_payload,
                                 public=public,
                                 public_share_id=public_share_id,
+                                remote=remote,
                             ),
                         )
                     elif (
@@ -12569,6 +12910,10 @@ async def _show_events_response(
     public: bool = False,
     public_share_id: str | None = None,
 ):
+    # A remote reader of the private Show surface must not receive local
+    # screenshot paths either; resolve it here because the SSE generator runs
+    # after the request context is gone.
+    remote = not public and _is_remote_show_page_request()
     if request.method == "GET":
         if request.args.get("stream") == "1":
             return await _show_events_stream(
@@ -12576,6 +12921,7 @@ async def _show_events_response(
                 after_id=request.args.get("after_id") or _last_event_id_from_request(),
                 public=public,
                 public_share_id=public_share_id,
+                remote=remote,
                 authorization_refresh_at=(
                     None if public else getattr(g, "remote_authorization_refresh_at", None)
                 ),
@@ -12603,6 +12949,7 @@ async def _show_events_response(
                     payload,
                     public=public,
                     public_share_id=public_share_id,
+                    remote=remote,
                 )
             )
         finally:
@@ -13381,7 +13728,14 @@ async def serve_private_show_page(session_id, asset_path):
         # visibility still fall through to not-found.
         if page.visibility not in {"private", "public"}:
             return _show_page_not_found_response()
-        if _is_show_page_runtime_denied_path(asset_path, session_id=page.session_id):
+        # A remote viewer is an untrusted viewer even on the private surface: keep
+        # its asset reads inside the page workspace so an authored symlink cannot
+        # serve out-of-Project disk files across the tunnel.
+        if _is_show_page_runtime_denied_path(
+            asset_path,
+            session_id=page.session_id,
+            confine_to_workspace=_is_remote_show_page_request(),
+        ):
             return _show_page_file_not_found_response()
         show_author = _show_request_author()
         can_annotate = show_author is not None
@@ -13467,7 +13821,11 @@ async def serve_public_show_page(share_id, asset_path):
             return _show_page_offline_response()
         if page.visibility != "public":
             return _show_page_not_found_response()
-        if _is_show_page_runtime_denied_path(asset_path, session_id=page.session_id, public=True):
+        if _is_show_page_runtime_denied_path(
+            asset_path,
+            session_id=page.session_id,
+            confine_to_workspace=True,
+        ):
             return _show_page_file_not_found_response()
         if asset_path.strip("/") == "__show/me":
             if request.method not in {"GET", "HEAD"}:

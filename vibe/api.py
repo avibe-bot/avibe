@@ -1257,6 +1257,12 @@ def remote_config_payload(config: V2Config) -> dict:
         "version": payload.get("version"),
         "setup_state": payload.get("setup_state"),
         "language": payload.get("language"),
+        "ack_mode": payload.get("ack_mode"),
+        "show_duration": payload.get("show_duration"),
+        "include_time_info": payload.get("include_time_info"),
+        "include_user_info": payload.get("include_user_info"),
+        "reply_enhancements": payload.get("reply_enhancements"),
+        "agent_progress_style": payload.get("agent_progress_style"),
         "ui": {
             key: ui_payload[key]
             for key in _REMOTE_CONFIG_UI_FIELDS
@@ -12058,6 +12064,7 @@ async def list_skills(
     *,
     scope: str = "all",
     project_dir: Optional[str] = None,
+    project_id: Optional[str] = None,
     backends: Optional[List[str]] = None,
     user_context: Any = None,
 ) -> dict:
@@ -12067,6 +12074,7 @@ async def list_skills(
             askill,
             scope=scope,
             project_dir=project_dir,
+            project_id=project_id,
             backends=backends,
             user_context=context,
         )
@@ -12077,6 +12085,7 @@ async def preview_skill_source(
     source: str,
     *,
     project_dir: Optional[str] = None,
+    project_id: Optional[str] = None,
     user_context: Any = None,
 ) -> dict:
     context = resolve_resource_access_context() if user_context is None else user_context
@@ -12085,6 +12094,7 @@ async def preview_skill_source(
             askill,
             source,
             project_dir=project_dir,
+            project_id=project_id,
             user_context=context,
         )
     )
@@ -12095,6 +12105,7 @@ async def add_skill(
     *,
     scope: str = "project",
     project_dir: Optional[str] = None,
+    project_id: Optional[str] = None,
     backends: Optional[List[str]] = None,
     all_skills: bool = False,
     skill: Optional[str] = None,
@@ -12108,6 +12119,7 @@ async def add_skill(
             source,
             scope=scope,
             project_dir=project_dir,
+            project_id=project_id,
             backends=backends,
             all_skills=all_skills,
             skill=skill,
@@ -12122,6 +12134,7 @@ async def remove_skill(
     *,
     scope: str = "project",
     project_dir: Optional[str] = None,
+    project_id: Optional[str] = None,
     backends: Optional[List[str]] = None,
     user_context: Any = None,
 ) -> dict:
@@ -12132,6 +12145,7 @@ async def remove_skill(
             name,
             scope=scope,
             project_dir=project_dir,
+            project_id=project_id,
             backends=backends,
             user_context=context,
         )
@@ -12149,6 +12163,7 @@ async def check_skills(
     *,
     scope: str = "project",
     project_dir: Optional[str] = None,
+    project_id: Optional[str] = None,
     user_context: Any = None,
 ) -> dict:
     context = resolve_resource_access_context() if user_context is None else user_context
@@ -12157,6 +12172,7 @@ async def check_skills(
             askill,
             scope=scope,
             project_dir=project_dir,
+            project_id=project_id,
             user_context=context,
         )
     )
@@ -12167,6 +12183,7 @@ async def update_skill(
     *,
     scope: str = "project",
     project_dir: Optional[str] = None,
+    project_id: Optional[str] = None,
     user_context: Any = None,
 ) -> dict:
     context = resolve_resource_access_context() if user_context is None else user_context
@@ -12176,6 +12193,7 @@ async def update_skill(
             name,
             scope=scope,
             project_dir=project_dir,
+            project_id=project_id,
             user_context=context,
         )
     )
@@ -12185,6 +12203,7 @@ async def upload_skill_zip(
     payload: dict,
     *,
     project_dir: Optional[str] = None,
+    project_id: Optional[str] = None,
     user_context: Any = None,
 ) -> dict:
     """Decode a base64 .zip, unpack it to a temp dir, and preview its skills.
@@ -12271,6 +12290,7 @@ async def upload_skill_zip(
             askill,
             unpack,
             project_dir=project_dir,
+            project_id=project_id,
             user_context=context,
         )
     )
