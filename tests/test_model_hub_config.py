@@ -962,6 +962,17 @@ def test_config_reload_recovers_invalid_platform_adapter_only(
     assert config_path.read_text(encoding="utf-8") == original
 
 
+def test_config_reload_ignores_stale_legacy_platform_when_platforms_are_valid(monkeypatch):
+    payload = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    payload["platform"] = "removed-platform"
+    payload["platforms"] = {"enabled": ["slack"], "primary": "slack"}
+
+    loaded = V2Config.from_payload(payload)
+
+    assert loaded.platform == "slack"
+    assert loaded.platforms.enabled == ["slack"]
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
@@ -1073,6 +1084,55 @@ def test_config_reload_migrates_legacy_mapping_to_exact_route_hop(monkeypatch, t
     assert loaded.model_hub.sources[0].models[0].reasoning_efforts == []
 
 
+def test_config_reload_recovers_dangling_legacy_custom_source_order(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    current = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    legacy = _legacy_model_hub_payload(current["model_hub"])
+    legacy["agents"]["claude"]["mode"] = "hub"
+    legacy["agents"]["claude"]["sources"] = {
+        "policy": "custom",
+        "order": ["src_missing123"],
+    }
+    current["model_hub"] = legacy
+    config_path = tmp_path / "dangling-source-order.json"
+    original = json.dumps(current)
+    config_path.write_text(original, encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert loaded.model_hub.to_payload() == V2Config.default().model_hub.to_payload()
+    assert loaded.load_warnings and "model_hub" in " ".join(loaded.load_warnings)
+    assert config_path.read_text(encoding="utf-8") == original
+
+
+def test_config_reload_recovers_backend_ineligible_legacy_custom_source_order(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    source = copy.deepcopy(_schema("source.schema.json")["examples"][0])
+    for model in source["models"]:
+        model["provenance"] = model.pop("origin")
+    current = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    legacy = _legacy_model_hub_payload(current["model_hub"])
+    legacy["sources"] = [source]
+    legacy["agents"]["codex"]["mode"] = "hub"
+    legacy["agents"]["codex"]["sources"] = {
+        "policy": "custom",
+        "order": [source["id"]],
+    }
+    current["model_hub"] = legacy
+    config_path = tmp_path / "ineligible-source-order.json"
+    original = json.dumps(current)
+    config_path.write_text(original, encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert loaded.model_hub.to_payload() == V2Config.default().model_hub.to_payload()
+    assert loaded.load_warnings and "model_hub" in " ".join(loaded.load_warnings)
+    assert config_path.read_text(encoding="utf-8") == original
+
+
 def test_config_reload_preserves_enabled_unchecked_legacy_opencode_mapping(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     source = copy.deepcopy(_schema("source.schema.json")["examples"][1])
@@ -1117,12 +1177,16 @@ def test_config_reload_keeps_legacy_hub_subscription_backend_specific(monkeypatc
     current = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
     legacy = _legacy_model_hub_payload(current["model_hub"])
     legacy["sources"] = [source]
-    for backend in ("claude", "codex"):
-        legacy["agents"][backend]["mode"] = "hub"
-        legacy["agents"][backend]["sources"] = {
-            "policy": "custom",
-            "order": [source["id"]],
-        }
+    legacy["agents"]["claude"]["mode"] = "hub"
+    legacy["agents"]["claude"]["sources"] = {
+        "policy": "custom",
+        "order": [source["id"]],
+    }
+    legacy["agents"]["codex"]["mode"] = "hub"
+    legacy["agents"]["codex"]["sources"] = {
+        "policy": "follow",
+        "order": [],
+    }
     current["model_hub"] = legacy
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps(current), encoding="utf-8")
@@ -1345,9 +1409,10 @@ def test_config_reload_does_not_overwrite_config_changed_during_migration(
 
     loaded = V2Config.load(config_path=config_path)
 
-    assert json.loads(config_path.read_text(encoding="utf-8")) == json.loads(
-        json.dumps(concurrent_payload)
-    )
+    assert loaded.show_duration is True
+    persisted = json.loads(config_path.read_text(encoding="utf-8"))
+    assert persisted["show_duration"] is True
+    assert set(persisted["model_hub"]) == {"sources", "agents"}
     assert loaded.load_warnings and "changed during load" in loaded.load_warnings[0]
 
 
@@ -1376,12 +1441,13 @@ def test_config_reload_does_not_overwrite_config_changed_before_replace(
 
     loaded = V2Config.load(config_path=config_path)
 
-    assert json.loads(config_path.read_text(encoding="utf-8")) == json.loads(
-        json.dumps(concurrent_payload)
-    )
+    assert loaded.show_duration is True
+    persisted = json.loads(config_path.read_text(encoding="utf-8"))
+    assert persisted["show_duration"] is True
+    assert set(persisted["model_hub"]) == {"sources", "agents"}
     assert loaded.load_warnings and "before replacement" in " ".join(loaded.load_warnings)
     backups = list(config_path.parent.glob("config.json.bak-model-hub-migration-*"))
-    assert backups and backups[0].read_text(encoding="utf-8") == original
+    assert backups and any(backup.read_text(encoding="utf-8") == original for backup in backups)
 
 
 def test_config_reload_recovers_invalid_optional_section_without_overwriting_file(
@@ -1471,6 +1537,7 @@ def test_config_reload_recovers_runtime_with_the_canonical_default(
             }
         ),
         lambda hub: hub["agents"]["claude"].update({"mode": "hbu"}),
+        lambda hub: hub["agents"]["claude"].update({"mode": []}),
         lambda hub: hub["agents"].update({"future-backend": {"mode": "hub"}}),
         lambda hub: hub["agents"]["claude"].update({"future-field": True}),
         lambda hub: hub["agents"]["claude"].update({"backend": "codex"}),
@@ -1524,6 +1591,7 @@ def test_config_reload_recovers_runtime_with_the_canonical_default(
         "mapping-not-object",
         "mapping-empty-builtin",
         "agent-invalid-mode",
+        "agent-non-scalar-mode",
         "agent-unknown-backend",
         "agent-unknown-field",
         "agent-backend-mismatch",

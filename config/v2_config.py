@@ -470,6 +470,11 @@ def _migrate_legacy_model_hub_payload(payload: dict) -> tuple[dict, bool, tuple[
         and not isinstance(model_hub["subscription_hub_experimental"], bool)
     ):
         return payload, False, ()
+    legacy_sources_by_id = {
+        source.get("id"): source
+        for source in raw_sources or []
+        if isinstance(source, dict) and isinstance(source.get("id"), str)
+    }
     for source in raw_sources or []:
         if not isinstance(source, dict):
             return payload, False, ()
@@ -494,8 +499,10 @@ def _migrate_legacy_model_hub_payload(payload: dict) -> tuple[dict, bool, tuple[
         expected_menu_kind = "open" if backend == "opencode" else "fixed"
         if agent.get("backend") != backend or agent.get("menu_kind") != expected_menu_kind:
             return payload, False, ()
-        if "mode" in agent and agent["mode"] not in {"hub", "direct"}:
-            return payload, False, ()
+        if "mode" in agent:
+            mode = agent["mode"]
+            if not isinstance(mode, str) or mode not in {"hub", "direct"}:
+                return payload, False, ()
         mappings = agent.get("mappings")
         if "mappings" in agent and not isinstance(mappings, list):
             return payload, False, ()
@@ -521,6 +528,19 @@ def _migrate_legacy_model_hub_payload(payload: dict) -> tuple[dict, bool, tuple[
                 source_settings,
                 required=isinstance(source_settings, dict)
                 and source_settings.get("policy") == "custom",
+            ):
+                return payload, False, ()
+            if (
+                isinstance(source_settings, dict)
+                and source_settings.get("policy") == "custom"
+                and any(
+                    source_id not in legacy_sources_by_id
+                    or not _legacy_source_eligible_for_backend(
+                        legacy_sources_by_id[source_id],
+                        backend,
+                    )
+                    for source_id in source_settings["order"]
+                )
             ):
                 return payload, False, ()
     has_legacy_shape = bool(
@@ -627,7 +647,8 @@ def _migrate_legacy_model_hub_payload(payload: dict) -> tuple[dict, bool, tuple[
             if key in {"backend", "mode", "menu_kind", "menu"}
         }
         allowed_agent["backend"] = backend
-        allowed_agent["mode"] = agent.get("mode") if agent.get("mode") in {"hub", "direct"} else "direct"
+        agent_mode = agent.get("mode")
+        allowed_agent["mode"] = agent_mode if isinstance(agent_mode, str) and agent_mode in {"hub", "direct"} else "direct"
         allowed_agent["menu_kind"] = "open" if backend == "opencode" else "fixed"
         allowed_agent["sources"] = source_settings
         allowed_agent["routes"] = routes
@@ -2277,7 +2298,12 @@ class V2Config:
         )
 
     @classmethod
-    def load(cls, config_path: Optional[Path] = None) -> "V2Config":
+    def load(
+        cls,
+        config_path: Optional[Path] = None,
+        *,
+        _migration_reload_depth: int = 0,
+    ) -> "V2Config":
         paths.ensure_data_dirs()
         path = config_path or paths.get_config_path()
         with CONFIG_LOCK:
@@ -2353,6 +2379,15 @@ class V2Config:
             if persistence_warning:
                 all_warnings = tuple(dict.fromkeys((*all_warnings, persistence_warning)))
                 logger.warning("%s (%s)", persistence_warning, path)
+                if "file changed" in persistence_warning and _migration_reload_depth == 0:
+                    winning_config = cls.load(
+                        config_path=path,
+                        _migration_reload_depth=1,
+                    )
+                    winning_config.load_warnings = tuple(
+                        dict.fromkeys((*winning_config.load_warnings, persistence_warning))
+                    )
+                    return winning_config
             else:
                 logger.info("Migrated Model Hub config in place (backup=%s)", backup)
         elif migration_warnings or recovery_warnings:
@@ -2375,18 +2410,22 @@ class V2Config:
             raise ValueError("Config 'mode' must be 'self_host' or 'saas'")
 
         raw_platform = payload.get("platform")
-        if raw_platform is not None and not isinstance(raw_platform, str):
-            raise ValueError("Config 'platform' must be a string")
-        platform = raw_platform or "slack"
-        try:
-            get_platform_descriptor(platform)
-        except ValueError as err:
-            supported_text = "', '".join(supported_platform_ids())
-            raise ValueError(f"Config 'platform' must be one of: '{supported_text}'") from err
-
         platforms_payload = payload.get("platforms")
         if platforms_payload is not None and not isinstance(platforms_payload, dict):
             raise ValueError("Config 'platforms' must be an object")
+        if platforms_payload is None:
+            if raw_platform is not None and not isinstance(raw_platform, str):
+                raise ValueError("Config 'platform' must be a string")
+            platform = raw_platform or "slack"
+            try:
+                get_platform_descriptor(platform)
+            except ValueError as err:
+                supported_text = "', '".join(supported_platform_ids())
+                raise ValueError(f"Config 'platform' must be one of: '{supported_text}'") from err
+        else:
+            # ``platforms`` is the current source of truth. A stale legacy
+            # compatibility field must not disable otherwise valid transports.
+            platform = platforms_payload.get("primary") or "slack"
         if platforms_payload:
             enabled_payload = platforms_payload.get("enabled")
             if enabled_payload is not None and not isinstance(enabled_payload, list):

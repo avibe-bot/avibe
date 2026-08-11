@@ -1320,6 +1320,20 @@ def test_start_oauth_web_blocks_recovery_before_service_mutation(monkeypatch):
     assert service_calls == []
 
 
+def test_submit_oauth_web_code_rechecks_recovery_before_service_mutation(monkeypatch):
+    fake_config = SimpleNamespace(load_warnings=("recovery required",), language="zh")
+    service_calls = []
+    monkeypatch.setattr(api, "load_config", lambda: fake_config)
+    monkeypatch.setattr(api, "_get_oauth_service", lambda: service_calls.append(True))
+
+    result = asyncio.run(api.submit_oauth_web_code_async("flow-1", "code-1"))
+
+    assert result["ok"] is False
+    assert result["error"] == "config_recovery"
+    assert "配置加载时发生了恢复" in result["message"]
+    assert service_calls == []
+
+
 def test_remove_backend_auth_blocks_recovery_before_service_mutation(monkeypatch):
     fake_config = SimpleNamespace(load_warnings=("recovery required",), language="zh")
     service_calls = []

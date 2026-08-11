@@ -588,6 +588,32 @@ def test_save_custom_provider_persists_config_and_key(fake_save_env) -> None:
     assert config["provider"]["my-relay"]["options"]["apiKey"] == "sk-relay"
 
 
+def test_save_custom_provider_blocks_recovery_before_external_mutation(fake_save_env, monkeypatch) -> None:
+    from vibe.opencode_config import read_opencode_custom_providers
+
+    server, home = fake_save_env
+    monkeypatch.setattr(
+        api,
+        "load_config",
+        lambda: type("Config", (), {"load_warnings": ("recovery required",)})(),
+    )
+
+    result = _save_custom(
+        {
+            "provider_id": "my-relay",
+            "name": "My Relay",
+            "adapter": "openai-compatible",
+            "base_url": "https://relay.example/v1",
+            "api_key": "sk-relay",
+        }
+    )
+
+    assert result["ok"] is False
+    assert result["error"] == "config_recovery"
+    assert read_opencode_custom_providers(home=home) == {}
+    assert server.set_calls == []
+
+
 def test_save_custom_provider_rejects_clearing_base_url(fake_save_env) -> None:
     from vibe.opencode_config import (
         read_opencode_provider_base_url,

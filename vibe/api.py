@@ -8941,6 +8941,9 @@ async def submit_oauth_web_code_async(flow_id: str, code: str) -> dict:
     flow_id = (flow_id or "").strip()
     if not flow_id:
         return {"ok": False, "error": "missing_flow_id"}
+    recovery_message = _config_recovery_message()
+    if recovery_message:
+        return {"ok": False, "error": "config_recovery", "message": recovery_message}
     service = _get_oauth_service()
     try:
         return await service.submit_web_code(flow_id, code or "")
@@ -10471,6 +10474,9 @@ async def save_opencode_custom_provider_async(payload: dict) -> dict:
         provider_id, name, adapter, base_url, api_key = _normalize_custom_provider_payload(payload)
     except ValueError as exc:
         return {"ok": False, "message": str(exc)}
+    recovery_message = _config_recovery_message()
+    if recovery_message:
+        return {"ok": False, "error": "config_recovery", "message": recovery_message}
 
     try:
         from vibe.opencode_config import is_reserved_opencode_provider_id
