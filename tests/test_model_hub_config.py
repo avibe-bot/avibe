@@ -1102,7 +1102,8 @@ def test_oauth_terminal_materialization_matrix_and_handoffs_are_total():
         "tests/scenarios/auth_setup/test_auth_setup_scenarios.py",
     ):
         assert path in ac_52
-    assert "After K4 and #1312 merge" in ac_52
+    assert "After K4, #1312, and K6 merge" in ac_52
+    assert "earlier K4 + #1312 edge" in ac_52
     assert "missing and false acknowledgement" in ac_52
     assert "before any adapter/provider call" in ac_52
     assert "starts exactly one Hub flow" in ac_52
@@ -1119,7 +1120,7 @@ def test_oauth_terminal_materialization_matrix_and_handoffs_are_total():
         "ui/src/components/settings/models/{modelsApi.ts,OAuthConnectDialog.tsx,apiFailure.test.ts,oauthResult.test.ts}",
     ):
         assert path in ac_53
-    assert "After K4 and #1312 merge" in ac_53
+    assert "After K4, #1312, and K6 merge" in ac_53
     assert "After K4 merges, K5 round 2" in ac_53
     assert "After\nthat K5 round and the I7 payload fixtures freeze" in ac_53
     assert "same-error/no-gap negative fixture" in ac_53
