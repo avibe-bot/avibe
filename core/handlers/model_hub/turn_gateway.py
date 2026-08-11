@@ -26,6 +26,7 @@ from .provenance import (
 from .request import ModelHubRequest
 from .service import (
     HandleSettlement,
+    HandleTerminationOrigin,
     ModelHubError,
     ModelHubService,
     ResolvedInvocation,
@@ -124,7 +125,11 @@ class ModelHubTurnGateway:
                 return
             app = web.Application(client_max_size=_MAX_REQUEST_BYTES)
             app.router.add_post("/{backend}/v1/{endpoint:.*}", self._handle_request)
-            runner = web.AppRunner(app, access_log=None)
+            runner = web.AppRunner(
+                app,
+                access_log=None,
+                handler_cancellation=True,
+            )
             await runner.setup()
             listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -285,13 +290,24 @@ class ModelHubTurnGateway:
 
         if not stream:
             payload = bytearray()
-            async for chunk in handle.stream:
-                payload.extend(chunk)
+            try:
+                async for chunk in handle.stream:
+                    payload.extend(chunk)
+            except asyncio.CancelledError:
+                await self._settle_consumed_handle(
+                    resolved,
+                    handle,
+                    terminalizer,
+                    termination_origin="downstream_cancel",
+                )
+                raise
             outcome, settlement = await self._settle_consumed_handle(
                 resolved,
                 handle,
                 terminalizer,
+                termination_origin="upstream_terminal",
             )
+            assert settlement.decision is not None
             if settlement.decision.action != "return":
                 return self._outcome_response(
                     outcome,
@@ -314,18 +330,35 @@ class ModelHubTurnGateway:
                 "X-Content-Type-Options": "nosniff",
             },
         )
-        await response.prepare(request)
+        termination_origin: HandleTerminationOrigin = "upstream_terminal"
         try:
+            try:
+                await response.prepare(request)
+            except (ConnectionResetError, BrokenPipeError):
+                termination_origin = "downstream_cancel"
+                raise
             async for chunk in handle.stream:
                 terminalizer.mark_stream_started()
-                await response.write(chunk)
+                try:
+                    await response.write(chunk)
+                except (ConnectionResetError, BrokenPipeError):
+                    termination_origin = "downstream_cancel"
+                    raise
+            try:
+                await response.write_eof()
+            except (ConnectionResetError, BrokenPipeError):
+                termination_origin = "downstream_cancel"
+                raise
+        except asyncio.CancelledError:
+            termination_origin = "downstream_cancel"
+            raise
         finally:
             await self._settle_consumed_handle(
                 resolved,
                 handle,
                 terminalizer,
+                termination_origin=termination_origin,
             )
-        await response.write_eof()
         return response
 
     async def _settle_consumed_handle(
@@ -333,11 +366,21 @@ class ModelHubTurnGateway:
         resolved: ResolvedInvocation,
         handle: InvokeHandle,
         terminalizer: GatewayTurnTerminalizer,
+        *,
+        termination_origin: HandleTerminationOrigin,
     ) -> tuple[RawCallOutcome, HandleSettlement]:
         """Route every handle terminal through the service settlement owner."""
 
         outcome = await handle.outcome()
-        settlement = await self.service.settle_handle_outcome(resolved, outcome)
+        settlement = await self.service.settle_handle_outcome(
+            resolved,
+            outcome,
+            termination_origin=termination_origin,
+        )
+        if termination_origin == "downstream_cancel":
+            terminalizer.mark_downstream_canceled()
+            return settlement.outcome, settlement
+        assert settlement.decision is not None
         terminalizer.finish_attempt(
             outcome=settlement.outcome,
             decision=settlement.decision,

@@ -250,8 +250,11 @@ class ResolvedInvocation:
 @dataclass(frozen=True)
 class HandleSettlement:
     outcome: RawCallOutcome
-    decision: ResolutionDecision
+    decision: ResolutionDecision | None
     turn_outcome: TurnOutcomeProjectionInput
+
+
+HandleTerminationOrigin = Literal["downstream_cancel", "upstream_terminal"]
 
 
 AttemptObserver = Callable[
@@ -3965,11 +3968,21 @@ class ModelHubService:
         self,
         resolved: ResolvedInvocation,
         outcome: RawCallOutcome,
+        *,
+        termination_origin: HandleTerminationOrigin,
     ) -> HandleSettlement:
         """Settle every consumed hub handle before its terminal facts are exposed."""
 
         if resolved.supply_channel != "hub":
             raise AssertionError("post-handle settlement requires a hub stream")
+        if termination_origin == "downstream_cancel":
+            return HandleSettlement(
+                outcome=outcome,
+                decision=None,
+                turn_outcome=produce_turn_outcome("turn.canceled"),
+            )
+        if termination_origin != "upstream_terminal":
+            raise AssertionError("unknown handle termination origin")
         # A consumed non-null handle is first-byte evidence even if an adapter
         # omitted the redundant flag from its terminal report.
         outcome = replace(outcome, stream_started=True)

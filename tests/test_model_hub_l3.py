@@ -55,7 +55,11 @@ from core.handlers.model_hub.provenance import (
 )
 from core.handlers.model_hub.request import ModelHubRequest
 from core.handlers.model_hub.revocations import CredentialRevocationJournal
-from core.handlers.model_hub.service import ModelHubError, ModelHubService
+from core.handlers.model_hub.service import (
+    ModelHubError,
+    ModelHubService,
+    ResolvedInvocation,
+)
 from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
 from core.run_settlement import (
     SETTLED_BY_NO_TERMINAL_RESULT,
@@ -249,10 +253,19 @@ def test_gateway_handle_termination_has_one_settlement_owner() -> None:
         for node in ast.walk(owner)
         if is_call(node, "settle_handle_outcome")
     }
+    settlement_nodes = [
+        node
+        for node in ast.walk(owner)
+        if is_call(node, "settle_handle_outcome")
+    ]
     assert owner_outcome_calls
     assert owner_settlement_calls
     assert all_outcome_calls == owner_outcome_calls
     assert all_settlement_calls == owner_settlement_calls
+    assert all(
+        any(keyword.arg == "termination_origin" for keyword in node.keywords)
+        for node in settlement_nodes
+    )
 
 
 def _terminal_resolution_facts(
@@ -528,11 +541,66 @@ class LiveInvokeHandle:
         return self._outcome
 
 
+class BlockingLiveInvokeHandle:
+    def __init__(self, outcome: RawCallOutcome):
+        self._outcome = outcome
+        self.started = asyncio.Event()
+        self.cancelled = asyncio.Event()
+        self._release = asyncio.Event()
+        self._stream = self._iterate()
+
+    async def _iterate(self):
+        self.started.set()
+        try:
+            await self._release.wait()
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            raise
+        yield b"data: {}\n\n"
+
+    @property
+    def stream(self):
+        return self._stream
+
+    async def outcome(self) -> RawCallOutcome:
+        return self._outcome
+
+
+class BrokenUpstreamInvokeHandle:
+    def __init__(self, outcome: RawCallOutcome):
+        self._outcome = outcome
+        self._stream = self._iterate()
+
+    @staticmethod
+    async def _iterate():
+        if False:
+            yield b""
+        raise ConnectionResetError("upstream disconnected")
+
+    @property
+    def stream(self):
+        return self._stream
+
+    async def outcome(self) -> RawCallOutcome:
+        return self._outcome
+
+
+class FakeStreamResponse:
+    async def prepare(self, _request) -> None:
+        return None
+
+    async def write(self, _chunk: bytes) -> None:
+        return None
+
+    async def write_eof(self) -> None:
+        return None
+
+
 class ProbeAdapter:
     def __init__(
         self,
         outcomes: list[RawCallOutcome],
-        live_handles: list[LiveInvokeHandle] | None = None,
+        live_handles: list[LiveInvokeHandle | BlockingLiveInvokeHandle] | None = None,
     ):
         self.outcomes = deque(outcomes)
         self.live_handles = deque(live_handles or [])
@@ -651,7 +719,7 @@ def _service(
     *,
     sources: list[ModelHubSourceConfig],
     outcomes: list[RawCallOutcome] | None = None,
-    live_handles: list[LiveInvokeHandle] | None = None,
+    live_handles: list[LiveInvokeHandle | BlockingLiveInvokeHandle] | None = None,
 ) -> ModelHubService:
     store = MemoryStore(_config(sources))
     return ModelHubService(
@@ -1485,6 +1553,10 @@ def test_gateway_handle_terminal_matrix_always_uses_service_settlement(
             await gateway.close()
 
         service.settle_handle_outcome.assert_awaited_once()
+        assert (
+            service.settle_handle_outcome.await_args.kwargs["termination_origin"]
+            == "upstream_terminal"
+        )
         assert service.store.load().sources[0].state.status == expected_source_status
         gateway.correlation.settle(
             turn_id,
@@ -1495,6 +1567,155 @@ def test_gateway_handle_terminal_matrix_always_uses_service_settlement(
         assert record is not None
         assert record["outcome"] == expected_outcome
         _assert_valid("turn-provenance.schema.json", record)
+
+    asyncio.run(exercise())
+
+
+def test_handle_settlement_requires_an_explicit_termination_origin(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        source = _source("src_origin01", "Explicit origin")
+        service = _service(tmp_path, sources=[source])
+        outcome = _outcome(
+            RawOutcomeKind.NETWORK_ERROR,
+            source_id=source.id,
+        )
+        resolved = ResolvedInvocation(
+            backend="codex",
+            requested_model_id="shared-model",
+            source_id=source.id,
+            model_id="shared-model",
+            handle=None,
+            outcome=None,
+            requested_supply_channel="hub",
+        )
+
+        with pytest.raises(TypeError, match="termination_origin"):
+            await service.settle_handle_outcome(resolved, outcome)  # type: ignore[call-arg]
+
+        settlement = await service.settle_handle_outcome(
+            resolved,
+            outcome,
+            termination_origin="downstream_cancel",
+        )
+        assert settlement.decision is None
+        assert settlement.turn_outcome == produce_turn_outcome("turn.canceled")
+        assert render_turn_outcome_copy(settlement.turn_outcome, "en") is None
+        assert service.store.load().sources[0].state.status == "standby"
+
+    asyncio.run(exercise())
+
+
+def test_gateway_downstream_cancellation_does_not_mutate_source(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        source = _source("src_cancel01", "Canceled downstream")
+        outcome = _outcome(
+            RawOutcomeKind.NETWORK_ERROR,
+            source_id=source.id,
+        )
+        handle = BlockingLiveInvokeHandle(outcome)
+        service = _service(
+            tmp_path,
+            sources=[source],
+            live_handles=[handle],
+        )
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        settled = asyncio.Event()
+        settle_handle_outcome = service.settle_handle_outcome
+
+        async def settle(*args, **kwargs):
+            result = await settle_handle_outcome(*args, **kwargs)
+            settled.set()
+            return result
+
+        service.settle_handle_outcome = AsyncMock(
+            side_effect=settle,
+        )
+        gateway = ModelHubTurnGateway(service)
+        base_url, token = await gateway.endpoint(
+            "codex",
+            process_scope="/repo",
+            turn_id="turn_downstream_cancel",
+            requested_model_id=requested_model,
+            resolved_model_id="shared-model",
+            source_id=source.id,
+        )
+        try:
+            async with aiohttp.ClientSession(trust_env=False) as client:
+                response = await client.post(
+                    f"{base_url}/v1/responses",
+                    json={
+                        "model": "shared-model",
+                        "input": "ping",
+                        "stream": True,
+                    },
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                await handle.started.wait()
+                response.close()
+                await asyncio.wait_for(handle.cancelled.wait(), timeout=1)
+                await asyncio.wait_for(settled.wait(), timeout=1)
+        finally:
+            await gateway.close()
+
+        service.settle_handle_outcome.assert_awaited_once()
+        assert (
+            service.settle_handle_outcome.await_args.kwargs["termination_origin"]
+            == "downstream_cancel"
+        )
+        assert service.store.load().sources[0].state.status == "standby"
+        assert service.events.list() == []
+
+    asyncio.run(exercise())
+
+
+def test_gateway_upstream_stream_failure_remains_source_attributable(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        source = _source("src_upstream01", "Broken upstream")
+        outcome = _outcome(
+            RawOutcomeKind.NETWORK_ERROR,
+            source_id=source.id,
+        )
+        handle = BrokenUpstreamInvokeHandle(outcome)
+        service = _service(tmp_path, sources=[source])
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        resolved = ResolvedInvocation(
+            backend="codex",
+            requested_model_id=requested_model,
+            source_id=source.id,
+            model_id="shared-model",
+            handle=handle,
+            outcome=None,
+            requested_supply_channel="hub",
+        )
+        terminalizer = SimpleNamespace(
+            mark_stream_started=Mock(),
+            mark_downstream_canceled=Mock(),
+            finish_attempt=Mock(),
+        )
+        gateway = ModelHubTurnGateway(service)
+
+        with patch(
+            "core.handlers.model_hub.turn_gateway.web.StreamResponse",
+            return_value=FakeStreamResponse(),
+        ):
+            with pytest.raises(ConnectionResetError, match="upstream disconnected"):
+                await gateway._resolved_response(
+                    SimpleNamespace(),
+                    resolved,
+                    stream=True,
+                    terminalizer=terminalizer,
+                )
+
+        terminalizer.mark_downstream_canceled.assert_not_called()
+        terminalizer.finish_attempt.assert_called_once()
+        assert service.store.load().sources[0].state.status == "cooldown"
+        assert [event["reason"] for event in service.events.list()] == ["network"]
 
     asyncio.run(exercise())
 

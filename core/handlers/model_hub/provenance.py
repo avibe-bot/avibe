@@ -513,11 +513,14 @@ class GatewayTurnTerminalizer:
             token=token,
         )
         self._stream_started = False
+        self._downstream_canceled = False
 
     def __enter__(self) -> "GatewayTurnTerminalizer":
         return self
 
     def __exit__(self, _exc_type, _exc, _traceback) -> None:
+        if self._downstream_canceled:
+            return
         self._registry._terminalize_gateway_exit(
             self.turn_id,
             stream_started=self._stream_started,
@@ -603,6 +606,11 @@ class GatewayTurnTerminalizer:
 
     def mark_stream_started(self) -> None:
         self._stream_started = True
+
+    def mark_downstream_canceled(self) -> None:
+        """Leave the live attempt pending for the outer stopped settlement."""
+
+        self._downstream_canceled = True
 
 
 def _utc_now_iso() -> str:
