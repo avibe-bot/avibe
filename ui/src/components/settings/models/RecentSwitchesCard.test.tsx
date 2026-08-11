@@ -82,6 +82,26 @@ describe('RecentSwitchesCard (AC-18)', () => {
     expect(html).not.toContain(zh.settings.models.recent.deletedSource);
   });
 
+  it('does not call a source deleted while the inventory read is unavailable', () => {
+    const html = renderToStaticMarkup(
+      <I18nextProvider i18n={instance('en')}>
+        <RecentSwitchesCard events={[event()]} sources={[]} sourcesRead={false} />
+      </I18nextProvider>,
+    );
+    expect(html).not.toContain(en.settings.models.recent.deletedSource);
+  });
+
+  it('renders an event-read failure with a retry instead of an authoritative empty feed', () => {
+    const html = renderToStaticMarkup(
+      <I18nextProvider i18n={instance('en')}>
+        <RecentSwitchesCard events={[]} sources={[]} readState="error" />
+      </I18nextProvider>,
+    );
+    expect(html).toContain('Couldn&#x27;t refresh, please retry');
+    expect(html).toContain(en.settings.models.upstream.retry);
+    expect(html).not.toContain(en.settings.models.recent.empty);
+  });
+
   it('marks nothing for an event that names no source at all', () => {
     // A supply interruption is about a backend: both endpoints are null by
     // contract, and null is not a deleted source.

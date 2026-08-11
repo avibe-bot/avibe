@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { I18nextProvider } from 'react-i18next';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -124,5 +125,37 @@ describe('SettingsModelsPage surface branches', () => {
     expect(await screen.findByText(/^1 takeover active$|^1 处接管中$/i)).toBeTruthy();
     expect(screen.getByText(/^Taken over$|^接管中$/i)).toBeTruthy();
     expect(screen.getByText(/Now: Replacement source \(takeover\)|当前 Replacement source（接管）/i)).toBeTruthy();
+  });
+
+  it('keeps a failed event read distinct from an empty history and retries it', async () => {
+    const hubAgent: AgentSupply = {
+      ...directAgent('claude'),
+      mode: 'hub',
+      sources: { order: [], eligibility: [] },
+      routes: {},
+      model_supply: [],
+      builtin_models: [],
+      named_agents: [],
+    };
+    vi.spyOn(modelsApi, 'listSources').mockResolvedValue([retainedSource]);
+    vi.spyOn(modelsApi, 'listAgents').mockResolvedValue([hubAgent]);
+    vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
+    const events = vi.spyOn(modelsApi, 'listEvents')
+      .mockRejectedValueOnce(new TypeError('offline'))
+      .mockResolvedValueOnce([]);
+
+    render(
+      <ToastProvider>
+        <I18nextProvider i18n={i18n}>
+          <SettingsModelsPage />
+        </I18nextProvider>
+      </ToastProvider>,
+    );
+
+    expect(await screen.findByText(/Couldn't refresh, please retry|刷新失败，请重试/i)).toBeTruthy();
+    expect(screen.queryByText(/^No switches yet$|^暂无切换记录$/i)).toBeNull();
+    await userEvent.click(screen.getByRole('button', { name: /^Retry$|^重试$/i }));
+    await waitFor(() => expect(events).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText(/^No switches yet$|^暂无切换记录$/i)).toBeTruthy();
   });
 });

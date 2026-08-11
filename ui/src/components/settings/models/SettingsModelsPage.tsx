@@ -69,7 +69,7 @@ const readSurfaceLanding = async (): Promise<SurfaceLanding> => {
     runtime: runtime.status === 'fulfilled' ? runtime.value : null,
     chains: agentRows ? await readChains(agentRows) : null,
     events: events.status === 'fulfilled' ? events.value : null,
-    failed: sources.status === 'rejected' || agents.status === 'rejected' || runtime.status === 'rejected',
+    failed: sources.status === 'rejected' || agents.status === 'rejected' || runtime.status === 'rejected' || events.status === 'rejected',
   };
 };
 
@@ -212,6 +212,7 @@ export const SettingsModelsPage: React.FC = () => {
   const [sourcesState, setSourcesState] = React.useState<PageReadState>('loading');
   const [agentsState, setAgentsState] = React.useState<PageReadState>('loading');
   const [runtimeState, setRuntimeState] = React.useState<PageReadState>('loading');
+  const [eventsState, setEventsState] = React.useState<PageReadState>('loading');
   const [tab, setTab] = React.useState<'sources' | 'usage'>('sources');
   const [startingRuntime, setStartingRuntime] = React.useState(false);
   const [runtimeRecoveryPending, setRuntimeRecoveryPending] = React.useState(false);
@@ -227,6 +228,7 @@ export const SettingsModelsPage: React.FC = () => {
   const [agentWriteRegistry] = React.useState(() => createPendingWrites(setAgentWrites));
   const overviewRef = React.useRef<HTMLDivElement>(null);
   const aliveRef = React.useRef(true);
+  const eventsHaveSnapshotRef = React.useRef(false);
   React.useEffect(() => {
     aliveRef.current = true;
     return () => { aliveRef.current = false; };
@@ -253,21 +255,26 @@ export const SettingsModelsPage: React.FC = () => {
     if (landing.sources !== null) {
       setSources(landing.sources);
       setSourcesState('ready');
-    }
+    } else setSourcesState('error');
     if (landing.agents !== null) {
       setAgents(landing.agents);
       setAgentsState('ready');
-    }
+    } else setAgentsState('error');
     if (landing.runtime !== null) {
       setRuntime(landing.runtime);
       setRuntimeState('ready');
       setRuntimeRecoveryPending(false);
-    }
+    } else setRuntimeState('error');
     if (landing.chains !== null) setChains(landing.chains);
     if (landing.events !== null) {
       const events = landing.events;
-      setFeed((previous) => feedAfterHeadRead(previous, events));
-    }
+      const hadSnapshot = eventsHaveSnapshotRef.current;
+      eventsHaveSnapshotRef.current = true;
+      setFeed((previous) => hadSnapshot
+        ? feedAfterHeadRead(previous, events)
+        : feedAfterTailRead(previous, events, EVENT_PAGE, null));
+      setEventsState('ready');
+    } else setEventsState('error');
   }));
 
   const refresh = React.useCallback(async () => {
@@ -306,7 +313,9 @@ export const SettingsModelsPage: React.FC = () => {
       if (landing.events !== null) {
         const events = landing.events;
         setFeed((previous) => feedAfterTailRead(previous, events, EVENT_PAGE, null));
-      }
+        eventsHaveSnapshotRef.current = true;
+        setEventsState('ready');
+      } else setEventsState('error');
       setLoading(false);
     });
     return () => { active = false; };
@@ -314,29 +323,18 @@ export const SettingsModelsPage: React.FC = () => {
 
   const retrySources = React.useCallback(async () => {
     setSourcesState('loading');
-    try {
-      const next = await modelsApi.listSources();
-      if (!aliveRef.current) return;
-      setSources(next);
-      setSourcesState('ready');
-    } catch {
-      if (aliveRef.current) setSourcesState('error');
-    }
-  }, []);
+    await refresh();
+  }, [refresh]);
 
   const retryAgents = React.useCallback(async () => {
     setAgentsState('loading');
-    try {
-      const next = await modelsApi.listAgents();
-      const nextChains = await readChains(next);
-      if (!aliveRef.current) return;
-      setAgents(next);
-      setChains(nextChains);
-      setAgentsState('ready');
-    } catch {
-      if (aliveRef.current) setAgentsState('error');
-    }
-  }, []);
+    await refresh();
+  }, [refresh]);
+
+  const retryEvents = React.useCallback(async () => {
+    setEventsState('loading');
+    await refresh();
+  }, [refresh]);
 
   const refreshAgentChains = React.useCallback(async (agent: AgentSupply) => {
     const requests = modelChainRequests([agent]);
@@ -460,7 +458,7 @@ export const SettingsModelsPage: React.FC = () => {
                       </div>
                       <SupplyLegend relations={supplyRelations} />
                     </div>
-                    <RecentSwitchesCard events={feed.events} sources={sources} hasMore={!feed.exhausted} loadingMore={loadingEvents} onLoadMore={loadOlderEvents} />
+                    <RecentSwitchesCard events={feed.events} sources={sources} readState={eventsState} sourcesRead={sourcesState === 'ready'} onRetry={retryEvents} hasMore={!feed.exhausted} loadingMore={loadingEvents} onLoadMore={loadOlderEvents} />
                     <AdvancedRow />
                   </div> : <section className="rounded-xl border border-border bg-surface px-5 py-8"><div className="flex items-start gap-3"><Info className="mt-0.5 size-4 text-muted" /><div><h2 className="text-[14px] font-semibold text-foreground">{t('settings.models.usageTab.title')}</h2><p className="mt-1 text-[12px] text-muted">{t('settings.models.usageTab.detail')}</p></div></div></section>}
                 </div>}

@@ -206,7 +206,8 @@ describe('the page reads the feed through this owner', () => {
     // to move the feed, not a probe-only twin bolted onto one call site.
     expect(page).toMatch(/refreshAuthority\.run\([\s\S]*?readSurfaceLanding\(\)/);
     expect(page).toMatch(/readSurfaceLanding[\s\S]*?modelsApi\.listEvents\(EVENT_PAGE\)/);
-    expect(page).toMatch(/setFeed\(\(previous\) => feedAfterHeadRead\(previous, events\)\)/);
+    expect(page).toMatch(/eventsHaveSnapshotRef\.current[\s\S]*?feedAfterHeadRead\(previous, events\)/);
+    expect(page).toMatch(/feedAfterTailRead\(previous, events, EVENT_PAGE, null\)/);
   });
 
   it('lets the ancillary feed read fail without losing the rows', () => {

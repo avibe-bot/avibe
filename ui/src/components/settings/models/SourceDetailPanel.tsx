@@ -10,6 +10,7 @@ import { cn } from '@/lib/utils';
 import { formatRelativeTime } from '@/lib/relativeTime';
 import { apiFailure, modelsApi } from './modelsApi';
 import { sourceStatePresentation } from './sourceStatePresentation';
+import { useDeadlineClock } from './useDeadlineClock';
 import { ACCENT_ICON, ACCENT_TILE, isCustomEndpoint, sourceVisual } from './vendorMeta';
 import type { AdoptedBy, RouteHopRef, Source, SuppliedModel, SupplyGap } from './types';
 
@@ -37,6 +38,26 @@ const ManualModelMenu: React.FC<{
 type GuardedAction =
   | { kind: 'refetch'; hops: RouteHopRef[]; gaps: SupplyGap[] }
   | { kind: 'remove'; model: SuppliedModel; hops: RouteHopRef[]; gaps: SupplyGap[] };
+
+export const GuardGapList: React.FC<{ gaps: SupplyGap[] }> = ({ gaps }) => {
+  const { t, i18n } = useTranslation();
+  if (gaps.length === 0) return null;
+  return (
+    <>
+      <div className="model-hub-guard-label"><p>{t('settings.models.guard.gap.label')}</p><span>{t('settings.models.gateway.modelCount', { count: gaps.length })}</span></div>
+      <div className="model-hub-guard-list">
+        {gaps.map((gap) => (
+          <div key={`${gap.backend}:${gap.model_id}`} className="model-hub-guard-hop">
+            <span className="min-w-0 flex-1">
+              <strong>{t('settings.models.guard.gap.subject', { backend: t(`settings.models.backends.${gap.backend}`, { defaultValue: gap.backend }), menuModel: gap.model_id })}</strong>
+              {gap.agents.length > 0 && <span>{t('settings.models.guard.gap.agents', { agents: gap.agents.join(i18n.language.startsWith('zh') ? '、' : ', ') })}</span>}
+            </span>
+          </div>
+        ))}
+      </div>
+    </>
+  );
+};
 
 const enteredHost = (source: Source): string | null => {
   if (!source.base_url || !isCustomEndpoint(source)) return null;
@@ -98,7 +119,7 @@ const TierEditor: React.FC<{
         onClick={() => { setFailedNext(null); setEditing(true); }}
       >
         {tiers.length > 0 ? tiers.map((tier) => (
-          <span key={tier} className="model-hub-source-tier inline-flex rounded-full border border-border bg-foreground/[0.06] px-2 py-1 text-foreground">{tier}</span>
+          <span key={tier} className="model-hub-source-tier model-hub-source-tier-chip inline-flex rounded-full border border-border text-foreground">{tier}</span>
         )) : <span className="model-hub-source-tier text-muted">{t('settings.models.sourceDetail.tiers.empty')}</span>}
         <span className="model-hub-source-tier font-semibold text-mint">{t(tiers.length > 0 ? 'settings.models.sourceDetail.tiers.add' : 'settings.models.sourceDetail.tiers.addFirst')}</span>
       </button>
@@ -107,7 +128,7 @@ const TierEditor: React.FC<{
   return (
     <div className="flex min-w-0 flex-wrap items-center gap-1.5">
       {tiers.map((tier) => (
-        <span key={tier} className="model-hub-source-tier inline-flex items-center gap-1 rounded-full border border-border bg-foreground/[0.06] px-2 py-1 text-foreground">
+        <span key={tier} className="model-hub-source-tier model-hub-source-tier-chip inline-flex items-center gap-1 rounded-full border border-border text-foreground">
           {tier}
           <button type="button" disabled={saving} onClick={() => void commit(tiers.filter((item) => item !== tier))} aria-label={t('settings.models.sourceDetail.tiers.remove', { tier }) as string} className="text-muted hover:text-foreground disabled:opacity-50">
             <X className="size-2.5" />
@@ -149,7 +170,7 @@ const DraftTiers: React.FC<{
   return (
     <div className="flex min-w-0 flex-wrap items-center gap-1.5">
       {tiers.map((tier) => (
-        <span key={tier} className="model-hub-source-tier inline-flex items-center gap-1 rounded-full border border-border bg-foreground/[0.06] px-2 py-1 text-foreground">
+        <span key={tier} className="model-hub-source-tier model-hub-source-tier-chip inline-flex items-center gap-1 rounded-full border border-border text-foreground">
           {tier}
           <button type="button" onClick={() => onChange(tiers.filter((item) => item !== tier))} aria-label={t('settings.models.sourceDetail.tiers.remove', { tier }) as string} className="text-muted hover:text-foreground"><X className="size-2.5" /></button>
         </span>
@@ -174,7 +195,7 @@ export const SourceDetailPanel: React.FC<{
   onChanged: () => Promise<void> | void;
 }> = ({ source, adoptedBy = [], onChanged }) => {
   const { t, i18n } = useTranslation();
-  const [now] = React.useState(() => Date.now());
+  const now = useDeadlineClock(source.state.status === 'cooldown' ? source.state.retry_at : null);
   const { Icon, accent } = sourceVisual(source);
   const [busy, setBusy] = React.useState(false);
   const [manualDraft, setManualDraft] = React.useState<{ modelId: string; tiers: string[]; failed: boolean } | null>(null);
@@ -249,7 +270,9 @@ export const SourceDetailPanel: React.FC<{
       const refusal = guardedFailure(error);
       if (refusal && !force) setGuard({ kind: 'remove', model, ...refusal });
       else {
-        if (apiFailure(error)?.code === 'source_not_found') await onChanged();
+        // A lost DELETE response is an unknown outcome. Re-read before another
+        // non-idempotent attempt so an already-committed removal disappears.
+        await onChanged();
         setRemoveFailure(model.id);
       }
     } finally {
@@ -278,7 +301,7 @@ export const SourceDetailPanel: React.FC<{
             <span className="model-hub-source-state flex items-center gap-1.5"><span className={cn('size-[5px] rounded-full', state.dotClass)} />{state.key && t(state.key, state.values)}</span>
             {source.last_discovered_at && <span className="model-hub-source-age text-muted">{t('settings.models.sourceDetail.status.listUpdated', { time: formatRelativeTime(source.last_discovered_at, t) })}</span>}
           </p>
-          <p className="model-hub-source-summary mt-1 truncate font-mono text-muted">{t(host ? 'settings.models.sourceDetail.summary' : 'settings.models.gateway.modelCount', { host, count: source.models.length })}</p>
+          <p className="model-hub-source-summary mt-1 truncate font-mono">{t(host ? 'settings.models.sourceDetail.summary' : 'settings.models.gateway.modelCount', { host, count: source.models.length })}</p>
         </div>
         <div className="flex shrink-0 gap-2">
           <Button variant="outline" size="sm" className="model-hub-source-action" disabled={busy} onClick={() => void refetch()}>{busy ? <Loader2 className="animate-spin" /> : <RefreshCw />}{t('settings.models.sourceDetail.action.refetch')}</Button>
@@ -289,13 +312,13 @@ export const SourceDetailPanel: React.FC<{
       {result && result.added.length === 0 && result.removed.length === 0 && <p className="rounded-lg border border-mint/25 bg-mint-soft/40 px-3 py-2 text-[11.5px] text-mint">{t('settings.models.sourceDetail.refetch.unchangedOnly')}</p>}
       {refetchFailed && <p className="rounded-lg border border-destructive/25 bg-destructive/[0.08] px-3 py-2 text-[11.5px] text-destructive">{t('settings.models.sourceDetail.fail.refetch')}</p>}
       <section className="model-hub-source-table overflow-hidden border border-border bg-surface">
-        <div className="model-hub-source-table-head hidden border-b border-border bg-foreground/[0.03] font-semibold text-muted md:grid">
+        <div className="model-hub-source-table-head hidden border-b border-border font-semibold md:grid">
           <span>{t('settings.models.sourceDetail.col.id')}</span><span>{t('settings.models.sourceDetail.col.entry')}</span><span className="flex items-center gap-1">{t('settings.models.sourceDetail.col.tiers')}<Info className="size-3" /></span><span />
         </div>
         {models.length === 0 && !manualDraft ? <p className="px-5 py-12 text-center text-[12px] text-muted">{t(source.last_discovered_at ? 'settings.models.sourceDetail.empty' : 'settings.models.sourceDetail.emptyNeverFetched')}</p> : models.map((model) => (
           <div key={model.id} className="model-hub-source-table-row grid gap-3 border-b border-border last:border-b-0 md:items-center md:gap-y-0">
             <span className="flex min-w-0 items-center gap-2"><span className="model-hub-source-model truncate font-mono text-foreground" title={model.id}>{model.id}</span>{result?.added.includes(model.id) && <span className="model-hub-source-pill rounded-full border border-mint/30 bg-mint-soft px-2 py-0.5 font-semibold text-mint">{t('settings.models.sourceDetail.refetch.added')}</span>}</span>
-            <span className="model-hub-source-pill w-fit rounded-full border border-border bg-foreground/[0.05] px-2 py-1 font-semibold text-muted">{t(`settings.models.sourceDetail.entry.${model.provenance === 'discovered' ? 'auto' : 'manual'}`)}</span>
+            <span className="model-hub-source-pill model-hub-source-entry-pill w-fit rounded-full border border-border font-semibold text-muted">{t(`settings.models.sourceDetail.entry.${model.provenance === 'discovered' ? 'auto' : 'manual'}`)}</span>
             <TierEditor source={source} model={model} onMutating={() => { setResult(null); setRefetchFailed(false); }} onChanged={onChanged} />
             <div className="flex items-center justify-end gap-2">
               {removeFailure === model.id && <span className="model-hub-source-tier text-right text-destructive">{t('settings.models.sourceDetail.fail.removeModel')} <button type="button" disabled={busy} onClick={() => void remove(model)} className="font-semibold underline underline-offset-2">{t('settings.models.sourceDetail.retry')}</button></span>}
@@ -312,7 +335,7 @@ export const SourceDetailPanel: React.FC<{
               placeholder={t('settings.models.sourceDetail.col.id') as string}
               className="model-hub-source-manual-id model-hub-source-model h-8 font-mono"
             />
-            <span className="model-hub-source-pill w-fit rounded-full border border-border bg-foreground/[0.05] px-2 py-1 font-semibold text-muted">{t('settings.models.sourceDetail.entry.manual')}</span>
+            <span className="model-hub-source-pill model-hub-source-entry-pill w-fit rounded-full border border-border font-semibold text-muted">{t('settings.models.sourceDetail.entry.manual')}</span>
             <DraftTiers tiers={manualDraft.tiers} onChange={(tiers) => setManualDraft((current) => current ? { ...current, tiers, failed: false } : current)} />
             <div className="flex justify-end gap-2">
               <Button variant="ghost" size="xs" disabled={busy} onClick={() => setManualDraft(null)}>{t('common.cancel')}</Button>
@@ -329,7 +352,7 @@ export const SourceDetailPanel: React.FC<{
           </button>
         )}
       </section>
-      <p className="model-hub-source-footnote leading-relaxed text-muted">{t('settings.models.sourceDetail.footnote')}</p>
+      <p className="model-hub-source-footnote leading-relaxed">{t('settings.models.sourceDetail.footnote')}</p>
       <DialogPrimitive.Root open={guard !== null} onOpenChange={(open) => !open && !busy && setGuard(null)}>
         <DialogPrimitive.Portal>
           <DialogPrimitive.Overlay className="model-hub-guard-overlay fixed inset-0 z-50" />
@@ -342,8 +365,11 @@ export const SourceDetailPanel: React.FC<{
               <DialogPrimitive.Description className="model-hub-guard-subtitle">{t(`settings.models.guard.subtitle.${guard?.kind === 'remove' ? 'removeModel' : 'refetch'}`)}</DialogPrimitive.Description>
             </header>
             {guard && <div className="model-hub-guard-body">
-              <div className="model-hub-guard-label"><p>{t('settings.models.guard.label')}</p><span>{t('settings.models.guard.count', { count: guard.hops.length })}</span></div>
-              <div className="model-hub-guard-list">{guard.hops.map((hop) => <div key={`${hop.backend}:${hop.menu_model}:${hop.source_id}:${hop.model_id}`} className="model-hub-guard-hop"><span className="min-w-0 flex-1"><strong>{t(`settings.models.backends.${hop.backend}`, { defaultValue: hop.backend })} · {hop.menu_model}</strong><span>{hop.model_id}</span></span></div>)}</div>
+              {guard.hops.length > 0 && <>
+                <div className="model-hub-guard-label"><p>{t('settings.models.guard.label')}</p><span>{t('settings.models.guard.count', { count: guard.hops.length })}</span></div>
+                <div className="model-hub-guard-list">{guard.hops.map((hop) => <div key={`${hop.backend}:${hop.menu_model}:${hop.source_id}:${hop.model_id}`} className="model-hub-guard-hop"><span className="min-w-0 flex-1"><strong>{t(`settings.models.backends.${hop.backend}`, { defaultValue: hop.backend })} · {hop.menu_model}</strong><span>{hop.model_id}</span></span></div>)}</div>
+              </>}
+              <GuardGapList gaps={guard.gaps} />
               <p className={cn('model-hub-guard-hint', guard.gaps.length > 0 && 'text-destructive')}><Info aria-hidden />{t(`settings.models.guard.hint.${guard.gaps.length > 0 ? 'interrupt' : 'safe'}`)}</p>
             </div>}
             <footer className="model-hub-guard-foot"><Button variant="outline" className="model-hub-guard-action" onClick={() => setGuard(null)} disabled={busy}>{t('settings.models.guard.cancel')}</Button><Button variant="destructive" className="model-hub-guard-action" onClick={confirmGuard} disabled={busy}>{busy && <Loader2 className="animate-spin" />}{t(`settings.models.guard.confirm.${guard?.kind === 'remove' ? 'removeModel' : 'refetch'}`)}</Button></footer>

@@ -3,6 +3,7 @@ import { LoaderCircle, Plus } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
+import { ModelHubInfoHint } from './ModelHubInfoHint';
 import { SourceRow } from './SourceRow';
 import type { AdoptedBy, Source } from './types';
 
@@ -22,7 +23,14 @@ export const SourcesCard: React.FC<{
   return (
     <section className="relative z-20 flex max-h-full min-h-[420px] flex-col self-start overflow-hidden rounded-[14px] border border-border bg-surface">
       <div className="flex h-14 shrink-0 items-center justify-between border-b border-border px-3.5">
-        <h2 className="text-[16px] font-bold text-foreground">{t('settings.models.upstream.heading')}</h2>
+        <span className="flex items-center gap-[7px]">
+          <h2 className="text-[16px] font-bold text-foreground">{t('settings.models.upstream.heading')}</h2>
+          <ModelHubInfoHint
+            label={t('settings.models.shell.gatewayInfo.label')}
+            content={t('settings.models.shell.gatewayInfo.body')}
+            className="model-hub-upstream-info"
+          />
+        </span>
         {readState === 'ready' && <span className="rounded-full border border-border bg-foreground/[0.04] px-2 py-[3px] text-[10.5px] font-semibold text-muted">{t('settings.models.upstream.count', { count: sources.length })}</span>}
       </div>
       <div className="min-h-0 flex-1 space-y-2.5 overflow-y-auto p-3">
@@ -31,7 +39,7 @@ export const SourcesCard: React.FC<{
           : readState === 'error'
             ? <div className="flex h-full min-h-36 flex-col items-center justify-center gap-3 px-4 text-center"><p className="text-[12px] text-muted">{t('settings.models.upstream.unread')}</p><Button variant="outline" size="xs" onClick={onRetry}>{t('settings.models.upstream.retry')}</Button></div>
             : groups.length > 0
-              ? groups.map((group) => <div key={group.id} className="space-y-2"><h3 className="flex h-[18px] items-center text-[10.5px] font-semibold uppercase text-muted/70">{t(`settings.models.upstream.group.${group.id}`)}</h3>{group.sources.map((source) => <SourceRow key={source.id} source={source} adoptedBy={adoptionBySource[source.id]} onOpen={onOpenSource} />)}</div>)
+              ? groups.map((group) => <div key={group.id} className="space-y-2"><h3 className="model-hub-upstream-group-label flex h-[18px] items-center uppercase">{t(`settings.models.upstream.group.${group.id}`)}</h3>{group.sources.map((source) => <SourceRow key={source.id} source={source} adoptedBy={adoptionBySource[source.id]} onOpen={onOpenSource} />)}</div>)
               : <p className="px-3 py-10 text-center text-[12px] text-muted">{t('settings.models.upstream.empty')}</p>}
       </div>
       <div className="flex h-14 shrink-0 items-center gap-2 border-t border-border px-3.5">

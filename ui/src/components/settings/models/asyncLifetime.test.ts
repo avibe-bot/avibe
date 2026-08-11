@@ -246,10 +246,16 @@ describe('sourcesWithEcho — one refresh result inside the shared authority', (
   it('routes Source-detail rereads and full reads through the same latest-result authority', () => {
     const page = readFileSync(join(__dirname, 'SettingsModelsPage.tsx'), 'utf8');
     const detail = readFileSync(join(__dirname, 'SourceDetailPanel.tsx'), 'utf8');
+    const sourceRetry = page.slice(page.indexOf('const retrySources'), page.indexOf('const retryAgents'));
+    const agentRetry = page.slice(page.indexOf('const retryAgents'), page.indexOf('const retryEvents'));
 
     expect(detail).toMatch(/modelsApi\.refreshSource\(source\.id, force\)/);
     expect(detail).toMatch(/await onChanged\(\)/);
     expect(page).toMatch(/await refreshAuthority\.run/);
+    expect(sourceRetry).toMatch(/await refresh\(\)/);
+    expect(agentRetry).toMatch(/await refresh\(\)/);
+    expect(sourceRetry).not.toMatch(/modelsApi\.listSources/);
+    expect(agentRetry).not.toMatch(/modelsApi\.listAgents/);
   });
 
   it('keeps the mutating refresh failure outside stale-read suppression', () => {

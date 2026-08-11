@@ -683,7 +683,7 @@ export const OAuthConnectDialog: React.FC<{
                       'model-hub-add-sub-option flex items-start gap-3 text-left transition-colors',
                       selected
                         ? 'border-mint/35 bg-mint/[0.06]'
-                        : 'border-border bg-foreground/[0.02] hover:border-border-strong',
+                        : 'model-hub-add-sub-option--idle border-border hover:border-border-strong',
                       disabled && 'cursor-not-allowed opacity-55 hover:border-border',
                     )}
                   >

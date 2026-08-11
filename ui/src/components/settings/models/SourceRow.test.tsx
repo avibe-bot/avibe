@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
-import { render, screen } from '@testing-library/react';
+import { act, cleanup, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { I18nextProvider } from 'react-i18next';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import i18n from '@/i18n';
 import { SourceRow } from './SourceRow';
@@ -13,6 +13,11 @@ const source: Source = {
   protocol: 'anthropic', base_url: null, supply_channel: 'hub', billing: 'metered',
   state: { status: 'standby', retry_at: null, detail_key: null }, masked_credential: 'sk-ant-…1234', models: [],
 };
+
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+});
 
 describe('SourceRow', () => {
   it('opens the Source detail without exposing inline source mutations', async () => {
@@ -34,5 +39,22 @@ describe('SourceRow', () => {
       </I18nextProvider>,
     );
     expect(screen.getByText(/Supplying Claude Code|正在供给 Claude Code/i)).toBeTruthy();
+  });
+
+  it('advances cooldown copy when its retry deadline passes', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-11T14:00:00Z'));
+    render(
+      <I18nextProvider i18n={i18n}>
+        <SourceRow
+          source={{ ...source, state: { status: 'cooldown', retry_at: '2026-08-11T14:01:00Z', detail_key: null } }}
+          onOpen={vi.fn()}
+        />
+      </I18nextProvider>,
+    );
+
+    expect(screen.getByText(/retrying automatically after|后自动重试/i)).toBeTruthy();
+    act(() => vi.advanceTimersByTime(60_000));
+    expect(screen.getByText(/retry is due|已到重试时间/i)).toBeTruthy();
   });
 });

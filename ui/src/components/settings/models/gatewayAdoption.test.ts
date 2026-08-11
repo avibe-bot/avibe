@@ -34,6 +34,16 @@ describe('resumeGatewayAdoption', () => {
     expect(client.setAgentMode).toHaveBeenCalledWith('claude', 'hub');
   });
 
+  it('returns the mode PATCH AgentSupply with its newly materialized native source', async () => {
+    const adopted = { ...agent('hub'), sources: { order: ['src_native'], eligibility: [] } };
+    const client = api({ setAgentMode: vi.fn().mockResolvedValue(adopted) });
+
+    await expect(resumeGatewayAdoption(client, 'claude')).resolves.toMatchObject({
+      ok: true,
+      agent: { mode: 'hub', sources: { order: ['src_native'] } },
+    });
+  });
+
   it('starts an idle runtime before switching the one backend', async () => {
     const client = api({ getRuntimeStatus: vi.fn().mockResolvedValue(runtime('not_started')) });
 

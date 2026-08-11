@@ -49,14 +49,17 @@ export const RecentSwitchesCard: React.FC<{
   loadingMore?: boolean;
   /** Fetch the next older page. Required for 查看全部 to mean 全部. */
   onLoadMore?: () => void | Promise<void>;
-}> = ({ events, sources, hasMore = false, loadingMore = false, onLoadMore }) => {
+  readState?: 'loading' | 'ready' | 'error';
+  sourcesRead?: boolean;
+  onRetry?: () => void | Promise<void>;
+}> = ({ events, sources, hasMore = false, loadingMore = false, onLoadMore, readState = 'ready', sourcesRead = true, onRetry }) => {
   const { t, i18n } = useTranslation();
   const [expanded, setExpanded] = React.useState(false);
   const formatTime = useEventTime();
   const zh = i18n.language.startsWith('zh');
   const liveIds = React.useMemo(() => new Set(sources.map((s) => s.id)), [sources]);
   const namesDeletedSource = (e: ResolutionEvent) =>
-    [e.from_source, e.to_source].some((id) => typeof id === 'string' && id !== '' && !liveIds.has(id));
+    sourcesRead && [e.from_source, e.to_source].some((id) => typeof id === 'string' && id !== '' && !liveIds.has(id));
 
   const visibleEvents = events;
   const shown = expanded ? visibleEvents : visibleEvents.slice(0, COLLAPSED);
@@ -68,15 +71,15 @@ export const RecentSwitchesCard: React.FC<{
   // advances after every useful page and keeps a
   // failed/overlapping response from becoming an automatic retry loop.
   React.useEffect(() => {
-    if (visibleEvents.length >= COLLAPSED || !hasMore || loadingMore || !onLoadMore) return;
+    if (readState !== 'ready' || visibleEvents.length >= COLLAPSED || !hasMore || loadingMore || !onLoadMore) return;
     if (backfilledTailRef.current === rawTailId) return;
     backfilledTailRef.current = rawTailId;
     void onLoadMore();
-  }, [hasMore, loadingMore, onLoadMore, rawTailId, visibleEvents.length]);
+  }, [hasMore, loadingMore, onLoadMore, rawTailId, readState, visibleEvents.length]);
 
   // 查看全部 opens the fetched rows AND asks for the next page, so the label is
   // true the moment it is pressed rather than only for feeds under one page.
-  const canExpand = visibleEvents.length > COLLAPSED || hasMore;
+  const canExpand = readState === 'ready' && (visibleEvents.length > COLLAPSED || hasMore);
   const expand = () => {
     setExpanded(true);
     if (hasMore && !loadingMore) onLoadMore?.();
@@ -96,10 +99,16 @@ export const RecentSwitchesCard: React.FC<{
           </button>
         )}
       </div>
-      {shown.length === 0 ? (
+      {readState === 'error' && (
+        <div className="flex items-center justify-between gap-3 border-b border-border px-4 py-3 text-[12px] text-destructive sm:px-5">
+          <span>{t('settings.models.toast.refreshFailed')}</span>
+          <button type="button" onClick={() => void onRetry?.()} className="shrink-0 font-semibold text-mint">{t('settings.models.upstream.retry')}</button>
+        </div>
+      )}
+      {readState === 'error' && shown.length === 0 ? null : shown.length === 0 ? (
         <div className="flex flex-col items-center gap-2 px-4 py-8 text-center text-[13px] text-muted sm:px-5">
-          <span>{hasMore ? t('settings.models.recent.loadingMore') : t('settings.models.recent.empty')}</span>
-          {hasMore && !loadingMore && (
+          <span>{readState === 'loading' || hasMore ? t('settings.models.recent.loadingMore') : t('settings.models.recent.empty')}</span>
+          {readState === 'ready' && hasMore && !loadingMore && (
             <button
               type="button"
               onClick={() => void onLoadMore?.()}

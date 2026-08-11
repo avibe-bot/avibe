@@ -39,7 +39,6 @@ const ModelRow: React.FC<{
   onOpenRoute: (agent: AgentSupply, modelId: string) => void;
 }> = ({ agent, modelId, sources, read, onOpenRoute }) => {
   const { t } = useTranslation();
-  const selected = agent.selected_model_id === modelId;
   const current = currentLink(read);
   const takeover = isTakeoverRead(read);
   const resolved = read?.kind === 'ready' && current !== null;
@@ -56,11 +55,11 @@ const ModelRow: React.FC<{
       type="button"
       onClick={() => onOpenRoute(agent, modelId)}
       aria-label={t('settings.models.routeDialog.open', { model: modelId }) as string}
-      className={cn('flex h-9 w-full min-w-0 items-center gap-2.5 overflow-hidden rounded-lg border border-border bg-foreground/[0.02] px-3 text-left', selected && 'bg-mint-soft/35')}
+      className="model-hub-model-row flex h-9 w-full min-w-0 items-center gap-2.5 overflow-hidden rounded-lg border border-border px-3 text-left"
     >
       <span className="min-w-0 flex-1 truncate font-mono text-[12px] font-medium text-foreground" title={modelId}>{modelId}</span>
-      <span className="shrink-0 rounded-full border border-border bg-foreground/[0.04] px-2 py-[3px] text-[10.5px] font-semibold text-muted">{mode}</span>
-      <span className={cn('w-[190px] min-w-0 truncate text-[10.5px]', takeover ? 'text-violet' : 'text-muted/80')} title={currentCopy}>{currentCopy}</span>
+      <span className="model-hub-model-mode-chip shrink-0 rounded-full border border-border px-2 py-[3px] text-[10.5px] font-semibold text-muted">{mode}</span>
+      <span className={cn('model-hub-model-current w-[190px] min-w-0 truncate text-[10.5px]', takeover && 'model-hub-model-current--takeover')} title={currentCopy}>{currentCopy}</span>
       <ChevronRight className="size-[15px] shrink-0 text-muted/40" aria-hidden="true" />
     </button>
   );
@@ -133,7 +132,7 @@ const AgentModelCard: React.FC<{
           <ModelHubInfoHint label={switchFailed ? t('settings.models.gateway.fail.switchToDirect') : subtitle} content={switchFailed ? t('settings.models.gateway.fail.switchToDirect') : subtitle} className="size-[13px] text-foreground/25" />
         </span>
       </div>
-      {models.length === 0 ? <div className="px-4 py-10 text-center sm:px-5"><p className="text-[12.5px] text-muted">{t('settings.models.gateway.group.emptyModels')}</p></div> : <div className="space-y-2 p-2">{noUsableSource && <p className="px-3 py-1 text-[11px] font-semibold text-muted">{t('settings.models.gateway.supply.none')}</p>}{models.map((modelId) => <ModelRow key={modelId} agent={agent} modelId={modelId} sources={sources} read={chains[modelChainKey(agent.backend, modelId)]} onOpenRoute={onOpenRoute} />)}{canCollapse && <button type="button" onClick={toggleCollapsed} className="flex h-6 w-full items-center justify-center gap-1.5 text-[11px] font-semibold text-muted hover:text-foreground">{expanded ? <ChevronUp className="size-3.5" /> : <ChevronDown className="size-3.5" />}{expanded ? t('settings.models.gateway.collapse', { count: collapsedAtRest.hidden.length }) : t('settings.models.gateway.collapse', { count: collapsed.hidden.length })}</button>}</div>}
+      {models.length === 0 ? <div className="px-4 py-10 text-center sm:px-5"><p className="text-[12.5px] text-muted">{t('settings.models.gateway.group.emptyModels')}</p></div> : <div className="space-y-2 p-2">{noUsableSource && <p className="px-3 py-1 text-[11px] font-semibold text-muted">{t('settings.models.gateway.supply.none')}</p>}{models.map((modelId) => <ModelRow key={modelId} agent={agent} modelId={modelId} sources={sources} read={chains[modelChainKey(agent.backend, modelId)]} onOpenRoute={onOpenRoute} />)}{canCollapse && <button type="button" onClick={toggleCollapsed} className="model-hub-model-collapse flex h-6 w-full items-center gap-1.5 hover:text-foreground">{expanded ? <ChevronUp /> : <ChevronDown />}{expanded ? t('settings.models.gateway.collapse', { count: collapsedAtRest.hidden.length }) : t('settings.models.gateway.collapse', { count: collapsed.hidden.length })}</button>}</div>}
     </section>
   );
 };

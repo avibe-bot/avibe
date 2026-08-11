@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import * as React from 'react';
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { I18nextProvider } from 'react-i18next';
@@ -7,7 +8,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ToastProvider } from '@/context/ToastProvider';
 import i18n from '@/i18n';
 import { modelsApi } from './modelsApi';
-import { SourceDetailPanel } from './SourceDetailPanel';
+import { GuardGapList, SourceDetailPanel } from './SourceDetailPanel';
 import type { Source } from './types';
 
 const source: Source = {
@@ -94,5 +95,41 @@ describe('SourceDetailPanel', () => {
     await userEvent.click(screen.getByRole('menuitem', { name: /^Remove$|^移除$/i }));
     await waitFor(() => expect(remove).toHaveBeenCalledWith(source.id, 'model-a', false));
     expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('names every model and Agent that a guarded change would interrupt', () => {
+    render(
+      <I18nextProvider i18n={i18n}>
+        <GuardGapList gaps={[{ backend: 'claude', model_id: 'claude-opus-4-6', agents: ['Release bot', 'Triage'] }]} />
+      </I18nextProvider>,
+    );
+
+    expect(screen.getByText(/Claude Code · claude-opus-4-6/)).toBeTruthy();
+    expect(screen.getByText(/Release bot.*Triage/)).toBeTruthy();
+  });
+
+  it('re-reads after an unconfirmed manual deletion before offering another DELETE', async () => {
+    vi.spyOn(modelsApi, 'deleteCustomModel').mockRejectedValueOnce(new TypeError('response lost'));
+    const onChanged = vi.fn();
+    const Fixture = () => {
+      const [current, setCurrent] = React.useState(source);
+      return (
+        <SourceDetailPanel
+          source={current}
+          onChanged={() => {
+            onChanged();
+            setCurrent((value) => ({ ...value, models: [] }));
+          }}
+        />
+      );
+    };
+    render(<I18nextProvider i18n={i18n}><Fixture /></I18nextProvider>);
+
+    await userEvent.click(screen.getByRole('button', { name: /Remove model-a|移除 model-a/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Remove$|^移除$/i }));
+
+    await waitFor(() => expect(onChanged).toHaveBeenCalledOnce());
+    await waitFor(() => expect(screen.queryByText('model-a')).toBeNull());
+    expect(screen.queryByRole('button', { name: /^Try again$|^重试$/i })).toBeNull();
   });
 });
