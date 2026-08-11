@@ -465,6 +465,18 @@ def test_streamed_protocol_failure_preserves_its_positive_terminal_category():
         (
             RawCallOutcome(
                 kind=RawOutcomeKind.NETWORK_ERROR,
+                http_status=200,
+                error_code="engine_down",
+                redacted_message="loopback transport failed",
+                stream_started=True,
+                model_id="upstream-first",
+                source_id="src_route006",
+            ),
+            "engine_down",
+        ),
+        (
+            RawCallOutcome(
+                kind=RawOutcomeKind.NETWORK_ERROR,
                 http_status=None,
                 error_code=None,
                 redacted_message=None,

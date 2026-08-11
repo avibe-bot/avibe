@@ -334,6 +334,7 @@ class EngineClient:
                     kind=RawOutcomeKind.NETWORK_ERROR,
                     source=source,
                     model_id=model_id,
+                    error_code="engine_down",
                     http_status=response.status if response is not None and first_received else None,
                     message="upstream request failed",
                     stream_started=first_received,
@@ -512,6 +513,7 @@ async def _response_stream(
             source=source,
             model_id=model_id,
             http_status=response.status,
+            error_code="engine_down",
             message="upstream response failed after streaming started",
             stream_started=True,
         )

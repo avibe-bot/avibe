@@ -1390,7 +1390,7 @@ def test_adapter_engine_unavailable_does_not_forge_an_upstream_error_code(tmp_pa
         outcome = await handle.outcome()
 
         assert outcome.kind is RawOutcomeKind.NETWORK_ERROR
-        assert outcome.error_code is None
+        assert outcome.error_code == "engine_down"
         assert outcome.redacted_message is None
 
     asyncio.run(run())
@@ -1493,6 +1493,67 @@ def test_engine_client_does_not_apply_a_total_turn_timeout(tmp_path: Path) -> No
         assert b"message_stop" in body
         assert (await handle.outcome()).kind is RawOutcomeKind.SUCCESS
         supervisor.stop()
+
+    asyncio.run(run())
+
+
+def test_engine_client_marks_loopback_stream_disconnect_as_engine_down(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> None:
+        class Content:
+            async def read(self, _size: int) -> bytes:
+                return b"data: first\n\n"
+
+            async def iter_chunked(self, _size: int):
+                raise client_module.aiohttp.ClientConnectionError(
+                    "loopback engine closed"
+                )
+                yield b""
+
+        class Response:
+            status = 200
+            content = Content()
+
+            def close(self) -> None:
+                return None
+
+        class Session:
+            async def post(self, *_args, **_kwargs):
+                return Response()
+
+            async def close(self) -> None:
+                return None
+
+        monkeypatch.setattr(
+            client_module.aiohttp,
+            "ClientSession",
+            lambda **_kwargs: Session(),
+        )
+        source = SourceRecord(
+            source_id="src_fixture123",
+            vendor="custom",
+            protocol="openai_chat",
+            base_url="https://api.example.test/v1",
+            credential_ref="cred_fixture123",
+            allowed_origins=(),
+            model_ids=("model-a",),
+            prefix="source-fixture123",
+        )
+        handle = await EngineClient(
+            EngineConnection(
+                base_url="http://127.0.0.1:15220",
+                management_key="management-key",
+                gateway_token="gateway-token",
+            )
+        ).invoke(source, "model-a", {}, stream=True)
+
+        assert handle.stream is not None
+        assert [chunk async for chunk in handle.stream] == [b"data: first\n\n"]
+        outcome = await handle.outcome()
+        assert outcome.kind is RawOutcomeKind.NETWORK_ERROR
+        assert outcome.error_code == "engine_down"
+        assert outcome.stream_started is True
 
     asyncio.run(run())
 

@@ -1081,7 +1081,7 @@ class CLIProxyEngineAdapter:
                     RawCallOutcome(
                         kind=RawOutcomeKind.NETWORK_ERROR,
                         http_status=None,
-                        error_code=None,
+                        error_code="engine_down",
                         redacted_message=None,
                         stream_started=False,
                         model_id=model_id,

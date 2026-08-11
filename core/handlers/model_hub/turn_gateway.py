@@ -412,6 +412,14 @@ class ModelHubTurnGateway:
         *,
         termination_origin: HandleTerminationOrigin,
     ) -> None:
+        if (
+            termination_origin == "downstream_cancel"
+            and execution.handle is not None
+            and execution.handle.outcome_available
+        ):
+            # The producer has already recorded the upstream history. A later
+            # downstream write failure cannot rewrite that history as cancel.
+            termination_origin = "upstream_terminal"
         await self._settle_turn_handle(
             execution,
             terminalizer,

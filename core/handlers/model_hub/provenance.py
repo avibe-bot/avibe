@@ -1158,6 +1158,14 @@ class TurnCorrelationRegistry:
     ) -> None:
         if turn_id is None:
             return
+        if decision.error_code == "engine_down":
+            self._terminalize_gateway_exit(
+                turn_id,
+                reason="engine_down",
+                stream_started=outcome.stream_started,
+                force=True,
+            )
+            return
         with self._lock:
             trace = self._traces.get(turn_id)
             if trace is None or trace.pending_attempt is None:

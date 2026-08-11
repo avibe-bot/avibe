@@ -14,6 +14,7 @@ TerminalOutcomeCategory = Literal[
     "request_nonfallback",
     "fallback_source",
     "upstream_protocol",
+    "engine_down",
 ]
 ResolutionReason = Literal[
     "quota_exhausted",
@@ -41,6 +42,7 @@ _MODEL_SURFACE_PATTERNS = re.compile(
 )
 _MODEL_NOT_FOUND_ERROR_CODES = frozenset({"not_found_error"})
 _MACHINE_ERROR_CODE_DECISIONS: dict[str, tuple[ResolutionAction, str]] = {
+    "engine_down": ("surface", "engine_down"),
     "permission_error": ("surface", "request_incompatible"),
     "request_too_large": ("surface", "upstream_request_invalid"),
 }
@@ -71,6 +73,7 @@ _TERMINAL_OUTCOME_CATEGORIES: Mapping[
     ("return", RawOutcomeKind.SUCCESS, False): "served",
     ("surface", RawOutcomeKind.HTTP_ERROR, False): "request_nonfallback",
     ("surface", RawOutcomeKind.PROTOCOL_ERROR, False): "upstream_protocol",
+    ("surface", RawOutcomeKind.NETWORK_ERROR, False): "engine_down",
     ("surface", RawOutcomeKind.HTTP_ERROR, True): "fallback_source",
     ("surface", RawOutcomeKind.NETWORK_ERROR, True): "fallback_source",
     ("surface", RawOutcomeKind.TIMEOUT, True): "fallback_source",
@@ -99,18 +102,17 @@ def _classify_unstreamed(
     *,
     refresh_attempted: bool = False,
 ) -> ResolutionDecision:
-    if outcome.kind in {RawOutcomeKind.NETWORK_ERROR, RawOutcomeKind.TIMEOUT}:
-        return ResolutionDecision("fallback", reason="network", cooldown_seconds=30)
-    if outcome.kind == RawOutcomeKind.PROTOCOL_ERROR:
-        return ResolutionDecision("surface", error_code="upstream_protocol_error")
-
-    # Signed machine-code rows precede every status heuristic. HTTP status is
-    # only fallback evidence when no canonical machine-code row matches.
+    # Signed machine-code rows precede every transport and status heuristic.
     normalized_error_code = str(outcome.error_code or "").strip().lower()
     machine_row = _MACHINE_ERROR_CODE_DECISIONS.get(normalized_error_code)
     if machine_row is not None:
         action, error_code = machine_row
         return ResolutionDecision(action, error_code=error_code)
+
+    if outcome.kind in {RawOutcomeKind.NETWORK_ERROR, RawOutcomeKind.TIMEOUT}:
+        return ResolutionDecision("fallback", reason="network", cooldown_seconds=30)
+    if outcome.kind == RawOutcomeKind.PROTOCOL_ERROR:
+        return ResolutionDecision("surface", error_code="upstream_protocol_error")
 
     if outcome.http_status == 401:
         if refresh_attempted:

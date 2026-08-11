@@ -705,10 +705,12 @@ class FakeStreamResponse:
         *,
         prepare_error: BaseException | None = None,
         write_error: BaseException | None = None,
+        eof_error: BaseException | None = None,
         eof_reached: asyncio.Event | None = None,
     ) -> None:
         self.prepare_error = prepare_error
         self.write_error = write_error
+        self.eof_error = eof_error
         self.eof_reached = eof_reached
 
     async def prepare(self, _request) -> None:
@@ -724,6 +726,8 @@ class FakeStreamResponse:
     async def write_eof(self) -> None:
         if self.eof_reached is not None:
             self.eof_reached.set()
+        if self.eof_error is not None:
+            raise self.eof_error
         return None
 
 
@@ -1925,6 +1929,53 @@ def test_handle_settlement_records_history_before_source_transition_event(
     asyncio.run(exercise())
 
 
+def test_engine_down_settlement_does_not_mutate_source(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        source = _source("src_enginedown1", "Engine unavailable")
+        service = _service(tmp_path, sources=[source])
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        resolved = ResolvedInvocation(
+            backend="codex",
+            requested_model_id=requested_model,
+            source_id=source.id,
+            source_label=source.display_name,
+            model_id="shared-model",
+            handle=None,
+            outcome=None,
+        )
+        outcome = _outcome(
+            RawOutcomeKind.NETWORK_ERROR,
+            status=200,
+            code="engine_down",
+            message="loopback transport failed",
+            source_id=source.id,
+            stream_started=True,
+        )
+        record_attempt = Mock()
+
+        settlement = await service.settle_handle_outcome(
+            resolved,
+            outcome,
+            termination_origin="upstream_terminal",
+            record_attempt=record_attempt,
+        )
+
+        assert settlement.decision is not None
+        assert settlement.decision.error_code == "engine_down"
+        assert settlement.decision.reason is None
+        assert settlement.turn_outcome == produce_turn_outcome(
+            "turn.engine_down",
+            stream_started=True,
+        )
+        assert service.store.load().sources[0].state.status == "standby"
+        assert service.events.list() == []
+        record_attempt.assert_called_once()
+
+    asyncio.run(exercise())
+
+
 @pytest.mark.parametrize(
     ("failure_phase", "expected_outcome_calls"),
     [("prepare", 0), ("write", 1)],
@@ -1935,7 +1986,7 @@ def test_gateway_closes_producer_before_downstream_cancel_settlement(
     expected_outcome_calls: int,
 ) -> None:
     async def exercise() -> None:
-        source = _source("src_close01", "Closed producer")
+        source = _source("src_close0001", "Closed producer")
         outcome = _outcome(
             RawOutcomeKind.NETWORK_ERROR,
             source_id=source.id,
@@ -1984,12 +2035,19 @@ def test_gateway_closes_producer_before_downstream_cancel_settlement(
         assert handle.close_calls == 1
         assert handle.outcome_calls == expected_outcome_calls
         service.settle_handle_outcome.assert_awaited_once()
+        expected_origin = (
+            "upstream_terminal" if failure_phase == "write" else "downstream_cancel"
+        )
         assert (
             service.settle_handle_outcome.await_args.kwargs["termination_origin"]
-            == "downstream_cancel"
+            == expected_origin
         )
-        assert service.store.load().sources[0].state.status == "standby"
-        assert service.events.list() == []
+        if failure_phase == "write":
+            assert service.store.load().sources[0].state.status == "cooldown"
+            assert [event["reason"] for event in service.events.list()] == ["network"]
+        else:
+            assert service.store.load().sources[0].state.status == "standby"
+            assert service.events.list() == []
 
     asyncio.run(exercise())
 
@@ -2191,6 +2249,55 @@ def test_gateway_cancellation_after_write_eof_preserves_upstream_settlement(
         assert record["outcome"] == "served"
         assert service.store.load().sources[0].state.status == "standby"
         assert service.events.list() == []
+
+    asyncio.run(exercise())
+
+
+def test_gateway_eof_disconnect_after_upstream_outcome_keeps_upstream_history(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        source = _source("src_eofdrop1", "EOF disconnect")
+        outcome = _outcome(RawOutcomeKind.SUCCESS, source_id=source.id)
+        handle = LiveInvokeHandle(outcome, (b"data: [DONE]\n\n",))
+        service = _service(tmp_path, sources=[source], live_handles=[handle])
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        gateway = ModelHubTurnGateway(service)
+        turn_id = "turn_eof_disconnect"
+        request = _prepared_gateway_request(
+            gateway,
+            turn_id=turn_id,
+            requested_model=requested_model,
+            source_id=source.id,
+            stream=True,
+        )
+        service.settle_handle_outcome = AsyncMock(
+            wraps=service.settle_handle_outcome
+        )
+
+        with patch(
+            "core.handlers.model_hub.turn_gateway.web.StreamResponse",
+            return_value=FakeStreamResponse(
+                eof_error=ConnectionResetError("downstream EOF failed")
+            ),
+        ):
+            with pytest.raises(ConnectionError, match="downstream EOF failed"):
+                await gateway._handle_request(request)
+
+        assert (
+            service.settle_handle_outcome.await_args.kwargs["termination_origin"]
+            == "upstream_terminal"
+        )
+        gateway.correlation.settle(
+            turn_id,
+            settled_by=SETTLED_BY_TERMINAL_RESULT,
+            ts=NOW.isoformat(),
+        )
+        record = service.provenance.get(turn_id)
+        assert record is not None
+        assert record["outcome"] == "served"
+        assert record["terminal_error"] is None
+        assert service.store.load().sources[0].state.status == "standby"
 
     asyncio.run(exercise())
 

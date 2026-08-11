@@ -3983,6 +3983,11 @@ class ModelHubService:
             # The Gateway's existing protocol-error copy is the positive row;
             # a request-incompatible projection would misclassify the failure.
             return None
+        if category == "engine_down":
+            return produce_turn_outcome(
+                "turn.engine_down",
+                stream_started=outcome.stream_started,
+            )
         if category != "fallback_source":
             raise AssertionError("attempt terminal producer received a non-failure")
 
