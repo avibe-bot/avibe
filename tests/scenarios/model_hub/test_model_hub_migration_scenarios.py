@@ -178,6 +178,42 @@ def _write(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
+def _assert_canonical_round_trip(config: ModelHubConfig) -> ModelHubConfig:
+    serialized = json.dumps(config.to_payload())
+    reloaded = ModelHubConfig.from_payload(json.loads(serialized))
+    assert reloaded.to_payload() == config.to_payload()
+    return reloaded
+
+
+def _assert_sources_validated_before_commit(
+    monkeypatch: pytest.MonkeyPatch,
+    service: ModelHubService,
+) -> None:
+    original_validator = ModelHubSourceConfig.from_payload.__func__
+    validated_source_ids: set[str] = set()
+
+    def tracked_validator(cls, payload):
+        source = original_validator(cls, payload)
+        validated_source_ids.add(source.id)
+        return source
+
+    original_commit = service._commit_synced
+
+    async def checked_commit(previous, updated):
+        new_source_ids = {
+            source.id for source in updated.sources
+        } - {source.id for source in previous.sources}
+        assert new_source_ids <= validated_source_ids
+        await original_commit(previous, updated)
+
+    monkeypatch.setattr(
+        ModelHubSourceConfig,
+        "from_payload",
+        classmethod(tracked_validator),
+    )
+    monkeypatch.setattr(service, "_commit_synced", checked_commit)
+
+
 def _write_claude(home: Path, *, malformed: bool = False) -> None:
     if malformed:
         _write(home / ".claude" / "settings.json", "{not-json")
@@ -518,6 +554,7 @@ def test_mh_mig_001_api_apply_keeps_native_tree_byte_identical(
     before = _tree_digest(native_home)
 
     service, store, adapter = _service(tmp_path)
+    _assert_sources_validated_before_commit(monkeypatch, service)
     monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
     client = app.test_client()
     base_url = "http://127.0.0.1:15131"
@@ -549,6 +586,12 @@ def test_mh_mig_001_api_apply_keeps_native_tree_byte_identical(
     assert adapter.transient_revoked == adapter.transient_refs
     assert len(adapter.observed) == len(adapter.transient_refs)
     assert before == _tree_digest(native_home)
+    reloaded = _assert_canonical_round_trip(store.config)
+    assert all(
+        model.reasoning_efforts == []
+        for source in reloaded.sources
+        for model in source.models
+    )
     by_id = {source.id: source for source in store.config.sources}
     imported_ids = set(by_id)
     for backend in ("claude", "codex", "opencode"):
@@ -609,6 +652,7 @@ def test_mh_mig_002_oauth_defaults_to_native_sources(
     _write_codex_oauth(native_home)
     _isolate_native_home(monkeypatch, native_home)
     service, store, adapter = _service(tmp_path)
+    _assert_sources_validated_before_commit(monkeypatch, service)
 
     scan = service.migration_scan()["items"]
     oauth_items = [item for item in scan if item["kind"] == "oauth_native"]
@@ -627,6 +671,14 @@ def test_mh_mig_002_oauth_defaults_to_native_sources(
         ("openai", "subscription", "native_cli", None),
     }
     assert adapter.provisioned == []
+    reloaded = _assert_canonical_round_trip(store.config)
+    assert {
+        (source.vendor, source.kind, source.supply_channel, source.credential_ref)
+        for source in reloaded.sources
+    } == {
+        ("anthropic", "subscription", "native_cli", None),
+        ("openai", "subscription", "native_cli", None),
+    }
 
 
 @pytest.mark.parametrize(
@@ -1006,6 +1058,37 @@ def test_failed_batch_revokes_every_provisioned_credential(
     assert error.value.code == "migration_item_conflict"
     assert adapter.revoked == ["cred_migration_1"]
     assert adapter.transient_revoked == adapter.transient_refs
+    assert store.config.sources == []
+    assert all(agent.sources.order == [] for agent in store.config.agents.values())
+
+
+def test_canonical_source_rejection_aborts_batch_and_revokes_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    native_home = tmp_path / "native-home"
+    _write_opencode(native_home)
+    _isolate_native_home(monkeypatch, native_home)
+    service, store, adapter = _service(tmp_path)
+    item_ids = [item["id"] for item in service.migration_scan()["items"]]
+    original_validator = ModelHubSourceConfig.from_payload.__func__
+
+    def reject_one_source(cls, payload):
+        if payload.get("vendor") == "zhipuai":
+            raise ValueError("injected canonical rejection")
+        return original_validator(cls, payload)
+
+    monkeypatch.setattr(
+        ModelHubSourceConfig,
+        "from_payload",
+        classmethod(reject_one_source),
+    )
+
+    with pytest.raises(ModelHubError) as error:
+        asyncio.run(service.migration_apply(item_ids))
+
+    assert error.value.code == "migration_item_conflict"
+    assert adapter.revoked == ["cred_migration_2", "cred_migration_1"]
     assert store.config.sources == []
     assert all(agent.sources.order == [] for agent in store.config.agents.values())
 

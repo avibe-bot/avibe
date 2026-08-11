@@ -1137,6 +1137,10 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
             harness.store.config.sources[0].state.status,
             "needs_action",
         )
+        self.assertEqual(
+            harness.store.config.sources[0].state.detail_key,
+            "models.source.needs_action.oauth_expired",
+        )
         self.assertEqual(harness.store.config.sources[0].models, [])
 
         harness.agent_auth.timeout(flow_id)
@@ -1240,6 +1244,68 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
             harness.service.get_agent_sources("claude")["supply_status"],
             "ok",
         )
+
+    async def test_duplicate_native_source_is_rejected_before_login_starts(self):
+        """Scenario: AUTH-SETUP-108"""
+        state_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(state_dir.cleanup)
+        harness = NativeOAuthScenarioHarness(Path(state_dir.name))
+        source = ModelHubSourceConfig.from_payload(
+            {
+                "id": "src_native0001",
+                "created_at": "2026-07-25T00:00:00+00:00",
+                "last_discovered_at": "2026-07-25T00:00:00+00:00",
+                "kind": "subscription",
+                "vendor": "anthropic",
+                "display_name": "Claude subscription",
+                "protocol": "anthropic",
+                "base_url": None,
+                "supply_channel": "native_cli",
+                "billing": "monthly",
+                "state": {
+                    "status": "standby",
+                    "retry_at": None,
+                    "detail_key": None,
+                },
+                "usage": {
+                    "cycle_used_pct": None,
+                    "month_spend_cents": None,
+                    "currency": None,
+                    "projected_exhaust_at": None,
+                },
+                "models": [
+                    {
+                        "id": "claude-opus-4-6",
+                        "display_name": None,
+                        "origin": "discovered",
+                        "reasoning_efforts": [],
+                        "discovered_at": "2026-07-25T00:00:00+00:00",
+                    }
+                ],
+                "credential_ref": None,
+                "account_label": None,
+                "masked_credential": None,
+            }
+        )
+        harness.store.config.sources.append(source)
+
+        with self.assertRaises(ModelHubError) as refused:
+            await harness.service.oauth_start(
+                {"vendor": "anthropic", "channel": "native_cli"}
+            )
+
+        self.assertEqual(refused.exception.code, "native_source_already_exists")
+        self.assertEqual(
+            refused.exception.data,
+            {"existing_source_id": source.id},
+        )
+        self.assertEqual(harness.agent_auth.start_calls, [])
+
+        started = await harness.service.oauth_start(
+            {"vendor": "openai", "channel": "native_cli"}
+        )
+        self.assertEqual(started["flow"]["channel"], "native_cli")
+        self.assertEqual(harness.agent_auth.start_calls, [("codex", False)])
 
     async def test_codex_failure_scenario_emits_reset_path(self):
         """Scenario: AUTH-SETUP-202"""
