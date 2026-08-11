@@ -38,7 +38,6 @@ import socket
 import stat
 import tempfile
 import time
-from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Optional, TYPE_CHECKING
@@ -207,9 +206,9 @@ def create_app(
     ) -> Any:
         """Run a Harness input through the same durable owner as interactive Chat.
 
-        The explicit source intent decides whether it queues or steers. Send-now
-        persists the new input at P3, then promotes the exact FIFO head through
-        empty P1; it never stops the active Turn or jumps older queued work.
+        The explicit source intent decides whether this content queues or steers.
+        Content-bearing P1 targets this Delivery; content-free P1 promotion is
+        exposed separately through ``SessionTurnManager.send_now``.
         The submission remains a Delivery until exact native acceptance materializes
         the harness Message.
         """
@@ -218,6 +217,7 @@ def create_app(
             return submission.route
 
         from core.message_mirror import _scope_id_for_session
+        from core.message_priority import normalize_delivery_intent
         from core.session_turns import (
             DeliveryRequest,
             SCHEDULED_PROVENANCE_KEY,
@@ -245,6 +245,7 @@ def create_app(
         scope_id: str | None = None
         delivery_owner_transferred = False
         target_was_busy = False
+        delivery_intent = normalize_delivery_intent(delivery_intent)
         effective_delivery_intent = delivery_intent
         execution_id = str(
             (context.platform_specific or {}).get("task_execution_id") or ""
@@ -313,28 +314,23 @@ def create_app(
                                 target_was_busy=target_was_busy,
                                 delivery_status="canceled",
                             )
-                        if not (
-                            delivery_intent == "send_now"
-                            and existing_state == "queued"
-                        ):
-                            return TurnSubmissionResult(
-                                route=(
-                                    "enqueued"
-                                    if existing_state
-                                    in {
-                                        "queued",
-                                        "interrupt_waiting",
-                                        "waiting_terminal",
-                                        "reconciling_steer",
-                                    }
-                                    else "ran"
-                                ),
-                                queue_persisted=True,
-                                target_was_busy=target_was_busy,
-                                delivery_status=existing_state,
-                                delivery_owner_transferred=True,
-                            )
-                        delivery_owner_transferred = True
+                        return TurnSubmissionResult(
+                            route=(
+                                "enqueued"
+                                if existing_state
+                                in {
+                                    "queued",
+                                    "interrupt_waiting",
+                                    "waiting_terminal",
+                                    "reconciling_steer",
+                                }
+                                else "ran"
+                            ),
+                            queue_persisted=True,
+                            target_was_busy=target_was_busy,
+                            delivery_status=existing_state,
+                            delivery_owner_transferred=True,
+                        )
                 if not delivery_owner_transferred:
                     return "duplicate"
             if legacy_accepted:
@@ -353,16 +349,7 @@ def create_app(
                 persisted_intent = delivery_intent_for_priority(
                     delivery_request.priority
                 )
-                effective_delivery_intent = (
-                    "send_now"
-                    if delivery_intent == "send_now"
-                    and delivery_request.priority == "p3"
-                    else persisted_intent
-                )
-                delivery_request = replace(
-                    delivery_request,
-                    admission_only=effective_delivery_intent == "send_now",
-                )
+                effective_delivery_intent = persisted_intent
                 provenance = (delivery_request.metadata or {}).get(
                     SCHEDULED_PROVENANCE_KEY
                 )
@@ -380,11 +367,7 @@ def create_app(
 
                 delivery_id = message_deliveries.new_delivery_id()
                 admitted_state = "reserved"
-                priority = (
-                    "p3"
-                    if delivery_intent == "send_now"
-                    else priority_for_delivery_intent(delivery_intent)
-                )
+                priority = priority_for_delivery_intent(delivery_intent)
                 message_deliveries.insert_delivery(
                     conn,
                     delivery_id=delivery_id,
@@ -448,11 +431,7 @@ def create_app(
 
             delivery_request = DeliveryRequest(
                 session_id=session_id,
-                priority=(
-                    "p3"
-                    if delivery_intent == "send_now"
-                    else priority_for_delivery_intent(delivery_intent)
-                ),
+                priority=priority_for_delivery_intent(delivery_intent),
                 content=text,
                 delivery_id=delivery_id,
                 scope_id=scope_id,
@@ -467,7 +446,6 @@ def create_app(
                     SCHEDULED_PROVENANCE_KEY: capture_scheduled_provenance(context)
                 },
                 native_message_id=native_message_id or None,
-                admission_only=delivery_intent == "send_now",
             )
 
         if context.platform_specific is None:
@@ -536,25 +514,6 @@ def create_app(
                 delivery_owner_transferred=True,
             )
         delivery_state = str(result.state)
-        if effective_delivery_intent == "send_now":
-            with get_cached_sqlite_engine().connect() as conn:
-                admitted = message_deliveries.get_delivery(conn, delivery_id)
-                observed_head = message_deliveries.ordering_head(conn, session_id)
-            if (
-                admitted is not None
-                and admitted["state"] == "queued"
-                and observed_head is not None
-                and observed_head["state"] == "queued"
-            ):
-                await manager.send_now(
-                    session_id,
-                    expected_delivery_id=str(observed_head["id"]),
-                )
-                with get_cached_sqlite_engine().connect() as conn:
-                    latest = message_deliveries.get_delivery(conn, delivery_id)
-                if latest is not None:
-                    delivery_state = str(latest["state"])
-
         route = "enqueued" if delivery_state in {
             "queued",
             "pending_steer",
@@ -567,39 +526,36 @@ def create_app(
             route=route,
             queue_persisted=True,
             target_was_busy=target_was_busy,
-            delivery_status=(
-                delivery_state if effective_delivery_intent == "send_now" else None
-            ),
+            delivery_status=delivery_state,
             delivery_owner_transferred=delivery_owner_transferred,
         )
         _publish_scheduled_queue_growth(session_id, delivery_state)
-        if effective_delivery_intent == "send_now":
+        if delivery_owner_transferred and execution_id:
             try:
                 with run_update_event_transaction(get_cached_sqlite_engine()) as conn:
                     recorded = record_agent_run_delivery_outcome_in_connection(
                         conn,
                         execution_id,
                         {
-                            "intent": "send_now",
+                            "intent": effective_delivery_intent,
                             "status": delivery_state,
                             "target_was_busy": submission.target_was_busy,
                         },
                     )
                 if not recorded:
                     logger.warning(
-                        "send-now Agent Run outcome lost its exact CAS after Delivery "
-                        "ownership transfer: run=%s delivery=%s",
+                        "Agent Run Delivery outcome lost its exact CAS after ownership "
+                        "transfer: run=%s delivery=%s",
                         execution_id,
                         delivery_id,
                     )
             except Exception:
                 logger.exception(
-                    "send-now Agent Run outcome persistence deferred after Delivery "
-                    "ownership transfer: run=%s delivery=%s",
+                    "Agent Run Delivery outcome persistence deferred after ownership "
+                    "transfer: run=%s delivery=%s",
                     execution_id,
                     delivery_id,
                 )
-            return submission
         return submission if delivery_owner_transferred else route
 
     @app.get("/internal/health")

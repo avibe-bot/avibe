@@ -3117,8 +3117,8 @@ def test_scheduled_gate_busy_enqueues_and_leaves_chat_turn_untouched(monkeypatch
     assert ("queue.updated", {"session_id": session_id}) in published
 
 
-def test_agent_run_send_now_steers_the_fifo_head_without_stopping(monkeypatch, tmp_path):
-    """HFR-430: send-now persists first, then steers the exact FIFO head."""
+def test_agent_run_send_now_steers_its_content_without_promoting_fifo(monkeypatch, tmp_path):
+    """HFR-430: content-bearing send-now is P1 for that exact content."""
     from core.scheduled_tasks import TaskExecutionStore
     from core.services import sessions as sessions_service
     from storage.db import create_sqlite_engine
@@ -3190,6 +3190,13 @@ def test_agent_run_send_now_steers_the_fifo_head_without_stopping(monkeypatch, t
             )
             assert response.status_code == 202
             await asyncio.wait_for(original_started.wait(), timeout=3)
+            with engine.begin() as conn:
+                message_deliveries.enqueue_queued(
+                    conn,
+                    scope_id=scope_id,
+                    session_id=session_id,
+                    text="older queued input",
+                )
             context = MessageContext(
                 user_id="workbench",
                 channel_id=session_id,
@@ -3225,20 +3232,23 @@ def test_agent_run_send_now_steers_the_fifo_head_without_stopping(monkeypatch, t
     )
     controller.command_handler.handle_stop.assert_not_awaited()
     controller.session_turns._steer.assert_awaited_once()
+    assert controller.session_turns._steer.await_args.args[1].text == "apply the correction"
     assert seen == [("original work", SOURCE_HUMAN)]
     with engine.connect() as conn:
-        assert message_deliveries.list_queued(conn, session_id) == []
+        assert [row["text"] for row in message_deliveries.list_queued(conn, session_id)] == [
+            "older queued input"
+        ]
     stored = request_store.get_run(request.id)
     assert stored is not None
     assert stored["metadata"]["delivery_outcome"] == {
-        "intent": "send_now",
+        "intent": "steer",
         "status": "accepted",
         "target_was_busy": True,
     }
 
 
-def test_agent_run_send_now_promotes_a_turn_started_during_admission(monkeypatch, tmp_path):
-    """A stale idle snapshot cannot downgrade explicit send-now into P3 queueing."""
+def test_agent_run_send_now_steers_a_turn_started_during_admission(monkeypatch, tmp_path):
+    """A stale idle snapshot cannot downgrade explicit P1 into P3 queueing."""
     from core.scheduled_tasks import TaskExecutionStore
     from core.services import sessions as sessions_service
     from storage.db import create_sqlite_engine
@@ -3282,7 +3292,7 @@ def test_agent_run_send_now_promotes_a_turn_started_during_admission(monkeypatch
 
     async def _deliver_with_race(delivery_request, *, context=None):
         nonlocal inserted_racer
-        if delivery_request.admission_only and not inserted_racer:
+        if not inserted_racer:
             inserted_racer = True
             with engine.begin() as conn:
                 owner = _reserve_submission(
@@ -3436,14 +3446,14 @@ def test_agent_run_send_now_refusal_keeps_the_turn_and_queue(monkeypatch, tmp_pa
     assert stored["delivery_id"] == queued[0]["id"]
     assert "workbench_queue_holds_run" not in stored["metadata"]
     assert stored["metadata"]["delivery_outcome"] == {
-        "intent": "send_now",
+        "intent": "steer",
         "status": "queued",
         "target_was_busy": True,
     }
 
 
-def test_agent_run_send_now_retry_promotes_its_persisted_queue_head(monkeypatch, tmp_path):
-    """A retry reuses the owned P3 Delivery instead of losing send-now intent."""
+def test_agent_run_send_now_retry_keeps_its_refused_p3_fallback_queued(monkeypatch, tmp_path):
+    """A retry does not promote a P1 Delivery after it has fallen back to P3."""
     from core.scheduled_tasks import TaskExecutionStore
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
@@ -3497,13 +3507,19 @@ def test_agent_run_send_now_retry_promotes_its_persisted_queue_head(monkeypatch,
     first, second = asyncio.run(_go())
 
     assert first.delivery_status == "queued"
-    assert second.delivery_status == "accepted"
-    assert controller.session_turns._steer.await_count == 2
+    assert second.delivery_status == "queued"
+    assert controller.session_turns._steer.await_count == 1
     with engine.connect() as conn:
-        assert message_deliveries.list_queued(conn, session_id) == []
+        assert [row["text"] for row in message_deliveries.list_queued(conn, session_id)] == [
+            "retry this correction"
+        ]
     stored = request_store.get_run(request.id)
     assert stored is not None
-    assert stored["metadata"]["delivery_outcome"]["status"] == "accepted"
+    assert stored["metadata"]["delivery_outcome"] == {
+        "intent": "steer",
+        "status": "queued",
+        "target_was_busy": True,
+    }
 
 
 def test_concurrent_agent_run_send_now_callers_steer_in_fifo_order(
@@ -3647,7 +3663,7 @@ def test_concurrent_agent_run_send_now_callers_steer_in_fifo_order(
         stored = request_store.get_run(request.id)
         assert stored is not None
         assert stored["metadata"]["delivery_outcome"] == {
-            "intent": "send_now",
+            "intent": "steer",
             "status": expected_status,
             "target_was_busy": True,
         }
@@ -3759,12 +3775,12 @@ def test_agent_run_send_now_restart_preserves_refused_queue_behind_durable_owner
         ]
     stored = request_store.get_run(request.id)
     assert stored is not None
-    assert stored["metadata"]["delivery_intent"] == "send_now"
+    assert stored["metadata"]["delivery_intent"] == "steer"
     assert stored["metadata"]["delivery_outcome"]["status"] == "queued"
 
 
-def test_agent_run_send_now_on_an_idle_backlog_does_not_stop_the_head(monkeypatch, tmp_path):
-    """An idle backlog starts in FIFO order without a post-submit interrupt race."""
+def test_agent_run_send_now_on_an_idle_backlog_starts_its_own_content(monkeypatch, tmp_path):
+    """Content-bearing P1 starts itself and leaves an older P3 head queued."""
     from core.scheduled_tasks import TaskExecutionStore
     from core.services import sessions as sessions_service
     from storage import messages_service
@@ -3841,16 +3857,16 @@ def test_agent_run_send_now_on_an_idle_backlog_does_not_stop_the_head(monkeypatc
     result = asyncio.run(_go())
 
     assert result == session_turns.TurnSubmissionResult(
-        route="enqueued",
+        route="ran",
         queue_persisted=True,
         target_was_busy=False,
-        delivery_status="queued",
+        delivery_status="claimed",
         delivery_owner_transferred=True,
     )
-    assert seen == ["older queued input"]
+    assert seen == ["new urgent input"]
     with engine.connect() as conn:
         assert [row["text"] for row in message_deliveries.list_queued(conn, session_id)] == [
-            "new urgent input"
+            "older queued input"
         ]
     controller.command_handler.handle_stop.assert_not_awaited()
 

@@ -134,19 +134,15 @@ logger = logging.getLogger(__name__)
 _TaskStoreResult = TypeVar("_TaskStoreResult")
 
 AGENT_RUN_DELIVERY_STEER = "steer"
-AGENT_RUN_DELIVERY_SEND_NOW = "send_now"
 AGENT_RUN_DELIVERY_QUEUE = "queue"
 AGENT_RUN_DELIVERY_INTENTS = frozenset(
     {
         AGENT_RUN_DELIVERY_STEER,
-        AGENT_RUN_DELIVERY_SEND_NOW,
         AGENT_RUN_DELIVERY_QUEUE,
     }
 )
 AGENT_RUN_DELIVERY_INTENT_METADATA_KEY = "delivery_intent"
 AGENT_RUN_DELIVERY_OUTCOME_METADATA_KEY = "delivery_outcome"
-FAILURE_CODE_SEND_NOW_GATE_UNAVAILABLE = "send_now_requires_turn_gate"
-SEND_NOW_GATE_UNAVAILABLE_I18N_KEY = "harness.run.sendNowGateUnavailable"
 
 
 def _publish_task_definitions_updated() -> None:
@@ -234,7 +230,9 @@ def _json_loads(value: str | None, default: Any) -> Any:
 def normalize_agent_run_delivery_intent(value: Any) -> str:
     """Return the durable Agent Run delivery intent or reject an unknown value."""
 
-    normalized = str(value or AGENT_RUN_DELIVERY_STEER).strip().lower()
+    from core.message_priority import normalize_delivery_intent
+
+    normalized = normalize_delivery_intent(value or AGENT_RUN_DELIVERY_STEER)
     if normalized not in AGENT_RUN_DELIVERY_INTENTS:
         raise ValueError(f"unsupported Agent Run delivery intent: {normalized}")
     return normalized
@@ -8633,12 +8631,6 @@ class ScheduledTaskService:
         delivery_intent = normalize_agent_run_delivery_intent(
             (metadata or {}).get(AGENT_RUN_DELIVERY_INTENT_METADATA_KEY)
         )
-        if session_id and delivery_intent == AGENT_RUN_DELIVERY_SEND_NOW and gate is None:
-            return AgentRunExecutionResult(
-                error=self._t(SEND_NOW_GATE_UNAVAILABLE_I18N_KEY),
-                complete_on_return=True,
-                failure_code=FAILURE_CODE_SEND_NOW_GATE_UNAVAILABLE,
-            )
         if session_id and gate is not None:
             if delivery_intent != AGENT_RUN_DELIVERY_STEER:
                 state = await gate.submit_scheduled(
@@ -8657,11 +8649,7 @@ class ScheduledTaskService:
                     "status": state.delivery_status or state.route,
                     "target_was_busy": state.target_was_busy,
                 }
-            if (
-                delivery_intent == AGENT_RUN_DELIVERY_SEND_NOW
-                and isinstance(state, TurnSubmissionResult)
-                and state.delivery_status == "canceled"
-            ):
+            if isinstance(state, TurnSubmissionResult) and state.delivery_status == "canceled":
                 self.request_store.settle_without_result(
                     execution_id,
                     terminal_status="canceled",
