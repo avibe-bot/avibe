@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   adminLandingPath,
+  filterLocalSystemNavItems,
   isAdvancedSettingsPath,
   isLocalOnlyMessagingField,
   isLocalSystemPath,
@@ -37,6 +38,7 @@ describe('isLocalSystemPath', () => {
   it('covers every destination whose page runs entirely on local-only routes', () => {
     expect(isLocalSystemPath('/admin/dashboard')).toBe(true);
     expect(isLocalSystemPath('/admin/remote-access')).toBe(true);
+    expect(isLocalSystemPath('/admin/groups')).toBe(true);
     expect(isLocalSystemPath('/admin/users')).toBe(true);
     expect(isLocalSystemPath('/admin/logs')).toBe(true);
     expect(isLocalSystemPath('/admin/settings/service')).toBe(true);
@@ -51,6 +53,7 @@ describe('isLocalSystemPath', () => {
 
   it('matches nested paths under a gated destination', () => {
     expect(isLocalSystemPath('/admin/settings/platforms/slack')).toBe(true);
+    expect(isLocalSystemPath('/admin/groups/engineering')).toBe(true);
     expect(isLocalSystemPath('/harness/')).toBe(true);
   });
 
@@ -69,6 +72,30 @@ describe('isLocalSystemPath', () => {
     expect(isLocalSystemPath('/admin/dashboards')).toBe(false);
     expect(isLocalSystemPath('/harness-status')).toBe(false);
     expect(isLocalSystemPath('/apps/library-picker')).toBe(false);
+  });
+});
+
+describe('filterLocalSystemNavItems', () => {
+  it('removes local-only destinations from nested admin navigation trees', () => {
+    const visible = filterLocalSystemNavItems([
+      {
+        children: [
+          { to: '/admin/settings/platforms' },
+          { to: '/admin/groups' },
+          { to: '/admin/settings/messaging' },
+        ],
+      },
+      { onClick: () => undefined },
+      { to: '/admin/settings/messaging' },
+    ]);
+
+    expect(visible).toEqual([
+      {
+        children: [{ to: '/admin/settings/messaging' }],
+      },
+      { onClick: expect.any(Function) },
+      { to: '/admin/settings/messaging' },
+    ]);
   });
 });
 

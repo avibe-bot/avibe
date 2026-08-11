@@ -35,6 +35,7 @@ import { useViewportHeightVar } from '../lib/useViewportHeightVar';
 import { OrganizationShell } from '../features/organization/OrganizationShell';
 import {
   adminLandingPath,
+  filterLocalSystemNavItems,
   isAdvancedSettingsPath,
   isLocalSystemPath,
   isMemorySettingsPath,
@@ -468,18 +469,10 @@ export const AppShell: React.FC = () => {
 
   // Second half of the trusted-local gate: a page the redirect above withholds
   // must not still be advertised, or a remote owner taps a nav entry and lands
-  // back on the Workbench. Recurses into groups (平台凭据 is a child) and drops a
-  // group left with nothing to open.
-  const withoutLocalSystemEntries = (navItems: ShellNavItem[]): ShellNavItem[] =>
-    navItems
-      .filter((item) => !item.to || !isLocalSystemPath(item.to))
-      .map((item) =>
-        item.children ? { ...item, children: withoutLocalSystemEntries(item.children) } : item,
-      )
-      .filter((item) => item.to || item.onClick || (item.children?.length ?? 0) > 0);
+  // back on the Workbench.
   const visibleAdminItems = capabilities.can_use_system
     ? adminItems
-    : withoutLocalSystemEntries(adminItems);
+    : filterLocalSystemNavItems(adminItems);
 
   const items: ShellNavItem[] = shellMode === 'admin' ? visibleAdminItems : [];
 
@@ -503,7 +496,7 @@ export const AppShell: React.FC = () => {
   ];
   const adminMobileTabs = capabilities.can_use_system
     ? adminMobileTabsAll
-    : withoutLocalSystemEntries(adminMobileTabsAll);
+    : filterLocalSystemNavItems(adminMobileTabsAll);
   // The More sheet shows the overflow: admin sections not already on the bottom
   // bar. Keep its filtering aligned with the currently visible primary tabs.
   const adminBottomBarPaths = new Set(

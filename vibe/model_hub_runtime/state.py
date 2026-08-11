@@ -11,7 +11,8 @@ import threading
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Sequence
-from urllib.parse import urlparse
+
+from config.v2_config import normalize_model_hub_base_url
 
 
 _CREDENTIAL_REF_RE = re.compile(r"^cred_[A-Za-z0-9_-]{6,128}$")
@@ -502,20 +503,10 @@ def _validated_source_id(value: str) -> str:
 
 
 def _validated_base_url(value: str | None) -> str | None:
-    if value is None:
-        return None
-    normalized = str(value).strip().rstrip("/")
-    parsed = urlparse(normalized)
-    if (
-        parsed.scheme not in {"http", "https"}
-        or not parsed.netloc
-        or parsed.username
-        or parsed.password
-        or parsed.query
-        or parsed.fragment
-    ):
+    try:
+        return normalize_model_hub_base_url(value)
+    except (TypeError, ValueError):
         raise EngineStateError("invalid source base URL")
-    return normalized
 
 
 def _validate_source_target(vendor: str, protocol: str, base_url: str | None) -> None:

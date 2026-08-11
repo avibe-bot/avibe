@@ -28,6 +28,7 @@ export const isMemorySettingsPath = (pathname: string): boolean =>
 export const LOCAL_SYSTEM_ROUTES = [
   '/admin/dashboard',
   '/admin/remote-access',
+  '/admin/groups',
   '/admin/users',
   '/admin/logs',
   '/admin/settings/service',
@@ -48,6 +49,20 @@ const LOCAL_ONLY_MESSAGING_FIELDS = new Set([
 
 export const isLocalSystemPath = (pathname: string): boolean =>
   LOCAL_SYSTEM_ROUTES.some((route) => matchesRoute(pathname, route));
+
+export type LocalSystemNavItem = {
+  to?: string;
+  onClick?: () => void;
+  children?: LocalSystemNavItem[];
+};
+
+export const filterLocalSystemNavItems = <T extends LocalSystemNavItem>(navItems: T[]): T[] =>
+  navItems
+    .filter((item) => !item.to || !isLocalSystemPath(item.to))
+    .map((item) =>
+      item.children ? ({ ...item, children: filterLocalSystemNavItems(item.children) } as T) : item,
+    )
+    .filter((item) => item.to || item.onClick || (item.children?.length ?? 0) > 0);
 
 export const isLocalOnlyMessagingField = (field: string): boolean =>
   LOCAL_ONLY_MESSAGING_FIELDS.has(field);

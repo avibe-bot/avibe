@@ -12,6 +12,7 @@ from unittest.mock import ANY, AsyncMock, Mock, call, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from core.processing_indicator import STOPPED_REACTION_EMOJI
 from core.runtime_activation import RuntimeActivationRegistry
 
 _AGENT_PATH = Path(__file__).resolve().parents[1] / "modules/agents/codex/agent.py"
@@ -602,6 +603,7 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         agent._session_mgr = SimpleNamespace(get_thread_id=lambda base_session_id: "thread-1")
         agent._turn_registry = _StubTurnRegistry()
         agent._turn_registry._active_turns["session-1"] = "turn-1"
+        agent._user_stopped_turn_ids = set()
         transport = SimpleNamespace(is_alive=True, send_request=AsyncMock(side_effect=RuntimeError("boom")))
         agent._transports = {"/tmp": transport}
         agent._event_handler = SimpleNamespace(clear_pending=Mock(return_value=SimpleNamespace()))
@@ -615,12 +617,15 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result)
         agent._event_handler.clear_pending.assert_not_called()
         agent._remove_ack_reaction.assert_not_awaited()
+        # Nothing was stopped, so no later ending may inherit a stopped receipt.
+        self.assertEqual(agent._user_stopped_turn_ids, set())
 
     async def test_handle_stop_hides_turn_after_interrupt_succeeds(self):
         agent = object.__new__(CodexAgent)
         agent._session_mgr = SimpleNamespace(get_thread_id=lambda base_session_id: "thread-1")
         agent._turn_registry = _StubTurnRegistry()
         agent._turn_registry._active_turns["session-1"] = "turn-1"
+        agent._user_stopped_turn_ids = set()
 
         events = []
 
@@ -634,7 +639,9 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
 
         agent._transports = {"/tmp": SimpleNamespace(is_alive=True, send_request=send_request)}
         agent._event_handler = SimpleNamespace(clear_pending=clear_pending)
-        agent._remove_ack_reaction = AsyncMock(side_effect=lambda request: events.append(("ack", None)))
+        agent._remove_ack_reaction = AsyncMock(
+            side_effect=lambda request, *, terminal_emoji=None: events.append(("ack", terminal_emoji))
+        )
         agent.controller = SimpleNamespace(emit_agent_message=AsyncMock())
 
         request = SimpleNamespace(base_session_id="session-1", working_path="/tmp", context=object())
@@ -644,6 +651,32 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result)
         self.assertEqual(events[0][0], "send")
         self.assertEqual(events[1][0], "clear")
+        # The stop is silent, so the ⏹️ receipt replacing the running 👀 is the
+        # only thing that tells the user the turn ended on their command.
+        self.assertEqual(events[2], ("ack", STOPPED_REACTION_EMOJI))
+        self.assertEqual(agent._user_stopped_turn_ids, set())
+
+    async def test_handle_stop_does_not_cancel_a_turn_that_completed_during_rpc(self):
+        agent = object.__new__(CodexAgent)
+        agent._session_mgr = SimpleNamespace(get_thread_id=lambda base_session_id: "thread-1")
+        agent._turn_registry = _StubTurnRegistry()
+        agent._turn_registry._active_turns["session-1"] = "turn-1"
+        agent._user_stopped_turn_ids = set()
+        agent._transports = {"/tmp": SimpleNamespace(is_alive=True, send_request=AsyncMock(return_value={}))}
+        # None with the intent still present means a normal/failed completion
+        # popped the turn; an interrupted completion would consume the intent.
+        agent._event_handler = SimpleNamespace(clear_pending=Mock(return_value=None))
+        agent._remove_ack_reaction = AsyncMock()
+        agent.controller = SimpleNamespace(emit_agent_message=AsyncMock())
+
+        request = SimpleNamespace(base_session_id="session-1", working_path="/tmp", context=object())
+
+        result = await agent.handle_stop(request)
+
+        self.assertTrue(result)
+        agent._remove_ack_reaction.assert_not_awaited()
+        agent.controller.emit_agent_message.assert_not_awaited()
+        self.assertEqual(agent._user_stopped_turn_ids, set())
 
     async def test_refresh_auth_state_stops_transports_and_invalidates_threads(self):
         agent = object.__new__(CodexAgent)
@@ -3865,6 +3898,80 @@ class CodexTransportCwdStalenessTests(unittest.IsolatedAsyncioTestCase):
 
             stale.stop.assert_not_awaited()
             self.assertIs(agent._transports[cwd], stale)
+
+    async def test_hfr_473_dead_transport_restarts_past_stale_turn_ownership(self):
+        import tempfile
+
+        agent = self._agent()
+        with tempfile.TemporaryDirectory() as cwd:
+            dead = SimpleNamespace(
+                is_initialized=False,
+                is_alive=False,
+                has_pending_notifications=False,
+                runtime_fingerprint="direct",
+                stop=AsyncMock(),
+            )
+            agent._transports[cwd] = dead
+            agent._transport_cwd_inodes[cwd] = os.stat(cwd).st_ino
+            agent._runtime_ownership_snapshot_for_cwd = Mock(
+                return_value=SimpleNamespace(
+                    blocks_transport_replacement=True,
+                    blocks_dead_transport_replacement=False,
+                )
+            )
+            agent._session_mgr = SimpleNamespace(
+                sessions_for_cwd=Mock(return_value=["session-1"]),
+                invalidate_thread=Mock(),
+            )
+            agent._turn_registry = SimpleNamespace(
+                get_active_turn=Mock(return_value="turn-from-dead-generation"),
+                has_pending_turn_start=Mock(return_value=False),
+                clear_session=Mock(),
+            )
+            agent._clear_thread_developer_instructions = Mock()
+            fresh = SimpleNamespace(
+                is_initialized=True,
+                pid=2468,
+                start=AsyncMock(),
+                on_notification=Mock(),
+                on_server_request=Mock(),
+            )
+
+            with patch.object(_MODULE, "CodexTransport", return_value=fresh):
+                result = await agent._get_or_create_transport(cwd)
+
+            self.assertIs(result, fresh)
+            dead.stop.assert_awaited_once()
+            fresh.start.assert_awaited_once()
+            agent._session_mgr.invalidate_thread.assert_called_once_with("session-1")
+            agent._turn_registry.clear_session.assert_called_once_with("session-1")
+
+    async def test_dead_transport_preserves_generation_with_active_activity_owner(self):
+        import tempfile
+
+        agent = self._agent()
+        with tempfile.TemporaryDirectory() as cwd:
+            dead = SimpleNamespace(
+                is_initialized=False,
+                is_alive=False,
+                has_pending_notifications=False,
+                runtime_fingerprint="direct",
+                stop=AsyncMock(),
+            )
+            agent._transports[cwd] = dead
+            agent._transport_cwd_inodes[cwd] = os.stat(cwd).st_ino
+            agent._runtime_ownership_snapshot_for_cwd = Mock(
+                return_value=SimpleNamespace(
+                    blocks_transport_replacement=True,
+                    blocks_dead_transport_replacement=True,
+                )
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "durable owner"):
+                await agent._get_or_create_transport(cwd)
+
+            dead.stop.assert_not_awaited()
+            self.assertIs(agent._transports[cwd], dead)
 
     async def test_runtime_change_preserves_transport_with_pid_run_owner(self):
         import tempfile

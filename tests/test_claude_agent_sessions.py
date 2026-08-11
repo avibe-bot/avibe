@@ -13,6 +13,7 @@ from core.native_dispatch_phase import (
     backend_dispatch_attempted,
     set_dispatch_phase,
 )
+from core.processing_indicator import STOPPED_REACTION_EMOJI
 from core.run_settlement import SETTLED_BY_BACKEND_REFRESH
 from core.session_activities import SessionActivity, activity_completion_output
 from core.services.agent_steering import ActiveSteerTarget, SteerOutcome, SteerRequest
@@ -492,7 +493,9 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(service._turn_gates[runtime_key].lock.locked())
         self.assertEqual(request.context.platform_specific["turn_token"], "T1")
         self.assertEqual(request.context.platform_specific["agent_runtime_turn_token"], "R1")
-        controller.processing_indicator.finish.assert_awaited_once_with(pending_request)
+        controller.processing_indicator.finish.assert_awaited_once_with(
+            pending_request, terminal_emoji=STOPPED_REACTION_EMOJI
+        )
 
     async def test_handle_stop_waits_for_in_flight_steering_write(self):
         controller = _StubController()
@@ -674,7 +677,9 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             current_receiver_task=None,
             activation_retired=False,
         )
-        controller.processing_indicator.finish.assert_awaited_once_with(pending_request)
+        controller.processing_indicator.finish.assert_awaited_once_with(
+            pending_request, terminal_emoji=STOPPED_REACTION_EMOJI
+        )
 
     async def test_handle_stop_keeps_runtime_gate_until_cleanup_finishes(self):
         controller = _StubController()

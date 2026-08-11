@@ -1889,6 +1889,16 @@ def test_remote_config_allows_only_explicit_preferences_and_unchanged_round_trip
     assert not ui_server._is_remote_local_execution_request(
         "POST",
         "/api/config",
+        {"agent_progress_style": "concise"},
+    )
+    assert ui_server._is_remote_local_execution_request(
+        "POST",
+        "/api/config",
+        {"agent_progress_style": "concise", "agent_status_heartbeat_ms": 1},
+    )
+    assert not ui_server._is_remote_local_execution_request(
+        "POST",
+        "/api/config",
         json.loads(json.dumps(api.config_to_payload(config))),
     )
     assert ui_server._is_remote_local_execution_request(
@@ -1912,6 +1922,7 @@ def test_remote_config_strips_protected_round_trip_fields_before_persistence(
     )
     payload = json.loads(json.dumps(api.config_to_payload(config)))
     payload["language"] = "zh"
+    payload["agent_progress_style"] = "concise"
     observed = []
 
     def save_config(remote_payload):
@@ -1931,6 +1942,8 @@ def test_remote_config_strips_protected_round_trip_fields_before_persistence(
     assert response.status_code == 200
     assert len(observed) == 1
     assert observed[0]["language"] == "zh"
+    assert observed[0]["agent_progress_style"] == "concise"
+    assert "agent_status_heartbeat_ms" not in observed[0]
     assert observed[0]["ui"] == {
         field: payload["ui"][field]
         for field in ui_server._REMOTE_UI_CONFIG_MUTABLE_FIELDS

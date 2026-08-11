@@ -125,6 +125,33 @@ def test_store_creates_exact_memory_tables_and_due_index(tmp_path: Path) -> None
             )
 
 
+def test_initial_memory_migration_supports_enqueue_request(tmp_path: Path) -> None:
+    database = _store_path(tmp_path, "memory-migrated.sqlite")
+    database.parent.mkdir(parents=True, exist_ok=True)
+    migration = Path(__file__).resolve().parents[1] / "core/memory/migrations/0001_initial.sql"
+    with sqlite3.connect(database) as conn:
+        conn.executescript(migration.read_text(encoding="utf-8"))
+
+    store = MemoryStore(database)
+    result = store.enqueue_request(
+        source_message_id="fresh-migration",
+        session_id="session",
+        principal_id="u-11111111111111111111111111111111",
+        project_ref=PROJECT,
+        provenance="user_input",
+        payload_text="queued payload",
+        occurred_at_ms=1_000,
+        max_provider_timestamp_ms=4_102_444_800_000,
+    )
+
+    assert result.outcome == "accepted"
+    assert result.row is not None
+    assert result.row.project_ref == PROJECT
+    with sqlite3.connect(store.path) as conn:
+        queue_columns = {row[1] for row in conn.execute("PRAGMA table_info('memory_capture_queue')")}
+    assert "project_ref" in queue_columns
+
+
 def test_principal_derivation_is_stable_opaque_and_user_scoped() -> None:
     scope_key = bytes.fromhex("11" * 32)
 

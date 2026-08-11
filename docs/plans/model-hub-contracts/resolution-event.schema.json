@@ -54,7 +54,10 @@
         "unclassified_error",
         "no_enabled_source",
         "no_eligible_source",
-        "model_unsupported"
+        "route_unconfigured",
+        "source_missing",
+        "model_unsupported",
+        "native_cli_unavailable"
       ],
       "description": "Adapter classification. The five non-self-healing source causes map bijectively to Source.state.detail_key: credential_expired→models.source.needs_action.oauth_expired; credential_revoked→models.source.needs_action.credential_revoked; balance_exhausted→models.source.needs_action.balance_exhausted; account_banned→models.source.needs_action.account_banned; unclassified_error→models.source.error.unclassified. permission_denied is request-scoped and has no Source-state mirror. The machine-readable mirror registry enforces the attempt-failure relation.",
       "$comment": "permission_denied preserves a request-scoped denial while redacting arbitrary upstream bodies; it does not claim Source-global credential state."
@@ -72,7 +75,7 @@
   },
   "allOf": [
     {
-      "$comment": "Backend-scoped supply interruption: no source endpoint, a real backend, a real model, and one of the three structural causes.",
+      "$comment": "Backend-scoped supply interruption: no source endpoint, a real backend, a real model, and one exact structural cause from the configured chain.",
       "if": {
         "properties": { "kind": { "const": "supply_interrupted" } },
         "required": ["kind"]
@@ -89,7 +92,10 @@
             "enum": [
               "no_enabled_source",
               "no_eligible_source",
-              "model_unsupported"
+              "route_unconfigured",
+              "source_missing",
+              "model_unsupported",
+              "native_cli_unavailable"
             ]
           }
         }
@@ -102,7 +108,10 @@
             "enum": [
               "no_enabled_source",
               "no_eligible_source",
-              "model_unsupported"
+              "route_unconfigured",
+              "source_missing",
+              "model_unsupported",
+              "native_cli_unavailable"
             ]
           }
         },
