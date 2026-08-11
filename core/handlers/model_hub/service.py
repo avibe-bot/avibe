@@ -8,7 +8,7 @@ import time
 import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
-from typing import Any, Awaitable, Callable, Literal, Mapping, Optional, Protocol, cast
+from typing import Any, Awaitable, Callable, Iterable, Literal, Mapping, Optional, Protocol, cast
 
 from sqlalchemy import func, select
 
@@ -77,7 +77,11 @@ from .oauth import (
     OAuthFlowRegistry,
     UnavailableNativeOAuthAdapter,
 )
-from .provenance import BoundedProvenanceStore
+from .provenance import (
+    BoundedProvenanceStore,
+    ExactHopBlocker,
+    exact_hop_blockers,
+)
 from .request import ModelHubRequest
 from .resolver import (
     BackendName,
@@ -116,6 +120,7 @@ class ModelHubError(Exception):
         detail: Optional[str] = None,
         supply_state: Optional[Literal["waiting", "interrupted"]] = None,
         data: Optional[Mapping[str, Any]] = None,
+        blockers: Iterable[ExactHopBlocker] = (),
     ):
         detail_key = detail or f"modelHub.errors.{code}"
         super().__init__(detail_key)
@@ -124,6 +129,7 @@ class ModelHubError(Exception):
         self.detail = detail_key
         self.supply_state = supply_state
         self.data = dict(data or {})
+        self.blockers = tuple(blockers)
 
 
 class EngineUnavailableError(RuntimeError):
@@ -4036,6 +4042,7 @@ class ModelHubService:
                 "mapping_target_unavailable",
                 status=409,
                 supply_state=supply_state,
+                blockers=exact_hop_blockers(resolution),
             )
 
         failed_source: Optional[ModelHubSourceConfig] = None
@@ -4177,7 +4184,7 @@ class ModelHubService:
                 failed_reason = event_reason
                 continue
             raise ModelHubError(decision.error_code or "engine_down", status=502)
-        raise ModelHubError("engine_down", status=503)
+        raise ModelHubError("mapping_target_unavailable", status=503)
 
 
 def create_default_service(

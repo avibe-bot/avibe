@@ -58,6 +58,19 @@ EVENT_REASON_AUTHORITY: dict[str, ReasonClass] = {
     "native_cli_unavailable": "structural",
 }
 
+SOURCE_DETAIL_EVENT_REASONS = {
+    "models.source.cooldown.quota_exhausted": "quota_exhausted",
+    "models.source.cooldown.rate_limited": "rate_limited",
+    "models.source.cooldown.server_error": "server_error",
+    "models.source.cooldown.network": "network",
+    "models.source.cooldown.timeout": "network",
+    "models.source.needs_action.oauth_expired": "credential_expired",
+    "models.source.needs_action.credential_revoked": "credential_revoked",
+    "models.source.needs_action.balance_exhausted": "balance_exhausted",
+    "models.source.needs_action.account_banned": "account_banned",
+    "models.source.error.unclassified": "unclassified_error",
+}
+
 
 def event_reason_label(reason: str, language: str) -> str:
     if reason not in EVENT_REASON_AUTHORITY:

@@ -21,6 +21,8 @@ from core.run_settlement import (
 
 from .adapter import RawCallOutcome
 from .classification import ResolutionDecision, ResolutionReason
+from .events import EVENT_REASON_AUTHORITY, SOURCE_DETAIL_EVENT_REASONS
+from .resolver import ModelHubTurnResolution
 
 
 BackendName = Literal["claude", "codex", "opencode"]
@@ -55,6 +57,43 @@ class ExactHopBlocker:
             "model_id": self.model_id,
             "reason": self.reason,
         }
+
+
+def exact_hop_blockers(
+    resolution: ModelHubTurnResolution,
+) -> tuple[ExactHopBlocker, ...]:
+    """Project every blocked persisted hop from the canonical live inspection."""
+
+    blockers = []
+    for inspection in resolution.inspected_hops:
+        if (
+            inspection.runnable
+            or inspection.source_id is None
+            or inspection.model_id is None
+        ):
+            continue
+        reason = inspection.reason
+        if (
+            inspection.source is not None
+            and EVENT_REASON_AUTHORITY.get(str(reason)) != "structural"
+        ):
+            if inspection.source.state.status == "cooldown":
+                reason = "cooldown"
+            elif inspection.source.state.detail_key is not None:
+                reason = SOURCE_DETAIL_EVENT_REASONS.get(
+                    inspection.source.state.detail_key,
+                    reason,
+                )
+        if reason is None:
+            continue
+        blockers.append(
+            ExactHopBlocker(
+                source_id=inspection.source_id,
+                model_id=inspection.model_id,
+                reason=reason,
+            )
+        )
+    return tuple(blockers)
 
 
 @dataclass

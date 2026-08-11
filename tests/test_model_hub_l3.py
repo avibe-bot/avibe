@@ -717,6 +717,170 @@ def test_no_candidate_provenance_carries_exact_hop_blockers_from_each_entry(
     _assert_valid("turn-provenance.schema.json", record)
 
 
+def test_runtime_no_candidate_projects_live_exact_hop_blockers(
+    tmp_path: Path,
+) -> None:
+    source = _source("src_blocked01", "Blocked")
+    source.state = ModelHubSourceStateConfig(
+        status="needs_action",
+        detail_key="models.source.needs_action.credential_revoked",
+    )
+    service = _service(tmp_path, sources=[source])
+    gateway = ModelHubTurnGateway(service)
+    router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(
+            router.resolve(
+                "claude",
+                "shared-model",
+                process_scope="/repo",
+                turn_id="turn_runtime_blocked",
+            )
+        )
+
+    assert exc_info.value.supply_state == "interrupted"
+    router.settle_turn(
+        "turn_runtime_blocked",
+        settled_by=SETTLED_BY_TERMINAL_RESULT,
+        ts=NOW.isoformat(),
+    )
+    record = service.provenance.get("turn_runtime_blocked")
+    assert record is not None
+    assert record["outcome"] == "no_candidate"
+    assert record["blockers"] == [
+        {
+            "source_id": source.id,
+            "model_id": "shared-model",
+            "reason": "credential_revoked",
+        }
+    ]
+    _assert_valid("turn-provenance.schema.json", record)
+
+
+def test_gateway_no_candidate_projects_live_exact_hop_blockers(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        source = _source("src_blocked02", "Blocked")
+        source.state = ModelHubSourceStateConfig(
+            status="needs_action",
+            detail_key="models.source.needs_action.credential_revoked",
+        )
+        service = _service(tmp_path, sources=[source])
+        service.store.config.agents["codex"].routes["shared-model"] = ModelHubRouteConfig(
+            hops=(ModelHubRouteHopConfig(source.id, "removed-model"),)
+        )
+        gateway = ModelHubTurnGateway(service)
+        base_url, token = await gateway.endpoint(
+            "codex",
+            process_scope="/repo",
+            turn_id="turn_gateway_blocked",
+            requested_model_id="shared-model",
+            resolved_model_id="removed-model",
+            source_id=source.id,
+        )
+        try:
+            async with aiohttp.ClientSession(trust_env=False) as client:
+                response = await client.post(
+                    f"{base_url}/v1/responses",
+                    json={"model": "removed-model", "input": "ping", "stream": False},
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                assert response.status == 409
+                await response.read()
+        finally:
+            await gateway.close()
+
+        gateway.correlation.settle(
+            "turn_gateway_blocked",
+            settled_by=SETTLED_BY_TERMINAL_RESULT,
+            ts=NOW.isoformat(),
+        )
+        record = service.provenance.get("turn_gateway_blocked")
+        assert record is not None
+        assert record["outcome"] == "no_candidate"
+        assert record["blockers"] == [
+            {
+                "source_id": source.id,
+                "model_id": "removed-model",
+                "reason": "model_unsupported",
+            }
+        ]
+        _assert_valid("turn-provenance.schema.json", record)
+
+    asyncio.run(exercise())
+
+
+def test_gateway_preserves_exhausted_provenance_after_all_hops_fallback(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        first = _source("src_primary01", "Primary")
+        second = _source("src_backup001", "Backup")
+        service = _service(
+            tmp_path,
+            sources=[first, second],
+            outcomes=[
+                _outcome(
+                    RawOutcomeKind.HTTP_ERROR,
+                    status=429,
+                    source_id=first.id,
+                ),
+                _outcome(
+                    RawOutcomeKind.HTTP_ERROR,
+                    status=503,
+                    source_id=second.id,
+                ),
+            ],
+        )
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        service.store.config.agents["codex"].routes[requested_model] = ModelHubRouteConfig(
+            hops=(
+                ModelHubRouteHopConfig(first.id, "shared-model"),
+                ModelHubRouteHopConfig(second.id, "shared-model"),
+            )
+        )
+        gateway = ModelHubTurnGateway(service)
+        base_url, token = await gateway.endpoint(
+            "codex",
+            process_scope="/repo",
+            turn_id="turn_gateway_exhausted",
+            requested_model_id=requested_model,
+            resolved_model_id="shared-model",
+            source_id=first.id,
+        )
+        try:
+            async with aiohttp.ClientSession(trust_env=False) as client:
+                response = await client.post(
+                    f"{base_url}/v1/responses",
+                    json={"model": "shared-model", "input": "ping", "stream": False},
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                assert response.status == 503
+                payload = await response.json()
+                assert payload["error"]["code"] == "mapping_target_unavailable"
+        finally:
+            await gateway.close()
+
+        gateway.correlation.settle(
+            "turn_gateway_exhausted",
+            settled_by=SETTLED_BY_TERMINAL_RESULT,
+            ts=NOW.isoformat(),
+        )
+        record = service.provenance.get("turn_gateway_exhausted")
+        assert record is not None
+        assert record["outcome"] == "exhausted"
+        assert record["terminal_error"] is None
+        assert [attempt["source_id"] for attempt in record["failed_attempts"]] == [
+            first.id,
+            second.id,
+        ]
+        _assert_valid("turn-provenance.schema.json", record)
+
+    asyncio.run(exercise())
+
+
 def test_gateway_provenance_retains_pre_mapping_model_identity(
     tmp_path: Path,
 ) -> None:

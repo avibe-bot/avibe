@@ -18,10 +18,12 @@ from config.v2_config import ModelHubConfig, ModelHubSourceConfig
 from core.handlers.model_hub.classification import ResolutionDecision
 from core.handlers.model_hub.events import (
     EVENT_REASON_AUTHORITY,
+    SOURCE_DETAIL_EVENT_REASONS,
     EventAgent,
     EventReason,
     event_reason_label,
 )
+from core.handlers.model_hub.provenance import exact_hop_blockers
 from core.handlers.model_hub.resolver import (
     BackendName,
     ModelHubTurnResolution,
@@ -53,20 +55,6 @@ _NETWORK_ERROR_RE = re.compile(
     r"(?:timed?\s*out|timeout|connection (?:failed|reset|refused)|network (?:error|unreachable))",
     re.IGNORECASE,
 )
-_SOURCE_DETAIL_EVENT_REASONS = {
-    "models.source.cooldown.quota_exhausted": "quota_exhausted",
-    "models.source.cooldown.rate_limited": "rate_limited",
-    "models.source.cooldown.server_error": "server_error",
-    "models.source.cooldown.network": "network",
-    "models.source.cooldown.timeout": "network",
-    "models.source.needs_action.oauth_expired": "credential_expired",
-    "models.source.needs_action.credential_revoked": "credential_revoked",
-    "models.source.needs_action.balance_exhausted": "balance_exhausted",
-    "models.source.needs_action.account_banned": "account_banned",
-    "models.source.error.unclassified": "unclassified_error",
-}
-
-
 @dataclass(frozen=True)
 class ModelHubLaunch:
     backend: BackendName
@@ -266,7 +254,7 @@ def _localized_launch_error(
             if blocker_reason in EVENT_REASON_AUTHORITY:
                 detail = event_reason_label(blocker_reason, language)
             else:
-                reason = _SOURCE_DETAIL_EVENT_REASONS.get(detail_key)
+                reason = SOURCE_DETAIL_EVENT_REASONS.get(detail_key)
                 detail = (
                     event_reason_label(reason, language)
                     if reason is not None
@@ -290,6 +278,7 @@ def _localized_launch_error(
         ),
         supply_state=error.supply_state,
         data=error.data,
+        blockers=error.blockers,
     )
 
 
@@ -788,6 +777,7 @@ class ModelHubRuntimeRouter:
                 turn_id=turn_id,
                 requested_model_id=requested_model,
                 supply_state=supply_state,
+                blockers=exact_hop_blockers(resolution),
             )
         if (
             not resolution.matching_sources

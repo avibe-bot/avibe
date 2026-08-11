@@ -211,7 +211,7 @@ class ModelHubTurnGateway:
                 if exc.code == "engine_down":
                     terminalizer.engine_down()
                 elif exc.supply_state is not None:
-                    terminalizer.mark_no_candidate(exc.supply_state)
+                    terminalizer.mark_no_candidate(exc.supply_state, exc.blockers)
                 return self._error_response(status=exc.status, code=exc.code)
             return await self._resolved_response(
                 request,
