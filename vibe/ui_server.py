@@ -6557,7 +6557,11 @@ def remote_access_auth_callback():
 @app.route("/api/session", methods=["GET"])
 def api_session():
     from vibe import remote_access
-    from vibe.authorization import context_from_session_payload, trusted_local_context
+    from vibe.authorization import (
+        context_from_session_payload,
+        has_temporary_unrestricted_org_app_access,
+        trusted_local_context,
+    )
 
     config = _load_remote_access_config()
     if config is None or not _is_remote_access_request(config):
@@ -6592,6 +6596,9 @@ def api_session():
                     "email": str(payload.get("email", "")),
                     "sub": str(payload.get("sub", "")),
                     "instance_role": context.instance_role,
+                    "temporary_unrestricted_org_app_access": (
+                        has_temporary_unrestricted_org_app_access(context)
+                    ),
                     "capabilities": context.capability_projection(),
                 }
             )

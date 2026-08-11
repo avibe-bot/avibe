@@ -183,7 +183,7 @@ class AuthorizationContext:
 
 
 def has_temporary_unrestricted_org_app_access(
-    context: AuthorizationContext | None,
+    context: AuthorizationContext | Mapping[str, Any] | None,
 ) -> bool:
     """Return whether the temporary Organization Apps policy applies.
 
@@ -193,11 +193,18 @@ def has_temporary_unrestricted_org_app_access(
     Show Page email grants remain confined to their signed page subtree.
     """
 
+    resolved = (
+        context
+        if isinstance(context, AuthorizationContext)
+        else context_from_session_payload(context)
+        if context is not None
+        else None
+    )
     return bool(
-        context is not None
-        and context.is_remote
-        and context.instance_access_source != "show_page_email"
-        and context.is_active_organization_member
+        resolved is not None
+        and resolved.is_remote
+        and resolved.instance_access_source != "show_page_email"
+        and resolved.is_active_organization_member
     )
 
 
@@ -337,6 +344,8 @@ def can_receive_workbench_event(
 ) -> bool:
     """Return whether an SSE subscriber may receive a workbench event."""
 
+    if event_type == "show.event" and has_temporary_unrestricted_org_app_access(context):
+        return True
     try:
         require_instance_role(context, required_workbench_event_role(event_type))
     except InstanceAuthorizationError:
@@ -357,7 +366,6 @@ _VIEWER_HTTP_RULES = tuple(
         r"^/api/projects(?:/[^/]+)?$",
         r"^/api/workbench/prefs$",
         r"^/api/workbench/projects-bootstrap$",
-        r"^/api/dock$",
         r"^/api/sessions$",
         r"^/api/sessions/[^/]+$",
         r"^/api/sessions/[^/]+/(?:bootstrap|messages|activity|turn-state)$",
@@ -466,6 +474,7 @@ _REMOTE_PAYLOAD_FILTERED_HTTP_RULES = tuple(
 _TEMPORARY_ORGANIZATION_APP_HTTP_RULES = tuple(
     (methods, re.compile(pattern))
     for methods, pattern in (
+        (frozenset({"GET", "HEAD"}), r"^/api/dock$"),
         (frozenset({"POST"}), r"^/api/dock/pins$"),
         (frozenset({"DELETE"}), r"^/api/dock/pins/[^/]+$"),
         (frozenset({"PUT"}), r"^/api/dock/order$"),
@@ -507,10 +516,8 @@ _REMOTE_OWNER_ALLOWED_HTTP_RULES = tuple(
             frozenset({"GET", "HEAD", "PUT"}),
             r"^/api/show-pages/[^/]+/authorized-emails$",
         ),
-        # Reading the Dock remains generally remote-safe. Dock writes are not
-        # listed here: the temporary Organization Apps matrix above admits only
-        # active members, while Workbench preference writes remain local-only.
-        (frozenset({"GET", "HEAD"}), r"^/api/dock$"),
+        # Dock reads and writes are admitted only by the temporary Organization
+        # Apps matrix above; Workbench preference writes remain local-only.
         # Reading push status stays remote, and so does the `POST` form of it:
         # it reports this principal's own subscription count and can only
         # re-attach a device id to an endpoint that is already stored and

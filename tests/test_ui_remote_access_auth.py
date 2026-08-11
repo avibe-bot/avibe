@@ -1238,6 +1238,7 @@ def test_remote_session_info_includes_authenticated_subject(monkeypatch, tmp_pat
         "email": "alex@example.com",
         "sub": "user-1",
         "instance_role": "owner",
+        "temporary_unrestricted_org_app_access": False,
         "capabilities": {
             "is_instance_owner": True,
             "can_read_instance": True,
@@ -1351,6 +1352,12 @@ def test_remote_org_members_can_use_files_editor_and_builtin_apps(
         "editor",
         "library",
     ]
+    session_response = client.get(
+        "/api/session",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+    assert session_response.get_json()["temporary_unrestricted_org_app_access"] is True
 
 
 @pytest.mark.parametrize(

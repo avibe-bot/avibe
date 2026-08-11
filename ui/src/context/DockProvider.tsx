@@ -20,7 +20,32 @@ import { useLatestRef } from '@/lib/useLatestRef';
 // server's fresh-instance seed; reconcileDock takes over once the GET resolves.
 const DEFAULT_DOC: DockDoc = seedDefaultDock();
 
-export const DockProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+const DISABLED_DOCK_VALUE: DockValue = {
+  order: DEFAULT_DOC.order,
+  pins: [],
+  isPinned: () => false,
+  isDocked: (dockId) => DEFAULT_DOC.order.includes(dockId),
+  pinFor: () => null,
+  pin: () => Promise.resolve(),
+  unpin: () => Promise.resolve(),
+  dock: () => Promise.resolve(),
+  undock: () => Promise.resolve(),
+  setOrder: () => Promise.resolve(),
+};
+
+export const DockProvider: React.FC<{ children: React.ReactNode; enabled?: boolean }> = ({
+  children,
+  enabled = true,
+}) => {
+  if (!enabled) {
+    return (
+      <DockContext.Provider value={DISABLED_DOCK_VALUE}>{children}</DockContext.Provider>
+    );
+  }
+  return <EnabledDockProvider>{children}</EnabledDockProvider>;
+};
+
+const EnabledDockProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const api = useApi();
   const [doc, setDoc] = useState<DockDoc>(DEFAULT_DOC);
   // Latest committed doc for the async actions' rollback (avoids stale closures).

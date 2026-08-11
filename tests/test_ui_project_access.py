@@ -181,7 +181,7 @@ def test_remote_editor_project_access_filters_every_read_surface(monkeypatch, tm
     monkeypatch.setattr(
         api,
         "list_show_pages",
-        lambda: {
+        lambda **_kwargs: {
             "ok": True,
             "count": 3,
             "pages": [
@@ -381,7 +381,7 @@ def test_archived_project_invalidates_retained_remote_urls(monkeypatch, tmp_path
     monkeypatch.setattr(
         api,
         "list_show_pages",
-        lambda: {
+        lambda **_kwargs: {
             "ok": True,
             "count": 1,
             "pages": [{"session_id": ids["session_a"]}],

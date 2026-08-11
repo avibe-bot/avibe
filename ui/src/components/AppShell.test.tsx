@@ -31,6 +31,7 @@ const status = vi.hoisted(() => ({ state: 'ready' as const }));
 const inbox = vi.hoisted(() => ({ totalUnread: 0 }));
 const instanceAuth = vi.hoisted(() => ({
   remote: true,
+  hasTemporaryUnrestrictedOrgAppAccess: true,
   capabilities: {
     can_manage_instance: true,
     can_use_system: false,
@@ -48,7 +49,9 @@ vi.mock('../context/StatusContext', () => ({ useStatus: () => ({ status }) }));
 vi.mock('../context/WorkbenchInboxContext', () => ({ useWorkbenchInbox: () => inbox }));
 vi.mock('../context/InstanceAuthorizationContext', () => ({ useInstanceAuthorization: () => instanceAuth }));
 vi.mock('../context/DockProvider', () => ({
-  DockProvider: ({ children }: { children: ReactNode }) => <div data-testid="dock-provider">{children}</div>,
+  DockProvider: ({ children, enabled = true }: { children: ReactNode; enabled?: boolean }) => (
+    <div data-testid="dock-provider" data-enabled={String(enabled)}>{children}</div>
+  ),
 }));
 vi.mock('../context/WindowManagerProvider', () => ({
   WindowManagerProvider: ({ children }: { children: ReactNode }) => <>{children}</>,
@@ -69,6 +72,7 @@ vi.mock('react-i18next', () => ({
 
 beforeEach(() => {
   instanceAuth.capabilities.can_manage_instance = true;
+  instanceAuth.hasTemporaryUnrestrictedOrgAppAccess = true;
   api.getConfig.mockResolvedValue({ platforms: { enabled: [] } });
   api.getMemorySettings.mockResolvedValue({
     status: 'failed',
@@ -123,6 +127,28 @@ describe('AppShell remote Apps access', () => {
     expect(screen.getByTestId('apps-launcher')).toBeTruthy();
     expect(screen.getByTestId('mobile-dock-drawer')).toBeTruthy();
     expect(screen.getByTestId('window-layer')).toBeTruthy();
+  });
+
+  it('hides Apps surfaces and redirects App routes for non-Organization remote users', async () => {
+    instanceAuth.hasTemporaryUnrestrictedOrgAppAccess = false;
+
+    render(
+      <MemoryRouter initialEntries={['/apps/library']}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route path="apps/library" element={<div data-testid="library-surface" />} />
+            <Route index element={<div data-testid="workbench-surface" />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByTestId('workbench-surface')).toBeTruthy();
+    expect(screen.queryByTestId('library-surface')).toBeNull();
+    expect(screen.queryByTestId('apps-launcher')).toBeNull();
+    expect(screen.queryByTestId('mobile-dock-drawer')).toBeNull();
+    expect(screen.queryByTestId('window-layer')).toBeNull();
+    expect(screen.getByTestId('dock-provider').getAttribute('data-enabled')).toBe('false');
   });
 
   it.each([

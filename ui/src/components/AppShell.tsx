@@ -232,7 +232,11 @@ export const AppShell: React.FC = () => {
   const { t } = useTranslation();
   const { status } = useStatus();
   const { totalUnread } = useWorkbenchInbox();
-  const { capabilities, remote } = useInstanceAuthorization();
+  const {
+    capabilities,
+    remote,
+    hasTemporaryUnrestrictedOrgAppAccess,
+  } = useInstanceAuthorization();
   const api = useApi();
   const location = useLocation();
   const [enabledPlatforms, setEnabledPlatforms] = useState<string[]>([]);
@@ -362,6 +366,7 @@ export const AppShell: React.FC = () => {
   const hasChannelPlatforms = enabledPlatforms.some((platform) => platformSupportsChannels(config, platform));
   const modelHubEnabled = modelHubEnabledFromConfig(config);
   const isRunning = status.state === 'running';
+  const canUseApps = !remote || hasTemporaryUnrestrictedOrgAppAccess === true;
 
   const ownerOnlyPath =
     location.pathname === '/setup' ||
@@ -377,10 +382,12 @@ export const AppShell: React.FC = () => {
   const resourceUseDenied =
     (location.pathname.startsWith('/skills') && !capabilities.can_use_skills) ||
     (location.pathname.startsWith('/vaults') && !capabilities.can_use_vault_secrets);
+  const appAccessDenied = location.pathname.startsWith('/apps/') && !canUseApps;
   if (
     (ownerOnlyPath && !capabilities.can_manage_instance) ||
     (localSystemPath && !capabilities.can_use_system) ||
-    resourceUseDenied
+    resourceUseDenied ||
+    appAccessDenied
   ) {
     return <Navigate to="/" replace />;
   }
@@ -407,10 +414,11 @@ export const AppShell: React.FC = () => {
           match: (p: string) => p.startsWith('/admin/organization'),
         }]
       : []),
-    // Permanent escape hatch to the App Library (a workbench app). Always present,
-    // so the Library is reachable from the control panel even when it is undocked
-    // (§7.1c #7). Matches any /apps/library path so it stays active on the route.
-    { to: '/apps/library', label: t('nav.appLibrary'), icon: LayoutGrid, match: (p) => p.startsWith('/apps/library') },
+    // Permanent escape hatch to the App Library (a workbench app) for principals
+    // covered by the current Apps policy. It stays reachable even when undocked.
+    ...(canUseApps
+      ? [{ to: '/apps/library', label: t('nav.appLibrary'), icon: LayoutGrid, match: (p: string) => p.startsWith('/apps/library') }]
+      : []),
     { to: '/admin/remote-access', label: t('nav.remoteAccess'), icon: Globe },
     {
       // 通讯平台: groups everything about connecting messaging platforms — the
@@ -523,7 +531,9 @@ export const AppShell: React.FC = () => {
     // Apps (§7.1b): replaces the old 更多 route tab. Tapping toggles the Dock
     // drawer (the mobile Dock) rather than navigating; `grid-2x2` distinguishes
     // it from Capabilities' `layout-grid`.
-    { label: t('nav.apps'), icon: Grid2x2, onClick: () => setAppsDrawerOpen((v) => !v), match: () => appsDrawerOpen },
+    ...(canUseApps
+      ? [{ label: t('nav.apps'), icon: Grid2x2, onClick: () => setAppsDrawerOpen((v) => !v), match: () => appsDrawerOpen }]
+      : []),
   ];
 
   // Chat is a full-screen detail (own composer) and Search is a full-screen
@@ -547,7 +557,7 @@ export const AppShell: React.FC = () => {
     // Desktop: normal document flow.
     <WindowManagerProvider standalone={standaloneAppTab}>
     <StandaloneAppTabContext.Provider value={standaloneAppTab}>
-    <DockProvider>
+    <DockProvider enabled={canUseApps}>
     <ShowPageDragProvider>
     {/* Chromeless (single-app tab): the locked full-viewport column applies on DESKTOP too —
         the app fills the browser area exactly, with nothing to scroll around it. */}
@@ -618,7 +628,7 @@ export const AppShell: React.FC = () => {
                 centered Chat composer. Workbench → Settings (control panel);
                 Control Panel → Back to Workbench, the mint counterpart. */}
             <div className="flex items-stretch gap-2">
-              <AppsLauncher />
+              {canUseApps && <AppsLauncher />}
               {shellMode === 'workbench' && ORGANIZATION_NAV_ENABLED && (
                 <Link
                   to="/admin/organization/overview"
@@ -801,7 +811,7 @@ export const AppShell: React.FC = () => {
       {/* Mobile Dock drawer — the workbench Apps tab summons it (§7.1b). Mobile-only
           (md:hidden internally); mounted inside DockProvider so it reads the same
           docked tiles + order as the desktop Dock. */}
-      {shellMode === 'workbench' && (
+      {shellMode === 'workbench' && canUseApps && (
         <MobileDockDrawer open={appsDrawerOpen} onClose={() => setAppsDrawerOpen(false)} />
       )}
 
@@ -824,7 +834,7 @@ export const AppShell: React.FC = () => {
           second launcher on top in full-screen anymore (product: avoid the fullscreen floating
           button; a Dock redesign comes later). Un-maximize via the window traffic-lights to reach
           the sidebar launcher. */}
-      <WindowLayer />
+      {canUseApps && <WindowLayer />}
     </div>
     </ShowPageDragProvider>
     </DockProvider>

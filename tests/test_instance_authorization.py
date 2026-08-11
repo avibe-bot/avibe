@@ -91,6 +91,25 @@ def test_temporary_org_app_access_is_not_projected_as_a_capability() -> None:
     ) is False
 
 
+def test_temporary_org_members_receive_show_events_at_viewer_instance_role() -> None:
+    member = AuthorizationContext(
+        instance_role="viewer",
+        organization_id="org-1",
+        organization_member_id="membership-1",
+        organization_role="member",
+        instance_access_source="organization_group",
+        is_remote=True,
+    )
+    non_member = AuthorizationContext(
+        instance_role="viewer",
+        instance_access_source="email",
+        is_remote=True,
+    )
+
+    assert can_receive_workbench_event(member, "show.event") is True
+    assert can_receive_workbench_event(non_member, "show.event") is False
+
+
 @pytest.mark.parametrize(
     ("role", "expected"),
     [
@@ -303,7 +322,7 @@ def test_remote_http_policy_defaults_local_machine_and_unknown_routes_to_local_o
         ("GET", "/api/backend/codex/runtime", REMOTE_HTTP_LOCAL_ONLY),
         ("GET", "/api/opencode/permission-status", REMOTE_HTTP_LOCAL_ONLY),
         ("GET", "/api/vault/audit", REMOTE_HTTP_ALLOWED),
-        ("GET", "/api/dock", REMOTE_HTTP_ALLOWED),
+        ("GET", "/api/dock", REMOTE_HTTP_ACTIVE_ORGANIZATION_MEMBER),
         ("POST", "/api/dock/pins", REMOTE_HTTP_ACTIVE_ORGANIZATION_MEMBER),
         ("PUT", "/api/dock/order", REMOTE_HTTP_ACTIVE_ORGANIZATION_MEMBER),
         # A push endpoint is caller-supplied and `send_web_push()` fetches it
@@ -369,6 +388,7 @@ def test_remote_http_policy_keeps_approved_management_and_read_surfaces(
     ("method", "path"),
     [
         ("POST", "/api/dock/pins"),
+        ("GET", "/api/dock"),
         ("DELETE", "/api/dock/pins/ses-1"),
         ("PUT", "/api/dock/order"),
         ("GET", "/api/files/list"),
@@ -508,7 +528,12 @@ def test_temporary_org_app_policy_does_not_open_adjacent_or_sensitive_endpoints(
         ("canAdministerMemory", "POST", "/api/memory/clear", REMOTE_HTTP_LOCAL_ONLY),
         # Dock is temporarily writable by active Organization members while
         # Workbench preferences remain a trusted-local control.
-        ("dockAndWorkbenchPrefs", "GET", "/api/dock", REMOTE_HTTP_ALLOWED),
+        (
+            "dockAndWorkbenchPrefs",
+            "GET",
+            "/api/dock",
+            REMOTE_HTTP_ACTIVE_ORGANIZATION_MEMBER,
+        ),
         ("dockAndWorkbenchPrefs", "GET", "/api/workbench/prefs", REMOTE_HTTP_ALLOWED),
         (
             "dockAndWorkbenchPrefs",
