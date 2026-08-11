@@ -333,6 +333,33 @@ describe('SettingsModelsPage surface branches', () => {
     expect(screen.queryByText(/Now: Replacement source \(takeover\)|当前 Replacement source（接管）/i)).toBeNull();
   });
 
+  it('reconciles a lost Direct-mode response before rendering failure', async () => {
+    const direct = { ...takeoverAgent, mode: 'direct' as const, sources: null, routes: null, supply_status: null, model_supply: null };
+    const agentRead = vi.spyOn(modelsApi, 'listAgents')
+      .mockResolvedValueOnce([takeoverAgent])
+      .mockResolvedValueOnce([direct]);
+    vi.spyOn(modelsApi, 'listSources').mockResolvedValue([retainedSource]);
+    vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
+    vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
+    vi.spyOn(modelsApi, 'getAgentChain').mockResolvedValue(takeoverChain);
+    const setMode = vi.spyOn(modelsApi, 'setAgentMode').mockRejectedValueOnce(new TypeError('response lost'));
+
+    render(
+      <ToastProvider>
+        <I18nextProvider i18n={i18n}>
+          <SettingsModelsPage />
+        </I18nextProvider>
+      </ToastProvider>,
+    );
+
+    await userEvent.click(await screen.findByRole('button', { name: /^Switch to direct$|^切换到直连$/i }));
+
+    expect(await screen.findByRole('button', { name: /^Switch to Gateway$|^切换到网关$/i })).toBeTruthy();
+    expect(screen.queryByText(/did not go through|没切换成功/i)).toBeNull();
+    expect(setMode).toHaveBeenCalledOnce();
+    expect(agentRead).toHaveBeenCalledTimes(2);
+  });
+
   it('keeps retained supply rows but clears derived chain claims when a later supply read fails', async () => {
     const head = { ...retainedSource, id: 'src_head', display_name: 'Paused source', state: { status: 'cooldown' as const, retry_at: '2099-01-01T00:00:00Z', detail_key: null } };
     const relay = { ...retainedSource, id: 'src_relay', display_name: 'Replacement source', state: { status: 'active' as const, retry_at: null, detail_key: null } };

@@ -35,7 +35,7 @@ const STANDBY: SourceState = { status: 'standby', retry_at: null, detail_key: nu
 const COOLING: SourceState = {
   status: 'cooldown',
   retry_at: '2026-07-30T09:00:00Z',
-  detail_key: 'models.source.cooldown.timeout',
+  detail_key: 'models.source.cooldown.server_error',
 };
 const EXHAUSTED: SourceState = {
   status: 'cooldown',

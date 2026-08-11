@@ -1457,8 +1457,6 @@
     },
     "source": {
       "cooldown": {
-        "network": "Network unreachable",
-        "timeout": "Repeated timeouts",
         "rate_limited": "Rate limited",
         "quota_exhausted": "Cycle quota used up",
         "server_error": "Upstream server error"

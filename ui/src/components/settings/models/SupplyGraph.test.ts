@@ -51,7 +51,7 @@ const chain = (current: string, headHealth: AgentChain['chain'][number]['health'
   model_id: 'model-a',
   current: { source_id: current, model_id: 'model-a' },
   chain: [
-    { source_id: 'native', model_id: 'model-a', channel: 'native_cli', health: headHealth, runnable: headRunnable, reason, retry_at: headHealth === 'cooldown' ? '2099-01-01T00:00:00Z' : null },
+    { source_id: 'native', model_id: 'model-a', channel: 'native_cli', health: headHealth, runnable: headRunnable, reason, retry_at: headHealth === 'cooldown' || headHealth === 'backoff' ? '2099-01-01T00:00:00Z' : null },
     { source_id: 'relay', model_id: 'model-a', channel: 'hub', health: 'healthy', runnable: true, reason: null, retry_at: null },
     { source_id: 'unused', model_id: 'model-a', channel: 'hub', health: 'healthy', runnable: true, reason: null, retry_at: null },
   ],
@@ -70,13 +70,21 @@ describe('buildSupplyRelations', () => {
     expect(buildSupplyRelations([agent], sources, { [key]: readyRegion(chain('relay', 'cooldown', false)) })[1]).toEqual(
       { sourceId: 'relay', backend: 'claude', kind: 'takeover' },
     );
+    expect(buildSupplyRelations([agent], sources, { [key]: readyRegion(chain('relay', 'backoff', false, 'models.source.backoff.connection_failed')) })[1]).toEqual(
+      { sourceId: 'relay', backend: 'claude', kind: 'takeover' },
+    );
     expect(buildSupplyRelations([agent], sources, { [key]: readyRegion(chain('relay', 'cooldown', false, 'native_cli_unavailable')) })[1]).toEqual(
       { sourceId: 'relay', backend: 'claude', kind: 'gateway' },
     );
     for (const health of ['needs_action', 'error'] as const) {
-      expect(buildSupplyRelations([agent], sources, { [key]: readyRegion(chain('relay', health, false)) })[1]).toEqual(
+      const reason = health === 'needs_action'
+        ? 'models.source.needs_action.oauth_expired' as const
+        : 'models.source.error.unclassified' as const;
+      const relations = buildSupplyRelations([agent], sources, { [key]: readyRegion(chain('relay', health, false, reason)) });
+      expect(relations[1]).toEqual(
         { sourceId: 'relay', backend: 'claude', kind: 'gateway' },
       );
+      expect(relations[0]).toEqual({ sourceId: 'native', backend: 'claude', kind: 'unavailable' });
     }
     expect(buildSupplyRelations([agent], sources, { [key]: readyRegion(chain('relay')) })[0]).toEqual(
       { sourceId: 'native', backend: 'claude', kind: 'connected_unused' },

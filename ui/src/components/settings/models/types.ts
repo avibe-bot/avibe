@@ -27,27 +27,31 @@ export type SupplyChannel = 'native_cli' | 'hub';
 /** v3 (§4.5): classified by whether the state heals itself. cooldown carries a
  *  `retry_at` and clears on its own; needs_action never recovers unattended;
  *  error is an unclassified failure and equally a blocker. */
-export type SourceStatus = 'active' | 'standby' | 'cooldown' | 'needs_action' | 'error';
+export const SOURCE_STATUSES = ['active', 'standby', 'cooldown', 'needs_action', 'error'] as const;
+export type SourceStatus = (typeof SOURCE_STATUSES)[number];
 export type ModelProvenance = 'discovered' | 'manual';
 
 /** Optional cause of a self-healing cooldown. A closed vocabulary, not a
  *  prefix: the key is rendered through i18n, never as raw upstream text. */
-export type CooldownDetailKey =
-  | 'models.source.cooldown.network'
-  | 'models.source.cooldown.timeout'
-  | 'models.source.cooldown.rate_limited'
-  | 'models.source.cooldown.quota_exhausted'
-  | 'models.source.cooldown.server_error';
+export const COOLDOWN_DETAIL_KEYS = [
+  'models.source.cooldown.rate_limited',
+  'models.source.cooldown.quota_exhausted',
+  'models.source.cooldown.server_error',
+] as const;
+export type CooldownDetailKey = (typeof COOLDOWN_DETAIL_KEYS)[number];
 
 /** Required on `needs_action`: the state's whole point is that the user must
  *  act, which is unrenderable without naming the action. */
-export type NeedsActionDetailKey =
-  | 'models.source.needs_action.oauth_expired'
-  | 'models.source.needs_action.balance_exhausted'
-  | 'models.source.needs_action.credential_revoked'
-  | 'models.source.needs_action.account_banned';
+export const NEEDS_ACTION_DETAIL_KEYS = [
+  'models.source.needs_action.oauth_expired',
+  'models.source.needs_action.balance_exhausted',
+  'models.source.needs_action.credential_revoked',
+  'models.source.needs_action.account_banned',
+] as const;
+export type NeedsActionDetailKey = (typeof NEEDS_ACTION_DETAIL_KEYS)[number];
 
-export type ErrorDetailKey = 'models.source.error.unclassified';
+export const ERROR_DETAIL_KEYS = ['models.source.error.unclassified'] as const;
+export type ErrorDetailKey = (typeof ERROR_DETAIL_KEYS)[number];
 
 /** The complete set `state.detail_key` (and `ProbeResult.error`) can hold. */
 export type SourceDetailKey = CooldownDetailKey | NeedsActionDetailKey | ErrorDetailKey;
@@ -313,13 +317,19 @@ export type ResolutionEvent = {
 };
 
 // ── agent-chain.schema.json ─────────────────────────────────────────────
-export type ChainHealth = 'healthy' | 'cooldown' | 'needs_action' | 'error';
+export const CHAIN_HEALTHS = ['healthy', 'cooldown', 'backoff', 'needs_action', 'error'] as const;
+export type ChainHealth = (typeof CHAIN_HEALTHS)[number];
 
 /** Closed runtime-unavailability vocabulary shared by chain and probe results. */
-export type ChainUnavailableReason =
-  | 'native_cli_unavailable'
-  | 'source_missing'
-  | 'model_unsupported';
+export const CHAIN_UNAVAILABLE_REASONS = [
+  'native_cli_unavailable',
+  'models.source.backoff.connection_failed',
+  'source_missing',
+  'model_unsupported',
+  ...NEEDS_ACTION_DETAIL_KEYS,
+  ...ERROR_DETAIL_KEYS,
+] as const;
+export type ChainUnavailableReason = (typeof CHAIN_UNAVAILABLE_REASONS)[number];
 
 export type AgentChainLink = {
   source_id: string;
@@ -360,7 +370,10 @@ export type AgentChain = {
 // ── probe-result.schema.json ────────────────────────────────────────────
 /** v4 widened this beyond `state.detail_key`: the native_cli branch reports
  *  process unavailability, which no source-state key can express. */
-export type ProbeErrorKey = SourceDetailKey | 'models.probe.native_cli_unavailable';
+export type ProbeErrorKey =
+  | SourceDetailKey
+  | 'models.source.backoff.connection_failed'
+  | 'models.probe.native_cli_unavailable';
 
 /** POST /api/models/agents/<backend>/probe — hub mode only, same reason as the
  *  chain route: there is no `src_*` identity to report in direct mode. */

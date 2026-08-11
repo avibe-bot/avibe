@@ -11,6 +11,7 @@ import { ToastProvider } from '@/context/ToastProvider';
 import i18n from '@/i18n';
 import { createPendingWrites } from './asyncLifetime';
 import { modelsApi } from './modelsApi';
+import type { SourceMutationSettlement, TrackSourceMutation } from './mutationSettlement';
 import { GuardGapList, SourceDetailPanel } from './SourceDetailPanel';
 import type { Source } from './types';
 
@@ -34,10 +35,19 @@ const deferred = <T,>() => {
   return { promise, resolve };
 };
 
-const immediateTrack = async <T,>(work: () => Promise<T>): Promise<T> => work();
 let sourceSnapshot = 0;
 const beginSourceSnapshot = () => ++sourceSnapshot;
-const serializedTrack = () => {
+const settlement = (overrides: Partial<SourceMutationSettlement> = {}): SourceMutationSettlement => ({
+  source: vi.fn().mockResolvedValue(undefined),
+  gone: vi.fn().mockResolvedValue(undefined),
+  unread: vi.fn().mockResolvedValue(undefined),
+  release: vi.fn(),
+  readInventory: async () => ({ snapshot: beginSourceSnapshot(), sources: await modelsApi.listSources() }),
+  ...overrides,
+});
+const immediateTrack: TrackSourceMutation = async (work) => work(settlement());
+type MutationScheduler = <T>(work: () => Promise<T>) => Promise<T>;
+const serializedTrack = (): MutationScheduler => {
   const writes = createPendingWrites(() => {});
   return async <T,>(work: () => Promise<T>): Promise<T> => {
     let result!: T;
@@ -49,30 +59,27 @@ const serializedTrack = () => {
 const renderPanel = (adoptedBy: Source['adopted_by'] = undefined) => render(
   <ToastProvider>
     <I18nextProvider i18n={i18n}>
-      <SourceDetailPanel source={{ ...source, adopted_by: adoptedBy }} onMutation={vi.fn().mockResolvedValue(undefined)} onGone={vi.fn().mockResolvedValue(undefined)} beginSourceSnapshot={beginSourceSnapshot} trackMutation={immediateTrack} />
+      <SourceDetailPanel source={{ ...source, adopted_by: adoptedBy }} trackMutation={immediateTrack} />
     </I18nextProvider>
   </ToastProvider>,
 );
 
-const EchoPanel: React.FC<{ reconcile?: () => Promise<void> | void; trackMutation?: typeof immediateTrack }> = ({ reconcile = vi.fn(), trackMutation = immediateTrack }) => {
+const EchoPanel: React.FC<{ reconcile?: () => Promise<void> | void; scheduler?: MutationScheduler }> = ({ reconcile = vi.fn(), scheduler = async (work) => work() }) => {
   const [current, setCurrent] = React.useState<Source | null>(source);
-  const onMutation = async (echoed?: Source) => {
-    if (echoed) setCurrent(echoed);
-    await reconcile();
-  };
-  const onGone = async () => {
-    setCurrent(null);
-    await reconcile();
-  };
+  const trackMutation: TrackSourceMutation = (work) => scheduler(() => work(settlement({
+    source: async (echoed) => { setCurrent(echoed); await reconcile(); },
+    gone: async () => { setCurrent(null); await reconcile(); },
+    unread: async () => { await reconcile(); },
+  })));
   return current
-    ? <SourceDetailPanel source={current} onMutation={onMutation} onGone={onGone} beginSourceSnapshot={beginSourceSnapshot} trackMutation={trackMutation} />
+    ? <SourceDetailPanel source={current} trackMutation={trackMutation} />
     : <p data-testid="source-gone">Source gone</p>;
 };
 
-const renderEchoPanel = (reconcile = vi.fn(), trackMutation = immediateTrack) => render(
+const renderEchoPanel = (reconcile = vi.fn(), scheduler?: MutationScheduler) => render(
   <ToastProvider>
     <I18nextProvider i18n={i18n}>
-      <EchoPanel reconcile={reconcile} trackMutation={trackMutation} />
+      <EchoPanel reconcile={reconcile} scheduler={scheduler} />
     </I18nextProvider>
   </ToastProvider>,
 );
@@ -99,7 +106,7 @@ describe('SourceDetailPanel', () => {
   });
 
   it('omits native refetch because that channel has no stored discovery credential', () => {
-    render(<I18nextProvider i18n={i18n}><SourceDetailPanel source={{ ...source, kind: 'subscription', supply_channel: 'native_cli' }} onMutation={vi.fn().mockResolvedValue(undefined)} onGone={vi.fn().mockResolvedValue(undefined)} beginSourceSnapshot={beginSourceSnapshot} trackMutation={immediateTrack} /></I18nextProvider>);
+    render(<I18nextProvider i18n={i18n}><SourceDetailPanel source={{ ...source, kind: 'subscription', supply_channel: 'native_cli' }} trackMutation={immediateTrack} /></I18nextProvider>);
     expect(screen.queryByRole('button', { name: /^Refetch$|^重新拉取$/i })).toBeNull();
   });
 
@@ -127,6 +134,19 @@ describe('SourceDetailPanel', () => {
     renderPanel();
     await userEvent.click(screen.getByRole('button', { name: /^Refetch$|^重新拉取$/i }));
     expect(await screen.findByText(/fetch did not come back|拉取没有回来/i)).toBeTruthy();
+  });
+
+  it('settles a failed refetch from the authoritative Source inventory', async () => {
+    const reconciled = { ...source, state: { status: 'error' as const, retry_at: null, detail_key: 'models.source.error.unclassified' as const } };
+    vi.spyOn(modelsApi, 'refreshSource').mockRejectedValueOnce(new Error('lost response'));
+    vi.spyOn(modelsApi, 'listSources').mockResolvedValueOnce([reconciled]);
+    const applySource = vi.fn().mockResolvedValue(undefined);
+    const trackMutation: TrackSourceMutation = (work) => work(settlement({ source: applySource }));
+    render(<I18nextProvider i18n={i18n}><SourceDetailPanel source={source} trackMutation={trackMutation} /></I18nextProvider>);
+
+    await userEvent.click(screen.getByRole('button', { name: /^Refetch$|^重新拉取$/i }));
+
+    await waitFor(() => expect(applySource).toHaveBeenCalledWith(reconciled));
   });
 
   it('applies the refetch Source echo before the collection refresh settles', async () => {
@@ -188,10 +208,10 @@ describe('SourceDetailPanel', () => {
 
   it('routes every full-Source mutation family through the shared per-Source queue', () => {
     const detail = readFileSync(join(process.cwd(), 'src/components/settings/models/SourceDetailPanel.tsx'), 'utf8');
-    expect(detail).toMatch(/const refetch = \(confirmation\?: GuardConfirmation\) => trackMutation/);
-    expect(detail).toMatch(/const addManualModel = \(\) => trackMutation/);
-    expect(detail).toMatch(/const remove = \(model: SuppliedModel, confirmation\?: GuardConfirmation\) => trackMutation/);
-    expect(detail).toMatch(/const commit = async[\s\S]*return trackMutation\(async \(\) =>/);
+    expect(detail).toMatch(/const refetch = \(confirmation\?: GuardConfirmation\) => trackMutation\(async \(settlement\)/);
+    expect(detail).toMatch(/const addManualModel = \(\) => trackMutation\(async \(settlement\)/);
+    expect(detail).toMatch(/const remove = \(model: SuppliedModel, confirmation\?: GuardConfirmation\) => trackMutation\(async \(settlement\)/);
+    expect(detail).toMatch(/const commit = async[\s\S]*return trackMutation\(async \(settlement\) =>/);
   });
 
   it('keeps Source entities behind one generation authority without an adoption side cache', () => {
@@ -201,6 +221,8 @@ describe('SourceDetailPanel', () => {
     expect(page).toMatch(/sourceEntityAuthority\.beginSnapshot\(\)/);
     expect(page).toMatch(/sourceEntityAuthority\.settleSnapshot/);
     expect(page).toMatch(/trackSourceMutation/);
+    expect(page).toMatch(/const settlement: SourceMutationSettlement/);
+    expect(page).not.toMatch(/activeSourceGenerations/);
     expect(`${page}\n${sourceRow}`).not.toMatch(/adoptionBySource/);
     expect(sourceRow).toMatch(/source\.adopted_by/);
   });
@@ -330,7 +352,8 @@ describe('SourceDetailPanel', () => {
     const remove = vi.spyOn(modelsApi, 'deleteCustomModel').mockRejectedValueOnce(new TypeError('response lost'));
     const list = vi.spyOn(modelsApi, 'listSources').mockResolvedValueOnce([{ ...source, models: [] }]);
     const onMutation = vi.fn().mockResolvedValue(undefined);
-    render(<I18nextProvider i18n={i18n}><SourceDetailPanel source={source} onMutation={onMutation} onGone={vi.fn().mockResolvedValue(undefined)} beginSourceSnapshot={beginSourceSnapshot} trackMutation={immediateTrack} /></I18nextProvider>);
+    const trackMutation: TrackSourceMutation = (work) => work(settlement({ source: onMutation }));
+    render(<I18nextProvider i18n={i18n}><SourceDetailPanel source={source} trackMutation={trackMutation} /></I18nextProvider>);
 
     await userEvent.click(screen.getByRole('button', { name: /Remove model-a|移除 model-a/i }));
     await userEvent.click(screen.getByRole('menuitem', { name: /^Remove$|^移除$/i }));
@@ -375,12 +398,13 @@ describe('SourceDetailPanel', () => {
     const remove = vi.spyOn(modelsApi, 'deleteCustomModel').mockRejectedValueOnce(new TypeError('response lost'));
     vi.spyOn(modelsApi, 'listSources').mockResolvedValueOnce([]);
     const onGone = vi.fn().mockResolvedValue(undefined);
-    render(<I18nextProvider i18n={i18n}><SourceDetailPanel source={source} onMutation={vi.fn().mockResolvedValue(undefined)} onGone={onGone} beginSourceSnapshot={beginSourceSnapshot} trackMutation={immediateTrack} /></I18nextProvider>);
+    const trackMutation: TrackSourceMutation = (work) => work(settlement({ gone: onGone }));
+    render(<I18nextProvider i18n={i18n}><SourceDetailPanel source={source} trackMutation={trackMutation} /></I18nextProvider>);
 
     await userEvent.click(screen.getByRole('button', { name: /Remove model-a|移除 model-a/i }));
     await userEvent.click(screen.getByRole('menuitem', { name: /^Remove$|^移除$/i }));
 
-    await waitFor(() => expect(onGone).toHaveBeenCalledWith(source.id, [], 1));
+    await waitFor(() => expect(onGone).toHaveBeenCalledWith(source.id, { kind: 'gone', sources: [], snapshot: 1 }));
     expect(remove).toHaveBeenCalledOnce();
     expect(screen.queryByRole('button', { name: /^Try again$|^重试$/i })).toBeNull();
   });

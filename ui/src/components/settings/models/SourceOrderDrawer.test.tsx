@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { I18nextProvider } from 'react-i18next';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -24,6 +24,11 @@ const source = (id: string, displayName: string): Source => ({
 });
 
 const sources = [source('src_a', 'Primary'), source('src_b', 'Backup')];
+const deferred = <T,>() => {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
+};
 const agent: AgentSupply = {
   backend: 'claude',
   mode: 'hub',
@@ -154,5 +159,54 @@ describe('SourceOrderDrawer keyboard ordering', () => {
 
     expect(await screen.findByText('Newest source')).toBeTruthy();
     expect(screen.getAllByRole('button', { name: 'Reorder source' })).toHaveLength(3);
+  });
+
+  it('renders a composition hole and performs exactly one regroup read', async () => {
+    const newest = source('src_c', 'Newest source');
+    const nextAgent = {
+      ...agent,
+      sources: {
+        order: ['src_a', 'src_b', 'src_c'],
+        eligibility: [...(agent.sources?.eligibility ?? []), { source_id: newest.id, eligible: true }],
+      },
+    };
+    const regroupedAgent = deferred<AgentSupply>();
+    const regroupedSources = deferred<Source[]>();
+    const agentRead = vi.spyOn(modelsApi, 'getAgentSources')
+      .mockResolvedValueOnce(nextAgent)
+      .mockReturnValueOnce(regroupedAgent.promise);
+    vi.mocked(modelsApi.listSources)
+      .mockResolvedValueOnce(sources)
+      .mockReturnValueOnce(regroupedSources.promise);
+
+    renderDrawer();
+
+    expect(await screen.findByText('src_c')).toBeTruthy();
+    expect(agentRead).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      regroupedAgent.resolve(nextAgent);
+      regroupedSources.resolve([...sources, newest]);
+      await Promise.all([regroupedAgent.promise, regroupedSources.promise]);
+    });
+    expect(await screen.findByText('Newest source')).toBeTruthy();
+    expect(agentRead).toHaveBeenCalledTimes(2);
+  });
+
+  it('moves a persistent composition hole to the drawer F1 retry state', async () => {
+    const inconsistent = {
+      ...agent,
+      sources: {
+        order: ['src_a', 'src_deleted'],
+        eligibility: [...(agent.sources?.eligibility ?? []), { source_id: 'src_deleted', eligible: true }],
+      },
+    };
+    const agentRead = vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(inconsistent);
+    vi.mocked(modelsApi.listSources).mockResolvedValue([sources[0]]);
+
+    renderDrawer();
+
+    expect(await screen.findByText('The source list could not be read')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeTruthy();
+    expect(agentRead).toHaveBeenCalledTimes(2);
   });
 });

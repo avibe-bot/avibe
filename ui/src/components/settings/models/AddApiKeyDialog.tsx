@@ -26,6 +26,7 @@ import {
   type AddApiKeyOrigin,
 } from './addApiKeyState';
 import { apiFailure, modelsApi, type SourceCreated } from './modelsApi';
+import { createContinuationSettlement, createSourceCreatedDelivery, type ContinuationTicket } from './mutationSettlement';
 import { reconcileUnknownWrite } from './reconcileUnknownWrite';
 import { serverText } from './serverCopy';
 import {
@@ -35,6 +36,7 @@ import {
   type SourceObservation,
   type SourceProtocol,
 } from './types';
+import { optionalTrimmedTextWithin } from './validation';
 
 type Phase =
   | { kind: 'form'; report: SourceObservation | null }
@@ -74,19 +76,16 @@ export const AddApiKeyDialog: React.FC<{
   const [apiKey, setApiKey] = React.useState('');
   const [revealed, setRevealed] = React.useState(false);
   const [phase, setPhase] = React.useState<Phase>(INITIAL_PHASE);
-  const attempt = React.useRef(0);
+  const [continuation] = React.useState(createContinuationSettlement);
+  const [createdDelivery] = React.useState(createSourceCreatedDelivery);
   const clientNonce = React.useRef(sourceClientNonce());
   const observationAbort = React.useRef<AbortController | null>(null);
-  const onAddedRef = React.useRef(onAdded);
-  const onCloseRef = React.useRef(onClose);
+  React.useEffect(() => {
+    createdDelivery.update(onAdded, onClose);
+  }, [createdDelivery, onAdded, onClose]);
 
   React.useEffect(() => {
-    onAddedRef.current = onAdded;
-    onCloseRef.current = onClose;
-  }, [onAdded, onClose]);
-
-  React.useEffect(() => {
-    attempt.current += 1;
+    continuation.invalidate();
     observationAbort.current?.abort();
     observationAbort.current = null;
     if (open) {
@@ -97,7 +96,7 @@ export const AddApiKeyDialog: React.FC<{
       setRevealed(false);
       setPhase(INITIAL_PHASE);
     }
-  }, [open]);
+  }, [continuation, open]);
 
   const draft = React.useCallback((protocolOrder?: SourceProtocol[]): ApiKeySourceCreate => ({
     kind: 'api_key',
@@ -109,32 +108,29 @@ export const AddApiKeyDialog: React.FC<{
     ...(protocolOrder ? { protocol_order: protocolOrder } : {}),
   }), [apiKey, baseUrl, displayName]);
 
-  const persist = React.useCallback(async (seq: number, protocolOrder?: SourceProtocol[]) => {
-    setPhase({ kind: 'working', origin: 'add', stage: 'persist' });
+  const persist = React.useCallback(async (seq: ContinuationTicket, protocolOrder?: SourceProtocol[]) => {
+    if (continuation.settle(seq, () => setPhase({ kind: 'working', origin: 'add', stage: 'persist' })) === 'stale') return;
     try {
       const created = await modelsApi.createApiKeySource(draft(protocolOrder));
-      if (attempt.current !== seq) return;
-      onAddedRef.current(created);
-      onCloseRef.current();
+      createdDelivery.settle(continuation, seq, created);
     } catch (error) {
-      if (attempt.current !== seq) return;
       const failure = apiFailure(error);
       const definitiveClientFailure = failure?.serverNamed
         && failure.responseStatus !== undefined
         && failure.responseStatus >= 400
         && failure.responseStatus < 500
         && failure.responseStatus !== 409;
-      setPhase(definitiveClientFailure
+      continuation.settle(seq, () => setPhase(definitiveClientFailure
         ? { kind: 'persist_failure', messageKey: failure.detail ?? failure.code ?? null, protocolOrder }
-        : { kind: 'save_unconfirmed', protocolOrder });
+        : { kind: 'save_unconfirmed', protocolOrder }));
     }
-  }, [draft]);
+  }, [continuation, createdDelivery, draft]);
 
   const observe = React.useCallback(async (
     origin: AddApiKeyOrigin,
     protocolOrder?: SourceProtocol[],
   ) => {
-    const seq = ++attempt.current;
+    const seq = continuation.begin();
     observationAbort.current?.abort();
     const controller = new AbortController();
     observationAbort.current = controller;
@@ -146,41 +142,46 @@ export const AddApiKeyDialog: React.FC<{
         key: apiKey.trim(),
         ...(protocolOrder ? { protocol_order: protocolOrder } : {}),
       }, controller.signal);
-      if (attempt.current !== seq) return;
-      observationAbort.current = null;
       const verdict = classifyObservation(observation);
-      if (verdict.kind === 'ready') {
-        if (origin === 'pull') setPhase({ kind: 'form', report: observation });
-        else await persist(seq, protocolOrder);
-      } else if (verdict.kind === 'undetermined') {
-        setPhase({ kind: 'undetermined', origin, observation, hint: null });
-      } else if (verdict.kind === 'inventory') {
-        setPhase({ kind: 'inventory', origin, observation });
-      } else {
-        setPhase({ kind: 'failure', origin, cause: verdict.cause });
-      }
+      let persistNext = false;
+      const landed = continuation.settle(seq, () => {
+        observationAbort.current = null;
+        if (verdict.kind === 'ready') {
+          if (origin === 'pull') setPhase({ kind: 'form', report: observation });
+          else persistNext = true;
+        } else if (verdict.kind === 'undetermined') {
+          setPhase({ kind: 'undetermined', origin, observation, hint: null });
+        } else if (verdict.kind === 'inventory') {
+          setPhase({ kind: 'inventory', origin, observation });
+        } else {
+          setPhase({ kind: 'failure', origin, cause: verdict.cause });
+        }
+      });
+      if (landed === 'landed' && persistNext) await persist(seq, protocolOrder);
     } catch (error) {
-      if (attempt.current !== seq || isAbortError(error)) return;
-      observationAbort.current = null;
-      setPhase({
-        kind: 'failure',
-        origin,
-        cause: apiFailure(error)?.code === 'engine_down' ? 'engineDown' : 'unclassified',
+      if (isAbortError(error)) return;
+      continuation.settle(seq, () => {
+        observationAbort.current = null;
+        setPhase({
+          kind: 'failure',
+          origin,
+          cause: apiFailure(error)?.code === 'engine_down' ? 'engineDown' : 'unclassified',
+        });
       });
     }
-  }, [apiKey, baseUrl, persist]);
+  }, [apiKey, baseUrl, continuation, persist]);
 
   const cancel = React.useCallback(() => {
     if (phase.kind === 'working' && phase.stage === 'persist') return;
-    attempt.current += 1;
+    continuation.invalidate();
     observationAbort.current?.abort();
     observationAbort.current = null;
     if ('origin' in phase && phase.origin === 'pull') {
       setPhase(INITIAL_PHASE);
       return;
     }
-    onCloseRef.current();
-  }, [phase]);
+    createdDelivery.close();
+  }, [continuation, createdDelivery, phase]);
 
   const retry = async () => {
     if (phase.kind === 'undetermined') {
@@ -198,26 +199,26 @@ export const AddApiKeyDialog: React.FC<{
       return;
     }
     if (phase.kind === 'save_unconfirmed') {
+      const seq = continuation.begin();
       const reconciliation = await reconcileUnknownWrite(
         () => modelsApi.listSources(),
         (sources) => sources.find((source) => source.client_nonce === clientNonce.current),
       );
       if (reconciliation.kind === 'committed') {
-        onAddedRef.current({
+        createdDelivery.settle(continuation, seq, {
           source: reconciliation.value,
           added_to: [],
           adopted_by: reconciliation.value.adopted_by ?? [],
         });
-        onCloseRef.current();
         return;
       }
       if (reconciliation.kind === 'absent') {
-        await persist(++attempt.current, phase.protocolOrder);
+        await persist(seq, phase.protocolOrder);
       }
       return;
     }
     if (phase.kind === 'persist_failure') {
-      await persist(++attempt.current, phase.protocolOrder);
+      await persist(continuation.begin(), phase.protocolOrder);
       return;
     }
     if (phase.kind === 'failure') await observe(phase.origin);
@@ -225,7 +226,7 @@ export const AddApiKeyDialog: React.FC<{
 
   const addAnyway = async () => {
     if (phase.kind !== 'inventory' || phase.origin !== 'add' || !phase.observation.protocol) return;
-    const seq = ++attempt.current;
+    const seq = continuation.begin();
     await persist(seq, protocolOrderWithHint(phase.observation.protocol));
   };
 
@@ -245,9 +246,7 @@ export const AddApiKeyDialog: React.FC<{
   const isWorking = phase.kind === 'working';
   const formLocked = isWorking || phase.kind === 'save_unconfirmed';
   const canCancel = !(phase.kind === 'working' && phase.stage === 'persist');
-  const trimmedDisplayName = displayName.trim();
-  const displayNameValid = displayName.length === 0
-    || (trimmedDisplayName.length > 0 && trimmedDisplayName.length <= SOURCE_DISPLAY_NAME_MAX_LENGTH);
+  const displayNameValid = optionalTrimmedTextWithin(displayName, SOURCE_DISPLAY_NAME_MAX_LENGTH);
   const canObserve = Boolean(baseUrl.trim() && apiKey.trim()) && !formLocked;
   const canSubmit = canObserve && displayNameValid;
   const showForm = phase.kind !== 'undetermined' && phase.kind !== 'inventory';

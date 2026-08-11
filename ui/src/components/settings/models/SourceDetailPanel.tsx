@@ -9,13 +9,12 @@ import { ResponsiveMenu } from '@/components/ui/responsive-menu';
 import { cn } from '@/lib/utils';
 import { formatRelativeTime } from '@/lib/relativeTime';
 import { apiFailure, modelsApi, type GuardConfirmation } from './modelsApi';
+import type { SourceMutationSettlement, TrackSourceMutation } from './mutationSettlement';
 import { reconcileUnknownWrite } from './reconcileUnknownWrite';
 import { sourceStatePresentation } from './sourceStatePresentation';
 import { useDeadlineClock } from './useDeadlineClock';
 import { ACCENT_ICON, ACCENT_TILE, isCustomEndpoint, sourceVisual } from './vendorMeta';
 import type { RouteHopRef, Source, SuppliedModel, SupplyGap } from './types';
-
-type TrackMutation = <T>(work: () => Promise<T>) => Promise<T>;
 
 const ManualModelMenu: React.FC<{
   model: SuppliedModel;
@@ -85,10 +84,8 @@ const TierEditor: React.FC<{
   source: Source;
   model: SuppliedModel;
   onMutating: () => void;
-  onMutation: (source?: Source) => Promise<void>;
-  onGone: (sourceId: string, sources?: Source[], snapshot?: number) => Promise<void>;
-  trackMutation: TrackMutation;
-}> = ({ source, model, onMutating, onMutation, onGone, trackMutation }) => {
+  trackMutation: TrackSourceMutation;
+}> = ({ source, model, onMutating, trackMutation }) => {
   const { t } = useTranslation();
   const [tiers, setTiers] = React.useState(model.reasoning_efforts ?? []);
   const [draft, setDraft] = React.useState('');
@@ -99,7 +96,7 @@ const TierEditor: React.FC<{
 
   const commit = async (next: string[]): Promise<boolean> => {
     if (saving) return false;
-    return trackMutation(async () => {
+    return trackMutation(async (settlement) => {
       const previous = tiers;
       onMutating();
       setFailedNext(null);
@@ -107,12 +104,13 @@ const TierEditor: React.FC<{
       setSaving(true);
       try {
         const echoed = await modelsApi.updateModelReasoningEfforts(source.id, model.id, next);
-        await onMutation(echoed);
+        await settlement.source(echoed);
         return true;
       } catch (error) {
         setTiers(previous);
         setFailedNext(next);
-        if (apiFailure(error)?.code === 'source_not_found') await onGone(source.id);
+        if (apiFailure(error)?.code === 'source_not_found') await settlement.gone(source.id);
+        else await settlement.unread();
         return false;
       } finally {
         setSaving(false);
@@ -208,11 +206,8 @@ const DraftTiers: React.FC<{
 
 export const SourceDetailPanel: React.FC<{
   source: Source;
-  onMutation: (source?: Source) => Promise<void>;
-  onGone: (sourceId: string, sources?: Source[], snapshot?: number) => Promise<void>;
-  beginSourceSnapshot: () => number;
-  trackMutation: TrackMutation;
-}> = ({ source, onMutation, onGone, beginSourceSnapshot, trackMutation }) => {
+  trackMutation: TrackSourceMutation;
+}> = ({ source, trackMutation }) => {
   const { t, i18n } = useTranslation();
   const now = useDeadlineClock(source.state.status === 'cooldown' ? source.state.retry_at : null);
   const { Icon, accent } = sourceVisual(source);
@@ -229,7 +224,7 @@ export const SourceDetailPanel: React.FC<{
     if (!failure || (failure.wouldRemoveHops.length === 0 && failure.wouldInterrupt.length === 0)) return null;
     return { hops: failure.wouldRemoveHops, gaps: failure.wouldInterrupt };
   };
-  const refetch = (confirmation?: GuardConfirmation) => trackMutation(async () => {
+  const refetch = (confirmation?: GuardConfirmation) => trackMutation(async (settlement) => {
     setResult(null);
     setRefetchFailed(false);
     setBusy(true);
@@ -241,27 +236,32 @@ export const SourceDetailPanel: React.FC<{
       const removed = [...before].filter((id) => !after.has(id));
       setResult({ added, removed });
       setGuard(null);
-      await onMutation(answer.source);
+      await settlement.source(answer.source);
     } catch (error) {
-      if (apiFailure(error)?.code === 'source_not_found') await onGone(source.id);
+      if (apiFailure(error)?.code === 'source_not_found') await settlement.gone(source.id);
       else {
         const refusal = guardedFailure(error);
-        if (refusal) setGuard({ kind: 'refetch', ...refusal });
-        else {
+        if (refusal) {
+          setGuard({ kind: 'refetch', ...refusal });
+          settlement.release();
+        } else {
           setRefetchFailed(true);
-          await onMutation();
+          try {
+            const inventory = await settlement.readInventory();
+            const current = inventory.sources.find((item) => item.id === source.id);
+            if (current) await settlement.source(current);
+            else await settlement.gone(source.id, inventory);
+          } catch {
+            settlement.release();
+          }
         }
       }
     } finally {
       setBusy(false);
     }
   });
-  const readSourceInventory = async () => {
-    const snapshot = beginSourceSnapshot();
-    return { snapshot, sources: await modelsApi.listSources() };
-  };
-  const reconcileManualCreate = async (modelId: string) => reconcileUnknownWrite(
-    readSourceInventory,
+  const reconcileManualCreate = async (modelId: string, settlement: SourceMutationSettlement) => reconcileUnknownWrite(
+    settlement.readInventory,
     ({ sources, snapshot }) => {
       const current = sources.find((item) => item.id === source.id);
       if (!current) return { kind: 'gone', sources, snapshot } satisfies SourceReconciliation;
@@ -270,11 +270,11 @@ export const SourceDetailPanel: React.FC<{
         : undefined;
     },
   );
-  const applyReconciliation = async (value: SourceReconciliation) => {
-    if (value.kind === 'gone') await onGone(source.id, value.sources, value.snapshot);
-    else await onMutation(value.source);
+  const applyReconciliation = async (value: SourceReconciliation, settlement: SourceMutationSettlement) => {
+    if (value.kind === 'gone') await settlement.gone(source.id, value);
+    else await settlement.source(value.source);
   };
-  const addManualModel = () => trackMutation(async () => {
+  const addManualModel = () => trackMutation(async (settlement) => {
     if (!manualDraft || busy) return;
     const modelId = manualDraft.modelId.trim();
     if (!modelId || source.models.some((model) => model.id === modelId)) return;
@@ -282,11 +282,12 @@ export const SourceDetailPanel: React.FC<{
     setRefetchFailed(false);
     setBusy(true);
     if (manualDraft.retryRead) {
-      const reconciliation = await reconcileManualCreate(modelId);
+      const reconciliation = await reconcileManualCreate(modelId, settlement);
       if (reconciliation.kind === 'committed') {
         setManualDraft(null);
-        await applyReconciliation(reconciliation.value);
+        await applyReconciliation(reconciliation.value, settlement);
       } else {
+        settlement.release();
         setManualDraft((current) => current ? {
           ...current,
           failed: true,
@@ -304,16 +305,17 @@ export const SourceDetailPanel: React.FC<{
       });
       setManualDraft(null);
       setResult(null);
-      await onMutation(echoed);
+      await settlement.source(echoed);
     } catch (error) {
       if (apiFailure(error)?.code === 'source_not_found') {
-        await onGone(source.id);
+        await settlement.gone(source.id);
       } else {
-        const reconciliation = await reconcileManualCreate(modelId);
+        const reconciliation = await reconcileManualCreate(modelId, settlement);
         if (reconciliation.kind === 'committed') {
           setManualDraft(null);
-          await applyReconciliation(reconciliation.value);
+          await applyReconciliation(reconciliation.value, settlement);
         } else {
+          settlement.release();
           setManualDraft((current) => current ? {
             ...current,
             failed: true,
@@ -325,9 +327,9 @@ export const SourceDetailPanel: React.FC<{
       setBusy(false);
     }
   });
-  const reconcileRemoval = async (model: SuppliedModel) => {
+  const reconcileRemoval = async (model: SuppliedModel, settlement: SourceMutationSettlement) => {
     const reconciliation = await reconcileUnknownWrite(
-      readSourceInventory,
+      settlement.readInventory,
       ({ sources, snapshot }) => {
         const current = sources.find((item) => item.id === source.id);
         if (!current) return { kind: 'gone', sources, snapshot } satisfies SourceReconciliation;
@@ -339,12 +341,13 @@ export const SourceDetailPanel: React.FC<{
     if (reconciliation.kind === 'committed') {
       setGuard(null);
       setRemoveFailure(null);
-      await applyReconciliation(reconciliation.value);
+      await applyReconciliation(reconciliation.value, settlement);
       return;
     }
+    settlement.release();
     setRemoveFailure({ modelId: model.id, retryRead: reconciliation.kind === 'unread' });
   };
-  const remove = (model: SuppliedModel, confirmation?: GuardConfirmation) => trackMutation(async () => {
+  const remove = (model: SuppliedModel, confirmation?: GuardConfirmation) => trackMutation(async (settlement) => {
     setResult(null);
     setRefetchFailed(false);
     setRemoveFailure(null);
@@ -352,13 +355,15 @@ export const SourceDetailPanel: React.FC<{
     try {
       const echoed = await modelsApi.deleteCustomModel(source.id, model.id, confirmation);
       setGuard(null);
-      await onMutation(echoed);
+      await settlement.source(echoed);
     } catch (error) {
-      if (apiFailure(error)?.code === 'source_not_found') await onGone(source.id);
+      if (apiFailure(error)?.code === 'source_not_found') await settlement.gone(source.id);
       else {
         const refusal = guardedFailure(error);
-        if (refusal) setGuard({ kind: 'remove', model, ...refusal });
-        else await reconcileRemoval(model);
+        if (refusal) {
+          setGuard({ kind: 'remove', model, ...refusal });
+          settlement.release();
+        } else await reconcileRemoval(model, settlement);
       }
     } finally {
       setBusy(false);
@@ -406,13 +411,13 @@ export const SourceDetailPanel: React.FC<{
           <div key={model.id} className="model-hub-source-table-row grid gap-3 border-b border-border last:border-b-0 md:items-center md:gap-y-0">
             <span className="flex min-w-0 items-center gap-2"><span className="model-hub-source-model truncate font-mono text-foreground" title={model.id}>{model.id}</span>{result?.added.includes(model.id) && <span className="model-hub-accent-pill--mint model-hub-source-pill rounded-full border px-2 py-0.5 font-semibold">{t('settings.models.sourceDetail.refetch.added')}</span>}</span>
             <span className="model-hub-source-pill model-hub-source-entry-pill w-fit rounded-full border border-border font-semibold text-muted">{t(`settings.models.sourceDetail.entry.${model.provenance === 'discovered' ? 'auto' : 'manual'}`)}</span>
-            <TierEditor source={source} model={model} onMutating={() => { setResult(null); setRefetchFailed(false); }} onMutation={onMutation} onGone={onGone} trackMutation={trackMutation} />
+            <TierEditor source={source} model={model} onMutating={() => { setResult(null); setRefetchFailed(false); }} trackMutation={trackMutation} />
             <div className="flex items-center justify-end gap-2">
               {removeFailure?.modelId === model.id && <span className="model-hub-source-tier text-right text-destructive">{t('settings.models.sourceDetail.fail.removeModel')} <button type="button" disabled={busy} onClick={() => {
                 if (!removeFailure.retryRead) void remove(model);
-                else void trackMutation(async () => {
+                else void trackMutation(async (settlement) => {
                   setBusy(true);
-                  try { await reconcileRemoval(model); } finally { setBusy(false); }
+                  try { await reconcileRemoval(model, settlement); } finally { setBusy(false); }
                 });
               }} className="font-semibold underline underline-offset-2">{t('settings.models.sourceDetail.retry')}</button></span>}
               {model.provenance === 'manual' && <ManualModelMenu model={model} busy={busy} onRemove={() => void remove(model)} />}

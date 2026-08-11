@@ -20,11 +20,12 @@ import { modelsSurfaceKindFromReads } from './modelHubSurfaceState';
 import { buildSupplyRelations } from './supplyRelations';
 import { SupplyGraph, SupplyLegend } from './SupplyGraph';
 import './modelHubSurface.css';
-import { agentsWithEcho, createLatestAsyncAuthority, createLatestAsyncAuthorityByKey, createLatestEntityAuthorityByKey, createPendingWrites, mapWithConcurrency, type EntityGeneration } from './asyncLifetime';
+import { agentsWithEcho, createLatestAsyncAuthority, createLatestAsyncAuthorityByKey, createLatestEntityAuthorityByKey, createPendingWrites, mapWithConcurrency } from './asyncLifetime';
 import { emptyFeed, feedAfterHeadRead, feedAfterTailRead, feedTailCursor, type EventFeed } from './eventFeed';
 import { readFirstPaintRegions, type SurfaceLanding } from './firstPaintRegions';
 import { modelsApi, type SourceCreated } from './modelsApi';
 import { convergeMutation, createIntentAuthority } from './mutationConvergence';
+import type { SourceMutationSettlement, TrackSourceMutation } from './mutationSettlement';
 import { modelChainKey, modelChainRequests, type ModelChainIndex } from './modelRows';
 import {
   beginRegionRead,
@@ -270,28 +271,10 @@ export const SettingsModelsPage: React.FC = () => {
     },
   ));
   const [sourceWriteRegistry] = React.useState(() => createPendingWrites(() => {}));
-  const activeSourceGenerations = React.useRef(new Map<string, EntityGeneration<string>>());
   React.useEffect(() => {
     aliveRef.current = true;
     return () => { aliveRef.current = false; };
   }, []);
-
-  const trackSourceMutation = React.useCallback(async <T,>(sourceId: string, work: () => Promise<T>): Promise<T> => {
-    let result!: T;
-    await sourceWriteRegistry.track(sourceId, async () => {
-      const generation = sourceEntityAuthority.begin(sourceId);
-      activeSourceGenerations.current.set(sourceId, generation);
-      try {
-        result = await work();
-      } finally {
-        sourceEntityAuthority.abandon(generation);
-        if (activeSourceGenerations.current.get(sourceId) === generation) {
-          activeSourceGenerations.current.delete(sourceId);
-        }
-      }
-    });
-    return result;
-  }, [sourceEntityAuthority, sourceWriteRegistry]);
 
   const sources = foldRegionRead<Source[], Source[]>(sourcesRead, {
     loading: () => [],
@@ -377,7 +360,12 @@ export const SettingsModelsPage: React.FC = () => {
 
   React.useEffect(() => {
     const freshSupply = freshRegionData(supplyRead);
-    if (freshSupply) refreshAllAgentChains(freshSupply);
+    if (freshSupply) {
+      refreshAllAgentChains(freshSupply);
+      setSwitchFailures((previous) => new Set(
+        [...previous].filter((backend) => freshSupply.some((agent) => agent.backend === backend && agent.mode === 'hub')),
+      ));
+    }
   }, [refreshAllAgentChains, supplyRead]);
 
   const [eventReadAuthority] = React.useState(() => createLatestAsyncAuthority<RegionRead<ResolutionEvent[]>>((incoming) => {
@@ -435,6 +423,45 @@ export const SettingsModelsPage: React.FC = () => {
       showToast(t('settings.models.toast.refreshFailed') as string, 'error');
     }
   }, [refreshAuthority, refreshEventHead, showToast, sourceEntityAuthority, t]);
+
+  const trackSourceMutation = React.useCallback((sourceId: string): TrackSourceMutation => async <T,>(work: (settlement: SourceMutationSettlement) => Promise<T>): Promise<T> => {
+    let result!: T;
+    await sourceWriteRegistry.track(sourceId, async () => {
+      const generation = sourceEntityAuthority.begin(sourceId);
+      let settled = false;
+      const finish = async (apply: () => void, reconcile = true): Promise<void> => {
+        if (settled) return;
+        settled = true;
+        apply();
+        if (reconcile) await refresh();
+      };
+      const settlement: SourceMutationSettlement = {
+        source: async (echoed) => finish(() => { sourceEntityAuthority.settle(generation, echoed); }),
+        gone: async (goneId, inventory) => finish(() => {
+          if (inventory) {
+            sourceEntityAuthority.settleSnapshotEntries(
+              inventory.snapshot,
+              inventory.sources.filter((source) => source.id !== goneId),
+            );
+          }
+          if (goneId === sourceId) sourceEntityAuthority.settleRemoval(generation);
+        }),
+        unread: async () => finish(() => { sourceEntityAuthority.abandon(generation); }),
+        release: () => { void finish(() => { sourceEntityAuthority.abandon(generation); }, false); },
+        readInventory: async () => {
+          const snapshot = sourceEntityAuthority.beginSnapshot();
+          return { snapshot, sources: await modelsApi.listSources() };
+        },
+      };
+      try {
+        result = await work(settlement);
+      } finally {
+        settlement.release();
+      }
+    });
+    return result;
+  }, [refresh, sourceEntityAuthority, sourceWriteRegistry]);
+
   React.useEffect(() => {
     void refresh();
   }, [refresh]);
@@ -468,36 +495,6 @@ export const SettingsModelsPage: React.FC = () => {
       reconcile: refresh,
     });
   }, [applyAgentEcho, refresh]);
-  const applySourceEcho = React.useCallback((echoed: Source) => {
-    const generation = activeSourceGenerations.current.get(echoed.id);
-    if (generation) sourceEntityAuthority.settle(generation, echoed);
-    else sourceEntityAuthority.landLatest(echoed);
-  }, [sourceEntityAuthority]);
-  const sourceMutation = React.useCallback(async (echoed?: Source) => {
-    await convergeMutation({
-      entity: echoed,
-      applyEntity: applySourceEcho,
-      reconcile: refresh,
-    });
-  }, [applySourceEcho, refresh]);
-  const beginSourceSnapshot = React.useCallback(() => sourceEntityAuthority.beginSnapshot(), [sourceEntityAuthority]);
-  const sourceGone = React.useCallback(async (sourceId: string, inventory?: Source[], snapshot?: number) => {
-    await convergeMutation({
-      entity: { sourceId, inventory, snapshot },
-      applyEntity: ({ sourceId: goneId, inventory: authoritative, snapshot: inventorySnapshot }) => {
-        if (authoritative && inventorySnapshot !== undefined) {
-          sourceEntityAuthority.settleSnapshotEntries(
-            inventorySnapshot,
-            authoritative.filter((source) => source.id !== goneId),
-          );
-        }
-        const generation = activeSourceGenerations.current.get(goneId) ?? sourceEntityAuthority.begin(goneId);
-        sourceEntityAuthority.settleRemoval(generation);
-      },
-      reconcile: refresh,
-    });
-  }, [refresh, sourceEntityAuthority]);
-
   const switchToDirect = (agent: AgentSupply) => {
     setSwitchFailures((previous) => {
       const next = new Set(previous);
@@ -515,7 +512,19 @@ export const SettingsModelsPage: React.FC = () => {
         setAdoptAgent(null);
         await agentSaved(echoed);
       } catch {
-        setSwitchFailures((previous) => new Set(previous).add(agent.backend));
+        try {
+          const authoritative = await modelsApi.listAgents();
+          setSupplyRead(readyRegion(authoritative));
+          const committed = authoritative.some((row) => row.backend === agent.backend && row.mode === 'direct');
+          setSwitchFailures((previous) => {
+            const next = new Set(previous);
+            if (committed) next.delete(agent.backend);
+            else next.add(agent.backend);
+            return next;
+          });
+        } catch {
+          setSwitchFailures((previous) => new Set(previous).add(agent.backend));
+        }
       }
     });
   };
@@ -610,7 +619,7 @@ export const SettingsModelsPage: React.FC = () => {
       {landingLoading ? <div className="text-[13px] text-muted">{t('common.loading')}</div>
         : selectedSourceId
           ? selectedSource
-            ? <SourceDetailPanel source={selectedSource} onMutation={sourceMutation} onGone={sourceGone} beginSourceSnapshot={beginSourceSnapshot} trackMutation={(work) => trackSourceMutation(selectedSource.id, work)} />
+            ? <SourceDetailPanel source={selectedSource} trackMutation={trackSourceMutation(selectedSource.id)} />
             : <section className="rounded-xl border border-border bg-surface px-5 py-12 text-center text-[12px] text-muted">{t('settings.models.sourceDetail.gone')}</section>
           : directEmpty ? <DirectHome agents={agents} onSwitch={setAdoptAgent} />
             : <div className="space-y-[22px]">

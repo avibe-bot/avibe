@@ -127,7 +127,7 @@ export function buildMockSources(): Source[] {
       base_url: 'https://relay.example/v1',
       supply_channel: 'hub',
       billing: 'metered',
-      state: { status: 'cooldown', retry_at: iso(47 * MIN), detail_key: 'models.source.cooldown.timeout' },
+      state: { status: 'cooldown', retry_at: iso(47 * MIN), detail_key: 'models.source.cooldown.server_error' },
       usage: { cycle_used_pct: null, month_spend_cents: 320, currency: 'USD' },
       account_label: null,
       masked_credential: 'key …9c1',

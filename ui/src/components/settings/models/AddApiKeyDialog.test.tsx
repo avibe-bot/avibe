@@ -34,6 +34,12 @@ const source: Source = {
   models: [],
 };
 
+const deferred = <T,>() => {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
+};
+
 const renderDialog = (onClose = vi.fn(), onAdded = vi.fn()) => {
   render(
     <I18nextProvider i18n={i18n}>
@@ -212,6 +218,46 @@ describe('AddApiKeyDialog', () => {
     expect(create.mock.calls[1][0].client_nonce).toBe(create.mock.calls[0][0].client_nonce);
   });
 
+  it('cannot create or navigate after cancelling a pending lost-response reconciliation', async () => {
+    const pendingInventory = deferred<Source[]>();
+    vi.spyOn(modelsApi, 'observeApiKeySource').mockResolvedValueOnce(observed());
+    const create = vi.spyOn(modelsApi, 'createApiKeySource').mockRejectedValueOnce(new TypeError('response lost'));
+    vi.spyOn(modelsApi, 'listSources').mockReturnValueOnce(pendingInventory.promise);
+    const { onAdded, onClose } = renderDialog();
+    const user = await fillCredentials();
+
+    await user.click(screen.getByRole('button', { name: /^Add$|^添加$/i }));
+    await user.click(await screen.findByRole('button', { name: /^Retry$|^重试$/i }));
+    await user.click(screen.getAllByRole('button', { name: /^Cancel$|^取消$/i }).at(-1)!);
+    pendingInventory.resolve([]);
+    await pendingInventory.promise;
+
+    await waitFor(() => expect(onClose).toHaveBeenCalledOnce());
+    expect(create).toHaveBeenCalledOnce();
+    expect(onAdded).not.toHaveBeenCalled();
+  });
+
+  it('cannot replay a reconciled Source after the dialog attempt is cancelled', async () => {
+    const pendingInventory = deferred<Source[]>();
+    let nonce: string | undefined;
+    vi.spyOn(modelsApi, 'observeApiKeySource').mockResolvedValueOnce(observed());
+    vi.spyOn(modelsApi, 'createApiKeySource').mockImplementationOnce(async (draft) => {
+      nonce = draft.client_nonce;
+      throw new TypeError('response lost');
+    });
+    vi.spyOn(modelsApi, 'listSources').mockReturnValueOnce(pendingInventory.promise);
+    const { onAdded } = renderDialog();
+    const user = await fillCredentials();
+
+    await user.click(screen.getByRole('button', { name: /^Add$|^添加$/i }));
+    await user.click(await screen.findByRole('button', { name: /^Retry$|^重试$/i }));
+    await user.click(screen.getAllByRole('button', { name: /^Cancel$|^取消$/i }).at(-1)!);
+    pendingInventory.resolve([{ ...source, client_nonce: nonce }]);
+    await pendingInventory.promise;
+
+    expect(onAdded).not.toHaveBeenCalled();
+  });
+
   it('rejects a trimmed blank or overlong display name before observation', async () => {
     const observe = vi.spyOn(modelsApi, 'observeApiKeySource');
     renderDialog();
@@ -226,6 +272,18 @@ describe('AddApiKeyDialog', () => {
     expect(add.disabled).toBe(true);
     await user.click(add);
     expect(observe).not.toHaveBeenCalled();
+  });
+
+  it('counts supplementary display-name characters as JSON Schema code points', async () => {
+    renderDialog();
+    const user = await fillCredentials();
+    const name = screen.getByRole('textbox', { name: /^Name|^名称/i });
+    const add = screen.getByRole('button', { name: /^Add$|^添加$/i }) as HTMLButtonElement;
+
+    await user.type(name, '😀'.repeat(SOURCE_DISPLAY_NAME_MAX_LENGTH));
+    expect(add.disabled).toBe(false);
+    await user.type(name, '😀');
+    expect(add.disabled).toBe(true);
   });
 
   it('keeps a server-named create validation failure editable and out of save reconciliation', async () => {

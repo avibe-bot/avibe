@@ -8,9 +8,9 @@ import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { ModelHubInfoHint } from './ModelHubInfoHint';
 import type { PendingWrite } from './asyncLifetime';
-import { eligibleSources } from './eligibility';
 import { modelsApi } from './modelsApi';
 import { movedOrder, sameIds } from './reorder';
+import { combineSourceOrderReads } from './sourceOrderComposition';
 import { sourceDetail } from './sourcePresentation';
 import type { AgentSupply, Source } from './types';
 import { ACCENT_PILL, sourceAccent } from './vendorMeta';
@@ -20,7 +20,7 @@ type OrderAnnouncement =
   | { key: 'grabCancelled'; source: string }
   | null;
 
-type ReadState = 'loading' | 'ready' | 'error';
+type ReadState = 'loading' | 'reconciling' | 'ready' | 'error';
 
 const SourceIdentity: React.FC<{ source: Source }> = ({ source }) => {
   const { t } = useTranslation();
@@ -103,7 +103,7 @@ export const SourceOrderDrawer: React.FC<{
   const readAttempt = React.useRef(0);
   const saving = orderWrite.pending;
 
-  const applyRead = React.useCallback((next: AgentSupply, nextSources: Source[]) => {
+  const applyRead = React.useCallback((next: AgentSupply, nextSources: Source[], state: ReadState) => {
     const nextOrder = next.sources?.order ?? [];
     setViewAgent(next);
     setViewSources(nextSources);
@@ -113,18 +113,32 @@ export const SourceOrderDrawer: React.FC<{
     setSaveFailed(false);
     setGrabbedId(null);
     setAnnouncement(null);
-    setReadState('ready');
+    setReadState(state);
   }, []);
 
   const read = React.useCallback(async () => {
     const seq = ++readAttempt.current;
     setReadState('loading');
     try {
-      const [next, nextSources] = await Promise.all([
+      const readPair = () => Promise.all([
         modelsApi.getAgentSources(agent.backend),
         modelsApi.listSources(),
-      ]);
-      if (readAttempt.current === seq) applyRead(next, nextSources);
+      ] as const);
+      const [next, nextSources] = await readPair();
+      if (readAttempt.current !== seq) return;
+      const composition = combineSourceOrderReads(next, nextSources);
+      if (composition.missingOrderedIds.length === 0) {
+        applyRead(next, nextSources, 'ready');
+        return;
+      }
+
+      // A composition hole is evidence that the two reads straddled a mutation,
+      // not that either endpoint failed. Keep it visible while one regroup read runs.
+      applyRead(next, nextSources, 'reconciling');
+      const [regroupedAgent, regroupedSources] = await readPair();
+      if (readAttempt.current !== seq) return;
+      const regrouped = combineSourceOrderReads(regroupedAgent, regroupedSources);
+      applyRead(regroupedAgent, regroupedSources, regrouped.missingOrderedIds.length === 0 ? 'ready' : 'error');
     } catch {
       if (readAttempt.current === seq) setReadState('error');
     }
@@ -135,8 +149,10 @@ export const SourceOrderDrawer: React.FC<{
     else readAttempt.current += 1;
   }, [open, read]);
 
-  const available = eligibleSources(viewSources, viewAgent);
+  const composition = combineSourceOrderReads(viewAgent, viewSources);
+  const available = composition.available;
   const byId = React.useMemo(() => new Map(available.map((source) => [source.id, source])), [available]);
+  const orderedEntries = order.map((id) => ({ id, source: byId.get(id) }));
   const ordered = order.map((id) => byId.get(id)).filter((source): source is Source => Boolean(source));
   const heldOut = available.filter((source) => !order.includes(source.id));
   const persist = (next: string[]) => {
@@ -273,6 +289,29 @@ export const SourceOrderDrawer: React.FC<{
           <div className="model-hub-order-body flex min-h-0 flex-1 flex-col overflow-y-auto">
             {readState === 'loading' && (
               <div className="model-hub-order-state"><LoaderCircle className="model-hub-ink-mint size-4 animate-spin" />{t('common.loading')}</div>
+            )}
+            {readState === 'reconciling' && (
+              <section className="model-hub-order-section" aria-busy="true">
+                <div className="model-hub-order-section-head">
+                  <h3>{t('settings.models.order.section.ordered')}</h3>
+                  <LoaderCircle className="model-hub-ink-mint size-3.5 animate-spin" aria-label={t('common.loading')} />
+                </div>
+                <div className="flex flex-col gap-2">
+                  {orderedEntries.map(({ id, source: orderedSource }, index) => (
+                    <div key={id} className="model-hub-order-row model-hub-order-row--ordered">
+                      {orderedSource
+                        ? <span className="model-hub-order-grip" />
+                        : <LoaderCircle className="model-hub-order-grip animate-spin" aria-hidden />}
+                      <span className={cn('model-hub-order-ordinal', index === 0 && 'is-first')}>{index + 1}</span>
+                      {orderedSource
+                        ? <SourceIdentity source={orderedSource} />
+                        : <span className="model-hub-order-identity">
+                            <span className="model-hub-order-name truncate font-mono" title={id}>{id}</span>
+                          </span>}
+                    </div>
+                  ))}
+                </div>
+              </section>
             )}
             {readState === 'error' && (
               <div className="model-hub-order-state model-hub-order-state--error">{t('settings.models.order.fail.read')}</div>

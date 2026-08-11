@@ -304,15 +304,18 @@ describe('agentsWithEcho — what speaks for a row when no read does', () => {
 });
 
 describe('Source entity landing through the shared authority', () => {
-  it('routes Source-detail rereads and full reads through the same latest-result authority', () => {
+  it('routes Source-detail rereads and full reads through the same per-Source settlement', () => {
     const page = readFileSync(join(__dirname, 'SettingsModelsPage.tsx'), 'utf8');
     const detail = readFileSync(join(__dirname, 'SourceDetailPanel.tsx'), 'utf8');
     const sourceRetry = page.slice(page.indexOf('const retrySources'), page.indexOf('const retrySupply'));
     const supplyRetry = page.slice(page.indexOf('const retrySupply'), page.indexOf('const retryEvents'));
 
     expect(detail).toMatch(/modelsApi\.refreshSource\(source\.id, confirmation\)/);
-    expect(detail).toMatch(/await onMutation\(answer\.source\)/);
-    expect(page).toMatch(/const sourceMutation[\s\S]*?convergeMutation\(\{/);
+    expect(detail).toMatch(/await settlement\.source\(answer\.source\)/);
+    expect(detail).toMatch(/trackMutation\(async \(settlement\)/);
+    expect(page).toMatch(/const trackSourceMutation[\s\S]*?sourceEntityAuthority\.begin\(sourceId\)[\s\S]*?const settlement: SourceMutationSettlement/);
+    expect(page).toMatch(/source: async \(echoed\)[\s\S]*?sourceEntityAuthority\.settle\(generation/);
+    expect(page).not.toMatch(/const sourceMutation|activeSourceGenerations/);
     expect(page).toMatch(/await refreshAuthority\.run/);
     expect(sourceRetry).toMatch(/await refresh\(\)/);
     expect(supplyRetry).toMatch(/await refresh\(\)/);

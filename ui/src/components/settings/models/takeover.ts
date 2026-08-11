@@ -1,17 +1,5 @@
-import type { AgentChain, AgentChainLink, ChainHealth, ChainUnavailableReason } from './types';
-
-const SELF_HEALING_HEAD: Readonly<Record<ChainHealth, boolean>> = {
-  healthy: false,
-  cooldown: true,
-  needs_action: false,
-  error: false,
-};
-
-const RECOVERABLE_PROCESS_REASON: Readonly<Record<ChainUnavailableReason, boolean>> = {
-  native_cli_unavailable: false,
-  source_missing: false,
-  model_unsupported: false,
-};
+import { classifyChainLink } from './sourceStateClassification';
+import type { AgentChain, AgentChainLink } from './types';
 
 export const currentChainLink = (chain: AgentChain): AgentChainLink | null => {
   if (!chain.current) return null;
@@ -26,6 +14,5 @@ export const isTakeoverChain = (chain: AgentChain): boolean => {
   const head = chain.chain[0];
   if (!current || !head) return false;
   const advanced = current.source_id !== head.source_id || current.model_id !== head.model_id;
-  const processCanRecover = head.reason === null || RECOVERABLE_PROCESS_REASON[head.reason];
-  return advanced && !head.runnable && SELF_HEALING_HEAD[head.health] && processCanRecover;
+  return advanced && !head.runnable && classifyChainLink(head) === 'self_healing';
 };

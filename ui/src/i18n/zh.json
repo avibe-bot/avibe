@@ -1457,8 +1457,6 @@
     },
     "source": {
       "cooldown": {
-        "network": "网络不通",
-        "timeout": "连续超时",
         "rate_limited": "触发限流",
         "quota_exhausted": "本周期额度用完",
         "server_error": "上游服务异常"
