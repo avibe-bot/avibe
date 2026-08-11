@@ -28,18 +28,24 @@ const source: Source = {
 const renderPanel = (adoptedBy: React.ComponentProps<typeof SourceDetailPanel>['adoptedBy'] = undefined) => render(
   <ToastProvider>
     <I18nextProvider i18n={i18n}>
-      <SourceDetailPanel source={source} adoptedBy={adoptedBy} onMutation={vi.fn().mockResolvedValue(undefined)} />
+      <SourceDetailPanel source={source} adoptedBy={adoptedBy} onMutation={vi.fn().mockResolvedValue(undefined)} onGone={vi.fn().mockResolvedValue(undefined)} />
     </I18nextProvider>
   </ToastProvider>,
 );
 
 const EchoPanel: React.FC<{ reconcile?: () => Promise<void> | void }> = ({ reconcile = vi.fn() }) => {
-  const [current, setCurrent] = React.useState(source);
+  const [current, setCurrent] = React.useState<Source | null>(source);
   const onMutation = async (echoed?: Source) => {
     if (echoed) setCurrent(echoed);
     await reconcile();
   };
-  return <SourceDetailPanel source={current} onMutation={onMutation} />;
+  const onGone = async () => {
+    setCurrent(null);
+    await reconcile();
+  };
+  return current
+    ? <SourceDetailPanel source={current} onMutation={onMutation} onGone={onGone} />
+    : <p data-testid="source-gone">Source gone</p>;
 };
 
 const renderEchoPanel = (reconcile = vi.fn()) => render(
@@ -70,7 +76,7 @@ describe('SourceDetailPanel', () => {
   });
 
   it('omits native refetch because that channel has no stored discovery credential', () => {
-    render(<I18nextProvider i18n={i18n}><SourceDetailPanel source={{ ...source, kind: 'subscription', supply_channel: 'native_cli' }} onMutation={vi.fn().mockResolvedValue(undefined)} /></I18nextProvider>);
+    render(<I18nextProvider i18n={i18n}><SourceDetailPanel source={{ ...source, kind: 'subscription', supply_channel: 'native_cli' }} onMutation={vi.fn().mockResolvedValue(undefined)} onGone={vi.fn().mockResolvedValue(undefined)} /></I18nextProvider>);
     expect(screen.queryByRole('button', { name: /^Refetch$|^重新拉取$/i })).toBeNull();
   });
 
@@ -153,6 +159,19 @@ describe('SourceDetailPanel', () => {
     expect(screen.getByRole('button', { name: /^Try again$|^重试$/i })).toBeTruthy();
   });
 
+  it('keeps an existing tier removal clickable while the editor input has focus', async () => {
+    const update = vi.spyOn(modelsApi, 'updateModelReasoningEfforts').mockResolvedValueOnce({
+      ...source,
+      models: [{ ...source.models[0], reasoning_efforts: [] }],
+    });
+    renderPanel();
+    await userEvent.click(screen.getByRole('button', { name: /high/i }));
+    await userEvent.type(screen.getByPlaceholderText(/Enter to add|回车添加/i), 'draft');
+    await userEvent.click(screen.getByRole('button', { name: /Remove high|移除 high/i }));
+
+    await waitFor(() => expect(update).toHaveBeenCalledWith(source.id, 'model-a', []));
+  });
+
   it('sends a manual-model removal before showing any guarded-change confirm', async () => {
     const remove = vi.spyOn(modelsApi, 'deleteCustomModel').mockResolvedValueOnce(source);
     renderPanel();
@@ -177,7 +196,7 @@ describe('SourceDetailPanel', () => {
     const remove = vi.spyOn(modelsApi, 'deleteCustomModel').mockRejectedValueOnce(new TypeError('response lost'));
     const list = vi.spyOn(modelsApi, 'listSources').mockResolvedValueOnce([{ ...source, models: [] }]);
     const onMutation = vi.fn().mockResolvedValue(undefined);
-    render(<I18nextProvider i18n={i18n}><SourceDetailPanel source={source} onMutation={onMutation} /></I18nextProvider>);
+    render(<I18nextProvider i18n={i18n}><SourceDetailPanel source={source} onMutation={onMutation} onGone={vi.fn().mockResolvedValue(undefined)} /></I18nextProvider>);
 
     await userEvent.click(screen.getByRole('button', { name: /Remove model-a|移除 model-a/i }));
     await userEvent.click(screen.getByRole('menuitem', { name: /^Remove$|^移除$/i }));
@@ -217,4 +236,19 @@ describe('SourceDetailPanel', () => {
     await waitFor(() => expect(remove).toHaveBeenCalledTimes(2));
     expect(list).toHaveBeenCalledOnce();
   });
+
+  it('settles an unknown deletion as Source gone when the authoritative inventory omits it', async () => {
+    const remove = vi.spyOn(modelsApi, 'deleteCustomModel').mockRejectedValueOnce(new TypeError('response lost'));
+    vi.spyOn(modelsApi, 'listSources').mockResolvedValueOnce([]);
+    const onGone = vi.fn().mockResolvedValue(undefined);
+    render(<I18nextProvider i18n={i18n}><SourceDetailPanel source={source} onMutation={vi.fn().mockResolvedValue(undefined)} onGone={onGone} /></I18nextProvider>);
+
+    await userEvent.click(screen.getByRole('button', { name: /Remove model-a|移除 model-a/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Remove$|^移除$/i }));
+
+    await waitFor(() => expect(onGone).toHaveBeenCalledWith(source.id, []));
+    expect(remove).toHaveBeenCalledOnce();
+    expect(screen.queryByRole('button', { name: /^Try again$|^重试$/i })).toBeNull();
+  });
+
 });

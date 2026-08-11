@@ -20,7 +20,7 @@ import { modelsSurfaceKind } from './modelHubSurfaceState';
 import { buildSupplyRelations } from './supplyRelations';
 import { SupplyGraph, SupplyLegend } from './SupplyGraph';
 import './modelHubSurface.css';
-import { agentsWithEcho, createLatestAsyncAuthority, createPendingWrites, mapWithConcurrency, sourcesWithEcho } from './asyncLifetime';
+import { agentsWithEcho, createLatestAsyncAuthority, createLatestAsyncAuthorityByKey, createPendingWrites, mapWithConcurrency, sourcesWithEcho } from './asyncLifetime';
 import { emptyFeed, feedAfterHeadRead, feedAfterTailRead, feedTailCursor, type EventFeed } from './eventFeed';
 import { modelsApi, type SourceCreated } from './modelsApi';
 import { convergeMutation, createIntentAuthority } from './mutationConvergence';
@@ -44,9 +44,9 @@ import type { AdoptedBy, AgentBackend, AgentSupply, ResolutionEvent, RuntimeDepe
 const CHAIN_READ_CONCURRENCY = 6;
 const EVENT_PAGE = 20;
 
-const readChains = async (agents: AgentSupply[]): Promise<ModelChainIndex> => Object.fromEntries(
+const readAgentChains = async (agent: AgentSupply): Promise<ModelChainIndex> => Object.fromEntries(
   await mapWithConcurrency(
-    modelChainRequests(agents.filter((agent) => agent.mode === 'hub')),
+    modelChainRequests([agent]),
     CHAIN_READ_CONCURRENCY,
     async ({ backend, modelId }) => {
       const key = modelChainKey(backend, modelId);
@@ -59,21 +59,36 @@ const readChains = async (agents: AgentSupply[]): Promise<ModelChainIndex> => Ob
   ),
 );
 
-const settleChainIndex = (
+const settleAgentChainIndex = (
   previous: ModelChainIndex,
+  agent: AgentSupply,
   incoming: ModelChainIndex,
-): ModelChainIndex => Object.fromEntries(
-  Object.entries(incoming).map(([key, read]) => [
-    key,
-    settleRegionRead(previous[key] ?? loadingRegion(), read),
-  ]),
-);
+): ModelChainIndex => {
+  const prefix = `${agent.backend}\u0000`;
+  const next = Object.fromEntries(Object.entries(previous).filter(([key]) => !key.startsWith(prefix)));
+  for (const [key, read] of Object.entries(incoming)) {
+    next[key] = settleRegionRead(previous[key] ?? loadingRegion(), read);
+  }
+  return next;
+};
+
+const beginAgentChainIndex = (
+  previous: ModelChainIndex,
+  agent: AgentSupply,
+): ModelChainIndex => {
+  const prefix = `${agent.backend}\u0000`;
+  const next = Object.fromEntries(Object.entries(previous).filter(([key]) => !key.startsWith(prefix)));
+  for (const { backend, modelId } of modelChainRequests([agent])) {
+    const key = modelChainKey(backend, modelId);
+    next[key] = beginRegionRead(previous[key] ?? loadingRegion());
+  }
+  return next;
+};
 
 type SurfaceLanding = {
   sources: RegionRead<Source[]>;
   supply: RegionRead<AgentSupply[]>;
   runtime: RegionRead<RuntimeDependency>;
-  chains: RegionRead<ModelChainIndex>;
   events: RegionRead<ResolutionEvent[]>;
 };
 
@@ -84,15 +99,10 @@ const readSurfaceLanding = async (): Promise<SurfaceLanding> => {
     readRegion(() => modelsApi.getRuntimeStatus()),
     readRegion(() => modelsApi.listEvents(EVENT_PAGE)),
   ]);
-  const agentRows = regionData(supply);
-  const chains = agentRows
-    ? readyRegion(await readChains(agentRows))
-    : unreadRegion<ModelChainIndex>();
   return {
     sources,
     supply,
     runtime,
-    chains,
     events,
   };
 };
@@ -266,7 +276,7 @@ export const SettingsModelsPage: React.FC = () => {
 
   const sources = regionData(sourcesRead) ?? [];
   const agents = regionData(supplyRead) ?? [];
-  const chains = chainsRead.kind === 'ready' ? chainsRead.data : {};
+  const chains = regionData(chainsRead) ?? {};
   const runtime = regionData(runtimeRead) ?? null;
   const feed = regionData(eventsRead) ?? emptyFeed;
   const runtimeHealth = runtime?.status.health ?? null;
@@ -287,6 +297,28 @@ export const SettingsModelsPage: React.FC = () => {
     });
   }, [runtimeHealth, runtimeRead.kind, runtimeRecoveryPending, startingRuntime]);
 
+  const [chainReadAuthority] = React.useState(() => createLatestAsyncAuthorityByKey<AgentBackend, { agent: AgentSupply; chains: ModelChainIndex }>((_backend, incoming) => {
+    if (!aliveRef.current) return;
+    setChainsRead((previous) => readyRegion(settleAgentChainIndex(regionData(previous) ?? {}, incoming.agent, incoming.chains)));
+  }));
+
+  const refreshAgentChains = React.useCallback(async (agent: AgentSupply) => {
+    setChainsRead((previous) => readyRegion(beginAgentChainIndex(regionData(previous) ?? {}, agent)));
+    await chainReadAuthority.run(agent.backend, async () => ({
+      agent,
+      chains: await readAgentChains(agent),
+    }));
+  }, [chainReadAuthority]);
+
+  const refreshAllAgentChains = React.useCallback((agentRows: AgentSupply[]) => {
+    const hubAgents = agentRows.filter((agent) => agent.mode === 'hub');
+    const activeBackends = new Set(hubAgents.map((agent) => agent.backend));
+    setChainsRead((previous) => readyRegion(Object.fromEntries(
+      Object.entries(regionData(previous) ?? {}).filter(([key]) => activeBackends.has(key.split('\u0000')[0] as AgentBackend)),
+    )));
+    for (const agent of hubAgents) void refreshAgentChains(agent);
+  }, [refreshAgentChains]);
+
   const [refreshAuthority] = React.useState(() => createLatestAsyncAuthority<SurfaceLanding>((landing) => {
     if (!aliveRef.current) return;
     setSourcesRead((previous) => settleRegionRead(previous, landing.sources));
@@ -296,10 +328,8 @@ export const SettingsModelsPage: React.FC = () => {
       if (next.kind === 'ready') setRuntimeRecoveryPending(false);
       return next;
     });
-    setChainsRead((previous) => {
-      if (landing.chains.kind !== 'ready') return failRegionRead(previous);
-      return readyRegion(settleChainIndex(regionData(previous) ?? {}, landing.chains.data));
-    });
+    if (landing.supply.kind === 'ready') refreshAllAgentChains(landing.supply.data);
+    else setChainsRead(failRegionRead);
     setEventsRead((previous) => {
       if (landing.events.kind !== 'ready') return failRegionRead(previous);
       const previousFeed = regionData(previous);
@@ -320,8 +350,8 @@ export const SettingsModelsPage: React.FC = () => {
     }
   }, [refreshAuthority, showToast, t]);
   React.useEffect(() => {
-    void refreshAuthority.run(readSurfaceLanding);
-  }, [refreshAuthority]);
+    void refresh();
+  }, [refresh]);
 
   const retrySources = React.useCallback(async () => {
     setSourcesRead(beginRegionRead);
@@ -337,31 +367,6 @@ export const SettingsModelsPage: React.FC = () => {
     setEventsRead(beginRegionRead);
     await refresh();
   }, [refresh]);
-
-  const refreshAgentChains = React.useCallback(async (agent: AgentSupply) => {
-    const requests = modelChainRequests([agent]);
-    setChainsRead((previous) => {
-      const index = regionData(previous) ?? {};
-      return readyRegion({
-        ...index,
-        ...Object.fromEntries(requests.map(({ backend, modelId }) => {
-          const key = modelChainKey(backend, modelId);
-          return [key, beginRegionRead(index[key] ?? loadingRegion())];
-        })),
-      });
-    });
-    const incoming = await readChains([agent]);
-    if (aliveRef.current) {
-      setChainsRead((previous) => {
-        const index = regionData(previous) ?? {};
-        const next = { ...index };
-        for (const [key, read] of Object.entries(incoming)) {
-          next[key] = settleRegionRead(index[key] ?? loadingRegion(), read);
-        }
-        return readyRegion(next);
-      });
-    }
-  }, []);
 
   const applyAgentEcho = React.useCallback((echoed: AgentSupply) => {
     setSupplyRead((previous) => readyRegion(agentsWithEcho(regionData(previous) ?? [], echoed)));
@@ -383,6 +388,22 @@ export const SettingsModelsPage: React.FC = () => {
       reconcile: refresh,
     });
   }, [applySourceEcho, refresh]);
+  const sourceGone = React.useCallback(async (sourceId: string, inventory?: Source[]) => {
+    await convergeMutation({
+      entity: { sourceId, inventory },
+      applyEntity: ({ sourceId: goneId, inventory: authoritative }) => {
+        setSourcesRead((previous) => readyRegion(
+          authoritative ?? (regionData(previous) ?? []).filter((source) => source.id !== goneId),
+        ));
+        setAdoptionBySource((previous) => {
+          const next = { ...previous };
+          delete next[goneId];
+          return next;
+        });
+      },
+      reconcile: refresh,
+    });
+  }, [refresh]);
 
   const switchToDirect = (agent: AgentSupply) => {
     setSwitchFailures((previous) => {
@@ -497,7 +518,7 @@ export const SettingsModelsPage: React.FC = () => {
       {landingLoading ? <div className="text-[13px] text-muted">{t('common.loading')}</div>
         : selectedSourceId
           ? selectedSource
-            ? <SourceDetailPanel source={selectedSource} adoptedBy={adoptionBySource[selectedSource.id]} onMutation={sourceMutation} />
+            ? <SourceDetailPanel source={selectedSource} adoptedBy={adoptionBySource[selectedSource.id]} onMutation={sourceMutation} onGone={sourceGone} />
             : <section className="rounded-xl border border-border bg-surface px-5 py-12 text-center text-[12px] text-muted">{t('settings.models.sourceDetail.gone')}</section>
           : directEmpty ? <DirectHome agents={agents} onSwitch={setAdoptAgent} />
             : <div className="space-y-[22px]">

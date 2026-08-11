@@ -2,7 +2,7 @@
 import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { I18nextProvider } from 'react-i18next';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ToastProvider } from '@/context/ToastProvider';
 import i18n from '@/i18n';
@@ -53,6 +53,10 @@ const renderDrawer = (overrides: Partial<React.ComponentProps<typeof SourceOrder
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+});
+
+beforeEach(() => {
+  vi.spyOn(modelsApi, 'listSources').mockResolvedValue(sources);
 });
 
 describe('SourceOrderDrawer keyboard ordering', () => {
@@ -133,5 +137,22 @@ describe('SourceOrderDrawer keyboard ordering', () => {
 
     await screen.findByText('No source is available to this backend yet.');
     expect(screen.getByRole('button', { name: 'Save order' }).hasAttribute('disabled')).toBe(true);
+  });
+
+  it('uses the source inventory read in the same generation as the Agent order', async () => {
+    const newest = source('src_c', 'Newest source');
+    vi.mocked(modelsApi.listSources).mockResolvedValueOnce([...sources, newest]);
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue({
+      ...agent,
+      sources: {
+        order: ['src_a', 'src_b', 'src_c'],
+        eligibility: [...(agent.sources?.eligibility ?? []), { source_id: newest.id, eligible: true }],
+      },
+    });
+
+    renderDrawer();
+
+    expect(await screen.findByText('Newest source')).toBeTruthy();
+    expect(screen.getAllByRole('button', { name: 'Reorder source' })).toHaveLength(3);
   });
 });

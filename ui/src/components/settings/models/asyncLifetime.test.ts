@@ -65,6 +65,7 @@ import {
   agentsWithEcho,
   createFlowAuthority,
   createLatestAsyncAuthority,
+  createLatestAsyncAuthorityByKey,
   createPendingWrites,
   failureLanded,
   flowLetGo,
@@ -143,6 +144,25 @@ describe('latest async authority', () => {
     expect(await olderRun).toBe('stale');
     await expect(authority.run(() => Promise.reject(new Error('read failed')))).rejects.toThrow('read failed');
     expect(landed).toEqual(['newest']);
+  });
+
+  it('orders reads per key without making independent backends supersede each other', async () => {
+    const olderClaude = deferred<string>();
+    const newerClaude = deferred<string>();
+    const codex = deferred<string>();
+    const landed: string[] = [];
+    const authority = createLatestAsyncAuthorityByKey<string, string>((key, value) => landed.push(`${key}:${value}`));
+
+    const olderRun = authority.run('claude', () => olderClaude.promise);
+    const codexRun = authority.run('codex', () => codex.promise);
+    const newerRun = authority.run('claude', () => newerClaude.promise);
+    newerClaude.resolve('new');
+    codex.resolve('independent');
+    await Promise.all([newerRun, codexRun]);
+    olderClaude.resolve('old');
+
+    expect(await olderRun).toBe('stale');
+    expect(landed).toEqual(['claude:new', 'codex:independent']);
   });
 });
 

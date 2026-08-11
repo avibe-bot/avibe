@@ -40,6 +40,10 @@ type GuardedAction =
   | { kind: 'refetch'; hops: RouteHopRef[]; gaps: SupplyGap[] }
   | { kind: 'remove'; model: SuppliedModel; hops: RouteHopRef[]; gaps: SupplyGap[] };
 
+type SourceReconciliation =
+  | { kind: 'source'; source: Source }
+  | { kind: 'gone'; sources: Source[] };
+
 export const GuardGapList: React.FC<{ gaps: SupplyGap[] }> = ({ gaps }) => {
   const { t, i18n } = useTranslation();
   if (gaps.length === 0) return null;
@@ -74,7 +78,8 @@ const TierEditor: React.FC<{
   model: SuppliedModel;
   onMutating: () => void;
   onMutation: (source?: Source) => Promise<void>;
-}> = ({ source, model, onMutating, onMutation }) => {
+  onGone: (sourceId: string, sources?: Source[]) => Promise<void>;
+}> = ({ source, model, onMutating, onMutation, onGone }) => {
   const { t } = useTranslation();
   const [tiers, setTiers] = React.useState(model.reasoning_efforts ?? []);
   const [draft, setDraft] = React.useState('');
@@ -97,7 +102,7 @@ const TierEditor: React.FC<{
     } catch (error) {
       setTiers(previous);
       setFailedNext(next);
-      if (apiFailure(error)?.code === 'source_not_found') await onMutation();
+      if (apiFailure(error)?.code === 'source_not_found') await onGone(source.id);
       return false;
     } finally {
       setSaving(false);
@@ -131,7 +136,7 @@ const TierEditor: React.FC<{
       {tiers.map((tier) => (
         <span key={tier} className="model-hub-source-tier model-hub-source-tier-chip inline-flex items-center gap-1 rounded-full border border-border text-foreground">
           {tier}
-          <button type="button" disabled={saving} onClick={() => void commit(tiers.filter((item) => item !== tier))} aria-label={t('settings.models.sourceDetail.tiers.remove', { tier }) as string} className="text-muted hover:text-foreground disabled:opacity-50">
+          <button type="button" disabled={saving} onMouseDown={(event) => event.preventDefault()} onClick={() => void commit(tiers.filter((item) => item !== tier))} aria-label={t('settings.models.sourceDetail.tiers.remove', { tier }) as string} className="text-muted hover:text-foreground disabled:opacity-50">
             <X className="size-2.5" />
           </button>
         </span>
@@ -194,7 +199,8 @@ export const SourceDetailPanel: React.FC<{
   source: Source;
   adoptedBy?: readonly AdoptedBy[];
   onMutation: (source?: Source) => Promise<void>;
-}> = ({ source, adoptedBy, onMutation }) => {
+  onGone: (sourceId: string, sources?: Source[]) => Promise<void>;
+}> = ({ source, adoptedBy, onMutation, onGone }) => {
   const { t, i18n } = useTranslation();
   const now = useDeadlineClock(source.state.status === 'cooldown' ? source.state.retry_at : null);
   const { Icon, accent } = sourceVisual(source);
@@ -225,11 +231,14 @@ export const SourceDetailPanel: React.FC<{
       setGuard(null);
       await onMutation(answer.source);
     } catch (error) {
-      const refusal = guardedFailure(error);
-      if (refusal && !force) setGuard({ kind: 'refetch', ...refusal });
+      if (apiFailure(error)?.code === 'source_not_found') await onGone(source.id);
       else {
-        setRefetchFailed(true);
-        await onMutation();
+        const refusal = guardedFailure(error);
+        if (refusal && !force) setGuard({ kind: 'refetch', ...refusal });
+        else {
+          setRefetchFailed(true);
+          await onMutation();
+        }
       }
     } finally {
       setBusy(false);
@@ -239,9 +248,16 @@ export const SourceDetailPanel: React.FC<{
     () => modelsApi.listSources(),
     (sources) => {
       const current = sources.find((item) => item.id === source.id);
-      return current?.models.some((model) => model.id === modelId) ? current : undefined;
+      if (!current) return { kind: 'gone', sources } satisfies SourceReconciliation;
+      return current.models.some((model) => model.id === modelId)
+        ? { kind: 'source', source: current } satisfies SourceReconciliation
+        : undefined;
     },
   );
+  const applyReconciliation = async (value: SourceReconciliation) => {
+    if (value.kind === 'gone') await onGone(source.id, value.sources);
+    else await onMutation(value.source);
+  };
   const addManualModel = async () => {
     if (!manualDraft || busy) return;
     const modelId = manualDraft.modelId.trim();
@@ -253,7 +269,7 @@ export const SourceDetailPanel: React.FC<{
       const reconciliation = await reconcileManualCreate(modelId);
       if (reconciliation.kind === 'committed') {
         setManualDraft(null);
-        await onMutation(reconciliation.value);
+        await applyReconciliation(reconciliation.value);
       } else {
         setManualDraft((current) => current ? {
           ...current,
@@ -275,12 +291,12 @@ export const SourceDetailPanel: React.FC<{
       await onMutation(echoed);
     } catch (error) {
       if (apiFailure(error)?.code === 'source_not_found') {
-        await onMutation();
+        await onGone(source.id);
       } else {
         const reconciliation = await reconcileManualCreate(modelId);
         if (reconciliation.kind === 'committed') {
           setManualDraft(null);
-          await onMutation(reconciliation.value);
+          await applyReconciliation(reconciliation.value);
         } else {
           setManualDraft((current) => current ? {
             ...current,
@@ -298,15 +314,16 @@ export const SourceDetailPanel: React.FC<{
       () => modelsApi.listSources(),
       (sources) => {
         const current = sources.find((item) => item.id === source.id);
-        return current && !current.models.some((entry) => entry.id === model.id)
-          ? current
+        if (!current) return { kind: 'gone', sources } satisfies SourceReconciliation;
+        return !current.models.some((entry) => entry.id === model.id)
+          ? { kind: 'source', source: current } satisfies SourceReconciliation
           : undefined;
       },
     );
     if (reconciliation.kind === 'committed') {
       setGuard(null);
       setRemoveFailure(null);
-      await onMutation(reconciliation.value);
+      await applyReconciliation(reconciliation.value);
       return;
     }
     setRemoveFailure({ modelId: model.id, retryRead: reconciliation.kind === 'unread' });
@@ -321,10 +338,11 @@ export const SourceDetailPanel: React.FC<{
       setGuard(null);
       await onMutation(echoed);
     } catch (error) {
-      const refusal = guardedFailure(error);
-      if (refusal && !force) setGuard({ kind: 'remove', model, ...refusal });
+      if (apiFailure(error)?.code === 'source_not_found') await onGone(source.id);
       else {
-        await reconcileRemoval(model);
+        const refusal = guardedFailure(error);
+        if (refusal && !force) setGuard({ kind: 'remove', model, ...refusal });
+        else await reconcileRemoval(model);
       }
     } finally {
       setBusy(false);
@@ -372,7 +390,7 @@ export const SourceDetailPanel: React.FC<{
           <div key={model.id} className="model-hub-source-table-row grid gap-3 border-b border-border last:border-b-0 md:items-center md:gap-y-0">
             <span className="flex min-w-0 items-center gap-2"><span className="model-hub-source-model truncate font-mono text-foreground" title={model.id}>{model.id}</span>{result?.added.includes(model.id) && <span className="model-hub-accent-pill--mint model-hub-source-pill rounded-full border px-2 py-0.5 font-semibold">{t('settings.models.sourceDetail.refetch.added')}</span>}</span>
             <span className="model-hub-source-pill model-hub-source-entry-pill w-fit rounded-full border border-border font-semibold text-muted">{t(`settings.models.sourceDetail.entry.${model.provenance === 'discovered' ? 'auto' : 'manual'}`)}</span>
-            <TierEditor source={source} model={model} onMutating={() => { setResult(null); setRefetchFailed(false); }} onMutation={onMutation} />
+            <TierEditor source={source} model={model} onMutating={() => { setResult(null); setRefetchFailed(false); }} onMutation={onMutation} onGone={onGone} />
             <div className="flex items-center justify-end gap-2">
               {removeFailure?.modelId === model.id && <span className="model-hub-source-tier text-right text-destructive">{t('settings.models.sourceDetail.fail.removeModel')} <button type="button" disabled={busy} onClick={() => void (async () => {
                 if (!removeFailure.retryRead) return remove(model);

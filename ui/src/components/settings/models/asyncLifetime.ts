@@ -28,6 +28,29 @@ export const createLatestAsyncAuthority = <T>(land: (value: T) => void) => {
   };
 };
 
+/** Gives each independent key its own latest-result generation. */
+export const createLatestAsyncAuthorityByKey = <K, T>(
+  land: (key: K, value: T) => void,
+) => {
+  const latestRequest = new Map<K, number>();
+
+  return {
+    run: async (key: K, read: () => Promise<T>): Promise<'landed' | 'stale'> => {
+      const request = (latestRequest.get(key) ?? 0) + 1;
+      latestRequest.set(key, request);
+      try {
+        const value = await read();
+        if (latestRequest.get(key) !== request) return 'stale';
+        land(key, value);
+        return 'landed';
+      } catch (error) {
+        if (latestRequest.get(key) !== request) return 'stale';
+        throw error;
+      }
+    },
+  };
+};
+
 /** Maps a potentially large read set without allowing it to fan out unbounded. */
 export async function mapWithConcurrency<T, R>(
   items: readonly T[],

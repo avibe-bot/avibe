@@ -89,6 +89,7 @@ export const SourceOrderDrawer: React.FC<{
 }> = ({ open, agent, sources, onClose, onSaved, orderWrite }) => {
   const { t } = useTranslation();
   const [viewAgent, setViewAgent] = React.useState(agent);
+  const [viewSources, setViewSources] = React.useState(sources);
   const [readState, setReadState] = React.useState<ReadState>('loading');
   const [order, setOrder] = React.useState<string[]>([]);
   const [dirty, setDirty] = React.useState(false);
@@ -102,9 +103,10 @@ export const SourceOrderDrawer: React.FC<{
   const readAttempt = React.useRef(0);
   const saving = orderWrite.pending;
 
-  const applyRead = React.useCallback((next: AgentSupply) => {
+  const applyRead = React.useCallback((next: AgentSupply, nextSources: Source[]) => {
     const nextOrder = next.sources?.order ?? [];
     setViewAgent(next);
+    setViewSources(nextSources);
     saved.current = nextOrder;
     setOrder(nextOrder);
     setDirty(false);
@@ -118,8 +120,11 @@ export const SourceOrderDrawer: React.FC<{
     const seq = ++readAttempt.current;
     setReadState('loading');
     try {
-      const next = await modelsApi.getAgentSources(agent.backend);
-      if (readAttempt.current === seq) applyRead(next);
+      const [next, nextSources] = await Promise.all([
+        modelsApi.getAgentSources(agent.backend),
+        modelsApi.listSources(),
+      ]);
+      if (readAttempt.current === seq) applyRead(next, nextSources);
     } catch {
       if (readAttempt.current === seq) setReadState('error');
     }
@@ -130,7 +135,7 @@ export const SourceOrderDrawer: React.FC<{
     else readAttempt.current += 1;
   }, [open, read]);
 
-  const available = eligibleSources(sources, viewAgent);
+  const available = eligibleSources(viewSources, viewAgent);
   const byId = React.useMemo(() => new Map(available.map((source) => [source.id, source])), [available]);
   const ordered = order.map((id) => byId.get(id)).filter((source): source is Source => Boolean(source));
   const heldOut = available.filter((source) => !order.includes(source.id));

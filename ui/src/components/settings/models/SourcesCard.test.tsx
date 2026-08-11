@@ -5,8 +5,22 @@ import { I18nextProvider } from 'react-i18next';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import i18n from '@/i18n';
-import { readyRegion } from './regionRead';
+import { failRegionRead, readyRegion } from './regionRead';
 import { SourcesCard } from './SourcesCard';
+import type { Source } from './types';
+
+const retained: Source = {
+  id: 'src_retained',
+  last_discovered_at: null,
+  kind: 'api_key',
+  vendor: 'anthropic',
+  display_name: 'Retained source',
+  protocol: 'anthropic',
+  supply_channel: 'hub',
+  billing: 'metered',
+  state: { status: 'active', retry_at: null, detail_key: null },
+  models: [],
+};
 
 afterEach(cleanup);
 
@@ -42,5 +56,19 @@ describe('SourcesCard footer', () => {
 
     await userEvent.click(screen.getByRole('button', { name: /Add API key|添加 API Key/i }));
     expect(onAddApiKey).toHaveBeenCalledOnce();
+  });
+
+  it('keeps the last good source rows visible with an F2 retry after a later read fails', async () => {
+    const onRetry = vi.fn();
+    render(
+      <I18nextProvider i18n={i18n}>
+        <SourcesCard read={failRegionRead(readyRegion([retained]))} onRetry={onRetry} onOpenSource={vi.fn()} onAddApiKey={vi.fn()} />
+      </I18nextProvider>,
+    );
+
+    expect(screen.getByText('Retained source')).toBeTruthy();
+    expect(screen.getByText(/Could not read the source list|没有读到来源列表/i)).toBeTruthy();
+    await userEvent.click(screen.getByRole('button', { name: /^Retry$|^重试$/i }));
+    expect(onRetry).toHaveBeenCalledOnce();
   });
 });
