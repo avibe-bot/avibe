@@ -3070,25 +3070,8 @@ class SessionTurnManager:
                     request.content is None
                     and expected_turn_id
                     and current_id != expected_turn_id
+                    and not expected_exclusive_run_id
                 ):
-                    if expected_exclusive_run_id:
-                        cancellation = apply_live_agent_run_cancellation_in_connection(
-                            conn,
-                            expected_exclusive_run_id,
-                            session_id=request.session_id,
-                            detach=True,
-                        )
-                        return DeliveryResult(
-                            None,
-                            None,
-                            (
-                                "run_detached"
-                                if cancellation == "run_detached"
-                                else "settled"
-                            ),
-                            current_id,
-                            cancellation,
-                        )
                     return DeliveryResult(
                         None,
                         None,
@@ -3525,6 +3508,15 @@ class SessionTurnManager:
                     ),
                     "control_receipt_json": json.dumps(
                         {"reason": reason or "stop_error"}, sort_keys=True
+                    ),
+                    **(
+                        {
+                            "control_mode": None,
+                            "control_successor_delivery_id": None,
+                            "control_successor_turn_id": None,
+                        }
+                        if definitive and not terminal_proven
+                        else {}
                     ),
                 },
             )

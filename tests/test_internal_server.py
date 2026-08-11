@@ -5045,6 +5045,219 @@ def test_run_cancel_guard_preserves_an_in_flight_replacement(monkeypatch, tmp_pa
     assert replacement is not None and replacement["state"] == "interrupt_waiting"
 
 
+def test_run_cancel_keeps_a_sole_starting_owner_attached(monkeypatch, tmp_path):
+    """A claimed initial Run owns its starting Turn until native start resolves."""
+
+    from core.scheduled_tasks import TaskExecutionStore
+    from storage.background import attach_agent_run_delivery_in_connection
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session = _create_test_session(
+        tmp_path,
+        native_id="proj_starting_run_cancel",
+    )
+    session_id = session["id"]
+    request_store = TaskExecutionStore()
+    owner_run = request_store.enqueue_agent_run(
+        session_id=session_id,
+        message="starting owner",
+        agent_name="worker",
+    )
+    assert request_store.claim(owner_run.id) is not None
+
+    with engine.begin() as conn:
+        delivery = _reserve_submission(
+            conn,
+            scope_id=session["scope_id"],
+            session_id=session_id,
+            text="starting owner",
+        )
+        turn_id = message_deliveries.new_turn_id()
+        message_deliveries.insert_turn(
+            conn,
+            turn_id=turn_id,
+            session_id=session_id,
+            initial_delivery_id=str(delivery["id"]),
+            state="starting",
+            backend="claude",
+        )
+        claimed = message_deliveries.open_start_attempt(
+            conn,
+            str(delivery["id"]),
+            expected_version=int(delivery["version"]),
+            turn_id=turn_id,
+            attempt_id=message_deliveries.new_attempt_id(),
+        )
+        assert claimed is not None and claimed["state"] == "claimed"
+        assert attach_agent_run_delivery_in_connection(
+            conn,
+            owner_run.id,
+            session_id=session_id,
+            delivery_id=str(claimed["id"]),
+        )
+
+    controller = _build_controller_double()
+    app = internal_server.create_app(controller)
+    transport = httpx.ASGITransport(app=app)
+
+    async def _go():
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            return await client.post(
+                f"/internal/cancel/{session_id}",
+                params={"run_id": owner_run.id},
+            )
+
+    response = asyncio.run(_go())
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": True,
+        "session_id": session_id,
+        "status": "cancel_requested",
+    }
+    controller.command_handler.handle_stop.assert_not_awaited()
+    saved = request_store.get_run(owner_run.id)
+    assert saved is not None
+    assert saved["status"] == "running"
+    assert saved["cancel_requested"] is True
+    with engine.connect() as conn:
+        turn = message_deliveries.get_turn(conn, turn_id)
+        delivery = message_deliveries.get_delivery(conn, str(delivery["id"]))
+    assert turn is not None
+    assert turn["state"] == "starting"
+    assert turn["control_state"] == "pending"
+    assert turn["control_mode"] == "stop_only"
+    assert delivery is not None and delivery["state"] == "claimed"
+
+
+def test_run_cancel_does_not_own_a_shared_starting_batch(monkeypatch, tmp_path):
+    """Other claimed inputs keep a starting batch shared."""
+
+    from core.scheduled_tasks import TaskExecutionStore
+    from storage.background import attach_agent_run_delivery_in_connection
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session = _create_test_session(
+        tmp_path,
+        native_id="proj_shared_starting_run_cancel",
+    )
+    request_store = TaskExecutionStore()
+    owner_run = request_store.enqueue_agent_run(
+        session_id=session["id"],
+        message="one batch participant",
+        agent_name="worker",
+    )
+    assert request_store.claim(owner_run.id) is not None
+
+    with engine.begin() as conn:
+        deliveries = [
+            _reserve_submission(
+                conn,
+                scope_id=session["scope_id"],
+                session_id=session["id"],
+                text=text,
+            )
+            for text in ("one batch participant", "another batch participant")
+        ]
+        turn_id = message_deliveries.new_turn_id()
+        claimed = message_deliveries.claim_start_batch(
+            conn,
+            turn_id=turn_id,
+            session_id=session["id"],
+            backend="claude",
+            deliveries=deliveries,
+            dispatch_text="one batch participant\n\nanother batch participant",
+        )
+        assert attach_agent_run_delivery_in_connection(
+            conn,
+            owner_run.id,
+            session_id=session["id"],
+            delivery_id=str(claimed["deliveries"][0]["id"]),
+        )
+        assert message_deliveries.agent_run_exclusively_owns_turn(
+            conn,
+            run_id=owner_run.id,
+            turn_id=turn_id,
+        ) == (False, "turn_has_other_participants")
+
+
+def test_run_cancel_rechecks_a_changed_current_turn(monkeypatch, tmp_path):
+    """A stale observed Turn cannot detach a Run that owns the current Turn."""
+
+    from core.scheduled_tasks import TaskExecutionStore
+    from storage.background import attach_agent_run_delivery_in_connection
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session, turn_id = _create_active_test_turn(
+        tmp_path,
+        native_id="proj_changed_turn_run_cancel",
+    )
+    session_id = session["id"]
+    request_store = TaskExecutionStore()
+    owner_run = request_store.enqueue_agent_run(
+        session_id=session_id,
+        message="recovered current owner",
+        agent_name="worker",
+    )
+    assert request_store.claim(owner_run.id) is not None
+    with engine.begin() as conn:
+        initial = message_deliveries.delivery_for_turn(conn, turn_id)
+        assert initial is not None
+        assert attach_agent_run_delivery_in_connection(
+            conn,
+            owner_run.id,
+            session_id=session_id,
+            delivery_id=str(initial["id"]),
+        )
+
+    controller = _build_controller_double()
+    internal_server.create_app(controller)
+    context = MessageContext(
+        user_id="workbench",
+        channel_id=session_id,
+        platform="avibe",
+        platform_specific={"workbench_session_id": session_id},
+    )
+
+    async def _go():
+        holder = asyncio.create_task(asyncio.Event().wait())
+        controller.session_turns.in_flight[session_id] = session_turns.Turn(
+            task=holder,
+            context=context,
+            logical_turn_id=turn_id,
+        )
+        try:
+            return await controller.session_turns.deliver(
+                session_turns.DeliveryRequest(
+                    session_id=session_id,
+                    priority="p0",
+                    content=None,
+                    expected_turn_id="trn_recovered_predecessor",
+                    expected_exclusive_agent_run_id=owner_run.id,
+                ),
+                context=context,
+            )
+        finally:
+            holder.cancel()
+            await asyncio.gather(holder, return_exceptions=True)
+
+    result = asyncio.run(_go())
+
+    assert result.state == "waiting_terminal"
+    controller.command_handler.handle_stop.assert_awaited_once()
+    saved = request_store.get_run(owner_run.id)
+    assert saved is not None
+    assert saved["status"] == "running"
+    assert saved["cancel_requested"] is True
+    with engine.connect() as conn:
+        turn = message_deliveries.get_turn(conn, turn_id)
+    assert turn is not None
+    assert turn["control_state"] == "waiting_terminal"
+
+
 def test_run_cancel_without_an_active_turn_settles_atomically(monkeypatch, tmp_path):
     """An orphaned live projection is canceled without inventing a Session Stop."""
 
