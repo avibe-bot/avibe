@@ -3157,7 +3157,13 @@ class TaskExecutionStore:
             return True
         return False
 
-    def mark_run_canceled(self, run_id: str, *, completed_at: Optional[str] = None) -> bool:
+    def mark_run_canceled(
+        self,
+        run_id: str,
+        *,
+        completed_at: Optional[str] = None,
+        skip_callback: bool = False,
+    ) -> bool:
         now = completed_at or _utc_now_iso()
         existing = self.get_run(run_id)
         if existing is None:
@@ -3171,6 +3177,8 @@ class TaskExecutionStore:
                 updated_at=now,
                 cancel_requested=True,
                 cancel_requested_at=cancel_requested_at,
+                callback_status="skipped" if skip_callback else None,
+                callback_completed_at=now if skip_callback else None,
             )
             return True
 
@@ -3194,6 +3202,9 @@ class TaskExecutionStore:
                     "updated_at": now,
                 }
             )
+            if skip_callback:
+                payload["callback_status"] = "skipped"
+                payload["callback_completed_at"] = now
             completed_path = self._request_path(run_id, state="completed")
             with tempfile.NamedTemporaryFile(
                 mode="w",

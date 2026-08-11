@@ -81,6 +81,34 @@ def test_cancel_dispatch_round_trip(tmp_path, socket_path):
     assert result["body"] == {"ok": True, "session_id": "ses_abc", "status": "cancel_requested"}
 
 
+def test_cancel_dispatch_forwards_exact_run_guard(socket_path):
+    app = FastAPI()
+    captured: dict = {}
+
+    @app.post("/internal/cancel/{session_id}")
+    async def _cancel(session_id: str, run_id: str | None = None):
+        captured.update(session_id=session_id, run_id=run_id)
+        return {"ok": True, "session_id": session_id, "status": "run_detached"}
+
+    async def _go():
+        fake_transport = httpx.ASGITransport(app=app)
+        with patch(
+            "vibe.internal_client.httpx.AsyncHTTPTransport",
+            return_value=fake_transport,
+        ):
+            return await internal_client.cancel_dispatch(
+                "ses_shared",
+                run_id="run_exact",
+                socket_path=socket_path,
+            )
+
+    result = asyncio.run(_go())
+
+    assert captured == {"session_id": "ses_shared", "run_id": "run_exact"}
+    assert result["status_code"] == 200
+    assert result["body"]["status"] == "run_detached"
+
+
 def test_cancel_dispatch_missing_socket_raises_unavailable(tmp_path):
     sock = tmp_path / "missing.sock"
     with pytest.raises(internal_client.InternalServerUnavailable):

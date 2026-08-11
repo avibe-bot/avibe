@@ -1768,6 +1768,72 @@ def accepted_agent_run_ids_for_turn(conn: Connection, turn_id: str) -> list[str]
     return run_ids
 
 
+def agent_run_exclusively_owns_turn(
+    conn: Connection,
+    *,
+    run_id: str,
+    turn_id: str,
+) -> tuple[bool, str]:
+    """Whether stopping ``run_id`` may safely interrupt the exact Turn.
+
+    An accepted steer is a participant in an existing Turn, not its owner.  A
+    Run-level cancel must therefore stay local unless the Run's Delivery is the
+    Turn's initial and only accepted input.  The caller holds SQLite's writer
+    reservation while asking, so a concurrent steer cannot slip between this
+    proof and the P0 control-slot write.
+    """
+
+    normalized_run_id = str(run_id or "").strip()
+    normalized_turn_id = str(turn_id or "").strip()
+    if not normalized_run_id or not normalized_turn_id:
+        return False, "missing_run_turn_identity"
+    turn = get_turn(conn, normalized_turn_id)
+    if turn is None or turn.get("state") not in TURN_OWNER_STATES:
+        return False, "turn_not_active"
+    row = conn.execute(
+        select(
+            agent_runs.c.status,
+            agent_runs.c.delivery_id,
+            message_deliveries.c.session_id,
+            message_deliveries.c.state,
+            message_deliveries.c.turn_id,
+        )
+        .select_from(
+            agent_runs.join(
+                message_deliveries,
+                message_deliveries.c.id == agent_runs.c.delivery_id,
+            )
+        )
+        .where(agent_runs.c.id == normalized_run_id)
+        .limit(1)
+    ).mappings().first()
+    if row is None:
+        return False, "run_delivery_missing"
+    if str(row["session_id"] or "") != str(turn["session_id"] or ""):
+        return False, "run_session_mismatch"
+    if str(row["turn_id"] or "") != normalized_turn_id or row["state"] != "accepted":
+        return False, "run_not_accepted_by_turn"
+    if str(row["delivery_id"] or "") != str(turn["initial_delivery_id"] or ""):
+        return False, "run_is_steered_participant"
+    if str(row["status"] or "").strip().lower() not in {
+        "running",
+        "processing",
+    }:
+        return False, "run_not_running"
+    accepted_delivery_ids = [
+        str(value)
+        for value in conn.execute(
+            select(message_deliveries.c.id)
+            .where(message_deliveries.c.turn_id == normalized_turn_id)
+            .where(message_deliveries.c.state == "accepted")
+            .order_by(message_deliveries.c.turn_position, message_deliveries.c.id)
+        ).scalars()
+    ]
+    if accepted_delivery_ids != [str(row["delivery_id"])]:
+        return False, "turn_has_other_accepted_inputs"
+    return True, "exclusive_run_owner"
+
+
 def retire_queued_with_run(
     conn: Connection,
     session_id: str,

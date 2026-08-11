@@ -705,7 +705,12 @@ def notify_vault_request_created_sync(
     return {"status_code": resp.status_code, "body": resp.json() if resp.content else {}}
 
 
-async def cancel_dispatch(session_id: str, *, socket_path: Optional[Path] = None) -> dict[str, Any]:
+async def cancel_dispatch(
+    session_id: str,
+    *,
+    run_id: str | None = None,
+    socket_path: Optional[Path] = None,
+) -> dict[str, Any]:
     """Ask the controller to cancel a running ``dispatch_turn`` for
     ``session_id``.
 
@@ -726,7 +731,10 @@ async def cancel_dispatch(session_id: str, *, socket_path: Optional[Path] = None
             # room so a slow-but-successful stop isn't read-timed-out into a 500.
             timeout=httpx.Timeout(30.0, connect=1.0),
         ) as client:
-            resp = await client.post(f"/internal/cancel/{session_id}")
+            resp = await client.post(
+                f"/internal/cancel/{session_id}",
+                params={"run_id": run_id} if run_id else None,
+            )
     except _SOCKET_ERRORS as exc:
         raise InternalServerUnavailable(str(exc)) from exc
     return {"status_code": resp.status_code, "body": resp.json() if resp.content else {}}

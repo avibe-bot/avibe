@@ -474,6 +474,9 @@ class DeliveryRequest:
     delivery_id: str | None = None
     expected_delivery_id: str | None = None
     expected_turn_id: str | None = None
+    # Run-level cancellation may interrupt a backend only when this exact Run is
+    # still the Turn's sole initial input.  Checked under the P0 writer lock.
+    expected_exclusive_agent_run_id: str | None = None
     scope_id: str | None = None
     platform: str = "avibe"
     source: str = "user"
@@ -3047,6 +3050,23 @@ class SessionTurnManager:
                         current_id,
                         "target_turn_changed",
                     )
+                expected_exclusive_run_id = str(
+                    request.expected_exclusive_agent_run_id or ""
+                ).strip()
+                if request.content is None and expected_exclusive_run_id:
+                    exclusive, reason = delivery_store.agent_run_exclusively_owns_turn(
+                        conn,
+                        run_id=expected_exclusive_run_id,
+                        turn_id=str(current_id or ""),
+                    )
+                    if not exclusive:
+                        return DeliveryResult(
+                            None,
+                            None,
+                            "run_detached",
+                            current_id,
+                            reason,
+                        )
                 control_in_progress = current.get("control_state") in {
                     "pending",
                     "interrupting",
@@ -7339,14 +7359,33 @@ class SessionTurnManager:
             )
         return bool(terminal.get("changed"))
 
-    async def cancel(self, session_id: str) -> dict:
-        """Persist one empty-P0 control request against the exact active Turn."""
+    async def cancel(
+        self,
+        session_id: str,
+        *,
+        agent_run_id: str | None = None,
+    ) -> dict:
+        """Cancel a Session Turn or detach one exact Run from a shared Turn."""
         turn = self.in_flight.get(session_id)
         if not self._durable_schema_available():
+            if agent_run_id:
+                return {
+                    "ok": True,
+                    "session_id": session_id,
+                    "status": "run_detached",
+                    "reason": "durable_turn_ownership_unavailable",
+                }
             return await self._cancel_legacy_turn(session_id, turn)
         with self._sqlite_engine().connect() as conn:
             owner = delivery_store.active_turn(conn, session_id)
         if owner is None:
+            if agent_run_id:
+                return {
+                    "ok": True,
+                    "session_id": session_id,
+                    "status": "run_detached",
+                    "reason": "not_in_flight",
+                }
             return {
                 "ok": False,
                 "code": "not_in_flight",
@@ -7361,12 +7400,29 @@ class SessionTurnManager:
                 priority="p0",
                 content=None,
                 expected_turn_id=str(owner["id"]),
+                expected_exclusive_agent_run_id=(
+                    str(agent_run_id).strip() if agent_run_id else None
+                ),
             ),
             context=turn.context if turn is not None else None,
         )
+        if result.state == "run_detached":
+            return {
+                "ok": True,
+                "session_id": session_id,
+                "status": "run_detached",
+                "reason": result.reason or "shared_turn",
+            }
         if result.state in {"waiting_terminal", "interrupt_waiting"}:
             return {"ok": True, "session_id": session_id, "status": "cancel_requested"}
         if result.state == "settled":
+            if agent_run_id:
+                return {
+                    "ok": True,
+                    "session_id": session_id,
+                    "status": "run_detached",
+                    "reason": result.reason or "already_terminal",
+                }
             return {
                 "ok": True,
                 "session_id": session_id,

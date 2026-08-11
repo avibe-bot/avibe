@@ -2495,7 +2495,7 @@ def test_runs_cancel_running_agent_run_stops_live_turn_and_marks_canceled(
         result = cli.cmd_runs_cancel(_parse_runs_cancel([request.id]))
 
     assert result == 0
-    cancel_dispatch.assert_awaited_once_with("ses_live_cancel")
+    cancel_dispatch.assert_awaited_once_with("ses_live_cancel", run_id=request.id)
     saved = request_store.get_run(request.id)
     assert saved is not None
     assert saved["status"] == "canceled"
@@ -2510,6 +2510,52 @@ def test_runs_cancel_running_agent_run_stops_live_turn_and_marks_canceled(
     assert payload["cancel_result"]["live_cancel_confirmed"] is True
     assert payload["cancel_result"]["run_terminalized"] is True
     assert payload["run"]["status"] == "canceled"
+
+
+def test_runs_cancel_shared_turn_detaches_only_the_requested_run(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = cli.TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_id="ses_shared_turn",
+        message="one shared participant",
+        agent_name="worker",
+        callback_session_id="ses_callback",
+    )
+    assert request_store.claim(request.id) is not None
+    cancel_dispatch = AsyncMock(
+        return_value={
+            "status_code": 200,
+            "body": {
+                "ok": True,
+                "session_id": "ses_shared_turn",
+                "status": "run_detached",
+                "reason": "turn_has_other_accepted_inputs",
+            },
+        }
+    )
+
+    with (
+        patch("vibe.cli._task_request_store", return_value=request_store),
+        patch("vibe.internal_client.cancel_dispatch", cancel_dispatch),
+    ):
+        result = cli.cmd_runs_cancel(_parse_runs_cancel([request.id]))
+
+    assert result == 0
+    cancel_dispatch.assert_awaited_once_with("ses_shared_turn", run_id=request.id)
+    saved = request_store.get_run(request.id)
+    assert saved is not None
+    assert saved["status"] == "canceled"
+    assert saved["callback_status"] == "skipped"
+    assert saved["callback_completed_at"] is not None
+    assert request_store.list_pending_callbacks() == []
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["cancel_code"] == "run_canceled_without_live_stop"
+    assert payload["cancel_result"]["live_cancel_confirmed"] is False
+    assert payload["cancel_result"]["run_terminalized"] is True
 
 
 def test_runs_cancel_running_agent_run_reports_recorded_only_when_controller_unavailable(
@@ -2536,7 +2582,7 @@ def test_runs_cancel_running_agent_run_reports_recorded_only_when_controller_una
         result = cli.cmd_runs_cancel(_parse_runs_cancel([request.id]))
 
     assert result == 0
-    cancel_dispatch.assert_awaited_once_with("ses_controller_down")
+    cancel_dispatch.assert_awaited_once_with("ses_controller_down", run_id=request.id)
     saved = request_store.get_run(request.id)
     assert saved is not None
     assert saved["status"] == "running"
@@ -2576,7 +2622,7 @@ def test_runs_cancel_running_agent_run_reports_recorded_only_when_backend_refuse
         result = cli.cmd_runs_cancel(_parse_runs_cancel([request.id]))
 
     assert result == 0
-    cancel_dispatch.assert_awaited_once_with("ses_stop_failed")
+    cancel_dispatch.assert_awaited_once_with("ses_stop_failed", run_id=request.id)
     saved = request_store.get_run(request.id)
     assert saved is not None
     assert saved["status"] == "running"
@@ -2614,7 +2660,7 @@ def test_runs_cancel_running_agent_run_reports_recorded_only_when_no_live_turn(
         result = cli.cmd_runs_cancel(_parse_runs_cancel([request.id]))
 
     assert result == 0
-    cancel_dispatch.assert_awaited_once_with("ses_no_live_turn")
+    cancel_dispatch.assert_awaited_once_with("ses_no_live_turn", run_id=request.id)
     saved = request_store.get_run(request.id)
     assert saved is not None
     assert saved["status"] == "running"
@@ -2652,7 +2698,7 @@ def test_runs_cancel_running_agent_run_does_not_overwrite_already_finished_turn(
         result = cli.cmd_runs_cancel(_parse_runs_cancel([request.id]))
 
     assert result == 0
-    cancel_dispatch.assert_awaited_once_with("ses_already_finished")
+    cancel_dispatch.assert_awaited_once_with("ses_already_finished", run_id=request.id)
     saved = request_store.get_run(request.id)
     assert saved is not None
     assert saved["status"] == "running"

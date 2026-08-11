@@ -6235,18 +6235,19 @@ def _live_cancel_was_confirmed(status_code: int | None, body: object) -> bool:
     return str(body.get("status") or "").strip() in {"cancel_requested", "stale_released"}
 
 
-async def _request_live_run_cancel(session_id: str) -> dict:
+async def _request_live_run_cancel(session_id: str, run_id: str) -> dict:
     from vibe import internal_client
 
-    return await internal_client.cancel_dispatch(session_id)
+    return await internal_client.cancel_dispatch(session_id, run_id=run_id)
 
 
 def _cancel_live_agent_run(store: TaskExecutionStore, run: dict) -> dict:
     session_id = _run_session_id(run)
+    run_id = str(run.get("id") or "").strip()
     from vibe import internal_client
 
     try:
-        controller_result = asyncio.run(_request_live_run_cancel(session_id))
+        controller_result = asyncio.run(_request_live_run_cancel(session_id, run_id))
     except internal_client.InternalServerUnavailable as exc:
         return _recorded_only_cancel_result(reason_code="internal_unavailable", detail=str(exc))
     except Exception as exc:  # noqa: BLE001
@@ -6258,6 +6259,22 @@ def _cancel_live_agent_run(store: TaskExecutionStore, run: dict) -> dict:
     except (TypeError, ValueError):
         normalized_status_code = None
     body = controller_result.get("body") or {}
+    if (
+        normalized_status_code is not None
+        and 200 <= normalized_status_code < 300
+        and isinstance(body, dict)
+        and str(body.get("status") or "").strip() == "run_detached"
+    ):
+        run_terminalized = store.mark_run_canceled(run_id, skip_callback=True)
+        return {
+            "code": "run_canceled_without_live_stop",
+            "live_cancel_attempted": False,
+            "live_cancel_confirmed": False,
+            "run_terminalized": run_terminalized,
+            "controller_status_code": normalized_status_code,
+            "controller_response": body,
+            "message": "Run was canceled without stopping the shared Session turn.",
+        }
     if not _live_cancel_was_confirmed(normalized_status_code, body):
         return _recorded_only_cancel_result(
             reason_code=_live_cancel_failure_code(normalized_status_code, body),
@@ -6267,7 +6284,7 @@ def _cancel_live_agent_run(store: TaskExecutionStore, run: dict) -> dict:
             },
         )
 
-    run_terminalized = store.mark_run_canceled(str(run.get("id") or ""))
+    run_terminalized = store.mark_run_canceled(run_id)
     return {
         "code": "live_cancel_confirmed",
         "live_cancel_attempted": True,

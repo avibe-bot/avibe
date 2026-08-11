@@ -4662,6 +4662,117 @@ def test_scheduled_gate_cancel_stops_scheduled_run(monkeypatch, tmp_path):
     assert session_id not in app.state.in_flight_dispatches, "slot released after the scheduled run was stopped"
 
 
+def test_hfr_476_run_cancel_does_not_stop_a_shared_turn(monkeypatch, tmp_path):
+    """A Run accepted as one Turn participant cannot issue Session-wide Stop."""
+
+    from core.scheduled_tasks import TaskExecutionStore
+    from storage.background import attach_agent_run_delivery_in_connection
+    from storage.models import message_deliveries as delivery_rows
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session, turn_id = _create_active_test_turn(
+        tmp_path,
+        native_id="proj_shared_run_cancel",
+    )
+    session_id = session["id"]
+    request_store = TaskExecutionStore()
+    run = request_store.enqueue_agent_run(
+        session_id=session_id,
+        message="steered participant",
+        agent_name="worker",
+        callback_session_id="ses_callback",
+    )
+    assert request_store.claim(run.id) is not None
+
+    with engine.begin() as conn:
+        initial = message_deliveries.delivery_for_turn(conn, turn_id)
+        assert initial is not None
+        steer_id = message_deliveries.new_delivery_id()
+        values = dict(initial)
+        values.update(
+            id=steer_id,
+            priority="p1",
+            dedupe_key=None,
+            turn_role="steer",
+            turn_position=1,
+            submitted_at="2026-08-11T11:00:00Z",
+            updated_at="2026-08-11T11:00:00Z",
+            version=1,
+        )
+        conn.execute(delivery_rows.insert().values(**values))
+        assert attach_agent_run_delivery_in_connection(
+            conn,
+            run.id,
+            session_id=session_id,
+            delivery_id=steer_id,
+        )
+
+    controller = _build_controller_double()
+    app = internal_server.create_app(controller)
+    transport = httpx.ASGITransport(app=app)
+
+    async def _go():
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            return await client.post(
+                f"/internal/cancel/{session_id}",
+                params={"run_id": run.id},
+            )
+
+    response = asyncio.run(_go())
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": True,
+        "session_id": session_id,
+        "status": "run_detached",
+        "reason": "run_is_steered_participant",
+    }
+    controller.command_handler.handle_stop.assert_not_awaited()
+    with engine.connect() as conn:
+        turn = message_deliveries.get_turn(conn, turn_id)
+    assert turn is not None
+    assert turn["state"] == "active"
+    assert turn["control_state"] is None
+
+
+def test_run_cancel_guard_allows_the_sole_initial_run_owner(monkeypatch, tmp_path):
+    """A Run remains allowed to stop the backend when it owns the whole Turn."""
+
+    from core.scheduled_tasks import TaskExecutionStore
+    from storage.background import attach_agent_run_delivery_in_connection
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session, turn_id = _create_active_test_turn(
+        tmp_path,
+        native_id="proj_exclusive_run_cancel",
+    )
+    request_store = TaskExecutionStore()
+    run = request_store.enqueue_agent_run(
+        session_id=session["id"],
+        message="sole initial participant",
+        agent_name="worker",
+    )
+    assert request_store.claim(run.id) is not None
+
+    with engine.begin() as conn:
+        initial = message_deliveries.delivery_for_turn(conn, turn_id)
+        assert initial is not None
+        assert attach_agent_run_delivery_in_connection(
+            conn,
+            run.id,
+            session_id=session["id"],
+            delivery_id=initial["id"],
+        )
+        assert message_deliveries.agent_run_exclusively_owns_turn(
+            conn,
+            run_id=run.id,
+            turn_id=turn_id,
+        ) == (True, "exclusive_run_owner")
+
+
 # --- #84: scheduled provenance survives the merge-queue --------------------------
 
 
