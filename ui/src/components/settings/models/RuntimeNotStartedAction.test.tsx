@@ -4,6 +4,7 @@ import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { describe, expect, it, vi } from 'vitest';
 
 import zh from '../../../i18n/zh.json';
+import { failRegionRead, readyRegion, unreadRegion } from './regionRead';
 import { pollRuntimeStatus, startRuntimeWithStatusRefresh } from './runtimeLifecycle';
 import { RuntimePill } from './SettingsModelsPage';
 import type { RuntimeDependency } from './types';
@@ -39,12 +40,13 @@ const runtime = (
 
 const renderPill = (
   health: RuntimeDependency['status']['health'],
-  options: { withAsset?: boolean; hostPlatform?: string; statusUnread?: boolean; starting?: boolean } = {},
+  options: { withAsset?: boolean; hostPlatform?: string; unread?: boolean; starting?: boolean } = {},
 ): string => renderToStaticMarkup(
   <I18nextProvider i18n={i18n}>
     <RuntimePill
-      runtime={runtime(health, options.withAsset, options.hostPlatform)}
-      statusUnread={options.statusUnread ?? false}
+      read={options.unread
+        ? unreadRegion()
+        : readyRegion(runtime(health, options.withAsset, options.hostPlatform))}
       starting={options.starting ?? false}
       onStart={vi.fn()}
       onInstall={vi.fn()}
@@ -76,8 +78,21 @@ describe('Model Hub runtime pill', () => {
   it('renders the pending and unread projections without claiming healthy state', () => {
     expect(renderPill('ok', { starting: true })).toContain(zh.settings.models.shell.starting);
     expect(renderPill('ok', { starting: true })).not.toContain('<button');
-    expect(renderPill('ok', { statusUnread: true })).toContain(zh.settings.models.shell.stopped);
-    expect(renderPill('ok', { statusUnread: true })).not.toContain(zh.settings.models.shell.running);
+    expect(renderPill('ok', { unread: true })).toContain(zh.settings.models.shell.unread);
+    expect(renderPill('ok', { unread: true })).not.toContain(zh.settings.models.shell.stopped);
+    expect(renderPill('ok', { unread: true })).not.toContain('<button');
+    const stale = renderToStaticMarkup(
+      <I18nextProvider i18n={i18n}>
+        <RuntimePill
+          read={failRegionRead(readyRegion(runtime('ok')))}
+          starting={false}
+          onStart={vi.fn()}
+          onInstall={vi.fn()}
+        />
+      </I18nextProvider>,
+    );
+    expect(stale).toContain(zh.settings.models.shell.running);
+    expect(stale).not.toContain('<button');
   });
 
   it('refreshes authoritative health after an explicit start fails', async () => {
@@ -142,6 +157,29 @@ describe('Model Hub runtime pill', () => {
       resolveStatus?.(runtime('ok'));
       await Promise.resolve();
       expect(onRuntime).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps polling after an unread status until an authoritative result arrives', async () => {
+    vi.useFakeTimers();
+    try {
+      const api = {
+        getRuntimeStatus: vi.fn()
+          .mockRejectedValueOnce(new TypeError('unread'))
+          .mockResolvedValueOnce(runtime('ok')),
+      };
+      const onRuntime = vi.fn();
+      const stop = pollRuntimeStatus(api, onRuntime, 100);
+
+      await vi.advanceTimersByTimeAsync(100);
+      expect(api.getRuntimeStatus).toHaveBeenCalledOnce();
+      expect(onRuntime).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(100);
+      expect(api.getRuntimeStatus).toHaveBeenCalledTimes(2);
+      expect(onRuntime).toHaveBeenCalledWith(expect.objectContaining({ status: expect.objectContaining({ health: 'ok' }) }));
+      stop();
     } finally {
       vi.useRealTimers();
     }

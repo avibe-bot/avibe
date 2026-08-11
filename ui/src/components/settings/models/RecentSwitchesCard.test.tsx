@@ -8,8 +8,9 @@ import { describe, expect, it } from 'vitest';
 
 import en from '../../../i18n/en.json';
 import zh from '../../../i18n/zh.json';
-import { eventAccent } from './eventFeed';
+import { emptyFeed, eventAccent } from './eventFeed';
 import { RecentSwitchesCard } from './RecentSwitchesCard';
+import { readyRegion, unreadRegion } from './regionRead';
 import type { ResolutionEvent, Source } from './types';
 
 const instance = (lng: 'en' | 'zh') => {
@@ -58,7 +59,7 @@ const render = (
 ) =>
   renderToStaticMarkup(
     <I18nextProvider i18n={instance(lng)}>
-      <RecentSwitchesCard events={events} sources={sources} hasMore={hasMore} />
+      <RecentSwitchesCard events={readyRegion({ ...emptyFeed, events, exhausted: !hasMore })} sources={readyRegion(sources)} hasMore={hasMore} />
     </I18nextProvider>,
   );
 
@@ -85,7 +86,7 @@ describe('RecentSwitchesCard (AC-18)', () => {
   it('does not call a source deleted while the inventory read is unavailable', () => {
     const html = renderToStaticMarkup(
       <I18nextProvider i18n={instance('en')}>
-        <RecentSwitchesCard events={[event()]} sources={[]} sourcesRead={false} />
+        <RecentSwitchesCard events={readyRegion({ ...emptyFeed, events: [event()] })} sources={unreadRegion()} />
       </I18nextProvider>,
     );
     expect(html).not.toContain(en.settings.models.recent.deletedSource);
@@ -94,7 +95,7 @@ describe('RecentSwitchesCard (AC-18)', () => {
   it('renders an event-read failure with a retry instead of an authoritative empty feed', () => {
     const html = renderToStaticMarkup(
       <I18nextProvider i18n={instance('en')}>
-        <RecentSwitchesCard events={[]} sources={[]} readState="error" />
+        <RecentSwitchesCard events={unreadRegion()} sources={readyRegion([])} />
       </I18nextProvider>,
     );
     expect(html).toContain('Couldn&#x27;t refresh, please retry');

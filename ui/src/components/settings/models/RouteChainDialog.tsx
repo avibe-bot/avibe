@@ -25,7 +25,7 @@ export const RouteChainDialog: React.FC<{
   const { t } = useTranslation();
   if (!selection) return null;
   const { agent, modelId, read } = selection;
-  const chain = read?.kind === 'ready' ? read.chain : null;
+  const chain = read?.kind === 'ready' ? read.data : null;
   const backend = t(`settings.models.backends.${agent.backend}`, { defaultValue: agent.backend }) as string;
   return (
     <DialogPrimitive.Root open onOpenChange={(open) => !open && onClose()}>

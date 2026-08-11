@@ -31,7 +31,7 @@ afterEach(cleanup);
 
 describe('RouteChainDialog', () => {
   it('renders the contracted chain order and current hop', () => {
-    render(<I18nextProvider i18n={i18n}><RouteChainDialog selection={{ agent, modelId: 'opus-5', read: { kind: 'ready', chain } }} sources={sources} onClose={vi.fn()} /></I18nextProvider>);
+    render(<I18nextProvider i18n={i18n}><RouteChainDialog selection={{ agent, modelId: 'opus-5', read: { kind: 'ready', data: chain } }} sources={sources} onClose={vi.fn()} /></I18nextProvider>);
 
     expect(screen.getByText('opus-5 · Route chain')).toBeTruthy();
     const current = document.querySelector('[data-current="true"]');
@@ -40,7 +40,7 @@ describe('RouteChainDialog', () => {
   });
 
   it('draws every write control disabled while G-32 remains unresolved', () => {
-    render(<I18nextProvider i18n={i18n}><RouteChainDialog selection={{ agent, modelId: 'opus-5', read: { kind: 'ready', chain } }} sources={sources} onClose={vi.fn()} /></I18nextProvider>);
+    render(<I18nextProvider i18n={i18n}><RouteChainDialog selection={{ agent, modelId: 'opus-5', read: { kind: 'ready', data: chain } }} sources={sources} onClose={vi.fn()} /></I18nextProvider>);
 
     for (const name of ['Remove hop', 'Add a hop', 'Reorder by source order', 'Save']) {
       const controls = screen.getAllByRole('button', { name });

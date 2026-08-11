@@ -206,27 +206,27 @@ describe('the page reads the feed through this owner', () => {
     // to move the feed, not a probe-only twin bolted onto one call site.
     expect(page).toMatch(/refreshAuthority\.run\([\s\S]*?readSurfaceLanding\(\)/);
     expect(page).toMatch(/readSurfaceLanding[\s\S]*?modelsApi\.listEvents\(EVENT_PAGE\)/);
-    expect(page).toMatch(/eventsHaveSnapshotRef\.current[\s\S]*?feedAfterHeadRead\(previous, events\)/);
-    expect(page).toMatch(/feedAfterTailRead\(previous, events, EVENT_PAGE, null\)/);
+    expect(page).toMatch(/setEventsRead[\s\S]*?feedAfterHeadRead\(previousFeed, landing\.events\.data\)/);
+    expect(page).toMatch(/feedAfterTailRead\(emptyFeed, landing\.events\.data, EVENT_PAGE, null\)/);
   });
 
   it('lets the ancillary feed read fail without losing the rows', () => {
     // A slow or broken /events must not veto the supply refresh: joined bare into
     // the same Promise.all, one failing leg left repaired sources and the ● 当前
     // the user just moved on screen as they were before the mutation.
-    expect(page).toMatch(/Promise\.allSettled\([\s\S]*?modelsApi\.listEvents\(EVENT_PAGE\)/);
+    expect(page).toMatch(/Promise\.all\([\s\S]*?readRegion\(\(\) => modelsApi\.listEvents\(EVENT_PAGE\)\)/);
     expect(page).toMatch(/createLatestAsyncAuthority<SurfaceLanding>/);
     // Region reads also settle independently: a failed source list cannot erase
     // a successful backend projection, and vice versa.
-    expect(page).toMatch(/sources: sources\.status === 'fulfilled' \? sources\.value : null/);
-    expect(page).toMatch(/agents: agentRows/);
+    expect(page).toMatch(/sources: RegionRead<Source\[\]>/);
+    expect(page).toMatch(/supply: RegionRead<AgentSupply\[\]>/);
   });
 
   it('moves rows and end-of-feed together, through the owners', () => {
     // One state, so no transition can move the rows and leave the flag behind.
-    expect(page).toMatch(/const \[feed, setFeed\] = React\.useState<EventFeed>\(emptyFeed\)/);
-    expect(page).toMatch(/setFeed\(\(previous\) => feedAfterTailRead\(previous, events, EVENT_PAGE, null\)\)/);
-    expect(page).toMatch(/setFeed\(\(previous\) => feedAfterTailRead\(previous, events, EVENT_PAGE, cursor\)\)/);
+    expect(page).toMatch(/const \[eventsRead, setEventsRead\] = React\.useState<RegionRead<EventFeed>>/);
+    expect(page).toMatch(/feedAfterTailRead\(emptyFeed, landing\.events\.data, EVENT_PAGE, null\)/);
+    expect(page).toMatch(/setEventsRead\(\(previous\) => readyRegion\(feedAfterTailRead\(regionData\(previous\) \?\? emptyFeed, events, EVENT_PAGE, cursor\)\)\)/);
     // Nothing left that could set one half on its own.
     expect(page).not.toMatch(/setEventsExhausted|setEvents\(/);
     // And no hand-rolled dedupe or page-length test outside the owners.
@@ -235,8 +235,8 @@ describe('the page reads the feed through this owner', () => {
   });
 
   it('reads 加载更早 off the same feed it renders', () => {
-    expect(page).toMatch(/hasMore=\{!feed\.exhausted\}/);
-    expect(page).toMatch(/events=\{feed\.events\}/);
+    expect(page).toMatch(/events=\{eventsRead\}/);
+    expect(page).toMatch(/sources=\{sourcesRead\}/);
     // Through the owner, and the SAME cursor is handed back to the merge — the
     // request and the answer have to be about one row for the check to mean
     // anything, which a second hand-rolled read of the tail would not guarantee.

@@ -16,7 +16,8 @@ import { useTranslation } from 'react-i18next';
 
 import { Badge } from '@/components/ui/badge';
 import { Dot } from './chips';
-import { eventAccent } from './eventFeed';
+import { emptyFeed, eventAccent, type EventFeed } from './eventFeed';
+import { regionData, type RegionRead } from './regionRead';
 import type { ResolutionEvent, Source } from './types';
 
 const COLLAPSED = 3;
@@ -41,25 +42,28 @@ function useEventTime() {
 }
 
 export const RecentSwitchesCard: React.FC<{
-  events: ResolutionEvent[];
+  events: RegionRead<EventFeed>;
   /** Live inventory — read only to tell a still-present source from a deleted one. */
-  sources: Source[];
+  sources: RegionRead<Source[]>;
   /** The feed has older pages than the ones held here (`/events` pages by cursor). */
   hasMore?: boolean;
   loadingMore?: boolean;
   /** Fetch the next older page. Required for 查看全部 to mean 全部. */
   onLoadMore?: () => void | Promise<void>;
-  readState?: 'loading' | 'ready' | 'error';
-  sourcesRead?: boolean;
   onRetry?: () => void | Promise<void>;
-}> = ({ events, sources, hasMore = false, loadingMore = false, onLoadMore, readState = 'ready', sourcesRead = true, onRetry }) => {
+}> = ({ events: eventsRead, sources: sourcesRead, hasMore, loadingMore = false, onLoadMore, onRetry }) => {
   const { t, i18n } = useTranslation();
   const [expanded, setExpanded] = React.useState(false);
   const formatTime = useEventTime();
   const zh = i18n.language.startsWith('zh');
+  const feed = regionData(eventsRead) ?? emptyFeed;
+  const events = feed.events;
+  const sources = regionData(sourcesRead) ?? [];
+  const sourceInventoryCurrent = sourcesRead.kind === 'ready';
+  const hasOlder = hasMore ?? !feed.exhausted;
   const liveIds = React.useMemo(() => new Set(sources.map((s) => s.id)), [sources]);
   const namesDeletedSource = (e: ResolutionEvent) =>
-    sourcesRead && [e.from_source, e.to_source].some((id) => typeof id === 'string' && id !== '' && !liveIds.has(id));
+    sourceInventoryCurrent && [e.from_source, e.to_source].some((id) => typeof id === 'string' && id !== '' && !liveIds.has(id));
 
   const visibleEvents = events;
   const shown = expanded ? visibleEvents : visibleEvents.slice(0, COLLAPSED);
@@ -71,18 +75,18 @@ export const RecentSwitchesCard: React.FC<{
   // advances after every useful page and keeps a
   // failed/overlapping response from becoming an automatic retry loop.
   React.useEffect(() => {
-    if (readState !== 'ready' || visibleEvents.length >= COLLAPSED || !hasMore || loadingMore || !onLoadMore) return;
+    if (eventsRead.kind !== 'ready' || visibleEvents.length >= COLLAPSED || !hasOlder || loadingMore || !onLoadMore) return;
     if (backfilledTailRef.current === rawTailId) return;
     backfilledTailRef.current = rawTailId;
     void onLoadMore();
-  }, [hasMore, loadingMore, onLoadMore, rawTailId, readState, visibleEvents.length]);
+  }, [eventsRead.kind, hasOlder, loadingMore, onLoadMore, rawTailId, visibleEvents.length]);
 
   // 查看全部 opens the fetched rows AND asks for the next page, so the label is
   // true the moment it is pressed rather than only for feeds under one page.
-  const canExpand = readState === 'ready' && (visibleEvents.length > COLLAPSED || hasMore);
+  const canExpand = eventsRead.kind === 'ready' && (visibleEvents.length > COLLAPSED || hasOlder);
   const expand = () => {
     setExpanded(true);
-    if (hasMore && !loadingMore) onLoadMore?.();
+    if (hasOlder && !loadingMore) onLoadMore?.();
   };
 
   return (
@@ -99,16 +103,16 @@ export const RecentSwitchesCard: React.FC<{
           </button>
         )}
       </div>
-      {readState === 'error' && (
+      {(eventsRead.kind === 'error' || eventsRead.kind === 'unread') && (
         <div className="flex items-center justify-between gap-3 border-b border-border px-4 py-3 text-[12px] text-destructive sm:px-5">
           <span>{t('settings.models.toast.refreshFailed')}</span>
           <button type="button" onClick={() => void onRetry?.()} className="model-hub-action-mint shrink-0 font-semibold">{t('settings.models.upstream.retry')}</button>
         </div>
       )}
-      {readState === 'error' && shown.length === 0 ? null : shown.length === 0 ? (
+      {(eventsRead.kind === 'error' || eventsRead.kind === 'unread') && shown.length === 0 ? null : shown.length === 0 ? (
         <div className="flex flex-col items-center gap-2 px-4 py-8 text-center text-[13px] text-muted sm:px-5">
-          <span>{readState === 'loading' || hasMore ? t('settings.models.recent.loadingMore') : t('settings.models.recent.empty')}</span>
-          {readState === 'ready' && hasMore && !loadingMore && (
+          <span>{eventsRead.kind === 'loading' || hasOlder ? t('settings.models.recent.loadingMore') : t('settings.models.recent.empty')}</span>
+          {eventsRead.kind === 'ready' && hasOlder && !loadingMore && (
             <button
               type="button"
               onClick={() => void onLoadMore?.()}
@@ -147,7 +151,7 @@ export const RecentSwitchesCard: React.FC<{
               </span>
             </div>
           ))}
-          {expanded && hasMore && (
+          {expanded && hasOlder && (
             <button
               type="button"
               onClick={() => void onLoadMore?.()}

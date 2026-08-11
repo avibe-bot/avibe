@@ -158,4 +158,32 @@ describe('SettingsModelsPage surface branches', () => {
     await waitFor(() => expect(events).toHaveBeenCalledTimes(2));
     expect(await screen.findByText(/^No switches yet$|^暂无切换记录$/i)).toBeTruthy();
   });
+
+  it('keeps an unread runtime status distinct from an authoritative stopped state', async () => {
+    const hubAgent: AgentSupply = {
+      ...directAgent('claude'),
+      mode: 'hub',
+      sources: { order: [], eligibility: [] },
+      routes: {},
+      model_supply: [],
+      builtin_models: [],
+      named_agents: [],
+    };
+    vi.spyOn(modelsApi, 'listSources').mockResolvedValue([retainedSource]);
+    vi.spyOn(modelsApi, 'listAgents').mockResolvedValue([hubAgent]);
+    vi.spyOn(modelsApi, 'getRuntimeStatus').mockRejectedValue(new TypeError('status unread'));
+    vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
+
+    render(
+      <ToastProvider>
+        <I18nextProvider i18n={i18n}>
+          <SettingsModelsPage />
+        </I18nextProvider>
+      </ToastProvider>,
+    );
+
+    expect(await screen.findByText(/^Gateway status unavailable$|^网关状态未读到$/i)).toBeTruthy();
+    expect(screen.queryByText(/^Gateway stopped|^网关已停止/i)).toBeNull();
+    expect(screen.queryByRole('button', { name: /Gateway stopped|网关已停止/i })).toBeNull();
+  });
 });

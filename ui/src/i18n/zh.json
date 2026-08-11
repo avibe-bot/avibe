@@ -642,6 +642,7 @@
         "running": "网关运行中",
         "stopped": "网关已停止 · 点击启动",
         "degraded": "网关降级运行",
+        "unread": "网关状态未读到",
         "notStarted": "网关未启动 · 点击启动",
         "notInstalled": "网关组件未安装 · 点击安装",
         "allDirect_one": "{{count}} 个后端都在直连",

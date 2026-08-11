@@ -5,6 +5,7 @@ import { I18nextProvider } from 'react-i18next';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import i18n from '@/i18n';
+import { readyRegion } from './regionRead';
 import { SourcesCard } from './SourcesCard';
 
 afterEach(cleanup);
@@ -14,7 +15,7 @@ describe('SourcesCard footer', () => {
     const user = userEvent.setup();
     render(
       <I18nextProvider i18n={i18n}>
-        <SourcesCard sources={[]} readState="ready" onRetry={vi.fn()} onOpenSource={vi.fn()} onAddApiKey={vi.fn()} />
+        <SourcesCard read={readyRegion([])} onRetry={vi.fn()} onOpenSource={vi.fn()} onAddApiKey={vi.fn()} />
       </I18nextProvider>,
     );
 
@@ -31,7 +32,7 @@ describe('SourcesCard footer', () => {
     const onAddApiKey = vi.fn();
     render(
       <I18nextProvider i18n={i18n}>
-        <SourcesCard sources={[]} readState="ready" onRetry={vi.fn()} onOpenSource={vi.fn()} onAddApiKey={onAddApiKey} />
+        <SourcesCard read={readyRegion([])} onRetry={vi.fn()} onOpenSource={vi.fn()} onAddApiKey={onAddApiKey} />
       </I18nextProvider>,
     );
 

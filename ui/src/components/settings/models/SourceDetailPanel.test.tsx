@@ -28,20 +28,24 @@ const source: Source = {
 const renderPanel = (adoptedBy: React.ComponentProps<typeof SourceDetailPanel>['adoptedBy'] = undefined) => render(
   <ToastProvider>
     <I18nextProvider i18n={i18n}>
-      <SourceDetailPanel source={source} adoptedBy={adoptedBy} onSourceEcho={vi.fn()} onChanged={vi.fn()} />
+      <SourceDetailPanel source={source} adoptedBy={adoptedBy} onMutation={vi.fn().mockResolvedValue(undefined)} />
     </I18nextProvider>
   </ToastProvider>,
 );
 
-const EchoPanel: React.FC<{ onChanged?: () => Promise<void> | void }> = ({ onChanged = vi.fn() }) => {
+const EchoPanel: React.FC<{ reconcile?: () => Promise<void> | void }> = ({ reconcile = vi.fn() }) => {
   const [current, setCurrent] = React.useState(source);
-  return <SourceDetailPanel source={current} onSourceEcho={setCurrent} onChanged={onChanged} />;
+  const onMutation = async (echoed?: Source) => {
+    if (echoed) setCurrent(echoed);
+    await reconcile();
+  };
+  return <SourceDetailPanel source={current} onMutation={onMutation} />;
 };
 
-const renderEchoPanel = (onChanged = vi.fn()) => render(
+const renderEchoPanel = (reconcile = vi.fn()) => render(
   <ToastProvider>
     <I18nextProvider i18n={i18n}>
-      <EchoPanel onChanged={onChanged} />
+      <EchoPanel reconcile={reconcile} />
     </I18nextProvider>
   </ToastProvider>,
 );
@@ -66,7 +70,7 @@ describe('SourceDetailPanel', () => {
   });
 
   it('omits native refetch because that channel has no stored discovery credential', () => {
-    render(<I18nextProvider i18n={i18n}><SourceDetailPanel source={{ ...source, kind: 'subscription', supply_channel: 'native_cli' }} onSourceEcho={vi.fn()} onChanged={vi.fn()} /></I18nextProvider>);
+    render(<I18nextProvider i18n={i18n}><SourceDetailPanel source={{ ...source, kind: 'subscription', supply_channel: 'native_cli' }} onMutation={vi.fn().mockResolvedValue(undefined)} /></I18nextProvider>);
     expect(screen.queryByRole('button', { name: /^Refetch$|^重新拉取$/i })).toBeNull();
   });
 
@@ -102,14 +106,14 @@ describe('SourceDetailPanel', () => {
       models: [...source.models, { id: 'model-b', display_name: null, provenance: 'discovered' as const, reasoning_efforts: [] }],
     };
     const refresh = vi.spyOn(modelsApi, 'refreshSource').mockResolvedValueOnce({ source: echoed, discovered: echoed.models.length });
-    const onChanged = vi.fn().mockResolvedValue(undefined);
-    renderEchoPanel(onChanged);
+    const reconcile = vi.fn().mockResolvedValue(undefined);
+    renderEchoPanel(reconcile);
 
     await userEvent.click(screen.getByRole('button', { name: /^Refetch$|^重新拉取$/i }));
 
     expect(await screen.findByText('model-b')).toBeTruthy();
     expect(refresh).toHaveBeenCalledOnce();
-    expect(onChanged).toHaveBeenCalledOnce();
+    expect(reconcile).toHaveBeenCalledOnce();
   });
 
   it('applies the manual-create Source echo without waiting for a collection read', async () => {
@@ -172,16 +176,31 @@ describe('SourceDetailPanel', () => {
   it('re-reads after an unconfirmed manual deletion before offering another DELETE', async () => {
     const remove = vi.spyOn(modelsApi, 'deleteCustomModel').mockRejectedValueOnce(new TypeError('response lost'));
     const list = vi.spyOn(modelsApi, 'listSources').mockResolvedValueOnce([{ ...source, models: [] }]);
-    const onChanged = vi.fn();
-    render(<I18nextProvider i18n={i18n}><SourceDetailPanel source={source} onSourceEcho={vi.fn()} onChanged={onChanged} /></I18nextProvider>);
+    const onMutation = vi.fn().mockResolvedValue(undefined);
+    render(<I18nextProvider i18n={i18n}><SourceDetailPanel source={source} onMutation={onMutation} /></I18nextProvider>);
 
     await userEvent.click(screen.getByRole('button', { name: /Remove model-a|移除 model-a/i }));
     await userEvent.click(screen.getByRole('menuitem', { name: /^Remove$|^移除$/i }));
 
-    await waitFor(() => expect(onChanged).toHaveBeenCalledOnce());
+    await waitFor(() => expect(onMutation).toHaveBeenCalledWith(expect.objectContaining({ models: [] })));
     expect(list).toHaveBeenCalledOnce();
     expect(remove).toHaveBeenCalledOnce();
     expect(screen.queryByRole('button', { name: /^Try again$|^重试$/i })).toBeNull();
+  });
+
+  it('applies the reconciled deletion Source before the follow-up refresh settles', async () => {
+    vi.spyOn(modelsApi, 'deleteCustomModel').mockRejectedValueOnce(new TypeError('response lost'));
+    vi.spyOn(modelsApi, 'listSources').mockResolvedValueOnce([{ ...source, models: [] }]);
+    let finishRefresh: (() => void) | undefined;
+    const refresh = vi.fn(() => new Promise<void>((resolve) => { finishRefresh = resolve; }));
+    renderEchoPanel(refresh);
+
+    await userEvent.click(screen.getByRole('button', { name: /Remove model-a|移除 model-a/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Remove$|^移除$/i }));
+
+    await waitFor(() => expect(screen.queryByText('model-a')).toBeNull());
+    expect(refresh).toHaveBeenCalledOnce();
+    finishRefresh?.();
   });
 
   it('offers a second DELETE only after the authoritative list proves the model remains', async () => {

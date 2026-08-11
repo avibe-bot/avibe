@@ -19,11 +19,11 @@ const relationKind = (
   let isTakeover = false;
   for (const modelId of Object.keys(agent.routes ?? {})) {
     const read = chains[modelChainKey(agent.backend, modelId)];
-    if (read?.kind !== 'ready' || !read.chain.current) continue;
-    const current = read.chain.current;
+    if (read?.kind !== 'ready' || !read.data.current) continue;
+    const current = read.data.current;
     if (current.source_id !== source.id) continue;
     isCurrent = true;
-    isTakeover ||= isTakeoverChain(read.chain);
+    isTakeover ||= isTakeoverChain(read.data);
   }
   if (isTakeover) return 'takeover';
   if (isCurrent) return source.supply_channel === 'native_cli' ? 'native' : 'gateway';

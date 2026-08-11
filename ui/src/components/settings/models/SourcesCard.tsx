@@ -4,21 +4,22 @@ import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
 import { ModelHubInfoHint } from './ModelHubInfoHint';
+import { regionData, type RegionRead } from './regionRead';
 import { SourceRow } from './SourceRow';
 import type { AdoptedBy, Source } from './types';
 
 export const SourcesCard: React.FC<{
-  sources: Source[];
-  readState: 'loading' | 'ready' | 'error';
+  read: RegionRead<Source[]>;
   onRetry: () => void;
   onOpenSource: (source: Source) => void;
   onAddApiKey: () => void;
   adoptionBySource?: Readonly<Record<string, readonly AdoptedBy[]>>;
-}> = ({ sources, readState, onRetry, onOpenSource, onAddApiKey, adoptionBySource = {} }) => {
+}> = ({ read, onRetry, onOpenSource, onAddApiKey, adoptionBySource = {} }) => {
   const { t } = useTranslation();
+  const sources = regionData(read);
   const groups = [
-    { id: 'native', sources: sources.filter((source) => source.supply_channel === 'native_cli') },
-    { id: 'hub', sources: sources.filter((source) => source.supply_channel === 'hub') },
+    { id: 'native', sources: (sources ?? []).filter((source) => source.supply_channel === 'native_cli') },
+    { id: 'hub', sources: (sources ?? []).filter((source) => source.supply_channel === 'hub') },
   ].filter((group) => group.sources.length > 0);
   return (
     <section className="relative z-20 flex max-h-full min-h-[420px] flex-col self-start overflow-hidden rounded-[14px] border border-border bg-surface">
@@ -31,12 +32,12 @@ export const SourcesCard: React.FC<{
             className="model-hub-upstream-info"
           />
         </span>
-        {readState === 'ready' && <span className="model-hub-upstream-count rounded-full border px-2 py-[3px] text-[10.5px] font-semibold">{t('settings.models.upstream.count', { count: sources.length })}</span>}
+        {sources !== undefined && <span className="model-hub-upstream-count rounded-full border px-2 py-[3px] text-[10.5px] font-semibold">{t('settings.models.upstream.count', { count: sources.length })}</span>}
       </div>
       <div className="min-h-0 flex-1 space-y-2.5 overflow-y-auto p-3">
-        {readState === 'loading'
+        {read.kind === 'loading' && sources === undefined
           ? <div className="flex h-full min-h-36 items-center justify-center"><LoaderCircle className="size-4 animate-spin text-muted" /></div>
-          : readState === 'error'
+          : read.kind === 'unread'
             ? <div className="flex h-full min-h-36 flex-col items-center justify-center gap-3 px-4 text-center"><p className="text-[12px] text-muted">{t('settings.models.upstream.unread')}</p><Button variant="outline" size="xs" onClick={onRetry}>{t('settings.models.upstream.retry')}</Button></div>
             : groups.length > 0
               ? groups.map((group) => <div key={group.id} className="space-y-2"><h3 className="model-hub-upstream-group-label flex h-[18px] items-center uppercase">{t(`settings.models.upstream.group.${group.id}`)}</h3>{group.sources.map((source) => <SourceRow key={source.id} source={source} adoptedBy={adoptionBySource[source.id]} onOpen={onOpenSource} />)}</div>)

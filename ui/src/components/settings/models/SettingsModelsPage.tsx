@@ -23,7 +23,20 @@ import './modelHubSurface.css';
 import { agentsWithEcho, createLatestAsyncAuthority, createPendingWrites, mapWithConcurrency, sourcesWithEcho } from './asyncLifetime';
 import { emptyFeed, feedAfterHeadRead, feedAfterTailRead, feedTailCursor, type EventFeed } from './eventFeed';
 import { modelsApi, type SourceCreated } from './modelsApi';
+import { convergeMutation, createIntentAuthority } from './mutationConvergence';
 import { modelChainKey, modelChainRequests, type ModelChainIndex } from './modelRows';
+import {
+  beginRegionRead,
+  failRegionRead,
+  loadingRegion,
+  readRegion,
+  readyRegion,
+  regionData,
+  regionFailed,
+  settleRegionRead,
+  unreadRegion,
+  type RegionRead,
+} from './regionRead';
 import { pollRuntimeStatus, runtimeHasInstallAsset, startRuntimeWithStatusRefresh } from './runtimeLifecycle';
 import { backendVisual } from './vendorMeta';
 import type { AdoptedBy, AgentBackend, AgentSupply, ResolutionEvent, RuntimeDependency, Source } from './types';
@@ -38,53 +51,70 @@ const readChains = async (agents: AgentSupply[]): Promise<ModelChainIndex> => Ob
     async ({ backend, modelId }) => {
       const key = modelChainKey(backend, modelId);
       try {
-        return [key, { kind: 'ready' as const, chain: await modelsApi.getAgentChain(backend, modelId) }] as const;
+        return [key, readyRegion(await modelsApi.getAgentChain(backend, modelId))] as const;
       } catch {
-        return [key, { kind: 'error' as const }] as const;
+        return [key, unreadRegion()] as const;
       }
     },
   ),
 );
 
+const settleChainIndex = (
+  previous: ModelChainIndex,
+  incoming: ModelChainIndex,
+): ModelChainIndex => Object.fromEntries(
+  Object.entries(incoming).map(([key, read]) => [
+    key,
+    settleRegionRead(previous[key] ?? loadingRegion(), read),
+  ]),
+);
+
 type SurfaceLanding = {
-  sources: Source[] | null;
-  agents: AgentSupply[] | null;
-  runtime: RuntimeDependency | null;
-  chains: ModelChainIndex | null;
-  events: ResolutionEvent[] | null;
-  failed: boolean;
+  sources: RegionRead<Source[]>;
+  supply: RegionRead<AgentSupply[]>;
+  runtime: RegionRead<RuntimeDependency>;
+  chains: RegionRead<ModelChainIndex>;
+  events: RegionRead<ResolutionEvent[]>;
 };
 
 const readSurfaceLanding = async (): Promise<SurfaceLanding> => {
-  const [sources, agents, runtime, events] = await Promise.allSettled([
-    modelsApi.listSources(),
-    modelsApi.listAgents(),
-    modelsApi.getRuntimeStatus(),
-    modelsApi.listEvents(EVENT_PAGE),
+  const [sources, supply, runtime, events] = await Promise.all([
+    readRegion(() => modelsApi.listSources()),
+    readRegion(() => modelsApi.listAgents()),
+    readRegion(() => modelsApi.getRuntimeStatus()),
+    readRegion(() => modelsApi.listEvents(EVENT_PAGE)),
   ]);
-  const agentRows = agents.status === 'fulfilled' ? agents.value : null;
+  const agentRows = regionData(supply);
+  const chains = agentRows
+    ? readyRegion(await readChains(agentRows))
+    : unreadRegion<ModelChainIndex>();
   return {
-    sources: sources.status === 'fulfilled' ? sources.value : null,
-    agents: agentRows,
-    runtime: runtime.status === 'fulfilled' ? runtime.value : null,
-    chains: agentRows ? await readChains(agentRows) : null,
-    events: events.status === 'fulfilled' ? events.value : null,
-    failed: sources.status === 'rejected' || agents.status === 'rejected' || runtime.status === 'rejected' || events.status === 'rejected',
+    sources,
+    supply,
+    runtime,
+    chains,
+    events,
   };
 };
 
-type PageReadState = 'loading' | 'ready' | 'error';
+const surfaceLandingFailed = (landing: SurfaceLanding): boolean =>
+  Object.values(landing).some(regionFailed);
 
 export const RuntimePill: React.FC<{
-  runtime: RuntimeDependency | null;
-  statusUnread: boolean;
+  read: RegionRead<RuntimeDependency>;
   starting: boolean;
   onStart: () => void;
   onInstall: () => void;
-}> = ({ runtime, statusUnread, starting, onStart, onInstall }) => {
+}> = ({ read, starting, onStart, onInstall }) => {
   const { t } = useTranslation();
-  const health = statusUnread ? 'down' : runtime?.status.health ?? 'down';
-  const canInstall = health === 'not_installed' && Boolean(runtime && runtimeHasInstallAsset(runtime));
+  const runtime = regionData(read);
+  if (!runtime) {
+    const key = read.kind === 'loading' ? 'starting' : 'unread';
+    return <span className={cn('model-hub-runtime-pill', read.kind !== 'loading' && 'model-hub-runtime-pill--error')}><span className="model-hub-runtime-dot" />{read.kind === 'loading' && <LoaderCircle className="animate-spin" />}{t(`settings.models.shell.${key}`)}</span>;
+  }
+  const health = runtime.status.health;
+  const authoritative = read.kind === 'ready';
+  const canInstall = health === 'not_installed' && runtimeHasInstallAsset(runtime);
   const key = starting
     ? 'starting'
     : health === 'installing'
@@ -100,14 +130,14 @@ export const RuntimePill: React.FC<{
             : canInstall
               ? 'notInstalled'
               : 'unsupported';
-  const action = !starting && health !== 'installing' && (health === 'down' || health === 'not_started')
+  const action = authoritative && !starting && health !== 'installing' && (health === 'down' || health === 'not_started')
     ? onStart
-    : !starting && canInstall
+    : authoritative && !starting && canInstall
       ? onInstall
       : null;
   const className = cn(
     'model-hub-runtime-pill',
-    (health === 'down' || health === 'degraded') && 'model-hub-runtime-pill--error',
+    (health === 'down' || health === 'degraded' || read.kind === 'error') && 'model-hub-runtime-pill--error',
   );
   const content = <><span className="model-hub-runtime-dot" />{(starting || health === 'installing') && <LoaderCircle className="animate-spin" />}{t(`settings.models.shell.${key}`)}</>;
   return action
@@ -207,17 +237,12 @@ const TakeoverPill: React.FC<{ count: number }> = ({ count }) => {
 export const SettingsModelsPage: React.FC = () => {
   const { t } = useTranslation();
   const { showToast } = useToast();
-  const [sources, setSources] = React.useState<Source[]>([]);
-  const [agents, setAgents] = React.useState<AgentSupply[]>([]);
-  const [chains, setChains] = React.useState<ModelChainIndex>({});
-  const [runtime, setRuntime] = React.useState<RuntimeDependency | null>(null);
-  const [feed, setFeed] = React.useState<EventFeed>(emptyFeed);
+  const [sourcesRead, setSourcesRead] = React.useState<RegionRead<Source[]>>(loadingRegion);
+  const [supplyRead, setSupplyRead] = React.useState<RegionRead<AgentSupply[]>>(loadingRegion);
+  const [chainsRead, setChainsRead] = React.useState<RegionRead<ModelChainIndex>>(loadingRegion);
+  const [runtimeRead, setRuntimeRead] = React.useState<RegionRead<RuntimeDependency>>(loadingRegion);
+  const [eventsRead, setEventsRead] = React.useState<RegionRead<EventFeed>>(loadingRegion);
   const [loadingEvents, setLoadingEvents] = React.useState(false);
-  const [loading, setLoading] = React.useState(true);
-  const [sourcesState, setSourcesState] = React.useState<PageReadState>('loading');
-  const [agentsState, setAgentsState] = React.useState<PageReadState>('loading');
-  const [runtimeState, setRuntimeState] = React.useState<PageReadState>('loading');
-  const [eventsState, setEventsState] = React.useState<PageReadState>('loading');
   const [tab, setTab] = React.useState<'sources' | 'usage'>('sources');
   const [startingRuntime, setStartingRuntime] = React.useState(false);
   const [runtimeRecoveryPending, setRuntimeRecoveryPending] = React.useState(false);
@@ -231,17 +256,24 @@ export const SettingsModelsPage: React.FC = () => {
   const [agentWrites, setAgentWrites] = React.useState<ReadonlySet<string>>(() => new Set());
   const [switchFailures, setSwitchFailures] = React.useState<ReadonlySet<string>>(() => new Set());
   const [agentWriteRegistry] = React.useState(() => createPendingWrites(setAgentWrites));
+  const [sourceIntentAuthority] = React.useState(createIntentAuthority);
   const overviewRef = React.useRef<HTMLDivElement>(null);
   const aliveRef = React.useRef(true);
-  const eventsHaveSnapshotRef = React.useRef(false);
   React.useEffect(() => {
     aliveRef.current = true;
     return () => { aliveRef.current = false; };
   }, []);
 
+  const sources = regionData(sourcesRead) ?? [];
+  const agents = regionData(supplyRead) ?? [];
+  const chains = chainsRead.kind === 'ready' ? chainsRead.data : {};
+  const runtime = regionData(runtimeRead) ?? null;
+  const feed = regionData(eventsRead) ?? emptyFeed;
   const runtimeHealth = runtime?.status.health ?? null;
   React.useEffect(() => {
-    const runtimeCanRecover = runtimeRecoveryPending
+    const runtimeCanRecover = runtimeRead.kind === 'unread'
+      || runtimeRead.kind === 'error'
+      || runtimeRecoveryPending
       || runtimeHealth === 'not_started'
       || runtimeHealth === 'not_installed'
       || runtimeHealth === 'installing'
@@ -250,116 +282,107 @@ export const SettingsModelsPage: React.FC = () => {
     if (!runtimeCanRecover || startingRuntime) return undefined;
     return pollRuntimeStatus(modelsApi, (nextRuntime) => {
       if (!aliveRef.current) return;
-      setRuntime(nextRuntime);
-      setRuntimeState('ready');
+      setRuntimeRead(readyRegion(nextRuntime));
       setRuntimeRecoveryPending(false);
     });
-  }, [runtimeHealth, runtimeRecoveryPending, startingRuntime]);
+  }, [runtimeHealth, runtimeRead.kind, runtimeRecoveryPending, startingRuntime]);
 
   const [refreshAuthority] = React.useState(() => createLatestAsyncAuthority<SurfaceLanding>((landing) => {
     if (!aliveRef.current) return;
-    if (landing.sources !== null) {
-      setSources(landing.sources);
-      setSourcesState('ready');
-    } else setSourcesState('error');
-    if (landing.agents !== null) {
-      setAgents(landing.agents);
-      setAgentsState('ready');
-    } else setAgentsState('error');
-    if (landing.runtime !== null) {
-      setRuntime(landing.runtime);
-      setRuntimeState('ready');
-      setRuntimeRecoveryPending(false);
-    } else setRuntimeState('error');
-    if (landing.chains !== null) setChains(landing.chains);
-    if (landing.events !== null) {
-      const events = landing.events;
-      const hadSnapshot = eventsHaveSnapshotRef.current;
-      eventsHaveSnapshotRef.current = true;
-      setFeed((previous) => hadSnapshot
-        ? feedAfterHeadRead(previous, events)
-        : feedAfterTailRead(previous, events, EVENT_PAGE, null));
-      setEventsState('ready');
-    } else setEventsState('error');
+    setSourcesRead((previous) => settleRegionRead(previous, landing.sources));
+    setSupplyRead((previous) => settleRegionRead(previous, landing.supply));
+    setRuntimeRead((previous) => {
+      const next = settleRegionRead(previous, landing.runtime);
+      if (next.kind === 'ready') setRuntimeRecoveryPending(false);
+      return next;
+    });
+    setChainsRead((previous) => {
+      if (landing.chains.kind !== 'ready') return failRegionRead(previous);
+      return readyRegion(settleChainIndex(regionData(previous) ?? {}, landing.chains.data));
+    });
+    setEventsRead((previous) => {
+      if (landing.events.kind !== 'ready') return failRegionRead(previous);
+      const previousFeed = regionData(previous);
+      return readyRegion(previousFeed
+        ? feedAfterHeadRead(previousFeed, landing.events.data)
+        : feedAfterTailRead(emptyFeed, landing.events.data, EVENT_PAGE, null));
+    });
   }));
 
   const refresh = React.useCallback(async () => {
     const outcome: { landing: SurfaceLanding | null } = { landing: null };
-    await refreshAuthority.run(async () => {
+    const result = await refreshAuthority.run(async () => {
       outcome.landing = await readSurfaceLanding();
       return outcome.landing;
     });
-    if (aliveRef.current && outcome.landing?.failed) {
+    if (aliveRef.current && result === 'landed' && outcome.landing && surfaceLandingFailed(outcome.landing)) {
       showToast(t('settings.models.toast.refreshFailed') as string, 'error');
     }
   }, [refreshAuthority, showToast, t]);
   React.useEffect(() => {
-    let active = true;
-    void readSurfaceLanding().then((landing) => {
-      if (!active) return;
-      if (landing.sources !== null) {
-        setSources(landing.sources);
-        setSourcesState('ready');
-      } else {
-        setSourcesState('error');
-      }
-      if (landing.agents !== null) {
-        setAgents(landing.agents);
-        setAgentsState('ready');
-      } else {
-        setAgentsState('error');
-      }
-      if (landing.runtime !== null) {
-        setRuntime(landing.runtime);
-        setRuntimeState('ready');
-      } else {
-        setRuntimeState('error');
-      }
-      if (landing.chains !== null) setChains(landing.chains);
-      if (landing.events !== null) {
-        const events = landing.events;
-        setFeed((previous) => feedAfterTailRead(previous, events, EVENT_PAGE, null));
-        eventsHaveSnapshotRef.current = true;
-        setEventsState('ready');
-      } else setEventsState('error');
-      setLoading(false);
-    });
-    return () => { active = false; };
-  }, []);
+    void refreshAuthority.run(readSurfaceLanding);
+  }, [refreshAuthority]);
 
   const retrySources = React.useCallback(async () => {
-    setSourcesState('loading');
+    setSourcesRead(beginRegionRead);
     await refresh();
   }, [refresh]);
 
-  const retryAgents = React.useCallback(async () => {
-    setAgentsState('loading');
+  const retrySupply = React.useCallback(async () => {
+    setSupplyRead(beginRegionRead);
     await refresh();
   }, [refresh]);
 
   const retryEvents = React.useCallback(async () => {
-    setEventsState('loading');
+    setEventsRead(beginRegionRead);
     await refresh();
   }, [refresh]);
 
   const refreshAgentChains = React.useCallback(async (agent: AgentSupply) => {
     const requests = modelChainRequests([agent]);
-    setChains((previous) => ({
-      ...previous,
-      ...Object.fromEntries(requests.map(({ backend, modelId }) => [modelChainKey(backend, modelId), { kind: 'loading' as const }])),
-    }));
-    const next = await readChains([agent]);
-    if (aliveRef.current) setChains((previous) => ({ ...previous, ...next }));
+    setChainsRead((previous) => {
+      const index = regionData(previous) ?? {};
+      return readyRegion({
+        ...index,
+        ...Object.fromEntries(requests.map(({ backend, modelId }) => {
+          const key = modelChainKey(backend, modelId);
+          return [key, beginRegionRead(index[key] ?? loadingRegion())];
+        })),
+      });
+    });
+    const incoming = await readChains([agent]);
+    if (aliveRef.current) {
+      setChainsRead((previous) => {
+        const index = regionData(previous) ?? {};
+        const next = { ...index };
+        for (const [key, read] of Object.entries(incoming)) {
+          next[key] = settleRegionRead(index[key] ?? loadingRegion(), read);
+        }
+        return readyRegion(next);
+      });
+    }
   }, []);
 
-  const agentSaved = React.useCallback((echoed: AgentSupply) => {
-    setAgents((previous) => agentsWithEcho(previous, echoed));
-    return refresh();
-  }, [refresh]);
-  const sourceEchoed = React.useCallback((echoed: Source) => {
-    setSources((previous) => sourcesWithEcho(previous, echoed));
-    setSourcesState('ready');
+  const applyAgentEcho = React.useCallback((echoed: AgentSupply) => {
+    setSupplyRead((previous) => readyRegion(agentsWithEcho(regionData(previous) ?? [], echoed)));
   }, []);
+  const agentSaved = React.useCallback(async (echoed: AgentSupply) => {
+    await convergeMutation({
+      entity: echoed,
+      applyEntity: applyAgentEcho,
+      reconcile: refresh,
+    });
+  }, [applyAgentEcho, refresh]);
+  const applySourceEcho = React.useCallback((echoed: Source) => {
+    setSourcesRead((previous) => readyRegion(sourcesWithEcho(regionData(previous) ?? [], echoed)));
+  }, []);
+  const sourceMutation = React.useCallback(async (echoed?: Source) => {
+    await convergeMutation({
+      entity: echoed,
+      applyEntity: applySourceEcho,
+      reconcile: refresh,
+    });
+  }, [applySourceEcho, refresh]);
 
   const switchToDirect = (agent: AgentSupply) => {
     setSwitchFailures((previous) => {
@@ -388,7 +411,9 @@ export const SettingsModelsPage: React.FC = () => {
     setLoadingEvents(true);
     try {
       const events = await modelsApi.listEvents(EVENT_PAGE, cursor);
-      if (aliveRef.current) setFeed((previous) => feedAfterTailRead(previous, events, EVENT_PAGE, cursor));
+      if (aliveRef.current) {
+        setEventsRead((previous) => readyRegion(feedAfterTailRead(regionData(previous) ?? emptyFeed, events, EVENT_PAGE, cursor)));
+      }
     } catch {
       if (aliveRef.current) showToast(t('settings.models.toast.refreshFailed') as string, 'error');
     } finally {
@@ -400,17 +425,25 @@ export const SettingsModelsPage: React.FC = () => {
     setStartingRuntime(true);
     try {
       const result = await startRuntimeWithStatusRefresh(modelsApi);
-      setRuntime(result.runtime);
-      setRuntimeState(result.runtime === null ? 'error' : 'ready');
+      setRuntimeRead((previous) => result.runtime === null
+        ? failRegionRead(previous)
+        : readyRegion(result.runtime));
       setRuntimeRecoveryPending(result.runtime === null);
       if (result.failed) showToast(t('settings.models.errors.startFailed') as string, 'error');
     } finally {
       setStartingRuntime(false);
     }
   };
-  const directEmpty = sourcesState === 'ready'
-    && agentsState === 'ready'
+  const landingLoading = sourcesRead.kind === 'loading' && regionData(sourcesRead) === undefined
+    && supplyRead.kind === 'loading' && regionData(supplyRead) === undefined
+    && runtimeRead.kind === 'loading' && regionData(runtimeRead) === undefined
+    && eventsRead.kind === 'loading' && regionData(eventsRead) === undefined;
+  const directEmpty = regionData(sourcesRead) !== undefined
+    && regionData(supplyRead) !== undefined
     && modelsSurfaceKind(agents, sources) === 'direct_empty';
+  const selectSource = React.useCallback((sourceId: string | null) => {
+    sourceIntentAuthority.commit(() => setSelectedSourceId(sourceId));
+  }, [sourceIntentAuthority]);
   const selectedSource = sources.find((source) => source.id === selectedSourceId) ?? null;
   const orderAgent = agents.find((agent) => agent.backend === orderBackend && agent.mode === 'hub') ?? null;
   const routeAgent = agents.find((agent) => agent.backend === routeTarget?.backend) ?? null;
@@ -424,24 +457,35 @@ export const SettingsModelsPage: React.FC = () => {
     supplyRelations.filter(({ kind }) => kind === 'takeover').map(({ backend }) => backend),
   ).size, [supplyRelations]);
   const sourceAdded = async (created: SourceCreated) => {
-    setAdoptionBySource((previous) => ({ ...previous, [created.source.id]: created.adopted_by }));
-    setSources((previous) => [created.source, ...previous.filter((source) => source.id !== created.source.id)]);
-    setSourcesState('ready');
-    setApiKeyOpen(false);
-    await refresh();
-    setSelectedSourceId(created.source.id);
+    await convergeMutation({
+      entity: created,
+      applyEntity: (answer) => {
+        setAdoptionBySource((previous) => ({ ...previous, [answer.source.id]: answer.adopted_by }));
+        setSourcesRead((previous) => readyRegion([
+          answer.source,
+          ...(regionData(previous) ?? []).filter((source) => source.id !== answer.source.id),
+        ]));
+      },
+      intent: {
+        authority: sourceIntentAuthority,
+        apply: () => {
+          setApiKeyOpen(false);
+          setSelectedSourceId(created.source.id);
+        },
+      },
+      reconcile: refresh,
+    });
   };
 
   return (
     <ModelHubShell
-      detailBack={selectedSourceId ? () => setSelectedSourceId(null) : undefined}
-      actions={!loading
+      detailBack={selectedSourceId ? () => selectSource(null) : undefined}
+      actions={!landingLoading
         ? directEmpty
           ? <DirectPill count={agents.length} />
           : <span className="flex items-center gap-2">
               <RuntimePill
-                runtime={runtime}
-                statusUnread={runtimeState === 'error' || runtimeRecoveryPending}
+                read={runtimeRead}
                 starting={startingRuntime}
                 onStart={() => void startRuntime()}
                 onInstall={() => setInstallOpen(true)}
@@ -450,10 +494,10 @@ export const SettingsModelsPage: React.FC = () => {
             </span>
         : undefined}
     >
-      {loading ? <div className="text-[13px] text-muted">{t('common.loading')}</div>
+      {landingLoading ? <div className="text-[13px] text-muted">{t('common.loading')}</div>
         : selectedSourceId
           ? selectedSource
-            ? <SourceDetailPanel source={selectedSource} adoptedBy={adoptionBySource[selectedSource.id]} onSourceEcho={sourceEchoed} onChanged={refresh} />
+            ? <SourceDetailPanel source={selectedSource} adoptedBy={adoptionBySource[selectedSource.id]} onMutation={sourceMutation} />
             : <section className="rounded-xl border border-border bg-surface px-5 py-12 text-center text-[12px] text-muted">{t('settings.models.sourceDetail.gone')}</section>
           : directEmpty ? <DirectHome agents={agents} onSwitch={setAdoptAgent} />
             : <div className="space-y-[22px]">
@@ -461,14 +505,14 @@ export const SettingsModelsPage: React.FC = () => {
                   {tab === 'sources' ? <div className="model-hub-overview">
                     <div className="model-hub-overview-body">
                       <div ref={overviewRef} className="model-hub-overview-grid relative flex flex-col gap-4">
-                        <SourcesCard sources={sources} adoptionBySource={adoptionBySource} readState={sourcesState} onRetry={() => void retrySources()} onOpenSource={(source) => setSelectedSourceId(source.id)} onAddApiKey={() => setApiKeyOpen(true)} />
+                        <SourcesCard read={sourcesRead} adoptionBySource={adoptionBySource} onRetry={() => void retrySources()} onOpenSource={(source) => selectSource(source.id)} onAddApiKey={() => setApiKeyOpen(true)} />
                         <div className="hidden lg:block" aria-hidden="true" />
-                        <GatewayModule agents={agents} sources={sources} chains={chains} runtime={runtime} readState={agentsState} onRetry={() => void retryAgents()} pendingBackends={agentWrites} switchFailures={switchFailures} connectingBackend={adoptAgent?.backend ?? null} onConnectHub={setAdoptAgent} onSwitchDirect={switchToDirect} onOpenOrder={(agent) => setOrderBackend(agent.backend)} onOpenRoute={(agent, modelId) => setRouteTarget({ backend: agent.backend, modelId })} onProbeSettled={(agent) => void refreshAgentChains(agent)} />
+                        <GatewayModule supply={supplyRead} sources={sources} chains={chains} runtime={runtime} onRetry={() => void retrySupply()} pendingBackends={agentWrites} switchFailures={switchFailures} connectingBackend={adoptAgent?.backend ?? null} onConnectHub={setAdoptAgent} onSwitchDirect={switchToDirect} onOpenOrder={(agent) => setOrderBackend(agent.backend)} onOpenRoute={(agent, modelId) => setRouteTarget({ backend: agent.backend, modelId })} onProbeSettled={(agent) => void refreshAgentChains(agent)} />
                         <SupplyGraph containerRef={overviewRef} relations={supplyRelations} />
                       </div>
                       <SupplyLegend relations={supplyRelations} />
                     </div>
-                    <RecentSwitchesCard events={feed.events} sources={sources} readState={eventsState} sourcesRead={sourcesState === 'ready'} onRetry={retryEvents} hasMore={!feed.exhausted} loadingMore={loadingEvents} onLoadMore={loadOlderEvents} />
+                    <RecentSwitchesCard events={eventsRead} sources={sourcesRead} onRetry={retryEvents} loadingMore={loadingEvents} onLoadMore={loadOlderEvents} />
                     <AdvancedRow />
                   </div> : <section className="rounded-xl border border-border bg-surface px-5 py-8"><div className="flex items-start gap-3"><Info className="mt-0.5 size-4 text-muted" /><div><h2 className="text-[14px] font-semibold text-foreground">{t('settings.models.usageTab.title')}</h2><p className="mt-1 text-[12px] text-muted">{t('settings.models.usageTab.detail')}</p></div></div></section>}
                 </div>}
@@ -483,8 +527,7 @@ export const SettingsModelsPage: React.FC = () => {
           onClose={() => setAdoptAgent(null)}
           onAdopted={agentSaved}
           onRuntime={(next) => {
-            setRuntime(next);
-            setRuntimeState(next === null ? 'error' : 'ready');
+            setRuntimeRead((previous) => next === null ? failRegionRead(previous) : readyRegion(next));
           }}
           trackWrite={(work) => agentWriteRegistry.track(adoptAgent.backend, work)}
         />
@@ -494,8 +537,7 @@ export const SettingsModelsPage: React.FC = () => {
           runtime={runtime}
           onClose={() => setInstallOpen(false)}
           onRuntime={(next) => {
-            setRuntime(next);
-            setRuntimeState(next === null ? 'error' : 'ready');
+            setRuntimeRead((previous) => next === null ? failRegionRead(previous) : readyRegion(next));
             setRuntimeRecoveryPending(next === null);
           }}
         />

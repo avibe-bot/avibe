@@ -73,9 +73,8 @@ const TierEditor: React.FC<{
   source: Source;
   model: SuppliedModel;
   onMutating: () => void;
-  onSourceEcho: (source: Source) => void;
-  onChanged: () => Promise<void> | void;
-}> = ({ source, model, onMutating, onSourceEcho, onChanged }) => {
+  onMutation: (source?: Source) => Promise<void>;
+}> = ({ source, model, onMutating, onMutation }) => {
   const { t } = useTranslation();
   const [tiers, setTiers] = React.useState(model.reasoning_efforts ?? []);
   const [draft, setDraft] = React.useState('');
@@ -93,13 +92,12 @@ const TierEditor: React.FC<{
     setSaving(true);
     try {
       const echoed = await modelsApi.updateModelReasoningEfforts(source.id, model.id, next);
-      onSourceEcho(echoed);
-      await onChanged();
+      await onMutation(echoed);
       return true;
     } catch (error) {
       setTiers(previous);
       setFailedNext(next);
-      if (apiFailure(error)?.code === 'source_not_found') await onChanged();
+      if (apiFailure(error)?.code === 'source_not_found') await onMutation();
       return false;
     } finally {
       setSaving(false);
@@ -195,9 +193,8 @@ const DraftTiers: React.FC<{
 export const SourceDetailPanel: React.FC<{
   source: Source;
   adoptedBy?: readonly AdoptedBy[];
-  onSourceEcho: (source: Source) => void;
-  onChanged: () => Promise<void> | void;
-}> = ({ source, adoptedBy, onSourceEcho, onChanged }) => {
+  onMutation: (source?: Source) => Promise<void>;
+}> = ({ source, adoptedBy, onMutation }) => {
   const { t, i18n } = useTranslation();
   const now = useDeadlineClock(source.state.status === 'cooldown' ? source.state.retry_at : null);
   const { Icon, accent } = sourceVisual(source);
@@ -224,16 +221,15 @@ export const SourceDetailPanel: React.FC<{
       const after = new Set(answer.source.models.map((model) => model.id));
       const added = [...after].filter((id) => !before.has(id));
       const removed = [...before].filter((id) => !after.has(id));
-      onSourceEcho(answer.source);
       setResult({ added, removed });
       setGuard(null);
-      await onChanged();
+      await onMutation(answer.source);
     } catch (error) {
       const refusal = guardedFailure(error);
       if (refusal && !force) setGuard({ kind: 'refetch', ...refusal });
       else {
         setRefetchFailed(true);
-        await onChanged();
+        await onMutation();
       }
     } finally {
       setBusy(false);
@@ -241,7 +237,10 @@ export const SourceDetailPanel: React.FC<{
   };
   const reconcileManualCreate = async (modelId: string) => reconcileUnknownWrite(
     () => modelsApi.listSources(),
-    (sources) => sources.find((item) => item.id === source.id)?.models.find((model) => model.id === modelId),
+    (sources) => {
+      const current = sources.find((item) => item.id === source.id);
+      return current?.models.some((model) => model.id === modelId) ? current : undefined;
+    },
   );
   const addManualModel = async () => {
     if (!manualDraft || busy) return;
@@ -254,7 +253,7 @@ export const SourceDetailPanel: React.FC<{
       const reconciliation = await reconcileManualCreate(modelId);
       if (reconciliation.kind === 'committed') {
         setManualDraft(null);
-        await onChanged();
+        await onMutation(reconciliation.value);
       } else {
         setManualDraft((current) => current ? {
           ...current,
@@ -271,18 +270,17 @@ export const SourceDetailPanel: React.FC<{
         display_name: null,
         reasoning_efforts: manualDraft.tiers,
       });
-      onSourceEcho(echoed);
       setManualDraft(null);
       setResult(null);
-      await onChanged();
+      await onMutation(echoed);
     } catch (error) {
       if (apiFailure(error)?.code === 'source_not_found') {
-        await onChanged();
+        await onMutation();
       } else {
         const reconciliation = await reconcileManualCreate(modelId);
         if (reconciliation.kind === 'committed') {
           setManualDraft(null);
-          await onChanged();
+          await onMutation(reconciliation.value);
         } else {
           setManualDraft((current) => current ? {
             ...current,
@@ -300,13 +298,15 @@ export const SourceDetailPanel: React.FC<{
       () => modelsApi.listSources(),
       (sources) => {
         const current = sources.find((item) => item.id === source.id);
-        return !current || !current.models.some((entry) => entry.id === model.id) ? true : undefined;
+        return current && !current.models.some((entry) => entry.id === model.id)
+          ? current
+          : undefined;
       },
     );
     if (reconciliation.kind === 'committed') {
       setGuard(null);
       setRemoveFailure(null);
-      await onChanged();
+      await onMutation(reconciliation.value);
       return;
     }
     setRemoveFailure({ modelId: model.id, retryRead: reconciliation.kind === 'unread' });
@@ -318,9 +318,8 @@ export const SourceDetailPanel: React.FC<{
     setBusy(true);
     try {
       const echoed = await modelsApi.deleteCustomModel(source.id, model.id, force);
-      onSourceEcho(echoed);
       setGuard(null);
-      await onChanged();
+      await onMutation(echoed);
     } catch (error) {
       const refusal = guardedFailure(error);
       if (refusal && !force) setGuard({ kind: 'remove', model, ...refusal });
@@ -373,7 +372,7 @@ export const SourceDetailPanel: React.FC<{
           <div key={model.id} className="model-hub-source-table-row grid gap-3 border-b border-border last:border-b-0 md:items-center md:gap-y-0">
             <span className="flex min-w-0 items-center gap-2"><span className="model-hub-source-model truncate font-mono text-foreground" title={model.id}>{model.id}</span>{result?.added.includes(model.id) && <span className="model-hub-accent-pill--mint model-hub-source-pill rounded-full border px-2 py-0.5 font-semibold">{t('settings.models.sourceDetail.refetch.added')}</span>}</span>
             <span className="model-hub-source-pill model-hub-source-entry-pill w-fit rounded-full border border-border font-semibold text-muted">{t(`settings.models.sourceDetail.entry.${model.provenance === 'discovered' ? 'auto' : 'manual'}`)}</span>
-            <TierEditor source={source} model={model} onMutating={() => { setResult(null); setRefetchFailed(false); }} onSourceEcho={onSourceEcho} onChanged={onChanged} />
+            <TierEditor source={source} model={model} onMutating={() => { setResult(null); setRefetchFailed(false); }} onMutation={onMutation} />
             <div className="flex items-center justify-end gap-2">
               {removeFailure?.modelId === model.id && <span className="model-hub-source-tier text-right text-destructive">{t('settings.models.sourceDetail.fail.removeModel')} <button type="button" disabled={busy} onClick={() => void (async () => {
                 if (!removeFailure.retryRead) return remove(model);

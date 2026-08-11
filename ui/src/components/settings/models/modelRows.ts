@@ -1,11 +1,9 @@
 import { eligibleSources } from './eligibility';
 import { buildIdentifier } from './menus/identifiers';
+import type { RegionRead } from './regionRead';
 import type { AgentBackend, AgentChain, AgentSupply, Source } from './types';
 
-export type ModelChainRead =
-  | { kind: 'loading' }
-  | { kind: 'ready'; chain: AgentChain }
-  | { kind: 'error' };
+export type ModelChainRead = RegionRead<AgentChain>;
 
 export type ModelChainIndex = Record<string, ModelChainRead>;
 

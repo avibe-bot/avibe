@@ -49,27 +49,27 @@ describe('buildSupplyRelations', () => {
   it('derives relation ink from configured routes and the exact current hop', () => {
     const sources = [source('native', 'native_cli'), source('relay', 'hub'), source('unused', 'hub')];
     const key = modelChainKey('claude', 'model-a');
-    expect(buildSupplyRelations([agent], sources, { [key]: { kind: 'ready', chain: chain('native') } })).toEqual([
+    expect(buildSupplyRelations([agent], sources, { [key]: { kind: 'ready', data: chain('native') } })).toEqual([
       { sourceId: 'native', backend: 'claude', kind: 'native' },
       { sourceId: 'relay', backend: 'claude', kind: 'connected_unused' },
       { sourceId: 'unused', backend: 'claude', kind: 'connected_unused' },
     ]);
-    expect(buildSupplyRelations([agent], sources, { [key]: { kind: 'ready', chain: chain('relay', 'cooldown', false) } })[1]).toEqual(
+    expect(buildSupplyRelations([agent], sources, { [key]: { kind: 'ready', data: chain('relay', 'cooldown', false) } })[1]).toEqual(
       { sourceId: 'relay', backend: 'claude', kind: 'takeover' },
     );
-    expect(buildSupplyRelations([agent], sources, { [key]: { kind: 'ready', chain: chain('relay', 'cooldown', false, 'native_cli_unavailable') } })[1]).toEqual(
+    expect(buildSupplyRelations([agent], sources, { [key]: { kind: 'ready', data: chain('relay', 'cooldown', false, 'native_cli_unavailable') } })[1]).toEqual(
       { sourceId: 'relay', backend: 'claude', kind: 'gateway' },
     );
     for (const health of ['needs_action', 'error'] as const) {
-      expect(buildSupplyRelations([agent], sources, { [key]: { kind: 'ready', chain: chain('relay', health, false) } })[1]).toEqual(
+      expect(buildSupplyRelations([agent], sources, { [key]: { kind: 'ready', data: chain('relay', health, false) } })[1]).toEqual(
         { sourceId: 'relay', backend: 'claude', kind: 'gateway' },
       );
     }
-    expect(buildSupplyRelations([agent], sources, { [key]: { kind: 'ready', chain: chain('relay') } })[0]).toEqual(
+    expect(buildSupplyRelations([agent], sources, { [key]: { kind: 'ready', data: chain('relay') } })[0]).toEqual(
       { sourceId: 'native', backend: 'claude', kind: 'connected_unused' },
     );
     const staleCooldown = [source('native', 'native_cli'), source('relay', 'hub', 'cooldown'), source('unused', 'hub')];
-    expect(buildSupplyRelations([agent], staleCooldown, { [key]: { kind: 'ready', chain: chain('relay') } })[1]).toEqual(
+    expect(buildSupplyRelations([agent], staleCooldown, { [key]: { kind: 'ready', data: chain('relay') } })[1]).toEqual(
       { sourceId: 'relay', backend: 'claude', kind: 'gateway' },
     );
   });

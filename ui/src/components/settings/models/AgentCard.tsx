@@ -12,8 +12,8 @@ import { ACCENT_ICON, ACCENT_TILE, backendVisual } from './vendorMeta';
 import type { AgentSupply, Source } from './types';
 
 const sourceName = (sources: Source[], id: string): string => sources.find((source) => source.id === id)?.display_name ?? id;
-const currentLink = (read: ModelChainRead | undefined) => read?.kind === 'ready' ? currentChainLink(read.chain) : null;
-const isTakeoverRead = (read: ModelChainRead | undefined): boolean => read?.kind === 'ready' && isTakeoverChain(read.chain);
+const currentLink = (read: ModelChainRead | undefined) => read?.kind === 'ready' ? currentChainLink(read.data) : null;
+const isTakeoverRead = (read: ModelChainRead | undefined): boolean => read?.kind === 'ready' && isTakeoverChain(read.data);
 
 const ModelRow: React.FC<{
   agent: AgentSupply;

@@ -206,7 +206,8 @@ describe('agentsWithEcho — what speaks for a row when no read does', () => {
   it('is how every Agent write on the page reports itself', () => {
     const page = readFileSync(join(__dirname, 'SettingsModelsPage.tsx'), 'utf8');
 
-    expect(page).toMatch(/setAgents\(\(previous\) => agentsWithEcho\(previous, echoed\)\)/);
+    expect(page).toMatch(/setSupplyRead\(\(previous\) => readyRegion\(agentsWithEcho\(regionData\(previous\) \?\? \[\], echoed\)\)\)/);
+    expect(page).toMatch(/const agentSaved[\s\S]*?convergeMutation\(\{/);
     // The mode PATCH echoes the same row the drawers' writes do.
     expect(page).toMatch(/await agentSaved\(echoed\)/);
 
@@ -246,16 +247,17 @@ describe('sourcesWithEcho — one refresh result inside the shared authority', (
   it('routes Source-detail rereads and full reads through the same latest-result authority', () => {
     const page = readFileSync(join(__dirname, 'SettingsModelsPage.tsx'), 'utf8');
     const detail = readFileSync(join(__dirname, 'SourceDetailPanel.tsx'), 'utf8');
-    const sourceRetry = page.slice(page.indexOf('const retrySources'), page.indexOf('const retryAgents'));
-    const agentRetry = page.slice(page.indexOf('const retryAgents'), page.indexOf('const retryEvents'));
+    const sourceRetry = page.slice(page.indexOf('const retrySources'), page.indexOf('const retrySupply'));
+    const supplyRetry = page.slice(page.indexOf('const retrySupply'), page.indexOf('const retryEvents'));
 
     expect(detail).toMatch(/modelsApi\.refreshSource\(source\.id, force\)/);
-    expect(detail).toMatch(/await onChanged\(\)/);
+    expect(detail).toMatch(/await onMutation\(answer\.source\)/);
+    expect(page).toMatch(/const sourceMutation[\s\S]*?convergeMutation\(\{/);
     expect(page).toMatch(/await refreshAuthority\.run/);
     expect(sourceRetry).toMatch(/await refresh\(\)/);
-    expect(agentRetry).toMatch(/await refresh\(\)/);
+    expect(supplyRetry).toMatch(/await refresh\(\)/);
     expect(sourceRetry).not.toMatch(/modelsApi\.listSources/);
-    expect(agentRetry).not.toMatch(/modelsApi\.listAgents/);
+    expect(supplyRetry).not.toMatch(/modelsApi\.listAgents/);
   });
 
   it('keeps the mutating refresh failure outside stale-read suppression', () => {

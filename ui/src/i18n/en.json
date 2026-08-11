@@ -642,6 +642,7 @@
         "running": "Gateway running",
         "stopped": "Gateway stopped · click to start",
         "degraded": "Gateway running degraded",
+        "unread": "Gateway status unavailable",
         "notStarted": "Gateway not started · click to start",
         "notInstalled": "Gateway component not installed · click to install",
         "allDirect_one": "The only backend is direct",
