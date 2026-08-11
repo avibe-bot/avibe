@@ -1312,7 +1312,11 @@
     "memory_runtime_unpublished": "当前 Avibe 版本尚未发布记忆运行时。",
     "memory_runtime_manifest_missing": "记忆运行时的清单缺失。",
     "memory_runtime_manifest_unavailable": "无法下载记忆运行时的清单。",
-    "memory_runtime_archive_unavailable": "记忆运行时的下载包当前不可用。"
+    "memory_runtime_archive_unavailable": "记忆运行时的下载包当前不可用。",
+    "memory_rebuild_failed": "重建记忆索引失败。可稍后重试；Markdown 记忆内容仍会保留。",
+    "memory_rebuild_root_busy": "另一个进程正在使用记忆根目录。请稍后重试重建。",
+    "memory_operation_in_progress": "记忆操作正在进行中，请等待完成。",
+    "memory_embedding_rebuild_required": "更改 Embedding 端点或模型会重建记忆索引。请确认后继续。"
   },
   "apps": {
     "title": "应用",
@@ -3913,7 +3917,6 @@
       "apiKeyNotSet": "尚未设置密钥。",
       "apiKeyPlaceholder": "sk-…",
       "apiKeyClearHint": "密钥仅可写入——Avibe 不会把已保存的密钥回显给你。",
-      "embeddingLocked": "已有记忆数据时无法更改 Embedding 端点或模型，请先执行「清除全部」。",
       "embeddingStatusPending": "正在读取本地维护状态……确认没有数据后，Embedding 端点将解锁。",
       "maintenanceLoadFailed": "无法加载本地记忆维护状态。",
       "save": "保存设置",
@@ -3935,7 +3938,17 @@
         "发往记忆端点的投递是至少一次——超时或崩溃后偶尔可能出现重复的派生记忆。",
         "每个平台用户拥有独立的记忆范围；不同平台之间不会自动关联身份。"
       ],
-      "clearKeyLabel": "清除已保存的密钥"
+      "clearKeyLabel": "清除已保存的密钥",
+      "rebuildRequiredTitle": "需要重建记忆索引",
+      "rebuildRequiredDescription": "已确认的 Embedding 更改已保存。重建成功前，重启引擎会保持禁用。",
+      "rebuildConfirmTitle": "重建记忆索引？",
+      "rebuildConfirmDescription": "更改 Embedding 端点或模型会重建本地向量索引。Markdown 记忆会保留，但重建可能较久，并可能消耗 Embedding API 配额。",
+      "rebuildConfirmLabel": "保存并重建",
+      "retryRebuild": "重试重建",
+      "retryingRebuild": "正在重建…",
+      "rebuildCompleted": "记忆索引重建完成。",
+      "rebuildFailed": "记忆索引重建失败。",
+      "embeddingIdentityHint": "更改 Embedding 端点或模型会重建本地向量索引。Markdown 记忆会保留。"
     },
     "clear": {
       "button": "清除全部",

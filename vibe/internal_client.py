@@ -367,6 +367,24 @@ async def memory_restart(
     )
 
 
+async def memory_rebuild(
+    *,
+    user_key: str,
+    socket_path: Optional[Path] = None,
+) -> dict[str, Any]:
+    """Wait without a reporting deadline for the retained Runtime rebuild."""
+
+    path = "/internal/memory/rebuild"
+    return await _memory_request(
+        "POST",
+        path,
+        payload={"confirm": True},
+        headers=_memory_user_key_headers("POST", path, user_key),
+        socket_path=socket_path,
+        timeout=None,
+    )
+
+
 async def memory_final_flush(
     session_id: str,
     *,

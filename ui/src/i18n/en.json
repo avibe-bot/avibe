@@ -1312,7 +1312,11 @@
     "memory_runtime_unpublished": "This Avibe version hasn't published a memory runtime yet.",
     "memory_runtime_manifest_missing": "The memory runtime manifest is missing.",
     "memory_runtime_manifest_unavailable": "The memory runtime manifest couldn't be downloaded.",
-    "memory_runtime_archive_unavailable": "The memory runtime download isn't available right now."
+    "memory_runtime_archive_unavailable": "The memory runtime download isn't available right now.",
+    "memory_rebuild_failed": "Rebuilding the Memory index failed. Retry when ready; your markdown memory is still kept.",
+    "memory_rebuild_root_busy": "Another process is using the Memory root. Wait and retry the rebuild.",
+    "memory_operation_in_progress": "A Memory operation is already in progress. Wait for it to finish.",
+    "memory_embedding_rebuild_required": "Changing the embedding endpoint or model rebuilds the Memory index. Confirm to continue."
   },
   "apps": {
     "title": "Apps",
@@ -3913,7 +3917,6 @@
       "apiKeyNotSet": "No key set.",
       "apiKeyPlaceholder": "sk-…",
       "apiKeyClearHint": "Keys are write-only — Avibe never shows a saved key back to you.",
-      "embeddingLocked": "Changing the embedding endpoint or model is disabled while memory data exists. Run Clear all first.",
       "embeddingStatusPending": "Reading local maintenance state… the embedding endpoint unlocks once it's confirmed no data exists.",
       "maintenanceLoadFailed": "Couldn't load local Memory maintenance state.",
       "save": "Save settings",
@@ -3935,7 +3938,17 @@
         "Delivery to the Memory endpoints is at-least-once — a rare duplicate derived memory is possible after a timeout or crash.",
         "Each platform user has a separate memory scope; identities are not linked across platforms."
       ],
-      "clearKeyLabel": "Clear the saved key"
+      "clearKeyLabel": "Clear the saved key",
+      "rebuildRequiredTitle": "Memory index rebuild required",
+      "rebuildRequiredDescription": "The confirmed embedding change is saved. Restart engine stays blocked until rebuild finishes successfully.",
+      "rebuildConfirmTitle": "Rebuild Memory index?",
+      "rebuildConfirmDescription": "Changing the embedding endpoint or model rebuilds the local vector index. Markdown memory is preserved, but the rebuild can take time and may use embedding API quota.",
+      "rebuildConfirmLabel": "Save and rebuild",
+      "retryRebuild": "Retry rebuild",
+      "retryingRebuild": "Rebuilding…",
+      "rebuildCompleted": "Memory index rebuild completed.",
+      "rebuildFailed": "Memory index rebuild failed.",
+      "embeddingIdentityHint": "Changing the embedding endpoint or model rebuilds the local vector index. Markdown memory is preserved."
     },
     "clear": {
       "button": "Clear all",

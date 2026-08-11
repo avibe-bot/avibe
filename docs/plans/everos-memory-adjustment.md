@@ -75,7 +75,9 @@ Therefore:
 - do not write migrations, compatibility conversion, legacy import, or `migrated_legacy` rows;
 - do not preserve or rebuild historical user data;
 - start from the clean schema already merged by PR #1230;
-- do not implement a user-data rebuild workflow or rebuild button;
+- do not implement a broad user-data rebuild workflow or rebuild button in this delivery;
+  the later, narrowly scoped embedding-identity recovery in issue #1314 is defined by
+  `docs/plans/memory-embedding-rebuild-recovery.md`;
 - do not implement an audited manual-resolution `operate` API, decision rows, fence-release UI, or
   manual-resolution workflow;
 - keep `manual_required` as a durable, visible, terminal safety state with no automatic replay;
@@ -325,7 +327,8 @@ Policy requirements:
 The one remaining PR must not absorb the following:
 
 - old schema inspection, migration, compatibility, legacy preservation, or historical-data rebuild;
-- user-data/index/profile/embedding rebuild workflow or UI action;
+- broad user-data/index/profile rebuild workflows or generic rebuild actions; issue #1314 adds only
+  the confirmed embedding-identity recovery defined in `memory-embedding-rebuild-recovery.md`;
 - audited manual operation, manual decision rows, or manual-resolution UI;
 - multi-run/fan-out search;
 - cross-platform IM alias pairing;
@@ -336,9 +339,10 @@ The one remaining PR must not absorb the following:
 - exactly-once claims that require unavailable EverOS receipts/reconciliation;
 - release artifacts or checksums that have not been published and verified.
 
-Full semantic embedding rotation remains future/gated work. A later plan may define it only after a
-complete provider/upstream contract exists for vector indexes, cluster state, OME-derived state, and
-fingerprint/recovery semantics. It is not a prerequisite for this PR.
+Automatic or generic semantic embedding rotation remains future/gated work. Issue #1314 is a narrower
+follow-up: an explicit confirmed settings change persists one recovery intent and runs the already
+supported pinned-child rebuild without adding background jobs, automatic repair, or a general operations
+framework. Its contract lives in `memory-embedding-rebuild-recovery.md`.
 
 ## 6. File and ownership boundaries
 
@@ -448,10 +452,10 @@ Delivery rules:
 | Search | Single-run `keyword/vector/hybrid/agentic`; hybrid default; agentic explicit and fail-closed |
 | Fan-out | Deferred; no multi-declaration request body |
 | IM alias pairing | Deferred |
-| User-data rebuild | Out of scope |
+| Broad user-data rebuild | Out of scope; #1314 separately permits only confirmed embedding-identity recovery |
 | EverOS changes | None; no private status or business-metrics API |
 | Runtime manifest | Publish/update only with real immutable artifacts and checksums |
-| Semantic embedding rotation | Future/gated; not a prerequisite for this PR |
+| Automatic/generic semantic embedding rotation | Future/gated; #1314 is limited to explicit confirmed identity recovery |
 
 ## 10. Primary source references
 

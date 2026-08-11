@@ -17,6 +17,7 @@ from config.v2_config import (
     SlackConfig,
     V2Config,
 )
+from core.memory.operation_lock import MemoryOperationLease
 from tests.ui_server_test_helpers import csrf_headers
 from vibe import api, internal_client, remote_access, ui_memory_routes, ui_server
 from vibe.ui_server import app
@@ -30,6 +31,15 @@ def _save_config(tmp_path) -> None:
         runtime=RuntimeConfig(default_cwd="."),
         agents=AgentsConfig(),
     ).save()
+
+
+def _save_memory(memory: MemoryConfig) -> V2Config:
+    from config.v2_config import memory_config_to_payload
+
+    return api.save_memory_config(
+        memory_config_to_payload(memory, include_secrets=True),
+        recovery_intent=memory.recovery_intent,
+    )
 
 
 def _save_remote_config(tmp_path) -> V2Config:
@@ -88,6 +98,9 @@ def test_memory_settings_are_direct_loopback_only_and_write_only(monkeypatch, tm
     assert response.headers["cache-control"] == "no-store"
     assert response.get_json()["processing"]["llm"]["api_key"] is None
     assert response.get_json()["processing"]["llm"]["has_api_key"] is False
+    assert response.get_json()["rebuild_required"] is False
+    assert "recovery_intent" not in response.get_json()
+    assert "embedding_change_pending" not in response.get_json()
     assert "diagnostics" not in response.get_json()
 
 
@@ -618,6 +631,13 @@ def test_memory_log_routes_forward_only_valid_query_and_are_no_store(monkeypatch
 def test_memory_settings_enable_reconciles_through_controller(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
+    current = V2Config.load().memory
+    current.processing.embedding = MemoryEndpointConfig(
+        "https://embed.example.test/v1",
+        "embed",
+        None,
+    )
+    _save_memory(current)
 
     def direct_probe_must_not_run(*_args, **_kwargs):
         raise AssertionError("UI settings route must not probe provider credentials directly")
@@ -685,6 +705,13 @@ def test_memory_settings_patch_rejects_the_retired_proactive_capture_field(monke
 def test_memory_enable_rolls_back_when_live_sidecar_reconciliation_fails(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
+    current = V2Config.load().memory
+    current.processing.embedding = MemoryEndpointConfig(
+        "https://embed.example.test/v1",
+        "embed",
+        None,
+    )
+    _save_memory(current)
 
     async def status():
         return {"status_code": 200, "body": {"state": "disabled", "data_exists": False}}
@@ -722,7 +749,54 @@ def test_memory_enable_rolls_back_when_live_sidecar_reconciliation_fails(monkeyp
     assert V2Config.load().memory.enabled is False
 
 
-def test_memory_embedding_change_rolls_back_when_controller_rejects_it(monkeypatch, tmp_path) -> None:
+def test_memory_api_key_only_save_rolls_back_when_reconciliation_fails(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    current = V2Config.load().memory
+    current.processing.llm = MemoryEndpointConfig(
+        "https://llm.example.test/v1",
+        "chat",
+        "old-key",
+    )
+    _save_memory(current)
+    observed_keys: list[str | None] = []
+
+    async def reconcile():
+        observed_keys.append(V2Config.load().memory.processing.llm.api_key)
+        if len(observed_keys) == 1:
+            return {
+                "status_code": 200,
+                "body": {"ok": False, "error": "memory_sidecar_unavailable"},
+            }
+        return {"status_code": 200, "body": {"ok": True, "state": "disabled"}}
+
+    monkeypatch.setattr(internal_client, "reconcile_memory", reconcile)
+    client = app.test_client()
+    response = client.patch(
+        "/api/memory/settings",
+        json={"processing": {"llm": {"api_key": "new-key"}}},
+        headers=csrf_headers(client, "http://127.0.0.1:15131"),
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 409
+    assert response.get_json() == {
+        "status": "failed",
+        "error": "memory_sidecar_unavailable",
+    }
+    assert observed_keys == ["new-key", "old-key"]
+    assert V2Config.load().memory.processing.llm.api_key == "old-key"
+
+
+def test_memory_embedding_identity_change_requires_confirm_and_saves_nothing(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """Scenario: MEMORY-REBUILD-101"""
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     current = V2Config.load()
@@ -733,16 +807,18 @@ def test_memory_embedding_change_rolls_back_when_controller_rejects_it(monkeypat
             embedding=MemoryEndpointConfig("https://embed.example.test/v1", "embed-v1", "embed-key"),
         ),
     )
-    current.save()
+    _save_memory(current.memory)
+    from config.paths import get_config_path
+
+    config_before = get_config_path().read_bytes()
     calls: list[bool] = []
 
-    async def reconcile():
+    async def rebuild(*, user_key: str):
         calls.append(True)
-        if len(calls) == 1:
-            return {"status_code": 200, "body": {"ok": False, "error": "memory_clear_failed"}}
-        return {"status_code": 200, "body": {"ok": True, "state": "disabled"}}
+        assert user_key
+        return {"status_code": 200, "body": {"ok": True, "result": "completed_empty"}}
 
-    monkeypatch.setattr(internal_client, "reconcile_memory", reconcile)
+    monkeypatch.setattr(internal_client, "memory_rebuild", rebuild)
     client = app.test_client()
     response = client.patch(
         "/api/memory/settings",
@@ -753,12 +829,185 @@ def test_memory_embedding_change_rolls_back_when_controller_rejects_it(monkeypat
     )
 
     assert response.status_code == 409
-    assert response.get_json() == {"status": "failed", "error": "memory_clear_failed"}
-    assert calls == [True, True]
+    assert response.get_json() == {
+        "status": "failed",
+        "error": "memory_embedding_rebuild_required",
+    }
+    assert calls == []
+    assert get_config_path().read_bytes() == config_before
     assert V2Config.load().memory.processing.embedding.model == "embed-v1"
+    assert V2Config.load().memory.recovery_intent is None
 
 
-def test_memory_embedding_change_delegates_marker_settlement_to_controller(monkeypatch, tmp_path) -> None:
+def test_memory_first_embedding_identity_requires_confirm_and_saves_nothing(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """Scenario: MEMORY-REBUILD-101"""
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    from config.paths import get_config_path
+
+    config_before = get_config_path().read_bytes()
+    calls: list[str] = []
+
+    async def reconcile():
+        calls.append("reconcile")
+        return {"status_code": 200, "body": {"ok": True, "state": "disabled"}}
+
+    async def rebuild(*, user_key: str):
+        calls.append(f"rebuild:{user_key}")
+        return {
+            "status_code": 200,
+            "body": {"ok": True, "result": "completed_empty"},
+        }
+
+    monkeypatch.setattr(internal_client, "reconcile_memory", reconcile)
+    monkeypatch.setattr(internal_client, "memory_rebuild", rebuild)
+    client = app.test_client()
+    response = client.patch(
+        "/api/memory/settings",
+        json={
+            "processing": {
+                "embedding": {
+                    "base_url": "https://embed.example.test/v1",
+                    "model": "embed-v1",
+                }
+            }
+        },
+        headers=csrf_headers(client, "http://127.0.0.1:15131"),
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 409
+    assert response.get_json() == {
+        "status": "failed",
+        "error": "memory_embedding_rebuild_required",
+    }
+    assert calls == []
+    assert get_config_path().read_bytes() == config_before
+    persisted = V2Config.load().memory
+    assert persisted.processing.embedding.base_url is None
+    assert persisted.processing.embedding.model is None
+    assert persisted.recovery_intent is None
+
+
+def test_memory_confirmed_first_embedding_identity_runs_retained_rebuild(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """Scenario: MEMORY-REBUILD-001"""
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    observed: list[tuple[str | None, str | None, str | None]] = []
+
+    async def rebuild(*, user_key: str):
+        persisted = V2Config.load().memory
+        observed.append(
+            (
+                persisted.processing.embedding.base_url,
+                persisted.processing.embedding.model,
+                persisted.recovery_intent,
+            )
+        )
+        assert user_key == "avibe:local"
+        persisted.recovery_intent = None
+        _save_memory(persisted)
+        return {
+            "status_code": 200,
+            "body": {
+                "ok": True,
+                "result": "completed_empty",
+                "state": "disabled",
+            },
+        }
+
+    monkeypatch.setattr(internal_client, "memory_rebuild", rebuild)
+    client = app.test_client()
+    response = client.patch(
+        "/api/memory/settings",
+        json={
+            "processing": {
+                "embedding": {
+                    "base_url": "https://embed.example.test/v1",
+                    "model": "embed-v1",
+                }
+            },
+            "confirm_rebuild": True,
+        },
+        headers=csrf_headers(client, "http://127.0.0.1:15131"),
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["runtime"] == {
+        "ok": True,
+        "result": "completed_empty",
+        "state": "disabled",
+    }
+    assert observed == [
+        (
+            "https://embed.example.test/v1",
+            "embed-v1",
+            "rebuild",
+        )
+    ]
+    persisted = V2Config.load().memory
+    assert persisted.processing.embedding.base_url == "https://embed.example.test/v1"
+    assert persisted.processing.embedding.model == "embed-v1"
+    assert persisted.recovery_intent is None
+
+
+def test_memory_first_embedding_api_key_only_does_not_require_rebuild(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    calls: list[str] = []
+
+    async def reconcile():
+        calls.append("reconcile")
+        return {"status_code": 200, "body": {"ok": True, "state": "disabled"}}
+
+    async def rebuild(*, user_key: str):
+        calls.append(f"rebuild:{user_key}")
+        return {
+            "status_code": 200,
+            "body": {"ok": True, "result": "completed_empty"},
+        }
+
+    monkeypatch.setattr(internal_client, "reconcile_memory", reconcile)
+    monkeypatch.setattr(internal_client, "memory_rebuild", rebuild)
+    client = app.test_client()
+    response = client.patch(
+        "/api/memory/settings",
+        json={"processing": {"embedding": {"api_key": "embed-key"}}},
+        headers=csrf_headers(client, "http://127.0.0.1:15131"),
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["processing"]["embedding"] == {
+        "base_url": None,
+        "model": None,
+        "api_key": None,
+        "has_api_key": True,
+    }
+    assert calls == ["reconcile"]
+    persisted = V2Config.load().memory
+    assert persisted.processing.embedding.api_key == "embed-key"
+    assert persisted.recovery_intent is None
+
+
+def test_memory_confirmed_embedding_change_persists_marker_and_awaits_rebuild(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """Scenario: MEMORY-REBUILD-001"""
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     current = V2Config.load()
@@ -769,33 +1018,676 @@ def test_memory_embedding_change_delegates_marker_settlement_to_controller(monke
             embedding=MemoryEndpointConfig("https://embed.example.test/v1", "embed-v1", "embed-key"),
         ),
     )
-    current.save()
-    observed: list[tuple[str | None, bool]] = []
+    _save_memory(current.memory)
+    observed: list[tuple[str | None, str | None]] = []
 
-    async def reconcile():
+    async def rebuild(*, user_key: str):
+        assert user_key
         persisted = V2Config.load().memory
-        observed.append((persisted.processing.embedding.model, persisted.embedding_change_pending))
-        persisted.embedding_change_pending = False
-        controller_config = V2Config.load()
-        controller_config.memory = persisted
-        controller_config.save()
-        return {"status_code": 200, "body": {"ok": True, "state": "disabled"}}
+        observed.append((persisted.processing.embedding.model, persisted.recovery_intent))
+        persisted.recovery_intent = None
+        _save_memory(persisted)
+        return {
+            "status_code": 200,
+            "body": {"ok": True, "result": "completed_empty", "state": "disabled"},
+        }
 
-    monkeypatch.setattr(internal_client, "reconcile_memory", reconcile)
+    monkeypatch.setattr(internal_client, "memory_rebuild", rebuild)
     client = app.test_client()
     response = client.patch(
         "/api/memory/settings",
-        json={"processing": {"embedding": {"model": "embed-v2"}}},
+        json={
+            "processing": {"embedding": {"model": "embed-v2"}},
+            "confirm_rebuild": True,
+        },
         headers=csrf_headers(client, "http://127.0.0.1:15131"),
         base_url="http://127.0.0.1:15131",
         environ_base={"REMOTE_ADDR": "127.0.0.1"},
     )
 
     assert response.status_code == 200
-    assert observed == [("embed-v2", True)]
+    body = response.get_json()
+    assert body["status"] == "ok"
+    assert body["rebuild_required"] is False
+    assert observed == [("embed-v2", "rebuild")]
     persisted = V2Config.load().memory
     assert persisted.processing.embedding.model == "embed-v2"
-    assert persisted.embedding_change_pending is False
+    assert persisted.recovery_intent is None
+
+
+def test_memory_confirmed_rebuild_failure_keeps_candidate(monkeypatch, tmp_path) -> None:
+    """Scenario: MEMORY-REBUILD-201"""
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    current = V2Config.load()
+    current.memory = MemoryConfig(
+        enabled=False,
+        processing=MemoryProcessingConfig(
+            llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-key"),
+            embedding=MemoryEndpointConfig("https://embed.example.test/v1", "embed-v1", "embed-key"),
+        ),
+    )
+    _save_memory(current.memory)
+
+    async def rebuild(*, user_key: str):
+        assert user_key
+        return {
+            "status_code": 409,
+            "body": {
+                "ok": False,
+                "error": "memory_rebuild_root_busy",
+                "result": "root_busy",
+            },
+        }
+
+    monkeypatch.setattr(internal_client, "memory_rebuild", rebuild)
+    client = app.test_client()
+    response = client.patch(
+        "/api/memory/settings",
+        json={
+            "processing": {"embedding": {"model": "embed-v2"}},
+            "confirm_rebuild": True,
+        },
+        headers=csrf_headers(client, "http://127.0.0.1:15131"),
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 409
+    body = response.get_json()
+    assert body["error"] == "memory_rebuild_root_busy"
+    assert body["rebuild_required"] is True
+    persisted = V2Config.load().memory
+    assert persisted.processing.embedding.model == "embed-v2"
+    assert persisted.recovery_intent == "rebuild"
+
+
+def test_memory_confirmed_identity_correction_replaces_pending_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    current = V2Config.load()
+    current.memory = MemoryConfig(
+        enabled=False,
+        recovery_intent="rebuild",
+        processing=MemoryProcessingConfig(
+            llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-key"),
+            embedding=MemoryEndpointConfig(
+                "https://invalid-embed.example.test/v1",
+                "embed-v1",
+                "embed-key",
+            ),
+        ),
+    )
+    _save_memory(current.memory)
+    rebuild_calls: list[bool] = []
+    reconcile_calls: list[bool] = []
+
+    async def rebuild(*, user_key: str):
+        assert user_key
+        rebuild_calls.append(True)
+        candidate = V2Config.load().memory
+        assert candidate.processing.embedding.base_url == (
+            "https://corrected-embed.example.test/v1"
+        )
+        assert candidate.recovery_intent == "rebuild"
+        return {
+            "status_code": 409,
+            "body": {
+                "ok": False,
+                "error": "memory_rebuild_failed",
+                "result": "failed",
+            },
+        }
+
+    async def reconcile():
+        reconcile_calls.append(True)
+        return {"status_code": 200, "body": {"ok": True, "state": "disabled"}}
+
+    monkeypatch.setattr(internal_client, "memory_rebuild", rebuild)
+    monkeypatch.setattr(internal_client, "reconcile_memory", reconcile)
+    client = app.test_client()
+    response = client.patch(
+        "/api/memory/settings",
+        json={
+            "processing": {
+                "embedding": {
+                    "base_url": "https://corrected-embed.example.test/v1",
+                },
+            },
+            "confirm_rebuild": True,
+        },
+        headers=csrf_headers(client, "http://127.0.0.1:15131"),
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 409
+    body = response.get_json()
+    assert body["error"] == "memory_rebuild_failed"
+    assert body["runtime"] == {
+        "ok": False,
+        "error": "memory_rebuild_failed",
+        "result": "failed",
+    }
+    assert body["rebuild_required"] is True
+    assert rebuild_calls == [True]
+    assert reconcile_calls == []
+    persisted = V2Config.load().memory
+    assert persisted.processing.embedding.base_url == (
+        "https://corrected-embed.example.test/v1"
+    )
+    assert persisted.recovery_intent == "rebuild"
+
+
+def test_memory_api_key_only_under_pending_marker_does_not_reconcile(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    current = V2Config.load()
+    current.memory = MemoryConfig(
+        enabled=False,
+        recovery_intent="rebuild",
+        processing=MemoryProcessingConfig(
+            llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-key"),
+            embedding=MemoryEndpointConfig("https://embed.example.test/v1", "embed-v1", "embed-key"),
+        ),
+    )
+    _save_memory(current.memory)
+    rebuild_calls: list[bool] = []
+    reconcile_calls: list[bool] = []
+
+    async def rebuild(*, user_key: str):
+        assert user_key
+        rebuild_calls.append(True)
+        return {"status_code": 200, "body": {"ok": True, "result": "completed"}}
+
+    async def reconcile():
+        reconcile_calls.append(True)
+        return {"status_code": 200, "body": {"ok": True, "state": "disabled"}}
+
+    monkeypatch.setattr(internal_client, "memory_rebuild", rebuild)
+    monkeypatch.setattr(internal_client, "reconcile_memory", reconcile)
+    client = app.test_client()
+    response = client.patch(
+        "/api/memory/settings",
+        json={"processing": {"embedding": {"api_key": "embed-key-2"}}},
+        headers=csrf_headers(client, "http://127.0.0.1:15131"),
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["status"] == "ok"
+    assert body["rebuild_required"] is True
+    assert rebuild_calls == []
+    assert reconcile_calls == []
+    persisted = V2Config.load().memory
+    assert persisted.processing.embedding.api_key == "embed-key-2"
+    assert persisted.recovery_intent == "rebuild"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("model", "chat-v2"),
+        ("base_url", "https://llm-v2.example.test/v1"),
+    ],
+)
+def test_memory_llm_change_under_pending_marker_still_reconciles(
+    monkeypatch,
+    tmp_path,
+    field: str,
+    value: str,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    current = V2Config.load().memory
+    current.recovery_intent = "rebuild"
+    current.processing.llm = MemoryEndpointConfig(
+        "https://llm.example.test/v1",
+        "chat-v1",
+        "llm-key",
+    )
+    current.processing.embedding = MemoryEndpointConfig(
+        "https://embed.example.test/v1",
+        "embed-v1",
+        "embed-key",
+    )
+    _save_memory(current)
+    reconcile_calls: list[bool] = []
+
+    async def reconcile():
+        reconcile_calls.append(True)
+        return {"status_code": 200, "body": {"ok": True, "state": "disabled"}}
+
+    monkeypatch.setattr(internal_client, "reconcile_memory", reconcile)
+    client = app.test_client()
+    response = client.patch(
+        "/api/memory/settings",
+        json={"processing": {"llm": {field: value}}},
+        headers=csrf_headers(client, "http://127.0.0.1:15131"),
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 200
+    assert reconcile_calls == [True]
+    persisted = V2Config.load().memory
+    assert getattr(persisted.processing.llm, field) == value
+    assert persisted.recovery_intent == "rebuild"
+
+
+def test_memory_runtime_rebuild_requires_exact_confirm(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    calls: list[bool] = []
+
+    async def rebuild(*, user_key: str):
+        calls.append(True)
+        assert user_key
+        return {
+            "status_code": 200,
+            "body": {
+                "ok": True,
+                "result": "completed",
+                "job_id": "must-not-leak",
+                "api_key": "must-not-leak",
+            },
+        }
+
+    monkeypatch.setattr(internal_client, "memory_rebuild", rebuild)
+    client = app.test_client()
+    response = client.post(
+        "/api/memory/runtime/rebuild",
+        json={},
+        headers=csrf_headers(client, "http://127.0.0.1:15131"),
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 400
+    assert response.get_json() == {"status": "failed", "error": "memory_invalid_input"}
+    assert calls == []
+
+    ok = client.post(
+        "/api/memory/runtime/rebuild",
+        json={"confirm": True},
+        headers=csrf_headers(client, "http://127.0.0.1:15131"),
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+    assert ok.status_code == 200
+    assert ok.get_json() == {"ok": True, "result": "completed"}
+    assert calls == [True]
+
+
+@pytest.mark.parametrize(
+    ("internal_status", "internal_body", "expected_status", "expected_body"),
+    [
+        (
+            202,
+            {"ok": True, "result": "completed"},
+            503,
+            {"ok": False, "error": "memory_rebuild_failed", "result": "failed"},
+        ),
+        (
+            200,
+            {"ok": True},
+            503,
+            {"ok": False, "error": "memory_rebuild_failed", "result": "failed"},
+        ),
+        (
+            200,
+            {
+                "ok": False,
+                "error": "memory_rebuild_root_busy",
+                "result": "root_busy",
+                "state": "disabled",
+                "job_id": "must-not-leak",
+                "api_key": "must-not-leak",
+            },
+            409,
+            {
+                "ok": False,
+                "error": "memory_rebuild_root_busy",
+                "result": "root_busy",
+                "state": "disabled",
+            },
+        ),
+        (
+            503,
+            {
+                "ok": False,
+                "error": "memory_rebuild_failed",
+                "result": "failed",
+            },
+            503,
+            {"ok": False, "error": "memory_rebuild_failed", "result": "failed"},
+        ),
+    ],
+)
+def test_memory_runtime_rebuild_exposes_only_final_closed_results(
+    monkeypatch,
+    tmp_path,
+    internal_status: int,
+    internal_body: dict,
+    expected_status: int,
+    expected_body: dict,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+
+    async def rebuild(*, user_key: str):
+        assert user_key == "avibe:local"
+        return {"status_code": internal_status, "body": internal_body}
+
+    monkeypatch.setattr(internal_client, "memory_rebuild", rebuild)
+    client = app.test_client()
+    response = client.post(
+        "/api/memory/runtime/rebuild",
+        json={"confirm": True},
+        headers=csrf_headers(client, "http://127.0.0.1:15131"),
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == expected_status
+    assert response.status_code != 202
+    assert response.get_json() == expected_body
+
+
+def test_memory_runtime_rebuild_joins_duplicate_and_survives_caller_cancellation(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    pending = V2Config.load().memory
+    pending.recovery_intent = "rebuild"
+    _save_memory(pending)
+    rebuild_started = asyncio.Event()
+    release_rebuild = asyncio.Event()
+    second_request_entered = asyncio.Event()
+    user_key_calls = 0
+    rebuild_calls: list[str] = []
+    mutation_calls: list[str] = []
+
+    def user_key() -> str:
+        nonlocal user_key_calls
+        user_key_calls += 1
+        if user_key_calls == 2:
+            second_request_entered.set()
+        return "avibe:local"
+
+    async def rebuild(*, user_key: str):
+        rebuild_calls.append(user_key)
+        rebuild_started.set()
+        await release_rebuild.wait()
+        settled = V2Config.load().memory
+        settled.recovery_intent = None
+        _save_memory(settled)
+        return {"status_code": 200, "body": {"ok": True, "result": "completed_empty"}}
+
+    async def unexpected_reconcile():
+        mutation_calls.append("reconcile")
+        return {"status_code": 200, "body": {"ok": True}}
+
+    async def unexpected_clear(*, user_key: str):
+        mutation_calls.append(f"clear:{user_key}")
+        return {"status_code": 200, "body": {"status": "completed"}}
+
+    async def unexpected_restart():
+        mutation_calls.append("restart")
+        return {"status_code": 200, "body": {"ok": True}}
+
+    monkeypatch.setattr(ui_memory_routes, "_memory_ui_user_key", user_key)
+    monkeypatch.setattr(internal_client, "memory_rebuild", rebuild)
+    monkeypatch.setattr(internal_client, "reconcile_memory", unexpected_reconcile)
+    monkeypatch.setattr(internal_client, "memory_clear", unexpected_clear)
+    monkeypatch.setattr(internal_client, "memory_restart", unexpected_restart)
+
+    async def scenario() -> tuple[httpx.Response, list[httpx.Response]]:
+        transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 12345))
+        headers = {
+            "Origin": "http://127.0.0.1:15131",
+            "X-Vibe-CSRF-Token": "rebuild-csrf",
+        }
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://127.0.0.1:15131",
+            cookies={"vibe_csrf_token": "rebuild-csrf"},
+        ) as client:
+            first = asyncio.create_task(
+                client.post("/api/memory/runtime/rebuild", json={"confirm": True}, headers=headers)
+            )
+            await rebuild_started.wait()
+            second = asyncio.create_task(
+                client.post("/api/memory/runtime/rebuild", json={"confirm": True}, headers=headers)
+            )
+            await second_request_entered.wait()
+
+            first.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await first
+
+            mutations = await asyncio.gather(
+                client.patch("/api/memory/settings", json={"enabled": True}, headers=headers),
+                client.post("/api/memory/clear", json={"confirm": True}, headers=headers),
+                client.post("/api/memory/runtime/restart", json={}, headers=headers),
+            )
+            assert not second.done()
+            release_rebuild.set()
+            return await second, mutations
+
+    second_response, mutation_responses = asyncio.run(scenario())
+
+    assert rebuild_calls == ["avibe:local"]
+    assert second_response.status_code == 200
+    assert second_response.json() == {"ok": True, "result": "completed_empty"}
+    assert [response.status_code for response in mutation_responses] == [409, 409, 409]
+    assert all(
+        response.json() == {"status": "failed", "error": "memory_operation_in_progress"}
+        for response in mutation_responses
+    )
+    assert mutation_calls == []
+    assert V2Config.load().memory.enabled is False
+
+
+def test_confirmed_settings_rebuild_and_retry_share_owner_while_settings_lock_is_held(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    current = V2Config.load().memory
+    current.processing.embedding = MemoryEndpointConfig(
+        "https://embed.example.test/v1",
+        "embed-v1",
+        "embed-key",
+    )
+    _save_memory(current)
+    rebuild_started = asyncio.Event()
+    release_rebuild = asyncio.Event()
+    retry_entered = asyncio.Event()
+    user_key_calls = 0
+    rebuild_calls: list[str] = []
+
+    def user_key() -> str:
+        nonlocal user_key_calls
+        user_key_calls += 1
+        if user_key_calls == 2:
+            retry_entered.set()
+        return "avibe:local"
+
+    async def rebuild(*, user_key: str):
+        rebuild_calls.append(user_key)
+        persisted = V2Config.load().memory
+        assert persisted.processing.embedding.model == "embed-v2"
+        assert persisted.recovery_intent == "rebuild"
+        rebuild_started.set()
+        await release_rebuild.wait()
+        persisted = V2Config.load().memory
+        persisted.recovery_intent = None
+        _save_memory(persisted)
+        return {"status_code": 200, "body": {"ok": True, "result": "completed_empty"}}
+
+    monkeypatch.setattr(ui_memory_routes, "_memory_ui_user_key", user_key)
+    monkeypatch.setattr(internal_client, "memory_rebuild", rebuild)
+
+    async def scenario() -> tuple[httpx.Response, httpx.Response]:
+        transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 12345))
+        headers = {
+            "Origin": "http://127.0.0.1:15131",
+            "X-Vibe-CSRF-Token": "rebuild-csrf",
+        }
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://127.0.0.1:15131",
+            cookies={"vibe_csrf_token": "rebuild-csrf"},
+        ) as client:
+            confirmed = asyncio.create_task(
+                client.patch(
+                    "/api/memory/settings",
+                    json={
+                        "processing": {"embedding": {"model": "embed-v2"}},
+                        "confirm_rebuild": True,
+                    },
+                    headers=headers,
+                )
+            )
+            await rebuild_started.wait()
+            retry = asyncio.create_task(
+                client.post("/api/memory/runtime/rebuild", json={"confirm": True}, headers=headers)
+            )
+            await retry_entered.wait()
+            assert not retry.done()
+            release_rebuild.set()
+            return await asyncio.gather(confirmed, retry)
+
+    confirmed_response, retry_response = asyncio.run(scenario())
+
+    assert rebuild_calls == ["avibe:local"]
+    assert confirmed_response.status_code == 200
+    assert confirmed_response.json()["runtime"] == {
+        "ok": True,
+        "result": "completed_empty",
+    }
+    assert retry_response.status_code == 200
+    assert retry_response.json() == {"ok": True, "result": "completed_empty"}
+    persisted = V2Config.load().memory
+    assert persisted.processing.embedding.model == "embed-v2"
+    assert persisted.recovery_intent is None
+
+
+def test_memory_config_stale_controller_settlement_cannot_clobber_newer_candidate(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """Cross-process CAS: a stale settlement loses to a newer confirmed write."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    baseline = V2Config.load()
+    baseline.memory = MemoryConfig(
+        enabled=False,
+        processing=MemoryProcessingConfig(
+            llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-key"),
+            embedding=MemoryEndpointConfig("https://embed.example.test/v1", "embed-v1", "embed-key"),
+        ),
+    )
+    _save_memory(baseline.memory)
+
+    stale_snapshot = V2Config.load().memory
+    from core.memory.runtime import MemoryRuntime
+
+    runtime = object.__new__(MemoryRuntime)
+
+    async def rebuild(*, user_key: str):
+        assert user_key == "avibe:local"
+        # The route has already durably written embed-v2 + intent. A Controller
+        # operation holding embed-v1 cannot settle or overwrite that candidate.
+        assert runtime._settle_rebuild_intent(stale_snapshot) is None
+        confirmed = V2Config.load().memory
+        assert confirmed.processing.embedding.model == "embed-v2"
+        assert confirmed.recovery_intent == "rebuild"
+        assert runtime._settle_rebuild_intent(confirmed) is not None
+        return {"status_code": 200, "body": {"ok": True, "result": "completed_empty"}}
+
+    monkeypatch.setattr(internal_client, "memory_rebuild", rebuild)
+    client = app.test_client()
+    response = client.patch(
+        "/api/memory/settings",
+        json={
+            "processing": {"embedding": {"model": "embed-v2"}},
+            "confirm_rebuild": True,
+        },
+        headers=csrf_headers(client, "http://127.0.0.1:15131"),
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 200
+    persisted = V2Config.load().memory
+    assert persisted.processing.embedding.model == "embed-v2"
+    assert persisted.recovery_intent is None
+
+
+def test_memory_settings_controller_lease_returns_busy_without_writing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """Controller ownership is authoritative even if the UI lost its local task."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    baseline = MemoryConfig(
+        enabled=False,
+        processing=MemoryProcessingConfig(
+            llm=MemoryEndpointConfig(
+                "https://llm.example.test/v1", "chat", "llm-key"
+            ),
+            embedding=MemoryEndpointConfig(
+                "https://embed.example.test/v1", "embed-v1", "embed-key"
+            ),
+        ),
+    )
+    _save_memory(baseline)
+    config_path = tmp_path / "config" / "config.json"
+    before = config_path.read_bytes()
+    monkeypatch.setattr(ui_memory_routes, "_rebuild_request_task", None)
+    monkeypatch.setattr(ui_memory_routes, "_rebuild_request_task_loop", None)
+    monkeypatch.setattr(
+        internal_client,
+        "reconcile_memory",
+        lambda: (_ for _ in ()).throw(AssertionError("busy save must not reconcile")),
+    )
+    lease = MemoryOperationLease(tmp_path)
+    lease.acquire()
+
+    try:
+        client = app.test_client()
+        response = client.patch(
+            "/api/memory/settings",
+            json={"processing": {"llm": {"model": "chat-next"}}},
+            headers=csrf_headers(client, "http://127.0.0.1:15131"),
+            base_url="http://127.0.0.1:15131",
+            environ_base={"REMOTE_ADDR": "127.0.0.1"},
+        )
+    finally:
+        lease.release()
+
+    assert response.status_code == 409
+    assert response.get_json() == {
+        "status": "failed",
+        "error": "memory_operation_in_progress",
+    }
+    assert config_path.read_bytes() == before
 
 
 def test_overlapping_memory_settings_patches_never_interleave_save_and_rollback(monkeypatch, tmp_path) -> None:
@@ -809,7 +1701,7 @@ def test_overlapping_memory_settings_patches_never_interleave_save_and_rollback(
             embedding=MemoryEndpointConfig("https://embed.example.test/v1", "embed-v1", "embed-key"),
         ),
     )
-    baseline.save()
+    _save_memory(baseline.memory)
     observed: list[str] = []
     first_reconcile_entered = asyncio.Event()
     release_first_reconcile = asyncio.Event()
@@ -818,17 +1710,17 @@ def test_overlapping_memory_settings_patches_never_interleave_save_and_rollback(
 
     def save(memory_payload, **kwargs):
         saved = save_memory_config(memory_payload, **kwargs)
-        if saved.memory.processing.embedding.model == "embed-accepted":
+        if saved.memory.processing.llm.model == "chat-accepted":
             accepted_persisted.set()
         return saved
 
     async def reconcile():
-        model = V2Config.load().memory.processing.embedding.model
+        model = V2Config.load().memory.processing.llm.model
         observed.append(model)
         if not first_reconcile_entered.is_set():
             first_reconcile_entered.set()
             await release_first_reconcile.wait()
-        if model == "embed-rejected":
+        if model == "chat-rejected":
             return {"status_code": 200, "body": {"ok": False, "error": "memory_clear_failed"}}
         return {"status_code": 200, "body": {"ok": True, "state": "disabled"}}
 
@@ -838,13 +1730,15 @@ def test_overlapping_memory_settings_patches_never_interleave_save_and_rollback(
     async def scenario():
         rejected = asyncio.create_task(
             ui_memory_routes._apply_memory_settings_patch(
-                {"processing": {"embedding": {"model": "embed-rejected"}}}
+                {"processing": {"llm": {"model": "chat-rejected"}}},
+                user_key="local",
             )
         )
         await first_reconcile_entered.wait()
         accepted = asyncio.create_task(
             ui_memory_routes._apply_memory_settings_patch(
-                {"processing": {"embedding": {"model": "embed-accepted"}}}
+                {"processing": {"llm": {"model": "chat-accepted"}}},
+                user_key="local",
             )
         )
         # Give the second request every chance to persist while the first is
@@ -865,8 +1759,8 @@ def test_overlapping_memory_settings_patches_never_interleave_save_and_rollback(
     # The rejected request rolls its own candidate back and the accepted request
     # then starts from that restored baseline; neither observes the other's
     # half-applied state.
-    assert observed == ["embed-rejected", "embed-v1", "embed-accepted"]
-    assert V2Config.load().memory.processing.embedding.model == "embed-accepted"
+    assert observed == ["chat-rejected", "chat", "chat-accepted"]
+    assert V2Config.load().memory.processing.llm.model == "chat-accepted"
 
 
 def test_memory_clear_requires_the_global_csrf_proof(monkeypatch, tmp_path) -> None:
@@ -1201,3 +2095,83 @@ def test_memory_restart_route_isolates_remote_session_cookie_renewal(
     assert second_response.status_code == 200
     assert renewed_subject(first_response) == "user-1"
     assert renewed_subject(second_response) == "user-2"
+
+
+def test_memory_disable_under_pending_marker_still_reconciles(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    current = V2Config.load()
+    current.memory = MemoryConfig(
+        enabled=True,
+        recovery_intent="rebuild",
+        processing=MemoryProcessingConfig(
+            llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-key"),
+            embedding=MemoryEndpointConfig("https://embed.example.test/v1", "embed-v1", "embed-key"),
+        ),
+    )
+    _save_memory(current.memory)
+    reconcile_calls = []
+
+    async def reconcile():
+        reconcile_calls.append(True)
+        return {"status_code": 200, "body": {"ok": True, "state": "disabled"}}
+
+    monkeypatch.setattr(internal_client, "reconcile_memory", reconcile)
+    client = app.test_client()
+    response = client.patch(
+        "/api/memory/settings",
+        json={"enabled": False},
+        headers=csrf_headers(client, "http://127.0.0.1:15131"),
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 200
+    assert reconcile_calls == [True]
+    persisted = V2Config.load().memory
+    assert persisted.enabled is False
+    assert persisted.recovery_intent == "rebuild"
+
+
+def test_memory_settings_save_is_refused_while_rebuild_is_running(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    current = V2Config.load()
+    current.memory = MemoryConfig(
+        enabled=False,
+        recovery_intent="rebuild",
+        processing=MemoryProcessingConfig(
+            llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-key"),
+            embedding=MemoryEndpointConfig("https://embed.example.test/v1", "embed-v1", "embed-key"),
+        ),
+    )
+    _save_memory(current.memory)
+    reconcile_calls: list[bool] = []
+
+    async def reconcile():
+        reconcile_calls.append(True)
+        return {"status_code": 200, "body": {"ok": True, "state": "ready"}}
+
+    monkeypatch.setattr(internal_client, "reconcile_memory", reconcile)
+    monkeypatch.setattr(ui_memory_routes, "_memory_rebuild_request_running", lambda: True)
+    client = app.test_client()
+    response = client.patch(
+        "/api/memory/settings",
+        json={"enabled": True},
+        headers=csrf_headers(client, "http://127.0.0.1:15131"),
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 409
+    assert response.get_json() == {
+        "status": "failed",
+        "error": "memory_operation_in_progress",
+    }
+    assert reconcile_calls == []
+    persisted = V2Config.load().memory
+    assert persisted.enabled is False
+    assert persisted.recovery_intent == "rebuild"

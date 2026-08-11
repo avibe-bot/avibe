@@ -20,14 +20,21 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from http.client import HTTPSConnection
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 import yaml
 from sqlalchemy import select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from config import paths
-from config.v2_config import CONFIG_LOCK, V2Config
+from config.v2_config import (
+    CONFIG_LOCK,
+    MemoryConfig,
+    MemoryConfigStaleWrite,
+    V2Config,
+    atomic_update_memory,
+    memory_config_from_payload,
+)
 from config.v2_settings import (
     SettingsStore,
     ChannelSettings,
@@ -42,6 +49,7 @@ from config.v2_settings import (
 )
 from config.v2_sessions import SessionsStore
 from config.platform_registry import get_platform_descriptor
+from core.memory.operation_lock import MemoryOperationBusy, MemoryOperationLease
 from vibe.opencode_config import (
     get_opencode_config_paths,
     load_first_opencode_user_config,
@@ -909,7 +917,6 @@ def _validate_remote_access_network_change(
 def save_config(
     payload: dict,
     *,
-    allow_memory: bool = False,
     validate_remote_access_network: bool = True,
     generic_remote_access: bool = False,
 ) -> V2Config:
@@ -917,8 +924,7 @@ def save_config(
     if not isinstance(payload, dict):
         raise ValueError("Config payload must be an object")
 
-    if not allow_memory:
-        payload = {key: value for key, value in payload.items() if key != "memory"}
+    payload = {key: value for key, value in payload.items() if key != "memory"}
     # Model Hub mutations must pass through ModelHubService so runtime source
     # bindings and credential lifecycle stay in sync with the persisted config.
     # Generic settings pages round-trip GET /api/config, so treat this section
@@ -929,6 +935,10 @@ def save_config(
     payload = _strip_preserved_config_secrets(payload)
     payload = _mark_explicit_audio_asr_enabled(payload)
 
+    # Preserve the established in-process read -> merge -> validate -> write
+    # transaction. V2Config.save() nests the same RLock before taking Memory's
+    # cross-process file lock, so generic writers remain linearizable without
+    # changing the Memory transaction's lock order.
     with CONFIG_LOCK:
         base_payload: dict = {}
         base_config: Optional[V2Config] = None
@@ -936,24 +946,10 @@ def save_config(
             base_config = load_config()
             base_payload = config_to_payload(base_config, include_secrets=True, include_internal=True)
         except FileNotFoundError:
-            # Fresh install: no config file yet. Seed the same workbench-only
-            # default the read side (GET /api/config) serves, so a partial
-            # first-run save — e.g. the wizard's reused provider-config modal
-            # POSTing just ``{"agents": ...}`` — merges onto a valid base
-            # instead of feeding a partial payload straight into
-            # ``V2Config.from_payload`` (which requires ``mode``/``runtime`` and
-            # would raise). ``base_config`` stays ``None`` so the Discord-scope
-            # preservation below (which keys off a real prior config) is skipped.
+            # Fresh install: seed the same workbench-only default served by the read side.
             from core.services.settings import default_config
 
             base_payload = config_to_payload(default_config(), include_secrets=True, include_internal=True)
-            # Don't let the seed's workbench-only ``platforms`` shadow
-            # from_payload's legacy ``platform`` -> ``platforms`` migration: when
-            # the request is a legacy single-platform update (``platform`` set,
-            # ``platforms`` absent), drop the seed's platform fields so the
-            # request's own platform still derives ``platforms.enabled``. The
-            # wizard always sends ``platforms`` and is unaffected; a bare partial
-            # save (neither key) keeps the workbench-only seed.
             if "platform" in payload and "platforms" not in payload:
                 base_payload.pop("platforms", None)
                 base_payload.pop("platform", None)
@@ -996,33 +992,48 @@ def save_config(
                 if existing_update is not None:
                     _save_discord_guild_scope_update(*existing_update, store=store)
         config.save()
-        # The activity-streaming gate (ui.show_agent_activity) is cached in-process
-        # by the message mirror; a save that flips it must take effect immediately,
-        # not after the cache TTL. Reset it here (same process) — best-effort.
         try:
             from core.message_mirror import reset_activity_flag_cache
 
             reset_activity_flag_cache()
         except Exception:
             pass
-        _ensure_builtin_default_agents(config)
-        return config
+        persisted = load_config()
+        _ensure_builtin_default_agents(persisted)
+        return persisted
 
 
 def save_memory_config(
     memory_payload: dict,
     *,
-    embedding_change_pending: bool = False,
+    recovery_intent: Literal["rebuild"] | None = None,
+    expected: MemoryConfig | None = None,
 ) -> V2Config:
-    """Persist Memory settings only from the direct-loopback Memory route."""
+    """Persist Memory settings only from the direct-loopback Memory route.
+
+    When *expected* is provided, the write is a narrow cross-process transaction:
+    the on-disk Memory candidate+marker unit must still match *expected* or the
+    save raises ``MemoryConfigStaleWrite`` without changing the file. Process-local
+    locks alone cannot protect UI saves from Controller settlement write-back.
+    """
 
     if not isinstance(memory_payload, dict):
         raise ValueError("Memory config payload must be an object")
-    if not isinstance(embedding_change_pending, bool):
-        raise ValueError("Memory embedding compatibility state must be a boolean")
     payload = dict(memory_payload)
-    payload["embedding_change_pending"] = embedding_change_pending
-    return save_config({"memory": payload}, allow_memory=True)
+    payload["recovery_intent"] = recovery_intent
+    candidate = memory_config_from_payload(payload)
+
+    def replace_memory(current: MemoryConfig) -> MemoryConfig:
+        if expected is not None and current != expected:
+            raise MemoryConfigStaleWrite("memory candidate changed")
+        return candidate
+
+    lease = MemoryOperationLease()
+    lease.acquire()
+    try:
+        return atomic_update_memory(replace_memory)
+    finally:
+        lease.release()
 
 
 def _vibe_cloud_payload(config: V2Config, include_secrets: bool) -> dict:

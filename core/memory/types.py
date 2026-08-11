@@ -36,6 +36,10 @@ MemoryErrorCode = Literal[
     "memory_capability_unavailable",
     "memory_processing_failed",
     "memory_clear_failed",
+    "memory_embedding_rebuild_required",
+    "memory_rebuild_failed",
+    "memory_rebuild_root_busy",
+    "memory_operation_in_progress",
 ]
 
 # Transport vocabulary, wider than the persistable one: errors such as
@@ -61,6 +65,10 @@ CLOSED_MEMORY_ERROR_CODES = frozenset(
         "memory_capability_unavailable",
         "memory_processing_failed",
         "memory_clear_failed",
+        "memory_embedding_rebuild_required",
+        "memory_rebuild_failed",
+        "memory_rebuild_root_busy",
+        "memory_operation_in_progress",
     }
 )
 

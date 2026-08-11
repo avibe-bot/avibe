@@ -5,10 +5,12 @@ import os
 import re
 import tempfile
 import threading
+from contextlib import contextmanager
+from copy import deepcopy
 from dataclasses import dataclass, field, fields
 from datetime import datetime
 from pathlib import Path
-from typing import List, Literal, Mapping, Optional, Union
+from typing import Callable, Iterator, List, Literal, Mapping, Optional, Union
 from urllib.parse import urlsplit, urlunsplit
 
 from config import paths
@@ -28,6 +30,134 @@ from vibe.i18n import normalize_language
 logger = logging.getLogger(__name__)
 
 CONFIG_LOCK = threading.RLock()
+_memory_config_tx_state = threading.local()
+
+
+def _acquire_memory_config_file_lock(descriptor: int) -> None:
+    """Acquire a cross-process exclusive lock with a platform-supported API."""
+
+    if os.name == "nt":
+        import msvcrt
+
+        # Lock one byte of the file; Windows keeps the range until unlocked.
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        try:
+            os.write(descriptor, b"\0")
+        except OSError:
+            pass
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        msvcrt.locking(descriptor, msvcrt.LK_LOCK, 1)
+        return
+    import fcntl
+
+    fcntl.flock(descriptor, fcntl.LOCK_EX)
+
+
+def _release_memory_config_file_lock(descriptor: int) -> None:
+    """Release the cross-process exclusive lock acquired by the helper above."""
+
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+    except Exception:
+        pass
+
+
+def _fsync_directory(path: Path) -> None:
+    """Best-effort durability for a replaced directory entry."""
+
+    flags = getattr(os, "O_DIRECTORY", None)
+    if flags is None:
+        return
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    except OSError:
+        pass
+    finally:
+        os.close(descriptor)
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    """Replace one text file durably without retaining a failed temp file."""
+
+    descriptor, temp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+        text=True,
+    )
+    temporary: Path | None = Path(temp_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            descriptor = -1
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        temporary = None
+        _fsync_directory(path.parent)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+
+
+@contextmanager
+def _memory_config_transaction(config_path: Path) -> Iterator[None]:
+    """Narrow cross-process exclusive section for Memory candidate+marker writes.
+
+    UI and Controller run in different processes. ``CONFIG_LOCK`` is process-local,
+    so settlement and a concurrent settings save need a shared file lock around
+    the durable Memory unit. This is not a general multi-writer config service.
+
+    Lock order is always ``CONFIG_LOCK`` then the file lock, matching existing
+    callers that already hold ``CONFIG_LOCK`` when they enter ``save_config``.
+    Nested acquisitions only re-enter the process lock.
+    """
+
+    depth = getattr(_memory_config_tx_state, "depth", 0)
+    if depth > 0:
+        with CONFIG_LOCK:
+            yield
+        return
+
+    lock_path = config_path.parent / "memory-config.tx.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(
+        lock_path,
+        os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0),
+        0o600,
+    )
+    _memory_config_tx_state.depth = 1
+    # CONFIG_LOCK first so threads that already hold it (remote_access/settings
+    # helpers) never wait on the file lock while another waiter holds the file
+    # lock and waits for CONFIG_LOCK.
+    with CONFIG_LOCK:
+        try:
+            _acquire_memory_config_file_lock(descriptor)
+            try:
+                yield
+            finally:
+                _release_memory_config_file_lock(descriptor)
+        finally:
+            _memory_config_tx_state.depth = 0
+            os.close(descriptor)
+
 
 DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS = 600
 
@@ -329,13 +459,13 @@ class MemoryConfig:
     enabled: bool = False
     processing: MemoryProcessingConfig = field(default_factory=MemoryProcessingConfig)
     diagnostics: MemoryDiagnosticsConfig = field(default_factory=MemoryDiagnosticsConfig)
-    embedding_change_pending: bool = False
+    recovery_intent: Literal["rebuild"] | None = None
 
     def validate(self) -> None:
         if not isinstance(self.enabled, bool):
             raise ValueError("Config 'memory.enabled' must be a boolean")
-        if not isinstance(self.embedding_change_pending, bool):
-            raise ValueError("Config 'memory.embedding_change_pending' must be a boolean")
+        if self.recovery_intent is not None and self.recovery_intent != "rebuild":
+            raise ValueError("Config 'memory.recovery_intent' must be 'rebuild' or null")
         self.processing.validate()
         self.diagnostics.validate()
         if self.enabled and not (self.processing.llm.complete() and self.processing.embedding.complete()):
@@ -442,11 +572,76 @@ def memory_config_to_payload(
             "log_provider_calls": memory.diagnostics.log_provider_calls,
         },
     }
-    if include_internal:
+    if include_internal and memory.recovery_intent is not None:
         # This records a candidate that must be rechecked by the controller
         # after a crash. It is never part of the settings response.
-        payload["embedding_change_pending"] = memory.embedding_change_pending
+        payload["recovery_intent"] = memory.recovery_intent
     return payload
+
+
+def _optional_memory_object(value: object, *, name: str) -> dict[str, object]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(f"Config '{name}' must be an object")
+    return value
+
+
+def memory_config_from_payload(payload: object) -> MemoryConfig:
+    """Parse the persisted Memory block, including the legacy rebuild marker."""
+
+    payload = _optional_memory_object(payload, name="memory")
+    processing_payload = _optional_memory_object(
+        payload.get("processing"),
+        name="memory.processing",
+    )
+    llm_payload = _optional_memory_object(
+        processing_payload.get("llm"),
+        name="memory.processing.llm",
+    )
+    embedding_payload = _optional_memory_object(
+        processing_payload.get("embedding"),
+        name="memory.processing.embedding",
+    )
+    diagnostics_payload = _optional_memory_object(
+        payload.get("diagnostics"),
+        name="memory.diagnostics",
+    )
+
+    legacy_present = "embedding_change_pending" in payload
+    legacy_pending = payload.get("embedding_change_pending", False)
+    if not isinstance(legacy_pending, bool):
+        raise ValueError("Config 'memory.embedding_change_pending' must be a boolean")
+    legacy_intent = "rebuild" if legacy_pending else None
+    if "recovery_intent" in payload:
+        recovery_intent = payload.get("recovery_intent")
+        if recovery_intent is not None and recovery_intent != "rebuild":
+            raise ValueError("Config 'memory.recovery_intent' must be 'rebuild' or null")
+        if legacy_present and recovery_intent != legacy_intent:
+            raise ValueError("Config 'memory' contains conflicting recovery intent fields")
+    else:
+        recovery_intent = legacy_intent
+
+    memory = MemoryConfig(
+        enabled=payload.get("enabled", False),
+        recovery_intent=recovery_intent,
+        processing=MemoryProcessingConfig(
+            llm=MemoryEndpointConfig(
+                **_filter_dataclass_fields(MemoryEndpointConfig, llm_payload)
+            ),
+            embedding=MemoryEndpointConfig(
+                **_filter_dataclass_fields(MemoryEndpointConfig, embedding_payload)
+            ),
+        ),
+        diagnostics=MemoryDiagnosticsConfig(
+            **_filter_dataclass_fields(
+                MemoryDiagnosticsConfig,
+                diagnostics_payload,
+            )
+        ),
+    )
+    memory.validate()
+    return memory
 
 
 @dataclass
@@ -1338,40 +1533,7 @@ class V2Config:
             avault=avault,
         )
 
-        memory_payload = payload.get("memory") or {}
-        if not isinstance(memory_payload, dict):
-            raise ValueError("Config 'memory' must be an object")
-        memory_processing_payload = memory_payload.get("processing") or {}
-        if not isinstance(memory_processing_payload, dict):
-            raise ValueError("Config 'memory.processing' must be an object")
-        memory_llm_payload = memory_processing_payload.get("llm") or {}
-        memory_embedding_payload = memory_processing_payload.get("embedding") or {}
-        if not isinstance(memory_llm_payload, dict):
-            raise ValueError("Config 'memory.processing.llm' must be an object")
-        if not isinstance(memory_embedding_payload, dict):
-            raise ValueError("Config 'memory.processing.embedding' must be an object")
-        memory_diagnostics_payload = memory_payload.get("diagnostics", {})
-        if not isinstance(memory_diagnostics_payload, dict):
-            raise ValueError("Config 'memory.diagnostics' must be an object")
-        memory = MemoryConfig(
-            enabled=memory_payload.get("enabled", False),
-            embedding_change_pending=memory_payload.get("embedding_change_pending", False),
-            processing=MemoryProcessingConfig(
-                llm=MemoryEndpointConfig(
-                    **_filter_dataclass_fields(MemoryEndpointConfig, memory_llm_payload)
-                ),
-                embedding=MemoryEndpointConfig(
-                    **_filter_dataclass_fields(MemoryEndpointConfig, memory_embedding_payload)
-                ),
-            ),
-            diagnostics=MemoryDiagnosticsConfig(
-                **_filter_dataclass_fields(
-                    MemoryDiagnosticsConfig,
-                    memory_diagnostics_payload,
-                )
-            ),
-        )
-        memory.validate()
+        memory = memory_config_from_payload(payload.get("memory"))
 
         model_hub_payload = payload.get("model_hub")
         if model_hub_payload is None:
@@ -1594,10 +1756,22 @@ class V2Config:
         return config
 
     def save(self, config_path: Optional[Path] = None) -> None:
+        """Persist non-Memory changes while preserving the durable Memory unit."""
+
         paths.ensure_data_dirs()
         path = config_path or paths.get_config_path()
+        with _memory_config_transaction(path):
+            try:
+                memory = type(self).load(path).memory
+            except FileNotFoundError:
+                memory = self.memory
+            self._write_locked(path, memory=memory)
+
+    def _write_locked(self, path: Path, *, memory: MemoryConfig) -> None:
+        """Write an exact snapshot while the config transaction is held."""
+
         self.platforms.validate()
-        self.memory.validate()
+        memory.validate()
         self.platform = self.platforms.primary
         platform_payload = {}
         for descriptor in platform_descriptors():
@@ -1634,7 +1808,7 @@ class V2Config:
                 "avault": self.agents.avault.__dict__,
             },
             "memory": memory_config_to_payload(
-                self.memory,
+                memory,
                 include_secrets=True,
                 include_internal=True,
             ),
@@ -1661,13 +1835,7 @@ class V2Config:
         }
         content = json.dumps(payload, indent=2)
         path.parent.mkdir(parents=True, exist_ok=True)
-        with CONFIG_LOCK:
-            with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as tmp:
-                tmp.write(content)
-                tmp.flush()
-                os.fsync(tmp.fileno())
-                temp_name = tmp.name
-            os.replace(temp_name, path)
+        _atomic_write_text(path, content)
 
     def enabled_platforms(self) -> list[str]:
         return list(self.platforms.enabled)
@@ -1695,3 +1863,27 @@ class V2Config:
             "configured_platforms": configured,
             "missing_credentials": missing,
         }
+
+
+class MemoryConfigStaleWrite(RuntimeError):
+    """The durable Memory unit no longer matches a writer's snapshot."""
+
+
+def atomic_update_memory(
+    mutator: Callable[[MemoryConfig], MemoryConfig],
+    *,
+    config_path: Optional[Path] = None,
+) -> V2Config:
+    """Atomically replace only Memory while preserving every other config field."""
+
+    paths.ensure_data_dirs()
+    path = config_path or paths.get_config_path()
+    with _memory_config_transaction(path):
+        config = V2Config.load(path)
+        memory = mutator(deepcopy(config.memory))
+        if not isinstance(memory, MemoryConfig):
+            raise TypeError("Memory config mutator must return MemoryConfig")
+        memory.validate()
+        config.memory = memory
+        config._write_locked(path, memory=memory)
+        return config

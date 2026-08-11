@@ -7,6 +7,7 @@ import logging
 import threading
 import time
 from collections.abc import Awaitable, Callable
+from copy import deepcopy
 from typing import Optional, Dict, Any, TypeVar
 from config import paths
 from config.platform_registry import get_platform_descriptor
@@ -424,6 +425,7 @@ class Controller:
         self.memory_runtime = create_memory_runtime(
             getattr(self.config, "memory", None) or MemoryConfig(),
             processing_event=self._send_memory_processing_event,
+            on_config_settled=self._adopt_settled_memory_config,
         )
         self.memory_module = self.memory_runtime.module
         self._migrate_discord_guild_scope_from_config()
@@ -443,6 +445,11 @@ class Controller:
         # Inject settings_manager into IM client if supported
         for platform, client in runtime_clients.items():
             self._inject_runtime_dependencies(platform, client)
+
+    def _adopt_settled_memory_config(self, memory_config: MemoryConfig) -> None:
+        """Publish a rebuild settlement into the live Controller snapshot."""
+
+        self.config.memory = deepcopy(memory_config)
 
     @staticmethod
     def _derive_primary_platform(config) -> str:
