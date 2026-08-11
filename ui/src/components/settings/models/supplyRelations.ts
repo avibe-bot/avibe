@@ -1,4 +1,5 @@
 import { modelChainKey, type ModelChainIndex } from './modelRows';
+import { equalHopIdentity, hopBelongsToSource } from './hopIdentity';
 import { freshRegionData } from './regionRead';
 import { agentHasLiveChainProjection, type FreshRuntimeProjection } from './runtimeLifecycle';
 import { classifyChainLink, classifySourceStatus } from './sourceStateClassification';
@@ -26,13 +27,13 @@ const relationKind = (
     const read = chains[modelChainKey(agent.backend, modelId)];
     const chain = read ? freshRegionData(read) : undefined;
     if (!chain) continue;
-    for (const link of chain.chain.filter((candidate) => candidate.source_id === source.id)) {
+    for (const link of chain.chain.filter((candidate) => hopBelongsToSource(candidate, source.id))) {
       hasRunnableLink ||= link.runnable;
       if (!link.runnable && classifyChainLink(link) !== null) isUnavailable = true;
-    }
-    if (chain.current?.source_id === source.id && chain.current.model_id === modelId) {
-      isCurrent = true;
-      isTakeover ||= isTakeoverChain(chain);
+      if (equalHopIdentity(chain.current, link)) {
+        isCurrent = true;
+        isTakeover ||= isTakeoverChain(chain);
+      }
     }
   }
   if (isTakeover) return 'takeover';

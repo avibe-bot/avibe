@@ -48,6 +48,7 @@ import type {
   SupplyChannel,
   SupplyGap,
 } from './types';
+import { equalHopIdentity } from './hopIdentity';
 import { AGENT_CHAIN_CONTRACT_VERSION, CONTRACT_VERSION, PROBE_RESULT_CONTRACT_VERSION } from './types';
 
 /** Add-time Route placement returned by both source-creation paths. */
@@ -935,7 +936,7 @@ class MockStore {
     for (const agent of this.agents) {
       for (const [menuModel, route] of Object.entries(agent.routes ?? {})) {
         for (const [index, hop] of route.hops.entries()) {
-          if (hop.source_id === sourceId && hop.model_id === modelId) {
+          if (equalHopIdentity(hop, { source_id: sourceId, model_id: modelId })) {
             references.push({ backend: agent.backend, menu_model: menuModel, ...hop, position: index + 1 });
           }
         }
@@ -953,7 +954,7 @@ class MockStore {
         agent.routes = Object.fromEntries(
           Object.entries(agent.routes ?? {}).map(([menuModel, route]) => [
             menuModel,
-            { hops: route.hops.filter((hop) => !(hop.source_id === sourceId && hop.model_id === modelId)) },
+            { hops: route.hops.filter((hop) => !equalHopIdentity(hop, { source_id: sourceId, model_id: modelId })) },
           ]),
         );
       }

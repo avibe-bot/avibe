@@ -103,4 +103,28 @@ describe('buildSupplyRelations', () => {
     const stopped = { ...runtime, status: { ...runtime.status, health: 'not_started' as const } };
     expect(buildRelations([agent], sources, {}, freshRuntimeProjection(readyRegion(stopped)))).toEqual([]);
   });
+
+  it('matches current and takeover relations by the exact mapped hop identity', () => {
+    const mappedAgent: AgentSupply = {
+      ...agent,
+      routes: {
+        'custom/model-a': {
+          hops: [
+            { source_id: 'native', model_id: 'model-a' },
+            { source_id: 'relay', model_id: 'model-a' },
+          ],
+        },
+      },
+    };
+    const mappedChain: AgentChain = {
+      ...chain('relay', 'cooldown', false),
+      model_id: 'custom/model-a',
+    };
+
+    expect(buildSupplyRelations(
+      [mappedAgent],
+      [source('native', 'native_cli'), source('relay', 'hub')],
+      { [modelChainKey('claude', 'custom/model-a')]: readyRegion(mappedChain) },
+    )).toContainEqual({ sourceId: 'relay', backend: 'claude', kind: 'takeover' });
+  });
 });

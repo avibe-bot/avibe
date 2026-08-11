@@ -51,5 +51,5 @@ export type SourceMutationSettlement = {
 };
 
 export type TrackSourceMutation = <T>(
-  work: (settlement: SourceMutationSettlement) => Promise<T>,
+  work: (source: Source, settlement: SourceMutationSettlement) => Promise<T>,
 ) => Promise<T>;

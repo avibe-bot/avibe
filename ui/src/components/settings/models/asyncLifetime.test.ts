@@ -197,6 +197,7 @@ describe('latest Source entity authority', () => {
 
     expect(authority.settle(newer, newerSource)).toBe('landed');
     expect(authority.settle(older, { ...initial, display_name: 'older' })).toBe('stale');
+    expect(authority.current('src_a')).toEqual(newerSource);
     expect(landed.at(-1)).toEqual([newerSource]);
   });
 
@@ -311,10 +312,9 @@ describe('Source entity landing through the shared authority', () => {
     const sourceRetry = page.slice(page.indexOf('const retrySources'), page.indexOf('const retrySupply'));
     const supplyRetry = page.slice(page.indexOf('const retrySupply'), page.indexOf('const retryEvents'));
 
-    expect(detail).toMatch(/modelsApi\.refreshSource\(source\.id, confirmation\)/);
+    expect(detail).toMatch(/trackMutation\(async \(latest, settlement\)[\s\S]*?modelsApi\.refreshSource\(latest\.id, confirmation\)/);
     expect(detail).toMatch(/await settlement\.source\(answer\.source\)/);
-    expect(detail).toMatch(/trackMutation\(async \(settlement\)/);
-    expect(page).toMatch(/const trackSourceMutation[\s\S]*?sourceEntityAuthority\.begin\(sourceId\)[\s\S]*?const settlement: SourceMutationSettlement/);
+    expect(page).toMatch(/sourceWriteRegistry\.track\(sourceId[\s\S]*?sourceEntityAuthority\.current\(sourceId\)[\s\S]*?sourceEntityAuthority\.begin\(sourceId\)[\s\S]*?const settlement: SourceMutationSettlement/);
     expect(page).toMatch(/source: async \(echoed\)[\s\S]*?sourceEntityAuthority\.settle\(generation/);
     expect(page).not.toMatch(/const sourceMutation|activeSourceGenerations/);
     expect(page).toMatch(/await refreshAuthority\.run/);

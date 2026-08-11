@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
+import { equalHopIdentity } from './hopIdentity';
 import type { ModelChainRead } from './modelRows';
 import { freshRegionData } from './regionRead';
 import type { AgentSupply, Source } from './types';
@@ -45,7 +46,7 @@ export const RouteChainDialog: React.FC<{
             <h3 className="model-hub-route-label font-bold text-muted">{t('settings.models.routeDialog.label')}</h3>
             <div className="model-hub-route-list flex flex-col border border-border bg-background">
               {chain ? chain.chain.map((hop, index) => {
-                const current = chain.current?.source_id === hop.source_id && chain.current.model_id === hop.model_id;
+                const current = equalHopIdentity(chain.current, hop);
                 return (
                   <div key={`${hop.source_id}:${hop.model_id}:${index}`} data-current={current || undefined} className="model-hub-route-hop model-hub-fill-white-08 flex items-center border border-border">
                     <GripVertical className="model-hub-ink-white-59 size-3.5 shrink-0" aria-hidden />

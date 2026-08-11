@@ -81,6 +81,7 @@ export const createLatestEntityAuthorityByKey = <K, T>(
 
   return {
     begin,
+    current: (key: K): T | undefined => values.get(key),
     beginSnapshot: (): number => ++generation,
     settle: (ticket: EntityGeneration<K>, value: T): 'landed' | 'stale' => {
       if (ticket.key !== keyOf(value) || generations.get(ticket.key) !== ticket.generation) return 'stale';

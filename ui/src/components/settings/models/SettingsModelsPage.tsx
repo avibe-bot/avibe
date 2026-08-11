@@ -424,9 +424,11 @@ export const SettingsModelsPage: React.FC = () => {
     }
   }, [refreshAuthority, refreshEventHead, showToast, sourceEntityAuthority, t]);
 
-  const trackSourceMutation = React.useCallback((sourceId: string): TrackSourceMutation => async <T,>(work: (settlement: SourceMutationSettlement) => Promise<T>): Promise<T> => {
+  const trackSourceMutation = React.useCallback((sourceId: string): TrackSourceMutation => async <T,>(work: (source: Source, settlement: SourceMutationSettlement) => Promise<T>): Promise<T> => {
     let result!: T;
     await sourceWriteRegistry.track(sourceId, async () => {
+      const current = sourceEntityAuthority.current(sourceId);
+      if (!current) throw new Error(`Source ${sourceId} is no longer available`);
       const generation = sourceEntityAuthority.begin(sourceId);
       let settled = false;
       const finish = async (apply: () => void, reconcile = true): Promise<void> => {
@@ -454,7 +456,7 @@ export const SettingsModelsPage: React.FC = () => {
         },
       };
       try {
-        result = await work(settlement);
+        result = await work(current, settlement);
       } finally {
         settlement.release();
       }
