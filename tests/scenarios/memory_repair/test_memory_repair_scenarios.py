@@ -44,9 +44,10 @@ def test_memory_repair_004_has_no_automatic_retry_or_polling() -> None:
 
 def test_memory_repair_002_renders_warning_health() -> None:
     """Scenario: MEMORY-REPAIR-002"""
-    panel = (ROOT / "ui/src/components/settings/memory/MemoryStatusPanel.tsx").read_text(encoding="utf-8")
-    assert "completedWithWarnings" in panel
-    assert "repairHealth.healthy" in panel
+    _run_vitest(
+        "src/components/settings/memory/MemoryStatusPanel.test.tsx",
+        "shows the structured final health projection and running lock",
+    )
 
 
 def test_memory_repair_003_has_running_guard() -> None:

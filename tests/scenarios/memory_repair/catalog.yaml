@@ -13,7 +13,7 @@ capability:
     - tests/conftest.py::memory_runtime_factory
 status_legend:
   covered: executable backend evidence plus UI evidence where applicable
-  partial: contract is represented but needs live backend coverage
+  partial: executable backend evidence exists but a named UI behavior remains source-inspected
   manual: requires a running Memory runtime
 scenarios:
   - id: MEMORY-REPAIR-001
@@ -52,7 +52,7 @@ scenarios:
     name: A failed Repair is shown as a closed error and can be retried manually
     status: partial
     kind: recovery
-    layer: ui_contract
+    layer: runtime_contract
     test: tests/test_memory_repair.py::test_repair_maps_closed_child_results
     related_tests:
       - tests/scenarios/memory_repair/test_memory_repair_scenarios.py::test_memory_repair_004_has_no_automatic_retry_or_polling
