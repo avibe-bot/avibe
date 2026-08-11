@@ -2204,6 +2204,10 @@ def test_same_scope_concurrency_is_absent_and_sequential_control_is_present(
     _assert_valid("turn-provenance.schema.json", sequential)
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason="AC-50: cooldown.network → backoff.connection_failed 契约先行,实现随 I7 落地",
+)
 def test_chain_projection_and_probe_latency_partition(tmp_path: Path) -> None:
     cooling = _source(
         "src_cooling01",

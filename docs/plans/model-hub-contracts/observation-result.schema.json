@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "model-hub/observation-result.schema.json",
   "title": "SourceObservation",
-  "description": "Response-backed result of the unsaved Source observation. It never contains a credential reference or persisted Source state. Any upstream response proves reachability, but a bare HTTP status proves neither protocol nor authentication. Authentication is accepted only for a shaped success or a shaped request error that occurs after authentication; shaped authentication errors are rejected, while shaped server and rate-limit errors leave authentication unknown and settle as adapter_error rather than observed or ambiguous.",
+  "description": "Response-backed result of the unsaved Source observation. It never contains a credential reference or persisted Source state. Optional evidence contains only sanitized facts the server actually observed; omission requires clients to omit evidence copy rather than fabricate it. Any upstream response proves reachability, but a bare HTTP status proves neither protocol nor authentication. Authentication is accepted only for a shaped success or a shaped request error that occurs after authentication; shaped authentication errors are rejected, while shaped server and rate-limit errors leave authentication unknown and settle as adapter_error rather than observed or ambiguous.",
   "type": "object",
   "required": [
     "contract_version",
@@ -33,6 +33,30 @@
       "enum": [null, "anthropic", "openai_responses", "openai_chat"]
     },
     "discovery": { "enum": ["succeeded", "failed", "not_attempted"] },
+    "evidence": {
+      "type": "object",
+      "description": "Optional sanitized evidence from the actual probe/fetch. request is always present when this object is present; status is absent when no HTTP response arrived. reason reuses the discovery-failure classifier and is not an upstream string or a second independent classification.",
+      "required": ["request"],
+      "additionalProperties": false,
+      "properties": {
+        "request": {
+          "type": "string",
+          "pattern": "^[A-Z]+ /[^\\s?#]*$",
+          "maxLength": 160,
+          "description": "Sanitized METHOD /path label. It contains no scheme, host, query, fragment, credential, header, body, or raw upstream text."
+        },
+        "status": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 599,
+          "description": "Observed HTTP response status. Omitted when the attempt did not receive an HTTP response. Presence proves reachable=true but never proves protocol or authentication by itself."
+        },
+        "reason": {
+          "enum": ["rate_limited", "transport", "unknown"],
+          "description": "Closed discovery-failure presentation classification. Legal and required only when discovery=failed; it reuses that failed discovery's classification and never carries an upstream message."
+        }
+      }
+    },
     "models": {
       "type": "array",
       "items": { "type": "string", "minLength": 1 },
@@ -113,7 +137,38 @@
     },
     {
       "if": { "properties": { "discovery": { "const": "failed" } }, "required": ["discovery"] },
-      "then": { "properties": { "models": { "maxItems": 0 } } }
+      "then": {
+        "properties": {
+          "models": { "maxItems": 0 },
+          "evidence": {
+            "if": { "type": "object" },
+            "then": { "required": ["reason"] }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "discovery": { "enum": ["succeeded", "not_attempted"] } },
+        "required": ["discovery"]
+      },
+      "then": {
+        "properties": {
+          "evidence": { "not": { "required": ["reason"] } }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "evidence": {
+            "type": "object",
+            "required": ["status"]
+          }
+        },
+        "required": ["evidence"]
+      },
+      "then": { "properties": { "reachable": { "const": true } } }
     },
     {
       "if": { "properties": { "protocol": { "const": null } }, "required": ["protocol"] },
@@ -121,6 +176,20 @@
     }
   ],
   "examples": [
+    {
+      "contract_version": 5,
+      "outcome": "observed",
+      "reachable": true,
+      "authenticated": "authenticated",
+      "protocol": "openai_chat",
+      "discovery": "failed",
+      "evidence": {
+        "request": "GET /v1/models",
+        "status": 429,
+        "reason": "rate_limited"
+      },
+      "models": []
+    },
     {
       "contract_version": 5,
       "outcome": "observed",
@@ -146,6 +215,10 @@
       "authenticated": "unknown",
       "protocol": null,
       "discovery": "not_attempted",
+      "evidence": {
+        "request": "POST /v1/responses",
+        "status": 200
+      },
       "models": []
     },
     {

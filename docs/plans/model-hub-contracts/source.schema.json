@@ -34,7 +34,7 @@
     "client_nonce": {
       "type": "string",
       "pattern": "^scn_[a-z0-9]{16,64}$",
-      "description": "Optional client-generated create correlation persisted unchanged when SourceCreate supplied it. It is unique among Sources and lets a client recognize a committed Source after the create response is lost. It is not Source identity, a credential, or a routing input."
+      "description": "Optional client-generated create correlation persisted unchanged when SourceCreate supplied it. It is unique among live Sources and live Source-create receipt records, and lets a client recognize a committed Source after the create response is lost. Source deletion atomically removes the associated receipt and releases the nonce. It is not Source identity, a credential, or a routing input."
     },
     "last_discovered_at": {
       "type": [
@@ -121,7 +121,7 @@
           }
         },
         {
-          "$comment": "v2 (07-29, review round 4; vocabulary closed in round 5): `cooldown` is the ONLY status whose `retry_at` is non-null — spec §4.5 defines it as 'self-healing, `retry_at` known', and 「约 09:15 恢复」 is the whole copy of the state. A cooldown with a null stamp leaves the UI able to say only 暂不可用 with no recovery time, which is indistinguishable to the user from 需处理 — the one distinction this taxonomy exists to make. `detail_key` stays optional here (the recovery time is the load-bearing fact, the cause is a nicety) but its vocabulary is now a CLOSED ENUM rather than the `^models\\.source\\.cooldown\\..+` pattern round 4 used. The round-5 review named that bypass on probe-result's `error`, where the identical construction let `models.source.cooldown.network: <raw upstream body>` validate; the same prefix-plus-`.+` shape was here too and is the same hole, so it is closed in both files rather than only where it was spotted. `.+` after a trusted prefix is a naming convention, not a redaction boundary — the whole point of `detail_key` is that raw upstream text never reaches config or the UI. The five keys are the self-healing causes the adapter classifies; `needs_action` keys remain unwritable here, so a dead source still cannot be filed under a status that promises recovery.",
+          "$comment": "v2 (07-29, review round 4; vocabulary closed in round 5; network correction 2026-08-11): `cooldown` is the ONLY persisted Source status whose `retry_at` is non-null — spec §4.5 defines it as self-healing with a known retry time. `detail_key` stays optional here, but its vocabulary is a CLOSED ENUM rather than the earlier `^models\\.source\\.cooldown\\..+` pattern: a trusted prefix plus `.+` is a naming convention, not a redaction boundary. The retained quota, rate-limit, and server-error keys are shaped explicit upstream classifications. Unclassified connection failures use the separate live AgentChain backoff projection; the historical persistent network/timeout keys are not legal Source state. `needs_action` keys remain unwritable here, so a dead source still cannot be filed under a status that promises unattended recovery.",
           "if": {
             "properties": {
               "status": {
@@ -143,8 +143,6 @@
               "detail_key": {
                 "enum": [
                   null,
-                  "models.source.cooldown.network",
-                  "models.source.cooldown.timeout",
                   "models.source.cooldown.rate_limited",
                   "models.source.cooldown.quota_exhausted",
                   "models.source.cooldown.server_error"
@@ -222,7 +220,7 @@
             "error"
           ],
           "$comment": "Source-global health never implies process-local native CLI availability. Live process availability is resolved separately and takes precedence when deciding hop runnability.",
-          "description": "Source-global recovery state. cooldown is self-healing with retry_at; needs_action and error require user action; active and standby are healthy. Process availability is a distinct live fact carried by Route-hop annotations, so a globally healthy Source may still have a native_cli_unavailable hop. Quota and upstream reachability share one Source-global state across backends."
+          "description": "Source-global recovery state. cooldown is self-healing with retry_at; needs_action and error require user action; active and standby are healthy. Process availability and short connection backoff are distinct live facts carried by Route-hop annotations, so neither is persisted here. Only shaped explicit upstream classifications may change Source-global health; an unclassified transport failure never does."
         },
         "retry_at": {
           "type": [
@@ -238,10 +236,8 @@
             "string",
             "null"
           ],
-          "description": "Closed i18n key, never raw upstream error text. Healthy states require null. Cooldown may carry a self-healing cause; needs_action requires the cause/remedy key selected by its schema branch; error requires the generic unclassified key. The mirror registry checks this vocabulary against probe and resolution-event consumers.",
+          "description": "Closed i18n key, never raw upstream error text. Healthy states require null. Cooldown may carry a shaped self-healing quota, rate-limit, or server-error cause; unclassified connection failures use only the live AgentChain backoff projection. needs_action requires the cause/remedy key selected by its schema branch; error requires the generic unclassified key. The mirror registry checks this vocabulary against probe and resolution-event consumers.",
       "examples": [
-        "models.source.cooldown.network",
-        "models.source.cooldown.timeout",
         "models.source.cooldown.rate_limited",
         "models.source.cooldown.quota_exhausted",
         "models.source.cooldown.server_error",
@@ -386,7 +382,7 @@
     },
     "adopted_by": {
       "type": "array",
-      "description": "Server-derived Source-card projection of persisted Route references, sorted by backend then menu_model. It is returned on every Source read and creation payload, is never persisted on the Source record, and must not be reconstructed by clients from live chains.",
+      "description": "Server-derived Source-card projection of persisted Route references, sorted by backend then menu_model. It is returned on every current Source read and creation payload, is never persisted on the Source record, and must not be reconstructed by clients from live chains. A committed Source-create receipt separately preserves the exact create-time response snapshot for idempotent replay; that snapshot does not make adopted_by a persisted Source-record field.",
       "uniqueItems": true,
       "items": {
         "type": "object",
@@ -565,7 +561,7 @@
       "state": {
         "status": "cooldown",
         "retry_at": "2026-07-23T04:00:00Z",
-        "detail_key": "models.source.cooldown.timeout"
+        "detail_key": "models.source.cooldown.server_error"
       },
       "usage": {
         "cycle_used_pct": null,

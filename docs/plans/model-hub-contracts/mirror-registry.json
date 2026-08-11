@@ -97,7 +97,10 @@
           "schema": "probe-result.schema.json",
           "paths": ["/properties/error"],
           "exclude": [null],
-          "extras": ["models.probe.native_cli_unavailable"]
+          "extras": [
+            "models.probe.native_cli_unavailable",
+            "models.source.backoff.connection_failed"
+          ]
         }
       ]
     },
@@ -111,7 +114,8 @@
       },
       "target": {
         "schema": "agent-chain.schema.json",
-        "path": "/properties/chain/items/properties/health"
+        "path": "/properties/chain/items/properties/health",
+        "exclude": ["backoff"]
       },
       "mapping": {
         "active": "healthy",
@@ -281,8 +285,7 @@
           "path": "/properties/error",
           "exclude": [
             null,
-            "models.source.cooldown.network",
-            "models.source.cooldown.timeout",
+            "models.source.backoff.connection_failed",
             "models.source.cooldown.rate_limited",
             "models.source.cooldown.quota_exhausted",
             "models.source.cooldown.server_error",
@@ -637,6 +640,95 @@
           "kind": "marker",
           "file": "docs/plans/model-hub-contracts/api.md",
           "prefix": "guard_decision."
+        }
+      ]
+    },
+    {
+      "id": "D17",
+      "domain": "OAuth-start nonce claim states",
+      "authority": {
+        "kind": "markdown_table",
+        "file": "docs/plans/model-hub.md",
+        "heading": "OAuth-start nonce state machine",
+        "column": "Decision"
+      },
+      "consumers": [
+        {
+          "kind": "marker",
+          "file": "docs/plans/model-hub-contracts/api.md",
+          "prefix": "oauth_nonce."
+        }
+      ]
+    },
+    {
+      "id": "D18",
+      "domain": "observation evidence discovery reasons",
+      "authority": {
+        "kind": "schema_vocabulary",
+        "schema": "observation-result.schema.json",
+        "paths": ["/properties/evidence/properties/reason"]
+      },
+      "consumers": [
+        {
+          "kind": "marker_tail",
+          "file": "docs/plans/model-hub-contracts/api.md",
+          "marker": "authority-consumer: observation.evidence_reason "
+        }
+      ]
+    },
+    {
+      "id": "D19",
+      "domain": "network failure phase totality",
+      "authority": {
+        "kind": "markdown_table",
+        "file": "docs/plans/model-hub.md",
+        "heading": "Network-failure totality matrix",
+        "column": "Decision"
+      },
+      "consumers": [
+        {
+          "kind": "marker",
+          "file": "docs/plans/model-hub-contracts/api.md",
+          "prefix": "network_failure."
+        }
+      ]
+    },
+    {
+      "id": "D20",
+      "domain": "live connection backoff health",
+      "authority": {
+        "kind": "markdown_table",
+        "file": "docs/plans/model-hub.md",
+        "heading": "Live connection-backoff projection",
+        "column": "Decision"
+      },
+      "consumers": [
+        {
+          "kind": "schema_vocabulary",
+          "schema": "agent-chain.schema.json",
+          "paths": ["/properties/chain/items/properties/health"],
+          "exclude": ["healthy", "cooldown", "needs_action", "error"]
+        },
+        {
+          "kind": "marker_tail",
+          "file": "docs/plans/model-hub-contracts/api.md",
+          "marker": "authority-consumer: live_backoff.health "
+        }
+      ]
+    },
+    {
+      "id": "D21",
+      "domain": "live connection backoff reason",
+      "authority": {
+        "kind": "schema_vocabulary",
+        "schema": "agent-chain.schema.json",
+        "paths": ["/properties/chain/items/properties/reason/anyOf/1"]
+      },
+      "consumers": [
+        {
+          "kind": "marker_tail",
+          "file": "docs/plans/model-hub-contracts/api.md",
+          "marker": "authority-consumer: live_backoff.reason "
         }
       ]
     }

@@ -12,7 +12,7 @@
     "client_nonce": {
       "type": "string",
       "pattern": "^ofn_[a-z0-9]{16,64}$",
-      "description": "Optional client-generated OAuth-start correlation echoed from the start request. The server makes start idempotent for the exact (client_nonce, vendor, channel) tuple while its flow exists, so retrying a lost start response returns the same flow_id instead of opening another flow."
+      "description": "Optional client-generated OAuth-start correlation echoed from the start request. Before provider work the server atomically claims the exact (client_nonce, vendor, channel) tuple; concurrent retries coalesce to its one pending start and terminal result. Provider failure or pending-start cancellation releases the claim after cleanup, while success atomically converts it to the one OAuthFlow returned by every later retry."
     },
     "intent": {
       "enum": ["create", "reauth"],

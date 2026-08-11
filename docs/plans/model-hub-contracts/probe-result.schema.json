@@ -18,8 +18,7 @@
       "type": ["string", "null"],
       "enum": [
         null,
-        "models.source.cooldown.network",
-        "models.source.cooldown.timeout",
+        "models.source.backoff.connection_failed",
         "models.source.cooldown.rate_limited",
         "models.source.cooldown.quota_exhausted",
         "models.source.cooldown.server_error",
@@ -43,7 +42,7 @@
     },
     {
       "if": { "properties": { "channel": { "const": "hub" }, "latency_ms": { "type": "null" } }, "required": ["channel", "latency_ms"] },
-      "then": { "properties": { "error": { "enum": ["models.source.cooldown.network", "models.source.cooldown.timeout"] } } }
+      "then": { "properties": { "error": { "const": "models.source.backoff.connection_failed" } } }
     },
     {
       "if": { "properties": { "channel": { "const": "native_cli" } }, "required": ["channel"] },

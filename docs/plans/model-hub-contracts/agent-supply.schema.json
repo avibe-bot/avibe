@@ -128,7 +128,7 @@
       "type": ["string", "null"],
       "enum": ["ok", "degraded", "waiting", "interrupted", null],
       "$comment": "This rollup is process-aware, not health-only. A process-unavailable native hop makes a no-runnable chain interrupted rather than waiting.",
-      "description": "Derived supply rollup (spec §4.5), computed per request and never persisted, for the model of the route named by `selected_by_agent`. It reads the same complete runnability predicate as AgentChain: source-global health permits AND this process can serve the channel. ok = serving from the intended head; degraded = serving through fallback and/or with blocked members; waiting = no runnable member and every member is a not-retry-ready cooldown that is process-available; interrupted = no runnable member and at least one blocker needs action — including a native CLI unavailable in this process at any health — or the capability chain is empty. null when mode=direct or when Hub has no pinned selection."
+      "description": "Derived supply rollup (spec §4.5), computed per request and never persisted, for the model of the route named by `selected_by_agent`. It reads the same complete runnability predicate as AgentChain: source-global health permits AND no live connection backoff applies AND this process can serve the channel. ok = serving from the intended head; degraded = serving through fallback and/or with blocked members; waiting = no runnable member and every member is a Source cooldown or live connection backoff that is process-available; interrupted = no runnable member and at least one blocker needs action — including a native CLI unavailable in this process at any health — or the capability chain is empty. null when mode=direct or when Hub has no pinned selection."
     },
     "menu": {
       "type": ["object", "null"],
@@ -161,7 +161,7 @@
             "type": "integer",
             "minimum": 0,
             "$comment": "Configuration visibility is not candidate availability. Every stored hop remains counted regardless of live runnability.",
-            "description": "Length of the exact configured Route chain, including cooling and process-unavailable native CLI hops. It is not a count of currently runnable candidates. Zero marks a structurally empty Route; live blockers appear through supply_status."
+            "description": "Length of the exact configured Route chain, including cooling, live-connection-backoff, and process-unavailable native CLI hops. It is not a count of currently runnable candidates. Zero marks a structurally empty Route; live blockers appear through supply_status."
           },
           "has_runnable_hop": {
             "type": "boolean",

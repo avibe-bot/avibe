@@ -247,30 +247,50 @@ request: `vendor` and transient `key`, plus optional `display_name`, `base_url`,
 only `protocol_order`, and client-generated `client_nonce`. Source identity, protocol
 evidence, discovered inventory, health, usage, custody metadata, and timestamps remain
 server-owned. When supplied, `client_nonce` is persisted unchanged and unique among
-Sources, so a client that loses the create response can identify the committed row on
-the next Source list read. Before any observation or credential work, the server
-atomically claims that nonce. A successful commit atomically converts the claim into
-`Source.client_nonce`; pre-commit failure or cancellation releases it only after AC-26
-retained-material settlement. On restart an ownerless claim cannot resume without
-persisted plaintext, so pending revocation is reconciled before the claim is released.
-The nonce is not Source identity, a routing input, or a separately persisted status.
+live Sources and live Source-create claim/receipt records, so a client that loses the
+create response can identify the committed row on the next Source list read. Before any
+observation or credential work, the server computes a server-keyed HMAC-SHA-256 over
+every canonical substantive create field (including the exact transient key bytes) and
+atomically persists a `source-create-receipt.schema.json` claim. A successful commit
+atomically adds the exact terminal envelope to that record and persists
+`Source.client_nonce`; pre-commit failure or cancellation deletes the claim only after
+AC-26 retained-material settlement. On restart an ownerless claim cannot resume without
+persisted plaintext, so pending revocation is reconciled before the claim is deleted.
+Source deletion removes the committed receipt atomically. The nonce is not Source
+identity or a routing input; the digest, digest key, and plaintext credential are never
+returned or logged.
 
 **Source-create nonce state machine (authoritative and exhaustive; owner rulings
-2026-08-11 19:10).** After a lost response or 409/list miss, the client's only recovery
+2026-08-11 19:10, receipt correction 19:42).** After a lost response or 409/list miss, the client's only recovery
 action is to retry the same SourceCreate request with the same nonce. Malformed request
 fields retain shared request-validation behavior.
 
-| Decision | Claim state at atomic retry boundary | Same-nonce retry result | Upstream work | First consumer |
-| --- | --- | --- | --- | --- |
-| `nonce.in_flight` | a live or recovering create owns the claim | retain the claim; HTTP 409 `source_nonce_conflict` | none | create client retry loop and API concurrency test |
-| `nonce.released` | failure/cancellation/reconstruction released the claim after retained-material settlement | atomically re-claim and proceed as a fresh create | exactly one new attempt owned by the new claim | create client retry loop and cleanup/recovery test |
-| `nonce.committed` | one Source persists the nonce | HTTP 200 ordinary create terminal envelope reading back that same Source | none | D-36 lost-response reconciliation and API idempotency test |
+| Decision | Durable condition | Retry relation | Server action and HTTP/API result | Upstream work | First consumer |
+| --- | --- | --- | --- | --- | --- |
+| `nonce.in_flight` | claim record exists without a terminal envelope | same nonce with any otherwise-valid request | retain claim; HTTP 409 `source_nonce_conflict` | none | Add Source retry loop and concurrent-create fixture |
+| `nonce.released` | no claim/receipt and no live Source owns the nonce | same nonce with any otherwise-valid request | atomically persist a fresh request digest and proceed as a fresh create | exactly one new attempt owned by the new claim | create client retry loop, cleanup/recovery, and Source-delete tests |
+| `nonce.committed` | receipt holds the original envelope and its Source still exists | same nonce + same digest → replay; different digest → conflict | same digest: HTTP 200 exact replay of the stored original envelope; different digest: existing HTTP 409 `source_nonce_conflict` | none in either subcase | D-36 reconciliation, placement-drift, and request-mismatch fixtures |
 
-OAuth start offers the equivalent optional client-generated correlation on
-`(client_nonce, vendor, channel)`. Repeating that exact tuple while its flow exists
-returns the same `flow_id` and current presentation rather than starting another
-provider flow. These two correlations implement the same rule: a client can reconcile
-a lost response only when it held the subject correlation before sending the request.
+The committed receipt is the only authority for idempotent create replay: its original
+`source`, `added_to`, `adopted_by`, and positions are not recomputed after later Source
+or Route edits (S-1). `released` is absence, not a tombstone row; Source deletion makes
+the nonce claimable again. These rules add no endpoint or top-level error code.
+
+**OAuth-start nonce state machine (authoritative and exhaustive; owner ruling
+2026-08-11 19:42).** The key is the exact `(client_nonce, vendor, channel)` tuple and is
+claimed before provider work. A different tuple never resolves to this claim or flow.
+
+| Decision | Tuple condition | Server action and HTTP/API result | Provider starts | First consumer |
+| --- | --- | --- | --- | --- |
+| `oauth_nonce.released` | no claim or flow exists, including after pending-start failure/cancellation cleanup | atomically claim, start once, and make all coalesced callers await the same terminal result | exactly one under the new claim | I3 OAuth registry and AUTH-SETUP-210 first-call fixture |
+| `oauth_nonce.in_flight` | one provider start owns the claim but has not produced a flow | coalesce the exact-tuple retry with that pending start and return its same terminal result | none for the retry | AUTH-SETUP-210 blocked-first-call/concurrent-retry fixture |
+| `oauth_nonce.committed` | provider success atomically converted the claim into one `OAuthFlow` | return the same `flow_id`, current state, presentation, and echoed nonce | none | OAuth API idempotency fixture |
+
+A shared provider-start failure or cancellation settles cleanup and releases the claim;
+success creates the flow atomically with no claim gap. Omitting the nonce preserves the
+ordinary one-action/one-start path. Source-create and OAuth-start correlation therefore
+share D-36's rule: reconciliation is possible only when the client held the subject
+correlation before sending.
 
 **Protocol observation (owner ruling 2026-08-09, superseding AC-27's 2026-08-07
 manual-choice ruling).** Every stored `protocol` is traceable to a real response from
@@ -280,6 +300,22 @@ save-time default. When observation cannot distinguish a protocol, the failure s
 honestly asks the user for a one-time manual hint among the same three values. The hint
 changes probe order only: its selected adapter must still receive a successful upstream
 response before Save. A failed observation therefore stores nothing rather than guessing.
+
+**Observation evidence presence (authoritative and exhaustive; owner ruling
+2026-08-11 19:47).** Evidence is optional because a server that did not retain a
+sanitized fact cannot truthfully create one. Its presence never changes the observation
+outcome, protocol proof, or discovery decision.
+
+| Observation condition | Evidence shape | Presentation rule | First consumer |
+| --- | --- | --- | --- |
+| no sanitized attempt fact is available | omit `evidence` | omit the complete evidence detail; never infer a request/status/reason | UI-spec §1.5 follow-up |
+| attempt sent, no HTTP response arrived | `request` only, plus discovery `reason` when discovery failed | request label is `METHOD /path`; status is absent | Add API Key transport evidence fixture |
+| HTTP response arrived | `request` + integer `status`, plus discovery `reason` when discovery failed | status proves reachability only, never protocol/authentication | Add API Key ambiguous/inventory evidence fixture |
+
+The closed discovery reason values are `rate_limited | transport | unknown`; they reuse
+the failed discovery classification and never contain upstream text. `request` contains
+no host, query, fragment, credential, header, or body. A reason is rejected for
+`succeeded` or `not_attempted`, and status is rejected unless `reachable` is true.
 
 Once saved, `protocol` is immutable for that Source. Connectivity retest, model
 discovery, refresh, credential replacement, Base URL replacement, and restart all use
@@ -478,7 +514,7 @@ for hop in C, in stored order:
     if result is terminal_request_error: return FAILED_TERMINAL(result)
     if result is engine_down_at_any_request_phase: return FAILED_TERMINAL(engine_down)
 
-    persist_attributable_source_state(result)
+    apply_attributable_failure_decision(result)
     if result.output_started: return FAILED_TERMINAL(result)
     if result is fallback_class: continue
     return FAILED_TERMINAL(result)
@@ -504,15 +540,16 @@ value; otherwise pass `null`, with no approximation or downgrade.
 Parameter, protocol, and tool-compatibility failures are terminal without fallthrough.
 A local Gateway start, listener, or process loss at **any** request phase is terminal
 `engine_down`: it mutates no Source, does not replay output, and does not walk another
-hop. Credential failures follow the authoritative matrix below. Before output starts,
-explicit quota exhaustion, 429, transient 5xx, or attributable upstream network failure
-persists its classified Source-global blocker and continues to the next configured hop.
-After output starts, no failure is replayed; attributable Source state is still
-persisted for the next turn.
+hop. Credential failures follow the authoritative matrix below. The network-failure
+matrix owns every upstream transport branch: before the first response byte, shaped
+quota/429/authentication/5xx results retain their existing classifier while an
+unclassified connection failure creates only live short backoff; after the first byte,
+a stream interruption creates only its existing redacted event and never mutates Source
+health or creates backoff. No post-first-byte failure is replayed.
 
 The read projection is `C` with live annotations plus `current`, never a reconstructed
 provider list. Takeover remains derived: the current hop is not `C[0]` and `C[0]` is
-unavailable for a recoverable quota/cooldown reason. Recovery changes current execution
+unavailable for a recoverable quota/cooldown or live connection-backoff reason. Recovery changes current execution
 position on the next turn without changing `C`. Every switch is recorded for pull
 surfaces; a successful handoff emits no conversation notice or setting.
 
@@ -531,6 +568,39 @@ credential-failure branch.
 | `credential.account_classified` | classified `402/403` account result | any | no credential refresh; retain the adapter's existing source-global credential classification | `needs_action`; choose the remedy from both classification and credential capability: refresh-capable auth re-authorizes, a static key is replaced, balance is topped up, and a banned account goes to the vendor | before output, continue to the next runnable hop |
 | `credential.request_nonfallback` | a non-fallback request-level failure | any | no credential refresh and no Source-global credential classification | no Source-health mutation; surface the request failure | terminal without fallback |
 
+**Network-failure totality matrix (authoritative and exhaustive; owner ruling
+2026-08-11 19:44–19:56).** “Shaped” means the adapter received an explicit, closed
+machine classification such as quota exhaustion/429, an authentication-family result,
+or 5xx. “Transport” means connection or stream failure without such a code. The phase is
+decided only by whether the first response byte was observed.
+
+| Decision | Failure shape | Phase | Persisted Source judgment | Live backoff | Route/event effect |
+| --- | --- | --- | --- | --- | --- |
+| `network_failure.shaped_before_first_byte` | explicit closed code/classification | before first byte | apply the existing non-permanent quota/rate/auth/server family and its unchanged recovery rule | none | before output, follow that family's existing retry/fallback rule and emit its existing redacted event |
+| `network_failure.transport_before_first_byte` | no explicit code; connection failed | before first byte | none; retain the prior Source state byte-for-byte | set Source-scoped in-memory connection backoff, then continue to the next runnable hop | emit redacted `network` event; no configuration mutation |
+| `network_failure.shaped_after_first_byte` | explicit closed code/classification arrives only after streaming began | after first byte | apply that existing non-permanent family and its unchanged recovery rule | none | terminal, no replay; emit only the existing redacted event |
+| `network_failure.transport_after_first_byte` | stream interrupted without explicit code | after first byte | none; the successful connection/authentication/output evidence wins | none | terminal, no replay; emit only the existing redacted `network` event |
+
+Connection backoff is live execution state, never Source/configuration state. For the
+same Source, consecutive `transport_before_first_byte` decisions use delays
+`1, 2, 4, 8, 16, 30, 30, ...` seconds. While the deadline is future, every exact hop
+for that Source reads `health: backoff`, `runnable: false`,
+`reason: models.source.backoff.connection_failed`, and that deadline as `retry_at`.
+Deadline expiry makes the hop runnable again without a write. The first subsequent
+response byte clears both deadline and streak automatically; Source endpoint/credential
+replacement and process reconstruction also clear them because the state is in-memory
+and identity-specific. The maximum is 30 seconds. This family never uses
+`models.source.cooldown.*`, never writes `Source.state`, and never creates a permanent
+health verdict.
+
+**Live connection-backoff projection (authoritative and exhaustive; owner ruling
+2026-08-11 19:44–19:56).** This table owns the one live health value that has no
+persisted Source-state counterpart.
+
+| Decision | Required live annotation | Persistence | First consumer |
+| --- | --- | --- | --- |
+| `backoff` | `runnable: false`, `reason: models.source.backoff.connection_failed`, future `retry_at` | in-memory only; never Source/configuration state | AgentChain and AgentSupply health reads |
+
 The final mirror registry checks the closed (classification, credential capability) →
 `detail_key` → remedy relation in both directions. The resolver suite executes every
 row and fails any extra retry or unlisted remedy.
@@ -543,7 +613,7 @@ connector color, recent switches, and usage; provenance remains a debug affordan
 
 **Takeover projection.** A configured route is in **takeover** exactly when its current
 hop is not the first stored hop and that first hop is unavailable for a
-self-healing quota/cooldown reason. This is computed from the resolved chain's current
+self-healing quota/cooldown or live connection-backoff reason. This is computed from the resolved chain's current
 hop and live runnability; it is never a stored boolean or a second routing field. A
 chain with no runnable hop is not takeover: it reaches §4.5's truthful `exhausted`
 terminal outcome and must not reuse takeover's visual semantics.
@@ -626,7 +696,7 @@ Three classes, because the action owed by the user differs in each.
 | --- | --- | --- | --- |
 | `active` | 使用中 | — | currently serving |
 | `standby` | 备用 | — | healthy, but not currently serving any configured route |
-| `cooldown` | 暂不可用 (gold) | **yes** | quota/rate/network; `retry_at` known; recovers unattended |
+| `cooldown` | 暂不可用 (gold) | **yes** | shaped quota/rate/server result; persisted `retry_at` known; recovers unattended |
 | `needs_action` | 需处理 (rose) | **no** | OAuth expired, balance exhausted, key revoked/banned — dead until the user acts |
 | `error` | 异常 | **no** | unclassified failure — no `retry_at`, so nothing clears it unattended |
 
@@ -723,7 +793,7 @@ splits — on whether the user owes an action:
 | --- | --- | --- | --- |
 | `ok` | 正常 | — | serving from the intended head of the chain |
 | `degraded` | 降级 | — | serving via a fallback, and/or some sources in the chain are down |
-| `waiting` | 暂时全部在冷却 | **yes** | nothing runnable right now, but every blocker is a cooldown — recovers unattended at the earliest `retry_at` |
+| `waiting` | 暂时全部在冷却 | **yes** | nothing runnable right now, but every blocker is a persisted cooldown or live connection backoff — recovers unattended at the earliest `retry_at` |
 | `interrupted` | 无可用来源 | **no** | nothing runnable and the stored chain is empty or at least one hop has a non-self-healing blocker: `needs_action`, `error`, `source_missing`, `model_unsupported`, or `native_cli_unavailable` |
 
 These four values are the **only backend-level supply-health wording**. The Gateway
@@ -994,9 +1064,8 @@ persisted-state versions. `plan_changed` remains data, not a new top-level error
 
 | Decision | `force` | Recomputed plan | Token state | HTTP/API result |
 | --- | --- | --- | --- | --- |
-| `guard_decision.token_without_force` | false | any | supplied | existing ordinary invalid-request response; the guard planner does not consume the token |
-| `guard_decision.unforced_no_impact` | false | empty | absent | ordinary mutation success |
-| `guard_decision.unforced_confirmation` | false | nonempty | absent | HTTP 409 `GuardRefusal` with `confirmation_required`, current plan, and fresh token |
+| `guard_decision.unforced_no_impact` | false | empty | absent or supplied; token is inert | ordinary mutation success |
+| `guard_decision.unforced_confirmation` | false | nonempty | absent or supplied; token is inert | HTTP 409 `GuardRefusal` with `confirmation_required`, current plan, and fresh token |
 | `guard_decision.forced_no_impact` | true | empty | absent, matching, stale, or expired | ordinary mutation success; `force` and any token are inert because no guarded impact remains |
 | `guard_decision.forced_confirmed` | true | nonempty | exact match for method, target, input, plan, and versions | commit once and return the matrix row's success envelope |
 | `guard_decision.forced_uncredentialed` | true | nonempty | absent | HTTP 409 `GuardRefusal` with `confirmation_required`, current plan, and fresh token |

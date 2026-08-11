@@ -1,0 +1,69 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "model-hub/source-create-receipt.schema.json",
+  "title": "SourceCreateReceipt",
+  "description": "Server-private durable claim/receipt for a SourceCreate client_nonce. A record without terminal_envelope is the in-flight claim; adding terminal_envelope in the Source commit transaction makes it the committed receipt. No record is the released state. The object is never an API payload, and Source deletion removes its committed receipt in the same transaction.",
+  "type": "object",
+  "required": ["client_nonce", "request_digest"],
+  "additionalProperties": false,
+  "properties": {
+    "client_nonce": {
+      "type": "string",
+      "pattern": "^scn_[a-z0-9]{16,64}$",
+      "description": "The client-held SourceCreate correlation claimed before observation or credential work."
+    },
+    "request_digest": {
+      "type": "string",
+      "pattern": "^hmac-sha256:[a-f0-9]{64}$",
+      "description": "Server-keyed HMAC-SHA-256 over the canonical substantive SourceCreate input, excluding client_nonce and covering vendor, default-expanded display_name, canonical/default-expanded base_url, the exact transient key bytes, and default-expanded protocol_order. It is compared only by the server and is never returned or logged; neither the digest key nor plaintext credential is stored in this record."
+    },
+    "terminal_envelope": {
+      "type": "object",
+      "description": "Exact create-time success envelope persisted at commit and replayed without recomputing Source, added_to, adopted_by, or placement positions. The Source snapshot remains a valid Source payload from that commit even if later Source or Route mutations change current read projections.",
+      "required": ["ok", "contract_version", "source", "added_to", "adopted_by"],
+      "additionalProperties": false,
+      "properties": {
+        "ok": { "const": true },
+        "contract_version": { "const": 5 },
+        "source": { "$ref": "source.schema.json" },
+        "added_to": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/AddedTo" }
+        },
+        "adopted_by": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/AdoptedBy" }
+        }
+      }
+    }
+  },
+  "definitions": {
+    "AddedTo": {
+      "type": "object",
+      "required": ["backend", "menu_model", "source_id", "model_id", "position"],
+      "additionalProperties": false,
+      "properties": {
+        "backend": { "enum": ["claude", "codex", "opencode"] },
+        "menu_model": { "type": "string", "minLength": 1 },
+        "source_id": { "type": "string", "minLength": 1 },
+        "model_id": { "type": "string", "minLength": 1 },
+        "position": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "AdoptedBy": {
+      "type": "object",
+      "required": ["backend", "menu_model"],
+      "additionalProperties": false,
+      "properties": {
+        "backend": { "enum": ["claude", "codex", "opencode"] },
+        "menu_model": { "type": "string", "minLength": 1 }
+      }
+    }
+  },
+  "examples": [
+    {
+      "client_nonce": "scn_01j5w8z7p4n6q2rt",
+      "request_digest": "hmac-sha256:3b9c4ac03753b3e67fa2fa59f64a52eea32a28565c968dbbb9bba1d527935ba0"
+    }
+  ]
+}
