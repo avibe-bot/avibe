@@ -942,6 +942,7 @@
         "startNow": "立即启动",
         "starting": "正在启动"
       },
+      "experimental": "实验",
       "agents": {
         "title": "Agent",
         "subtitle": "各自选用来源、各自排序；失败自动切到下一个",
@@ -1461,6 +1462,9 @@
         "rate_limited": "触发限流",
         "quota_exhausted": "本周期额度用完",
         "server_error": "上游服务异常"
+      },
+      "backoff": {
+        "connection_failed": "连接失败，短暂退避"
       },
       "needs_action": {
         "oauth_expired": "需要重新登录",

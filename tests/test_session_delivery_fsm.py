@@ -2807,6 +2807,50 @@ def test_definitive_p0_refusal_leaves_backlog_behind_the_active_turn(managers) -
     assert _row(engine, queued_id)["state"] == "queued"
 
 
+def test_refused_replacement_releases_its_control_ownership(managers) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+
+    async def run() -> tuple[str, str]:
+        turn_id, context = await _activate(manager)
+        holder = asyncio.create_task(asyncio.Event().wait())
+        manager.in_flight["ses_fsm"] = Turn(
+            task=holder,
+            context=context,
+            logical_turn_id=turn_id,
+        )
+
+        async def refused(stop_context):
+            stop_context.platform_specific["stop_failure_reason"] = "refused"
+            return False
+
+        manager.controller.command_handler.handle_stop = AsyncMock(side_effect=refused)
+        try:
+            result = await manager.deliver(
+                DeliveryRequest(
+                    session_id="ses_fsm",
+                    priority="p0",
+                    content="replacement",
+                ),
+                context=_context(),
+            )
+        finally:
+            holder.cancel()
+            await asyncio.gather(holder, return_exceptions=True)
+        assert result.state == "queued"
+        return turn_id, str(result.delivery_id)
+
+    turn_id, replacement_delivery_id = asyncio.run(run())
+    with engine.connect() as conn:
+        active = delivery_store.get_turn(conn, turn_id)
+    assert active is not None
+    assert active["state"] == "active"
+    assert active["control_state"] == "refused"
+    assert active["control_mode"] is None
+    assert active["control_successor_turn_id"] is None
+    assert active["control_successor_delivery_id"] is None
+    assert _row(engine, replacement_delivery_id)["state"] == "queued"
+
+
 def test_empty_p0_uses_the_control_slot_without_creating_a_message_delivery(managers) -> None:
     manager, _other, engine, _engine_b, _starts = managers
 

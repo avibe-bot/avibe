@@ -1081,6 +1081,8 @@ def derive_session_harness_activities(conn: Connection, session_id: str) -> list
                 agent_runs.c.updated_at,
                 message_deliveries.c.state.label("delivery_state"),
                 message_deliveries.c.submitted_at.label("delivery_submitted_at"),
+                message_deliveries.c.turn_id.label("delivery_turn_id"),
+                message_deliveries.c.turn_position.label("delivery_turn_position"),
             )
             .select_from(
                 agent_runs.outerjoin(
@@ -1103,7 +1105,29 @@ def derive_session_harness_activities(conn: Connection, session_id: str) -> list
         .mappings()
         .all()
     )
+    # Once several delegated messages are accepted into one target Turn, they
+    # describe one running unit of work. Keep its latest accepted participant as
+    # the representative; Deliveries that are still queued have no Turn
+    # membership and remain individually visible.
+    projected_run_rows: list[Any] = []
+    accepted_turn_indexes: dict[str, int] = {}
     for row in run_rows:
+        delivery_turn_id = str(row["delivery_turn_id"] or "").strip()
+        if row["delivery_state"] != "accepted" or not delivery_turn_id:
+            projected_run_rows.append(row)
+            continue
+        previous_index = accepted_turn_indexes.get(delivery_turn_id)
+        if previous_index is None:
+            accepted_turn_indexes[delivery_turn_id] = len(projected_run_rows)
+            projected_run_rows.append(row)
+            continue
+        previous = projected_run_rows[previous_index]
+        if int(row["delivery_turn_position"]) > int(
+            previous["delivery_turn_position"]
+        ):
+            projected_run_rows[previous_index] = row
+
+    for row in projected_run_rows:
         head = _banner_label(row["message"] or row["prompt"])
         agent_name = str(row["agent_name"] or "").strip()
         if agent_name and head:

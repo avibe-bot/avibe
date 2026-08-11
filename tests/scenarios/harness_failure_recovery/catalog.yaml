@@ -4274,6 +4274,16 @@ scenarios:
     # remain visible, while deleted definitions never leak their opaque id or append
     # internal error, origin, lifecycle, and inspection lines.
     test: tests/test_harness_failure_visibility.py::test_hfr_475_restart_notice_is_one_calm_action_without_internal_details
+  - id: HFR-476
+    name: Run cancellation cannot stop a shared Session Turn
+    status: covered
+    kind: cancellation
+    layer: scenario
+    backend: shared
+    # A Run-level cancel may stop the backend only when its Delivery is the exact
+    # Turn's sole initial accepted input. Steered or coalesced participants settle
+    # locally, skip their callback, and leave the shared Session Turn untouched.
+    test: tests/test_internal_server.py::test_hfr_476_run_cancel_does_not_stop_a_shared_turn
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor

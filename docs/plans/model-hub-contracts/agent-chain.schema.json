@@ -36,11 +36,15 @@
           "source_id": { "type": "string", "pattern": "^src_[a-z0-9]{8,}$" },
           "model_id": { "type": "string", "minLength": 1 },
           "channel": { "enum": ["hub", "native_cli"] },
-          "health": { "enum": ["healthy", "cooldown", "needs_action", "error"] },
+          "health": {
+            "enum": ["healthy", "cooldown", "backoff", "needs_action", "error"],
+            "description": "Source-global health mapped to this hop, plus live backoff. backoff is an in-memory connection throttle before the first user-visible model-output byte and is never persisted on Source or configuration. It is projected only over an otherwise healthy hop whose exact Source/model capability is present; every durable Source/capability blocker suppresses it."
+          },
           "runnable": { "type": "boolean" },
           "reason": {
             "anyOf": [
               { "const": "native_cli_unavailable" },
+              { "const": "models.source.backoff.connection_failed" },
               {
                 "enum": [
                   "source_missing",
@@ -55,7 +59,11 @@
               { "type": "null" }
             ]
           },
-          "retry_at": { "type": ["string", "null"], "format": "date-time" }
+          "retry_at": {
+            "type": ["string", "null"],
+            "format": "date-time",
+            "description": "When health is backoff, this live deadline is strictly later than the read assembler's captured assembly time. The API normalizes an expired overlay to its underlying non-backoff health before validation and serialization; JSON Schema enforces only the date-time shape, not the relation to a moving clock."
+          }
         },
         "allOf": [
           {
@@ -73,13 +81,31 @@
           {
             "if": { "properties": { "health": { "const": "cooldown" } }, "required": ["health"] },
             "then": { "required": ["retry_at"], "properties": { "retry_at": { "type": "string" } } }
+          },
+          {
+            "if": { "properties": { "health": { "const": "backoff" } }, "required": ["health"] },
+            "then": {
+              "required": ["reason", "retry_at"],
+              "properties": {
+                "runnable": { "const": false },
+                "reason": {
+                  "enum": ["models.source.backoff.connection_failed", "native_cli_unavailable"],
+                  "description": "Connection backoff is the reason unless an unavailable native CLI is the simultaneous actionable process blocker; in that combined state native_cli_unavailable takes the single reason slot while health and retry_at retain the backoff facts."
+                },
+                "retry_at": { "type": "string" }
+              }
+            }
+          },
+          {
+            "if": { "properties": { "health": { "enum": ["healthy", "cooldown", "needs_action", "error"] } }, "required": ["health"] },
+            "then": { "properties": { "reason": { "not": { "const": "models.source.backoff.connection_failed" } } } }
           }
         ]
       }
     },
     "supply_state": {
       "enum": ["ok", "waiting", "interrupted"],
-      "description": "ok has a runnable hop; waiting is a non-empty all-cooldown chain with no process blocker; interrupted covers an empty chain or an action/process blocker."
+      "description": "ok has a runnable hop; waiting is a non-empty chain whose only blockers are Source cooldown or live connection backoff and which has no process blocker; interrupted covers an empty chain or an action/process blocker. A durable blocker cannot be hidden by a simultaneous live backoff."
     }
   },
   "allOf": [
@@ -97,8 +123,38 @@
         "properties": {
           "chain": {
             "minItems": 1,
-            "items": { "properties": { "health": { "const": "cooldown" }, "runnable": { "const": false }, "reason": { "type": "null" } }, "required": ["health", "runnable", "reason"] }
+            "items": {
+              "properties": {
+                "health": { "enum": ["cooldown", "backoff"] },
+                "runnable": { "const": false },
+                "reason": { "enum": [null, "models.source.backoff.connection_failed"] }
+              },
+              "required": ["health", "runnable", "reason"]
+            }
           }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "chain": {
+            "minItems": 1,
+            "items": {
+              "properties": {
+                "health": { "enum": ["cooldown", "backoff"] },
+                "runnable": { "const": false },
+                "reason": { "enum": [null, "models.source.backoff.connection_failed"] }
+              },
+              "required": ["health", "runnable", "reason"]
+            }
+          }
+        },
+        "required": ["chain"]
+      },
+      "then": {
+        "properties": {
+          "supply_state": { "const": "waiting" }
         }
       }
     }
@@ -114,9 +170,25 @@
     },
     {
       "contract_version": 5,
+      "backend": "opencode",
+      "model_id": "custom/glm-5.2",
+      "chain": [{ "source_id": "src_relay9c1x", "model_id": "glm-5.2", "channel": "hub", "health": "backoff", "runnable": false, "reason": "models.source.backoff.connection_failed", "retry_at": "2026-08-11T11:55:08Z" }],
+      "current": null,
+      "supply_state": "waiting"
+    },
+    {
+      "contract_version": 5,
       "backend": "codex",
       "model_id": "gpt-5.6",
       "chain": [{ "source_id": "src_chatgptplus", "model_id": "gpt-5.6", "channel": "native_cli", "health": "healthy", "runnable": false, "reason": "native_cli_unavailable", "retry_at": null }],
+      "current": null,
+      "supply_state": "interrupted"
+    },
+    {
+      "contract_version": 5,
+      "backend": "codex",
+      "model_id": "gpt-5.6",
+      "chain": [{ "source_id": "src_chatgptplus", "model_id": "gpt-5.6", "channel": "native_cli", "health": "backoff", "runnable": false, "reason": "native_cli_unavailable", "retry_at": "2026-08-11T11:55:08Z" }],
       "current": null,
       "supply_state": "interrupted"
     },

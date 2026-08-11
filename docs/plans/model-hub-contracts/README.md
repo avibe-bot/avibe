@@ -1,11 +1,12 @@
 # Model Hub contracts
 
-Status: **FINAL v5 shape, implementation-gated (2026-08-09)**.
+Status: **FINAL v5 shape, implementation-gated (2026-08-11 contract completion)**.
 
 These files describe the terminal contract for Model Hub before first release. There is
 no v4-to-v5 data migration, compatibility reader, conversion transaction, or version
 discriminator: Model Hub has not shipped. `contract_version` is 5 wherever a versioned
-object exists.
+object exists. The owner-approved pre-release network correction removes the earlier
+persistent network/timeout cooldown spelling without adding a compatibility path.
 
 The contracts and their consumers must coexist on one tested PR head before Model Hub
 can be enabled. CI evaluates that head, not individual commits. A green intermediate
@@ -25,8 +26,9 @@ commit is not evidence that the complete final protocol has landed.
 - The protocol vocabulary is exactly `anthropic | openai_responses | openai_chat`.
   `base_url` already distinguishes official endpoints from relays and self-hosted
   gateways; no fourth protocol value is defined.
-- Source health is global. Native CLI process availability and exact-hop integrity are
-  live execution facts and never silently rewrite stored configuration.
+- Source health is global and changes only from shaped explicit upstream classifications.
+  Native CLI availability, exact-hop integrity, and bounded pre-first-byte connection
+  backoff are live execution facts and never silently rewrite stored configuration.
 - Supply state is pull-oriented. Successful fallback is silent; Gateway and Usage are
   the user-visible inspection surfaces.
 
@@ -56,8 +58,9 @@ Contract prose points to those authorities and does not add branches.
    across time, quota, and health changes. Live runnability and current execution
    position may change; Route membership and order may not.
 6. Every Source model id is unique within that Source. The final model item shape is
-   `{id, origin, reasoning_efforts, display_name?, discovered_at?}`; effort lists are
-   editable capability declarations, may be empty, and have no selected/default item.
+   `{id, origin, reasoning_efforts, retired?, display_name?, discovered_at?}`; effort
+   lists are editable capability declarations, may be empty, and have no selected/default
+   item. `retired: true` is a persistent discovered-model tombstone and never supplies.
 7. A backend has at most one `native_cli` Source. Additional accounts are Hub-held
    Sources.
 8. Direct mode and a Native hop are distinct. Direct bypasses Gateway for the backend;
@@ -87,6 +90,7 @@ The terminal value 5 must coexist in all registered version locations on the sam
 - `probe-result.schema.json`
 - `observation-result.schema.json`
 - `runtime-dependency.schema.json`
+- `guard-refusal.schema.json`
 - `turn-provenance.schema.json`
 - `core/handlers/model_hub/service.py`
 - `core/handlers/model_hub/provenance.py`
@@ -106,15 +110,17 @@ revision; the discovering lane does not reinterpret or edit the contract in plac
 | File | Authority and consumer role |
 | --- | --- |
 | `source.schema.json` | Source identity, channel, three protocols, state, usage, inventory, credential reference, and audit metadata. |
+| `source-create.schema.json` | API-key Source creation request, transient credential boundary, probe-order hint, and lost-response correlation. |
 | `agent-supply.schema.json` | Backend mode, explicit policy-free Source order, configuration eligibility, model-supply and backend-health projections. |
-| `agent-chain.schema.json` | Read projection of exact stored hops plus current execution position, runnability, blockers, retry metadata, and model supply state. |
-| `probe-result.schema.json` | Saved recovery probes and route probes over exact configured hops. |
+| `agent-chain.schema.json` | Read projection of exact stored hops plus current execution position, runnability, blockers, live connection backoff, retry metadata, and model supply state. |
+| `probe-result.schema.json` | Saved recovery probes and route probes over exact configured hops, including the live connection-backoff reason without persistent network health. |
 | `observation-result.schema.json` | Non-persisting Add-time connectivity, authentication, response-backed protocol, and inventory observation. |
 | `turn-provenance.schema.json` | Exactly attributed turn attempts and terminal outcome; no policy or mapping discriminator. |
 | `resolution-event.schema.json` | Pull-feed Source/resolution records and their closed reason/detail vocabulary. |
 | `oauth-flow.schema.json` | Subscription creation and re-auth presentation without secret material. |
 | `migration-scan.schema.json` | Copy-only import of existing native CLI/provider configuration; not an internal contract migration. |
 | `runtime-dependency.schema.json` | Managed local Gateway asset, lifecycle, and health. |
+| `guard-refusal.schema.json` | Shared guarded-mutation refusal whose two arrays are the exact plan echoed by a confirmed retry. |
 | `api.md` | Routes, envelopes, exact Source order and Route-chain writes, guards, OAuth/import results, provenance, and runtime status. |
 | `opencode-overlay.md` | Stable OpenCode provider/model identifiers and exact configured-hop overlay behavior. |
 | `adapter-interface.py` | Adapter protocol, observation, credential, discovery, invocation, cleanup, and classification boundary. |

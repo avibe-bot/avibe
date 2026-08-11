@@ -942,6 +942,7 @@
         "startNow": "Start now",
         "starting": "Starting"
       },
+      "experimental": "Experimental",
       "agents": {
         "title": "Agent",
         "subtitle": "Each agent picks its own sources and order; a failure moves to the next one",
@@ -1461,6 +1462,9 @@
         "rate_limited": "Rate limited",
         "quota_exhausted": "Cycle quota used up",
         "server_error": "Upstream server error"
+      },
+      "backoff": {
+        "connection_failed": "Connection failed, retrying shortly"
       },
       "needs_action": {
         "oauth_expired": "Needs a new sign-in",
