@@ -7,7 +7,10 @@ import userEvent from '@testing-library/user-event';
 import type { MemorySettings } from '../../../context/ApiContext';
 import { MemorySettingsPanel } from './MemorySettingsPanel';
 
-const api = vi.hoisted(() => ({ saveMemorySettings: vi.fn() }));
+const api = vi.hoisted(() => ({
+  saveMemorySettings: vi.fn(),
+  rebuildMemoryRuntime: vi.fn(),
+}));
 const showToast = vi.hoisted(() => vi.fn());
 
 vi.mock('../../../context/ApiContext', async (loadOriginal) => {
@@ -17,6 +20,16 @@ vi.mock('../../../context/ApiContext', async (loadOriginal) => {
 
 vi.mock('../../../context/ToastContext', () => ({
   useToast: () => ({ showToast }),
+}));
+
+vi.mock('../../ui/confirm-dialog', () => ({
+  ConfirmDialog: ({
+    open,
+    onConfirm,
+  }: {
+    open: boolean;
+    onConfirm: () => void | Promise<void>;
+  }) => (open ? <button type="button" onClick={() => void onConfirm()}>confirm-rebuild</button> : null),
 }));
 
 vi.mock('react-i18next', () => ({
@@ -86,49 +99,10 @@ describe('MemorySettingsPanel', () => {
     expect(onSaved).toHaveBeenCalledWith(saved);
   });
 
-  it('locks embedding identity until the separate maintenance fact is known', () => {
-    render(
-      <MemorySettingsPanel
-        settings={legacySettings}
-        maintenance={null}
-        maintenanceError={null}
-        dependencyReady
-        onSaved={() => undefined}
-        onReloadSettings={() => undefined}
-        onReloadMaintenance={() => undefined}
-        onClearAll={() => undefined}
-        clearing={false}
-      />,
-    );
-
-    const embeddingBaseUrl = screen.getAllByPlaceholderText('memory.settings.baseUrlPlaceholder')[1] as HTMLInputElement;
-    expect(embeddingBaseUrl.disabled).toBe(true);
-    expect(screen.getByText('memory.settings.embeddingStatusPending')).toBeTruthy();
-  });
-
-  it('keeps the embedding identity locked and reports a maintenance read failure', () => {
-    render(
-      <MemorySettingsPanel
-        settings={legacySettings}
-        maintenance={null}
-        maintenanceError="maintenance unavailable"
-        dependencyReady
-        onSaved={() => undefined}
-        onReloadSettings={() => undefined}
-        onReloadMaintenance={() => undefined}
-        onClearAll={() => undefined}
-        clearing={false}
-      />,
-    );
-
-    const embeddingBaseUrl = screen.getAllByPlaceholderText('memory.settings.baseUrlPlaceholder')[1] as HTMLInputElement;
-    expect(embeddingBaseUrl.disabled).toBe(true);
-    expect(screen.getByText('maintenance unavailable')).toBeTruthy();
-  });
-
-  it('unlocks embedding identity only when maintenance reports no data', async () => {
+  it('keeps embedding identity editable when data exists and confirms rebuild on save', async () => {
     api.saveMemorySettings.mockResolvedValue({
       ...legacySettings,
+      rebuild_required: true,
       processing: {
         ...legacySettings.processing,
         embedding: endpoint('https://new-embedding.example.test/v1'),
@@ -138,7 +112,7 @@ describe('MemorySettingsPanel', () => {
     render(
       <MemorySettingsPanel
         settings={legacySettings}
-        maintenance={{ status: 'ok', data_exists: false, can_clear: true, clear_recovery: null }}
+        maintenance={{ status: 'ok', data_exists: true, can_clear: true, clear_recovery: null }}
         maintenanceError={null}
         dependencyReady
         onSaved={() => undefined}
@@ -154,10 +128,37 @@ describe('MemorySettingsPanel', () => {
     await user.clear(embeddingBaseUrl);
     await user.type(embeddingBaseUrl, 'https://new-embedding.example.test/v1');
     await user.click(screen.getByRole('button', { name: 'memory.settings.save' }));
+    expect(api.saveMemorySettings).not.toHaveBeenCalled();
+    await user.click(await screen.findByRole('button', { name: 'confirm-rebuild' }));
 
     await waitFor(() => expect(api.saveMemorySettings).toHaveBeenCalledWith({
       processing: { embedding: { base_url: 'https://new-embedding.example.test/v1' } },
+      confirm_rebuild: true,
     }));
+  });
+
+  it('shows Retry rebuild under a pending marker', async () => {
+    api.rebuildMemoryRuntime.mockResolvedValue({ ok: true, result: 'completed' });
+    const onReloadSettings = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <MemorySettingsPanel
+        settings={{ ...legacySettings, rebuild_required: true }}
+        maintenance={{ status: 'ok', data_exists: true, can_clear: true, clear_recovery: null }}
+        maintenanceError={null}
+        dependencyReady
+        onSaved={() => undefined}
+        onReloadSettings={onReloadSettings}
+        onReloadMaintenance={() => undefined}
+        onClearAll={() => undefined}
+        clearing={false}
+      />,
+    );
+
+    expect(screen.getByText('memory.settings.rebuildRequiredTitle')).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: 'memory.settings.retryRebuild' }));
+    await waitFor(() => expect(api.rebuildMemoryRuntime).toHaveBeenCalled());
+    expect(onReloadSettings).toHaveBeenCalled();
   });
 
   it.each([false, true])('disables Clear when authoritative maintenance refuses it with data_exists=%s', async (dataExists) => {

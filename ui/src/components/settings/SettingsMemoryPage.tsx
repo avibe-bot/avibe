@@ -40,6 +40,7 @@ export const SettingsMemoryPage: React.FC = () => {
   const [dependencyReady, setDependencyReady] = useState(true);
   const [runtimeInstalled, setRuntimeInstalled] = useState<boolean | null>(null);
   const [restarting, setRestarting] = useState(false);
+  const [rebuildBusy, setRebuildBusy] = useState(false);
   const [logGeneration, setLogGeneration] = useState(0);
   const [logRefreshToken, setLogRefreshToken] = useState(0);
   const [recoveryAction, setRecoveryAction] = useState<'resume' | 'abort' | null>(null);
@@ -187,12 +188,15 @@ export const SettingsMemoryPage: React.FC = () => {
     [t],
   );
 
+  const rebuildRequired = settings?.rebuild_required === true;
   const settingsPanel = settings ? (
     <MemorySettingsPanel
       settings={settings}
       maintenance={maintenanceRead.data}
       maintenanceError={maintenanceRead.error}
       dependencyReady={dependencyReady}
+      rebuildBusy={rebuildBusy}
+      onRebuildBusyChange={setRebuildBusy}
       onSaved={(next) => {
         setSettings(next);
         window.dispatchEvent(new Event('avibe:memory-settings-changed'));
@@ -224,7 +228,7 @@ export const SettingsMemoryPage: React.FC = () => {
             variant="secondary"
             size="xs"
             onClick={() => void restartEngine()}
-            disabled={restarting}
+            disabled={restarting || rebuildRequired || rebuildBusy}
           >
             {restarting ? <Loader2 className="animate-spin" /> : <RotateCw />}
             {t('memory.status.restartEngine')}

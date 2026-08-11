@@ -47,6 +47,7 @@ from core.memory.process import (
     EverOSProcessSettings,
     FakeEverOSProcess,
     FakeEverOSProcessFactory,
+    RebuildProcessResult,
 )
 from core.memory.runtime import (
     MemoryRuntime,
@@ -2509,12 +2510,15 @@ async def test_runtime_restart_rechecks_persisted_embedding_candidate(
         return True
 
     monkeypatch.setattr(runtime, "_provider_data_exists_strict", existing_vectors, raising=False)
-    assert await runtime.reconcile(restarted) == {"ok": False, "error": "memory_clear_failed"}
+    assert await runtime.reconcile(restarted) == {
+        "ok": False,
+        "error": "memory_embedding_rebuild_required",
+    }
     assert runtime._config is restarted
-    assert runtime.module._worker._claims_paused is False
+    assert runtime.module._worker._claims_paused is True
     await memory_runtime_factory.close(runtime)
     assert inspected == [True]
-    # The rejection must land before any child is launched.
+    # The pending marker must fence without launching any child.
     assert factory.created == []
 
 
@@ -4018,7 +4022,7 @@ async def test_runtime_restart_fails_closed_before_launch_for_marker_or_clear_re
 
     assert await marked.restart() == {
         "ok": False,
-        "error": "memory_clear_failed",
+        "error": "memory_embedding_rebuild_required",
     }
     assert await recovering.restart() == {
         "ok": False,
@@ -4566,3 +4570,185 @@ async def test_runtime_effective_home_owns_the_attachment_pipeline(
     assert len(pinned_files) == 1
     assert pinned_files[0].read_bytes() == b"runtime-owned attachment"
     assert not attachment_pin_root(global_home).exists()
+
+
+async def test_runtime_rebuild_validates_before_destructive_stop(
+    monkeypatch,
+    tmp_path,
+    memory_runtime_factory,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    processing = _processing_config()
+    V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+        memory=MemoryConfig(
+            enabled=True,
+            processing=processing,
+            embedding_change_pending=True,
+        ),
+    ).save()
+    factory = FakeEverOSProcessFactory()
+    runtime = memory_runtime_factory(
+        V2Config.load().memory,
+        artifact_manager=_installed_artifact(
+            python=None,
+            status_payload={"reason": "missing"},
+        ),
+        process_factory=factory,
+        effective_home=tmp_path,
+    )
+    old = FakeEverOSProcess(settings=_settings())
+    runtime._process = old
+    runtime.module.resume_claims()
+    result = await runtime.rebuild()
+    assert result["ok"] is False
+    assert result["result"] == "failed"
+    assert old.stopped is False
+    assert factory.created == []
+    assert V2Config.load().memory.embedding_change_pending is True
+    await memory_runtime_factory.close(runtime)
+
+async def test_runtime_rebuild_empty_root_settles_without_child(
+    monkeypatch,
+    tmp_path,
+    memory_runtime_factory,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    processing = _processing_config()
+    V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+        memory=MemoryConfig(
+            enabled=True,
+            processing=processing,
+            embedding_change_pending=True,
+        ),
+    ).save()
+    factory = FakeEverOSProcessFactory()
+    runtime = memory_runtime_factory(
+        V2Config.load().memory,
+        artifact_manager=_installed_artifact(),
+        process_factory=factory,
+        effective_home=tmp_path,
+    )
+    monkeypatch.setattr(runtime, "_provider_data_exists_strict", lambda: False, raising=False)
+    rebuild_calls = []
+
+    class _NoChild:
+        def __init__(self, *args, **kwargs):
+            rebuild_calls.append(True)
+
+        async def run(self):
+            raise AssertionError("empty root must not launch cascade rebuild")
+
+    monkeypatch.setattr("core.memory.runtime.EverOSRebuildProcess", _NoChild)
+    result = await runtime.rebuild()
+    assert result == {"ok": True, "result": "completed_empty", "state": "ready"}
+    assert rebuild_calls == []
+    assert V2Config.load().memory.embedding_change_pending is False
+    assert runtime._restart_config.embedding_change_pending is False
+    await memory_runtime_factory.close(runtime)
+
+
+async def test_runtime_rebuild_maps_root_busy_without_settling(
+    monkeypatch,
+    tmp_path,
+    memory_runtime_factory,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    processing = _processing_config()
+    V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+        memory=MemoryConfig(
+            enabled=True,
+            processing=processing,
+            embedding_change_pending=True,
+        ),
+    ).save()
+    factory = FakeEverOSProcessFactory()
+    runtime = memory_runtime_factory(
+        V2Config.load().memory,
+        artifact_manager=_installed_artifact(),
+        process_factory=factory,
+        effective_home=tmp_path,
+    )
+    monkeypatch.setattr(runtime, "_provider_data_exists_strict", lambda: True, raising=False)
+
+    class _BusyRebuild:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def run(self):
+            return RebuildProcessResult.ROOT_BUSY
+
+    monkeypatch.setattr("core.memory.runtime.EverOSRebuildProcess", _BusyRebuild)
+    result = await runtime.rebuild()
+    assert result == {"ok": False, "error": "memory_rebuild_root_busy", "result": "root_busy"}
+    assert "factory" not in str(result).lower()
+    assert V2Config.load().memory.embedding_change_pending is True
+    assert runtime.module._worker._claims_paused is True
+    await memory_runtime_factory.close(runtime)
+
+async def test_runtime_rebuild_refreshes_restart_snapshot_before_activation(
+    monkeypatch,
+    tmp_path,
+    memory_runtime_factory,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    processing = _processing_config()
+    V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+        memory=MemoryConfig(
+            enabled=True,
+            processing=processing,
+            embedding_change_pending=True,
+        ),
+    ).save()
+    observed = []
+
+    class _CompletedRebuild:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def run(self):
+            return RebuildProcessResult.COMPLETED
+
+    class _Process(FakeEverOSProcess):
+        async def start(self) -> bool:
+            observed.append(
+                (
+                    runtime._restart_config.embedding_change_pending,
+                    V2Config.load().memory.embedding_change_pending,
+                )
+            )
+            return await super().start()
+
+    factory = FakeEverOSProcessFactory(template=_Process)
+    runtime = memory_runtime_factory(
+        V2Config.load().memory,
+        artifact_manager=_installed_artifact(),
+        process_factory=factory,
+        effective_home=tmp_path,
+    )
+    monkeypatch.setattr(runtime, "_provider_data_exists_strict", lambda: True, raising=False)
+    monkeypatch.setattr("core.memory.runtime.EverOSRebuildProcess", _CompletedRebuild)
+    result = await runtime.rebuild()
+    assert result == {"ok": True, "result": "completed", "state": "ready"}
+    assert observed == [(False, False)]
+    assert runtime._restart_config.embedding_change_pending is False
+    await memory_runtime_factory.close(runtime)

@@ -540,6 +540,7 @@ export type ApiContextType = {
   resumeMemoryClear: (operationId: string) => Promise<MemoryClearRecoveryResult>;
   abortMemoryClear: (operationId: string) => Promise<MemoryClearRecoveryResult>;
   restartMemoryRuntime: () => Promise<MemoryRuntimeRestartResult>;
+  rebuildMemoryRuntime: () => Promise<MemoryRuntimeRebuildResult>;
   getBackendRuntime: (name: string) => Promise<BackendRuntimeInfo>;
   restartBackend: (name: string) => Promise<BackendRestartResult>;
   getCodexAuth: () => Promise<CodexAuthState>;
@@ -1740,6 +1741,7 @@ export type MemorySettings = {
   status: 'ok';
   enabled: boolean;
   processing: MemoryProcessingConfig;
+  rebuild_required?: boolean;
 };
 
 // Omitting a field keeps its current value; an explicit `api_key: null` clears it
@@ -1756,6 +1758,7 @@ export type MemorySettingsPatch = {
     llm?: MemoryEndpointPatch;
     embedding?: MemoryEndpointPatch;
   };
+  confirm_rebuild?: boolean;
 };
 
 export type MemoryFailure = { status: 'failed'; error: string };
@@ -2001,6 +2004,10 @@ export type MemoryClearRecoveryResult =
 // Reconciliation answers the controller's ok/error shape rather than the
 // status/error one the read routes use.
 export type MemoryRuntimeRestartResult = { ok: true; state?: string } | { ok: false; error?: string };
+
+export type MemoryRuntimeRebuildResult =
+  | { ok: true; result?: string; state?: string }
+  | { ok: false; error?: string; result?: string };
 
 export type BackendRuntimeInfo = {
   ok: boolean;
@@ -3008,6 +3015,8 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     abortMemoryClear: (operationId) =>
       postJson('/api/memory/clear/abort', { operation_id: operationId }, { handleError: false }),
     restartMemoryRuntime: () => postJson('/api/memory/runtime/restart', {}, { handleError: false }),
+    rebuildMemoryRuntime: () =>
+      postJson('/api/memory/runtime/rebuild', { confirm: true }, { handleError: false }),
     getBackendRuntime: (name) => getJson(`/api/backend/${encodeURIComponent(name)}/runtime`),
     restartBackend: (name) => postJson(`/api/backend/${encodeURIComponent(name)}/restart`, {}),
     getCodexAuth: () => getJson('/api/backend/codex/auth'),

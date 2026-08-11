@@ -117,20 +117,29 @@ def _memory_settings_projection(memory: object) -> dict:
 def _memory_settings_payload() -> dict:
     # Tag the response, not `memory_config_to_payload` itself: the same helper
     # feeds the persisted config, which must stay free of result envelopes.
-    return {
-        **_memory_settings_projection(V2Config.load().memory),
-        "status": "ok",
-    }
+    memory = V2Config.load().memory
+    payload = _memory_settings_projection(memory)
+    payload["status"] = "ok"
+    # Read-only projection while a durable rebuild marker is pending.
+    payload["rebuild_required"] = bool(memory.embedding_change_pending)
+    return payload
 
 
-def _memory_settings_patch(current: V2Config, patch_payload: object) -> dict:
-    """Merge one write-only Memory settings PATCH."""
+def _memory_settings_patch(current: V2Config, patch_payload: object) -> tuple[dict, bool]:
+    """Merge one write-only Memory settings PATCH.
+
+    Returns ``(target_payload, confirm_rebuild)``. ``confirm_rebuild`` is accepted
+    only as an exact boolean and never becomes part of the persisted candidate.
+    """
 
     from config.v2_config import memory_config_to_payload
 
     if not isinstance(patch_payload, dict) or not set(patch_payload).issubset(
-        {"enabled", "processing"}
+        {"enabled", "processing", "confirm_rebuild"}
     ):
+        raise ValueError("invalid_memory_patch")
+    confirm_rebuild = patch_payload.get("confirm_rebuild", False)
+    if not isinstance(confirm_rebuild, bool):
         raise ValueError("invalid_memory_patch")
     target = memory_config_to_payload(current.memory, include_secrets=True)
     for endpoint in ("llm", "embedding"):
@@ -158,7 +167,7 @@ def _memory_settings_patch(current: V2Config, patch_payload: object) -> dict:
     )
     if explicit_key_clear and target["enabled"]:
         raise ValueError("memory_key_clear_while_enabled")
-    return target
+    return target, confirm_rebuild
 
 
 def _memory_candidate_config(current: V2Config, memory_payload: dict) -> V2Config:
@@ -170,13 +179,22 @@ def _memory_candidate_config(current: V2Config, memory_payload: dict) -> V2Confi
 
 
 def _memory_embedding_configuration_changed(current: V2Config, candidate: V2Config) -> bool:
-    """Return whether the persisted vector-space identity would change."""
+    """Return whether an already-established vector-space identity would change.
+
+    First-time configuration of empty embedding fields is ordinary setup, not a
+    rebuild. Only a change away from a previously set base_url/model requires
+    confirm_rebuild.
+    """
 
     current_embedding = current.memory.processing.embedding
     candidate_embedding = candidate.memory.processing.embedding
+    current_base = (current_embedding.base_url or "").strip()
+    current_model = (current_embedding.model or "").strip()
+    if not current_base and not current_model:
+        return False
     return (
-        current_embedding.base_url != candidate_embedding.base_url
-        or current_embedding.model != candidate_embedding.model
+        current_base != (candidate_embedding.base_url or "").strip()
+        or current_model != (candidate_embedding.model or "").strip()
     )
 
 
@@ -191,6 +209,8 @@ _settings_write_lock: asyncio.Lock | None = None
 _settings_write_lock_loop: asyncio.AbstractEventLoop | None = None
 _restart_request_task: asyncio.Task[tuple[dict, int]] | None = None
 _restart_request_task_loop: asyncio.AbstractEventLoop | None = None
+_rebuild_request_task: asyncio.Task[tuple[dict, int]] | None = None
+_rebuild_request_task_loop: asyncio.AbstractEventLoop | None = None
 
 
 def _memory_settings_write_lock() -> asyncio.Lock:
@@ -241,6 +261,47 @@ def _memory_restart_request_task() -> asyncio.Task[tuple[dict, int]]:
     return _restart_request_task
 
 
+async def _run_memory_rebuild_request() -> tuple[dict, int]:
+    # Intentionally not under the settings write lock: confirmed settings saves
+    # already hold that lock and then join this retained task. Controller-side
+    # rebuild ownership serializes the destructive work.
+    from vibe import internal_client
+
+    return await _memory_internal_result(internal_client.memory_rebuild)
+
+
+def _memory_rebuild_request_task() -> asyncio.Task[tuple[dict, int]]:
+    """Create or join the UI process' loop-scoped rebuild request owner."""
+
+    global _rebuild_request_task, _rebuild_request_task_loop
+
+    loop = asyncio.get_running_loop()
+    if _rebuild_request_task_loop is not loop:
+        _rebuild_request_task = None
+        _rebuild_request_task_loop = loop
+    if _rebuild_request_task is None:
+        task = loop.create_task(_run_memory_rebuild_request())
+        _rebuild_request_task = task
+
+        def clear_finished(finished: asyncio.Task[tuple[dict, int]]) -> None:
+            global _rebuild_request_task
+
+            if _rebuild_request_task is finished:
+                _rebuild_request_task = None
+
+        task.add_done_callback(clear_finished)
+    return _rebuild_request_task
+
+
+def _settings_ok_payload(memory, runtime_payload: dict | None = None) -> dict:
+    payload = _memory_settings_projection(memory)
+    payload["status"] = "ok"
+    payload["rebuild_required"] = bool(getattr(memory, "embedding_change_pending", False))
+    if runtime_payload is not None:
+        payload["runtime"] = runtime_payload
+    return payload
+
+
 async def _apply_memory_settings_patch(
     patch_payload: object,
 ) -> Response:
@@ -261,15 +322,46 @@ async def _apply_memory_settings_patch(
     async with _memory_settings_write_lock():
         try:
             current = await asyncio.to_thread(V2Config.load)
-            target_payload = _memory_settings_patch(current, patch_payload)
+            target_payload, confirm_rebuild = _memory_settings_patch(current, patch_payload)
             candidate = _memory_candidate_config(current, target_payload)
-            embedding_change_pending = (
-                current.memory.embedding_change_pending
-                or _memory_embedding_configuration_changed(current, candidate)
-            )
+            identity_changed = _memory_embedding_configuration_changed(current, candidate)
+            pending_marker = bool(current.memory.embedding_change_pending)
         except (TypeError, ValueError):
             return _memory_response({"status": "failed", "error": "memory_invalid_input"}, status_code=400)
 
+        # Unconfirmed identity change never writes — including on empty roots —
+        # so a check-then-save race cannot quietly accept a new vector space.
+        if identity_changed and not confirm_rebuild:
+            return _memory_response(
+                {
+                    "status": "failed",
+                    "error": "memory_embedding_rebuild_required",
+                },
+                status_code=409,
+            )
+
+        # API-key (or other non-identity) updates under an existing marker update
+        # the candidate only. They do not reconcile, clear the fence, or roll back.
+        if pending_marker and not identity_changed:
+            try:
+                saved = await asyncio.to_thread(
+                    api.save_memory_config,
+                    target_payload,
+                    embedding_change_pending=True,
+                    expected=current.memory,
+                )
+            except api.MemoryConfigStaleWrite:
+                return _memory_response(
+                    {"status": "failed", "error": "memory_operation_in_progress"},
+                    status_code=409,
+                )
+            except ValueError:
+                return _memory_response({"status": "failed", "error": "memory_invalid_input"}, status_code=400)
+            except Exception:
+                return _memory_response({"status": "failed", "error": "memory_store_unavailable"}, status_code=503)
+            return _memory_response(_settings_ok_payload(saved.memory))
+
+        embedding_change_pending = pending_marker or identity_changed
         try:
             # Persist a durable marker before asking the controller to inspect
             # the root. If Avibe exits in this interval, startup must re-run
@@ -279,15 +371,50 @@ async def _apply_memory_settings_patch(
                 api.save_memory_config,
                 target_payload,
                 embedding_change_pending=embedding_change_pending,
+                expected=current.memory,
+            )
+        except api.MemoryConfigStaleWrite:
+            return _memory_response(
+                {"status": "failed", "error": "memory_operation_in_progress"},
+                status_code=409,
             )
         except ValueError:
             return _memory_response({"status": "failed", "error": "memory_invalid_input"}, status_code=400)
         except Exception:
             return _memory_response({"status": "failed", "error": "memory_store_unavailable"}, status_code=503)
+
+        # Confirmed identity change: candidate+marker are durable. Schedule the
+        # same rebuild path as Retry; never roll the confirmed config back.
+        if identity_changed and confirm_rebuild:
+            body, status_code = await asyncio.shield(_memory_rebuild_request_task())
+            runtime_payload = body if isinstance(body, dict) else {}
+            latest = await asyncio.to_thread(V2Config.load)
+            payload = _settings_ok_payload(latest.memory, runtime_payload)
+            if status_code != 200 or runtime_payload.get("ok") is not True:
+                error = _memory_closed_error(
+                    runtime_payload,
+                    fallback="memory_rebuild_failed",
+                )
+                payload["status"] = "failed"
+                payload["error"] = error
+                # Confirmed candidate stays; surface rebuild_required for Retry.
+                payload["rebuild_required"] = True
+                return _memory_response(payload, status_code=status_code if status_code >= 400 else 409)
+            return _memory_response(payload)
+
         response = await _memory_internal_response(internal_client.reconcile_memory)
         runtime_payload = _memory_response_body(response)
         if response.status_code != 200 or runtime_payload.get("ok") is not True:
-            # Persisted settings must not outrun the controller's closed
+            closed_error = _memory_closed_error(
+                runtime_payload,
+                fallback="memory_sidecar_unavailable",
+            )
+            # Pending-marker reconcile that only needs rebuild is not a rollback.
+            if closed_error == "memory_embedding_rebuild_required":
+                payload = _settings_ok_payload(saved.memory, runtime_payload)
+                payload["rebuild_required"] = True
+                return _memory_response(payload)
+            # Ordinary non-identity saves must not outrun the controller's closed
             # compatibility decision, including while memory is disabled.
             try:
                 rollback_payload = memory_config_to_payload(
@@ -298,6 +425,7 @@ async def _apply_memory_settings_patch(
                     api.save_memory_config,
                     rollback_payload,
                     embedding_change_pending=current.memory.embedding_change_pending,
+                    expected=saved.memory,
                 )
                 await _memory_internal_response(internal_client.reconcile_memory)
             except Exception:
@@ -305,16 +433,14 @@ async def _apply_memory_settings_patch(
             return _memory_response(
                 {
                     "status": "failed",
-                    "error": _memory_closed_error(runtime_payload, fallback="memory_sidecar_unavailable"),
+                    "error": closed_error,
                 },
                 status_code=409,
             )
         if response.status_code >= 500:
             return response
-        payload = _memory_settings_projection(saved.memory)
-        payload["runtime"] = runtime_payload
-        payload["status"] = "ok"
-        return _memory_response(payload)
+        latest = await asyncio.to_thread(V2Config.load)
+        return _memory_response(_settings_ok_payload(latest.memory, runtime_payload))
 
 
 def register_memory_routes(app) -> None:
@@ -507,6 +633,27 @@ def register_memory_routes(app) -> None:
             # The retained task shares only the internal transport result. Each
             # request needs its own Response so request-local after hooks cannot
             # mix remote-session cookies across concurrent callers.
+            return _memory_response(body, status_code=status_code)
+
+        return await app.dispatch_native_request(starlette_request, handler)
+
+    @app.post("/api/memory/runtime/rebuild", include_in_schema=False)
+    async def memory_runtime_rebuild_post(starlette_request: FastAPIRequest):
+        """Wait for one retained Memory rebuild; requires a pending marker."""
+
+        async def handler():
+            if _memory_ui_user_key() is None:
+                return _memory_forbidden_response()
+            try:
+                payload = await starlette_request.json()
+            except Exception:
+                payload = None
+            if payload != {"confirm": True}:
+                return _memory_response(
+                    {"status": "failed", "error": "memory_invalid_input"},
+                    status_code=400,
+                )
+            body, status_code = await asyncio.shield(_memory_rebuild_request_task())
             return _memory_response(body, status_code=status_code)
 
         return await app.dispatch_native_request(starlette_request, handler)

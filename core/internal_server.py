@@ -908,6 +908,27 @@ def create_app(
                 content={"ok": False, "error": "memory_restart_failed"},
             )
 
+    @app.post("/internal/memory/rebuild")
+    async def _memory_rebuild() -> Any:
+        """Run one retained Memory rebuild and wait for the closed result."""
+
+        runtime = _memory_runtime()
+        if runtime is None:
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": "memory_runtime_missing", "result": "failed"},
+            )
+        try:
+            result = await runtime.rebuild()
+            status_code = 200 if result.get("ok") is True else 409
+            return JSONResponse(status_code=status_code, content=result)
+        except Exception:
+            logger.exception("internal memory rebuild failed")
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": "memory_rebuild_failed", "result": "failed"},
+            )
+
     @app.post("/internal/memory/install-runtime")
     async def _memory_install_runtime() -> Any:
         """Install or repair the managed runtime on the controller lifecycle."""

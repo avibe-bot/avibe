@@ -5,10 +5,11 @@ import os
 import re
 import tempfile
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass, field, fields
 from datetime import datetime
 from pathlib import Path
-from typing import List, Literal, Mapping, Optional, Union
+from typing import Iterator, List, Literal, Mapping, Optional, Union
 from urllib.parse import urlsplit, urlunsplit
 
 from config import paths
@@ -28,6 +29,40 @@ from vibe.i18n import normalize_language
 logger = logging.getLogger(__name__)
 
 CONFIG_LOCK = threading.RLock()
+
+
+@contextmanager
+def memory_config_transaction() -> Iterator[None]:
+    """Narrow cross-process exclusive section for Memory candidate+marker writes.
+
+    UI and Controller run in different processes. ``CONFIG_LOCK`` is process-local,
+    so settlement and a concurrent settings save need a shared file lock around
+    the durable Memory unit. This is not a general multi-writer config service.
+    """
+
+    paths.ensure_data_dirs()
+    lock_path = paths.get_config_dir() / "memory-config.tx.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(
+        lock_path,
+        os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0),
+        0o600,
+    )
+    try:
+        import fcntl
+
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        with CONFIG_LOCK:
+            yield
+    finally:
+        try:
+            import fcntl
+
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        except Exception:
+            pass
+        os.close(descriptor)
+
 
 DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS = 600
 

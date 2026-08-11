@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 from config import paths
-from config.v2_config import CONFIG_LOCK, MemoryConfig, V2Config
+from config.v2_config import CONFIG_LOCK, MemoryConfig, V2Config, memory_config_transaction
 from core.memory.artifact import (
     EVEROS_VERSION,
     MemoryArtifactCandidate,
@@ -53,6 +53,7 @@ from core.memory.process import (
     EverOSProcessPort,
     EverOSRebuildProcess,
     EverOSProcessSettings,
+    RebuildProcessResult,
 )
 from core.memory.sidecar_lifecycle import MemorySidecarLifecycle, SidecarSnapshot
 from core.memory.processing_record import (
@@ -338,6 +339,7 @@ class MemoryRuntime:
             self._advance_processing_lifecycle
         )
         self._restart_task: asyncio.Task[dict[str, Any]] | None = None
+        self._rebuild_task: asyncio.Task[dict[str, Any]] | None = None
         self._ready_activation_task: asyncio.Task[None] | None = None
         self._artifact_activation_task: asyncio.Task[None] | None = None
         self._closing = False
@@ -661,6 +663,9 @@ class MemoryRuntime:
     async def _reconcile(self, config: MemoryConfig) -> dict[str, Any]:
         """Run one reconciliation owned by the public lifecycle operation."""
 
+        if self._rebuild_running() and asyncio.current_task() is not self._rebuild_task:
+            return {"ok": False, "error": "memory_operation_in_progress"}
+
         # Before every early return below, because a boot that never launches a
         # sidecar is exactly the boot that may face one from the run before it.
         # Takes and releases the reconcile lock itself; the lock this method
@@ -773,28 +778,45 @@ class MemoryRuntime:
                 self._runtime_error = "memory_clear_failed"
                 return {"ok": False, "error": self._runtime_error}
             claims_paused = True
-            embedding_guard_rejected = False
-            try:
-                if await asyncio.to_thread(self._provider_data_exists_strict):
+            # A durable pending marker means the user confirmed rebuild; non-empty
+            # roots stay fenced for an explicit rebuild rather than failing as a
+            # clear-style rejection. Only unmarked identity drift still fails
+            # closed when data exists.
+            if not config.embedding_change_pending:
+                embedding_guard_rejected = False
+                try:
+                    if await asyncio.to_thread(self._provider_data_exists_strict):
+                        embedding_guard_rejected = True
+                        self._runtime_error = "memory_clear_failed"
+                        return {"ok": False, "error": self._runtime_error}
+                except Exception:
+                    # An indeterminate root/queue state cannot safely accept an
+                    # embedding change because it could mix vector spaces.
                     embedding_guard_rejected = True
                     self._runtime_error = "memory_clear_failed"
                     return {"ok": False, "error": self._runtime_error}
-            except Exception:
-                # An indeterminate root/queue state cannot safely accept an
-                # embedding change because it could mix vector spaces.
-                embedding_guard_rejected = True
-                self._runtime_error = "memory_clear_failed"
-                return {"ok": False, "error": self._runtime_error}
-            finally:
-                if embedding_guard_rejected and resume_claims_on_failure:
-                    self.module.resume_claims()
-                    claims_paused = False
+                finally:
+                    if embedding_guard_rejected and resume_claims_on_failure:
+                        self.module.resume_claims()
+                        claims_paused = False
 
         if config.embedding_change_pending:
             # A durable candidate marker prevents a post-save crash from
-            # comparing the candidate against itself on next startup. Clear it
-            # only after the guarded inspection succeeds, while claims remain
-            # paused, so no capture can resume against an unverified config.
+            # comparing the candidate against itself on next startup. Empty
+            # roots may settle here. Non-empty (or indeterminate) roots keep
+            # claims fenced and the sidecar down until an explicit rebuild.
+            try:
+                has_data = await asyncio.to_thread(self._provider_data_exists_strict)
+            except Exception:
+                has_data = True
+            if has_data:
+                self.module.pause_claims()
+                await self._stop_worker()
+                await self._sidecar.stop()
+                self._config = config
+                self._restart_config = deepcopy(config)
+                self._runtime_error = "memory_embedding_rebuild_required"
+                return {"ok": False, "error": "memory_embedding_rebuild_required"}
             if not await asyncio.to_thread(self._settle_embedding_change_pending, config):
                 error = "memory_runtime_install_failed"
                 if not (self._process and self._process.running):
@@ -1269,6 +1291,8 @@ class MemoryRuntime:
     async def clear(self, *, operator_ref: str) -> dict[str, Any]:
         if not self.available:
             raise self._unavailable()
+        if self._rebuild_running():
+            return {"status": "failed", "error": "memory_operation_in_progress"}
         result = await self._require_maintenance().clear(operator_ref=operator_ref)
         return _clear_result_payload(result)
 
@@ -1280,6 +1304,8 @@ class MemoryRuntime:
     ) -> dict[str, Any]:
         if not self.available:
             raise self._unavailable()
+        if self._rebuild_running():
+            return {"status": "failed", "error": "memory_operation_in_progress"}
         result = await self._require_maintenance().resume_clear(
             operation_id,
             operator_ref=operator_ref,
@@ -1294,6 +1320,8 @@ class MemoryRuntime:
     ) -> dict[str, Any]:
         if not self.available:
             raise self._unavailable()
+        if self._rebuild_running():
+            return {"status": "failed", "error": "memory_operation_in_progress"}
         result = await self._require_maintenance().abort_clear(
             operation_id,
             operator_ref=operator_ref,
@@ -1514,6 +1542,8 @@ class MemoryRuntime:
     async def restart(self) -> dict[str, Any]:
         """Join or start one process-only replacement of the Memory sidecar."""
 
+        if self._rebuild_running():
+            return {"ok": False, "error": "memory_operation_in_progress"}
         task = self._restart_task
         if task is None or task.done():
             task = asyncio.create_task(self._restart_once(), name="memory-restart")
@@ -1526,6 +1556,25 @@ class MemoryRuntime:
             task.add_done_callback(clear_restart)
         return await asyncio.shield(task)
 
+    async def rebuild(self) -> dict[str, Any]:
+        """Join or start one retained embedding-index rebuild over the cascade child."""
+
+        task = self._rebuild_task
+        if task is None or task.done():
+            task = asyncio.create_task(self._rebuild_once(), name="memory-rebuild")
+            self._rebuild_task = task
+
+            def clear_rebuild(completed: asyncio.Task[dict[str, Any]]) -> None:
+                if self._rebuild_task is completed:
+                    self._rebuild_task = None
+
+            task.add_done_callback(clear_rebuild)
+        return await asyncio.shield(task)
+
+    def _rebuild_running(self) -> bool:
+        task = self._rebuild_task
+        return task is not None and not task.done()
+
     async def _restart_once(self) -> dict[str, Any]:
         try:
             async with self._reconcile_lock:
@@ -1533,6 +1582,21 @@ class MemoryRuntime:
         except Exception:
             logger.exception("Memory sidecar restart failed")
             return {"ok": False, "error": "memory_restart_failed"}
+        finally:
+            if self._maintenance is not None:
+                self._maintenance.ensure_housekeeping()
+
+    async def _rebuild_once(self) -> dict[str, Any]:
+        try:
+            async with self._reconcile_lock:
+                return await self._rebuild_locked()
+        except Exception:
+            logger.exception("Memory embedding rebuild failed")
+            return {
+                "ok": False,
+                "error": "memory_rebuild_failed",
+                "result": "failed",
+            }
         finally:
             if self._maintenance is not None:
                 self._maintenance.ensure_housekeeping()
@@ -1545,12 +1609,14 @@ class MemoryRuntime:
             return {"ok": False, "error": "memory_store_unavailable"}
         if self._artifact_installing:
             return {"ok": False, "error": "memory_restart_failed"}
+        if self._rebuild_running() and asyncio.current_task() is not self._rebuild_task:
+            return {"ok": False, "error": "memory_operation_in_progress"}
 
         replay = deepcopy(self._restart_config)
         if not replay.enabled:
             return {"ok": False, "error": "memory_disabled"}
         if replay.embedding_change_pending:
-            return {"ok": False, "error": "memory_clear_failed"}
+            return {"ok": False, "error": "memory_embedding_rebuild_required"}
 
         python = await asyncio.to_thread(self._artifact_manager.resolve_python)
         if python is None:
@@ -1633,6 +1699,192 @@ class MemoryRuntime:
             self._ensure_worker()
             return {"ok": True, "state": "ready"}
 
+    async def _rebuild_locked(self) -> dict[str, Any]:
+        """Rebuild the vector index while ``_reconcile_lock`` is held."""
+
+        self._activation_loop = asyncio.get_running_loop()
+        if not self.available or self._store is None or self._module is None:
+            return {
+                "ok": False,
+                "error": "memory_store_unavailable",
+                "result": "failed",
+            }
+        if self._artifact_installing:
+            return {
+                "ok": False,
+                "error": "memory_rebuild_failed",
+                "result": "failed",
+            }
+
+        # Prefer the durable on-disk candidate so a concurrent settings write
+        # that already landed is the unit we rebuild against.
+        try:
+            candidate = await asyncio.to_thread(lambda: V2Config.load().memory)
+        except Exception:
+            candidate = deepcopy(self._restart_config)
+        if not candidate.embedding_change_pending:
+            return {
+                "ok": False,
+                "error": "memory_invalid_input",
+                "result": "failed",
+            }
+
+        # Fail closed before any destructive stop when the pinned artifact or
+        # embedding endpoint cannot rebuild a non-empty root.
+        python = await asyncio.to_thread(self._artifact_manager.resolve_python)
+        if python is None:
+            error = _runtime_error_for_status(
+                await asyncio.to_thread(self._artifact_manager.status)
+            )
+            self._runtime_error = error
+            return {"ok": False, "error": error, "result": "failed"}
+        rebuild_settings = _process_settings(
+            candidate,
+            call_log_db_path=self._call_log_db_path,
+        )
+        if not _rebuild_settings_usable(rebuild_settings):
+            self._runtime_error = "memory_rebuild_failed"
+            return {
+                "ok": False,
+                "error": "memory_rebuild_failed",
+                "result": "failed",
+            }
+
+        async with self.module.lifecycle():
+            if self._maintenance_open():
+                self.module.pause_claims()
+                return {
+                    "ok": False,
+                    "error": "memory_operation_in_progress",
+                    "result": "failed",
+                }
+
+            if not await self.module.quiesce_claims():
+                self._runtime_error = "memory_rebuild_failed"
+                return {
+                    "ok": False,
+                    "error": "memory_rebuild_failed",
+                    "result": "failed",
+                }
+            await self._stop_worker()
+            await self._sidecar.stop()
+
+            self._config = deepcopy(candidate)
+            self._restart_config = deepcopy(candidate)
+            self._configure_insight_reader(self._config)
+            self._provider = EverOSPort(
+                self._socket_path,
+                processing_health_check=self._processing_healthy,
+            )
+            self.module.replace_provider(self._provider)
+
+            try:
+                has_data = await asyncio.to_thread(self._provider_data_exists_strict)
+            except Exception:
+                self._runtime_error = "memory_rebuild_failed"
+                return {
+                    "ok": False,
+                    "error": "memory_rebuild_failed",
+                    "result": "failed",
+                }
+
+            child_result = RebuildProcessResult.COMPLETED
+            if has_data:
+                rebuild_process = EverOSRebuildProcess(
+                    python,
+                    effective_home=self._effective_home,
+                    provider_root=self._provider_root,
+                    settings=rebuild_settings,
+                )
+                child_result = await rebuild_process.run()
+                mapped = _rebuild_public_result(child_result)
+                if mapped["result"] not in {"completed", "completed_empty"}:
+                    self._runtime_error = mapped["error"]
+                    return mapped
+            else:
+                child_result = RebuildProcessResult.COMPLETED
+                mapped = {
+                    "ok": True,
+                    "result": "completed_empty",
+                }
+
+            if not await asyncio.to_thread(
+                self._settle_embedding_change_pending,
+                candidate,
+            ):
+                self._runtime_error = "memory_rebuild_failed"
+                return {
+                    "ok": False,
+                    "error": "memory_rebuild_failed",
+                    "result": "failed",
+                }
+
+            # Marker is clear. Refresh Controller/restart snapshot before any
+            # sidecar activation so activation uses the settled candidate.
+            settled = deepcopy(candidate)
+            settled.embedding_change_pending = False
+            self._config = settled
+            self._restart_config = deepcopy(settled)
+            self._configure_insight_reader(self._config)
+
+            if not settled.enabled:
+                self._runtime_error = None
+                return {
+                    "ok": True,
+                    "result": mapped["result"],
+                    "state": "disabled",
+                }
+
+            try:
+                meta = await asyncio.to_thread(self._store.ensure_meta)
+                await run_blocking(
+                    self._provider_root_owner.ensure,
+                    meta,
+                    self._active_provider_root_metadata(),
+                )
+            except Exception:
+                self._runtime_error = "memory_rebuild_failed"
+                return {
+                    "ok": False,
+                    "error": "memory_rebuild_failed",
+                    "result": "failed",
+                }
+
+            self.module.begin_activation(new_lease=True)
+            try:
+                # Destructive cutover: skip ordinary healthy-replacement endpoint
+                # preflight; the rebuild child already exercised the candidate.
+                started = await self._sidecar.start(
+                    python,
+                    _process_settings(
+                        self._config,
+                        call_log_db_path=self._call_log_db_path,
+                    ),
+                )
+            except Exception:
+                self._runtime_error = "memory_rebuild_failed"
+                return {
+                    "ok": False,
+                    "error": "memory_rebuild_failed",
+                    "result": "failed",
+                }
+            if not started:
+                self._runtime_error = "memory_sidecar_unavailable"
+                return {
+                    "ok": False,
+                    "error": "memory_sidecar_unavailable",
+                    "result": "failed",
+                }
+
+            self._runtime_error = None
+            self.module.resume_claims()
+            self._ensure_worker()
+            return {
+                "ok": True,
+                "result": mapped["result"],
+                "state": "ready",
+            }
+
     async def close(self) -> None:
         self._closing = True
         self._sidecar.close_ready_admission()
@@ -1640,14 +1892,14 @@ class MemoryRuntime:
         self._advance_processing_lifecycle()
         if self._maintenance is not None:
             await self._maintenance.close()
-        restart_task = self._restart_task
-        if restart_task is not None and restart_task is not asyncio.current_task():
-            try:
-                await asyncio.shield(restart_task)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                pass
+        for retained in (self._rebuild_task, self._restart_task):
+            if retained is not None and retained is not asyncio.current_task():
+                try:
+                    await asyncio.shield(retained)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    pass
         for task in (self._artifact_activation_task, self._ready_activation_task):
             if task is None or task is asyncio.current_task():
                 continue
@@ -2054,10 +2306,15 @@ class MemoryRuntime:
         return bool(root_has_data or stats.pending or stats.processing or stats.dead or self._store.has_provider_data_history())
 
     def _settle_embedding_change_pending(self, config: MemoryConfig) -> bool:
-        """Clear a persisted candidate marker only when its full config still matches."""
+        """Clear a persisted candidate marker only when its full config still matches.
+
+        Compare-and-swap under the cross-process Memory config transaction so a
+        newer confirmed candidate from the UI process cannot be clobbered by a
+        stale Controller snapshot.
+        """
 
         try:
-            with CONFIG_LOCK:
+            with memory_config_transaction():
                 persisted = V2Config.load()
                 if not _same_memory_configuration(persisted.memory, config):
                     return False
@@ -2132,6 +2389,49 @@ def _process_settings(
         **_provider_kwargs(config),
         call_log_db_path=call_log_db_path,
     )
+
+
+def _rebuild_settings_usable(settings: EverOSProcessSettings) -> bool:
+    """Return whether the candidate embedding endpoint is complete enough to rebuild."""
+
+    return all(
+        isinstance(value, str) and bool(value.strip())
+        for value in (
+            settings.embedding_base_url,
+            settings.embedding_model,
+            settings.embedding_api_key,
+        )
+    )
+
+
+def _rebuild_public_result(result: RebuildProcessResult) -> dict[str, Any]:
+    """Map a closed child result to the public rebuild response shape."""
+
+    if result is RebuildProcessResult.COMPLETED:
+        return {"ok": True, "result": "completed"}
+    if result is RebuildProcessResult.ROOT_BUSY:
+        return {
+            "ok": False,
+            "error": "memory_rebuild_root_busy",
+            "result": "root_busy",
+        }
+    if result is RebuildProcessResult.INTERRUPTED:
+        return {
+            "ok": False,
+            "error": "memory_rebuild_failed",
+            "result": "interrupted",
+        }
+    if result is RebuildProcessResult.TIMED_OUT:
+        return {
+            "ok": False,
+            "error": "memory_rebuild_failed",
+            "result": "timed_out",
+        }
+    return {
+        "ok": False,
+        "error": "memory_rebuild_failed",
+        "result": "failed",
+    }
 
 
 def _runtime_error_for_status(status: dict[str, Any]) -> str:

@@ -27,7 +27,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from config import paths
-from config.v2_config import CONFIG_LOCK, V2Config
+from config.v2_config import CONFIG_LOCK, V2Config, memory_config_transaction
 from config.v2_settings import (
     SettingsStore,
     ChannelSettings,
@@ -1009,12 +1009,40 @@ def save_config(
         return config
 
 
+class MemoryConfigStaleWrite(RuntimeError):
+    """The on-disk Memory candidate/marker no longer matches this writer's snapshot."""
+
+
+def _memory_transaction_unit(memory) -> tuple:
+    """Project the durable Memory candidate + marker unit for compare-and-swap."""
+
+    processing = memory.processing
+    return (
+        bool(memory.enabled),
+        bool(memory.embedding_change_pending),
+        processing.llm.base_url,
+        processing.llm.model,
+        processing.llm.api_key,
+        processing.embedding.base_url,
+        processing.embedding.model,
+        processing.embedding.api_key,
+        bool(memory.diagnostics.log_provider_calls),
+    )
+
+
 def save_memory_config(
     memory_payload: dict,
     *,
     embedding_change_pending: bool = False,
+    expected: object | None = None,
 ) -> V2Config:
-    """Persist Memory settings only from the direct-loopback Memory route."""
+    """Persist Memory settings only from the direct-loopback Memory route.
+
+    When *expected* is provided, the write is a narrow cross-process transaction:
+    the on-disk Memory candidate+marker unit must still match *expected* or the
+    save raises ``MemoryConfigStaleWrite`` without changing the file. Process-local
+    locks alone cannot protect UI saves from Controller settlement write-back.
+    """
 
     if not isinstance(memory_payload, dict):
         raise ValueError("Memory config payload must be an object")
@@ -1022,7 +1050,15 @@ def save_memory_config(
         raise ValueError("Memory embedding compatibility state must be a boolean")
     payload = dict(memory_payload)
     payload["embedding_change_pending"] = embedding_change_pending
-    return save_config({"memory": payload}, allow_memory=True)
+    with memory_config_transaction():
+        if expected is not None:
+            try:
+                current = load_config()
+            except FileNotFoundError as exc:
+                raise MemoryConfigStaleWrite("memory config missing") from exc
+            if _memory_transaction_unit(current.memory) != _memory_transaction_unit(expected):
+                raise MemoryConfigStaleWrite("memory candidate changed")
+        return save_config({"memory": payload}, allow_memory=True)
 
 
 def _vibe_cloud_payload(config: V2Config, include_secrets: bool) -> dict:
