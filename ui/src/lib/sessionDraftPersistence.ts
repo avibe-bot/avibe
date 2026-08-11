@@ -19,6 +19,7 @@ export type SessionDraftSaveResult = {
 export type SessionDraftRead = {
   revision: number;
   pending: boolean;
+  generation: number;
 };
 
 type DraftEntry = {
@@ -33,6 +34,10 @@ type DraftEntry = {
 };
 
 type DraftSave = (draft: SessionDraftWrite) => Promise<SessionDraftSaveResult>;
+type SessionDraftSave = (
+  sessionId: string,
+  draft: SessionDraftWrite,
+) => Promise<SessionDraftSaveResult>;
 
 /**
  * Keeps the latest draft available synchronously, serializes cloud writes per
@@ -44,6 +49,7 @@ export class SessionDraftPersistence {
   private readonly entries = new Map<string, DraftEntry>();
   private readonly activeReads = new Map<string, Set<SessionDraftRead>>();
   private readonly serverVersions = new Map<string, string | null>();
+  private readonly generations = new Map<string, number>();
   private readonly localCache: SessionDraftLocalCache;
 
   constructor(localCache = new SessionDraftLocalCache()) {
@@ -91,11 +97,25 @@ export class SessionDraftPersistence {
     return this.startSync(sessionId, current, write);
   }
 
+  retryAll(write: SessionDraftSave): Promise<SessionDraftSaveResult[]> {
+    const sessionIds = new Set(this.localCache.dirtySessionIds());
+    for (const [sessionId, entry] of this.entries) {
+      if (entry.dirty) sessionIds.add(sessionId);
+    }
+    return Promise.all(
+      [...sessionIds].map((sessionId) => this.retry(
+        sessionId,
+        (draft) => write(sessionId, draft),
+      )),
+    );
+  }
+
   beginRead(sessionId: string): SessionDraftRead {
     const current = this.hydrateDirty(sessionId);
     const read: SessionDraftRead = {
       revision: current?.revision ?? 0,
       pending: Boolean(current?.pending),
+      generation: this.generations.get(sessionId) ?? 0,
     };
     const reads = this.activeReads.get(sessionId) ?? new Set<SessionDraftRead>();
     reads.add(read);
@@ -119,6 +139,9 @@ export class SessionDraftPersistence {
   ): string {
     const current = this.entries.get(sessionId);
     this.finishRead(sessionId, read);
+    if (read.generation !== (this.generations.get(sessionId) ?? 0)) {
+      return '';
+    }
 
     // A write that finished after this read started is newer than the read's
     // response even though both have server revisions. Preserve that result
@@ -149,6 +172,7 @@ export class SessionDraftPersistence {
   }
 
   clearSession(sessionId: string): void {
+    this.generations.set(sessionId, (this.generations.get(sessionId) ?? 0) + 1);
     this.entries.delete(sessionId);
     this.activeReads.delete(sessionId);
     this.serverVersions.delete(sessionId);
@@ -249,16 +273,21 @@ export class SessionDraftPersistence {
 
   private hydrateDirty(sessionId: string): DraftEntry | null {
     const current = this.entries.get(sessionId);
-    if (current) return current;
     const cached = this.localCache.read(sessionId);
+    if (current && (!cached || cached.mutationId === current.localId)) return current;
+    if (current && cached && !cached.dirty) {
+      if (current.pending) return current;
+      this.entries.delete(sessionId);
+      return null;
+    }
     if (!cached?.dirty) return null;
     const hydrated: DraftEntry = {
-      revision: 1,
+      revision: (current?.revision ?? 0) + 1,
       text: cached.text,
       localId: cached.mutationId,
       baseUpdatedAt: cached.serverUpdatedAt,
-      pending: null,
-      pendingRevision: null,
+      pending: current?.pending ?? null,
+      pendingRevision: current?.pendingRevision ?? null,
       dirty: true,
       conflict: false,
     };

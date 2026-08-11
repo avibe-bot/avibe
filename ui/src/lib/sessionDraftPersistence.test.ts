@@ -17,6 +17,14 @@ const deferred = <T,>() => {
 class MemoryStorage {
   readonly values = new Map<string, string>();
 
+  get length(): number {
+    return this.values.size;
+  }
+
+  key(index: number): string | null {
+    return [...this.values.keys()][index] ?? null;
+  }
+
   getItem(key: string): string | null {
     return this.values.get(key) ?? null;
   }
@@ -110,6 +118,28 @@ describe('SessionDraftPersistence', () => {
     });
   });
 
+  it('retries the newest local mutation instead of a stale in-memory tab copy', async () => {
+    const storage = new MemoryStorage();
+    const firstCache = new SessionDraftLocalCache(storage, () => 'tab-a', () => 1);
+    const secondCache = new SessionDraftLocalCache(storage, () => 'tab-b', () => 2);
+    const first = new SessionDraftPersistence(firstCache);
+    await first.save('session-a', 'from tab A', async () => ({ ok: false }));
+    secondCache.writeDirty('session-a', 'from tab B', null);
+    const writes: SessionDraftWrite[] = [];
+
+    await first.retryAll(async (_sessionId, draft) => {
+      writes.push(draft);
+      return { ok: true, server: { text: draft.text, updatedAt: 'rev-1' } };
+    });
+
+    expect(writes).toEqual([{ text: 'from tab B', expectedUpdatedAt: null }]);
+    expect(secondCache.read('session-a')).toMatchObject({
+      text: 'from tab B',
+      dirty: false,
+      mutationId: 'tab-b',
+    });
+  });
+
   it('keeps local text when a read starts during a pending write', async () => {
     const persistence = new SessionDraftPersistence(localCache());
     const first = deferred<SessionDraftSaveResult>();
@@ -159,6 +189,38 @@ describe('SessionDraftPersistence', () => {
       text: 'offline text',
       expectedUpdatedAt: null,
     });
+  });
+
+  it('retries every dirty session discovered after a reload', async () => {
+    const storage = new MemoryStorage();
+    const cache = localCache(storage);
+    cache.writeDirty('session-a', 'offline A', 'rev-a');
+    cache.writeDirty('session-b', 'offline B', 'rev-b');
+    cache.writeClean('session-c', 'synced C', 'rev-c');
+    const persistence = new SessionDraftPersistence(cache);
+    const calls: Array<{ sessionId: string; draft: SessionDraftWrite }> = [];
+
+    await persistence.retryAll(async (sessionId, draft) => {
+      calls.push({ sessionId, draft });
+      return {
+        ok: true,
+        server: { text: draft.text, updatedAt: `synced-${sessionId}` },
+      };
+    });
+
+    expect(calls).toEqual([
+      {
+        sessionId: 'session-a',
+        draft: { text: 'offline A', expectedUpdatedAt: 'rev-a' },
+      },
+      {
+        sessionId: 'session-b',
+        draft: { text: 'offline B', expectedUpdatedAt: 'rev-b' },
+      },
+    ]);
+    expect(cache.read('session-a')?.dirty).toBe(false);
+    expect(cache.read('session-b')?.dirty).toBe(false);
+    expect(cache.read('session-c')).toMatchObject({ text: 'synced C', dirty: false });
   });
 
   it('lets an authoritative newer cloud revision replace a clean local copy', async () => {
@@ -227,5 +289,19 @@ describe('SessionDraftPersistence', () => {
     expect(cache.read('session-a')).toBeNull();
     expect(persistence.revision('session-a')).toBe(0);
     expect(persistence.beginRead('session-a').pending).toBe(false);
+  });
+
+  it('discards a read response captured before the session was archived', () => {
+    const cache = localCache();
+    const persistence = new SessionDraftPersistence(cache);
+    const read = persistence.beginRead('session-a');
+
+    persistence.clearSession('session-a');
+    expect(persistence.reconcileRead(
+      'session-a',
+      read,
+      { text: 'stale pre-archive draft', updatedAt: 'old-revision' },
+    )).toBe('');
+    expect(cache.read('session-a')).toBeNull();
   });
 });

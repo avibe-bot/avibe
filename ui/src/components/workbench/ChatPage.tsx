@@ -1307,13 +1307,6 @@ export const ChatPage: React.FC = () => {
     };
   }, [sessionId, api]);
 
-  useEffect(() => {
-    if (!sessionId) return undefined;
-    const syncLocalDraft = () => void api.syncSessionDraft(sessionId);
-    window.addEventListener('online', syncLocalDraft);
-    return () => window.removeEventListener('online', syncLocalDraft);
-  }, [api, sessionId]);
-
   // The fire-and-forget turn survives browser disconnects, so a freshly loaded /
   // reconnected page asks the controller whether a turn is still in flight and
   // restores the working/Stop state to match (Codex P2). Authoritative in BOTH

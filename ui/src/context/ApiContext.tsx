@@ -723,7 +723,6 @@ export type ApiContextType = {
   getTurnState: (sessionId: string, options?: { handleError?: boolean }) => Promise<SessionRuntimeState>;
   getCachedSessionDraft: (sessionId: string) => string | null;
   cacheSessionDraft: (sessionId: string, text: string) => void;
-  syncSessionDraft: (sessionId: string) => Promise<{ ok: boolean }>;
   getSessionDraft: (sessionId: string) => Promise<{ text: string }>;
   setSessionDraft: (sessionId: string, text: string) => Promise<{ ok: boolean }>;
   listInbox: (params?: { platform?: string; unreadOnly?: boolean; limit?: number; before?: string; onlySession?: string; cache?: boolean; handleError?: boolean }) => Promise<InboxFeedResult>;
@@ -2338,6 +2337,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const eventConnectionStateRef = useRef<WorkbenchEventConnectionState>('reconnecting');
   const eventReconnectLoopRef = useRef<WorkbenchEventReconnectLoop | null>(null);
   const wakeWorkbenchEventsRef = useRef<() => void>(() => {});
+  const syncSessionDraftsRef = useRef<() => void>(() => {});
   const stopWorkbenchEventsRef = useRef<() => void>(() => {});
   const sessionArchivedHandlersRef = useRef(new Set<(sessionId: string) => void>());
   const sessionDraftPersistence = useMemo(() => new SessionDraftPersistence(), []);
@@ -2726,7 +2726,9 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   useEffect(() => {
     const wakeIfVisible = () => {
-      if (document.visibilityState === 'visible') wakeWorkbenchEventsRef.current();
+      if (document.visibilityState !== 'visible') return;
+      wakeWorkbenchEventsRef.current();
+      syncSessionDraftsRef.current();
     };
     document.addEventListener('visibilitychange', wakeIfVisible);
     window.addEventListener('online', wakeIfVisible);
@@ -2781,6 +2783,9 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return res.ok
       ? { ok: true, ...(hasServerDraft ? { server } : {}) }
       : { ok: false };
+  };
+  syncSessionDraftsRef.current = () => {
+    void sessionDraftPersistence.retryAll(writeSessionDraft);
   };
 
   const postJson = async (path: string, payload: any, opts?: { handleError?: boolean }) => {
@@ -3300,10 +3305,6 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     },
     getCachedSessionDraft: (sessionId) => sessionDraftPersistence.peek(sessionId),
     cacheSessionDraft: (sessionId, text) => sessionDraftPersistence.cache(sessionId, text),
-    syncSessionDraft: (sessionId) => sessionDraftPersistence.retry(
-      sessionId,
-      (draft) => writeSessionDraft(sessionId, draft),
-    ),
     getSessionDraft: async (sessionId) => {
       const read = sessionDraftPersistence.beginRead(sessionId);
       try {

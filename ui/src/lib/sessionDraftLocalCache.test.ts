@@ -7,6 +7,14 @@ import {
 class MemoryStorage {
   readonly values = new Map<string, string>();
 
+  get length(): number {
+    return this.values.size;
+  }
+
+  key(index: number): string | null {
+    return [...this.values.keys()][index] ?? null;
+  }
+
   getItem(key: string): string | null {
     return this.values.get(key) ?? null;
   }
@@ -62,8 +70,29 @@ describe('SessionDraftLocalCache', () => {
     cache.acknowledge('session-a', 'stale', 'old text', 'server-1');
     expect(cache.read('session-a')).toMatchObject({ text: 'text', dirty: true });
 
+    cache.acknowledge('session-a', 'current', 'text', 'server-1');
+    expect(cache.read('session-a')).toMatchObject({
+      text: 'text',
+      dirty: false,
+      mutationId: 'current',
+      serverUpdatedAt: 'server-1',
+    });
+
     cache.writeClean('session-a', '', 'server-2');
     expect(cache.read('session-a')).toBeNull();
+  });
+
+  it('enumerates only dirty session records for reconnect replay', () => {
+    const storage = new MemoryStorage();
+    let sequence = 0;
+    const cache = new SessionDraftLocalCache(storage, () => `id-${++sequence}`, () => sequence);
+    cache.writeDirty('session/a', 'offline A', 'server-1');
+    storage.setItem(`${SESSION_DRAFT_STORAGE_PREFIX}broken`, '{not-json');
+    cache.writeClean('session-b', 'synced B', 'server-2');
+    cache.writeDirty('session-c', 'offline C', null);
+
+    expect(cache.dirtySessionIds()).toEqual(['session/a', 'session-c']);
+    expect(storage.getItem(`${SESSION_DRAFT_STORAGE_PREFIX}broken`)).toBeNull();
   });
 
   it('discards malformed data and tolerates blocked storage', () => {

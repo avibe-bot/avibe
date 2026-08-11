@@ -7,7 +7,8 @@ export type SessionDraftCacheRecord = {
   savedAt: number;
 };
 
-type DraftStorage = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
+type DraftStorage = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>
+  & Partial<Pick<Storage, 'key' | 'length'>>;
 type CreateId = () => string;
 type Now = () => number;
 
@@ -77,6 +78,36 @@ export class SessionDraftLocalCache {
     }
   }
 
+  dirtySessionIds(): string[] {
+    const target = browserStorage(this.storage);
+    if (!target || typeof target.length !== 'number' || typeof target.key !== 'function') return [];
+    const sessionIds = new Set<string>();
+    try {
+      const keys = Array.from(
+        { length: target.length },
+        (_, index) => target.key!(index),
+      );
+      for (const key of keys) {
+        if (!key?.startsWith(SESSION_DRAFT_STORAGE_PREFIX)) continue;
+        const raw = target.getItem(key);
+        const record = parseRecord(raw);
+        if (raw && !record) {
+          target.removeItem(key);
+          continue;
+        }
+        if (!record?.dirty) continue;
+        try {
+          sessionIds.add(decodeURIComponent(key.slice(SESSION_DRAFT_STORAGE_PREFIX.length)));
+        } catch {
+          // Ignore malformed keys that were not written by this cache.
+        }
+      }
+    } catch {
+      return [];
+    }
+    return [...sessionIds];
+  }
+
   writeDirty(sessionId: string, text: string, serverUpdatedAt: string | null): SessionDraftCacheRecord {
     return this.write(sessionId, {
       version: 1,
@@ -117,7 +148,17 @@ export class SessionDraftLocalCache {
   ): void {
     const current = this.read(sessionId);
     if (!current || current.mutationId !== mutationId) return;
-    this.writeClean(sessionId, text, serverUpdatedAt);
+    if (!text) {
+      this.clear(sessionId);
+      return;
+    }
+    this.write(sessionId, {
+      ...current,
+      text,
+      serverUpdatedAt,
+      dirty: false,
+      savedAt: this.now(),
+    });
   }
 
   clear(sessionId: string): void {
