@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { ChevronDown, ChevronRight, ChevronUp } from 'lucide-react';
+import { ChevronDown, ChevronRight, ChevronUp, RefreshCw } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Badge } from '@/components/ui/badge';
@@ -74,6 +74,11 @@ const AgentModelCard: React.FC<{
   const collapsedAtRest = collapsedModelRows(agent);
   const models = collapsed.visible;
   const canCollapse = collapsedAtRest.hidden.length > 0;
+  const needsChainRepair = chainProjectionLive
+    && allModels.some((modelId) => {
+      const read = chains[modelChainKey(agent.backend, modelId)];
+      return read?.kind === 'unread' || read?.kind === 'error';
+    });
   const hasTakeover = chainProjectionLive
     && allModels.some((modelId) => isTakeoverRead(chains[modelChainKey(agent.backend, modelId)]));
   const modeWord = t(`settings.models.gateway.group.mode.${agent.mode === 'hub' ? 'gateway' : 'direct'}`) as string;
@@ -85,6 +90,7 @@ const AgentModelCard: React.FC<{
     setExpanded((value) => !value);
     onProbeSettled(agent);
   };
+  const retryChains = () => onProbeSettled(agent);
   const noUsableSource = agent.mode === 'hub'
     && Boolean(agent.model_supply?.length)
     && agent.model_supply?.every((entry) => entry.chain_length === 0);
@@ -121,7 +127,7 @@ const AgentModelCard: React.FC<{
           <ModelHubInfoHint label={switchFailed ? t('settings.models.gateway.fail.switchToDirect') : subtitle} content={switchFailed ? t('settings.models.gateway.fail.switchToDirect') : subtitle} className="model-hub-overview-info size-[13px]" />
         </span>
       </div>
-      {agent.mode === 'hub' && (models.length === 0 ? <div className="px-4 py-10 text-center sm:px-5"><p className="text-[12.5px] text-muted">{t('settings.models.gateway.group.emptyModels')}</p></div> : <div className="space-y-2 p-2">{noUsableSource && <p className="px-3 py-1 text-[11px] font-semibold text-muted">{t('settings.models.gateway.supply.none')}</p>}{models.map((modelId) => <ModelRow key={modelId} agent={agent} modelId={modelId} sources={sources} read={chainProjectionLive ? chains[modelChainKey(agent.backend, modelId)] : undefined} onOpenRoute={onOpenRoute} />)}{canCollapse && <button type="button" onClick={toggleCollapsed} className="model-hub-model-collapse flex h-6 w-full items-center gap-1.5 hover:text-foreground">{expanded ? <ChevronUp /> : <ChevronDown />}{expanded ? t('settings.models.gateway.collapse', { count: collapsedAtRest.hidden.length }) : t('settings.models.gateway.collapse', { count: collapsed.hidden.length })}</button>}</div>)}
+      {agent.mode === 'hub' && (models.length === 0 ? <div className="px-4 py-10 text-center sm:px-5"><p className="text-[12.5px] text-muted">{t('settings.models.gateway.group.emptyModels')}</p></div> : <div className="space-y-2 p-2">{noUsableSource && <p className="px-3 py-1 text-[11px] font-semibold text-muted">{t('settings.models.gateway.supply.none')}</p>}{models.map((modelId) => <ModelRow key={modelId} agent={agent} modelId={modelId} sources={sources} read={chainProjectionLive ? chains[modelChainKey(agent.backend, modelId)] : undefined} onOpenRoute={onOpenRoute} />)}{canCollapse ? <button type="button" onClick={toggleCollapsed} className="model-hub-model-collapse flex h-6 w-full items-center gap-1.5 hover:text-foreground">{expanded ? <ChevronUp /> : <ChevronDown />}{expanded ? t('settings.models.gateway.collapse', { count: collapsedAtRest.hidden.length }) : t('settings.models.gateway.collapse', { count: collapsed.hidden.length })}</button> : needsChainRepair ? <button type="button" onClick={retryChains} className="model-hub-model-collapse flex h-6 w-full items-center gap-1.5 hover:text-foreground"><RefreshCw />{t('settings.models.gateway.retry')}</button> : null}</div>)}
     </section>
   );
 };

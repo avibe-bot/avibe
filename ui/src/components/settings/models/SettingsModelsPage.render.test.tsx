@@ -105,6 +105,51 @@ describe('SettingsModelsPage surface branches', () => {
     expect(screen.queryByRole('tab')).toBeNull();
   });
 
+  it('keeps an unread runtime visible on the direct-only surface', async () => {
+    vi.spyOn(modelsApi, 'listSources').mockResolvedValue([]);
+    vi.spyOn(modelsApi, 'listAgents').mockResolvedValue([
+      directAgent('claude'),
+      directAgent('codex'),
+      directAgent('opencode'),
+    ]);
+    vi.spyOn(modelsApi, 'getRuntimeStatus').mockRejectedValue(new TypeError('status unread'));
+    vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
+
+    render(
+      <ToastProvider>
+        <I18nextProvider i18n={i18n}>
+          <SettingsModelsPage />
+        </I18nextProvider>
+      </ToastProvider>,
+    );
+
+    expect(await screen.findByText(/^Gateway status unavailable$|^网关状态未读到$/i)).toBeTruthy();
+    expect(screen.queryByText(/^All 3 backends are direct$|^3 个后端均为直连$/i)).toBeNull();
+  });
+
+  it('keeps the stopped runtime action visible on the direct-only surface', async () => {
+    const stopped = { ...runtime, status: { ...runtime.status, health: 'down' as const } };
+    vi.spyOn(modelsApi, 'listSources').mockResolvedValue([]);
+    vi.spyOn(modelsApi, 'listAgents').mockResolvedValue([
+      directAgent('claude'),
+      directAgent('codex'),
+      directAgent('opencode'),
+    ]);
+    vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(stopped);
+    vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
+
+    render(
+      <ToastProvider>
+        <I18nextProvider i18n={i18n}>
+          <SettingsModelsPage />
+        </I18nextProvider>
+      </ToastProvider>,
+    );
+
+    expect(await screen.findByRole('button', { name: /Gateway stopped|网关已停止/i })).toBeTruthy();
+    expect(screen.queryByText(/^All 3 backends are direct$|^3 个后端均为直连$/i)).toBeNull();
+  });
+
   it('renders Frame 01 with tabs when retained sources remain under all-direct backends', async () => {
     renderPage([retainedSource]);
 

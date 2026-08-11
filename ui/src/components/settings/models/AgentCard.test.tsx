@@ -88,6 +88,16 @@ describe('AgentCard', () => {
     expect(onProbeSettled).toHaveBeenNthCalledWith(2, expect.objectContaining({ backend: 'claude' }));
   });
 
+  it('keeps a chain reread reachable when a short group is unresolved', async () => {
+    const onProbeSettled = vi.fn();
+    const key = modelChainKey('claude', 'claude-opus-4-6');
+    render(<I18nextProvider i18n={i18n}><AgentCard agents={[hubAgent]} sources={[]} chains={{ [key]: { kind: 'unread', retryable: true } }} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={onProbeSettled} /></I18nextProvider>);
+
+    await userEvent.click(screen.getByRole('button', { name: /^Retry$|^重试$/i }));
+    expect(onProbeSettled).toHaveBeenCalledOnce();
+    expect(onProbeSettled).toHaveBeenCalledWith(expect.objectContaining({ backend: 'claude' }));
+  });
+
   it('opens Frame 02 with the exact backend and model context', async () => {
     const onOpenRoute = vi.fn();
     render(<I18nextProvider i18n={i18n}><AgentCard agents={[hubAgent]} sources={[]} chains={{}} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenOrder={vi.fn()} onOpenRoute={onOpenRoute} onProbeSettled={vi.fn()} /></I18nextProvider>);

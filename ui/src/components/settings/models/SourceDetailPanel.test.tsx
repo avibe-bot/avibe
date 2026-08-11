@@ -35,6 +35,8 @@ const deferred = <T,>() => {
 };
 
 const immediateTrack = async <T,>(work: () => Promise<T>): Promise<T> => work();
+let sourceSnapshot = 0;
+const beginSourceSnapshot = () => ++sourceSnapshot;
 const serializedTrack = () => {
   const writes = createPendingWrites(() => {});
   return async <T,>(work: () => Promise<T>): Promise<T> => {
@@ -47,7 +49,7 @@ const serializedTrack = () => {
 const renderPanel = (adoptedBy: Source['adopted_by'] = undefined) => render(
   <ToastProvider>
     <I18nextProvider i18n={i18n}>
-      <SourceDetailPanel source={{ ...source, adopted_by: adoptedBy }} onMutation={vi.fn().mockResolvedValue(undefined)} onGone={vi.fn().mockResolvedValue(undefined)} trackMutation={immediateTrack} />
+      <SourceDetailPanel source={{ ...source, adopted_by: adoptedBy }} onMutation={vi.fn().mockResolvedValue(undefined)} onGone={vi.fn().mockResolvedValue(undefined)} beginSourceSnapshot={beginSourceSnapshot} trackMutation={immediateTrack} />
     </I18nextProvider>
   </ToastProvider>,
 );
@@ -63,7 +65,7 @@ const EchoPanel: React.FC<{ reconcile?: () => Promise<void> | void; trackMutatio
     await reconcile();
   };
   return current
-    ? <SourceDetailPanel source={current} onMutation={onMutation} onGone={onGone} trackMutation={trackMutation} />
+    ? <SourceDetailPanel source={current} onMutation={onMutation} onGone={onGone} beginSourceSnapshot={beginSourceSnapshot} trackMutation={trackMutation} />
     : <p data-testid="source-gone">Source gone</p>;
 };
 
@@ -77,6 +79,7 @@ const renderEchoPanel = (reconcile = vi.fn(), trackMutation = immediateTrack) =>
 
 afterEach(() => {
   cleanup();
+  sourceSnapshot = 0;
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
@@ -96,7 +99,7 @@ describe('SourceDetailPanel', () => {
   });
 
   it('omits native refetch because that channel has no stored discovery credential', () => {
-    render(<I18nextProvider i18n={i18n}><SourceDetailPanel source={{ ...source, kind: 'subscription', supply_channel: 'native_cli' }} onMutation={vi.fn().mockResolvedValue(undefined)} onGone={vi.fn().mockResolvedValue(undefined)} trackMutation={immediateTrack} /></I18nextProvider>);
+    render(<I18nextProvider i18n={i18n}><SourceDetailPanel source={{ ...source, kind: 'subscription', supply_channel: 'native_cli' }} onMutation={vi.fn().mockResolvedValue(undefined)} onGone={vi.fn().mockResolvedValue(undefined)} beginSourceSnapshot={beginSourceSnapshot} trackMutation={immediateTrack} /></I18nextProvider>);
     expect(screen.queryByRole('button', { name: /^Refetch$|^重新拉取$/i })).toBeNull();
   });
 
@@ -327,7 +330,7 @@ describe('SourceDetailPanel', () => {
     const remove = vi.spyOn(modelsApi, 'deleteCustomModel').mockRejectedValueOnce(new TypeError('response lost'));
     const list = vi.spyOn(modelsApi, 'listSources').mockResolvedValueOnce([{ ...source, models: [] }]);
     const onMutation = vi.fn().mockResolvedValue(undefined);
-    render(<I18nextProvider i18n={i18n}><SourceDetailPanel source={source} onMutation={onMutation} onGone={vi.fn().mockResolvedValue(undefined)} trackMutation={immediateTrack} /></I18nextProvider>);
+    render(<I18nextProvider i18n={i18n}><SourceDetailPanel source={source} onMutation={onMutation} onGone={vi.fn().mockResolvedValue(undefined)} beginSourceSnapshot={beginSourceSnapshot} trackMutation={immediateTrack} /></I18nextProvider>);
 
     await userEvent.click(screen.getByRole('button', { name: /Remove model-a|移除 model-a/i }));
     await userEvent.click(screen.getByRole('menuitem', { name: /^Remove$|^移除$/i }));
@@ -372,12 +375,12 @@ describe('SourceDetailPanel', () => {
     const remove = vi.spyOn(modelsApi, 'deleteCustomModel').mockRejectedValueOnce(new TypeError('response lost'));
     vi.spyOn(modelsApi, 'listSources').mockResolvedValueOnce([]);
     const onGone = vi.fn().mockResolvedValue(undefined);
-    render(<I18nextProvider i18n={i18n}><SourceDetailPanel source={source} onMutation={vi.fn().mockResolvedValue(undefined)} onGone={onGone} trackMutation={immediateTrack} /></I18nextProvider>);
+    render(<I18nextProvider i18n={i18n}><SourceDetailPanel source={source} onMutation={vi.fn().mockResolvedValue(undefined)} onGone={onGone} beginSourceSnapshot={beginSourceSnapshot} trackMutation={immediateTrack} /></I18nextProvider>);
 
     await userEvent.click(screen.getByRole('button', { name: /Remove model-a|移除 model-a/i }));
     await userEvent.click(screen.getByRole('menuitem', { name: /^Remove$|^移除$/i }));
 
-    await waitFor(() => expect(onGone).toHaveBeenCalledWith(source.id, []));
+    await waitFor(() => expect(onGone).toHaveBeenCalledWith(source.id, [], 1));
     expect(remove).toHaveBeenCalledOnce();
     expect(screen.queryByRole('button', { name: /^Try again$|^重试$/i })).toBeNull();
   });

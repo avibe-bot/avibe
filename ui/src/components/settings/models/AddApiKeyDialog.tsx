@@ -28,6 +28,7 @@ import {
 import { apiFailure, modelsApi, type SourceCreated } from './modelsApi';
 import { reconcileUnknownWrite } from './reconcileUnknownWrite';
 import {
+  SOURCE_DISPLAY_NAME_MAX_LENGTH,
   SOURCE_PROTOCOLS,
   type ApiKeySourceCreate,
   type SourceObservation,
@@ -40,6 +41,7 @@ type Phase =
   | { kind: 'failure'; origin: AddApiKeyOrigin; cause: AddApiKeyFailure }
   | { kind: 'undetermined'; origin: AddApiKeyOrigin; observation: SourceObservation; hint: SourceProtocol | null }
   | { kind: 'inventory'; origin: AddApiKeyOrigin; observation: SourceObservation }
+  | { kind: 'persist_failure'; message: string; protocolOrder: SourceProtocol[] | undefined }
   | { kind: 'save_unconfirmed'; protocolOrder: SourceProtocol[] | undefined };
 
 const INITIAL_PHASE: Phase = { kind: 'form', report: null };
@@ -113,8 +115,17 @@ export const AddApiKeyDialog: React.FC<{
       if (attempt.current !== seq) return;
       onAddedRef.current(created);
       onCloseRef.current();
-    } catch {
-      if (attempt.current === seq) setPhase({ kind: 'save_unconfirmed', protocolOrder });
+    } catch (error) {
+      if (attempt.current !== seq) return;
+      const failure = apiFailure(error);
+      const definitiveClientFailure = failure?.serverNamed
+        && failure.responseStatus !== undefined
+        && failure.responseStatus >= 400
+        && failure.responseStatus < 500
+        && failure.responseStatus !== 409;
+      setPhase(definitiveClientFailure
+        ? { kind: 'persist_failure', message: failure.detail ?? failure.code, protocolOrder }
+        : { kind: 'save_unconfirmed', protocolOrder });
     }
   }, [draft]);
 
@@ -204,6 +215,10 @@ export const AddApiKeyDialog: React.FC<{
       }
       return;
     }
+    if (phase.kind === 'persist_failure') {
+      await persist(++attempt.current, phase.protocolOrder);
+      return;
+    }
     if (phase.kind === 'failure') await observe(phase.origin);
   };
 
@@ -221,11 +236,19 @@ export const AddApiKeyDialog: React.FC<{
     setApiKey(value);
     if (phase.kind === 'form' && phase.report) setPhase(INITIAL_PHASE);
   };
+  const editDisplayName = (value: string) => {
+    setDisplayName(value);
+    if (phase.kind === 'persist_failure') setPhase(INITIAL_PHASE);
+  };
 
   const isWorking = phase.kind === 'working';
   const formLocked = isWorking || phase.kind === 'save_unconfirmed';
   const canCancel = !(phase.kind === 'working' && phase.stage === 'persist');
-  const canSubmit = Boolean(baseUrl.trim() && apiKey.trim()) && !formLocked;
+  const trimmedDisplayName = displayName.trim();
+  const displayNameValid = displayName.length === 0
+    || (trimmedDisplayName.length > 0 && trimmedDisplayName.length <= SOURCE_DISPLAY_NAME_MAX_LENGTH);
+  const canObserve = Boolean(baseUrl.trim() && apiKey.trim()) && !formLocked;
+  const canSubmit = canObserve && displayNameValid;
   const showForm = phase.kind !== 'undetermined' && phase.kind !== 'inventory';
   return (
     <DialogPrimitive.Root open={open} onOpenChange={(next) => !next && canCancel && cancel()}>
@@ -261,7 +284,7 @@ export const AddApiKeyDialog: React.FC<{
         {showForm && (
           <div className="model-hub-add-key-body flex flex-col">
             <Field className="model-hub-add-key-field" labelClassName="model-hub-add-key-label" label={t('settings.models.addKey.field.name')}>
-              {(id) => <Input id={id} value={displayName} disabled={formLocked} onChange={(event) => setDisplayName(event.target.value)} className="model-hub-add-key-input" />}
+              {(id) => <Input id={id} value={displayName} disabled={formLocked} aria-invalid={!displayNameValid} onChange={(event) => editDisplayName(event.target.value)} className="model-hub-add-key-input" />}
             </Field>
             <Field className="model-hub-add-key-field" labelClassName="model-hub-add-key-label" hintClassName="model-hub-add-key-hint" label={t('settings.models.addKey.field.baseUrl')} hint={t('settings.models.addKey.field.baseUrl.hint')}>
               {(id) => <Input id={id} value={baseUrl} disabled={formLocked} autoComplete="url" spellCheck={false} onChange={(event) => editEndpoint(event.target.value)} className="model-hub-add-key-input font-mono" />}
@@ -276,7 +299,7 @@ export const AddApiKeyDialog: React.FC<{
                   type="button"
                   variant="outline"
                   className="model-hub-add-key-secondary"
-                  disabled={!canSubmit}
+                  disabled={!canObserve}
                   onClick={() => void observe('pull')}
                 >
                   <PlugZap className="size-3" />
@@ -317,6 +340,12 @@ export const AddApiKeyDialog: React.FC<{
               <div className="model-hub-add-key-strip model-hub-add-key-strip--error">
                 <CircleX className="model-hub-add-key-error-ink size-3.5 shrink-0" />
                 <span className="model-hub-add-key-error-ink model-hub-add-key-strip-title">{t('settings.models.addKey.fail.save')}</span>
+              </div>
+            )}
+            {phase.kind === 'persist_failure' && (
+              <div className="model-hub-add-key-strip model-hub-add-key-strip--error">
+                <CircleX className="model-hub-add-key-error-ink size-3.5 shrink-0" />
+                <span className="model-hub-add-key-error-ink model-hub-add-key-strip-title">{phase.message}</span>
               </div>
             )}
           </div>
@@ -397,7 +426,7 @@ export const AddApiKeyDialog: React.FC<{
               {t('settings.models.addKey.adding')}
             </Button>
           )}
-          {(phase.kind === 'failure' || phase.kind === 'save_unconfirmed' || phase.kind === 'inventory' || phase.kind === 'undetermined') && (
+          {(phase.kind === 'failure' || phase.kind === 'persist_failure' || phase.kind === 'save_unconfirmed' || phase.kind === 'inventory' || phase.kind === 'undetermined') && (
             <Button
               type="button"
               variant="brand"

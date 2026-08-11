@@ -69,11 +69,13 @@ export const createLatestEntityAuthorityByKey = <K, T>(
 ) => {
   let generation = 0;
   const generations = new Map<K, number>();
+  const pending = new Map<K, number>();
   const values = new Map<K, T>();
   const publish = () => land([...values.values()]);
   const begin = (key: K): EntityGeneration<K> => {
     const ticket = { key, generation: ++generation } as const;
     generations.set(key, ticket.generation);
+    pending.set(key, ticket.generation);
     return ticket;
   };
 
@@ -83,20 +85,25 @@ export const createLatestEntityAuthorityByKey = <K, T>(
     settle: (ticket: EntityGeneration<K>, value: T): 'landed' | 'stale' => {
       if (ticket.key !== keyOf(value) || generations.get(ticket.key) !== ticket.generation) return 'stale';
       values.set(ticket.key, value);
+      if (pending.get(ticket.key) === ticket.generation) pending.delete(ticket.key);
       publish();
       return 'landed';
     },
     settleRemoval: (ticket: EntityGeneration<K>): 'landed' | 'stale' => {
       if (generations.get(ticket.key) !== ticket.generation) return 'stale';
       values.delete(ticket.key);
+      if (pending.get(ticket.key) === ticket.generation) pending.delete(ticket.key);
       publish();
       return 'landed';
+    },
+    abandon: (ticket: EntityGeneration<K>): void => {
+      if (pending.get(ticket.key) === ticket.generation) pending.delete(ticket.key);
     },
     settleSnapshot: (snapshotGeneration: number, incoming: readonly T[]): void => {
       const incomingByKey = new Map(incoming.map((value) => [keyOf(value), value]));
       const keys = new Set([...values.keys(), ...incomingByKey.keys()]);
       for (const key of keys) {
-        if ((generations.get(key) ?? 0) > snapshotGeneration) continue;
+        if (pending.has(key) || (generations.get(key) ?? 0) > snapshotGeneration) continue;
         generations.set(key, snapshotGeneration);
         const value = incomingByKey.get(key);
         if (value === undefined) values.delete(key);
@@ -104,20 +111,24 @@ export const createLatestEntityAuthorityByKey = <K, T>(
       }
       publish();
     },
-    landLatest: (value: T): void => {
-      const ticket = begin(keyOf(value));
-      values.set(ticket.key, value);
+    /** Lands only the named snapshot rows. Callers use this for a scoped
+     * reconciliation so an absent, concurrently mutating sibling is untouched. */
+    settleSnapshotEntries: (snapshotGeneration: number, incoming: readonly T[]): void => {
+      for (const value of incoming) {
+        const key = keyOf(value);
+        if (pending.has(key) || (generations.get(key) ?? 0) > snapshotGeneration) continue;
+        generations.set(key, snapshotGeneration);
+        values.set(key, value);
+      }
       publish();
     },
-    replaceLatest: (incoming: readonly T[]): void => {
-      const snapshotGeneration = ++generation;
-      const incomingByKey = new Map(incoming.map((value) => [keyOf(value), value]));
-      for (const key of new Set([...generations.keys(), ...incomingByKey.keys()])) {
-        generations.set(key, snapshotGeneration);
+    landLatest: (value: T): void => {
+      const ticket = begin(keyOf(value));
+      if (generations.get(ticket.key) === ticket.generation) {
+        values.set(ticket.key, value);
+        pending.delete(ticket.key);
+        publish();
       }
-      values.clear();
-      for (const [key, value] of incomingByKey) values.set(key, value);
-      publish();
     },
   };
 };

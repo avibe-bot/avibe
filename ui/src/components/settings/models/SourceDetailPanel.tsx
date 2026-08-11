@@ -50,7 +50,7 @@ const confirmGuardPlan = (guard: Pick<GuardedAction, 'hops' | 'gaps'>): GuardCon
 
 type SourceReconciliation =
   | { kind: 'source'; source: Source }
-  | { kind: 'gone'; sources: Source[] };
+  | { kind: 'gone'; sources: Source[]; snapshot: number };
 
 export const GuardGapList: React.FC<{ gaps: SupplyGap[] }> = ({ gaps }) => {
   const { t, i18n } = useTranslation();
@@ -86,7 +86,7 @@ const TierEditor: React.FC<{
   model: SuppliedModel;
   onMutating: () => void;
   onMutation: (source?: Source) => Promise<void>;
-  onGone: (sourceId: string, sources?: Source[]) => Promise<void>;
+  onGone: (sourceId: string, sources?: Source[], snapshot?: number) => Promise<void>;
   trackMutation: TrackMutation;
 }> = ({ source, model, onMutating, onMutation, onGone, trackMutation }) => {
   const { t } = useTranslation();
@@ -209,9 +209,10 @@ const DraftTiers: React.FC<{
 export const SourceDetailPanel: React.FC<{
   source: Source;
   onMutation: (source?: Source) => Promise<void>;
-  onGone: (sourceId: string, sources?: Source[]) => Promise<void>;
+  onGone: (sourceId: string, sources?: Source[], snapshot?: number) => Promise<void>;
+  beginSourceSnapshot: () => number;
   trackMutation: TrackMutation;
-}> = ({ source, onMutation, onGone, trackMutation }) => {
+}> = ({ source, onMutation, onGone, beginSourceSnapshot, trackMutation }) => {
   const { t, i18n } = useTranslation();
   const now = useDeadlineClock(source.state.status === 'cooldown' ? source.state.retry_at : null);
   const { Icon, accent } = sourceVisual(source);
@@ -255,18 +256,22 @@ export const SourceDetailPanel: React.FC<{
       setBusy(false);
     }
   });
+  const readSourceInventory = async () => {
+    const snapshot = beginSourceSnapshot();
+    return { snapshot, sources: await modelsApi.listSources() };
+  };
   const reconcileManualCreate = async (modelId: string) => reconcileUnknownWrite(
-    () => modelsApi.listSources(),
-    (sources) => {
+    readSourceInventory,
+    ({ sources, snapshot }) => {
       const current = sources.find((item) => item.id === source.id);
-      if (!current) return { kind: 'gone', sources } satisfies SourceReconciliation;
+      if (!current) return { kind: 'gone', sources, snapshot } satisfies SourceReconciliation;
       return current.models.some((model) => model.id === modelId)
         ? { kind: 'source', source: current } satisfies SourceReconciliation
         : undefined;
     },
   );
   const applyReconciliation = async (value: SourceReconciliation) => {
-    if (value.kind === 'gone') await onGone(source.id, value.sources);
+    if (value.kind === 'gone') await onGone(source.id, value.sources, value.snapshot);
     else await onMutation(value.source);
   };
   const addManualModel = () => trackMutation(async () => {
@@ -322,10 +327,10 @@ export const SourceDetailPanel: React.FC<{
   });
   const reconcileRemoval = async (model: SuppliedModel) => {
     const reconciliation = await reconcileUnknownWrite(
-      () => modelsApi.listSources(),
-      (sources) => {
+      readSourceInventory,
+      ({ sources, snapshot }) => {
         const current = sources.find((item) => item.id === source.id);
-        if (!current) return { kind: 'gone', sources } satisfies SourceReconciliation;
+        if (!current) return { kind: 'gone', sources, snapshot } satisfies SourceReconciliation;
         return !current.models.some((entry) => entry.id === model.id)
           ? { kind: 'source', source: current } satisfies SourceReconciliation
           : undefined;

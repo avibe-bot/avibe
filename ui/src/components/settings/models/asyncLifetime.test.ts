@@ -203,7 +203,8 @@ describe('latest Source entity authority', () => {
     const landed: Source[][] = [];
     const authority = createLatestEntityAuthorityByKey((source: Source) => source.id, (sources) => landed.push(sources));
     const initial = { id: 'src_a', display_name: 'initial' } as Source;
-    authority.replaceLatest([initial]);
+    const initialSnapshot = authority.beginSnapshot();
+    authority.settleSnapshot(initialSnapshot, [initial]);
     const olderSnapshot = authority.beginSnapshot();
     const mutation = authority.begin('src_a');
     const echoed = { ...initial, display_name: 'echoed' };
@@ -211,6 +212,24 @@ describe('latest Source entity authority', () => {
     expect(authority.settle(mutation, echoed)).toBe('landed');
     authority.settleSnapshot(olderSnapshot, [initial]);
     expect(landed.at(-1)).toEqual([echoed]);
+  });
+
+  it('does not let a scoped gone reconciliation invalidate a sibling write already in flight', () => {
+    const landed: Source[][] = [];
+    const authority = createLatestEntityAuthorityByKey((source: Source) => source.id, (sources) => landed.push(sources));
+    const sourceA = { id: 'src_a', display_name: 'A' } as Source;
+    const sourceB = { id: 'src_b', display_name: 'B' } as Source;
+    const initial = authority.beginSnapshot();
+    authority.settleSnapshot(initial, [sourceA, sourceB]);
+    const removingA = authority.begin(sourceA.id);
+    const mutatingB = authority.begin(sourceB.id);
+    const reconciliation = authority.beginSnapshot();
+
+    authority.settleSnapshotEntries(reconciliation, [sourceB]);
+    expect(authority.settleRemoval(removingA)).toBe('landed');
+    const echoedB = { ...sourceB, display_name: 'B after mutation' };
+    expect(authority.settle(mutatingB, echoedB)).toBe('landed');
+    expect(landed.at(-1)).toEqual([echoedB]);
   });
 });
 

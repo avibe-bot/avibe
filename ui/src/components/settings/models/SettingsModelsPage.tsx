@@ -104,7 +104,8 @@ export const RuntimePill: React.FC<{
   starting: boolean;
   onStart: () => void;
   onInstall: () => void;
-}> = ({ read, starting, onStart, onInstall }) => {
+  directCount?: number;
+}> = ({ read, starting, onStart, onInstall, directCount }) => {
   const { t } = useTranslation();
   const runtime = regionData(read);
   if (!runtime) {
@@ -114,12 +115,15 @@ export const RuntimePill: React.FC<{
   const health = runtime.status.health;
   const authoritative = read.kind === 'ready';
   const canInstall = health === 'not_installed' && runtimeHasInstallAsset(runtime);
-  const key = starting
+  const allDirect = authoritative && !starting && health === 'ok' && directCount !== undefined && directCount > 0;
+  const key = read.kind === 'error'
+    ? 'unread'
+    : starting
     ? 'starting'
     : health === 'installing'
       ? 'starting'
     : health === 'ok'
-      ? 'running'
+      ? allDirect ? 'allDirect' : 'running'
       : health === 'degraded'
         ? 'degraded'
         : health === 'down'
@@ -137,8 +141,9 @@ export const RuntimePill: React.FC<{
   const className = cn(
     'model-hub-runtime-pill',
     (health === 'down' || health === 'degraded' || read.kind === 'error') && 'model-hub-runtime-pill--error',
+    allDirect && 'model-hub-runtime-pill--direct',
   );
-  const content = <><span className="model-hub-runtime-dot" />{(starting || health === 'installing') && <LoaderCircle className="animate-spin" />}{t(`settings.models.shell.${key}`)}</>;
+  const content = <><span className="model-hub-runtime-dot" />{(starting || health === 'installing') && <LoaderCircle className="animate-spin" />}{t(`settings.models.shell.${key}`, allDirect ? { count: directCount } : undefined)}</>;
   return action
     ? <button type="button" className={className} onClick={action}>{content}</button>
     : <span className={className}>{content}</span>;
@@ -221,12 +226,6 @@ const DirectHome: React.FC<{ agents: AgentSupply[]; onSwitch: (agent: AgentSuppl
   );
 };
 
-const DirectPill: React.FC<{ count: number }> = ({ count }) => {
-  const { t } = useTranslation();
-  if (count === 0) return null;
-  return <span className="model-hub-runtime-pill model-hub-runtime-pill--direct"><span className="model-hub-runtime-dot" />{t('settings.models.shell.allDirect', { count })}</span>;
-};
-
 const TakeoverPill: React.FC<{ count: number }> = ({ count }) => {
   const { t } = useTranslation();
   if (count === 0) return null;
@@ -278,6 +277,7 @@ export const SettingsModelsPage: React.FC = () => {
       try {
         result = await work();
       } finally {
+        sourceEntityAuthority.abandon(generation);
         if (activeSourceGenerations.current.get(sourceId) === generation) {
           activeSourceGenerations.current.delete(sourceId);
         }
@@ -423,15 +423,19 @@ export const SettingsModelsPage: React.FC = () => {
       reconcile: refresh,
     });
   }, [applySourceEcho, refresh]);
-  const sourceGone = React.useCallback(async (sourceId: string, inventory?: Source[]) => {
+  const beginSourceSnapshot = React.useCallback(() => sourceEntityAuthority.beginSnapshot(), [sourceEntityAuthority]);
+  const sourceGone = React.useCallback(async (sourceId: string, inventory?: Source[], snapshot?: number) => {
     await convergeMutation({
-      entity: { sourceId, inventory },
-      applyEntity: ({ sourceId: goneId, inventory: authoritative }) => {
-        if (authoritative) sourceEntityAuthority.replaceLatest(authoritative);
-        else {
-          const generation = activeSourceGenerations.current.get(goneId) ?? sourceEntityAuthority.begin(goneId);
-          sourceEntityAuthority.settleRemoval(generation);
+      entity: { sourceId, inventory, snapshot },
+      applyEntity: ({ sourceId: goneId, inventory: authoritative, snapshot: inventorySnapshot }) => {
+        if (authoritative && inventorySnapshot !== undefined) {
+          sourceEntityAuthority.settleSnapshotEntries(
+            inventorySnapshot,
+            authoritative.filter((source) => source.id !== goneId),
+          );
         }
+        const generation = activeSourceGenerations.current.get(goneId) ?? sourceEntityAuthority.begin(goneId);
+        sourceEntityAuthority.settleRemoval(generation);
       },
       reconcile: refresh,
     });
@@ -529,23 +533,24 @@ export const SettingsModelsPage: React.FC = () => {
     <ModelHubShell
       detailBack={selectedSourceId ? () => selectSource(null) : undefined}
       actions={!landingLoading
-        ? directEmpty
-          ? <DirectPill count={agents.length} />
+        ? directEmpty && agents.length === 0
+          ? undefined
           : <span className="flex items-center gap-2">
               <RuntimePill
                 read={runtimeRead}
                 starting={startingRuntime}
                 onStart={() => void startRuntime()}
                 onInstall={() => setInstallOpen(true)}
+                directCount={directEmpty ? agents.length : undefined}
               />
-              <TakeoverPill count={takeoverCount} />
+              {!directEmpty && <TakeoverPill count={takeoverCount} />}
             </span>
         : undefined}
     >
       {landingLoading ? <div className="text-[13px] text-muted">{t('common.loading')}</div>
         : selectedSourceId
           ? selectedSource
-            ? <SourceDetailPanel source={selectedSource} onMutation={sourceMutation} onGone={sourceGone} trackMutation={(work) => trackSourceMutation(selectedSource.id, work)} />
+            ? <SourceDetailPanel source={selectedSource} onMutation={sourceMutation} onGone={sourceGone} beginSourceSnapshot={beginSourceSnapshot} trackMutation={(work) => trackSourceMutation(selectedSource.id, work)} />
             : <section className="rounded-xl border border-border bg-surface px-5 py-12 text-center text-[12px] text-muted">{t('settings.models.sourceDetail.gone')}</section>
           : directEmpty ? <DirectHome agents={agents} onSwitch={setAdoptAgent} />
             : <div className="space-y-[22px]">

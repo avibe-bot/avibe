@@ -103,7 +103,7 @@ describe('Model Hub runtime pill', () => {
         />
       </I18nextProvider>,
     );
-    expect(stale).toContain(zh.settings.models.shell.running);
+    expect(stale).toContain(zh.settings.models.shell.unread);
     expect(stale).not.toContain('<button');
   });
 

@@ -46,7 +46,7 @@ describe('convergeMutation', () => {
     expect(mutationOwners).toEqual(expect.arrayContaining(['agentSaved', 'sourceMutation']));
     expect(page).toMatch(/const sourceAdded = async[\s\S]*?await convergeMutation\(\{[\s\S]*?intent:\s*\{[\s\S]*?reconcile: refresh/);
     expect(detail).toMatch(/reconcileRemoval[\s\S]*?await applyReconciliation\(reconciliation\.value\)/);
-    expect(detail).toMatch(/kind: 'gone'[\s\S]*?await onGone\(source\.id, value\.sources\)/);
+    expect(detail).toMatch(/kind: 'gone'[\s\S]*?await onGone\(source\.id, value\.sources, value\.snapshot\)/);
     const sourceNotFoundWithoutGone = [...detail.matchAll(/source_not_found/g)].flatMap((match) => (
       detail.slice(match.index, (match.index ?? 0) + 140).includes('onGone') ? [] : [match.index]
     ));

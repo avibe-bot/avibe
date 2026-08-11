@@ -22,6 +22,7 @@ export const SOURCE_PROTOCOLS = [
   'openai_chat',
 ] as const;
 export type SourceProtocol = (typeof SOURCE_PROTOCOLS)[number];
+export const SOURCE_DISPLAY_NAME_MAX_LENGTH = 64 as const;
 export type SupplyChannel = 'native_cli' | 'hub';
 /** v3 (§4.5): classified by whether the state heals itself. cooldown carries a
  *  `retry_at` and clears on its own; needs_action never recovers unattended;

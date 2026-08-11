@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import i18n from '@/i18n';
 import { AddApiKeyDialog } from './AddApiKeyDialog';
 import { modelsApi } from './modelsApi';
-import { CONTRACT_VERSION, SOURCE_PROTOCOLS, type Source, type SourceObservation } from './types';
+import { CONTRACT_VERSION, SOURCE_DISPLAY_NAME_MAX_LENGTH, SOURCE_PROTOCOLS, type Source, type SourceObservation } from './types';
 
 const observed = (patch: Partial<SourceObservation> = {}): SourceObservation => ({
   contract_version: CONTRACT_VERSION,
@@ -53,6 +53,7 @@ const fillCredentials = async () => {
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe('AddApiKeyDialog', () => {
@@ -209,5 +210,52 @@ describe('AddApiKeyDialog', () => {
     await waitFor(() => expect(create).toHaveBeenCalledTimes(2));
     expect(list).toHaveBeenCalledOnce();
     expect(create.mock.calls[1][0].client_nonce).toBe(create.mock.calls[0][0].client_nonce);
+  });
+
+  it('rejects a trimmed blank or overlong display name before observation', async () => {
+    const observe = vi.spyOn(modelsApi, 'observeApiKeySource');
+    renderDialog();
+    const user = await fillCredentials();
+    const name = screen.getByRole('textbox', { name: /^Name|^名称/i });
+    const add = screen.getByRole('button', { name: /^Add$|^添加$/i }) as HTMLButtonElement;
+
+    await user.type(name, '   ');
+    expect(add.disabled).toBe(true);
+    await user.clear(name);
+    await user.type(name, 'x'.repeat(SOURCE_DISPLAY_NAME_MAX_LENGTH + 1));
+    expect(add.disabled).toBe(true);
+    await user.click(add);
+    expect(observe).not.toHaveBeenCalled();
+  });
+
+  it('keeps a server-named create validation failure editable and out of save reconciliation', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === '/api/csrf-token') return Response.json({ csrf_token: 'csrf' });
+      return Response.json({ ok: false, error: 'invalid_source', detail: 'display_name is invalid' }, { status: 422 });
+    }));
+    let validationError: unknown;
+    try {
+      await modelsApi.createApiKeySource({ kind: 'api_key', vendor: 'custom', base_url: 'https://relay.example/v1', key: 'secret-key' });
+    } catch (error) {
+      validationError = error;
+    }
+    vi.spyOn(modelsApi, 'observeApiKeySource').mockResolvedValueOnce(observed());
+    const create = vi.spyOn(modelsApi, 'createApiKeySource').mockRejectedValue(validationError);
+    const list = vi.spyOn(modelsApi, 'listSources');
+    renderDialog();
+    const user = await fillCredentials();
+    const name = screen.getByRole('textbox', { name: /^Name|^名称/i });
+    await user.type(name, 'Relay');
+
+    await user.click(screen.getByRole('button', { name: /^Add$|^添加$/i }));
+
+    expect(await screen.findByText('display_name is invalid')).toBeTruthy();
+    expect((name as HTMLInputElement).disabled).toBe(false);
+    expect(screen.queryByText(/not confirmed saved|确认.*保存/i)).toBeNull();
+    expect(list).not.toHaveBeenCalled();
+    await user.clear(name);
+    await user.type(name, 'Fixed relay');
+    expect(screen.getByRole('button', { name: /^Add$|^添加$/i })).toBeTruthy();
+    expect(create).toHaveBeenCalledOnce();
   });
 });
