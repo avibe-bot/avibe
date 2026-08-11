@@ -3141,6 +3141,19 @@ def model_hub_sources_get():
         return _model_hub_error(exc)
 
 
+@app.route("/api/models/sources/observe", methods=["POST"])
+async def model_hub_sources_observe_post():
+    from core.handlers.model_hub import ModelHubError
+
+    try:
+        result = await _model_hub_service().observe_source(
+            _model_hub_json_object("discovery_failed")
+        )
+        return _model_hub_success(**result)
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
+
+
 @app.route("/api/models/sources", methods=["POST"])
 async def model_hub_sources_post():
     from core.handlers.model_hub import ModelHubError
@@ -3157,8 +3170,8 @@ async def model_hub_sources_patch(source_id):
     from core.handlers.model_hub import ModelHubError
 
     try:
-        source = await _model_hub_service().patch_source(source_id, _model_hub_json_object())
-        return _model_hub_success(source=source)
+        result = await _model_hub_service().patch_source(source_id, _model_hub_json_object())
+        return _model_hub_success(**result)
     except ModelHubError as exc:
         return _model_hub_error(exc)
 
@@ -3197,8 +3210,8 @@ async def model_hub_sources_delete(source_id):
 
     try:
         force = str(request.args.get("force") or "").lower() in _TRUE_BOOL_STRINGS
-        await _model_hub_service().delete_source(source_id, force=force)
-        return _model_hub_success()
+        result = await _model_hub_service().delete_source(source_id, force=force)
+        return _model_hub_success(**result)
     except ModelHubError as exc:
         return _model_hub_error(exc)
 
@@ -3208,8 +3221,16 @@ async def model_hub_sources_refresh(source_id):
     from core.handlers.model_hub import ModelHubError
 
     try:
-        source, discovered = await _model_hub_service().refresh_source(source_id)
-        return _model_hub_success(source=source, discovered=discovered)
+        payload = request.json
+        if payload is None:
+            payload = {}
+        if not isinstance(payload, dict) or set(payload) - {"force"}:
+            raise ModelHubError("invalid_source_order")
+        result = await _model_hub_service().refresh_source(
+            source_id,
+            force=payload.get("force") is True,
+        )
+        return _model_hub_success(**result)
     except ModelHubError as exc:
         return _model_hub_error(exc)
 
@@ -3256,20 +3277,6 @@ async def model_hub_agent_mode_patch(backend):
         agent = await _model_hub_service().set_agent_mode(
             backend,
             _model_hub_json_object("mode_switch_blocked").get("mode"),
-        )
-        return _model_hub_success(agent=agent)
-    except ModelHubError as exc:
-        return _model_hub_error(exc)
-
-
-@app.route("/api/models/agents/<backend>/mappings", methods=["PUT"])
-async def model_hub_agent_mappings_put(backend):
-    from core.handlers.model_hub import ModelHubError
-
-    try:
-        agent = await _model_hub_service().set_mappings(
-            backend,
-            _model_hub_json_object("mapping_target_unavailable").get("mappings"),
         )
         return _model_hub_success(agent=agent)
     except ModelHubError as exc:
@@ -3330,12 +3337,12 @@ async def model_hub_source_models_delete(source_id, model_id):
 
     try:
         payload = _model_hub_json_object("mapping_target_unavailable")
-        source = await _model_hub_service().delete_custom_model(
+        result = await _model_hub_service().delete_custom_model(
             source_id,
             model_id,
             force=payload.get("force") is True,
         )
-        return _model_hub_success(source=source)
+        return _model_hub_success(**result)
     except ModelHubError as exc:
         return _model_hub_error(exc)
 
@@ -3365,6 +3372,24 @@ def model_hub_agent_chain_get(backend):
             raise ModelHubError("mapping_target_unavailable", status=409)
         chain = _model_hub_service().agent_chain(backend, model_id)
         return _model_hub_success(chain=chain)
+    except ModelHubError as exc:
+        return _model_hub_error(exc)
+
+
+@app.route("/api/models/agents/<backend>/chain", methods=["PUT"])
+async def model_hub_agent_chain_put(backend):
+    from core.handlers.model_hub import ModelHubError
+
+    try:
+        model_id = str(request.args.get("model") or "").strip()
+        if not model_id:
+            raise ModelHubError("mapping_target_unavailable", status=409)
+        result = await _model_hub_service().set_agent_chain(
+            backend,
+            model_id,
+            _model_hub_json_object("mapping_target_unavailable"),
+        )
+        return _model_hub_success(**result)
     except ModelHubError as exc:
         return _model_hub_error(exc)
 

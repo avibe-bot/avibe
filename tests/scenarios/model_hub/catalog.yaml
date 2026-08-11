@@ -45,78 +45,12 @@ scenarios:
     kind: recovery
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py::test_mh_evt_002_switch_events_survive_router_and_service_restart
-  - id: MH-RES-001
-    name: Quota-exhausted failover and recovery switchback
-    status: partial
-    kind: recovery
-    layer: unit
-    test: tests/test_model_hub_resolution.py::test_quota_failure_cools_source_switches_and_emits_redacted_events
-  - id: MH-SRC-REFRESH-001
-    name: Manual source refresh replaces discovery inventory and freshness timestamp
-    status: partial
-    kind: recovery
-    layer: unit_contract
-    test: tests/test_model_hub_api.py::test_model_hub_rest_api_contract
-  - id: MH-PRI-001
-    name: Per-agent source-order mutations and follow restoration take effect immediately
-    status: covered
-    kind: ordering
-    layer: scenario
-    test: tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py::test_mh_pri_001_order_mutations_change_the_next_turn
   - id: MH-SEL-001
     name: Unpinned Hub activation stays honest and resolves the turn model
     status: covered
     kind: selection
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_live_resolution_scenarios.py::test_unpinned_hub_projection_is_null_while_explicit_turn_resolves
-  - id: MH-MAP-001
-    name: Mapping applies to Claude Code only
-    status: partial
-    kind: mapping
-    layer: unit_contract
-    test: tests/test_model_hub_resolution.py::test_mapping_is_scoped_to_the_requesting_backend
-  - id: MH-OC-001
-    name: OpenCode identifiers stay stable across mode switches
-    status: covered
-    kind: stability
-    layer: scenario
-    test: tests/test_model_hub_injection.py::test_mh_ovl_001_identifiers_stay_stable_across_all_perturbations
-  - id: MH-CHAN-001
-    name: Native subscription exhaustion falls back and recovers per turn
-    status: covered
-    kind: recovery
-    layer: scenario
-    test: tests/test_model_hub_injection.py::test_mh_chan_001_native_quota_falls_back_then_recovers_next_turn
-  - id: MH-INJ-CLAUDE-001
-    name: Claude Hub launch uses environment-only gateway injection
-    status: covered
-    kind: injection
-    layer: scenario
-    test: tests/test_model_hub_injection.py::test_mh_inj_runtime_injection_never_writes_native_configs
-  - id: MH-INJ-CODEX-001
-    name: Codex Hub launch uses app-server runtime overrides
-    status: covered
-    kind: injection
-    layer: scenario
-    test: tests/test_model_hub_injection.py::test_mh_inj_runtime_injection_never_writes_native_configs
-  - id: MH-INJ-OPENCODE-001
-    name: OpenCode overlay changes drain work and restart with hash metadata
-    status: covered
-    kind: injection
-    layer: scenario
-    test: tests/test_model_hub_injection.py::test_mh_inj_opencode_overlay_change_drains_then_restarts_and_records_hash
-  - id: MH-INJ-DIRECT-001
-    name: Direct launches preserve native configuration and omit Hub injection
-    status: covered
-    kind: compatibility
-    layer: scenario
-    test: tests/test_model_hub_injection.py::test_mh_inj_runtime_injection_never_writes_native_configs
-  - id: MH-OVL-001
-    name: OpenCode visible identifiers survive source and runtime perturbations
-    status: covered
-    kind: stability
-    layer: scenario
-    test: tests/test_model_hub_injection.py::test_mh_ovl_001_identifiers_stay_stable_across_all_perturbations
   - id: MH-MIG-001
     name: Migration copies without modifying native configuration
     status: covered
@@ -129,18 +63,6 @@ scenarios:
     kind: migration
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_migration_scenarios.py::test_mh_mig_002_oauth_defaults_to_native_sources
-  - id: MH-MIG-003
-    name: Experimental mode keeps native OAuth files in their CLI stores
-    status: covered
-    kind: migration
-    layer: scenario
-    test: tests/scenarios/model_hub/test_model_hub_migration_scenarios.py::test_mh_mig_003_experimental_flag_keeps_oauth_native
-  - id: MH-OAUTH-A-001
-    name: Paste-code OAuth happy path
-    status: partial
-    kind: oauth
-    layer: contract
-    test: tests/test_model_hub_api.py::test_model_hub_rest_api_contract
   - id: MH-OAUTH-B-001
     name: Device-code OAuth happy path
     status: gap
@@ -151,12 +73,6 @@ scenarios:
     status: gap
     kind: oauth
     layer: scenario
-  - id: MH-OAUTH-ERR-001
-    name: OAuth timeout and cancel terminate cleanly
-    status: partial
-    kind: timeout_cancel
-    layer: contract
-    test: tests/test_model_hub_api.py::test_model_hub_rest_api_contract
   - id: MH-OAUTH-NATIVE-001
     name: Claude native CLI paste-code login persists an active Source
     status: covered
@@ -175,30 +91,11 @@ scenarios:
     kind: timeout_cancel
     layer: scenario
     test: tests/scenarios/model_hub/test_model_hub_native_oauth_scenarios.py::test_mh_oauth_native_003_cancel_and_timeout_terminate_cleanly
-  - id: MH-OAUTH-CONSENT-001
-    name: Experimental hub OAuth requires and persists explicit consent before Source creation
-    status: covered
-    kind: oauth_consent
-    layer: scenario
-    test: tests/scenarios/model_hub/test_model_hub_native_oauth_scenarios.py::test_mh_oauth_consent_001_is_required_and_persisted
 next_priority:
-  - MH-RES-001
-  - MH-PRI-001
   - MH-SEL-001
-  - MH-MAP-001
-  - MH-OC-001
-  - MH-CHAN-001
-  - MH-INJ-CLAUDE-001
-  - MH-INJ-CODEX-001
-  - MH-INJ-OPENCODE-001
-  - MH-INJ-DIRECT-001
-  - MH-OVL-001
   - MH-MIG-001
-  - MH-OAUTH-A-001
   - MH-OAUTH-B-001
   - MH-OAUTH-C-001
-  - MH-OAUTH-ERR-001
   - MH-OAUTH-NATIVE-001
   - MH-OAUTH-NATIVE-002
   - MH-OAUTH-NATIVE-003
-  - MH-OAUTH-CONSENT-001

@@ -1574,22 +1574,17 @@ def test_engine_client_non_stream_failures_after_first_byte_block_retry(
 
 
 @pytest.mark.parametrize(
-    ("vendor", "endpoint", "expected_query", "device_flow"),
+    ("vendor", "endpoint"),
     [
-        ("anthropic", "/anthropic-auth-url", {"is_webui": "true"}, False),
-        ("openai", "/codex-auth-url", {"is_webui": "true"}, False),
-        ("codex", "/codex-auth-url", {"is_webui": "true"}, False),
-        ("antigravity", "/antigravity-auth-url", {"is_webui": "true"}, False),
-        ("kimi", "/kimi-auth-url", None, True),
-        ("xai", "/xai-auth-url", None, True),
+        ("anthropic", "/anthropic-auth-url"),
+        ("openai", "/codex-auth-url"),
+        ("codex", "/codex-auth-url"),
     ],
 )
-def test_oauth_start_uses_webui_callback_only_for_browser_flows(
+def test_oauth_start_uses_webui_callback_for_observable_vendors(
     tmp_path: Path,
     vendor: str,
     endpoint: str,
-    expected_query: dict[str, str] | None,
-    device_flow: bool,
 ) -> None:
     class Client:
         def __init__(self) -> None:
@@ -1600,10 +1595,7 @@ def test_oauth_start_uses_webui_callback_only_for_browser_flows(
                 return {"files": []}
             if path == endpoint:
                 self.start_query = query
-                response = {"state": "engine-state", "url": "https://example.test/oauth"}
-                if device_flow:
-                    response.update({"flow": "device", "user_code": "ABCD-EFGH"})
-                return response
+                return {"state": "engine-state", "url": "https://example.test/oauth"}
             raise AssertionError((method, path, query, payload, timeout))
 
     class Supervisor:
@@ -1624,8 +1616,33 @@ def test_oauth_start_uses_webui_callback_only_for_browser_flows(
 
         flow = await adapter.start_oauth("src_fixture123", vendor)
 
-        assert client.start_query == expected_query
-        assert flow.expects == ("none" if device_flow else "paste_callback_url")
+        assert client.start_query == {"is_webui": "true"}
+        assert flow.expects == "paste_callback_url"
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("vendor", ["antigravity", "kimi", "xai"])
+def test_oauth_start_rejects_engine_only_vendors_before_engine_work(
+    tmp_path: Path,
+    vendor: str,
+) -> None:
+    class Supervisor:
+        def client(self):
+            raise AssertionError("unsupported Model Hub OAuth must not reach the engine")
+
+    async def run() -> None:
+        store = EngineStateStore(tmp_path / "state")
+        adapter = CLIProxyEngineAdapter(
+            supervisor=Supervisor(),  # type: ignore[arg-type]
+            state_store=store,
+        )
+
+        with pytest.raises(
+            EngineStateError,
+            match="lacks Model Hub response-backed observation",
+        ):
+            await adapter.start_oauth("src_fixture123", vendor)
 
     asyncio.run(run())
 
@@ -1973,7 +1990,10 @@ def test_oauth_flow_releases_provider_after_engine_failure_or_expiry(tmp_path: P
             state_store=store,
         )
 
-        with pytest.raises(EngineStateError, match="unsupported OAuth vendor"):
+        with pytest.raises(
+            EngineStateError,
+            match="lacks Model Hub response-backed observation",
+        ):
             await adapter.start_oauth("src_fixture123", "gemini")
 
         failed_flow = await adapter.start_oauth("src_fixture123", "anthropic")

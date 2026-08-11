@@ -9,7 +9,7 @@ from dataclasses import dataclass, field, fields
 from datetime import datetime
 from pathlib import Path
 from typing import List, Literal, Mapping, Optional, Union
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
 from config import paths
 from config.platform_registry import (
@@ -28,6 +28,20 @@ from vibe.i18n import normalize_language
 logger = logging.getLogger(__name__)
 
 CONFIG_LOCK = threading.RLock()
+
+_MODEL_HUB_CREDENTIAL_PATTERNS = (
+    re.compile(r"(?i)\b(?:sk|rk|pk|sess|token)[-_][a-z0-9_-]{8,}\b"),
+    re.compile(
+        r"(?i)\b(?:authorization|api[_ -]?key|access[_ -]?token)\s*[:=]\s*"
+        r"(?:sk[-_][a-z0-9_-]{8,}|[a-z0-9._~+/=-]{16,})"
+    ),
+    re.compile(r"(?i)\bbearer\s+[a-z0-9._~+/=-]{8,}"),
+)
+
+
+def _contains_model_hub_credential_material(value: object) -> bool:
+    rendered = json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return any(pattern.search(rendered) for pattern in _MODEL_HUB_CREDENTIAL_PATTERNS)
 
 DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS = 600
 
@@ -104,6 +118,118 @@ MODEL_HUB_BACKENDS = ("claude", "codex", "opencode")
 MODEL_HUB_LEGACY_CREATED_AT = "1970-01-01T00:00:00Z"
 
 
+def normalize_model_hub_vendor_id(value: object) -> str:
+    """Return the canonical persisted vendor id used by matching-v1."""
+
+    if not isinstance(value, str):
+        raise ValueError("Config 'model_hub.sources.vendor' must be a non-empty string")
+    vendor = value.strip().lower()
+    if (
+        not vendor
+        or re.fullmatch(r"[a-z0-9]+(?:[._-][a-z0-9]+)*", vendor) is None
+        or _contains_model_hub_credential_material(vendor)
+    ):
+        raise ValueError("Config 'model_hub.sources.vendor' is invalid")
+    return vendor
+
+
+def canonical_opencode_menu_identity(identifier: object) -> tuple[str, str]:
+    """Validate and split one persisted OpenCode ``provider/model`` identity."""
+
+    from core.handlers.model_hub.identifiers import (
+        STANDARD_OPENCODE_VENDOR_IDS,
+        parse_opencode_model_id,
+    )
+
+    if not isinstance(identifier, str) or identifier != identifier.strip():
+        raise ValueError("Invalid OpenCode model identifier")
+    provider_id, model_id = parse_opencode_model_id(identifier)
+    if (
+        provider_id not in STANDARD_OPENCODE_VENDOR_IDS
+        and provider_id != "custom"
+    ) or provider_id != provider_id.strip() or model_id != model_id.strip():
+        raise ValueError("Invalid OpenCode model identifier")
+    if _contains_model_hub_credential_material(identifier):
+        raise ValueError("OpenCode model identifier contains credential material")
+    return provider_id, model_id
+
+
+def model_hub_fixed_menu_ids(backend: str) -> tuple[str, ...]:
+    """Return the bundled fixed-menu ids used by persisted Hub routes."""
+
+    if backend not in {"claude", "codex"}:
+        return ()
+    from vibe.backend_model_catalog import backend_model_entries, load_bundled_catalog
+
+    return tuple(
+        entry["id"]
+        for entry in backend_model_entries(backend, load_bundled_catalog())
+    )
+
+
+def _migrate_fixed_menu_routes_on_load(payload: dict) -> dict:
+    """Adapt fixed-menu route keys to the current bundled catalog on reload.
+
+    A changed catalog is a one-time structural migration: newly introduced
+    menu ids receive empty routes and removed ids are discarded. Existing hop
+    payloads are copied verbatim; matching and placement never run here.
+    """
+
+    model_hub = payload.get("model_hub")
+    if not isinstance(model_hub, dict):
+        return payload
+    agents = model_hub.get("agents")
+    if not isinstance(agents, dict):
+        return payload
+
+    migrated_agents = dict(agents)
+    changed = False
+    for backend in ("claude", "codex"):
+        raw_agent = agents.get(backend)
+        if not isinstance(raw_agent, dict):
+            continue
+        routes = raw_agent.get("routes")
+        expected_menu_ids = model_hub_fixed_menu_ids(backend)
+        if not isinstance(routes, dict) or not expected_menu_ids:
+            continue
+        migrated_routes = {
+            model_id: routes.get(model_id, {"hops": []})
+            for model_id in expected_menu_ids
+        }
+        if migrated_routes == routes:
+            continue
+        migrated_agent = dict(raw_agent)
+        migrated_agent["routes"] = migrated_routes
+        migrated_agents[backend] = migrated_agent
+        changed = True
+
+    if not changed:
+        return payload
+    migrated_model_hub = dict(model_hub)
+    migrated_model_hub["agents"] = migrated_agents
+    migrated_payload = dict(payload)
+    migrated_payload["model_hub"] = migrated_model_hub
+    return migrated_payload
+
+
+_MODEL_HUB_CREDENTIAL_QUERY_KEYS = {
+    "access_token",
+    "api_key",
+    "apikey",
+    "auth",
+    "authorization",
+    "bearer",
+    "credential",
+    "key",
+    "password",
+    "passwd",
+    "secret",
+    "sig",
+    "signature",
+    "token",
+}
+
+
 def is_model_hub_enabled(environ: Optional[Mapping[str, str]] = None) -> bool:
     """Return the backend-authoritative Model Hub release capability."""
 
@@ -123,6 +249,64 @@ def _validate_optional_datetime(value: object, field_path: str) -> Optional[str]
     if parsed.tzinfo is None:
         raise ValueError(f"Config '{field_path}' must include a timezone")
     return value
+
+
+def normalize_model_hub_base_url(
+    value: object,
+    *,
+    append_path: str | None = None,
+) -> Optional[str]:
+    """Validate a Source URL and optionally append an upstream API path."""
+
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("Config 'model_hub.sources.base_url' is invalid")
+    try:
+        parsed = urlsplit(value.strip())
+        hostname = parsed.hostname
+    except ValueError as exc:
+        raise ValueError("Config 'model_hub.sources.base_url' is invalid") from exc
+    if (
+        parsed.scheme.lower() not in {"http", "https"}
+        or not hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.fragment
+    ):
+        raise ValueError("Config 'model_hub.sources.base_url' is invalid")
+    for key, _ in parse_qsl(
+        parsed.query,
+        keep_blank_values=True,
+    ):
+        normalized = key.strip().lower().replace("-", "_").replace(".", "_")
+        if normalized in _MODEL_HUB_CREDENTIAL_QUERY_KEYS or any(
+            marker in normalized
+            for marker in (
+                "api_key",
+                "access_token",
+                "auth_token",
+                "token",
+                "authorization",
+                "signature",
+                "secret",
+                "password",
+                "credential",
+            )
+        ):
+            raise ValueError("Config 'model_hub.sources.base_url' is invalid")
+    if _contains_model_hub_credential_material(value):
+        raise ValueError("Config 'model_hub.sources.base_url' is invalid")
+    path = parsed.path.rstrip("/")
+    if append_path is not None:
+        if not append_path.startswith("/") or append_path.startswith("//"):
+            raise ValueError("Model Hub URL path must be relative to the API root")
+        path = f"{path}{append_path}"
+    return urlunsplit((parsed.scheme.lower(), parsed.netloc, path, parsed.query, ""))
+
+
+def _validate_model_hub_base_url(value: object) -> Optional[str]:
+    return normalize_model_hub_base_url(value)
 
 
 def _filter_dataclass_fields(dc_class, payload: dict) -> dict:
@@ -556,12 +740,22 @@ class ModelHubModelConfig:
     def from_payload(cls, payload: dict) -> "ModelHubModelConfig":
         if not isinstance(payload, dict):
             raise ValueError("Config 'model_hub.sources.models' entries must be objects")
+        if set(payload) - {
+            "id",
+            "display_name",
+            "origin",
+            "reasoning_efforts",
+            "discovered_at",
+        }:
+            raise ValueError("Config 'model_hub.sources.models' contains unknown fields")
         model_id = payload.get("id")
         origin = payload.get("origin")
-        reasoning_efforts = payload.get("reasoning_efforts", [])
+        if "reasoning_efforts" not in payload:
+            raise ValueError("Config 'model_hub.sources.models.reasoning_efforts' is required")
+        reasoning_efforts = payload["reasoning_efforts"]
         display_name = payload.get("display_name")
         discovered_at = payload.get("discovered_at")
-        if not isinstance(model_id, str) or not model_id:
+        if not isinstance(model_id, str) or not model_id or _contains_model_hub_credential_material(model_id):
             raise ValueError("Config 'model_hub.sources.models.id' must be a non-empty string")
         if origin not in {"discovered", "manual"}:
             raise ValueError("Config 'model_hub.sources.models.origin' is invalid")
@@ -569,10 +763,18 @@ class ModelHubModelConfig:
             not isinstance(reasoning_efforts, list)
             or any(not isinstance(effort, str) or not effort for effort in reasoning_efforts)
             or len(set(reasoning_efforts)) != len(reasoning_efforts)
+            or any(_contains_model_hub_credential_material(effort) for effort in reasoning_efforts)
         ):
-            raise ValueError("Config 'model_hub.sources.models.reasoning_efforts' must be a unique array of strings")
-        if display_name is not None and not isinstance(display_name, str):
+            raise ValueError(
+                "Config 'model_hub.sources.models.reasoning_efforts' must be a unique credential-free array of strings"
+            )
+        if display_name is not None and (
+            not isinstance(display_name, str)
+            or _contains_model_hub_credential_material(display_name)
+        ):
             raise ValueError("Config 'model_hub.sources.models.display_name' must be a string or null")
+        if origin == "manual" and discovered_at is not None:
+            raise ValueError("Config manual model entries cannot carry discovered_at")
         return cls(
             id=model_id,
             provenance=origin,
@@ -604,6 +806,8 @@ class ModelHubSourceStateConfig:
     def from_payload(cls, payload: dict) -> "ModelHubSourceStateConfig":
         if not isinstance(payload, dict):
             raise ValueError("Config 'model_hub.sources.state' must be an object")
+        if set(payload) - {"status", "retry_at", "detail_key"}:
+            raise ValueError("Config 'model_hub.sources.state' contains unknown fields")
         status = payload.get("status")
         retry_at = payload.get("retry_at")
         detail_key = payload.get("detail_key")
@@ -654,6 +858,13 @@ class ModelHubSourceUsageConfig:
     def from_payload(cls, payload: dict) -> "ModelHubSourceUsageConfig":
         if not isinstance(payload, dict):
             raise ValueError("Config 'model_hub.sources.usage' must be an object")
+        if set(payload) - {
+            "cycle_used_pct",
+            "month_spend_cents",
+            "currency",
+            "projected_exhaust_at",
+        }:
+            raise ValueError("Config 'model_hub.sources.usage' contains unknown fields")
         cycle_used_pct = payload.get("cycle_used_pct")
         if cycle_used_pct is not None and (
             isinstance(cycle_used_pct, bool)
@@ -703,7 +914,6 @@ class ModelHubSourceConfig:
     created_at: str = MODEL_HUB_LEGACY_CREATED_AT
     last_discovered_at: Optional[str] = None
     base_url: Optional[str] = None
-    experimental_consent_at: Optional[str] = None
     usage: Optional[ModelHubSourceUsageConfig] = None
     credential_ref: Optional[str] = None
     account_label: Optional[str] = None
@@ -713,6 +923,26 @@ class ModelHubSourceConfig:
     def from_payload(cls, payload: dict) -> "ModelHubSourceConfig":
         if not isinstance(payload, dict):
             raise ValueError("Config 'model_hub.sources' entries must be objects")
+        allowed_fields = {
+            "id",
+            "created_at",
+            "last_discovered_at",
+            "kind",
+            "vendor",
+            "display_name",
+            "protocol",
+            "base_url",
+            "supply_channel",
+            "billing",
+            "state",
+            "usage",
+            "models",
+            "credential_ref",
+            "account_label",
+            "masked_credential",
+        }
+        if set(payload) - allowed_fields:
+            raise ValueError("Config 'model_hub.sources' contains unknown fields")
         source_id = payload.get("id")
         kind = payload.get("kind")
         vendor = payload.get("vendor")
@@ -724,8 +954,7 @@ class ModelHubSourceConfig:
             raise ValueError("Config 'model_hub.sources.id' is invalid")
         if kind not in {"subscription", "api_key"}:
             raise ValueError("Config 'model_hub.sources.kind' is invalid")
-        if not isinstance(vendor, str) or not vendor:
-            raise ValueError("Config 'model_hub.sources.vendor' must be a non-empty string")
+        vendor = normalize_model_hub_vendor_id(vendor)
         if not isinstance(display_name, str) or not display_name or len(display_name) > 64:
             raise ValueError("Config 'model_hub.sources.display_name' is invalid")
         if protocol not in {"anthropic", "openai_responses", "openai_chat"}:
@@ -737,22 +966,39 @@ class ModelHubSourceConfig:
         models_payload = payload.get("models")
         if not isinstance(models_payload, list):
             raise ValueError("Config 'model_hub.sources.models' must be an array")
+        model_ids = [model.get("id") for model in models_payload if isinstance(model, dict)]
+        if len(model_ids) != len(models_payload):
+            raise ValueError("Config 'model_hub.sources.models' entries must be objects")
+        if any(not isinstance(model_id, str) for model_id in model_ids):
+            raise ValueError("Config 'model_hub.sources.models.id' must be a non-empty string")
+        if len(set(model_ids)) != len(model_ids):
+            raise ValueError("Config 'model_hub.sources.models' contains duplicate ids")
         usage_payload = payload.get("usage")
         base_url = payload.get("base_url")
-        consent_at = payload.get("experimental_consent_at")
         credential_ref = payload.get("credential_ref")
         account_label = payload.get("account_label")
         masked_credential = payload.get("masked_credential")
         created_at = payload.get("created_at")
         last_discovered_at = payload.get("last_discovered_at")
-        if base_url is not None and not isinstance(base_url, str):
-            raise ValueError("Config 'model_hub.sources.base_url' is invalid")
+        base_url = _validate_model_hub_base_url(base_url)
         if credential_ref is not None and not isinstance(credential_ref, str):
             raise ValueError("Config 'model_hub.sources.credential_ref' is invalid")
         if account_label is not None and not isinstance(account_label, str):
             raise ValueError("Config 'model_hub.sources.account_label' is invalid")
         if masked_credential is not None and not isinstance(masked_credential, str):
             raise ValueError("Config 'model_hub.sources.masked_credential' is invalid")
+        if kind == "subscription" and (base_url is not None or masked_credential is not None):
+            raise ValueError("Config subscription Sources cannot carry API-key fields")
+        if kind == "api_key" and supply_channel != "hub":
+            raise ValueError("Config API-key Sources must use the hub channel")
+        if supply_channel == "native_cli" and credential_ref is not None:
+            raise ValueError("Config native Sources cannot carry an engine credential ref")
+        if supply_channel == "hub" and (not isinstance(credential_ref, str) or not credential_ref):
+            raise ValueError("Config hub Sources require an engine credential ref")
+        if kind == "api_key" and usage_payload is not None:
+            projected_exhaust_at = usage_payload.get("projected_exhaust_at") if isinstance(usage_payload, dict) else None
+            if projected_exhaust_at is not None:
+                raise ValueError("Config API-key Sources cannot carry projected exhaustion")
         return cls(
             id=source_id,
             kind=kind,
@@ -775,10 +1021,6 @@ class ModelHubSourceConfig:
                 "model_hub.sources.last_discovered_at",
             ),
             base_url=base_url,
-            experimental_consent_at=_validate_optional_datetime(
-                consent_at,
-                "model_hub.sources.experimental_consent_at",
-            ),
             usage=ModelHubSourceUsageConfig.from_payload(usage_payload) if usage_payload is not None else None,
             credential_ref=credential_ref,
             account_label=account_label,
@@ -808,33 +1050,50 @@ class ModelHubSourceConfig:
         return payload
 
 
-@dataclass
-class ModelHubMappingConfig:
-    builtin_id: str
-    target_model_id: str
-    enabled: bool
+@dataclass(frozen=True)
+class ModelHubRouteHopConfig:
+    source_id: str
+    model_id: str
 
     @classmethod
-    def from_payload(cls, payload: dict) -> "ModelHubMappingConfig":
-        if not isinstance(payload, dict):
-            raise ValueError("Config 'model_hub.agents.mappings' entries must be objects")
-        builtin_id = payload.get("builtin_id")
-        target_model_id = payload.get("target_model_id")
-        enabled = payload.get("enabled")
-        if not isinstance(builtin_id, str) or not builtin_id:
-            raise ValueError("Config 'model_hub.agents.mappings.builtin_id' is invalid")
-        if not isinstance(target_model_id, str) or not target_model_id:
-            raise ValueError("Config 'model_hub.agents.mappings.target_model_id' is invalid")
-        if not isinstance(enabled, bool):
-            raise ValueError("Config 'model_hub.agents.mappings.enabled' must be a boolean")
-        return cls(builtin_id=builtin_id, target_model_id=target_model_id, enabled=enabled)
+    def from_payload(cls, payload: object) -> "ModelHubRouteHopConfig":
+        if not isinstance(payload, dict) or set(payload) != {"source_id", "model_id"}:
+            raise ValueError("Config 'model_hub.agents.routes.hops' entries must contain source_id and model_id")
+        source_id = payload.get("source_id")
+        model_id = payload.get("model_id")
+        if not isinstance(source_id, str) or re.fullmatch(r"src_[a-z0-9]{8,}", source_id) is None:
+            raise ValueError("Config 'model_hub.agents.routes.hops.source_id' is invalid")
+        if (
+            not isinstance(model_id, str)
+            or not model_id
+            or _contains_model_hub_credential_material(model_id)
+        ):
+            raise ValueError("Config 'model_hub.agents.routes.hops.model_id' is invalid")
+        return cls(source_id=source_id, model_id=model_id)
 
     def to_payload(self) -> dict:
-        return {
-            "builtin_id": self.builtin_id,
-            "target_model_id": self.target_model_id,
-            "enabled": self.enabled,
-        }
+        return {"source_id": self.source_id, "model_id": self.model_id}
+
+
+@dataclass
+class ModelHubRouteConfig:
+    hops: tuple[ModelHubRouteHopConfig, ...] = ()
+
+    @classmethod
+    def from_payload(cls, payload: object) -> "ModelHubRouteConfig":
+        if not isinstance(payload, dict) or set(payload) != {"hops"}:
+            raise ValueError("Config 'model_hub.agents.routes' entries must contain hops")
+        hops = payload.get("hops")
+        if not isinstance(hops, list):
+            raise ValueError("Config 'model_hub.agents.routes.hops' must be an array")
+        parsed = tuple(ModelHubRouteHopConfig.from_payload(hop) for hop in hops)
+        pairs = [(hop.source_id, hop.model_id) for hop in parsed]
+        if len(set(pairs)) != len(pairs):
+            raise ValueError("Config 'model_hub.agents.routes.hops' must contain unique pairs")
+        return cls(hops=parsed)
+
+    def to_payload(self) -> dict:
+        return {"hops": [hop.to_payload() for hop in self.hops]}
 
 
 @dataclass
@@ -846,6 +1105,8 @@ class ModelHubMenuConfig:
     def from_payload(cls, payload: dict) -> "ModelHubMenuConfig":
         if not isinstance(payload, dict):
             raise ValueError("Config 'model_hub.agents.menu' must be an object")
+        if set(payload) - {"view", "checked"}:
+            raise ValueError("Config 'model_hub.agents.menu' contains unknown fields")
         view = payload.get("view")
         checked = payload.get("checked")
         if view not in {"featured", "full"}:
@@ -854,6 +1115,8 @@ class ModelHubMenuConfig:
             raise ValueError("Config 'model_hub.agents.menu.checked' must be an array of strings")
         if len(set(checked)) != len(checked):
             raise ValueError("Config 'model_hub.agents.menu.checked' must be unique")
+        if any(_contains_model_hub_credential_material(item) for item in checked):
+            raise ValueError("Config 'model_hub.agents.menu.checked' is invalid")
         return cls(view=view, checked=list(checked))
 
     def to_payload(self) -> dict:
@@ -862,27 +1125,23 @@ class ModelHubMenuConfig:
 
 @dataclass
 class ModelHubAgentSourcesConfig:
-    policy: Literal["follow", "custom"] = "follow"
     order: list[str] = field(default_factory=list)
 
     @classmethod
     def from_payload(cls, payload: dict) -> "ModelHubAgentSourcesConfig":
         if not isinstance(payload, dict):
             raise ValueError("Config 'model_hub.agents.sources' must be an object")
-        if set(payload) != {"policy", "order"}:
-            raise ValueError("Config 'model_hub.agents.sources' must contain policy and order")
-        policy = payload.get("policy")
+        if set(payload) != {"order"}:
+            raise ValueError("Config 'model_hub.agents.sources' must contain only order")
         order = payload.get("order")
-        if policy not in {"follow", "custom"}:
-            raise ValueError("Config 'model_hub.agents.sources.policy' is invalid")
         if not isinstance(order, list) or not all(isinstance(item, str) for item in order):
             raise ValueError("Config 'model_hub.agents.sources.order' must be an array of strings")
         if len(set(order)) != len(order):
             raise ValueError("Config 'model_hub.agents.sources.order' must be unique")
-        return cls(policy=policy, order=list(order))
+        return cls(order=list(order))
 
     def to_payload(self) -> dict:
-        return {"policy": self.policy, "order": list(self.order)}
+        return {"order": list(self.order)}
 
 
 @dataclass
@@ -891,7 +1150,7 @@ class ModelHubAgentSupplyConfig:
     mode: Literal["hub", "direct"]
     menu_kind: Literal["fixed", "open"]
     sources: ModelHubAgentSourcesConfig = field(default_factory=ModelHubAgentSourcesConfig)
-    mappings: list[ModelHubMappingConfig] = field(default_factory=list)
+    routes: dict[str, ModelHubRouteConfig] = field(default_factory=dict)
     menu: Optional[ModelHubMenuConfig] = None
 
     @classmethod
@@ -900,12 +1159,19 @@ class ModelHubAgentSupplyConfig:
             return cls(backend="opencode", mode=mode, menu_kind="open", menu=ModelHubMenuConfig())
         if backend not in {"claude", "codex"}:
             raise ValueError(f"Unsupported Model Hub backend: {backend}")
-        return cls(backend=backend, mode=mode, menu_kind="fixed")
+        return cls(
+            backend=backend,
+            mode=mode,
+            menu_kind="fixed",
+            routes={model_id: ModelHubRouteConfig() for model_id in model_hub_fixed_menu_ids(backend)},
+        )
 
     @classmethod
     def from_payload(cls, payload: dict, *, expected_backend: Optional[str] = None) -> "ModelHubAgentSupplyConfig":
         if not isinstance(payload, dict):
             raise ValueError("Config 'model_hub.agents' entries must be objects")
+        if set(payload) - {"backend", "mode", "menu_kind", "sources", "routes", "menu"}:
+            raise ValueError("Config 'model_hub.agents' contains unknown fields")
         backend = payload.get("backend") or expected_backend
         mode = payload.get("mode")
         menu_kind = payload.get("menu_kind")
@@ -918,15 +1184,27 @@ class ModelHubAgentSupplyConfig:
         expected_menu_kind = "open" if backend == "opencode" else "fixed"
         if menu_kind != expected_menu_kind:
             raise ValueError("Config 'model_hub.agents.menu_kind' is invalid for backend")
-        mappings_payload = payload.get("mappings") or []
-        if not isinstance(mappings_payload, list):
-            raise ValueError("Config 'model_hub.agents.mappings' must be an array")
+        routes_payload = payload.get("routes", {})
+        if not isinstance(routes_payload, dict):
+            raise ValueError("Config 'model_hub.agents.routes' must be an object")
+        if any(not isinstance(model_id, str) or not model_id for model_id in routes_payload):
+            raise ValueError("Config 'model_hub.agents.routes' keys must be non-empty strings")
         menu_payload = payload.get("menu")
         sources_payload = payload.get("sources")
         if backend == "opencode" and menu_payload is None:
             menu_payload = {"view": "featured", "checked": []}
         if backend != "opencode" and menu_payload is not None:
             raise ValueError("Config 'model_hub.agents.menu' is only valid for opencode")
+        routes = {
+            model_id: ModelHubRouteConfig.from_payload(route)
+            for model_id, route in routes_payload.items()
+        }
+        menu = ModelHubMenuConfig.from_payload(menu_payload) if menu_payload is not None else None
+        if any(_contains_model_hub_credential_material(model_id) for model_id in routes):
+            raise ValueError("Config 'model_hub.agents.routes' contains an invalid model id")
+        if backend == "opencode":
+            for identifier in (*routes, *(menu.checked if menu else ())):
+                canonical_opencode_menu_identity(identifier)
         return cls(
             backend=backend,
             mode=mode,
@@ -936,8 +1214,8 @@ class ModelHubAgentSupplyConfig:
                 if sources_payload is not None
                 else ModelHubAgentSourcesConfig()
             ),
-            mappings=[ModelHubMappingConfig.from_payload(mapping) for mapping in mappings_payload],
-            menu=ModelHubMenuConfig.from_payload(menu_payload) if menu_payload is not None else None,
+            routes=routes,
+            menu=menu,
         )
 
     def to_payload(self) -> dict:
@@ -946,7 +1224,10 @@ class ModelHubAgentSupplyConfig:
             "mode": self.mode,
             "menu_kind": self.menu_kind,
             "sources": self.sources.to_payload(),
-            "mappings": [mapping.to_payload() for mapping in self.mappings],
+            "routes": {
+                model_id: route.to_payload()
+                for model_id, route in self.routes.items()
+            },
             "menu": self.menu.to_payload() if self.menu else None,
         }
 
@@ -959,7 +1240,6 @@ class ModelHubConfig:
             backend: ModelHubAgentSupplyConfig.default(backend, mode="direct") for backend in MODEL_HUB_BACKENDS
         }
     )
-    subscription_hub_experimental: bool = False
 
     @staticmethod
     def source_eligible_for_backend(
@@ -968,8 +1248,10 @@ class ModelHubConfig:
     ) -> bool:
         if backend not in MODEL_HUB_BACKENDS:
             return False
+        if source.supply_channel == "hub":
+            return True
         if source.kind == "api_key":
-            return source.supply_channel == "hub"
+            return False
         expected_backend = {"anthropic": "claude", "openai": "codex"}.get(source.vendor)
         return expected_backend == backend
 
@@ -991,49 +1273,80 @@ class ModelHubConfig:
         ]
 
     def effective_source_order(self, backend: str) -> list[str]:
-        sources = self.agents[backend].sources
-        if sources.policy == "follow":
-            return self.recommended_source_order(backend)
-        return list(sources.order)
-
-    def refresh_follow_orders(self) -> None:
-        for backend in MODEL_HUB_BACKENDS:
-            sources = self.agents[backend].sources
-            if sources.policy == "follow":
-                sources.order = self.recommended_source_order(backend)
+        return list(self.agents[backend].sources.order)
 
     @classmethod
     def from_payload(cls, payload: dict) -> "ModelHubConfig":
         if not isinstance(payload, dict):
             raise ValueError("Config 'model_hub' must be an object")
+        if set(payload) - {"sources", "agents"}:
+            raise ValueError("Config 'model_hub' contains unknown fields")
         sources_payload = payload.get("sources") or []
         agents_payload = payload.get("agents") or {}
-        experimental = payload.get("subscription_hub_experimental", False)
         if not isinstance(sources_payload, list):
             raise ValueError("Config 'model_hub.sources' must be an array")
         if not isinstance(agents_payload, dict):
             raise ValueError("Config 'model_hub.agents' must be an object")
-        if not isinstance(experimental, bool):
-            raise ValueError("Config 'model_hub.subscription_hub_experimental' must be a boolean")
+        if set(agents_payload) - set(MODEL_HUB_BACKENDS):
+            raise ValueError("Config 'model_hub.agents' contains unknown backends")
         sources = [ModelHubSourceConfig.from_payload(source) for source in sources_payload]
         source_ids = [source.id for source in sources]
         if len(set(source_ids)) != len(source_ids):
             raise ValueError("Config 'model_hub.sources' contains duplicate ids")
-        agents = {
-            backend: ModelHubAgentSupplyConfig.from_payload(
-                agents_payload.get(backend) or ModelHubAgentSupplyConfig.default(backend, mode="direct").to_payload(),
+        for backend in MODEL_HUB_BACKENDS:
+            native_sources = [
+                source
+                for source in sources
+                if source.supply_channel == "native_cli"
+                and cls.source_eligible_for_backend(source, backend)
+            ]
+            if len(native_sources) > 1:
+                raise ValueError(
+                    f"Config 'model_hub.sources' contains multiple native sources for '{backend}'"
+                )
+        agents = {}
+        for backend in MODEL_HUB_BACKENDS:
+            if backend not in agents_payload:
+                raw_agent = ModelHubAgentSupplyConfig.default(backend, mode="direct").to_payload()
+            else:
+                raw_agent = agents_payload[backend]
+                if not isinstance(raw_agent, dict):
+                    raise ValueError(f"Config 'model_hub.agents.{backend}' must be an object")
+                if "routes" not in raw_agent:
+                    raise ValueError(f"Config 'model_hub.agents.{backend}.routes' is required")
+            agents[backend] = ModelHubAgentSupplyConfig.from_payload(
+                raw_agent,
                 expected_backend=backend,
             )
-            for backend in MODEL_HUB_BACKENDS
-        }
-        # Consent and the experimental flag are retired product concepts.  Older
-        # in-memory callers may still carry these private attributes while the
-        # final serialized Source shape omits them; loading a valid final Source
-        # must therefore never require a retired stamp.
+            expected_menu_ids = (
+                model_hub_fixed_menu_ids(backend)
+                if backend in {"claude", "codex"}
+                else tuple(agents[backend].menu.checked if agents[backend].menu else ())
+            )
+            missing_route = next(
+                (model_id for model_id in expected_menu_ids if model_id not in agents[backend].routes),
+                None,
+            )
+            if missing_route is not None:
+                raise ValueError(
+                    f"Config 'model_hub.agents.{backend}.routes' is missing menu model '{missing_route}'"
+                )
+            if backend in {"claude", "codex"}:
+                extra_route = next(
+                    (
+                        model_id
+                        for model_id in agents[backend].routes
+                        if model_id not in expected_menu_ids
+                    ),
+                    None,
+                )
+                if extra_route is not None:
+                    raise ValueError(
+                        f"Config 'model_hub.agents.{backend}.routes' contains non-menu model '{extra_route}'"
+                    )
         config = cls(
             sources=sources,
             agents=agents,
-            subscription_hub_experimental=experimental,
         )
         for backend in MODEL_HUB_BACKENDS:
             configured_sources = agents[backend].sources
@@ -1054,16 +1367,23 @@ class ModelHubConfig:
                     f"Config 'model_hub.agents.{backend}.sources.order' contains "
                     f"ineligible or missing source '{invalid_id}'"
                 )
-            if configured_sources.policy == "follow":
-                recommended = config.recommended_source_order(backend)
-                configured_sources.order = recommended
+            for model_id, route in agents[backend].routes.items():
+                for hop in route.hops:
+                    source = next((item for item in sources if item.id == hop.source_id), None)
+                    if source is None:
+                        raise ValueError(
+                            f"Config 'model_hub.agents.{backend}.routes.{model_id}' references missing source '{hop.source_id}'"
+                        )
+                    if not config.source_eligible_for_backend(source, backend):
+                        raise ValueError(
+                            f"Config 'model_hub.agents.{backend}.routes.{model_id}' references ineligible source '{hop.source_id}'"
+                        )
         return config
 
     def to_payload(self) -> dict:
         return {
             "sources": [source.to_payload() for source in self.sources],
             "agents": {backend: self.agents[backend].to_payload() for backend in MODEL_HUB_BACKENDS},
-            "subscription_hub_experimental": self.subscription_hub_experimental,
         }
 
 
@@ -1237,7 +1557,7 @@ class V2Config:
             if not path.exists():
                 raise FileNotFoundError(f"Config not found: {path}")
             payload = json.loads(path.read_text(encoding="utf-8"))
-        return cls.from_payload(payload)
+        return cls.from_payload(_migrate_fixed_menu_routes_on_load(payload))
 
     @classmethod
     def from_payload(cls, payload: dict) -> "V2Config":

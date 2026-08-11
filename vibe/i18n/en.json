@@ -742,7 +742,6 @@
         "network": "network unavailable",
         "recovery": "recovered",
         "manual": "manual change",
-        "mapping": "model mapping applied",
         "credential_expired": "credential expired",
         "credential_revoked": "credential revoked",
         "balance_exhausted": "balance exhausted",
@@ -751,7 +750,10 @@
         "unclassified_error": "unclassified source error",
         "no_enabled_source": "no source is enabled",
         "no_eligible_source": "no source is eligible",
-        "model_unsupported": "no source supports this model"
+        "route_unconfigured": "the route is not configured",
+        "source_missing": "the configured source no longer exists",
+        "model_unsupported": "the configured source no longer supplies this model",
+        "native_cli_unavailable": "CLI login is not available in this process"
       }
     },
     "launch": {
@@ -759,6 +761,7 @@
       "waiting": "Model {model} is temporarily unavailable. Waiting for {source} to recover at {retry_at}.",
       "interrupted": "Model {model} is unavailable: {blockers}. Open Models to resolve it.",
       "native_cli_unavailable": "CLI login is not available in this process",
+      "route_unconfigured": "Model {model} has no configured route. Open Models to configure one.",
       "no_enabled_source": "Model {model} has no enabled source. Open Models to configure one.",
       "no_eligible_source": "Model {model} has no source eligible for {backend}. Open Models to configure one.",
       "model_unsupported": "No source supports model {model}. Open Models to configure one."

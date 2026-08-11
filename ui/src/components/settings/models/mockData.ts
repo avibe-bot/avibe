@@ -98,7 +98,7 @@ export function buildMockSources(): Source[] {
       kind: 'api_key',
       vendor: 'zhipuai',
       display_name: '智谱 API Key',
-      protocol: 'openai_compatible',
+      protocol: 'openai_chat',
       base_url: 'https://open.bigmodel.cn/api/paas/v4',
       supply_channel: 'hub',
       billing: 'metered',
@@ -124,7 +124,7 @@ export function buildMockSources(): Source[] {
       kind: 'api_key',
       vendor: 'custom',
       display_name: 'relay.example',
-      protocol: 'openai_compatible',
+      protocol: 'openai_chat',
       base_url: 'https://relay.example/v1',
       supply_channel: 'hub',
       billing: 'metered',
@@ -357,7 +357,7 @@ function olderHistory(count: number): ResolutionEvent[] {
 
 export function buildMockRuntime(): RuntimeDependency {
   return {
-    contract_version: 4,
+    contract_version: 5,
     manifest: {
       name: 'cliproxyapi',
       version: 'v7.2.95',
