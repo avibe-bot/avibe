@@ -57,6 +57,23 @@
               "error_key": { "type": "null" }
             }
           }
+        },
+        {
+          "$comment": "installing is the unverified, non-listening transition entered only from not_installed. A verified binary settles at not_started before it may listen.",
+          "if": {
+            "properties": {
+              "health": { "const": "installing" }
+            },
+            "required": ["health"]
+          },
+          "then": {
+            "required": ["listening"],
+            "properties": {
+              "installed_version": { "type": "null" },
+              "verified": { "const": false },
+              "listening": { "type": "null" }
+            }
+          }
         }
       ],
       "properties": {

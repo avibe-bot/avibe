@@ -581,9 +581,13 @@ for that Source reads `health: backoff`, `runnable: false`, and that deadline as
 takes the single reason slot as `native_cli_unavailable`, while the backoff health and
 deadline remain visible and the chain is `interrupted`.
 Deadline expiry makes the hop runnable again without a write. The first subsequent
-user-visible model-output byte clears both deadline and streak automatically; Source endpoint/credential
-replacement and process reconstruction also clear them because the state is in-memory
-and identity-specific. The maximum is 30 seconds. This family never uses
+user-visible model-output byte produced by that same affected Source clears both
+deadline and streak automatically; successful fallback output from another Source does
+not. Source endpoint/credential replacement and process reconstruction also clear them
+because the state is in-memory and identity-specific. Before an API read is serialized,
+the assembler captures one read time and normalizes an expired overlay to the Source's
+underlying non-backoff health and runnability; a stale backoff deadline never crosses the
+API boundary. The maximum is 30 seconds. This family never uses
 `models.source.cooldown.*`, never writes `Source.state`, and never creates a permanent
 health verdict.
 
@@ -710,7 +714,7 @@ state set; prose cannot add another runtime health value.
 | `degraded` | runtime is listening but its health check proves impaired service | current health evidence only; recovery exits to `ok`, loss exits to `down` | null |
 | `down` | an installed runtime was demanded and failed or stopped | failed start or demanded process loss; a successful later start exits to `ok` | null |
 | `not_installed` | no verified managed binary is installed | initial/unsupported state, or failed install; supported install enters `installing` | null initially/unsupported; `settings.models.install.fail.detail` after install failure |
-| `installing` | one server-owned installation job is in progress | persisted before work begins; reload/repeat stays here; verified success exits to `not_started`, failure to `not_installed` | null |
+| `installing` | one server-owned installation job is in progress | persisted before work begins with `installed_version: null`, `verified: false`, and `listening: null`; reload/repeat stays here; verified success exits to `not_started`, failure to `not_installed` | null |
 | `not_started` | binary is installed and verified but intentionally idle | successful installation or pre-demand restart; explicit/runtime demand exits to `ok` or `down` | null |
 
 `POST /api/models/runtime/install` is idempotent and owns the

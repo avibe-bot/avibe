@@ -623,6 +623,33 @@ def test_targeted_permission_denial_contract_is_request_scoped_and_mirrored():
 
 
 def test_v5_shape_amendments_reject_the_false_states_they_replace():
+    runtime_schema = _schema("runtime-dependency.schema.json")
+    runtime_validator = Draft7Validator(runtime_schema)
+    installing_runtime = copy.deepcopy(runtime_schema["examples"][0])
+    installing_runtime["status"].update(
+        {
+            "installed_version": None,
+            "verified": False,
+            "listening": None,
+            "health": "installing",
+            "error_key": None,
+        }
+    )
+    runtime_validator.validate(installing_runtime)
+    for field, contradiction in (
+        ("installed_version", "v7.2.95"),
+        ("verified", True),
+        ("listening", {"host": "127.0.0.1", "port": 15220}),
+    ):
+        invalid_installing = copy.deepcopy(installing_runtime)
+        invalid_installing["status"][field] = contradiction
+        with pytest.raises(ValidationError):
+            runtime_validator.validate(invalid_installing)
+    missing_installing_shape = copy.deepcopy(installing_runtime)
+    del missing_installing_shape["status"]["listening"]
+    with pytest.raises(ValidationError):
+        runtime_validator.validate(missing_installing_shape)
+
     supply_schema = _schema("agent-supply.schema.json")
     supply_validator = Draft7Validator(supply_schema)
     base_supply = {

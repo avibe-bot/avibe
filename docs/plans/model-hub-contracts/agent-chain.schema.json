@@ -59,7 +59,11 @@
               { "type": "null" }
             ]
           },
-          "retry_at": { "type": ["string", "null"], "format": "date-time" }
+          "retry_at": {
+            "type": ["string", "null"],
+            "format": "date-time",
+            "description": "When health is backoff, this live deadline is strictly later than the read assembler's captured assembly time. The API normalizes an expired overlay to its underlying non-backoff health before validation and serialization; JSON Schema enforces only the date-time shape, not the relation to a moving clock."
+          }
         },
         "allOf": [
           {

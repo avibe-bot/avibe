@@ -77,7 +77,8 @@
     "would_interrupt": {
       "type": "array",
       "items": { "$ref": "#/definitions/SupplyGap" },
-      "uniqueItems": true
+      "uniqueItems": true,
+      "description": "Canonical order is ascending by (backend, model_id); each SupplyGap.agents array is ascending by stable Agent id."
     }
   },
   "definitions": {
@@ -103,7 +104,8 @@
         "agents": {
           "type": "array",
           "items": { "type": "string", "minLength": 1 },
-          "uniqueItems": true
+          "uniqueItems": true,
+          "description": "Enabled named Agent ids in ascending lexicographic order."
         }
       }
     }

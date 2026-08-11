@@ -195,7 +195,7 @@ every other existing field and enum meaning remains unchanged.
 | `RouteHopRef.position` | guarded mutation planner | guarded-change hop row | One-based position in the named Route before the attempted mutation. |
 | `OAuthStart.client_nonce` | OAuth client before send | OAuth start idempotency | Optional client-generated correlation; the server claims its exact tuple with vendor and channel before provider work, coalesces an in-flight retry, releases after failed/canceled cleanup, and converts success atomically to the flow. |
 | `OAuthFlow.client_nonce` | OAuth start echo | lost-start reconciliation | When the request supplied the nonce, every flow response echoes it unchanged. |
-| `AgentChain.chain[].health: backoff` | configured-chain live annotator | chain/AgentSupply health reads | Source-scoped in-memory connection throttle before the first user-visible model-output byte, with future `retry_at`, never persisted in Source/config. Its reason is `models.source.backoff.connection_failed` unless simultaneous native-process unavailability takes the single reason slot as `native_cli_unavailable`; the ordinary case rolls up as self-healing `waiting`, while that process-blocked case is `interrupted`. |
+| `AgentChain.chain[].health: backoff` | configured-chain live annotator | chain/AgentSupply health reads | Source-scoped in-memory connection throttle before the first user-visible model-output byte, with `retry_at` strictly later than the assembler's captured read time, never persisted in Source/config. Before serialization, an expired overlay is normalized to the same Source's underlying non-backoff health and runnability; stale backoff is never emitted. Its reason is `models.source.backoff.connection_failed` unless simultaneous native-process unavailability takes the single reason slot as `native_cli_unavailable`; the ordinary case rolls up as self-healing `waiting`, while that process-blocked case is `interrupted`. |
 
 ## AgentSupply read projection
 
@@ -471,7 +471,10 @@ returns the same references and positions as the corresponding refusal.
 ```
 
 `agents` is the set of enabled named Vibe Agents whose explicit model is the
-menu-side `model_id`. It is present and may be empty.
+menu-side `model_id`. It is present and may be empty. The planner emits
+`would_interrupt` in ascending `(backend, model_id)` order and each `agents` array in
+ascending stable Agent-id lexicographic order. This is the canonical JSON order used
+by exact plan echo; enumeration or insertion order never changes plan identity.
 
 The protected model set for a backend is the union of:
 
@@ -857,10 +860,14 @@ transport means there is no explicit code:
 | `network_failure.shaped_after_first_byte` | explicit closed classification after output started | `stream_started: true`; after first user-visible model output | existing non-permanent family only, with its unchanged recovery rule | none | terminal, no replay; existing redacted event only |
 | `network_failure.transport_after_first_byte` | no explicit code; stream interruption | `stream_started: true`; after first user-visible model output | none | none | terminal, no replay; redacted `network` event only |
 
-The backoff deadline expiring makes the hop runnable without persistence. The first
-later user-visible model-output byte, Source endpoint/credential replacement, or process
-reconstruction clears its deadline and consecutive-failure streak. The delay is capped
-at 30 seconds.
+The backoff deadline expiring makes the hop runnable without persistence. Before any
+chain, AgentSupply, or probe response is validated and serialized, the read assembler
+captures one assembly time and normalizes every expired live overlay to that Source's
+underlying non-backoff health and runnability; it never emits a stale `backoff` or expired
+live `retry_at`. The first later user-visible model-output byte produced by that same
+affected Source, Source endpoint/credential replacement, or process reconstruction
+clears its deadline and consecutive-failure streak. Output from a different fallback
+Source does not clear the affected Source's streak. The delay is capped at 30 seconds.
 For a native hop whose process is simultaneously unavailable, the live deadline remains
 visible but `native_cli_unavailable` takes the single reason slot and the chain remains
 `interrupted`; restoring the process reveals any still-live connection backoff.
@@ -917,8 +924,9 @@ route fails before download with HTTP 422 and
 `error_key: null`.
 
 `POST /api/models/runtime/install` is idempotent. Only `not_installed` on a supported
-host starts work: it clears the previous `error_key`, durably enters `installing`, starts
-the owned install job, and returns that state. A reload and concurrent repeat while
+host starts work: it clears the previous `error_key`, durably enters `installing` with
+exactly `installed_version: null`, `verified: false`, and `listening: null`, starts the
+owned install job, and returns that state. A reload and concurrent repeat while
 `installing` read/return the same state instead of starting another job. Calls from
 `not_started`, `ok`, `degraded`, or `down` are HTTP 200 no-ops that return the current
 RuntimeDependency without mutating runtime state: they start no download, do not clear
@@ -1005,13 +1013,13 @@ contract harness and API-boundary tests enforce:
 | API AgentSupply includes `cli_present`, `selected_by_agent`, `selected_model_id`, `selected_model_explicit`, policy-free `sources.order`, `supply_status`, `model_supply[].has_runnable_hop`, and `named_agents`; every Source includes persisted `last_discovered_at`, optional persisted `client_nonce`, derived `adopted_by`, and model retirement tombstones; source creation returns `added_to` and top-level `adopted_by` equal to `source.adopted_by`; saved refresh and discovered-model retirement use the guarded Source envelope | API payload test |
 | every OAuthFlow response includes `intent` | API payload test |
 | OAuth start claims `(client_nonce, vendor, channel)` before provider work; a blocked first call plus concurrent same-tuple retry coalesces to one pending result and exactly one provider start, failure/cancellation releases, and success atomically exposes one echoed-nonce flow | OAuth registry, API payload, and auth-setup closed-loop tests |
-| every RuntimeDependency API payload includes server-derived `host_platform` and `status.error_key`; only supported `not_installed` starts a download, installed states are state-preserving no-ops, page reload preserves a live `installing` job, and service bootstrap reconciles an orphan before serving runtime endpoints | API payload test |
+| every RuntimeDependency API payload includes server-derived `host_platform` and `status.error_key`; `installing` has exactly null `installed_version`, false `verified`, and null `listening`, with one positive and each-field contradiction fixtures; only supported `not_installed` starts a download, installed states are state-preserving no-ops, page reload preserves a live `installing` job, and service bootstrap reconciles an orphan before serving runtime endpoints | RuntimeDependency schema and API payload tests |
 | Source create reserves `client_nonce` in process before work; the client reads Sources before any lost-response retry; fixtures cover `nonce.in_flight` (`source_create_in_progress`/no work), `nonce.released` (atomic reserve/exactly one fresh attempt), and `nonce.committed` (`source_nonce_conflict` followed by a list read that finds exactly one Source with that nonce), while AC-26 cleanup or process restart releases any live reservation and Source deletion releases its committed nonce; after restart or deletion and a list miss, same-nonce create is positively asserted as a fresh creation | config, API payload, cancellation/restart, Source-delete, and client retry tests |
 | Source observation rejects unregistered request/status evidence fields; clients consume only the contracted outcome, reachability, authentication, protocol, discovery, and models facts | observation schema and API payload tests |
-| network fixtures cover shaped/transport × `stream_started: false/true`, where the boundary is the first user-visible model-output byte: shaped results at either phase enter only their existing non-permanent Source classifier; unclassified pre-output connection failure creates bounded live backoff with no config write; unclassified post-output interruption is event-only with no backoff/state mutation or replay; simultaneous native-process unavailability takes reason precedence while preserving backoff health/deadline and yields interrupted; a pure cooldown/backoff chain validates only as waiting | table-driven resolver/API/event and AgentChain schema tests |
+| network fixtures cover shaped/transport × `stream_started: false/true`, where the boundary is the first user-visible model-output byte: shaped results at either phase enter only their existing non-permanent Source classifier; unclassified pre-output connection failure creates bounded live backoff with no config write; only later output from that same Source clears its streak, while another Source's successful fallback does not; the API/read assembler emits a future deadline for a live overlay and normalizes an expired overlay to underlying non-backoff health before serialization; unclassified post-output interruption is event-only with no backoff/state mutation or replay; simultaneous native-process unavailability takes reason precedence while preserving backoff health/deadline and yields interrupted; a pure cooldown/backoff chain validates only as waiting | clocked table-driven resolver/API/event and AgentChain boundary tests |
 | every `GuardRefusal` validates against `guard-refusal.schema.json` and has a nonempty current plan; fixtures cover every guard-decision row, including unforced refusal, exact echoed-plan confirmation, missing/different echo returning the new plan, and old-echo empty-plan ordinary success without a fabricated 409 | API payload and concurrent-mutation test |
 | each `source_in_route_chain` or `source_model_in_route_chain` refusal has nonempty `would_remove_hops`; each `source_last_supplier` refusal has nonempty `would_interrupt`; mismatched code/empty-required-array combinations fail schema validation even when the other array is nonempty | guard schema relation fixture |
-| both GuardRefusal plan arrays contain unique objects; duplicate hop and supply-gap entries fail schema validation | guard schema uniqueness fixture |
+| both GuardRefusal plan arrays contain unique objects; duplicate hop and supply-gap entries fail schema validation; producers emit SupplyGap rows in ascending `(backend, model_id)` order and each `agents` array in stable-id lexicographic order, with permutation fixtures proving canonical output | guard schema uniqueness and producer-order fixtures |
 | `model_supply[].chain_length: 0` implies `has_runnable_hop: false`; the opposite pair fails schema validation | AgentSupply schema correlation fixture |
 | contract and in-repo adapter interface copies are byte-identical; the five retained-material enum members and ref-pairing predicates are mutation-tested | contract harness |
 
