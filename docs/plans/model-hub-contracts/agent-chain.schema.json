@@ -84,7 +84,10 @@
               "required": ["reason", "retry_at"],
               "properties": {
                 "runnable": { "const": false },
-                "reason": { "const": "models.source.backoff.connection_failed" },
+                "reason": {
+                  "enum": ["models.source.backoff.connection_failed", "native_cli_unavailable"],
+                  "description": "Connection backoff is the reason unless an unavailable native CLI is the simultaneous actionable process blocker; in that combined state native_cli_unavailable takes the single reason slot while health and retry_at retain the backoff facts."
+                },
                 "retry_at": { "type": "string" }
               }
             }
@@ -151,6 +154,14 @@
       "backend": "codex",
       "model_id": "gpt-5.6",
       "chain": [{ "source_id": "src_chatgptplus", "model_id": "gpt-5.6", "channel": "native_cli", "health": "healthy", "runnable": false, "reason": "native_cli_unavailable", "retry_at": null }],
+      "current": null,
+      "supply_state": "interrupted"
+    },
+    {
+      "contract_version": 5,
+      "backend": "codex",
+      "model_id": "gpt-5.6",
+      "chain": [{ "source_id": "src_chatgptplus", "model_id": "gpt-5.6", "channel": "native_cli", "health": "backoff", "runnable": false, "reason": "native_cli_unavailable", "retry_at": "2026-08-11T11:55:08Z" }],
       "current": null,
       "supply_state": "interrupted"
     },

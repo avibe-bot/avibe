@@ -34,7 +34,7 @@
     "client_nonce": {
       "type": "string",
       "pattern": "^scn_[a-z0-9]{16,64}$",
-      "description": "Optional client-generated create correlation persisted unchanged when SourceCreate supplied it. It is unique among live Sources and in-flight Source-create reservations, and lets a client recognize a committed Source after the create response is lost. Source deletion releases the nonce. It is not Source identity, a credential, or a routing input."
+      "description": "Optional client-generated create correlation persisted unchanged only when SourceCreate commits. It is unique among live Sources and live-process Source-create reservations, and lets a client recognize a committed Source after the create response is lost. Process restart ends an in-flight reservation; Source deletion releases a committed nonce. It is not Source identity, a credential, or a routing input."
     },
     "last_discovered_at": {
       "type": [

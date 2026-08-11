@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "model-hub/source-create.schema.json",
   "title": "SourceCreate",
-  "description": "API-key Source creation input. It extends the unsaved observation request with display and reconciliation data; the server still owns Source identity, protocol evidence, discovered inventory, health, usage, custody metadata, and timestamps. When client_nonce is present, the server reserves the Source.client_nonce uniqueness slot before observation or credential work and persists the same column unchanged on the committed Source, so a lost-response client can reconcile through the ordinary Source list without a receipt or separate endpoint.",
+  "description": "API-key Source creation input. It extends the unsaved observation request with display and reconciliation data; the server still owns Source identity, protocol evidence, discovered inventory, health, usage, custody metadata, and timestamps. When client_nonce is present, the server reserves it atomically in process before observation or credential work; only a successful commit persists Source.client_nonce unchanged. A lost-response client reconciles through the ordinary Source list without a receipt or separate endpoint. Nonce uniqueness covers live-process reservations and live Sources; process restart or Source deletion releases it, and a later same-nonce request after the required list read is a fresh create.",
   "type": "object",
   "required": ["vendor", "key"],
   "additionalProperties": false,
@@ -40,7 +40,7 @@
     "client_nonce": {
       "type": "string",
       "pattern": "^scn_[a-z0-9]{16,64}$",
-      "description": "Optional client-generated create correlation held before submission. The server atomically reserves the Source.client_nonce uniqueness slot before observation or credential work and persists that same column unchanged on the resulting Source; no separate claim record exists. A same-nonce retry receives an in-progress conflict, atomically reclaims a released slot, or receives a committed conflict and reconciles by finding that nonce in the ordinary Source list. It is not Source identity, credential material, or a routing input."
+      "description": "Optional client-generated create correlation held before submission. The server atomically reserves it in process before observation or credential work and writes Source.client_nonce only on successful commit; no durable pre-create claim record exists. A lost-response client reads Sources before retrying. A same-nonce retry receives an in-progress conflict, atomically reclaims a released slot as a fresh create, or receives a committed conflict and reconciles by finding that nonce in the ordinary Source list. Uniqueness applies only while a live-process reservation or live Source exists; process restart and Source deletion release it. It is not Source identity, credential material, or a routing input."
     }
   },
   "examples": [

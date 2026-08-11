@@ -2204,10 +2204,6 @@ def test_same_scope_concurrency_is_absent_and_sequential_control_is_present(
     _assert_valid("turn-provenance.schema.json", sequential)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="AC-50: cooldown.network → backoff.connection_failed 契约先行,实现随 I7 落地",
-)
 def test_chain_projection_and_probe_latency_partition(tmp_path: Path) -> None:
     cooling = _source(
         "src_cooling01",
@@ -2244,32 +2240,6 @@ def test_chain_projection_and_probe_latency_partition(tmp_path: Path) -> None:
     assert isinstance(probe["latency_ms"], int)
     assert probe["error"] is None
     _assert_valid("probe-result.schema.json", probe)
-
-    network_service = _service(
-        tmp_path / "network",
-        sources=[_source("src_primary01", "Primary")],
-        outcomes=[_outcome(RawOutcomeKind.NETWORK_ERROR)],
-    )
-    network_model = _canonicalize_fixed_test_routes(network_service)["claude"]
-    network = asyncio.run(network_service.probe_agent("claude", network_model))
-    assert network["reachable"] is False
-    assert network["latency_ms"] is None
-    assert network["error"] == "models.source.cooldown.network"
-    _assert_valid("probe-result.schema.json", network)
-
-    timeout_service = _service(
-        tmp_path / "timeout",
-        sources=[_source("src_primary01", "Primary")],
-        outcomes=[_outcome(RawOutcomeKind.TIMEOUT)],
-    )
-    timeout_model = _canonicalize_fixed_test_routes(timeout_service)["claude"]
-    timeout = asyncio.run(timeout_service.probe_agent("claude", timeout_model))
-    assert timeout["reachable"] is False
-    assert timeout["latency_ms"] is None
-    assert timeout["error"] == "models.source.cooldown.timeout"
-    assert timeout_service.store.load().sources[0].state.detail_key == ("models.source.cooldown.timeout")
-    assert timeout_service.events.list(limit=10)[0]["reason"] == "network"
-    _assert_valid("probe-result.schema.json", timeout)
 
     rate_service = _service(
         tmp_path / "rate",
@@ -2345,6 +2315,40 @@ def test_chain_projection_and_probe_latency_partition(tmp_path: Path) -> None:
     assert anthropic_not_found.store.load().sources[0].state.status == "standby"
     assert anthropic_not_found.events.list(limit=10) == []
     _assert_valid("probe-result.schema.json", not_found)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="AC-50: cooldown.network → backoff.connection_failed 契约先行,实现随 I7 落地",
+)
+def test_probe_transport_failures_await_ac50_backoff_contract(tmp_path: Path) -> None:
+    network_service = _service(
+        tmp_path / "network",
+        sources=[_source("src_primary01", "Primary")],
+        outcomes=[_outcome(RawOutcomeKind.NETWORK_ERROR)],
+    )
+    network_model = _canonicalize_fixed_test_routes(network_service)["claude"]
+    network = asyncio.run(network_service.probe_agent("claude", network_model))
+    assert network["reachable"] is False
+    assert network["latency_ms"] is None
+    assert network["error"] == "models.source.cooldown.network"
+    _assert_valid("probe-result.schema.json", network)
+
+    timeout_service = _service(
+        tmp_path / "timeout",
+        sources=[_source("src_primary01", "Primary")],
+        outcomes=[_outcome(RawOutcomeKind.TIMEOUT)],
+    )
+    timeout_model = _canonicalize_fixed_test_routes(timeout_service)["claude"]
+    timeout = asyncio.run(timeout_service.probe_agent("claude", timeout_model))
+    assert timeout["reachable"] is False
+    assert timeout["latency_ms"] is None
+    assert timeout["error"] == "models.source.cooldown.timeout"
+    assert timeout_service.store.load().sources[0].state.detail_key == (
+        "models.source.cooldown.timeout"
+    )
+    assert timeout_service.events.list(limit=10)[0]["reason"] == "network"
+    _assert_valid("probe-result.schema.json", timeout)
 
 
 def test_probe_401_uses_exact_credential_refresh_capability(tmp_path: Path) -> None:

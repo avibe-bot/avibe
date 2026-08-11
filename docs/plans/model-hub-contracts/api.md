@@ -20,7 +20,7 @@ Hub has not shipped, so there is no internal contract migration or compatibility
 | --- | --- | --- |
 | GET `/api/models/sources` | → `{sources: Source[]}` | Unordered asset inventory. Every Source carries server-derived `adopted_by` and any persisted `client_nonce`; array order is never a spend order. |
 | POST `/api/models/sources/observe` | `{vendor, base_url?, key, protocol_order?}` → `{observation: SourceObservation}` | Non-persisting connectivity/authentication/protocol/inventory observation. `protocol_order` only orders the three probes; it never supplies a conclusion. No credential reference is returned. |
-| POST `/api/models/sources` | `source-create.schema.json` → `{source: Source, added_to: AddedTo[], adopted_by: AdoptedBy[]}` | The server assigns `id` and `created_at`; plaintext keys are transient. Add-time matching and placement are materialized before response. An optional `client_nonce` is reserved before work and persisted on the committed Source for list-based lost-response reconciliation. |
+| POST `/api/models/sources` | `source-create.schema.json` → `{source: Source, added_to: AddedTo[], adopted_by: AdoptedBy[]}` | The server assigns `id` and `created_at`; plaintext keys are transient. Add-time matching and placement are materialized before response. An optional `client_nonce` is reserved only in process before work and persisted only on the committed Source for list-based lost-response reconciliation. |
 | PATCH `/api/models/sources/<id>` | `{display_name?, base_url?, force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded Source-mutation envelope | Metadata/Base-URL mutation from the authoritative matrix in `model-hub.md` §4.5. A forced retry confirms only an exact echo of the refusal plan. |
 | PUT `/api/models/sources/<id>/credential` | `{key, force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded Source-mutation envelope | API-key replacement. Confirmation fields are JSON body fields. |
 | POST `/api/models/sources/<id>/reauth` | `{acknowledge_irreversible?: true}` → `{flow: OAuthFlow}` | A `native_cli` source requires the acknowledgement before OAuth starts. See repair rules. |
@@ -36,7 +36,7 @@ Hub has not shipped, so there is no internal contract migration or compatibility
 | PATCH `/api/models/agents/<backend>/mode` | `{mode}` → `{agent: AgentSupply}` | Explicit `hub` / `direct` switch. A qualifying Direct → Gateway switch atomically adopts the recognized CLI login as the first native Source; other switches create nothing. |
 | PUT `/api/models/agents/opencode/menu` | `{menu}` → `{agent: AgentSupply}` | Open-menu configuration. |
 | GET `/api/models/agents/<backend>/chain?model=<id>` | → `{chain: AgentChain}` | Hub only. Direct returns the documented `direct_mode` error. |
-| PUT `/api/models/agents/<backend>/chain?model=<id>` | `{hops: RouteHop[], force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded `409` or `{chain, removed_hops, interrupted}` | Replaces the exact Source/model pairs in submitted order after validating new or changed pairs; it is the `mutation.route_replace` row of the authoritative mutation matrix. |
+| PUT `/api/models/agents/<backend>/chain?model=<id>` | `{hops: RouteHop[], force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded `409` or `{chain, removed_hops, interrupted}` | Replaces the exact Source/model pairs in submitted order after validating new or changed pairs; it is the `mutation.route_replace` row of the authoritative mutation matrix. A visible noninterrupting hop removal is ordinary success; only a resulting protected-supply interruption enters the guard. |
 | POST `/api/models/agents/<backend>/probe` | `{model?}` → `{probe: ProbeResult}` | Hub only. Direct returns the same `direct_mode` error. |
 | GET `/api/models/events?limit=<n>&before=<id>` | → `{events: ResolutionEvent[]}` | Bounded source-resolution feed. |
 | POST `/api/models/oauth/start` | `{vendor, channel, client_nonce?}` → `{flow: OAuthFlow}` | Starts creation of a new subscription source. Before provider work, the optional exact `(client_nonce, vendor, channel)` tuple is atomically claimed; concurrent retries coalesce to its one pending start and terminal result. |
@@ -95,36 +95,42 @@ authoritative; no Source response field may be inferred backwards into the reque
 | `base_url` | no | Add Source client → observation adapter | null or omission selects the official endpoint; a custom URL is validated before provisioning. |
 | `key` | yes | Add Source client → transient and committed credential provisioning | Plaintext is write-only and never appears in a response, Source record, event, or log. |
 | `protocol_order` | no | Add Source client → observation adapter | Contains all three protocols exactly once and only orders probes. |
-| `client_nonce` | no | Add Source client → create reservation and persisted Source read projection | Client-generated before send and atomically reserved before observation or credential work; the successful commit persists and echoes it unchanged so an ordinary list read can reconcile a lost response. |
+| `client_nonce` | no | Add Source client → process-local create reservation and persisted Source read projection | Client-generated before send and atomically reserved in the live process before observation or credential work; only the successful commit persists and echoes it unchanged so an ordinary list read can reconcile a lost response. |
 
 The request has no `id`, `created_at`, `state`, `usage`, `protocol`, discovered-model,
 credential-ref, billing, or supply-channel field. The server assigns or observes all of
 them. A successfully observed empty inventory is represented by the returned
 `source.models: []`; the client never submits a discovered inventory as authority.
 
-When `client_nonce` is present, the server atomically reserves the unique
-`Source.client_nonce` slot before observation, transient-ref creation, or committed
-credential provisioning. That same column is the in-flight claim and committed evidence;
-there is no separate claim record, and it stores no request digest, terminal envelope,
-or plaintext credential. After
-a lost response the client retries the same nonce. An in-progress conflict means wait and
-retry; a committed conflict means read `GET /api/models/sources` and select the one row
-whose `client_nonce` matches. A list miss means the nonce was released and the client may
-retry it. The server applies this total state/action table:
+When `client_nonce` is present, the server atomically reserves it in the live process
+before observation, transient-ref creation, or committed credential provisioning. The
+reservation is not a Source row and has no durable representation. Only successful
+commit persists the unchanged value as `Source.client_nonce`; neither representation
+stores a request digest, terminal envelope, or plaintext credential. After a lost
+response, the client first reads
+`GET /api/models/sources`: an exact nonce match reconciles the committed Source, while a
+miss permits a same-nonce retry. A retry that races unfinished work receives an
+in-progress conflict and waits; a retry that races a newly committed Source receives a
+committed conflict and repeats the list read. The server applies this total state/action
+table:
 
-| Decision | Durable state at retry | Retry relation | Server action and HTTP/API result | Upstream work |
+| Decision | Live state at retry | Retry relation | Server action and HTTP/API result | Upstream work |
 | --- | --- | --- | --- | --- |
-| `nonce.in_flight` | the Source nonce slot is reserved by unfinished create work | same nonce with any otherwise-valid request | retain the reservation; HTTP 409 `source_create_in_progress` | none |
-| `nonce.released` | no reservation and no live Source owns the nonce | same nonce with any otherwise-valid request | atomically reserve the nonce and run a fresh create | exactly one new attempt under the reservation |
+| `nonce.in_flight` | this process holds the nonce reservation for unfinished create work | same nonce with any otherwise-valid request | retain the reservation; HTTP 409 `source_create_in_progress` | none |
+| `nonce.released` | no live-process reservation and no live Source owns the nonce, including after process restart | same nonce with any otherwise-valid request | atomically reserve the nonce in process and run a fresh create | exactly one new attempt under the reservation |
 | `nonce.committed` | one live Source carries the nonce | same nonce with any otherwise-valid request | HTTP 409 `source_nonce_conflict`; client reads the ordinary Source list and finds the exact nonce | none |
 
-The successful Source commit converts the reservation into the visible
-`Source.client_nonce` value in one atomic write; there is no unclaimed interval.
+The successful Source commit atomically removes the process reservation while writing the
+visible `Source.client_nonce`; there is no live-process overlap or unclaimed interval.
 Pre-commit failure or cancellation releases the reservation only after every transient or
 uncommitted credential ref has been revoked or entered the durable pending-revocation
-journal under AC-26. On service reconstruction, an ownerless claim cannot resume because
-plaintext is never persisted: pending revocation is reconciled first, then the claim is
-released so the same-nonce retry may acquire it. Source deletion releases its nonce. No
+journal under AC-26. Process termination ends both the in-flight work and its process-local
+reservation; reconstruction reconciles any durable pending-revocation entry before a
+same-nonce retry begins as a fresh attempt. No ownerless claim is reconstructed.
+Uniqueness covers only live-process reservations and live Sources. Source deletion releases its nonce; after the required
+list read observes no matching live Source, a later same-nonce request is definitionally
+a fresh create and may create one new Source. Protecting a deleted Source from a stale
+nonconforming caller is outside this single-user client's D-36 recovery protocol. No
 receipt, digest, terminal-envelope snapshot, released-state record, or separate
 reconciliation endpoint exists.
 
@@ -179,7 +185,7 @@ every other existing field and enum meaning remains unchanged.
 
 | Field | Producer | First consumer | Invariant |
 | --- | --- | --- | --- |
-| `Source.client_nonce` | Source create reservation/commit | lost-create reconciliation | Exact optional echo of `SourceCreate.client_nonce`; unique across live Sources and in-flight reservations, and never used for routing. |
+| `Source.client_nonce` | Source create commit | lost-create reconciliation | Exact optional echo of `SourceCreate.client_nonce`, written only at commit; unique across live Sources and live-process reservations, and never used for routing. |
 | `Source.models[].retired` | discovered-model DELETE | Source detail inventory | Omission means false; only a discovered row may be true; true rows remain readable and never supply. |
 | `Source.adopted_by` | Source read assembler | Source cards and Source detail status | Complete unique persisted-reference projection sorted by backend then menu model; clients do not derive it from `hops`. |
 | `AgentSupply.cli_present` | backend CLI detector | zero-installed-backend state | Boolean installation fact only; it does not imply login or process readiness. |
@@ -189,7 +195,7 @@ every other existing field and enum meaning remains unchanged.
 | `RouteHopRef.position` | guarded mutation planner | guarded-change hop row | One-based position in the named Route before the attempted mutation. |
 | `OAuthStart.client_nonce` | OAuth client before send | OAuth start idempotency | Optional client-generated correlation; the server claims its exact tuple with vendor and channel before provider work, coalesces an in-flight retry, releases after failed/canceled cleanup, and converts success atomically to the flow. |
 | `OAuthFlow.client_nonce` | OAuth start echo | lost-start reconciliation | When the request supplied the nonce, every flow response echoes it unchanged. |
-| `AgentChain.chain[].health: backoff` | configured-chain live annotator | chain/AgentSupply health reads | Source-scoped in-memory pre-first-byte connection throttle. It requires `models.source.backoff.connection_failed` plus future `retry_at`, never appears in Source/config serialization, and rolls up as self-healing `waiting`. |
+| `AgentChain.chain[].health: backoff` | configured-chain live annotator | chain/AgentSupply health reads | Source-scoped in-memory pre-first-byte connection throttle with future `retry_at`, never persisted in Source/config. Its reason is `models.source.backoff.connection_failed` unless simultaneous native-process unavailability takes the single reason slot as `native_cli_unavailable`; the ordinary case rolls up as self-healing `waiting`, while that process-blocked case is `interrupted`. |
 
 ## AgentSupply read projection
 
@@ -374,10 +380,12 @@ Every menu model stores one `hops` array. Each hop is an exact
 `{source_id, model_id}` pair; a differing upstream id is the mapping itself, not a
 separate mapping object. A write validates only newly introduced or changed pairs.
 The whole-array PUT uses `force` plus the optional echoed `would_remove_hops` and
-`would_interrupt` arrays in the JSON body and the same guarded refusal/reporting family
-as Source mutations. A successful write returns `{chain, removed_hops,
-interrupted}`; a non-forced write that would empty protected supply returns the shared
-`GuardRefusal` envelope.
+`would_interrupt` arrays in the JSON body only when the submitted edit would interrupt
+protected supply. A successful write returns `{chain, removed_hops, interrupted}`.
+Removing a hop while leaving protected supply runnable is the user's visible direct edit
+and succeeds without a guard round trip; a non-forced write that would interrupt
+protected supply returns the shared `GuardRefusal` envelope with
+`error: source_last_supplier`.
 An unchanged stale pair may be retained or reordered so a user can add a working
 fallback without discarding a temporarily unavailable configured hop. Runtime walks
 the stored array verbatim and annotates only live runnability.
@@ -501,15 +509,18 @@ mutation with `force: true` and byte-for-byte equivalent JSON values for the ref
 server-side confirmation state exists.
 
 The shared layer recomputes the current guarded-impact plan and then applies this total
-decision matrix. A plan is nonempty exactly when the staged mutation has at least one
-`would_remove_hops` or `would_interrupt` item. Recalculation, exact-array comparison, and
-any commit share one atomic boundary. Source DELETE carries `force` in the query and the
+decision matrix. For Source and inventory mutations, a plan is nonempty when the staged
+mutation has at least one `would_remove_hops` or `would_interrupt` item. For
+`mutation.route_replace`, only a nonempty `would_interrupt` activates the plan; its
+refusal also reports every submitted removal in `would_remove_hops`, while a
+noninterrupting removal skips refusal and appears only in successful `removed_hops`.
+Recalculation, exact-array comparison, and any commit share one atomic boundary. Source DELETE carries `force` in the query and the
 two echoed arrays in its JSON body; every other guarded mutation carries all confirmation
 fields in the JSON body.
 
 | Decision | `force` | Recomputed plan | Echoed refusal plan | HTTP/API result |
 | --- | --- | --- | --- | --- |
-| `guard_decision.unforced_no_impact` | false | empty | absent or supplied; echo is inert | ordinary mutation success |
+| `guard_decision.unforced_no_impact` | false | empty, including visible noninterrupting `route_replace` removals | absent or supplied; echo is inert | ordinary mutation success |
 | `guard_decision.unforced_confirmation` | false | nonempty | absent or supplied; echo is inert | HTTP 409 `GuardRefusal` with the current plan |
 | `guard_decision.forced_no_impact` | true | empty | absent, exact, or stale | ordinary mutation success; `force` and any echo are inert |
 | `guard_decision.forced_confirmed` | true | nonempty | both arrays exactly equal the recomputed plan | commit once and return the row's success envelope |
@@ -709,11 +720,14 @@ Process availability is definitionally true for `channel: "hub"` in v2; there is
 configuration knob for it. For `native_cli`, `reason: "native_cli_unavailable"` is an
 orthogonal process fact legal at every health and always forces `runnable: false`. The
 item stays visible and dimmed, and makes a fully blocked chain `interrupted`, even when
-its health is `cooldown`. A hub or native hop under short connection throttle instead
-carries `health: backoff`, `reason: models.source.backoff.connection_failed`, and the
-future deadline in `retry_at`; this blocker rolls up as `waiting`, not `interrupted`.
-Outside that live backoff, `reason: null` means process-available. An empty Hub chain
-remains a valid `interrupted` chain.
+its health is `cooldown` or `backoff`. A hub or process-available native hop under
+short connection throttle carries `health: backoff`,
+`reason: models.source.backoff.connection_failed`, and the future deadline in
+`retry_at`; this blocker rolls up as `waiting`. If the native CLI also becomes
+unavailable, the actionable process fact takes the single `reason` slot, while
+`health: backoff` and the same `retry_at` remain visible; the chain is `interrupted`.
+Outside those blockers, `reason: null` means process-available. An empty Hub chain remains
+a valid `interrupted` chain.
 
 ```json
 {
@@ -838,6 +852,9 @@ means there is no explicit code:
 The backoff deadline expiring makes the hop runnable without persistence. The first
 later response byte, Source endpoint/credential replacement, or process reconstruction
 clears its deadline and consecutive-failure streak. The delay is capped at 30 seconds.
+For a native hop whose process is simultaneously unavailable, the live deadline remains
+visible but `native_cli_unavailable` takes the single reason slot and the chain remains
+`interrupted`; restoring the process reveals any still-live connection backoff.
 `Source.state`, Source serialization, and every `models.source.cooldown.*` key remain
 untouched by unclassified transport failure. Probe connection failure uses the same
 closed live key; it never reports the removed persistent network/timeout cooldown keys.
@@ -980,9 +997,9 @@ contract harness and API-boundary tests enforce:
 | every OAuthFlow response includes `intent` | API payload test |
 | OAuth start claims `(client_nonce, vendor, channel)` before provider work; a blocked first call plus concurrent same-tuple retry coalesces to one pending result and exactly one provider start, failure/cancellation releases, and success atomically exposes one echoed-nonce flow | OAuth registry, API payload, and auth-setup closed-loop tests |
 | every RuntimeDependency API payload includes server-derived `host_platform` and `status.error_key`; only supported `not_installed` starts a download, installed states are state-preserving no-ops, page reload preserves a live `installing` job, and service bootstrap reconciles an orphan before serving runtime endpoints | API payload test |
-| Source create reserves `client_nonce` before work; fixtures cover `nonce.in_flight` (`source_create_in_progress`/no work), `nonce.released` (atomic reserve/exactly one new attempt), and `nonce.committed` (`source_nonce_conflict` followed by a list read that finds exactly one Source with that nonce), while AC-26 cleanup/restart and Source deletion release only at their specified settlement boundaries | config, API payload, cancellation/restart, and Source-delete tests |
+| Source create reserves `client_nonce` in process before work; the client reads Sources before any lost-response retry; fixtures cover `nonce.in_flight` (`source_create_in_progress`/no work), `nonce.released` (atomic reserve/exactly one fresh attempt), and `nonce.committed` (`source_nonce_conflict` followed by a list read that finds exactly one Source with that nonce), while AC-26 cleanup or process restart releases any live reservation and Source deletion releases its committed nonce; after restart or deletion and a list miss, same-nonce create is positively asserted as a fresh creation | config, API payload, cancellation/restart, Source-delete, and client retry tests |
 | Source observation rejects unregistered request/status evidence fields; clients consume only the contracted outcome, reachability, authentication, protocol, discovery, and models facts | observation schema and API payload tests |
-| network fixtures cover shaped/transport × before/after-first-byte: shaped results at either phase enter only their existing non-permanent Source classifier; unclassified pre-stream connection failure creates bounded live backoff with no config write; unclassified post-first-byte interruption is event-only with no backoff/state mutation or replay | table-driven resolver/API/event test |
+| network fixtures cover shaped/transport × before/after-first-byte: shaped results at either phase enter only their existing non-permanent Source classifier; unclassified pre-stream connection failure creates bounded live backoff with no config write; unclassified post-first-byte interruption is event-only with no backoff/state mutation or replay; simultaneous native-process unavailability takes reason precedence while preserving backoff health/deadline and yields interrupted | table-driven resolver/API/event and AgentChain schema tests |
 | every `GuardRefusal` validates against `guard-refusal.schema.json` and has a nonempty current plan; fixtures cover every guard-decision row, including unforced refusal, exact echoed-plan confirmation, missing/different echo returning the new plan, and old-echo empty-plan ordinary success without a fabricated 409 | API payload and concurrent-mutation test |
 | contract and in-repo adapter interface copies are byte-identical; the five retained-material enum members and ref-pairing predicates are mutation-tested | contract harness |
 

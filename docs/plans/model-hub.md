@@ -246,34 +246,38 @@ The Source workflow is complete at both entry points:
 request: `vendor` and transient `key`, plus optional `display_name`, `base_url`, probe-
 only `protocol_order`, and client-generated `client_nonce`. Source identity, protocol
 evidence, discovered inventory, health, usage, custody metadata, and timestamps remain
-server-owned. When supplied, `client_nonce` is unique among live Sources and in-flight
-create reservations. The server reserves the `Source.client_nonce` uniqueness slot
-before observation or credential work and persists that same column unchanged on the
-committed Source, so a client that loses the response can identify the committed row on
-the next Source list read. There is no separate claim record, and the column stores no
-request digest, terminal envelope, or plaintext credential. Pre-commit failure or
+server-owned. When supplied, `client_nonce` is unique among live Sources and live-process
+create reservations. The server reserves it atomically in process before observation or
+credential work and persists `Source.client_nonce` unchanged only on commit, so a client
+that loses the response can identify the committed row on the next Source list read.
+There is no durable pre-create claim record, and neither representation stores a request
+digest, terminal envelope, or plaintext credential. Pre-commit failure or
 cancellation releases it only after AC-26 retained-material settlement. On restart an
-ownerless reservation cannot resume without persisted plaintext, so pending revocation
-is reconciled before release. Source deletion releases the nonce. It is not Source
-identity or a routing input.
+in-flight create and its process-local reservation no longer exist; pending revocation
+is reconciled before a retry begins fresh. Source deletion releases the nonce. A lost-response client
+must read Sources before retrying; after that read observes no live nonce owner, a
+same-nonce request is a fresh create, including after deletion. It is not Source identity
+or a routing input.
 
 **Source-create nonce state machine (authoritative and exhaustive; simplified by owner
 subtraction ruling 2026-08-11 20:35, superseding the 19:10/19:42 receipt design).** After
-a lost response the client retries the same nonce. An in-progress conflict means wait and
-retry; a committed conflict means read Sources and select the exact `client_nonce` match.
-A list miss means the nonce is released and may be retried. Malformed request fields
-retain shared request-validation behavior.
+a lost response the client reads Sources before retrying the same nonce. An exact match
+reconciles the Source; a list miss permits a fresh retry. An in-progress conflict means
+wait and retry; a committed conflict means repeat the Source read and select the exact
+`client_nonce` match. Malformed request fields retain shared request-validation behavior.
 
-| Decision | Durable condition | Retry relation | Server action and HTTP/API result | Upstream work | First consumer |
+| Decision | Live condition | Retry relation | Server action and HTTP/API result | Upstream work | First consumer |
 | --- | --- | --- | --- | --- | --- |
-| `nonce.in_flight` | the Source nonce slot is reserved by unfinished create work | same nonce with any otherwise-valid request | retain reservation; HTTP 409 `source_create_in_progress` | none | Add Source wait/retry loop and concurrent-create fixture |
-| `nonce.released` | no reservation and no live Source owns the nonce | same nonce with any otherwise-valid request | atomically reserve the nonce and proceed as a fresh create | exactly one new attempt owned by the reservation | create retry loop, AC-26 cleanup/recovery, and Source-delete tests |
+| `nonce.in_flight` | this process holds the nonce reservation for unfinished create work | same nonce with any otherwise-valid request | retain reservation; HTTP 409 `source_create_in_progress` | none | Add Source wait/retry loop and concurrent-create fixture |
+| `nonce.released` | no live-process reservation and no live Source owns the nonce, including after restart | same nonce with any otherwise-valid request | atomically reserve the nonce in process and proceed as a fresh create | exactly one new attempt owned by the reservation | create retry loop, AC-26 cleanup/recovery, restart, and Source-delete tests |
 | `nonce.committed` | one live Source carries the nonce | same nonce with any otherwise-valid request | HTTP 409 `source_nonce_conflict`; client list read finds exactly one Source with that nonce | none | D-36 list reconciliation and committed-conflict fixture |
 
 There is no committed replay promise: ordinary Source reads, not a stored terminal
 envelope, reconcile the rare lost-response path. `released` is absence, not a tombstone
-row; Source deletion makes the nonce claimable again. These rules add no endpoint,
-receipt, digest, or server-side response snapshot.
+row; Source deletion makes the nonce claimable again, and a same-nonce create after the
+required list miss is definitionally new. A stale client that skips the D-36 read can
+recreate a deleted Source and is outside the single supported UI client's threat model.
+These rules add no endpoint, receipt, digest, or server-side response snapshot.
 
 **OAuth-start nonce state machine (authoritative and exhaustive; owner ruling
 2026-08-11 19:42).** The key is the exact `(client_nonce, vendor, channel)` tuple and is
@@ -567,8 +571,11 @@ decided only by whether the first response byte was observed.
 Connection backoff is live execution state, never Source/configuration state. For the
 same Source, consecutive `transport_before_first_byte` decisions use delays
 `1, 2, 4, 8, 16, 30, 30, ...` seconds. While the deadline is future, every exact hop
-for that Source reads `health: backoff`, `runnable: false`,
-`reason: models.source.backoff.connection_failed`, and that deadline as `retry_at`.
+for that Source reads `health: backoff`, `runnable: false`, and that deadline as
+`retry_at`. Its reason is `models.source.backoff.connection_failed` unless a
+`native_cli` process is simultaneously unavailable; that actionable process blocker
+takes the single reason slot as `native_cli_unavailable`, while the backoff health and
+deadline remain visible and the chain is `interrupted`.
 Deadline expiry makes the hop runnable again without a write. The first subsequent
 response byte clears both deadline and streak automatically; Source endpoint/credential
 replacement and process reconstruction also clear them because the state is in-memory
@@ -582,7 +589,7 @@ persisted Source-state counterpart.
 
 | Decision | Required live annotation | Persistence | First consumer |
 | --- | --- | --- | --- |
-| `backoff` | `runnable: false`, `reason: models.source.backoff.connection_failed`, future `retry_at` | in-memory only; never Source/configuration state | AgentChain and AgentSupply health reads |
+| `backoff` | `runnable: false`, future `retry_at`, and `reason: models.source.backoff.connection_failed`; simultaneous native-process unavailability instead takes reason precedence as `native_cli_unavailable` without erasing health/deadline | in-memory only; never Source/configuration state | AgentChain and AgentSupply health reads |
 
 The final mirror registry checks the closed (classification, credential capability) →
 `detail_key` → remedy relation in both directions. The resolver suite executes every
@@ -801,7 +808,8 @@ detail/remedy copy for restoring the sanctioned local CLI; it is never presented
 upstream Source cooldown.
 
 `waiting` exists to keep the surfacing rule below consistent. An agent whose
-sources are *all* mid-cooldown has nothing runnable, but nothing is owed either —
+sources are *all* in persisted cooldown or live connection backoff has nothing runnable,
+but nothing is owed either —
 it heals itself in minutes. Collapsing that into `interrupted` would tell the user to
 go fix a problem that resolves before they finish reading the sentence, which is
 exactly what the self-healing tier is supposed to prevent. The Turn-outcome copy matrix
@@ -824,7 +832,8 @@ rollup stays what its name says. One taxonomy, two grains, and only one definiti
 The predicate itself is stated **once, here**, and every contract that carries either
 grain points back at this table rather than restating it: `interrupted` when the chain
 is empty **or at least one blocker needs the user**, `waiting` only when every blocker
-is a cooldown. The asymmetry is deliberate and load-bearing — `interrupted` is the
+is a persisted cooldown or live connection backoff. The asymmetry is deliberate and
+load-bearing — `interrupted` is the
 OR-branch, `waiting` the AND-branch, so a chain holding one cooling source and one
 revoked key is `interrupted`. Reading it as "every member needs the user" leaves that
 mixed chain matching neither value and, worse, hides the action the user is owed for
@@ -1039,15 +1048,19 @@ It also reports every resulting supply gap; force is confirmation, not a claim t
 the mutation is interruption-free.
 
 **Guard confirmation totality matrix (authoritative and exhaustive; owner subtraction
-ruling 2026-08-11 20:35, superseding the 18:32/19:10 token design).** The shared layer
-recomputes under the atomic commit boundary. A guarded-impact plan is nonempty exactly
-when the staged mutation has at least one `would_remove_hops` or `would_interrupt` item.
-Confirmation is only the client's unchanged echo of those two refusal arrays; no token,
-digest, version receipt, or server-side confirmation state exists.
+ruling 2026-08-11 20:35, with direct-Route scope corrected at 21:14).** The shared layer
+recomputes under the atomic commit boundary. For Source and inventory mutations, a
+guarded-impact plan is nonempty when the staged mutation has at least one
+`would_remove_hops` or `would_interrupt` item. For `mutation.route_replace`, only a
+nonempty `would_interrupt` activates the plan: the refusal also reports its submitted
+removals, but a visible noninterrupting removal is ordinary success and reports those
+items only as `removed_hops`. Confirmation is only the client's unchanged echo of the
+two refusal arrays; no token, digest, version receipt, or server-side confirmation state
+exists.
 
 | Decision | `force` | Recomputed plan | Echoed refusal plan | HTTP/API result |
 | --- | --- | --- | --- | --- |
-| `guard_decision.unforced_no_impact` | false | empty | absent or supplied; echo is inert | ordinary mutation success |
+| `guard_decision.unforced_no_impact` | false | empty, including visible noninterrupting `route_replace` removals | absent or supplied; echo is inert | ordinary mutation success |
 | `guard_decision.unforced_confirmation` | false | nonempty | absent or supplied; echo is inert | HTTP 409 `GuardRefusal` with the current plan |
 | `guard_decision.forced_no_impact` | true | empty | absent, exact, or stale | ordinary mutation success; `force` and any echo are inert because no guarded impact remains |
 | `guard_decision.forced_confirmed` | true | nonempty | both arrays exactly equal the recomputed plan | commit once and return the matrix row's success envelope |
@@ -1073,7 +1086,7 @@ present even when empty.
 | `mutation.model_efforts` | replace one model entry's capability list | `PATCH /api/models/sources/<source_id>/models/<model_id>` with `{reasoning_efforts}` | not guarded: it changes no `id`, `origin`, or Route | `{source: Source}` |
 | `mutation.model_delete` | retire a discovered model or delete a manual model | `DELETE /api/models/sources/<source_id>/models/<model_id>` with `{force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` | same guarded `409`; discovered retirement is staged before evaluating exact-hop and protected-supply loss | same Source success envelope; discovered success preserves the row with `retired: true`, manual success removes it |
 | `mutation.source_delete` | delete Source | `DELETE /api/models/sources/<id>?force=<bool>` with body `{would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` | same guarded `409`; a nonempty recomputed plan commits only when both arrays exactly match | `{removed_hops: RouteHopRef[], interrupted: SupplyGap[]}` after atomically pruning the Source from every backend Source order and every Route chain while preserving each survivor order; the deleted Source is not returned and legacy `{ok}` is invalid |
-| `mutation.route_replace` | replace one model's complete Route chain | `PUT /api/models/agents/<backend>/chain?model=<id>` with `{hops: RouteHop[], force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` | same guarded `409` | `{chain: AgentChain, removed_hops: RouteHopRef[], interrupted: SupplyGap[]}`; the reporting fields are the same guarded-mutation family as Source success |
+| `mutation.route_replace` | replace one model's complete Route chain | `PUT /api/models/agents/<backend>/chain?model=<id>` with `{hops: RouteHop[], force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` | only when `would_interrupt` is nonempty: `source_last_supplier` in the same guarded `409`, including all submitted removals; noninterrupting removal is ordinary success because it is the user's visible direct edit | `{chain: AgentChain, removed_hops: RouteHopRef[], interrupted: SupplyGap[]}`; noninterrupting removal needs no wire confirmation, and survivor order is the submitted order |
 
 The request carrier shown in each row is the only one. The final `api.md`, server/client
 envelopes, confirmation UI, and route tests mirror this matrix row-for-row.
