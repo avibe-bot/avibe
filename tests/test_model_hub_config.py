@@ -438,6 +438,84 @@ def test_every_frozen_schema_example_is_valid_and_json_round_trips():
             assert _canonical(json.loads(_canonical(example))) == _canonical(example)
 
 
+def test_source_create_unavailable_inventory_consent_is_explicit_and_total():
+    schema = _schema("source-create.schema.json")
+    validator = Draft7Validator(schema)
+    field = schema["properties"]["accept_unavailable_inventory"]
+    assert field["type"] == "boolean"
+    assert field["default"] is False
+
+    clean = copy.deepcopy(schema["examples"][0])
+    assert "accept_unavailable_inventory" not in clean
+    validator.validate(clean)
+
+    explicit_false = {**clean, "accept_unavailable_inventory": False}
+    validator.validate(explicit_false)
+
+    accepted_failure = copy.deepcopy(schema["examples"][1])
+    assert accepted_failure["accept_unavailable_inventory"] is True
+    validator.validate(accepted_failure)
+
+    for invalid in (None, "true", 1, {}):
+        with pytest.raises(ValidationError):
+            validator.validate({**clean, "accept_unavailable_inventory": invalid})
+
+    api_contract = (CONTRACTS / "api.md").read_text(encoding="utf-8")
+    consent_table = api_contract.split(
+        "### Source-create unavailable-inventory consent", 1
+    )[1].split("When `client_nonce` is present", 1)[0]
+    result_rows = [
+        line
+        for line in consent_table.splitlines()
+        if line.startswith("| Protocol ")
+    ]
+    assert len(result_rows) == 4
+
+    succeeded = next(
+        line for line in result_rows if "`discovery: succeeded`" in line
+    )
+    assert "omitted, `false`, or `true`" in succeeded
+    assert "Ordinary create" in succeeded
+    assert "legitimately empty" in succeeded
+
+    failed_rows = [
+        line
+        for line in result_rows
+        if line.startswith("| Protocol proved; `discovery: failed` |")
+    ]
+    assert len(failed_rows) == 2
+    rejected = next(line for line in failed_rows if "omitted or `false`" in line)
+    accepted = next(line for line in failed_rows if "| `true` |" in line)
+    assert "`discovery_failed`" in rejected
+    assert "no Source or committed credential" in rejected
+    assert "AC-26 cleanup" in rejected
+    assert "Commit exactly one Source" in accepted
+    assert "`models: []`" in accepted
+    assert "proved protocol" in accepted
+
+    unproved = next(
+        line for line in result_rows if line.startswith("| Protocol not proved")
+    )
+    assert "omitted, `false`, or `true`" in unproved
+    assert "no Source is committed" in unproved
+    assert "cannot authorize" in unproved
+
+    implementation_plan = (
+        CONTRACTS.parent / "model-hub-implementation.md"
+    ).read_text(encoding="utf-8")
+    ac_54 = implementation_plan.split("### AC-54", 1)[1].split(
+        "### K4 open contract-gap registry", 1
+    )[0]
+    for required in (
+        "accept_unavailable_inventory",
+        "K5 round 2",
+        "After K4, #1312, and K6 merge",
+        "I4's second increment",
+        "tests/test_model_hub_{config,api}.py",
+    ):
+        assert required in ac_54
+
+
 def test_guard_refusal_error_requires_its_corresponding_nonempty_plan_array():
     validator = Draft7Validator(_schema("guard-refusal.schema.json"))
     hop = {
@@ -1109,9 +1187,7 @@ def test_oauth_terminal_materialization_matrix_and_handoffs_are_total():
     assert "starts exactly one Hub flow" in ac_52
     assert "terminal status and the\nrepair read projection agree" in ac_52
 
-    ac_53 = implementation_plan.split("### AC-53", 1)[1].split(
-        "### K4 open contract-gap registry", 1
-    )[0]
+    ac_53 = implementation_plan.split("### AC-53", 1)[1].split("### AC-54", 1)[0]
     assert "all five rows" in ac_53
     for path in (
         "core/handlers/model_hub/{service,errors}.py",

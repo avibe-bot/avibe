@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "model-hub/source-create.schema.json",
   "title": "SourceCreate",
-  "description": "API-key Source creation input. It extends the unsaved observation request with display and reconciliation data; the server still owns Source identity, protocol evidence, discovered inventory, health, usage, custody metadata, and timestamps. When client_nonce is present, the server reserves it atomically in process before observation or credential work; only a successful commit persists Source.client_nonce unchanged. A lost-response client reconciles through the ordinary Source list without a receipt or separate endpoint. Nonce uniqueness covers live-process reservations and live Sources; process restart or Source deletion releases it, and a later same-nonce request after the required list read is a fresh create.",
+  "description": "API-key Source creation input. It extends the unsaved observation request with display, reconciliation, and explicit unavailable-inventory consent data; the server still owns Source identity, protocol evidence, discovered inventory, health, usage, custody metadata, and timestamps. When client_nonce is present, the server reserves it atomically in process before observation or credential work; only a successful commit persists Source.client_nonce unchanged. A lost-response client reconciles through the ordinary Source list without a receipt or separate endpoint. Nonce uniqueness covers live-process reservations and live Sources; process restart or Source deletion releases it, and a later same-nonce request after the required list read is a fresh create.",
   "type": "object",
   "required": ["vendor", "key"],
   "additionalProperties": false,
@@ -41,6 +41,11 @@
       "type": "string",
       "pattern": "^scn_[a-z0-9]{16,64}$",
       "description": "Optional client-generated create correlation held before submission. The server atomically reserves it in process before observation or credential work and writes Source.client_nonce only on successful commit; no durable pre-create claim record exists. A lost-response client reads Sources before retrying. A same-nonce retry receives an in-progress conflict, atomically reclaims a released slot as a fresh create, or receives a committed conflict and reconciles by finding that nonce in the ordinary Source list. Uniqueness applies only while a live-process reservation or live Source exists; process restart and Source deletion release it. It is not Source identity, credential material, or a routing input."
+    },
+    "accept_unavailable_inventory": {
+      "type": "boolean",
+      "default": false,
+      "description": "Optional explicit consent to commit only when the server's repeated response-backed observation proves a protocol but inventory discovery fails. Omission or false rejects that cell with discovery_failed; true permits a Source with models: []. The flag never supplies observation evidence, has no effect on a successful discovery, and cannot bypass reachability, authentication, or protocol proof."
     }
   },
   "examples": [
@@ -51,6 +56,13 @@
       "key": "<transient plaintext key>",
       "protocol_order": ["openai_chat", "openai_responses", "anthropic"],
       "client_nonce": "scn_01j5w8z7p4n6q2rt"
+    },
+    {
+      "vendor": "custom",
+      "base_url": "https://relay.example/v1",
+      "key": "<transient plaintext key>",
+      "protocol_order": ["openai_chat", "openai_responses", "anthropic"],
+      "accept_unavailable_inventory": true
     }
   ]
 }

@@ -244,7 +244,10 @@ The Source workflow is complete at both entry points:
 
 **Source-create boundary.** `source-create.schema.json` is the complete API-key create
 request: `vendor` and transient `key`, plus optional `display_name`, `base_url`, probe-
-only `protocol_order`, and client-generated `client_nonce`. Source identity, protocol
+only `protocol_order`, client-generated `client_nonce`, and boolean
+`accept_unavailable_inventory`; omission is `false`, and the boolean consents only when
+the server's repeated response-backed observation proves a protocol but returns
+`discovery: failed`. Source identity, protocol
 evidence, discovered inventory, health, usage, custody metadata, and timestamps remain
 server-owned. When supplied, `client_nonce` is unique among live Sources and live-process
 create reservations. The server reserves it atomically in process before observation or
