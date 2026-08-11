@@ -1,29 +1,30 @@
-version: 1
+version: 2
 capability: model_hub
 observations:
   - id: MH-OBS-001
     source: engine-survey-s1
-    summary: Engine fallback is broader than the signed taxonomy, so the adapter owns the per-source candidate loop.
+    summary: The adapter owns one Source call while the configured route executor owns cross-Source fallback.
     affects:
-      - MH-RES-001
+      - MH-S1-001
+      - MH-TAKEOVER-001
+      - MH-CREDENTIAL-001
   - id: MH-OBS-002
     source: engine-survey-s1
-    summary: Engine usage events contain inbound credential material and remain disabled; Model Hub emits its own redacted events.
+    summary: Engine usage events can contain credential material, so Model Hub emits only its own redacted records.
     affects:
-      - MH-RES-001
+      - MH-PROTOCOL-001
+      - MH-TURN-RESULT-001
+      - MH-TURN-COPY-001
   - id: MH-OBS-003
     source: engine-survey-s1
-    summary: OAuth presentation is runtime-declared rather than inferred from a vendor table.
+    summary: OAuth presentation is runtime-declared rather than inferred from vendor metadata.
     affects:
-      - MH-OAUTH-A-001
-      - MH-OAUTH-B-001
-      - MH-OAUTH-C-001
       - MH-OAUTH-NATIVE-001
       - MH-OAUTH-NATIVE-002
+      - MH-OAUTH-NATIVE-003
   - id: MH-OBS-004
     source: model-hub-completeness-audit
-    summary: A successful OAuth status response must atomically materialize the bound Source; no second create request exists in the live UI path.
+    summary: Persisted Sources from every writer must survive the same canonical serialization and reload boundary.
     affects:
-      - MH-OAUTH-NATIVE-001
-      - MH-OAUTH-NATIVE-002
-      - MH-OAUTH-CONSENT-001
+      - MH-AC29-001
+      - MH-MIG-001
