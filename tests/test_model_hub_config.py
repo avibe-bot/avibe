@@ -329,7 +329,7 @@ class GateCase(NamedTuple):
     `cls` is the gate class expected to report it, `universe` the named
     inventory the comparison runs against (None when the case exercises a
     class's own logic rather than the shared comparator), and `rule` one of the
-    comparator's three structural rules — or `arm`, for a class-logic case that
+    comparator's four structural rules — or `arm`, for a class-logic case that
     predates them and still has to keep working.
 
     `within` is the section the anchor is read inside; see `_region`.
@@ -777,6 +777,14 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "has no English column",
         within="1.0",
     ),
+    GateCase(
+        "B", None, "arm",
+        "Chinese column dropped",
+        "| `shell.title` | 模型 | Models |",
+        "| `shell.title` |  | Models |",
+        "has no Chinese column",
+        within="1.0",
+    ),
     # §0.9 names its consumers and the copy tables interpolate: one set, written
     # twice, by two authors who cannot see each other. Both directions get a
     # case, because they fail differently and only one of them is loud. A
@@ -1184,6 +1192,22 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "renders",
         within="1.0",
     ),
+    GateCase(
+        "E", "schema fields", "arm",
+        "mapping table field header is malformed",
+        "| `Source.state.status` `[contract]` | Ink | Key |",
+        "| `Source.state-status` `[contract]` | Ink | Key |",
+        "mapping header `Source.state-status` is not a valid field citation",
+        within="1.6",
+    ),
+    GateCase(
+        "E", "schema fields", "arm",
+        "mapping table row has an unowned cell",
+        "| `standby` | `$--muted` | `upstream.state.standby` |",
+        "| `standby` | `$--muted` | `upstream.state.standby` | extra |",
+        "mapping row has 4 cells where its header declares 3",
+        within="1.6",
+    ),
     # Reviewer's finding, round 1 of #1276: a gap registration says one field is
     # absent, and the excusal read that as "this whole row is unverifiable" —
     # every attributed-field claim inside it, including the *evidence*. G-3's
@@ -1209,6 +1233,54 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "`PUT /api/models/agents/<backend>/sources` with `{hops: string[]}` `[contract]`",
         "not contracted for",
         within="0.8",
+    ),
+    GateCase(
+        "E", "routes", "arm",
+        "empty body omits a required member",
+        "`PUT /api/models/agents/<backend>/sources` with `{order: string[]}` `[contract]`",
+        "`PUT /api/models/agents/<backend>/sources` with `{}` `[contract]`",
+        "`{}` omits order — required for",
+        within="0.8",
+    ),
+    GateCase(
+        "E", "routes", "arm",
+        "body member declares the wrong type",
+        "`PUT /api/models/agents/<backend>/sources` with `{order: string[]}` `[contract]`",
+        "`PUT /api/models/agents/<backend>/sources` with `{order: integer[]}` `[contract]`",
+        "declares `order` as integer[]",
+        within="0.8",
+    ),
+    GateCase(
+        "E", "routes", "arm",
+        "required body member is described as optional",
+        "`PUT /api/models/agents/<backend>/sources` with `{order: string[]}` `[contract]`",
+        "`PUT /api/models/agents/<backend>/sources` with `{order?: string[]}` `[contract]`",
+        "marks order optional — required for",
+        within="0.8",
+    ),
+    GateCase(
+        "E", None, "arm",
+        "api authority line is outside the file",
+        "`api.md:212`",
+        "`api.md:9999`",
+        "is outside `docs/plans/model-hub-contracts/api.md`",
+        within="0.5",
+    ),
+    GateCase(
+        "E", None, "arm",
+        "revision authority line is outside the cited file",
+        "`ceace07f:2197`",
+        "`ceace07f:9999`",
+        "is outside `core/handlers/model_hub/service.py`",
+        within="0.5",
+    ),
+    GateCase(
+        "E", None, "arm",
+        "revision line no longer points at the cited symbol",
+        "`ceace07f:2197`",
+        "`ceace07f:2198`",
+        "does not point at `core/handlers/model_hub/service.py:set_agent_mode`",
+        within="0.5",
     ),
     # `api.md` puts request and response in one cell, and a check that unions
     # the two sides accepts the answer's vocabulary as a legal request body.
@@ -1498,6 +1570,14 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         within="1.7",
     ),
     GateCase(
+        "B", "copy", "malformed",
+        "a copy row key uses a malformed spelling",
+        "| `shell.title` | 模型 | Models |",
+        "| `shell-title` | 模型 | Models |",
+        "copy row `shell-title` has malformed key `shell-title`",
+        within="1.0",
+    ),
+    GateCase(
         "B", "slots", "malformed",
         "a §0.9 slot row loses its consumer cell",
         "| `{{vendor}}` | The upstream vendor's product name, as the user chose it. "
@@ -1530,11 +1610,35 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         within="0.8",
     ),
     GateCase(
+        "E", "gaps", "arm",
+        "a gap marker uses an underscore in place of its separator",
+        "An install confirm was accepted `[contract-gap]` G-10",
+        "An install confirm was accepted `[contract-gap]` G_10",
+        "`[contract-gap] G_10` names no §0.5 row",
+        within="0.8",
+    ),
+    GateCase(
         "E", "repo symbols", "arm",
         "a symbol cited by its qualified name, misspelt",
         "core/handlers/model_hub/service.py:set_agent_mode",
         "core/handlers/model_hub/service.py:ModelHubService.set_agent_moed",
         "defines no `ModelHubService.set_agent_moed`",
+        within="0.5",
+    ),
+    GateCase(
+        "E", "repo symbols", "arm",
+        "a symbol citation contains a hyphen",
+        "core/handlers/model_hub/service.py:list_agents",
+        "core/handlers/model_hub/service.py:list-agents",
+        "defines no `list-agents`",
+        within="0.5",
+    ),
+    GateCase(
+        "E", "repo symbols", "arm",
+        "a symbol citation starts with a digit",
+        "core/handlers/model_hub/service.py:list_agents",
+        "core/handlers/model_hub/service.py:1list_agents",
+        "defines no `1list_agents`",
         within="0.5",
     ),
     GateCase(

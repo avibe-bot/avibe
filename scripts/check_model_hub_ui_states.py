@@ -640,7 +640,7 @@ CLASSES: tuple[str, ...] = tuple(CLASS_UNIVERSES)
 
 CLASS_LABELS: dict[str, str] = {
     "A": "mutating call with no treatment, a treatment that does not exist, a route named by method word, or a failure dispersed into another frame's states as a set that frame does not have",
-    "B": "copy cited but not defined, missing English, an undeclared slot, a misdeclared slot consumer, a line no copy row renders, or a state whose one key contradicts its frame's own mapping table",
+    "B": "copy cited but not defined, missing localized text, an undeclared slot, a misdeclared slot consumer, a line no copy row renders, or a state whose one key contradicts its frame's own mapping table",
     "C": "state with no exit, a state its frame's own value table reaches that the dispatching row never lands in, a frame with no register row, or a state attributed to the wrong frame",
     "D": "condition key no state cites",
     "E": "a claim about the system that its authority file does not make",
@@ -654,13 +654,16 @@ KEY_REF_RE = re.compile(r"`([a-z][A-Za-z0-9]*(?:\.[A-Za-z0-9_*]+)+)`")
 # the reason given there, and so does a bare space, which is prose.
 _KEY_REF = KEY_REF_RE.pattern.replace("(", "(?:", 1)
 KEY_LIST_RE = re.compile(rf"{_KEY_REF}(?:\s*(?:[,、]|and)\s*{_KEY_REF}){{2,}}")
-KEY_DEF_RE = re.compile(r"^\|\s*`([a-z][A-Za-z0-9._*]*)`([^|]*)\|([^|]*)\|([^|]*)\|\s*$")
+COPY_KEY = r"[a-z][A-Za-z0-9._*]*"
+COPY_KEY_RE = re.compile(rf"^{COPY_KEY}$")
+KEY_DEF_RE = re.compile(rf"^\|\s*`({COPY_KEY})`([^|]*)\|([^|]*)\|([^|]*)\|\s*$")
+COPY_HEADER_RE = re.compile(r"^\|\s*Key\s*\|\s*中文\s*\|\s*English\s*\|\s*$")
 # The same row shape with the cell count taken out: what a copy row *claims to
 # be*, so that a row claiming it and failing it can be told from a row that was
 # never a copy definition. `KEY_DEF_RE` cannot answer this question, because
 # being unable to answer it is the whole of what it means for that pattern not
 # to match.
-KEY_ROW_OPEN_RE = re.compile(r"^\|\s*`([a-z][A-Za-z0-9._*]*)`[^|]*\|")
+KEY_ROW_OPEN_RE = re.compile(r"^\|\s*`([^`\n]+)`[^|]*\|")
 SLOT_RE = re.compile(r"\{\{(\w+)\}\}")
 # Two or more slots joined by the segment separator — a rendered line quoted
 # whole. `·` is the one character this document uses to join the parts of a
@@ -760,7 +763,8 @@ DOTTED_TOKEN_RE = re.compile(r"`([a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*)`")
 # resolves where the bare name is ambiguous — matched nothing and was read as a
 # bare file citation with no symbol at all. The document's most careful way of
 # pointing at a method was the one form the reader skipped.
-PY_CITE_RE = re.compile(r"`([A-Za-z0-9_./-]+\.py)(?::([A-Za-z_][A-Za-z0-9_.]*))?`")
+PY_CITE_RE = re.compile(r"`([A-Za-z0-9_./-]+\.py)(?::([^`\s]+))?`")
+AUTHORITY_LINE_RE = re.compile(r"`(api\.md|[0-9a-f]{7,40}):(\d+)`")
 STATUS_RE = re.compile(r"\b(4\d\d|5\d\d)\b")
 COUNT_WORDS = {
     "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
@@ -887,8 +891,15 @@ def json_keys(text: str) -> set[str]:
     return found
 
 
-def literal_members(text: str) -> dict[str, bool]:
-    """The key names a `{...}` literal declares, each to whether it is required.
+class LiteralMember(NamedTuple):
+    """One body member claim, retaining every comparable part of its spelling."""
+
+    required: bool
+    types: frozenset[str]
+
+
+def literal_members(text: str) -> dict[str, LiteralMember]:
+    """The members a `{...}` literal declares, including requiredness and type.
 
     The name test is deliberately wider than any name the contract actually has.
     It used to be `[a-z_][A-Za-z0-9_]*` — the shape of a *correct* key — which
@@ -902,15 +913,23 @@ def literal_members(text: str) -> dict[str, bool]:
     stripped and discarded — which made every member look alike and left the
     downstream comparison one-sided: a body may name nothing the route lacks and
     still omit something the route demands. Kept here, so the direction the
-    comparison was missing has something to compare against.
+    comparison was missing has something to compare against. The type spelling
+    stays beside it for the same reason: reducing `{order: string[]}` to `order`
+    lets an incompatible body look identical to the contracted one.
     """
-    members: dict[str, bool] = {}
+    members: dict[str, LiteralMember] = {}
     for block in JSONISH_RE.findall(text):
         for part in block.strip("{}").split(","):
-            declared = part.split(":")[0].strip().strip('"').strip()
+            declared, separator, member_type = part.partition(":")
+            declared = declared.strip().strip('"').strip()
             name = declared.rstrip("?").strip()
             if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]*", name):
-                members[name] = members.get(name, True) and not declared.endswith("?")
+                previous = members.get(name)
+                types = frozenset({re.sub(r"\s+", "", member_type)}) if separator else frozenset()
+                members[name] = LiteralMember(
+                    required=(previous.required if previous else True) and not declared.endswith("?"),
+                    types=(previous.types if previous else frozenset()) | types,
+                )
     return members
 
 
@@ -919,7 +938,7 @@ def literal_keys(text: str) -> set[str]:
     return set(literal_members(text))
 
 
-def spelled_shapes(api_text: str) -> dict[str, dict[str, dict[str, bool]]]:
+def spelled_shapes(api_text: str) -> dict[str, dict[str, dict[str, LiteralMember]]]:
     """Every shape this file names in a cell and spells in a section, by heading.
 
     A route row can spell only what fits in a cell; what does not fit is named
@@ -928,15 +947,19 @@ def spelled_shapes(api_text: str) -> dict[str, dict[str, dict[str, bool]]]:
     what, so each section is returned as its readings: the selecting value to
     that reading's members, plus `""` for the section's whole vocabulary.
     """
-    shapes: dict[str, dict[str, dict[str, bool]]] = {}
+    shapes: dict[str, dict[str, dict[str, LiteralMember]]] = {}
     for block in re.split(r"^## ", api_text, flags=re.M)[1:]:
         heading, _, body = block.partition("\n")
-        readings: dict[str, dict[str, bool]] = {"": literal_members(body)}
+        readings: dict[str, dict[str, LiteralMember]] = {"": literal_members(body)}
         for selector, literal in SHAPE_VARIANT_RE.findall(body):
             for name in VARIANT_NAME_RE.findall(selector):
                 merged = dict(readings.get(name, {}))
-                for member, req in literal_members(literal).items():
-                    merged[member] = merged.get(member, True) and req
+                for member, claim in literal_members(literal).items():
+                    previous = merged.get(member)
+                    merged[member] = LiteralMember(
+                        required=(previous.required if previous else True) and claim.required,
+                        types=(previous.types if previous else frozenset()) | claim.types,
+                    )
                 readings[name] = merged
         shapes[heading.strip()] = readings
     return shapes
@@ -1632,7 +1655,7 @@ def parse(doc: Document) -> dict[str, Any]:
             m = re.search(r"`models\.hub\.([a-zA-Z]+)\.\*`", line)
             pending_ns = m.group(1) if m else ""
             continue
-        if line.startswith("| Key |"):
+        if COPY_HEADER_RE.match(line):
             tables += 1
             in_table = True
             ns = pending_ns
@@ -1660,10 +1683,16 @@ def parse(doc: Document) -> dict[str, Any]:
             opener = KEY_ROW_OPEN_RE.match(line)
             if opener:
                 cells = [c.strip() for c in line.strip().strip("|").split("|")]
-                broken_copy.append(
-                    (n, f"copy row `{opener.group(1)}` has {len(cells)} cells where a copy "
-                        f"table declares 3 (key, 中文, English)")
-                )
+                key = opener.group(1).strip()
+                problems: list[str] = []
+                if not COPY_KEY_RE.fullmatch(key):
+                    problems.append(f"has malformed key `{key}`")
+                if len(cells) != 3:
+                    problems.append(
+                        f"has {len(cells)} cells where a copy table declares 3 "
+                        f"(key, 中文, English)"
+                    )
+                broken_copy.append((n, f"copy row `{key}` {' and '.join(problems)}"))
                 # The key is the one cell a broken row still has, and it is
                 # collected like any other so citations of it resolve and its
                 # plural sibling can still see it — dropping `pill_one`'s
@@ -1673,8 +1702,8 @@ def parse(doc: Document) -> dict[str, Any]:
                 # whose English cell is empty, and every rule that reads a text
                 # declines on `None` rather than judging one nobody read.
                 collected.append(
-                    {"key": opener.group(1), "zh": None, "en": None, "line": n, "ns": ns,
-                     "qualified": f"{ns}.{opener.group(1)}" if ns else opener.group(1)}
+                    {"key": key, "zh": None, "en": None, "line": n, "ns": ns,
+                     "qualified": f"{ns}.{key}" if ns else key}
                 )
             continue
         key, zh, en = m.group(1), m.group(3).strip(), m.group(4).strip()
@@ -1851,6 +1880,7 @@ def cited_rows(tokens: set[str], copy: Universe) -> set[int]:
 
 
 MAPPING_HEADER_CELL_RE = re.compile(r"^\s*`([A-Za-z][A-Za-z0-9_.\[\]]*)`((?:\s*`\[[a-z-]+\]`)*)\s*$")
+MAPPING_HEADER_CANDIDATE_RE = re.compile(r"^\s*`([^`]+)`((?:\s*`\[[^`]+\]`)*)\s*$")
 SEPARATOR_RE = re.compile(r"^\|[\s:|-]+\|$")
 
 
@@ -1861,6 +1891,7 @@ class MappingScan(NamedTuple):
     fields: dict[int, tuple[str, str]]
     rows: list[tuple[int, list[str]]]
     cites: set[str]
+    malformed: tuple[tuple[int, str], ...]
 
 
 def _mapping_scan(doc: Document) -> list[MappingScan]:
@@ -1891,17 +1922,31 @@ def _mapping_scan(doc: Document) -> list[MappingScan]:
             continue
         headers = line.strip().strip("|").split("|")
         fields: dict[int, tuple[str, str]] = {}
+        malformed: list[tuple[int, str]] = []
         for col, cell in enumerate(headers):
             m = MAPPING_HEADER_CELL_RE.match(cell)
             if m:
                 fields[col] = (m.group(1), m.group(2))
-        if not fields:
+            elif candidate := MAPPING_HEADER_CANDIDATE_RE.match(cell):
+                malformed.append(
+                    (line_no, f"mapping header `{candidate.group(1)}` is not a valid field citation")
+                )
+        if not fields and not malformed:
             continue
         rows: list[tuple[int, list[str]]] = []
         for n, row in numbered[pos + 2 :]:
             if not row.startswith("|"):
                 break
-            rows.append((n, row.strip().strip("|").split("|")))
+            cells = row.strip().strip("|").split("|")
+            if len(cells) != len(headers):
+                malformed.append(
+                    (
+                        n,
+                        f"mapping row has {len(cells)} cells where its header declares "
+                        f"{len(headers)}",
+                    )
+                )
+            rows.append((n, cells))
         # The lead-in paragraph is where these tables say whose field this is —
         # "`runtime-dependency.schema.json` enumerates five values", and then the
         # table. Reading it keeps the gate from calling a bound table ambiguous,
@@ -1915,12 +1960,20 @@ def _mapping_scan(doc: Document) -> list[MappingScan]:
                 continue  # the blank line every table is separated from its lead-in by
             lead.append(above)
         tables.append(
-            MappingScan(line_no, fields, rows, set(SCHEMA_CITE_RE.findall("\n".join(lead))))
+            MappingScan(
+                line_no,
+                fields,
+                rows,
+                set(SCHEMA_CITE_RE.findall("\n".join(lead))),
+                tuple(malformed),
+            )
         )
     return tables
 
 
-def mapping_tables(doc: Document) -> list[tuple[int, str, set[str], set[str], bool]]:
+def mapping_tables(
+    doc: Document, scans: list[MappingScan] | None = None
+) -> list[tuple[int, str, set[str], set[str], bool]]:
     """Tables that render a named field totally, one row per value.
 
     The document's own convention, used wherever a field's whole vocabulary has
@@ -1952,7 +2005,7 @@ def mapping_tables(doc: Document) -> list[tuple[int, str, set[str], set[str], bo
     call that a drift.
     """
     found: list[tuple[int, str, set[str], set[str], bool]] = []
-    for table in _mapping_scan(doc):
+    for table in scans if scans is not None else _mapping_scan(doc):
         values: dict[int, set[str]] = {col: set() for col in table.fields}
         for _n, cells in table.rows:
             for col in table.fields:
@@ -2065,7 +2118,9 @@ GAP_END = r"(?=$|[\s,;:*'\"`)\]}，、。；:）」』】]|\.(?!\w))"
 # it kept whatever `[contract-gap]` buys and no arm ever asked which row it
 # named. Reading the whole token hands `G-10x` to the registry, which answers
 # `empty`, which is the finding.
-GAP_REF_RE = re.compile(r"\[contract-gap\]`?\s*`?(G-[A-Za-z0-9-]+)" + GAP_END)
+GAP_REF_RE = re.compile(
+    r"\[contract-gap\]`?\s*`?(G(?:[A-Za-z0-9_.-]*[A-Za-z0-9_-])?)" + GAP_END
+)
 GAP_ROW_RE = re.compile(r"^\|\s*(G-\d+)\s*\|")
 # Strikethrough is how this document retracts text it keeps for the record, and
 # a register that keeps withdrawn rows has to say which ones they are in a way a
@@ -2384,7 +2439,7 @@ def authority_claims(doc: Document, auth: dict[str, Any], origin: Origin, regist
     findings: list[dict[str, str]] = []
     scale = {"routes": 0, "bodies": 0, "status branches": 0, "schema citations": 0,
              "vocabulary claims": 0, "attributed fields": 0,
-             "contract mapping tables": 0, "repo symbols": 0}
+             "contract mapping tables": 0, "repo symbols": 0, "authority lines": 0}
 
     def add(where: str, msg: str) -> None:
         findings.append({"class": "E", "where": where, "message": msg})
@@ -2443,9 +2498,8 @@ def authority_claims(doc: Document, auth: dict[str, Any], origin: Origin, regist
         for m_body in BODY_RE.finditer(scope):
             literal = m_body.group(1)
             scale["bodies"] += 1
-            keys = literal_keys(literal)
-            if not keys:
-                continue
+            claimed = literal_members(literal)
+            keys = set(claimed)
             if not named:
                 # A gap row describes a body for a route that does not exist, so
                 # there is nothing to bind it to and nothing to compare. Anywhere
@@ -2478,7 +2532,7 @@ def authority_claims(doc: Document, auth: dict[str, Any], origin: Origin, regist
             # server rejects.
             answer = bool(ANSWER_CUE_RE.search(scope[: m_body.start()])) or bound.startswith("GET ")
             allowed: set[str] = set()
-            demanded: dict[str, bool] = {}
+            demanded: dict[str, LiteralMember] = {}
             hit = auth["routes"].resolve(bound)
             if not hit.empty:
                 row = hit.one
@@ -2545,12 +2599,31 @@ def authority_claims(doc: Document, auth: dict[str, Any], origin: Origin, regist
             # field this route demands is contracted, so a gap row omitting it
             # is not describing missing behaviour — it is misdescribing the
             # behaviour that exists.
-            missing = sorted(k for k, required in demanded.items() if required and k not in keys)
+            missing = sorted(k for k, member in demanded.items() if member.required and k not in keys)
             if missing:
                 add(
                     f"L{line_no}",
                     f"`{literal}` omits {', '.join(missing)} — required for {bound}",
                 )
+            optional = sorted(
+                key
+                for key in keys & demanded.keys()
+                if demanded[key].required and not claimed[key].required
+            )
+            if optional:
+                add(
+                    f"L{line_no}",
+                    f"`{literal}` marks {', '.join(optional)} optional — required for {bound}",
+                )
+            for key in sorted(keys & demanded.keys()):
+                stated = claimed[key].types
+                contracted = demanded[key].types
+                if stated and contracted and stated.isdisjoint(contracted):
+                    add(
+                        f"L{line_no}",
+                        f"`{literal}` declares `{key}` as {' / '.join(sorted(stated))} — "
+                        f"{bound} contracts {' / '.join(sorted(contracted))}",
+                    )
 
         # A 409 claim is about one route, so the excuse for it has to be about
         # that route too — the same per-claim binding class A now uses, and for
@@ -2724,6 +2797,52 @@ def authority_claims(doc: Document, auth: dict[str, Any], origin: Origin, regist
                 named = ", ".join(f"`{t.split(':', 1)[1]}`" for t in hit.hits)
                 add(f"L{line_no}", f"`{rel}` defines `{symbol}` in {len(hit.hits)} places ({named})")
 
+        python_citations = list(PY_CITE_RE.finditer(scope))
+        for cited_line in AUTHORITY_LINE_RE.finditer(scope):
+            reference, number_text = cited_line.groups()
+            number = int(number_text)
+            scale["authority lines"] += 1
+            symbol = ""
+            if reference == "api.md":
+                rel = str(API_CONTRACT)
+                cited_origin = origin
+            else:
+                owners = [m for m in python_citations if m.end() <= cited_line.start()]
+                if not owners:
+                    add(
+                        f"L{line_no}",
+                        f"`{reference}:{number}` names no authority file in this claim",
+                    )
+                    continue
+                owner = owners[-1]
+                rel, symbol = owner.group(1), owner.group(2) or ""
+                cited_origin = Origin.revision(reference)
+            source = cited_origin.read(rel)
+            if source is None:
+                add(
+                    f"L{line_no}",
+                    f"`{reference}:{number}` cannot read `{rel}` from {cited_origin.label}",
+                )
+                continue
+            line_count = len(source.splitlines())
+            if number < 1 or number > line_count:
+                add(
+                    f"L{line_no}",
+                    f"`{reference}:{number}` is outside `{rel}`'s {line_count} lines",
+                )
+                continue
+            if symbol:
+                symbols_at_revision = defined_symbols(source)
+                definitions = {qualified: at for qualified, _bare, at in symbols_at_revision}
+                aliases = {bare: at for _qualified, bare, at in symbols_at_revision}
+                declared_at = definitions.get(symbol, aliases.get(symbol))
+                if declared_at != number:
+                    add(
+                        f"L{line_no}",
+                        f"`{reference}:{number}` does not point at `{rel}:{symbol}` "
+                        f"(defined at line {declared_at or 'unknown'})",
+                    )
+
     # A route `api.md` guards can be refused. The register is where a refusal
     # becomes a state with copy and an exit, so the question is not whether the
     # word `force` appears somewhere in 3000 lines — it is whether the rows that
@@ -2756,7 +2875,11 @@ def authority_claims(doc: Document, auth: dict[str, Any], origin: Origin, regist
     # reads as a per-backend one); only after both does the row set mean
     # anything. Values are compared as sets — not counted — because one value
     # may legitimately occupy two rows.
-    for line_no, field, drawn, cited, contracted in mapping_tables(doc):
+    scans = _mapping_scan(doc)
+    for table in scans:
+        for where, message in table.malformed:
+            add(f"L{where}", message)
+    for line_no, field, drawn, cited, contracted in mapping_tables(doc, scans):
         scale["contract mapping tables"] += 1
         hit = auth["schema fields"].resolve(field)
         if cited:
@@ -3140,6 +3263,8 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
                 continue  # unread, and said so once already on its own line
             if not row["en"]:
                 add("B", f"L{row['line']}", f"key `{row['key']}` has no English column")
+            if not row["zh"]:
+                add("B", f"L{row['line']}", f"key `{row['key']}` has no Chinese column")
             for slot in sorted(set(SLOT_RE.findall(row["zh"] + row["en"]))):
                 if slot_u.resolve(slot).empty:
                     add(
@@ -3820,6 +3945,7 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
         "authority: attributed field claims": e_scale["attributed fields"],
         "authority: contract mapping tables": e_scale["contract mapping tables"],
         "authority: repo symbol citations": e_scale["repo symbols"],
+        "authority: precise line citations": e_scale["authority lines"],
     }
     empty = [k for k, v in scale.items() if v == 0 and k not in TARGET_ZERO]
     broken = self_test(auth, origin)
