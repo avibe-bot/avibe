@@ -907,6 +907,68 @@ def test_memory_final_flush_rejects_invalid_payloads(payload: dict[str, object])
     controller.final_flush_memory_cli_session.assert_not_awaited()
 
 
+def test_memory_remember_route_rejects_capture_queued_across_runtime_replacement() -> None:
+    """The production CLI route cannot repopulate the fresh reset aggregate."""
+
+    from core.controller import Controller
+    from core.memory import CaptureAccepted
+    from core.memory.http_headers import CALLER_SESSION_HEADER
+
+    class Module:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def capture(self, _request):  # noqa: ANN001, ANN202
+            self.calls += 1
+            return CaptureAccepted()
+
+    old_module = Module()
+    fresh_module = Module()
+    old_runtime = SimpleNamespace(retired=False, available=True, module=old_module)
+    fresh_runtime = SimpleNamespace(retired=False, available=True, module=fresh_module)
+    controller = Controller.__new__(Controller)
+    controller.memory_runtime = old_runtime
+    controller.memory_scope_for_cli_session = lambda _session_id: (
+        "u-" + "1" * 32,
+        "p-" + "2" * 32,
+    )
+    app = internal_server.create_app(controller)
+
+    async def _exercise() -> httpx.Response:
+        gate = controller._memory_replacement_lock()
+        await gate.acquire()
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            request = asyncio.create_task(
+                client.post(
+                    "/internal/memory/remember",
+                    json={"text": "remember this"},
+                    headers={CALLER_SESSION_HEADER: "session-1"},
+                )
+            )
+            for _ in range(20):
+                await asyncio.sleep(0)
+                if getattr(gate, "_waiters", None):
+                    break
+            assert getattr(gate, "_waiters", None)
+            controller.memory_runtime = fresh_runtime
+            gate.release()
+            return await request
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "skipped",
+        "reason": "memory_operation_in_progress",
+    }
+    assert old_module.calls == 0
+    assert fresh_module.calls == 0
+
+
 # ---------------------------------------------------------------------
 # Public surface
 # ---------------------------------------------------------------------

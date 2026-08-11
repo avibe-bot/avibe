@@ -754,9 +754,10 @@ def remove_confined_path(
     relative = _relative_to_home(path, home)
     if not relative.parts:
         raise ConfinedFilesystemError("refusing to remove the confinement root")
-    current: int | None = None
+    anchored: list[int] = []
     try:
         current = os.open(home, strict_directory_open_flags())
+        anchored.append(current)
         _require_exact_private_directory(os.fstat(current), "confinement root")
         for component in relative.parts[:-1]:
             try:
@@ -766,14 +767,28 @@ def remove_confined_path(
                     dir_fd=current,
                 )
             except FileNotFoundError:
+                _fsync_anchored_deletion(anchored)
                 return
-            os.close(current)
             current = next_descriptor
+            anchored.append(current)
             _require_private_directory(os.fstat(current), "confined directory")
         remove_anchored_entry(current, relative.parts[-1])
+        _fsync_anchored_deletion(anchored)
     finally:
-        if current is not None:
-            os.close(current)
+        for descriptor in reversed(anchored):
+            os.close(descriptor)
+
+
+def _fsync_anchored_deletion(anchored: list[int]) -> None:
+    """Persist an entry's absence from its nearest parent through the root."""
+
+    try:
+        for descriptor in reversed(anchored):
+            os.fsync(descriptor)
+    except OSError as error:
+        raise ConfinedFilesystemError(
+            "confined deletion parent cannot be synchronized safely"
+        ) from error
 
 
 def remove_anchored_entry(

@@ -38,6 +38,15 @@ scenarios:
     given: A capture is queued while replacement owns the gate
     when: The old runtime is retired
     then: The stale capture cannot write and returns operation_in_progress
+  - id: MEMORY-FACTORY-004
+    name: Captures cannot repopulate a freshly reset runtime
+    status: covered
+    kind: service_boundary
+    layer: scenario
+    test: tests/scenarios/memory_factory_reset/test_memory_factory_reset_scenarios.py::test_memory_factory_004_capture_queued_for_reset_cannot_use_fresh_runtime
+    given: A capture observes the old runtime before Factory Reset publishes a replacement
+    when: The replacement gate opens after the fresh aggregate is published
+    then: The capture is rejected without writing to either runtime
   - id: MEMORY-FACTORY-101
     name: Invalid artifact disables reset
     status: covered

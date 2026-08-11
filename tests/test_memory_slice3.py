@@ -59,6 +59,8 @@ class _Runtime:
 
     def __init__(self, module) -> None:
         self.module = module
+        self.available = True
+        self.retired = False
         self.final_flush_calls: list[dict[str, object]] = []
         self.final_flush_result = True
         self.final_flush_error: Exception | None = None
@@ -244,6 +246,30 @@ def test_capture_stamps_user_principal_provenance_and_native_dedup_key() -> None
     assert request.provenance == "user_input"
     assert request.text == "/memory status"
     assert controller.memory_module.accepted[1].source_message_id == f"im:telegram:u-{'2' * 32}:native-1"
+
+
+def test_capture_user_memory_rejects_fresh_runtime_after_reset_gate() -> None:
+    controller = _controller()
+    gate = controller._memory_replacement_lock()
+
+    async def run() -> None:
+        await gate.acquire()
+        capture = controller.capture_user_memory(
+            _context("telegram"),
+            "remember this",
+            "stable-session",
+        )
+
+        fresh_module = _CaptureModule()
+        controller.memory_runtime = _Runtime(fresh_module)
+        queued = asyncio.create_task(capture)
+        await asyncio.sleep(0)
+        gate.release()
+
+        await queued
+        assert fresh_module.accepted == []
+
+    asyncio.run(run())
 
 
 def test_final_flush_memory_session_reuses_capture_scope_and_raw_anchor() -> None:

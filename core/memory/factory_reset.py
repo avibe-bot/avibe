@@ -37,7 +37,10 @@ class FactoryResetDeletionResult:
 
     @property
     def data_remaining(self) -> bool:
-        return any(root.existed and not root.deleted for root in self.roots)
+        return any(
+            root.error is not None or (root.existed and not root.deleted)
+            for root in self.roots
+        )
 
     def payload(self) -> dict[str, object]:
         return {
@@ -96,16 +99,13 @@ def delete_memory_roots(effective_home: Path) -> FactoryResetDeletionResult:
                 )
             )
             continue
-        if not existed:
-            outcomes.append(FactoryResetRootOutcome(relative_path, False, False))
-            continue
         try:
             remove_confined_path(home, path)
         except Exception as error:  # noqa: BLE001
             outcomes.append(
                 FactoryResetRootOutcome(
                     relative_path,
-                    existed=True,
+                    existed=existed,
                     deleted=False,
                     error=type(error).__name__,
                 )
@@ -131,7 +131,13 @@ def delete_memory_roots(effective_home: Path) -> FactoryResetDeletionResult:
                     )
                 )
             else:
-                outcomes.append(FactoryResetRootOutcome(relative_path, True, True))
+                outcomes.append(
+                    FactoryResetRootOutcome(
+                        relative_path,
+                        existed=existed,
+                        deleted=existed,
+                    )
+                )
     return FactoryResetDeletionResult(tuple(outcomes))  # type: ignore[arg-type]
 
 

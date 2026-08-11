@@ -198,6 +198,41 @@ async def test_memory_factory_003_stale_remember_waits_for_controller_replacemen
 
 
 @pytest.mark.asyncio
+async def test_memory_factory_004_capture_queued_for_reset_cannot_use_fresh_runtime() -> None:
+    """MEMORY-FACTORY-004: a pre-reset capture is fenced at generation change."""
+
+    class Module:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def capture(self, _request: CaptureRequest):
+            self.calls += 1
+            return CaptureAccepted()
+
+    old_module = Module()
+    fresh_module = Module()
+    old_runtime = SimpleNamespace(retired=False, available=True, module=old_module)
+    fresh_runtime = SimpleNamespace(retired=False, available=True, module=fresh_module)
+    controller = Controller.__new__(Controller)
+    controller.memory_runtime = old_runtime
+
+    gate = controller._memory_replacement_lock()
+    await gate.acquire()
+    queued = asyncio.create_task(controller.capture_memory(_request()))
+    await asyncio.sleep(0)
+
+    controller.memory_runtime = fresh_runtime
+    gate.release()
+
+    result = await queued
+
+    assert isinstance(result, CaptureSkipped)
+    assert result.reason == "memory_operation_in_progress"
+    assert old_module.calls == 0
+    assert fresh_module.calls == 0
+
+
+@pytest.mark.asyncio
 async def test_memory_factory_101_disabled_reset_fails_closed_without_deletion(tmp_path: Path) -> None:
     """MEMORY-FACTORY-101: an invalid artifact leaves both roots untouched."""
     _create_roots(tmp_path)

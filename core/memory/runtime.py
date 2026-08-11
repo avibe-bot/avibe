@@ -1558,6 +1558,23 @@ class MemoryRuntime:
                 "download_error": None,
             }
 
+        lease = MemoryOperationLease(self._effective_home)
+        try:
+            await run_blocking(lease.acquire)
+        except MemoryOperationBusy:
+            return {
+                "ok": False,
+                "reason": "memory_operation_in_progress",
+                "download_error": None,
+            }
+        try:
+            return await self._install_artifact_with_lease()
+        finally:
+            await run_blocking(lease.release)
+
+    async def _install_artifact_with_lease(self) -> dict[str, Any]:
+        """Run the installer after destructive-operation admission succeeds."""
+
         self._activation_loop = asyncio.get_running_loop()
         async with self._reconcile_lock:
             if self._rebuild_running() and asyncio.current_task() is not self._rebuild_task:
@@ -2240,11 +2257,24 @@ class MemoryRuntime:
     def _coordinate_artifact_activation(
         self,
         candidate: MemoryArtifactCandidate,
-        root_state: MemoryProviderRootState,
+        root_state: MemoryProviderRootState | None,
         commit: Callable[[], None],
         rollback: Callable[[], None],
     ) -> None:
         """Bridge the synchronous shared installer into the controller loop."""
+
+        # A durable factory-reset marker deliberately fences runtime activation.
+        # Repair still needs to publish an admitted pointer so the next reset
+        # attempt can proceed, but it must not resurrect the pending runtime.
+        if (
+            getattr(self._config, "recovery_intent", None) == "factory_reset"
+            or getattr(self._restart_config, "recovery_intent", None) == "factory_reset"
+        ):
+            commit()
+            return
+
+        if root_state is None:
+            raise MemoryRuntimeActivationError("memory provider root could not be inspected")
 
         loop = self._activation_loop
         if loop is None or loop.is_closed():

@@ -53,6 +53,7 @@ from core.vibe_agents import VibeAgent, VibeAgentStore
 from core.memory import CaptureReceipt, CaptureRequest, CaptureSkipped
 from core.memory.admission import CaptureAdmission, InboundTurnFacts
 from core.memory.blocking import run_blocking
+from core.memory.operation_lock import MemoryOperationBusy, MemoryOperationLease
 from vibe.i18n import get_supported_languages, t as i18n_t
 
 logger = logging.getLogger(__name__)
@@ -653,9 +654,19 @@ class Controller:
     async def capture_memory(self, request: CaptureRequest) -> CaptureReceipt:
         """Capture through the replacement gate so stale modules cannot write."""
 
+        observed_runtime = getattr(self, "memory_runtime", None)
+        if self._memory_factory_reset_running():
+            return CaptureSkipped(reason="memory_operation_in_progress")
+        if observed_runtime is None or getattr(observed_runtime, "retired", False):
+            return CaptureSkipped(reason="memory_operation_in_progress")
         async with self._memory_replacement_lock():
             runtime = getattr(self, "memory_runtime", None)
-            if runtime is None or getattr(runtime, "retired", False):
+            if (
+                self._memory_factory_reset_running()
+                or runtime is not observed_runtime
+                or runtime is None
+                or getattr(runtime, "retired", False)
+            ):
                 return CaptureSkipped(reason="memory_operation_in_progress")
             if not runtime.available:
                 return CaptureSkipped(reason="memory_store_unavailable")
@@ -694,105 +705,132 @@ class Controller:
                     reason="memory_runtime_unavailable"
                 )
 
-            if not runtime.artifact_admitted():
-                return unchanged_memory_reset_result(
-                    runtime.effective_home,
-                    reason="artifact_repair_required",
-                )
-
+            lease = MemoryOperationLease(runtime.effective_home)
             try:
-                candidate = await asyncio.to_thread(self._mark_factory_reset_intent)
-            except Exception:
-                logger.exception("Memory factory reset could not persist intent")
-                return unchanged_memory_reset_result(
-                    runtime.effective_home,
-                    reason="intent_persist_failed",
-                )
-
-            # A retry may arrive with the prior aggregate already tombstoned.
-            if not runtime.retired:
-                runtime.adopt_recovery_intent(candidate)
-                runtime.retire()
-            if not getattr(runtime, "closed", False):
-                try:
-                    await runtime.close()
-                except Exception:
-                    logger.exception("Memory factory reset could not retire Runtime")
-                    return unchanged_memory_reset_result(
-                        runtime.effective_home,
-                        reason="runtime_retirement_failed",
-                    )
-
-            deletion = await asyncio.to_thread(
-                delete_memory_roots,
-                runtime.effective_home,
-            )
-            payload = deletion.payload()
-            if deletion.data_remaining:
+                await run_blocking(lease.acquire)
+            except MemoryOperationBusy:
                 return {
                     "ok": False,
-                    "error": "memory_factory_reset_failed",
-                    "result": "partial",
-                    **payload,
+                    "error": "memory_operation_in_progress",
+                    "result": "failed",
                 }
-
-            settled = replace(candidate, recovery_intent=None)
-            fresh = None
-            try:
-                fresh = create_memory_runtime(
-                    settled,
-                    artifact_manager=runtime.artifact_manager,
-                    process_factory=runtime.process_factory,
-                    effective_home=runtime.effective_home,
-                    processing_event=self._send_memory_processing_event,
-                    on_config_settled=self._adopt_settled_memory_config,
-                )
-                activation = await fresh.activate_fresh(settled)
             except Exception:
-                logger.exception("Memory factory reset could not activate fresh Runtime")
-                if fresh is not None:
+                logger.exception("Memory factory reset could not acquire operation lease")
+                return unchanged_memory_reset_result(
+                    runtime.effective_home,
+                    reason="operation_lock_failed",
+                )
+
+            try:
+                # Keep a defensive admission check for runtimes that expose the
+                # in-flight installer flag before they acquire the shared lease.
+                if getattr(runtime, "_artifact_installing", False):
+                    return {
+                        "ok": False,
+                        "error": "memory_operation_in_progress",
+                        "result": "failed",
+                    }
+                if not runtime.artifact_admitted():
+                    return unchanged_memory_reset_result(
+                        runtime.effective_home,
+                        reason="artifact_repair_required",
+                    )
+
+                try:
+                    candidate = await asyncio.to_thread(self._mark_factory_reset_intent)
+                except Exception:
+                    logger.exception("Memory factory reset could not persist intent")
+                    return unchanged_memory_reset_result(
+                        runtime.effective_home,
+                        reason="intent_persist_failed",
+                    )
+
+                # A retry may arrive with the prior aggregate already tombstoned.
+                if not runtime.retired:
+                    runtime.adopt_recovery_intent(candidate)
+                    runtime.retire()
+                if not getattr(runtime, "closed", False):
+                    try:
+                        await runtime.close()
+                    except Exception:
+                        logger.exception("Memory factory reset could not retire Runtime")
+                        return unchanged_memory_reset_result(
+                            runtime.effective_home,
+                            reason="runtime_retirement_failed",
+                        )
+
+                deletion = await asyncio.to_thread(
+                    delete_memory_roots,
+                    runtime.effective_home,
+                )
+                payload = deletion.payload()
+                if deletion.data_remaining:
+                    return {
+                        "ok": False,
+                        "error": "memory_factory_reset_failed",
+                        "result": "partial",
+                        **payload,
+                    }
+
+                settled = replace(candidate, recovery_intent=None)
+                fresh = None
+                try:
+                    fresh = create_memory_runtime(
+                        settled,
+                        artifact_manager=runtime.artifact_manager,
+                        process_factory=runtime.process_factory,
+                        effective_home=runtime.effective_home,
+                        processing_event=self._send_memory_processing_event,
+                        on_config_settled=self._adopt_settled_memory_config,
+                    )
+                    activation = await fresh.activate_fresh(settled)
+                except Exception:
+                    logger.exception("Memory factory reset could not activate fresh Runtime")
+                    if fresh is not None:
+                        fresh.retire()
+                        try:
+                            await fresh.close()
+                        except Exception:
+                            logger.exception("Failed fresh Memory Runtime could not close")
+                    return {
+                        "ok": False,
+                        "error": "memory_factory_reset_failed",
+                        "result": "deleted_activation_failed",
+                        **payload,
+                    }
+                self.memory_runtime = fresh
+                self.memory_module = fresh.module
+                if activation.get("ok") is not True:
                     fresh.retire()
                     try:
                         await fresh.close()
                     except Exception:
                         logger.exception("Failed fresh Memory Runtime could not close")
-                return {
-                    "ok": False,
-                    "error": "memory_factory_reset_failed",
-                    "result": "deleted_activation_failed",
-                    **payload,
-                }
-            self.memory_runtime = fresh
-            self.memory_module = fresh.module
-            if activation.get("ok") is not True:
-                fresh.retire()
+                    return {
+                        "ok": False,
+                        "error": "memory_factory_reset_failed",
+                        "result": "deleted_activation_failed",
+                        **payload,
+                    }
                 try:
-                    await fresh.close()
+                    persisted = await asyncio.to_thread(self._clear_factory_reset_intent)
                 except Exception:
-                    logger.exception("Failed fresh Memory Runtime could not close")
-                return {
-                    "ok": False,
-                    "error": "memory_factory_reset_failed",
-                    "result": "deleted_activation_failed",
-                    **payload,
-                }
-            try:
-                persisted = await asyncio.to_thread(self._clear_factory_reset_intent)
-            except Exception:
-                fresh.retire()
-                try:
-                    await fresh.close()
-                except Exception:
-                    logger.exception("Unsettled fresh Memory Runtime could not close")
-                return {
-                    "ok": False,
-                    "error": "memory_factory_reset_failed",
-                    "result": "deleted_activation_failed",
-                    **payload,
-                }
-            fresh.adopt_recovery_intent(persisted)
-            self.config.memory = persisted
-            return {"ok": True, "result": "completed", **payload}
+                    fresh.retire()
+                    try:
+                        await fresh.close()
+                    except Exception:
+                        logger.exception("Unsettled fresh Memory Runtime could not close")
+                    return {
+                        "ok": False,
+                        "error": "memory_factory_reset_failed",
+                        "result": "deleted_activation_failed",
+                        **payload,
+                    }
+                fresh.adopt_recovery_intent(persisted)
+                self.config.memory = persisted
+                return {"ok": True, "result": "completed", **payload}
+            finally:
+                await run_blocking(lease.release)
 
     @staticmethod
     def _mark_factory_reset_intent() -> MemoryConfig:
@@ -818,6 +856,37 @@ class Controller:
             gate = asyncio.Lock()
             self._memory_replacement_gate = gate
         return gate
+
+    def _memory_factory_reset_running(self) -> bool:
+        """Return whether the retained factory-reset task still owns admission."""
+
+        task = getattr(self, "_memory_factory_reset_task", None)
+        done = getattr(task, "done", None)
+        return task is not None and callable(done) and not done()
+
+    async def _join_memory_factory_reset_task(self) -> None:
+        """Settle the retained reset before selecting the runtime to close."""
+
+        task = getattr(self, "_memory_factory_reset_task", None)
+        if task is None or task is asyncio.current_task():
+            return
+        cancellation: asyncio.CancelledError | None = None
+        current = asyncio.current_task()
+        try:
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError as error:
+                    if current is not None and current.cancelling():
+                        cancellation = cancellation or error
+                except Exception as error:
+                    logger.debug("Memory factory reset already failed during shutdown: %s", error)
+                    break
+        finally:
+            if getattr(self, "_memory_factory_reset_task", None) is task and task.done():
+                self._memory_factory_reset_task = None
+        if cancellation is not None:
+            raise cancellation
 
     def _migrate_discord_guild_scope_from_config(self) -> None:
         if "discord" not in self.platform_settings_managers:
@@ -2006,13 +2075,34 @@ class Controller:
                 logger.debug("Memory final flush failed", exc_info=True)
                 return False
 
-    async def capture_user_memory(self, context: MessageContext, text: str, session_id: str) -> None:
+    def capture_user_memory(
+        self,
+        context: MessageContext,
+        text: str,
+        session_id: str,
+    ) -> Awaitable[None]:
         """Submit one eligible attributed human turn after session resolution.
 
         This is deliberately best effort. It is scheduled by ``MessageHandler``
-        and never participates in an agent turn's completion path.
+        and never participates in an agent turn's completion path. Bind the
+        aggregate before task scheduling can yield to a concurrent reset.
         """
 
+        return self._capture_user_memory_bound(
+            context,
+            text,
+            session_id,
+            observed_runtime=getattr(self, "memory_runtime", None),
+        )
+
+    async def _capture_user_memory_bound(
+        self,
+        context: MessageContext,
+        text: str,
+        session_id: str,
+        *,
+        observed_runtime: object,
+    ) -> None:
         facts = self._memory_turn_facts(context, text=text, session_id=session_id)
         request = self._memory_admission().decide(facts)
         if not isinstance(request, CaptureRequest):
@@ -2021,9 +2111,19 @@ class Controller:
         platform = CaptureAdmission.platform_of(facts)
         started_at = time.monotonic()
         try:
+            if self._memory_factory_reset_running() or observed_runtime is None:
+                return
+            if getattr(observed_runtime, "retired", False):
+                return
             async with self._memory_replacement_lock():
                 runtime = getattr(self, "memory_runtime", None)
-                if runtime is None:
+                if (
+                    self._memory_factory_reset_running()
+                    or runtime is not observed_runtime
+                    or runtime is None
+                    or getattr(runtime, "retired", False)
+                    or not runtime.available
+                ):
                     return
                 await runtime.module.capture(request)
             logger.info(
@@ -2543,14 +2643,14 @@ class Controller:
         """Best-effort synchronous cleanup without cross-loop awaits"""
         logger.info("Cleaning up controller resources (sync, best-effort)...")
 
-        def _stop_loop_coroutine(coro, label: str) -> None:
+        def _stop_loop_coroutine(coro, label: str, *, timeout: float | None = 5) -> None:
             try:
                 loop = self._loop
                 if not loop or loop.is_closed():
                     return
                 if loop.is_running():
                     future = asyncio.run_coroutine_threadsafe(coro, loop)
-                    future.result(timeout=5)
+                    future.result(timeout=timeout)
                     return
                 loop.run_until_complete(coro)
             except Exception as e:
@@ -2623,6 +2723,14 @@ class Controller:
         # Reconciliation can start the sidecar, so settle it before closing the
         # runtime or it could race shutdown and leave a process behind.
         _stop_loop_coroutine(_cancel_memory_reconcile_task(), "Memory startup reconciliation")
+        # Factory reset retains its inner task behind a shield; join it before
+        # reading ``memory_runtime`` so a fresh aggregate cannot appear after
+        # shutdown has started closing the old one.
+        _stop_loop_coroutine(
+            self._join_memory_factory_reset_task(),
+            "Memory factory reset",
+            timeout=None,
+        )
         async def _drain_memory_capture_tasks() -> None:
             handler = getattr(self, "message_handler", None)
             drain = getattr(handler, "drain_memory_capture_tasks", None)
