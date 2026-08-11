@@ -4,7 +4,6 @@ import asyncio
 import concurrent.futures
 import json
 import logging
-import os
 import threading
 import time
 from collections.abc import Awaitable, Callable
@@ -685,18 +684,18 @@ class Controller:
         return await asyncio.shield(task)
 
     async def _factory_reset_memory_once(self) -> dict[str, Any]:
-        from core.memory.factory_reset import delete_memory_roots
+        from core.memory.factory_reset import delete_memory_roots, unchanged_memory_reset_result
         from core.memory.runtime import create_memory_runtime
 
         async with self._memory_replacement_lock():
             runtime = getattr(self, "memory_runtime", None)
             if runtime is None:
-                return self._factory_reset_unchanged_result(
+                return unchanged_memory_reset_result(
                     reason="memory_runtime_unavailable"
                 )
 
             if not runtime.artifact_admitted():
-                return self._factory_reset_unchanged_result(
+                return unchanged_memory_reset_result(
                     runtime.effective_home,
                     reason="artifact_repair_required",
                 )
@@ -705,7 +704,7 @@ class Controller:
                 candidate = await asyncio.to_thread(self._mark_factory_reset_intent)
             except Exception:
                 logger.exception("Memory factory reset could not persist intent")
-                return self._factory_reset_unchanged_result(
+                return unchanged_memory_reset_result(
                     runtime.effective_home,
                     reason="intent_persist_failed",
                 )
@@ -719,7 +718,7 @@ class Controller:
                     await runtime.close()
                 except Exception:
                     logger.exception("Memory factory reset could not retire Runtime")
-                    return self._factory_reset_unchanged_result(
+                    return unchanged_memory_reset_result(
                         runtime.effective_home,
                         reason="runtime_retirement_failed",
                     )
@@ -794,57 +793,6 @@ class Controller:
             fresh.adopt_recovery_intent(persisted)
             self.config.memory = persisted
             return {"ok": True, "result": "completed", **payload}
-
-    @staticmethod
-    def _factory_reset_unchanged_result(
-        effective_home: Path | None = None,
-        *,
-        reason: str,
-    ) -> dict[str, Any]:
-        """Return the closed result shape when reset stops before deletion.
-
-        Admission and retirement failures leave both roots untouched, but the
-        response still reports their observed state so clients never need a
-        second pre-admission shape or infer deletion from a bare boolean.
-        """
-
-        home = effective_home or paths.get_vibe_remote_dir()
-        roots: list[dict[str, Any]] = []
-        for relative_path in ("memory", "state/memory"):
-            try:
-                os.lstat(home / relative_path)
-            except FileNotFoundError:
-                existed = False
-            except OSError as error:
-                # An unreadable root is conservatively treated as remaining.
-                existed = True
-                roots.append(
-                    {
-                        "path": relative_path,
-                        "existed": True,
-                        "deleted": False,
-                        "error": type(error).__name__,
-                    }
-                )
-                continue
-            else:
-                existed = True
-            roots.append(
-                {
-                    "path": relative_path,
-                    "existed": existed,
-                    "deleted": False,
-                }
-            )
-        return {
-            "ok": False,
-            "error": "memory_factory_reset_failed",
-            "result": "failed",
-            "reason": reason,
-            "data_deleted": False,
-            "data_remaining": any(root["existed"] for root in roots),
-            "roots": roots,
-        }
 
     @staticmethod
     def _mark_factory_reset_intent() -> MemoryConfig:

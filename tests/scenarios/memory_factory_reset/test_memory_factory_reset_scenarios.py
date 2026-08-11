@@ -23,17 +23,33 @@ class _Runtime:
         self.retired = False
         self._artifact_admitted = artifact_admitted
         self.closed = False
+        self.worker_running = True
+        self.process_running = True
+        self.module = SimpleNamespace(
+            claims_paused=False,
+            claims_resumed=False,
+            retired=False,
+            pause_claims=lambda: None,
+            resume_claims=lambda: None,
+            retire=lambda: None,
+        )
 
     def artifact_admitted(self) -> bool:
         return self._artifact_admitted
 
     def adopt_recovery_intent(self, _config: object) -> None:
+        if getattr(_config, "recovery_intent", None) is not None:
+            self.module.claims_paused = True
         return None
 
     def retire(self) -> None:
         self.retired = True
+        self.module.retired = True
+        self.module.claims_paused = True
 
     async def close(self) -> None:
+        self.worker_running = False
+        self.process_running = False
         self.closed = True
 
 
@@ -41,9 +57,17 @@ class _FreshRuntime(_Runtime):
     def __init__(self, home: Path, *, activation_ok: bool = True) -> None:
         super().__init__(home)
         self.activation_ok = activation_ok
-        self.module = SimpleNamespace(pause_claims=lambda: None)
+        self.module.claims_paused = True
+
+        def resume_claims() -> None:
+            self.module.claims_paused = False
+            self.module.claims_resumed = True
+
+        self.module.resume_claims = resume_claims
 
     async def activate_fresh(self, _config: MemoryConfig) -> dict[str, object]:
+        if self.activation_ok:
+            self.module.resume_claims()
         return {"ok": self.activation_ok}
 
 
@@ -52,14 +76,18 @@ def _controller(runtime: _Runtime) -> Controller:
     controller.memory_runtime = runtime
     controller.memory_module = getattr(runtime, "module", None)
     controller.config = SimpleNamespace(memory=MemoryConfig(enabled=False))
-    controller._mark_factory_reset_intent = lambda: replace(
-        controller.config.memory,
-        recovery_intent="factory_reset",
-    )
-    controller._clear_factory_reset_intent = lambda: replace(
-        controller.config.memory,
-        recovery_intent=None,
-    )
+    def mark_intent() -> MemoryConfig:
+        candidate = replace(controller.config.memory, recovery_intent="factory_reset")
+        controller.config.memory = candidate
+        return candidate
+
+    def clear_intent() -> MemoryConfig:
+        settled = replace(controller.config.memory, recovery_intent=None)
+        controller.config.memory = settled
+        return settled
+
+    controller._mark_factory_reset_intent = mark_intent
+    controller._clear_factory_reset_intent = clear_intent
     return controller
 
 
@@ -84,7 +112,7 @@ def _request() -> CaptureRequest:
 
 @pytest.mark.asyncio
 async def test_memory_factory_001_successful_reset_is_a_closed_service_result(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A successful boundary call deletes exactly both roots and settles intent."""
+    """MEMORY-FACTORY-001: delete both roots and settle durable intent."""
     _create_roots(tmp_path)
     old = _Runtime(tmp_path)
     fresh = _FreshRuntime(tmp_path)
@@ -98,6 +126,8 @@ async def test_memory_factory_001_successful_reset_is_a_closed_service_result(tm
     assert result["data_remaining"] is False
     assert [root["path"] for root in result["roots"]] == ["memory", "state/memory"]
     assert controller.config.memory.recovery_intent is None
+    assert fresh.module.claims_resumed is True
+    assert fresh.module.claims_paused is False
     assert not (tmp_path / "memory").exists()
     assert not (tmp_path / "state" / "memory").exists()
 
@@ -107,7 +137,7 @@ async def test_memory_factory_002_partial_delete_is_truthful_and_retryable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A failed root remains visible, and a later call finishes the reset."""
+    """MEMORY-FACTORY-002: report partial deletion and complete on retry."""
     _create_roots(tmp_path)
     old = _Runtime(tmp_path)
     controller = _controller(old)
@@ -138,7 +168,7 @@ async def test_memory_factory_002_partial_delete_is_truthful_and_retryable(
 
 @pytest.mark.asyncio
 async def test_memory_factory_003_stale_remember_waits_for_controller_replacement_gate() -> None:
-    """A stale capture cannot cross the Controller replacement gate."""
+    """MEMORY-FACTORY-003: retirement fences a stale capture at the gate."""
     entered = asyncio.Event()
     release = asyncio.Event()
 
@@ -157,20 +187,19 @@ async def test_memory_factory_003_stale_remember_waits_for_controller_replacemen
     task = asyncio.create_task(controller.capture_memory(_request()))
     await asyncio.sleep(0)
     assert not entered.is_set()
-    gate.release()
-    await entered.wait()
-    release.set()
-    assert (await task).status == "accepted"
-
     runtime.retired = True
+    gate.release()
     blocked = await controller.capture_memory(_request())
     assert isinstance(blocked, CaptureSkipped)
     assert blocked.reason == "memory_operation_in_progress"
+    assert isinstance(await task, CaptureSkipped)
+    assert not entered.is_set()
+    release.set()
 
 
 @pytest.mark.asyncio
 async def test_memory_factory_101_disabled_reset_fails_closed_without_deletion(tmp_path: Path) -> None:
-    """An invalid pinned artifact leaves both roots untouched."""
+    """MEMORY-FACTORY-101: an invalid artifact leaves both roots untouched."""
     _create_roots(tmp_path)
     result = await Controller._factory_reset_memory_once(
         _controller(_Runtime(tmp_path, artifact_admitted=False))
@@ -187,21 +216,26 @@ async def test_memory_factory_201_worker_and_process_death_are_quiesced_before_d
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Retirement closes the old aggregate before either mutable root is removed."""
+    """MEMORY-FACTORY-201: quiesce worker and process before root deletion."""
     _create_roots(tmp_path)
     old = _Runtime(tmp_path)
+    fresh = _FreshRuntime(tmp_path)
     controller = _controller(old)
-    monkeypatch.setattr("core.memory.runtime.create_memory_runtime", lambda *args, **kwargs: _FreshRuntime(tmp_path))
+    monkeypatch.setattr("core.memory.runtime.create_memory_runtime", lambda *args, **kwargs: fresh)
     result = await controller._factory_reset_memory_once()
     assert result["ok"] is True
     assert result["data_remaining"] is False
     assert old.closed is True
     assert old.retired is True
+    assert old.worker_running is False
+    assert old.process_running is False
+    assert fresh.module.claims_resumed is True
+    assert fresh.module.claims_paused is False
 
 
 @pytest.mark.asyncio
 async def test_memory_factory_202_supervisor_down_still_returns_two_root_outcomes(tmp_path: Path) -> None:
-    """A retained, down supervisor does not change the exact deletion envelope."""
+    """MEMORY-FACTORY-202: a down supervisor keeps exact root outcomes."""
     _create_roots(tmp_path)
     result = delete_memory_roots(tmp_path)
     assert len(result.roots) == 2
@@ -214,7 +248,7 @@ async def test_memory_factory_301_post_delete_activation_failure_retains_recover
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Activation failure after deletion is closed, truthful, and retryable."""
+    """MEMORY-FACTORY-301: failed activation preserves durable retry intent."""
     _create_roots(tmp_path)
     old = _Runtime(tmp_path)
     fresh = _FreshRuntime(tmp_path, activation_ok=False)
@@ -235,4 +269,5 @@ async def test_memory_factory_301_post_delete_activation_failure_retains_recover
         ],
     }
     assert fresh.retired is True
-    assert controller.config.memory.recovery_intent is None
+    assert fresh.module.claims_paused is True
+    assert controller.config.memory.recovery_intent == "factory_reset"

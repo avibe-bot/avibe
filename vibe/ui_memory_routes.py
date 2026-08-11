@@ -272,12 +272,32 @@ def _memory_rebuild_result(
 
 
 _FACTORY_RESET_ROOTS = frozenset({"memory", "state/memory"})
+_FACTORY_RESET_SUCCESS_KEYS = frozenset(
+    {"ok", "result", "data_deleted", "data_remaining", "roots"}
+)
 
 
 def _memory_factory_reset_result(payload: dict, status_code: int) -> tuple[dict, int]:
     """Normalize the exact final factory-reset contract without leaking internals."""
 
     from core.memory.types import is_memory_error_code
+
+    # The Controller reports an in-flight operation before deletion starts, so
+    # there is intentionally no root envelope to project yet. Preserve only
+    # this exact closed conflict shape; every extra or missing field fails
+    # closed below without leaking backend details.
+    if status_code == 409 and payload == {
+        "ok": False,
+        "error": "memory_operation_in_progress",
+        "result": "failed",
+    }:
+        return dict(payload), 409
+
+    # Successful responses are closed and must not carry backend-only fields.
+    # Failure responses may carry diagnostic fields, which are projected below
+    # only when they are part of the public contract.
+    if payload.get("ok") is True and not set(payload).issubset(_FACTORY_RESET_SUCCESS_KEYS):
+        return {"ok": False, "error": "memory_factory_reset_failed", "result": "failed"}, 503
 
     roots = payload.get("roots")
     valid_roots = (

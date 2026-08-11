@@ -11,6 +11,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from config import paths
 from core.memory.confined_filesystem import remove_confined_path
 
 
@@ -134,8 +135,43 @@ def delete_memory_roots(effective_home: Path) -> FactoryResetDeletionResult:
     return FactoryResetDeletionResult(tuple(outcomes))  # type: ignore[arg-type]
 
 
+def unchanged_memory_reset_result(
+    effective_home: Path | None = None,
+    *,
+    reason: str,
+) -> dict[str, object]:
+    """Return the closed unchanged envelope after admission or retirement stops.
+
+    The same lstat-based observation is used for every pre-delete failure so
+    callers receive truthful outcomes for both exact mutable roots.
+    """
+
+    home = effective_home or paths.get_vibe_remote_dir()
+    roots: list[dict[str, object]] = []
+    for relative_path in _ROOT_RELATIVE_PATHS:
+        existed, observation_error = _entry_state(home / relative_path)
+        root: dict[str, object] = {
+            "path": relative_path,
+            "existed": existed,
+            "deleted": False,
+        }
+        if observation_error is not None:
+            root["error"] = observation_error
+        roots.append(root)
+    return {
+        "ok": False,
+        "error": "memory_factory_reset_failed",
+        "result": "failed",
+        "reason": reason,
+        "data_deleted": False,
+        "data_remaining": any(bool(root["existed"]) for root in roots),
+        "roots": roots,
+    }
+
+
 __all__ = [
     "FactoryResetDeletionResult",
     "FactoryResetRootOutcome",
     "delete_memory_roots",
+    "unchanged_memory_reset_result",
 ]

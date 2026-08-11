@@ -120,6 +120,96 @@ def test_memory_factory_reset_public_result_keeps_truthful_root_contract() -> No
     }
 
 
+def test_memory_factory_reset_public_conflict_preserves_exact_closed_envelope() -> None:
+    payload = {
+        "ok": False,
+        "error": "memory_operation_in_progress",
+        "result": "failed",
+    }
+
+    public, status_code = ui_memory_routes._memory_factory_reset_result(payload, 409)
+
+    assert status_code == 409
+    assert public == payload
+
+
+def test_memory_factory_reset_public_conflict_rejects_extra_fields() -> None:
+    public, status_code = ui_memory_routes._memory_factory_reset_result(
+        {
+            "ok": False,
+            "error": "memory_operation_in_progress",
+            "result": "failed",
+            "secret": "must-not-cross",
+        },
+        409,
+    )
+
+    assert status_code == 503
+    assert public == {
+        "ok": False,
+        "error": "memory_factory_reset_failed",
+        "result": "failed",
+    }
+
+
+def test_memory_factory_reset_public_success_rejects_extra_fields() -> None:
+    public, status_code = ui_memory_routes._memory_factory_reset_result(
+        {
+            "ok": True,
+            "result": "completed",
+            "data_deleted": True,
+            "data_remaining": False,
+            "roots": [
+                {"path": "memory", "existed": True, "deleted": True},
+                {"path": "state/memory", "existed": True, "deleted": True},
+            ],
+            "secret": "must-not-cross",
+        },
+        200,
+    )
+
+    assert status_code == 503
+    assert public == {
+        "ok": False,
+        "error": "memory_factory_reset_failed",
+        "result": "failed",
+    }
+
+
+def test_memory_factory_reset_route_returns_conflict_envelope(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    monkeypatch.setattr(ui_memory_routes, "_memory_ui_user_key", lambda: "avibe:local")
+
+    async def conflict(*, user_key: str):
+        assert user_key == "avibe:local"
+        return {
+            "status_code": 409,
+            "body": {
+                "ok": False,
+                "error": "memory_operation_in_progress",
+                "result": "failed",
+            },
+        }
+
+    monkeypatch.setattr(internal_client, "memory_factory_reset", conflict)
+    client = app.test_client()
+    response = client.post(
+        "/api/memory/runtime/factory-reset",
+        json={"confirm": True},
+        headers=csrf_headers(client, "http://127.0.0.1:15131"),
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 409
+    assert response.get_json() == {
+        "ok": False,
+        "error": "memory_operation_in_progress",
+        "result": "failed",
+    }
+
+
 def test_memory_settings_are_direct_loopback_only_and_write_only(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
