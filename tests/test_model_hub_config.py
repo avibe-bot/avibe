@@ -1194,8 +1194,9 @@ def test_mh_cfg_mig_001_pre_v5_root_keys_the_v5_contract_dropped_never_block_sta
 def test_current_model_hub_config_still_rejects_an_unknown_root_key(tmp_path):
     """Migration must not soften the v5 parse for a config that is already v5.
 
-    An unknown root key there is a typo or a corrupted write, not a legacy
-    shape, and silently dropping it would lose whatever it was meant to say.
+    The MH-CFG-MIG-001 boundary: an unknown root key in a v5 config is a typo or
+    a corrupted write, not a legacy shape, and silently dropping it would lose
+    whatever it was meant to say.
     """
 
     current = api.config_to_payload(default_config())
@@ -1353,8 +1354,9 @@ def test_mh_cfg_mig_001_pre_v5_retired_consent_metadata_never_blocks_migration(t
 def test_pre_v5_only_model_hub_fields_are_all_migrated(tmp_path):
     """Every field the v5 dataclasses retired must be handled by the migration.
 
-    A retired field that migration forgets is not a cosmetic gap: the parser
-    rejects unknown fields, so the install fails to start on upgrade.
+    The completeness guard behind MH-CFG-MIG-001: a retired field that migration
+    forgets is not a cosmetic gap, because the parser rejects unknown fields and
+    the install fails to start on upgrade.
     """
 
     legacy = _legacy_model_hub_payload(api.config_to_payload(default_config()))
@@ -1745,7 +1747,8 @@ def test_mh_cfg_mig_001_pre_v5_hub_subscription_stays_on_its_own_backend(tmp_pat
 def test_legacy_source_eligibility_is_narrower_than_the_live_rule():
     """The frozen pre-v5 rule must never admit what the live rule refuses.
 
-    A migrated `sources.order` is validated on the way back in by the live
+    The invariant MH-CFG-MIG-001 rests on: a migrated `sources.order` is
+    validated on the way back in by the live
     eligibility rule, so the moment the frozen copy is wider than it, migration
     writes an order that fails the load it was rescuing.
     """
@@ -2013,7 +2016,141 @@ def test_mh_cfg_mig_001_pre_v5_noncanonical_vendor_supplied_nothing_and_still_do
         assert agent.routes.get(supplied_id, ModelHubRouteConfig()).hops == ()
 
 
+def test_mh_cfg_mig_001_pre_v5_native_twin_under_a_noncanonical_vendor_collapses(
+    tmp_path,
+    caplog,
+):
+    """Two natives are one native to v5 as soon as their vendors canonicalize alike.
+
+    ``anthropic`` and ``Anthropic`` were two different vendors before the
+    upgrade and are the same one after it, so the pair trips the aggregate rule
+    that allows a backend only one native source. Counting the duplicates by
+    the frozen pre-v5 rule would see a single native, collapse nothing, and
+    fail the load this migration exists to rescue.
+    """
+
+    legacy = _legacy_model_hub_payload(api.config_to_payload(default_config()))
+    kept = copy.deepcopy(_schema("source.schema.json")["examples"][0])
+    supplied_id = kept["models"][0]["id"]
+    twin = copy.deepcopy(kept) | {"id": "src_claudepro2", "vendor": "Anthropic"}
+    # The twin is persisted first: the survivor is the source the legacy walk
+    # could reach, not the source that happens to come first in the file.
+    legacy["model_hub"]["sources"] = [twin, kept]
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING, logger="config.v2_config"):
+        loaded = V2Config.load(config_path=config_path)
+
+    assert [source.id for source in loaded.model_hub.sources] == [kept["id"]]
+    assert [
+        (hop.source_id, hop.model_id)
+        for hop in loaded.model_hub.agents["claude"].routes[supplied_id].hops
+    ] == [(kept["id"], supplied_id)]
+    assert any(twin["id"] in record.getMessage() for record in caplog.records)
+
+
+def test_mh_cfg_mig_001_pre_v5_repeated_model_id_keeps_the_source(tmp_path):
+    """A repeated model id was legal before v5 and is rejected now.
+
+    The old inventory answered a lookup with the first entry carrying the id,
+    so keeping the first and dropping the rest is that same inventory. Refusing
+    the source instead would cost every model it supplies over a duplicate that
+    never changed an answer.
+    """
+
+    legacy = _legacy_model_hub_payload(api.config_to_payload(default_config()))
+    source = copy.deepcopy(_schema("source.schema.json")["examples"][0])
+    supplied_id = source["models"][0]["id"]
+    source["models"].append({**source["models"][0], "display_name": "Opus 4.6 (again)"})
+    legacy["model_hub"]["sources"] = [source]
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert [model.id for model in loaded.model_hub.sources[0].models] == [supplied_id]
+    assert [model.display_name for model in loaded.model_hub.sources[0].models] == [
+        source["models"][0]["display_name"]
+    ]
+    assert [
+        (hop.source_id, hop.model_id)
+        for hop in loaded.model_hub.agents["claude"].routes[supplied_id].hops
+    ] == [(source["id"], supplied_id)]
+
+
+def test_mh_cfg_mig_001_pre_v5_claude_alias_resolves_on_a_non_native_source(tmp_path):
+    """A bundled Claude alias resolved on any Anthropic source before v5.
+
+    The frozen add-time matcher only answers an alias on a native source, so a
+    hub Anthropic subscription would migrate the whole alias half of the menu
+    to empty routes — the models the user actually selected by name.
+    """
+
+    legacy = _legacy_model_hub_payload(api.config_to_payload(default_config()))
+    source = copy.deepcopy(_schema("source.schema.json")["examples"][0]) | {
+        "supply_channel": "hub",
+        "credential_ref": "cred_hubsub01",
+    }
+    supplied_id = source["models"][0]["id"]
+    legacy["model_hub"]["sources"] = [source]
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    routes = V2Config.load(config_path=config_path).model_hub.agents["claude"].routes
+
+    assert [(hop.source_id, hop.model_id) for hop in routes["opus"].hops] == [
+        (source["id"], supplied_id)
+    ]
+    assert [(hop.source_id, hop.model_id) for hop in routes[supplied_id].hops] == [
+        (source["id"], supplied_id)
+    ]
+
+
+def test_mh_cfg_mig_001_pre_v5_empty_routes_never_outrank_a_checked_menu(tmp_path):
+    """An empty ``routes`` object is readable and still means nothing.
+
+    A legacy agent whose own fields carry no pre-v5 marker can still hold a
+    ``routes`` key, and an empty one parses cleanly — so keeping it would look
+    valid while discarding the checked menu that was the real supply. The menu,
+    the mappings and the order are the only inputs.
+    """
+
+    current = api.config_to_payload(default_config())
+    legacy = _legacy_model_hub_payload(current)
+    source = copy.deepcopy(_schema("source.schema.json")["examples"][1])
+    model_id = source["models"][0]["id"]
+    checked_id = opencode_model_id(source["vendor"], model_id)
+    legacy["model_hub"]["sources"] = [source]
+    opencode = legacy["model_hub"]["agents"]["opencode"]
+    opencode.pop("mappings")
+    opencode["sources"].pop("policy")
+    opencode["sources"]["order"] = [source["id"]]
+    opencode["menu"] = {"view": "featured", "checked": [checked_id]}
+    opencode["routes"] = {}
+    claude = legacy["model_hub"]["agents"]["claude"]
+    claude.pop("mappings")
+    claude["sources"].pop("policy")
+    claude["routes"] = {}
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert [
+        (hop.source_id, hop.model_id)
+        for hop in loaded.model_hub.agents["opencode"].routes[checked_id].hops
+    ] == [(source["id"], model_id)]
+    # A fixed backend owes a route to every bundled menu id, so an empty object
+    # there is not even loadable — it has to be rebuilt, not validated.
+    assert set(loaded.model_hub.agents["claude"].routes) == set(
+        current["model_hub"]["agents"]["claude"]["routes"]
+    )
+
+
 def test_current_model_hub_config_survives_load_unchanged(tmp_path):
+    """A v5 config is returned untouched — the other half of MH-CFG-MIG-001."""
+
     current = api.config_to_payload(default_config())
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps(current), encoding="utf-8")

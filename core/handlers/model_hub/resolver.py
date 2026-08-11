@@ -243,6 +243,52 @@ def matching_v1_model_id(
     )
 
 
+def _legacy_claude_family_alias(
+    *,
+    backend: BackendName,
+    menu_model: str,
+    source: ModelHubSourceConfig,
+) -> str | None:
+    """Resolve a bundled Claude alias by the pre-v5 rule, on any supply channel.
+
+    A frozen copy of the old resolver's family matcher, kept for the same reason
+    the frozen eligibility rule is: the live one moved on. Matching-v1 offers
+    family aliases only to a ``native_cli`` source, while pre-v5 offered them to
+    every source whose vendor was the backend's native vendor — an Anthropic hub
+    subscription or API-key source included. Reading a pre-v5 config through the
+    narrower rule would migrate ``opus`` on such a source to an empty route and
+    take a model the install was using offline.
+    """
+
+    if backend != "claude" or source.vendor != "anthropic":
+        return None
+    family = _CLAUDE_FAMILY_ALIASES.get(menu_model)
+    requested_version: tuple[int, ...] | None = None
+    if family is None:
+        parsed_request = _parsed_claude_model_id(menu_model)
+        if parsed_request is None:
+            return None
+        family, requested_version, requested_date = parsed_request
+        # A dated request named one exact model; the old matcher left it to the
+        # plain inventory lookup rather than answering with a newer date.
+        if requested_date is not None:
+            return None
+    matches: list[tuple[tuple[int, ...], int, str]] = []
+    for model in source.models:
+        if model.provenance != "discovered":
+            continue
+        parsed = _parsed_claude_model_id(model.id)
+        if parsed is None:
+            continue
+        candidate_family, candidate_version, candidate_date = parsed
+        if candidate_family != family:
+            continue
+        if requested_version is not None and candidate_version != requested_version:
+            continue
+        matches.append((candidate_version, candidate_date or 0, model.id))
+    return max(matches)[2] if matches else None
+
+
 def legacy_supplied_model_id(
     *,
     backend: BackendName,
@@ -255,12 +301,16 @@ def legacy_supplied_model_id(
     Legacy resolution walked the agent's source order for every menu model, not
     only the mapped ones, so config migration needs the same answer the walk
     gave. The frozen add-time matcher decides it first, which keeps a migrated
-    hop identical to the one an add would persist today. A manually added model
-    is invisible to that matcher by design, yet it was routable pre-v5, so it
-    falls back to a plain inventory lookup under the same identity rule the
-    matcher uses: canonical ``provider/model`` for OpenCode, the bare model id
-    elsewhere. It lives here because OpenCode identity may only be computed by
-    this module.
+    hop identical to the one an add would persist today. Where the two rules
+    disagree, that is the tie-break: a migrated hop and a re-added source agree.
+
+    What the matcher no longer answers is restored behind it. A Claude family
+    alias on a non-native Anthropic source was resolvable pre-v5 and is not by
+    matching-v1. A manually added model is invisible to the matcher by design,
+    yet it was routable pre-v5, so it falls back to a plain inventory lookup
+    under the same identity rule the matcher uses: canonical ``provider/model``
+    for OpenCode, the bare model id elsewhere. It all lives here because
+    OpenCode identity may only be computed by this module.
     """
 
     matched = matching_v1_model_id(
@@ -271,6 +321,14 @@ def legacy_supplied_model_id(
     )
     if matched is not None:
         return matched
+
+    alias = _legacy_claude_family_alias(
+        backend=backend,
+        menu_model=menu_model,
+        source=source,
+    )
+    if alias is not None:
+        return alias
 
     if backend == "opencode":
         requested = normalize_opencode_requested_model(menu_model, checked_models)

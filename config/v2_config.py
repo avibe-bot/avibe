@@ -242,7 +242,21 @@ def _legacy_model_hub_source_payload(raw_source: object) -> object:
         payload["usage"] = _narrowed_legacy_payload(payload["usage"], _LEGACY_MODEL_HUB_USAGE_FIELDS)
     models = payload.get("models")
     if isinstance(models, list):
-        payload["models"] = [_legacy_model_hub_model_payload(model) for model in models]
+        # A repeated model id was legal before v5 and is rejected now. The old
+        # inventory answered a lookup with the first entry that carried the id,
+        # so keeping the first and dropping the rest is that same inventory —
+        # and it costs the source nothing, where refusing it would cost every
+        # model the source supplies.
+        seen: set[str] = set()
+        deduplicated: list = []
+        for model in models:
+            model_id = model.get("id") if isinstance(model, dict) else None
+            if isinstance(model_id, str):
+                if model_id in seen:
+                    continue
+                seen.add(model_id)
+            deduplicated.append(_legacy_model_hub_model_payload(model))
+        payload["models"] = deduplicated
     return payload
 
 
@@ -346,6 +360,15 @@ def _legacy_model_hub_native_sources(
     the keeper is whichever the backend's own legacy walk reached first, and the
     walk is computed here over the uncollapsed list precisely because that is
     what the old resolver saw.
+
+    The duplicates are counted by the rule that will reject them — the live one,
+    over the canonical vendor — while the keeper is still chosen by the legacy
+    walk. Those are different questions: two sources recorded as ``anthropic``
+    and ``Anthropic`` are one native source to v5 and were never both usable
+    before it, so counting them by the frozen rule would let the pair through to
+    the aggregate check and fail the load. When the walk reaches neither, the
+    legacy-eligible one is kept: it is the one the old install could use, and
+    the mis-spelled twin supplied nothing.
     """
 
     dropped: dict[str, str] = {}
@@ -354,7 +377,10 @@ def _legacy_model_hub_native_sources(
             source.id
             for source in sources
             if source.supply_channel == "native_cli"
-            and _legacy_source_eligible_for_backend(source, backend)
+            and ModelHubConfig.source_eligible_for_backend(
+                replace(source, vendor=normalize_model_hub_vendor_id(source.vendor)),
+                backend,
+            )
         ]
         if len(natives) < 2:
             continue
@@ -364,9 +390,15 @@ def _legacy_model_hub_native_sources(
             backend,
             sources,
         )
+        legacy_eligible = [
+            source.id
+            for source in sources
+            if source.id in set(natives)
+            and _legacy_source_eligible_for_backend(source, backend)
+        ]
         keeper = next(
             (source.id for source in walk if source.id in set(natives)),
-            natives[0],
+            next(iter(legacy_eligible), natives[0]),
         )
         for source_id in natives:
             if source_id != keeper:
@@ -568,25 +600,6 @@ def _legacy_model_hub_agent_fields(agent: dict) -> bool:
     return isinstance(raw_sources, dict) and "policy" in raw_sources
 
 
-def _v5_model_hub_routes_payload(routes: object, backend: str) -> bool:
-    """Report whether a ``routes`` payload is one the v5 parser would accept."""
-
-    if not isinstance(routes, dict):
-        return False
-    try:
-        for model_id, route in routes.items():
-            if not isinstance(model_id, str) or not model_id:
-                return False
-            if _contains_model_hub_credential_material(model_id):
-                return False
-            if backend == "opencode":
-                canonical_opencode_menu_identity(model_id)
-            ModelHubRouteConfig.from_payload(route)
-    except (ValueError, TypeError):
-        return False
-    return True
-
-
 def _legacy_model_hub_payload(model_hub: dict, agents: dict) -> bool:
     """Report whether ``model_hub`` was written before the v5 supply contract.
 
@@ -689,11 +702,6 @@ def _migrate_legacy_model_hub_on_load(payload: dict) -> dict:
         raw_sources = migrated_agent.get("sources")
         raw_sources = raw_sources if isinstance(raw_sources, dict) else {}
         migrated_sources = {key: value for key, value in raw_sources.items() if key != "policy"}
-        # An absent section stays absent unless routes are rebuilt below: v5
-        # reads a missing `sources` as the default empty order but rejects an
-        # explicit `{}`.
-        if "sources" in migrated_agent:
-            migrated_agent["sources"] = migrated_sources
         # The menu is narrowed for the same reason as the agent around it: the
         # legacy menu parser read `view` and `checked` and ignored the rest.
         if isinstance(migrated_agent.get("menu"), dict):
@@ -702,40 +710,38 @@ def _migrate_legacy_model_hub_on_load(payload: dict) -> dict:
                 _LEGACY_MODEL_HUB_MENU_FIELDS,
             )
 
-        # Whether the routes must be rebuilt is decided by the agent, not by the
-        # presence of the key: the pre-v5 contract had no `routes` field at all,
-        # so a legacy agent that carries one carries something no old build
-        # wrote and no old parser read. A field only the old contract defined
-        # means the `mappings` beside it are the real supply and must win over
-        # any route object — an empty one included. Failing that, the routes
-        # themselves decide: one the live parser would reject (`null`, a
-        # malformed hop) has to be rebuilt or it fails the very load this
-        # migration exists to rescue.
-        if _legacy_model_hub_agent_fields(raw_agent) or not _v5_model_hub_routes_payload(
-            migrated_agent.get("routes"),
+        # Routes are rebuilt for every agent in a legacy payload, never carried
+        # over. The pre-v5 contract had no `routes` field at all — the old parser
+        # never read one and the old serializer never wrote one — so whatever
+        # sits under that key here came from neither side of the upgrade and
+        # means nothing. Validating it instead of replacing it is a trap: it has
+        # to satisfy not just the route parser but the agent contract around it
+        # (a route for every fixed menu id, no route beyond it, a route for every
+        # checked OpenCode identity, a hop onto a source that still exists), and
+        # every one of those is a way for a legacy config to be refused by the
+        # load this migration exists to rescue. The mappings, the menu and the
+        # order are the pre-v5 supply, and they are the only inputs.
+        menu_ids = _legacy_model_hub_menu_ids(raw_agent, backend)
+        ordered_sources = _legacy_model_hub_ordered_sources(raw_agent, backend, sources)
+        migrated_agent["routes"] = _legacy_model_hub_routes(
+            raw_agent,
             backend,
-        ):
-            menu_ids = _legacy_model_hub_menu_ids(raw_agent, backend)
-            ordered_sources = _legacy_model_hub_ordered_sources(raw_agent, backend, sources)
-            migrated_agent["routes"] = _legacy_model_hub_routes(
-                raw_agent,
-                backend,
-                ordered_sources,
-                menu_ids,
-            )
-            # The menu is narrowed to the same ids the routes were built for:
-            # v5 requires a route for every checked entry and rejects any that
-            # is not a canonical identity, so the two must be filtered together.
-            if backend == "opencode" and isinstance(migrated_agent.get("menu"), dict):
-                migrated_agent["menu"] = {**migrated_agent["menu"], "checked": list(menu_ids)}
-            # The walk the routes were built from is also the order v5 reads
-            # back. A legacy `follow` order was recomputed on every load, so
-            # persisting the stored list instead would leave settings showing
-            # sources as disabled while turns route straight through them.
-            migrated_agent["sources"] = {
-                **migrated_sources,
-                "order": [source.id for source in ordered_sources],
-            }
+            ordered_sources,
+            menu_ids,
+        )
+        # The menu is narrowed to the same ids the routes were built for: v5
+        # requires a route for every checked entry and rejects any that is not a
+        # canonical identity, so the two must be filtered together.
+        if backend == "opencode" and isinstance(migrated_agent.get("menu"), dict):
+            migrated_agent["menu"] = {**migrated_agent["menu"], "checked": list(menu_ids)}
+        # The walk the routes were built from is also the order v5 reads back. A
+        # legacy `follow` order was recomputed on every load, so persisting the
+        # stored list instead would leave settings showing sources as disabled
+        # while turns route straight through them.
+        migrated_agent["sources"] = {
+            **migrated_sources,
+            "order": [source.id for source in ordered_sources],
+        }
 
         migrated_agents[backend] = migrated_agent
     if isinstance(model_hub.get("agents"), dict):
