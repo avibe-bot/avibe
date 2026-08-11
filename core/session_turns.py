@@ -48,6 +48,7 @@ from core.run_settlement import (
     SETTLED_BY_STOPPED,
     SETTLED_BY_TERMINAL_RESULT,
 )
+from core.processing_indicator import INTERRUPTED_REACTION_EMOJI
 from core.services.dispatch import SOURCE_HUMAN, SOURCE_SCHEDULED, dispatch_turn_with_outcome
 from core.services.agent_steering import (
     SteerOutcome,
@@ -581,6 +582,12 @@ class SessionTurnManager:
     lives in ``internal_server``).
     """
 
+    # Backoff for re-sending an interruption notice the transport claimed to be
+    # ready for and then failed to deliver. Short enough to catch a blip, long
+    # enough that a hard outage does not spin; a class attribute so tests can
+    # shrink it instead of sleeping.
+    LOST_TURN_RETRY_DELAYS: tuple[float, ...] = (5.0, 30.0, 120.0)
+
     def __init__(
         self,
         controller: Any = None,
@@ -594,6 +601,11 @@ class SessionTurnManager:
         self._draining_backends: set[str] = set()
         self._deferred_restart_sessions: dict[str, set[str]] = {}
         self._queue_recovery_locks: dict[str, asyncio.Lock] = {}
+        # Interruption reports owed to turns whose platform was not connected yet
+        # when recovery ran, keyed by platform. See ``_report_lost_im_turn``.
+        self._pending_lost_turn_reports: dict[str, list[tuple[str, str]]] = {}
+        # One in-flight retry task per platform for the reports above.
+        self._lost_turn_retry_tasks: dict[str, asyncio.Task[None]] = {}
         # The live turn sink per TURN SINK KEY. Each is
         # ``{on_chunk, done_event, turn_token}`` — the turn's stream callback +
         # completion event + correlation token. Every dispatched turn registers one,
@@ -5621,6 +5633,282 @@ class SessionTurnManager:
             return result.state != "reconciling_steer"
         return False
 
+    def _turn_origin_native_message_id(self, turn_id: str) -> str:
+        """The message a terminal receipt for one Turn belongs on, or ``""``.
+
+        Read durably rather than from the live indicator because the caller runs
+        AFTER a restart, where no in-memory handle survived. The Delivery's own
+        snapshot is NOT the source: admission materializes it into ``messages``
+        and clears ``snapshot_json``, so by the time a Turn is active its
+        Delivery no longer carries the native id — only the ledger row it points
+        at does. The snapshot is still consulted first for a Delivery caught
+        before materialization.
+
+        The target is not always the sender's message: a quick-reply callback is
+        admitted with no ``native_message_id`` on purpose and wears its indicator
+        on the bot echo instead, so ``_delivery_ack_target`` — which recovers
+        that echo id from the durable admission context — decides first. Reading
+        only the native id would return ``""`` for those turns and silently skip
+        the ⚠️, leaving the echo claiming the turn is still running.
+        """
+
+        if not turn_id or not self._durable_schema_available():
+            return ""
+        try:
+            with self._sqlite_engine().connect() as conn:
+                turn = delivery_store.get_turn(conn, turn_id)
+                if turn is None:
+                    return ""
+                delivery = delivery_store.get_delivery(
+                    conn,
+                    str(turn["initial_delivery_id"]),
+                )
+                if delivery is None:
+                    return ""
+                ack_target = self._delivery_ack_target(delivery)
+                if ack_target:
+                    return str(ack_target).strip()
+                message_id = str(delivery.get("message_id") or "").strip()
+                if not message_id:
+                    return ""
+                message = messages_service.get_message(conn, message_id)
+                if message is None:
+                    return ""
+                return str(message.get("native_message_id") or "").strip()
+        except Exception:
+            logger.debug(
+                "turn origin lookup failed for turn=%s", turn_id, exc_info=True
+            )
+            return ""
+
+    def _controller_language(self) -> str:
+        language_getter = getattr(self.controller, "_get_lang", None)
+        if callable(language_getter):
+            return language_getter()
+        return getattr(getattr(self.controller, "config", None), "language", "en")
+
+    async def _report_lost_im_turn(
+        self,
+        session_id: str,
+        origin_native_message_id: str,
+    ) -> None:
+        """Tell an IM turn's author that its runtime died with the service.
+
+        An IM turn owns no ``agent_runs`` row, so the Harness interruption lane is
+        structurally unreachable for it: notices are stamped on runs, and
+        ``_settle_agent_run_ids`` returns early for a Turn that has none. Without
+        this report the turn's only trace is a durable row the user cannot read —
+        the thread simply stops, which is indistinguishable from an agent that
+        chose to stay quiet. The reported field case had a user wait five hours
+        before asking what had happened to their request.
+
+        This is deliberately NOT the shape of a Stop, which stays silent because
+        the user caused it and already knows. Nobody asked for this ending, so it
+        has to announce itself.
+
+        Recovery runs from ``_on_runtime_ready``, which fires BEFORE an external
+        transport has necessarily connected. A turn is terminal once reported, so
+        a lost report is lost for good — hence the report is held until
+        ``notify_transport_ready`` says that platform can actually deliver, and a
+        send that still fails goes back on the queue rather than being dropped.
+        ``avibe`` is ready as soon as the runtime is, so Workbench sessions
+        report inline.
+        """
+
+        if self.controller is None:
+            return
+        try:
+            context = self._delivery_context(session_id)
+        except Exception:
+            logger.debug(
+                "lost turn report: no delivery context for session=%s",
+                session_id,
+                exc_info=True,
+            )
+            return
+        platform = str(getattr(context, "platform", "") or "")
+        if self._transport_can_deliver(platform) and await self._emit_lost_turn_report(
+            context, session_id, origin_native_message_id
+        ):
+            return
+        self._pending_lost_turn_reports.setdefault(platform, []).append(
+            (session_id, str(origin_native_message_id or ""))
+        )
+        logger.info(
+            "lost turn report held until %s transport can deliver (session=%s)",
+            platform,
+            session_id,
+        )
+        if self._transport_can_deliver(platform):
+            # Held despite a ready transport means the send itself failed, so no
+            # ready callback is coming to flush it — retry on our own clock.
+            self._schedule_lost_turn_retry(platform)
+
+    def _transport_can_deliver(self, platform: str) -> bool:
+        """Whether ``platform`` can deliver right now.
+
+        Unknown readiness is treated as ready: a controller that does not expose
+        the probe (tests, embedded runners) must not silently swallow reports.
+        """
+
+        probe = getattr(self.controller, "is_im_transport_ready", None)
+        if not callable(probe) or not platform:
+            return True
+        try:
+            return bool(probe(platform))
+        except Exception:
+            logger.debug(
+                "transport readiness probe failed for %s", platform, exc_info=True
+            )
+            return True
+
+    async def notify_transport_ready(self, platform: str) -> int:
+        """Flush the interruption reports held for one platform.
+
+        Held in memory only: the turn is already terminal, so a report that never
+        drains (transport disabled before it connects) is dropped rather than
+        replayed on the next start, where it would be stale news. A send that
+        fails against a connected transport is retained AND retried on a bounded
+        backoff — see ``_schedule_lost_turn_retry`` for why nothing else would.
+        """
+
+        pending = self._pending_lost_turn_reports.pop(platform, [])
+        if not pending or self.controller is None:
+            return 0
+        reported = 0
+        unsent: list[tuple[str, str]] = []
+        for session_id, origin_native_message_id in pending:
+            try:
+                context = self._delivery_context(session_id)
+            except Exception:
+                logger.debug(
+                    "deferred lost turn report: no delivery context for session=%s",
+                    session_id,
+                    exc_info=True,
+                )
+                continue
+            if await self._emit_lost_turn_report(
+                context, session_id, origin_native_message_id
+            ):
+                reported += 1
+            else:
+                # "Ready" is the transport's claim, not a delivered message: a
+                # transient API error still loses the notice. Popping happened
+                # first, so an unsent report has to be put BACK or the only
+                # record of the interruption is gone for the process's lifetime.
+                unsent.append((session_id, str(origin_native_message_id or "")))
+        if unsent:
+            self._pending_lost_turn_reports.setdefault(platform, []).extend(unsent)
+            logger.info(
+                "%d lost turn report(s) on %s still undelivered; retrying",
+                len(unsent),
+                platform,
+            )
+            self._schedule_lost_turn_retry(platform)
+        return reported
+
+    def _schedule_lost_turn_retry(self, platform: str) -> None:
+        """Start the bounded retry for reports this platform failed to deliver.
+
+        ``notify_transport_ready`` has exactly one caller — ``_on_im_ready`` —
+        and ``MultiIMClient`` suppresses further ready callbacks until the
+        platform goes unready again. So a connection that merely hit one API
+        error would hold the notice forever with nothing to nudge it: the retry
+        has to come from here. One task per platform, a few attempts, then give
+        up loudly — the next genuine reconnect flushes whatever is left.
+        """
+
+        existing = self._lost_turn_retry_tasks.get(platform)
+        if existing is not None and not existing.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.debug("no running loop for lost turn retry on %s", platform)
+            return
+        self._lost_turn_retry_tasks[platform] = loop.create_task(
+            self._retry_lost_turn_reports(platform),
+            name=f"lost-turn-report-retry:{platform}",
+        )
+
+    async def _retry_lost_turn_reports(self, platform: str) -> None:
+        try:
+            for delay in self.LOST_TURN_RETRY_DELAYS:
+                await asyncio.sleep(delay)
+                if not self._pending_lost_turn_reports.get(platform):
+                    return
+                if not self._transport_can_deliver(platform):
+                    # Went unready again; the reconnect's ready callback flushes.
+                    return
+                await self.notify_transport_ready(platform)
+            remaining = len(self._pending_lost_turn_reports.get(platform) or [])
+            if remaining:
+                logger.warning(
+                    "%d lost turn report(s) on %s undelivered after %d retries; "
+                    "held until the transport reconnects",
+                    remaining,
+                    platform,
+                    len(self.LOST_TURN_RETRY_DELAYS),
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.debug("lost turn report retry failed for %s", platform, exc_info=True)
+        finally:
+            if self._lost_turn_retry_tasks.get(platform) is asyncio.current_task():
+                self._lost_turn_retry_tasks.pop(platform, None)
+
+    async def _emit_lost_turn_report(
+        self,
+        context: "MessageContext",
+        session_id: str,
+        origin_native_message_id: str,
+    ) -> bool:
+        """Emit one interruption notice. ``False`` means it did NOT reach the user.
+
+        The dispatcher returns the delivered message id, and ``None`` when every
+        send failed — so a falsy return is real evidence of loss, not merely an
+        absent receipt. Treating it as success would stamp a ⚠️ next to a notice
+        nobody got, on a turn that is already terminal and will never be retried
+        by anything else.
+        """
+
+        try:
+            delivered = await self.controller.emit_agent_message(
+                context,
+                "notify",
+                i18n_t("turn.interrupted.serviceRestart", self._controller_language()),
+            )
+        except Exception:
+            logger.warning(
+                "lost turn report: failed to notify session=%s",
+                session_id,
+                exc_info=True,
+            )
+            return False
+        if not delivered:
+            logger.warning(
+                "lost turn report: notify produced no delivery for session=%s",
+                session_id,
+            )
+            return False
+        # The dead process could not clear its own 👀. Retire it here so the
+        # triggering message stops claiming the turn is still running.
+        native_message_id = str(origin_native_message_id or "")
+        service = getattr(self.controller, "processing_indicator", None)
+        stamp = getattr(service, "stamp_orphaned_terminal_reaction", None)
+        if not native_message_id or not callable(stamp):
+            return True
+        try:
+            await stamp(context, native_message_id, INTERRUPTED_REACTION_EMOJI)
+        except Exception:
+            logger.debug(
+                "lost turn report: terminal reaction failed for session=%s",
+                session_id,
+                exc_info=True,
+            )
+        return True
+
     async def recover_durable_delivery_state(
         self,
         session_id: str | None = None,
@@ -5789,6 +6077,11 @@ class SessionTurnManager:
                     )
 
         for target_session, turn_id, attempt_id, backend in lost_active_turns:
+            # Read Run attribution BEFORE terminalizing: the notice below is owed
+            # only to a turn that has none, and terminalization retires the
+            # deliveries the attribution is derived from.
+            owning_run_ids = self.accepted_agent_run_ids_for_turn(turn_id)
+            origin_message_id = self._turn_origin_native_message_id(turn_id)
             terminal = self._terminalize_durable_turn(
                 turn_id,
                 "failed",
@@ -5803,6 +6096,8 @@ class SessionTurnManager:
             if not terminal.get("changed"):
                 continue
             recovered.append(target_session)
+            if not owning_run_ids:
+                await self._report_lost_im_turn(target_session, origin_message_id)
             successor_turn_id = str(terminal.get("successor_turn_id") or "")
             if successor_turn_id:
                 await self._start_persisted_turn(successor_turn_id)
@@ -7591,16 +7886,7 @@ class SessionTurnManager:
                     if session_row["status"] != "active":
                         return False
                     delivery_id = delivery_store.new_delivery_id()
-                    language_getter = getattr(self.controller, "_get_lang", None)
-                    language = (
-                        language_getter()
-                        if callable(language_getter)
-                        else getattr(
-                            getattr(self.controller, "config", None),
-                            "language",
-                            "en",
-                        )
-                    )
+                    language = self._controller_language()
                     trigger_text = str(
                         payload.get("agent_initiated_trigger_text")
                         or i18n_t("harness.agentInitiatedContinuation", language)

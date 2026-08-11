@@ -15,6 +15,7 @@ assert _SPEC is not None and _SPEC.loader is not None
 _MODULE = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(_MODULE)
 CodexEventHandler = _MODULE.CodexEventHandler
+STOPPED_REACTION_EMOJI = _MODULE.STOPPED_REACTION_EMOJI
 
 
 class _TurnState:
@@ -25,6 +26,7 @@ class _TurnState:
         self.terminal_error = None
         self.terminal_error_notified = False
         self.visible_to_user = True
+        self.indicator_cleanup_claimed = False
 
 
 class _StubTurnRegistry:
@@ -50,6 +52,13 @@ class _StubTurnRegistry:
         if state and self._active_turns.get(state.request.base_session_id) == turn_id:
             self._active_turns.pop(state.request.base_session_id, None)
         return state
+
+    def claim_indicator_cleanup(self, turn_id: str):
+        state = self._turns.get(turn_id)
+        if state is None or state.indicator_cleanup_claimed:
+            return None
+        state.indicator_cleanup_claimed = True
+        return state.request
 
     def hide_turn(self, turn_id: str):
         state = self._turns.get(turn_id)
@@ -94,6 +103,13 @@ class _StubAgent:
         self.emit_result_message = AsyncMock()
         self._remove_ack_reaction = AsyncMock()
         self._maybe_backfill_session_title = Mock()
+        self._user_stopped_turn_ids: set[str] = set()
+
+    def consume_user_stop_intent(self, turn_id):
+        if turn_id not in self._user_stopped_turn_ids:
+            return False
+        self._user_stopped_turn_ids.discard(turn_id)
+        return True
 
     def bind_agent_session_id(self, request, native_session_id):
         payload = dict(request.context.platform_specific or {})
@@ -356,6 +372,46 @@ class CodexEventHandlerTests(unittest.IsolatedAsyncioTestCase):
 
         agent.emit_result_message.assert_not_awaited()
         release_runtime_turn.assert_called_once_with(context)
+        # Superseded by a newer turn, not stopped by the user: no receipt.
+        agent._remove_ack_reaction.assert_awaited_once_with(request, terminal_emoji=None)
+
+    async def test_user_stopped_completion_stamps_the_receipt(self):
+        # The completion notification can beat handle_stop's own RPC back. When
+        # it does, it inherits the duty to trade the 👀 for a ⏹️ — otherwise the
+        # silent stop leaves the message showing nothing at all.
+        agent = _StubAgent()
+        agent.controller.agent_service = SimpleNamespace(release_runtime_turn=Mock())
+        handler = CodexEventHandler(agent)
+        context = SimpleNamespace(platform_specific={})
+        request = SimpleNamespace(base_session_id="session-1", context=context, started_at=0)
+        agent._turn_registry.register_turn("turn-1", request)
+        agent._user_stopped_turn_ids.add("turn-1")
+
+        await handler._on_turn_completed(
+            {"turn": {"id": "turn-1", "status": "interrupted"}}, request
+        )
+
+        agent._remove_ack_reaction.assert_awaited_once_with(
+            request, terminal_emoji=STOPPED_REACTION_EMOJI
+        )
+        # Consumed: handle_stop must not stamp a second one behind it.
+        self.assertEqual(agent._user_stopped_turn_ids, set())
+
+    async def test_hidden_turn_completion_cannot_compete_with_claimed_cleanup(self):
+        agent = _StubAgent()
+        agent.controller.agent_service = SimpleNamespace(release_runtime_turn=Mock())
+        handler = CodexEventHandler(agent)
+        context = SimpleNamespace(platform_specific={})
+        request = SimpleNamespace(base_session_id="session-1", context=context, started_at=0)
+        agent._turn_registry.register_turn("turn-1", request)
+
+        claimed_request = handler.clear_pending("turn-1")
+        await handler._on_turn_completed(
+            {"turn": {"id": "turn-1", "status": "interrupted"}}, request
+        )
+
+        self.assertIs(claimed_request, request)
+        agent._remove_ack_reaction.assert_not_awaited()
 
     async def test_auth_recovery_message_suppresses_plain_notify(self):
         agent = _StubAgent()

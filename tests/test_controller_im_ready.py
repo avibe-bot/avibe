@@ -64,6 +64,9 @@ def test_transport_ready_restores_only_its_state() -> None:
         start=Mock(),
     )
     controller.scheduled_task_service = SimpleNamespace(start=Mock(), notify_transport_ready=Mock())
+    controller.session_turns = SimpleNamespace(
+        notify_transport_ready=AsyncMock(return_value=0)
+    )
     controller.watch_service = SimpleNamespace(start=Mock())
     controller.runtime_command_watcher = SimpleNamespace(start=AsyncMock())
     controller.runtime_work_supervisor = SimpleNamespace(notify=Mock())
@@ -74,6 +77,8 @@ def test_transport_ready_restores_only_its_state() -> None:
 
     opencode_agent.restore_active_polls.assert_awaited_once_with({"discord", ""})
     controller.scheduled_task_service.notify_transport_ready.assert_called_once_with("discord")
+    # Interruption reports held during recovery are owed to this transport.
+    controller.session_turns.notify_transport_ready.assert_awaited_once_with("discord")
     controller.update_checker.notify_transport_ready.assert_called_once_with("discord")
     controller.update_checker.check_and_send_post_update_notification.assert_awaited_once_with(
         ready_platform="discord"
@@ -110,12 +115,16 @@ def test_transport_ready_registers_polls_before_owner_recovery() -> None:
         controller.scheduled_task_service = SimpleNamespace(
             notify_transport_ready=Mock()
         )
+        controller.session_turns = SimpleNamespace(
+            notify_transport_ready=AsyncMock(return_value=0)
+        )
         controller._delivery_recovery_complete = asyncio.Event()
 
         ready = asyncio.create_task(controller._on_im_ready(platform="slack"))
         await restore_entered.wait()
 
         assert not ready.done()
+        controller.session_turns.notify_transport_ready.assert_not_awaited()
         controller.scheduled_task_service.notify_transport_ready.assert_not_called()
         controller.update_checker.notify_transport_ready.assert_not_called()
         controller.update_checker.check_and_send_post_update_notification.assert_not_awaited()
@@ -126,6 +135,7 @@ def test_transport_ready_registers_polls_before_owner_recovery() -> None:
         controller.scheduled_task_service.notify_transport_ready.assert_called_once_with(
             "slack"
         )
+        controller.session_turns.notify_transport_ready.assert_awaited_once_with("slack")
         controller.update_checker.notify_transport_ready.assert_called_once_with("slack")
 
     asyncio.run(exercise())

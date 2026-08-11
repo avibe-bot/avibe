@@ -25,6 +25,7 @@ from core.run_settlement import (
     SETTLED_BY_STOPPED,
     SETTLED_BY_TERMINAL_RESULT,
 )
+from core.processing_indicator import INTERRUPTED_REACTION_EMOJI
 from core.runtime_activation import (
     RuntimeActivationRegistry,
     RuntimeActivationResolution,
@@ -3549,6 +3550,318 @@ def test_accepted_codex_turn_without_runtime_settles_and_releases_queue(managers
     assert accepted is not None and accepted["state"] == "accepted"
     assert _row(engine, str(queued.delivery_id))["state"] == "claimed"
     assert [text for _started_turn, text in starts] == ["continue after restart"]
+
+
+def _capture_lost_turn_report(manager: SessionTurnManager) -> tuple[list, list]:
+    """Record what a lost turn reports outward, without a real IM client."""
+
+    emitted: list[tuple[str, str]] = []
+    stamped: list[tuple[str, str]] = []
+
+    async def _emit(_context, kind, text, **_kwargs):
+        emitted.append((kind, text))
+        # The dispatcher answers with the delivered message id; a falsy answer
+        # means the send failed, which the report path must not read as success.
+        return f"msg-{len(emitted)}"
+
+    async def _stamp(_context, message_id, emoji):
+        stamped.append((message_id, emoji))
+        return True
+
+    manager.controller.emit_agent_message = _emit
+    manager.controller.processing_indicator = SimpleNamespace(
+        stamp_orphaned_terminal_reaction=_stamp
+    )
+    return emitted, stamped
+
+
+def test_lost_im_turn_without_run_reports_interruption(managers) -> None:
+    # An IM turn owns no agent_runs row, so the Harness interruption lane cannot
+    # reach it: without this report the thread just stops, which is
+    # indistinguishable from an agent choosing to stay quiet.
+    first, restarted, engine, _engine_b, _starts = managers
+    context = _context()
+    admitted = asyncio.run(
+        first.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="im turn killed by restart",
+                native_message_id="m-origin",
+            ),
+            context=context,
+        )
+    )
+    turn_id = str(admitted.turn_id)
+    context.platform_specific["turn_token"] = turn_id
+    context.platform_specific["agent_runtime_turn_token"] = f"runtime-{turn_id}"
+    first._active_identity = lambda _backend, _session_id, logical_id: (
+        logical_id,
+        f"native-{logical_id}",
+    )
+    first.on_native_start(
+        context,
+        backend="codex",
+        runtime_key=f"runtime-key-{turn_id}",
+        runtime_turn_id=f"runtime-{turn_id}",
+    )
+    emitted, stamped = _capture_lost_turn_report(restarted)
+    restarted._active_identity = lambda *_args: None
+
+    asyncio.run(restarted.recover_durable_delivery_state("ses_fsm", service_restart=True))
+
+    with engine.connect() as conn:
+        settled = delivery_store.get_turn(conn, turn_id)
+    assert settled is not None and settled["terminal_evidence_kind"] == "restart_runtime_missing"
+    assert [kind for kind, _text in emitted] == ["notify"]
+    assert "interrupted" in emitted[0][1].lower()
+    # The dead process could not clear its own 👀; recovery retires it in place.
+    assert stamped == [("m-origin", INTERRUPTED_REACTION_EMOJI)]
+
+
+def test_lost_quick_reply_turn_stamps_the_echo_it_reacted_on(managers) -> None:
+    """A quick-reply turn wears its 👀 on the bot echo, not on a user message.
+
+    The callback is admitted with ``native_message_id=None`` on purpose (it would
+    collide with platform event dedup) and the echo id survives only in the
+    durable admission context. Reading the native id alone yields ``""`` here, so
+    the ⚠️ is skipped and the echo keeps claiming the turn is still running —
+    exactly the stuck indicator the report exists to retire.
+    """
+
+    first, restarted, _engine, _engine_b, _starts = managers
+    context = _context()
+    admitted = asyncio.run(
+        first.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="quick reply killed by restart",
+                admission_context={"processing_indicator_message_id": "echo-9"},
+            ),
+            context=context,
+        )
+    )
+    turn_id = str(admitted.turn_id)
+    context.platform_specific["turn_token"] = turn_id
+    context.platform_specific["agent_runtime_turn_token"] = f"runtime-{turn_id}"
+    first._active_identity = lambda _backend, _session_id, logical_id: (
+        logical_id,
+        f"native-{logical_id}",
+    )
+    first.on_native_start(
+        context,
+        backend="codex",
+        runtime_key=f"runtime-key-{turn_id}",
+        runtime_turn_id=f"runtime-{turn_id}",
+    )
+    emitted, stamped = _capture_lost_turn_report(restarted)
+    restarted._active_identity = lambda *_args: None
+
+    asyncio.run(restarted.recover_durable_delivery_state("ses_fsm", service_restart=True))
+
+    assert [kind for kind, _text in emitted] == ["notify"]
+    assert stamped == [("echo-9", INTERRUPTED_REACTION_EMOJI)]
+
+
+def test_lost_im_turn_report_waits_for_its_transport(managers) -> None:
+    # Recovery runs at startup, BEFORE the IM transports finish connecting.
+    # Emitting then would drop the notice into a client that cannot send, so the
+    # report is held and flushed from the transport-ready hook instead.
+    first, restarted, _engine, _engine_b, _starts = managers
+    context = _context()
+    admitted = asyncio.run(
+        first.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="im turn killed before the transport came up",
+                native_message_id="m-origin",
+            ),
+            context=context,
+        )
+    )
+    turn_id = str(admitted.turn_id)
+    context.platform_specific["turn_token"] = turn_id
+    context.platform_specific["agent_runtime_turn_token"] = f"runtime-{turn_id}"
+    first._active_identity = lambda _backend, _session_id, logical_id: (
+        logical_id,
+        f"native-{logical_id}",
+    )
+    first.on_native_start(
+        context,
+        backend="codex",
+        runtime_key=f"runtime-key-{turn_id}",
+        runtime_turn_id=f"runtime-{turn_id}",
+    )
+    emitted, stamped = _capture_lost_turn_report(restarted)
+    restarted._active_identity = lambda *_args: None
+    ready: set[str] = set()
+    restarted._transport_can_deliver = lambda platform: platform in ready
+
+    asyncio.run(restarted.recover_durable_delivery_state("ses_fsm", service_restart=True))
+
+    assert emitted == [] and stamped == []
+
+    ready.add("avibe")
+    reported = asyncio.run(restarted.notify_transport_ready("avibe"))
+
+    assert reported == 1
+    assert [kind for kind, _text in emitted] == ["notify"]
+    assert stamped == [("m-origin", INTERRUPTED_REACTION_EMOJI)]
+    # The queue is drained, not replayed: a second hook fires nothing.
+    assert asyncio.run(restarted.notify_transport_ready("avibe")) == 0
+    assert len(emitted) == 1
+
+
+def test_lost_im_turn_report_survives_a_failed_send(managers) -> None:
+    # "Transport ready" is the transport's claim, not a delivered message. The
+    # dispatcher swallows a send failure and answers None, and the turn is
+    # already terminal, so treating that as done would discard the only account
+    # of the interruption the user will ever get.
+    first, restarted, _engine, _engine_b, _starts = managers
+    context = _context()
+    admitted = asyncio.run(
+        first.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="im turn killed by restart",
+                native_message_id="m-origin",
+            ),
+            context=context,
+        )
+    )
+    turn_id = str(admitted.turn_id)
+    context.platform_specific["turn_token"] = turn_id
+    context.platform_specific["agent_runtime_turn_token"] = f"runtime-{turn_id}"
+    first._active_identity = lambda _backend, _session_id, logical_id: (
+        logical_id,
+        f"native-{logical_id}",
+    )
+    first.on_native_start(
+        context,
+        backend="codex",
+        runtime_key=f"runtime-key-{turn_id}",
+        runtime_turn_id=f"runtime-{turn_id}",
+    )
+    emitted, stamped = _capture_lost_turn_report(restarted)
+    restarted._active_identity = lambda *_args: None
+    delivers = False
+
+    async def _emit(_context, kind, text, **_kwargs):
+        emitted.append((kind, text))
+        return "msg-1" if delivers else None
+
+    restarted.controller.emit_agent_message = _emit
+
+    asyncio.run(restarted.recover_durable_delivery_state("ses_fsm", service_restart=True))
+
+    # It was attempted and it failed: no ⚠️ next to a notice nobody received.
+    assert [kind for kind, _text in emitted] == ["notify"]
+    assert stamped == []
+
+    delivers = True
+    assert asyncio.run(restarted.notify_transport_ready("avibe")) == 1
+    assert len(emitted) == 2
+    assert stamped == [("m-origin", INTERRUPTED_REACTION_EMOJI)]
+
+
+def test_retained_lost_turn_report_is_retried_on_its_own_clock(managers) -> None:
+    # notify_transport_ready has exactly one caller (_on_im_ready) and the IM
+    # client suppresses repeat ready callbacks until the platform goes unready,
+    # so a connected transport that merely hit one API error would hold the
+    # notice forever. The retry has to come from the manager itself.
+    _first, restarted, _engine, _engine_b, _starts = managers
+    emitted, _stamped = _capture_lost_turn_report(restarted)
+    restarted.LOST_TURN_RETRY_DELAYS = (0.0, 0.0)
+    restarted._pending_lost_turn_reports["slack"] = [("ses_fsm", "m-origin")]
+    failures = 1
+
+    async def _emit(_context, kind, text, **_kwargs):
+        nonlocal failures
+        emitted.append((kind, text))
+        if failures:
+            failures -= 1
+            return None
+        return "msg-late"
+
+    restarted.controller.emit_agent_message = _emit
+    restarted._delivery_context = lambda _session_id: _context()
+
+    async def _flush_then_settle():
+        assert await restarted.notify_transport_ready("slack") == 0
+        assert restarted._pending_lost_turn_reports["slack"]
+        # Nothing else will call in; the scheduled retry is the only hope.
+        task = restarted._lost_turn_retry_tasks["slack"]
+        await asyncio.wait_for(task, timeout=5)
+
+    asyncio.run(_flush_then_settle())
+
+    assert len(emitted) == 2
+    assert not restarted._pending_lost_turn_reports.get("slack")
+    assert not restarted._lost_turn_retry_tasks
+
+
+def test_lost_turn_retry_gives_up_instead_of_spinning(managers) -> None:
+    # A hard outage must not turn into an unbounded resend loop; the next real
+    # reconnect flushes whatever is still owed.
+    _first, restarted, _engine, _engine_b, _starts = managers
+    emitted, _stamped = _capture_lost_turn_report(restarted)
+    restarted.LOST_TURN_RETRY_DELAYS = (0.0, 0.0)
+    restarted._pending_lost_turn_reports["slack"] = [("ses_fsm", "m-origin")]
+
+    async def _emit(_context, kind, text, **_kwargs):
+        emitted.append((kind, text))
+        return None
+
+    restarted.controller.emit_agent_message = _emit
+    restarted._delivery_context = lambda _session_id: _context()
+
+    async def _flush_and_exhaust():
+        await restarted.notify_transport_ready("slack")
+        await asyncio.wait_for(restarted._lost_turn_retry_tasks["slack"], timeout=5)
+
+    asyncio.run(_flush_and_exhaust())
+
+    # One initial attempt plus one per configured delay, then it stops.
+    assert len(emitted) == 3
+    assert restarted._pending_lost_turn_reports["slack"] == [("ses_fsm", "m-origin")]
+
+
+def test_lost_turn_owning_a_run_leaves_the_notice_to_the_harness_lane(managers) -> None:
+    # A Harness turn already gets harness.run.interrupted.* stamped on its Run.
+    # Reporting again here would double-notify the same interruption.
+    first, restarted, engine, _engine_b, _starts = managers
+    turn_id, _context_value = asyncio.run(_activate(first, text="harness turn"))
+    with engine.begin() as conn:
+        accepted = delivery_store.delivery_for_turn(conn, turn_id)
+        assert accepted is not None
+        conn.execute(
+            agent_runs.insert().values(
+                id="run-lost-turn",
+                definition_id=None,
+                run_type="scheduled",
+                status="running",
+                cancel_requested=0,
+                session_id="ses_fsm",
+                delivery_id=str(accepted["id"]),
+                created_at="2026-08-01T00:00:00Z",
+                updated_at="2026-08-01T00:00:00Z",
+                metadata_json="{}",
+            )
+        )
+    assert first.accepted_agent_run_ids_for_turn(turn_id) == ["run-lost-turn"]
+    emitted, stamped = _capture_lost_turn_report(restarted)
+    restarted._active_identity = lambda *_args: None
+
+    asyncio.run(restarted.recover_durable_delivery_state("ses_fsm", service_restart=True))
+
+    with engine.connect() as conn:
+        settled = delivery_store.get_turn(conn, turn_id)
+    assert settled is not None and settled["terminal_evidence_kind"] == "restart_runtime_missing"
+    assert emitted == []
+    assert stamped == []
 
 
 def test_accepted_opencode_turn_without_restored_identity_stays_live(managers) -> None:

@@ -84,21 +84,22 @@ export function backendVisual(backend: AgentBackend): BackendVisual {
 
 // ── API-key vendor picker (frame 06r) ───────────────────────────────────
 // value = standard vendor id; labelKey → i18n; base_url prefilled for official
-// vendors (editable), null for 自定义. Protocol drives the created source.
+// vendors (editable), null for 自定义. Probe order is only a hint; the server
+// still requires upstream response evidence before it stores a protocol.
 export type VendorOption = {
   value: string;
   labelKey: string;
   base_url: string | null;
-  protocol: SourceProtocol;
+  probe_order: SourceProtocol[];
 };
 
 export const VENDOR_OPTIONS: VendorOption[] = [
-  { value: 'custom', labelKey: 'settings.models.addKey.vendors.custom', base_url: null, protocol: 'openai_compatible' },
-  { value: 'anthropic', labelKey: 'settings.models.addKey.vendors.anthropic', base_url: 'https://api.anthropic.com', protocol: 'anthropic' },
-  { value: 'openai', labelKey: 'settings.models.addKey.vendors.openai', base_url: 'https://api.openai.com/v1', protocol: 'openai_chat' },
-  { value: 'zhipuai', labelKey: 'settings.models.addKey.vendors.zhipuai', base_url: 'https://open.bigmodel.cn/api/paas/v4', protocol: 'openai_compatible' },
-  { value: 'kimi', labelKey: 'settings.models.addKey.vendors.kimi', base_url: 'https://api.moonshot.cn/v1', protocol: 'openai_compatible' },
-  { value: 'xai', labelKey: 'settings.models.addKey.vendors.xai', base_url: 'https://api.x.ai/v1', protocol: 'openai_chat' },
+  { value: 'custom', labelKey: 'settings.models.addKey.vendors.custom', base_url: null, probe_order: ['openai_responses', 'openai_chat', 'anthropic'] },
+  { value: 'anthropic', labelKey: 'settings.models.addKey.vendors.anthropic', base_url: 'https://api.anthropic.com/v1', probe_order: ['anthropic', 'openai_responses', 'openai_chat'] },
+  { value: 'openai', labelKey: 'settings.models.addKey.vendors.openai', base_url: 'https://api.openai.com/v1', probe_order: ['openai_responses', 'openai_chat', 'anthropic'] },
+  { value: 'zhipuai', labelKey: 'settings.models.addKey.vendors.zhipuai', base_url: 'https://open.bigmodel.cn/api/paas/v4', probe_order: ['openai_responses', 'openai_chat', 'anthropic'] },
+  { value: 'kimi', labelKey: 'settings.models.addKey.vendors.kimi', base_url: 'https://api.moonshot.cn/v1', probe_order: ['openai_responses', 'openai_chat', 'anthropic'] },
+  { value: 'xai', labelKey: 'settings.models.addKey.vendors.xai', base_url: 'https://api.x.ai/v1', probe_order: ['openai_responses', 'openai_chat', 'anthropic'] },
 ];
 
 export const DEFAULT_VENDOR = VENDOR_OPTIONS[0];
