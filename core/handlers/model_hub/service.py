@@ -1725,7 +1725,6 @@ class ModelHubService:
                     binding.channel,
                     binding.source_id,
                     binding.vendor,
-                    experimental_consent=binding.experimental_consent,
                     intent="reauth",
                     recovered=binding.recovered,
                 )
@@ -1907,7 +1906,6 @@ class ModelHubService:
             "credential_ref",
             "account_label",
             "masked_credential",
-            "experimental_consent_at",
             "state",
             "usage",
             "created_at",
@@ -3132,8 +3130,6 @@ class ModelHubService:
     ) -> tuple[str, Optional[EventReason]]:
         if decision.action == "surface":
             return "models.source.error.unclassified", None
-        if decision.reason == "permission_denied":
-            return "models.source.error.unclassified", None
         if outcome.kind == RawOutcomeKind.NETWORK_ERROR:
             return "models.source.cooldown.network", "network"
         if outcome.kind == RawOutcomeKind.TIMEOUT:
@@ -3550,7 +3546,6 @@ class ModelHubService:
                     channel,
                     source.id,
                     source.vendor,
-                    experimental_consent=False,
                     intent="reauth",
                     recovered=recovered,
                     replace_flow_id=replace_pending_flow_id,
@@ -3611,7 +3606,6 @@ class ModelHubService:
             oauth_channel,
             pending_source_id,
             vendor,
-            experimental_consent=False,
         )
         return {"flow": _oauth_payload(flow, channel=channel)}
 
@@ -4163,7 +4157,7 @@ class ModelHubService:
                         agent=event_agent,
                         model_id=model_id,
                     )
-                elif event_reason != "permission_denied":
+                else:
                     detail_key = {
                         "credential_expired": "models.source.needs_action.oauth_expired",
                         "credential_revoked": "models.source.needs_action.credential_revoked",
@@ -4178,8 +4172,7 @@ class ModelHubService:
                         detail_key=detail_key,
                         reason=event_reason,
                     )
-                if event_reason != "permission_denied":
-                    globally_blocked_source_ids.add(source.id)
+                globally_blocked_source_ids.add(source.id)
                 failed_source = source
                 failed_reason = event_reason
                 continue

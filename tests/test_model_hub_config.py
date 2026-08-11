@@ -533,50 +533,23 @@ def test_model_hub_authority_closure_is_generated_from_live_files():
     assert result["ok"], result["findings"]
 
 
-def test_targeted_permission_denial_contract_is_request_scoped_and_mirrored():
+def test_permission_denial_contract_has_no_fallback_member():
+    retired_reason = "permission_denied"
     event_schema = _schema("resolution-event.schema.json")
-    event_validator = Draft7Validator(event_schema)
-    permission_event = next(
-        example
-        for example in event_schema["examples"]
-        if example["reason"] == "permission_denied"
-    )
-    event_validator.validate(permission_event)
-
-    invalid_cooldown = {
-        **permission_event,
-        "kind": "cooldown",
-        "to_source": None,
-    }
-    with pytest.raises(ValidationError):
-        event_validator.validate(invalid_cooldown)
-
     provenance_schema = _schema("turn-provenance.schema.json")
-    assert provenance_schema["properties"]["contract_version"]["const"] == 5
-    permission_record = next(
-        example
-        for example in provenance_schema["examples"]
-        if any(
-            attempt["reason"] == "permission_denied"
-            for attempt in example["failed_attempts"]
-        )
+    assert retired_reason not in event_schema["properties"]["reason"]["enum"]
+    assert retired_reason not in (
+        provenance_schema["properties"]["failed_attempts"]["items"]["properties"]["reason"]["enum"]
     )
-    Draft7Validator(provenance_schema).validate(permission_record)
-
-    registry = json.loads(
-        (CONTRACTS / "mirror-registry.json").read_text(encoding="utf-8")
+    assert all(
+        event.get("reason") != retired_reason
+        for event in event_schema["examples"]
     )
-    schemas = _mirror_schemas(registry)
-    failed_reasons = _json_pointer(
-        schemas["turn-provenance.schema.json"],
-        "/properties/failed_attempts/items/properties/reason",
-    )["enum"]
-    failed_reasons.remove("permission_denied")
-    with pytest.raises(AssertionError):
-        _validate_mirror_entry(
-            next(entry for entry in registry["entries"] if entry["id"] == "M3"),
-            schemas,
-        )
+    assert all(
+        attempt.get("reason") != retired_reason
+        for record in provenance_schema["examples"]
+        for attempt in record["failed_attempts"]
+    )
 
 
 def test_v5_shape_amendments_reject_the_false_states_they_replace():
@@ -823,19 +796,6 @@ def test_model_hub_release_capability_accepts_explicit_truthy_values(value):
 @pytest.mark.parametrize("value", ["", "0", "false", "no", "off", "unexpected"])
 def test_model_hub_release_capability_defaults_and_fails_closed(value):
     assert is_model_hub_enabled({MODEL_HUB_ENABLED_ENV: value}) is False
-
-
-def test_final_config_rejects_retired_consent_metadata():
-    source = _schema("source.schema.json")["examples"][0]
-    source = {**source, "supply_channel": "hub"}
-    payload = {
-        "sources": [source],
-        "agents": {},
-    }
-
-    payload["sources"][0]["experimental_consent_at"] = "2026-07-23T03:00:00Z"
-    with pytest.raises(ValueError):
-        ModelHubConfig.from_payload(payload)
 
 
 def test_final_config_rejects_retired_global_priority_key():
@@ -1145,10 +1105,6 @@ def test_source_optional_fields_reject_schema_invalid_values():
 
     invalid = json.loads(json.dumps(source))
     invalid["usage"]["currency"] = 1
-    invalid_sources.append(invalid)
-
-    invalid = json.loads(json.dumps(source))
-    invalid["experimental_consent_at"] = 1
     invalid_sources.append(invalid)
 
     invalid = json.loads(json.dumps(source))

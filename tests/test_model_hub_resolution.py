@@ -397,7 +397,7 @@ def test_supply_is_degraded_when_a_later_exact_hop_is_blocked():
     assert resolution.supply_status == "degraded"
 
 
-def test_runtime_fallback_preserves_distinct_models_from_one_source(tmp_path):
+def test_permission_denial_is_terminal_without_switch_or_source_mutation(tmp_path):
     source = _source("src_route006", ("upstream-first", "upstream-second"))
     config = _config([source])
     config.agents["claude"].routes["claude-opus-4-6"] = ModelHubRouteConfig(
@@ -429,21 +429,25 @@ def test_runtime_fallback_preserves_distinct_models_from_one_source(tmp_path):
             ),
         )
     )
-    service, _store, _ = _service(tmp_path, config, adapter)
+    service, store, _ = _service(tmp_path, config, adapter)
 
-    resolved = asyncio.run(
-        service.resolve(
-            backend="claude",
-            model_id="claude-opus-4-6",
-            request={},
+    decisions = []
+    with pytest.raises(ModelHubError) as exc:
+        asyncio.run(
+            service.resolve(
+                backend="claude",
+                model_id="claude-opus-4-6",
+                request={},
+                attempt_observer=lambda *args: decisions.append(args[-1]),
+            )
         )
-    )
 
-    assert adapter.invocations == [
-        (source.id, "upstream-first"),
-        (source.id, "upstream-second"),
-    ]
-    assert resolved.model_id == "upstream-second"
+    assert exc.value.code == "upstream_request_invalid"
+    assert exc.value.status == 403
+    assert decisions[-1].action == "surface"
+    assert adapter.invocations == [(source.id, "upstream-first")]
+    assert store.load().sources[0].state.status == "standby"
+    assert BoundedEventLog(tmp_path / "events.json").list() == []
 
 
 def test_runtime_skips_later_hops_after_a_source_global_failure(tmp_path):
@@ -619,8 +623,8 @@ def test_runtime_filters_reasoning_effort_for_each_exact_hop(tmp_path):
         (
             RawCallOutcome(
                 kind=RawOutcomeKind.HTTP_ERROR,
-                http_status=403,
-                error_code="permission_error",
+                http_status=429,
+                error_code="rate_limit_error",
                 redacted_message=None,
                 stream_started=False,
                 model_id="upstream-first",

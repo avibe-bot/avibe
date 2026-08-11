@@ -18,7 +18,6 @@ ResolutionReason = Literal[
     "credential_revoked",
     "balance_exhausted",
     "account_banned",
-    "permission_denied",
     "unclassified_error",
 ]
 
@@ -36,7 +35,7 @@ _MODEL_SURFACE_PATTERNS = re.compile(
 )
 _MODEL_NOT_FOUND_ERROR_CODES = frozenset({"not_found_error"})
 _REQUEST_SURFACE_ERROR_CODES = frozenset({"request_too_large"})
-_REQUEST_FALLBACK_ERROR_CODES = frozenset({"permission_error"})
+_REQUEST_TERMINAL_ERROR_CODES = frozenset({"permission_error"})
 _QUOTA_PATTERNS = re.compile(
     r"(?:quota[_ -]?(?:exhausted|exceeded)|insufficient[_ -]?(?:quota|credits)|"
     r"billing[_ -]?(?:limit|exhausted)|usage[_ -]?limit|credit[_ -]?balance)",
@@ -106,8 +105,8 @@ def classify_outcome(
         or model_not_found
     ):
         return ResolutionDecision("surface", error_code="upstream_request_invalid")
-    if normalized_error_code in _REQUEST_FALLBACK_ERROR_CODES:
-        return ResolutionDecision("fallback", reason="permission_denied")
+    if normalized_error_code in _REQUEST_TERMINAL_ERROR_CODES:
+        return ResolutionDecision("surface", error_code="upstream_request_invalid")
 
     if _QUOTA_PATTERNS.search(error_text):
         return ResolutionDecision(

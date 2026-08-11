@@ -32,7 +32,6 @@ EventSeverity = Literal["info", "action_required"]
 ReasonClass = Literal[
     "self_healing",
     "non_self_healing",
-    "request_scoped",
     "structural",
     "transition",
 ]
@@ -50,7 +49,6 @@ EVENT_REASON_AUTHORITY: dict[str, ReasonClass] = {
     "credential_revoked": "non_self_healing",
     "balance_exhausted": "non_self_healing",
     "account_banned": "non_self_healing",
-    "permission_denied": "request_scoped",
     "unclassified_error": "non_self_healing",
     "no_enabled_source": "structural",
     "no_eligible_source": "structural",
@@ -163,8 +161,6 @@ def build_resolution_event(
             raise ValueError("Invalid supply_interrupted event")
     elif reason_class == "structural":
         raise ValueError("Structural reasons require supply_interrupted")
-    if reason_class == "request_scoped" and kind != "switch":
-        raise ValueError("Request-scoped reasons require a switch event")
     if kind == "needs_action" and (
         from_source is None
         or to_source is not None
