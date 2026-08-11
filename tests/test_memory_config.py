@@ -135,10 +135,15 @@ def test_memory_config_rejects_conflicting_recovery_fields(memory: dict) -> None
         V2Config.from_payload(_payload(memory))
 
 
-@pytest.mark.parametrize("intent", ["factory_reset", "unknown", True, [], {}])
+@pytest.mark.parametrize("intent", ["unknown", True, [], {}])
 def test_memory_config_rejects_unknown_recovery_intent(intent: object) -> None:
     with pytest.raises(ValueError, match="memory.recovery_intent"):
         V2Config.from_payload(_payload({"recovery_intent": intent}))
+
+
+def test_memory_config_accepts_factory_reset_recovery_intent() -> None:
+    config = V2Config.from_payload(_payload({"recovery_intent": "factory_reset"}))
+    assert config.memory.recovery_intent == "factory_reset"
 
 
 @pytest.mark.parametrize(

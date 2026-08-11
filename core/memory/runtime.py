@@ -351,6 +351,7 @@ class MemoryRuntime:
         self._worker_task: asyncio.Task[None] | None = None
         self._activation_loop: asyncio.AbstractEventLoop | None = None
         self._artifact_installing = False
+        self._retired = False
         self._store: MemoryStore | None = None
         self._module: MemoryModule | None = None
         self._store_error: Exception | None = None
@@ -420,7 +421,76 @@ class MemoryRuntime:
     def available(self) -> bool:
         """Whether the local store opened. False keeps every read closed."""
 
-        return self._module is not None
+        return self._module is not None and not self._retired
+
+    @property
+    def retired(self) -> bool:
+        """Whether this aggregate has been permanently retired."""
+
+        return self._retired
+
+    @property
+    def effective_home(self) -> Path:
+        """Return the pinned home used by this aggregate's mutable state."""
+
+        return self._effective_home
+
+    @property
+    def artifact_manager(self) -> MemoryArtifactPort:
+        return self._artifact_manager
+
+    @property
+    def process_factory(self) -> EverOSProcessFactory:
+        return self._process_factory
+
+    def retire(self) -> None:
+        """Tombstone this aggregate and its module before mutable roots die."""
+
+        self._retired = True
+        self._closing = True
+        self._sidecar.close_ready_admission()
+        if self._module is not None:
+            self._module.retire()
+        self._advance_processing_lifecycle()
+
+    def artifact_admitted(self) -> bool:
+        """Return whether the pinned artifact is valid for a reset admission."""
+
+        try:
+            status = self._artifact_manager.status()
+            return (
+                self._artifact_manager.resolve_python() is not None
+                and status.get("status") == "ready"
+                and status.get("reason") is None
+            )
+        except Exception:
+            return False
+
+    def adopt_recovery_intent(self, config: MemoryConfig) -> None:
+        """Publish a durable recovery candidate and fence all module claims."""
+
+        self._config = deepcopy(config)
+        self._restart_config = deepcopy(config)
+        if self.available:
+            self.module.pause_claims()
+
+    async def activate_fresh(self, config: MemoryConfig) -> dict[str, Any]:
+        """Activate a newly constructed aggregate without re-reading old intent."""
+
+        if self._retired:
+            return {"ok": False, "error": "memory_operation_in_progress"}
+        if not self.available:
+            return {"ok": False, "error": "memory_store_unavailable"}
+        self._activation_loop = asyncio.get_running_loop()
+        self.module.pause_claims()
+        async with self._reconcile_lock:
+            async with self.module.lifecycle():
+                return await self._reconcile_locked(
+                    config,
+                    claims_already_paused=True,
+                    skip_embedding_guard=True,
+                    resume_claims_on_failure=False,
+                )
 
     @property
     def module(self) -> MemoryModule | _UnavailableMemoryModule:
@@ -659,6 +729,8 @@ class MemoryRuntime:
     async def reconcile(self, config: MemoryConfig) -> dict[str, Any]:
         """Apply persisted config without restarting the Avibe service."""
 
+        if self._retired:
+            return {"ok": False, "error": "memory_operation_in_progress"}
         try:
             return await self._reconcile(config)
         finally:
@@ -794,6 +866,15 @@ class MemoryRuntime:
             self._config = deepcopy(config)
             self._restart_config = deepcopy(config)
             self._runtime_error = "memory_embedding_rebuild_required"
+            return {"ok": False, "error": self._runtime_error}
+
+        if config.recovery_intent == "factory_reset":
+            self.module.pause_claims()
+            await self._stop_worker()
+            await self._sidecar.stop()
+            self._config = deepcopy(config)
+            self._restart_config = deepcopy(config)
+            self._runtime_error = "memory_factory_reset_failed"
             return {"ok": False, "error": self._runtime_error}
 
         embedding_changed = (
@@ -1292,6 +1373,8 @@ class MemoryRuntime:
         )
 
     async def clear(self, *, operator_ref: str) -> dict[str, Any]:
+        if self._retired or getattr(self._restart_config, "recovery_intent", None) == "factory_reset":
+            return {"status": "failed", "error": "memory_operation_in_progress"}
         if not self.available:
             raise self._unavailable()
         maintenance = self._require_maintenance()
@@ -1305,6 +1388,8 @@ class MemoryRuntime:
         *,
         operator_ref: str,
     ) -> dict[str, Any]:
+        if self._retired or getattr(self._restart_config, "recovery_intent", None) == "factory_reset":
+            return {"status": "failed", "error": "memory_operation_in_progress"}
         if not self.available:
             raise self._unavailable()
         maintenance = self._require_maintenance()
@@ -1321,6 +1406,8 @@ class MemoryRuntime:
         *,
         operator_ref: str,
     ) -> dict[str, Any]:
+        if self._retired or getattr(self._restart_config, "recovery_intent", None) == "factory_reset":
+            return {"status": "failed", "error": "memory_operation_in_progress"}
         if not self.available:
             raise self._unavailable()
         maintenance = self._require_maintenance()
@@ -1335,6 +1422,8 @@ class MemoryRuntime:
         self,
         operation: Callable[[], Awaitable[ClearResult]],
     ) -> dict[str, Any]:
+        if self._retired or getattr(self._restart_config, "recovery_intent", None) == "factory_reset":
+            return {"status": "failed", "error": "memory_operation_in_progress"}
         if self._rebuild_running():
             return {"status": "failed", "error": "memory_operation_in_progress"}
         lease = MemoryOperationLease(self._effective_home)
@@ -1572,6 +1661,8 @@ class MemoryRuntime:
     async def restart(self) -> dict[str, Any]:
         """Join or start one process-only replacement of the Memory sidecar."""
 
+        if self._retired:
+            return {"ok": False, "error": "memory_operation_in_progress"}
         if self._rebuild_running():
             return {"ok": False, "error": "memory_operation_in_progress"}
         task = self._restart_task
@@ -1589,7 +1680,7 @@ class MemoryRuntime:
     async def rebuild(self) -> dict[str, Any]:
         """Join or start one retained embedding-index rebuild over the cascade child."""
 
-        if self._closing:
+        if self._closing or self._retired:
             return {
                 "ok": False,
                 "error": "memory_operation_in_progress",
@@ -1663,7 +1754,9 @@ class MemoryRuntime:
         replay = deepcopy(self._restart_config)
         if not replay.enabled:
             return {"ok": False, "error": "memory_disabled"}
-        if replay.recovery_intent == "rebuild":
+        if replay.recovery_intent in {"rebuild", "factory_reset"}:
+            if replay.recovery_intent == "factory_reset":
+                return {"ok": False, "error": "memory_operation_in_progress"}
             return {"ok": False, "error": "memory_embedding_rebuild_required"}
 
         python = await asyncio.to_thread(self._artifact_manager.resolve_python)

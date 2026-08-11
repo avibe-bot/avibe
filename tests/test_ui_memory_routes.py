@@ -82,6 +82,44 @@ def _local_headers() -> dict[str, str]:
     return {"Origin": "http://127.0.0.1:15131"}
 
 
+def test_memory_factory_reset_public_result_keeps_truthful_root_contract() -> None:
+    payload = {
+        "ok": False,
+        "result": "partial",
+        "error": "memory_factory_reset_failed",
+        "data_deleted": True,
+        "data_remaining": True,
+        "roots": [
+            {"path": "memory", "existed": True, "deleted": True},
+            {
+                "path": "state/memory",
+                "existed": True,
+                "deleted": False,
+                "error": "ConfinedFilesystemError",
+            },
+        ],
+        "secret": "must-not-cross",
+    }
+    public, status_code = ui_memory_routes._memory_factory_reset_result(payload, 503)
+    assert status_code == 503
+    assert public == {
+        "ok": False,
+        "result": "partial",
+        "error": "memory_factory_reset_failed",
+        "data_deleted": True,
+        "data_remaining": True,
+        "roots": [
+            {"path": "memory", "existed": True, "deleted": True},
+            {
+                "path": "state/memory",
+                "existed": True,
+                "deleted": False,
+                "error": "ConfinedFilesystemError",
+            },
+        ],
+    }
+
+
 def test_memory_settings_are_direct_loopback_only_and_write_only(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
@@ -102,6 +140,40 @@ def test_memory_settings_are_direct_loopback_only_and_write_only(monkeypatch, tm
     assert "recovery_intent" not in response.get_json()
     assert "embedding_change_pending" not in response.get_json()
     assert "diagnostics" not in response.get_json()
+
+
+def test_memory_factory_reset_marker_projects_retry_state_and_blocks_non_key_patch(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _save_memory(MemoryConfig(recovery_intent="factory_reset"))
+    client = app.test_client()
+    settings = client.get(
+        "/api/memory/settings",
+        headers=_local_headers(),
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+    assert settings.status_code == 200
+    public = settings.get_json()
+    assert public["factory_reset_required"] is True
+    assert "recovery_intent" not in public
+
+    response = client.patch(
+        "/api/memory/settings",
+        json={"processing": {"llm": {"model": "new-model"}}},
+        headers=csrf_headers(client, "http://127.0.0.1:15131"),
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+    assert response.status_code == 409
+    assert response.get_json() == {
+        "status": "failed",
+        "error": "memory_operation_in_progress",
+    }
+    assert V2Config.load().memory.recovery_intent == "factory_reset"
 
 
 def test_memory_settings_get_accepts_same_origin_referer_without_origin(monkeypatch, tmp_path) -> None:

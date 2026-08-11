@@ -688,6 +688,7 @@
         "capabilityUnavailable": "记忆能力不可用",
         "processingFailed": "记忆处理失败",
         "clearFailed": "清除记忆失败",
+        "factoryResetFailed": "记忆工厂重置失败",
         "unknown": "未知原因"
       },
       "fault": {

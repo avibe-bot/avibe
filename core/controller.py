@@ -4,10 +4,13 @@ import asyncio
 import concurrent.futures
 import json
 import logging
+import os
 import threading
 import time
 from collections.abc import Awaitable, Callable
 from copy import deepcopy
+from dataclasses import replace
+from pathlib import Path
 from typing import Optional, Dict, Any, TypeVar
 from config import paths
 from config.platform_registry import get_platform_descriptor
@@ -16,6 +19,7 @@ from config.v2_config import (
     DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS,
     DEFAULT_AGENT_PROGRESS_STYLE,
     MemoryConfig,
+    atomic_update_memory,
 )
 from modules.im import BaseIMClient, MessageContext, IMFactory
 from modules.im.multi import MultiIMClient
@@ -326,6 +330,8 @@ class Controller:
         # Background task for cleanup
         self.cleanup_task: Optional[asyncio.Task] = None
         self._memory_reconcile_task: Optional[asyncio.Task] = None
+        self._memory_replacement_gate = asyncio.Lock()
+        self._memory_factory_reset_task: Optional[asyncio.Task[dict[str, Any]]] = None
 
         # Initialize update checker (use default config if not present)
         from config.v2_config import UpdateConfig
@@ -633,11 +639,190 @@ class Controller:
     async def reconcile_memory(self, memory_config: MemoryConfig) -> dict[str, Any]:
         """Hot-apply persisted Memory settings without restarting Avibe."""
 
-        result = await self.memory_runtime.reconcile(memory_config)
-        self.memory_module = self.memory_runtime.module
-        if result.get("ok") is True:
-            self.config.memory = memory_config
-        return result
+        if getattr(memory_config, "recovery_intent", None) == "factory_reset":
+            return await self.factory_reset_memory()
+        async with self._memory_replacement_lock():
+            runtime = getattr(self, "memory_runtime", None)
+            if runtime is None:
+                return {"ok": False, "error": "memory_factory_reset_failed"}
+            result = await runtime.reconcile(memory_config)
+            self.memory_module = runtime.module
+            if result.get("ok") is True:
+                self.config.memory = memory_config
+            return result
+
+    async def factory_reset_memory(self) -> dict[str, Any]:
+        """Delete Memory's two mutable roots and atomically publish a fresh Runtime.
+
+        Calls join one retained task so a request cancellation cannot abandon the
+        reset or let a second mutation race the replacement gate.
+        """
+
+        task = getattr(self, "_memory_factory_reset_task", None)
+        if task is None or task.done():
+            task = asyncio.create_task(
+                self._factory_reset_memory_once(),
+                name="memory-factory-reset",
+            )
+            self._memory_factory_reset_task = task
+
+            def clear_factory_reset(completed: asyncio.Task[dict[str, Any]]) -> None:
+                if self._memory_factory_reset_task is completed:
+                    self._memory_factory_reset_task = None
+
+            task.add_done_callback(clear_factory_reset)
+        return await asyncio.shield(task)
+
+    async def _factory_reset_memory_once(self) -> dict[str, Any]:
+        from core.memory.factory_reset import delete_memory_roots
+        from core.memory.runtime import create_memory_runtime
+
+        async with self._memory_replacement_lock():
+            runtime = getattr(self, "memory_runtime", None)
+            if runtime is None:
+                return self._factory_reset_unchanged_result(
+                    reason="memory_runtime_unavailable"
+                )
+
+            if not runtime.artifact_admitted():
+                return self._factory_reset_unchanged_result(
+                    runtime.effective_home,
+                    reason="artifact_repair_required",
+                )
+
+            try:
+                candidate = await asyncio.to_thread(self._mark_factory_reset_intent)
+            except Exception:
+                logger.exception("Memory factory reset could not persist intent")
+                return self._factory_reset_unchanged_result(
+                    runtime.effective_home,
+                    reason="intent_persist_failed",
+                )
+
+            # A retry may arrive with the prior aggregate already tombstoned.
+            if not runtime.retired:
+                runtime.adopt_recovery_intent(candidate)
+                runtime.retire()
+                try:
+                    await runtime.close()
+                except Exception:
+                    logger.exception("Memory factory reset could not retire Runtime")
+                    return self._factory_reset_unchanged_result(
+                        runtime.effective_home,
+                        reason="runtime_retirement_failed",
+                    )
+
+            deletion = await asyncio.to_thread(
+                delete_memory_roots,
+                runtime.effective_home,
+            )
+            payload = deletion.payload()
+            if deletion.data_remaining:
+                return {
+                    "ok": False,
+                    "error": "memory_factory_reset_failed",
+                    "result": "partial",
+                    **payload,
+                }
+
+            settled = replace(candidate, recovery_intent=None)
+            fresh = create_memory_runtime(
+                settled,
+                artifact_manager=runtime.artifact_manager,
+                process_factory=runtime.process_factory,
+                effective_home=runtime.effective_home,
+                processing_event=self._send_memory_processing_event,
+                on_config_settled=self._adopt_settled_memory_config,
+            )
+            activation = await fresh.activate_fresh(settled)
+            self.memory_runtime = fresh
+            self.memory_module = fresh.module
+            if activation.get("ok") is not True:
+                if fresh.available:
+                    fresh.module.pause_claims()
+                return {
+                    "ok": False,
+                    "error": "memory_factory_reset_failed",
+                    "result": "deleted_activation_failed",
+                    **payload,
+                }
+            try:
+                persisted = await asyncio.to_thread(self._clear_factory_reset_intent)
+            except Exception:
+                if fresh.available:
+                    fresh.module.pause_claims()
+                return {
+                    "ok": False,
+                    "error": "memory_factory_reset_failed",
+                    "result": "deleted_activation_failed",
+                    **payload,
+                }
+            fresh.adopt_recovery_intent(persisted)
+            self.config.memory = persisted
+            return {"ok": True, "result": "completed", **payload}
+
+    @staticmethod
+    def _factory_reset_unchanged_result(
+        effective_home: Path | None = None,
+        *,
+        reason: str,
+    ) -> dict[str, Any]:
+        """Return the closed result shape when reset stops before deletion.
+
+        Admission and retirement failures leave both roots untouched, but the
+        response still reports their observed state so clients never need a
+        second pre-admission shape or infer deletion from a bare boolean.
+        """
+
+        home = effective_home or paths.get_vibe_remote_dir()
+        roots: list[dict[str, Any]] = []
+        for relative_path in ("memory", "state/memory"):
+            try:
+                existed = os.path.lexists(home / relative_path)
+            except OSError:
+                # An unreadable root is conservatively treated as remaining.
+                existed = True
+            roots.append(
+                {
+                    "path": relative_path,
+                    "existed": existed,
+                    "deleted": False,
+                }
+            )
+        return {
+            "ok": False,
+            "error": "memory_factory_reset_failed",
+            "result": "failed",
+            "reason": reason,
+            "data_deleted": False,
+            "data_remaining": any(root["existed"] for root in roots),
+            "roots": roots,
+        }
+
+    @staticmethod
+    def _mark_factory_reset_intent() -> MemoryConfig:
+        def mark(current: MemoryConfig) -> MemoryConfig:
+            return replace(current, recovery_intent="factory_reset")
+
+        return atomic_update_memory(mark).memory
+
+    @staticmethod
+    def _clear_factory_reset_intent() -> MemoryConfig:
+        def clear(current: MemoryConfig) -> MemoryConfig:
+            if current.recovery_intent != "factory_reset":
+                raise ValueError("factory reset intent is no longer pending")
+            return replace(current, recovery_intent=None)
+
+        return atomic_update_memory(clear).memory
+
+    def _memory_replacement_lock(self) -> asyncio.Lock:
+        """Lazily provide the gate for lightweight Controller test doubles."""
+
+        gate = getattr(self, "_memory_replacement_gate", None)
+        if gate is None:
+            gate = asyncio.Lock()
+            self._memory_replacement_gate = gate
+        return gate
 
     def _migrate_discord_guild_scope_from_config(self) -> None:
         if "discord" not in self.platform_settings_managers:
@@ -1808,22 +1993,23 @@ class Controller:
         ):
             return False
 
-        runtime = getattr(self, "memory_runtime", None)
-        final_flush = getattr(runtime, "final_flush", None)
-        if not callable(final_flush):
-            return False
-        try:
-            return bool(
-                await final_flush(
-                    principal_id=principal_id,
-                    project_id=project_id,
-                    raw_session_id=raw_session_id,
-                    deadline_seconds=deadline_seconds,
+        async with self._memory_replacement_lock():
+            runtime = getattr(self, "memory_runtime", None)
+            final_flush = getattr(runtime, "final_flush", None)
+            if not callable(final_flush):
+                return False
+            try:
+                return bool(
+                    await final_flush(
+                        principal_id=principal_id,
+                        project_id=project_id,
+                        raw_session_id=raw_session_id,
+                        deadline_seconds=deadline_seconds,
+                    )
                 )
-            )
-        except Exception:
-            logger.debug("Memory final flush failed", exc_info=True)
-            return False
+            except Exception:
+                logger.debug("Memory final flush failed", exc_info=True)
+                return False
 
     async def capture_user_memory(self, context: MessageContext, text: str, session_id: str) -> None:
         """Submit one eligible attributed human turn after session resolution.
@@ -1840,7 +2026,11 @@ class Controller:
         platform = CaptureAdmission.platform_of(facts)
         started_at = time.monotonic()
         try:
-            await self.memory_runtime.module.capture(request)
+            async with self._memory_replacement_lock():
+                runtime = getattr(self, "memory_runtime", None)
+                if runtime is None:
+                    return
+                await runtime.module.capture(request)
             logger.info(
                 "Memory capture platform=%s latency_ms=%d",
                 platform,

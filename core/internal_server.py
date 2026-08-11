@@ -866,6 +866,11 @@ def create_app(
     def _memory_runtime():
         return getattr(controller, "memory_runtime", None)
 
+    def _memory_factory_reset_running() -> bool:
+        task = getattr(controller, "_memory_factory_reset_task", None)
+        done = getattr(task, "done", None)
+        return task is not None and callable(done) and not done()
+
     @app.post("/internal/reconcile-memory")
     async def _reconcile_memory() -> Any:
         """Hot-apply persisted Memory configuration on the controller loop."""
@@ -892,6 +897,11 @@ def create_app(
     async def _memory_restart() -> Any:
         """Replace the live Memory sidecar through the Runtime lifecycle."""
 
+        if _memory_factory_reset_running():
+            return JSONResponse(
+                status_code=409,
+                content={"ok": False, "error": "memory_operation_in_progress"},
+            )
         runtime = _memory_runtime()
         if runtime is None:
             return JSONResponse(
@@ -917,6 +927,11 @@ def create_app(
                 status_code=403,
                 content={"ok": False, "error": "memory_access_denied", "result": "failed"},
             )
+        if _memory_factory_reset_running():
+            return JSONResponse(
+                status_code=409,
+                content={"ok": False, "error": "memory_operation_in_progress", "result": "failed"},
+            )
         runtime = _memory_runtime()
         if runtime is None:
             return JSONResponse(
@@ -940,10 +955,56 @@ def create_app(
         status_code = 200 if result.get("ok") is True else 409
         return JSONResponse(status_code=status_code, content=result)
 
+    @app.post("/internal/memory/factory-reset")
+    async def _memory_factory_reset(request: Request) -> Any:
+        """Run the Controller-owned factory reset and await its final result."""
+
+        if _verified_memory_ui_user_key(request) is None:
+            return JSONResponse(
+                status_code=403,
+                content={"ok": False, "error": "memory_access_denied", "result": "failed"},
+            )
+        payload = await _safe_json(request)
+        if payload != {"confirm": True}:
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": "memory_invalid_input", "result": "failed"},
+            )
+        runtime = _memory_runtime()
+        rebuild_running = getattr(runtime, "_rebuild_running", None)
+        if callable(rebuild_running) and rebuild_running():
+            return JSONResponse(
+                status_code=409,
+                content={"ok": False, "error": "memory_operation_in_progress", "result": "failed"},
+            )
+        reset = getattr(controller, "factory_reset_memory", None)
+        if not callable(reset):
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": "memory_runtime_missing", "result": "failed"},
+            )
+        try:
+            result = await reset()
+        except Exception:
+            logger.exception("internal memory factory reset failed")
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": "memory_factory_reset_failed", "result": "failed"},
+            )
+        status_code = 200 if result.get("ok") is True else (
+            409 if result.get("error") == "memory_operation_in_progress" else 503
+        )
+        return JSONResponse(status_code=status_code, content=result)
+
     @app.post("/internal/memory/install-runtime")
     async def _memory_install_runtime() -> Any:
         """Install or repair the managed runtime on the controller lifecycle."""
 
+        if _memory_factory_reset_running():
+            return JSONResponse(
+                status_code=409,
+                content={"ok": False, "reason": "memory_operation_in_progress"},
+            )
         runtime = _memory_runtime()
         if runtime is None:
             return JSONResponse(status_code=503, content={"ok": False, "reason": "memory_runtime_missing"})
@@ -1414,6 +1475,11 @@ def create_app(
         user_key = _verified_memory_ui_user_key(request)
         if user_key is None:
             return JSONResponse(status_code=403, content={"status": "failed", "error": "memory_access_denied"})
+        if _memory_factory_reset_running():
+            return JSONResponse(
+                status_code=409,
+                content={"status": "failed", "error": "memory_operation_in_progress"},
+            )
         runtime = _memory_runtime()
         if runtime is None:
             return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_runtime_missing"})
@@ -1437,6 +1503,11 @@ def create_app(
         user_key = _verified_memory_ui_user_key(request)
         if user_key is None:
             return JSONResponse(status_code=403, content={"status": "failed", "error": "memory_access_denied"})
+        if _memory_factory_reset_running():
+            return JSONResponse(
+                status_code=409,
+                content={"status": "failed", "error": "memory_operation_in_progress"},
+            )
         runtime = _memory_runtime()
         if runtime is None:
             return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_runtime_missing"})

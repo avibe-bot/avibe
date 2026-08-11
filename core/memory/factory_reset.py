@@ -1,0 +1,116 @@
+"""Confined deletion primitive for Memory factory reset.
+
+The Controller owns lifecycle and aggregate replacement.  This module only
+knows the two mutable roots that factory reset is allowed to remove and
+returns one truthful outcome for each root.
+"""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from pathlib import Path
+
+from core.memory.confined_filesystem import remove_confined_path
+
+
+@dataclass(frozen=True, slots=True)
+class FactoryResetRootOutcome:
+    """Deletion result for one exact effective-home-relative root."""
+
+    relative_path: str
+    existed: bool
+    deleted: bool
+    error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class FactoryResetDeletionResult:
+    """Truthful result for both mutable Memory roots."""
+
+    roots: tuple[FactoryResetRootOutcome, FactoryResetRootOutcome]
+
+    @property
+    def data_deleted(self) -> bool:
+        return any(root.deleted for root in self.roots)
+
+    @property
+    def data_remaining(self) -> bool:
+        return any(root.existed and not root.deleted for root in self.roots)
+
+    def payload(self) -> dict[str, object]:
+        return {
+            "data_deleted": self.data_deleted,
+            "data_remaining": self.data_remaining,
+            "roots": [
+                {
+                    "path": root.relative_path,
+                    "existed": root.existed,
+                    "deleted": root.deleted,
+                    **({"error": root.error} if root.error else {}),
+                }
+                for root in self.roots
+            ],
+        }
+
+
+_ROOT_RELATIVE_PATHS = ("memory", "state/memory")
+
+
+def _entry_exists(path: Path) -> bool:
+    """Observe an entry without following a symlink."""
+
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def delete_memory_roots(effective_home: Path) -> FactoryResetDeletionResult:
+    """Remove exactly ``memory`` and ``state/memory`` beneath *effective_home*.
+
+    Each root is attempted independently so a failure is represented honestly
+    and a later retry can finish whichever root remains.  ``remove_confined_path``
+    supplies the no-follow, owner-private confinement checks.
+    """
+
+    home = Path(os.path.abspath(os.path.expanduser(os.fspath(effective_home))))
+    outcomes: list[FactoryResetRootOutcome] = []
+    for relative_path in _ROOT_RELATIVE_PATHS:
+        path = home / relative_path
+        existed = _entry_exists(path)
+        if not existed:
+            outcomes.append(FactoryResetRootOutcome(relative_path, False, True))
+            continue
+        try:
+            remove_confined_path(home, path)
+        except Exception as error:  # noqa: BLE001
+            outcomes.append(
+                FactoryResetRootOutcome(
+                    relative_path,
+                    existed=True,
+                    deleted=False,
+                    error=type(error).__name__,
+                )
+            )
+        else:
+            if _entry_exists(path):
+                outcomes.append(
+                    FactoryResetRootOutcome(
+                        relative_path,
+                        existed=True,
+                        deleted=False,
+                        error="root_reappeared",
+                    )
+                )
+            else:
+                outcomes.append(FactoryResetRootOutcome(relative_path, True, True))
+    return FactoryResetDeletionResult(tuple(outcomes))  # type: ignore[arg-type]
+
+
+__all__ = [
+    "FactoryResetDeletionResult",
+    "FactoryResetRootOutcome",
+    "delete_memory_roots",
+]
