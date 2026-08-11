@@ -542,7 +542,7 @@ async def _apply_memory_settings_patch(
                 status_code=409,
             )
 
-        if pending_factory_reset and not _memory_api_key_only_patch(patch_payload):
+        if pending_factory_reset:
             return _memory_response(
                 {"status": "failed", "error": "memory_operation_in_progress"},
                 status_code=409,
@@ -551,12 +551,12 @@ async def _apply_memory_settings_patch(
         # An exact credential-only update under an existing marker updates the
         # candidate without touching the fenced runtime. Every broader patch
         # keeps the ordinary reconcile/rollback contract.
-        if (pending_marker or pending_factory_reset) and _memory_api_key_only_patch(patch_payload):
+        if pending_marker and _memory_api_key_only_patch(patch_payload):
             try:
                 saved = await asyncio.to_thread(
                     api.save_memory_config,
                     target_payload,
-                    recovery_intent="factory_reset" if pending_factory_reset else "rebuild",
+                    recovery_intent="rebuild",
                     expected=current.memory,
                 )
             except (api.MemoryConfigStaleWrite, api.MemoryOperationBusy):

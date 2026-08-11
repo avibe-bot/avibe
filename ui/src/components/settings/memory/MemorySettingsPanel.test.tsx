@@ -76,6 +76,30 @@ afterEach(() => {
 });
 
 describe('MemorySettingsPanel', () => {
+  it('disables competing controls while retaining only factory reset retry', () => {
+    render(
+      <MemorySettingsPanel
+        settings={legacySettings}
+        maintenance={{ status: 'ok', data_exists: true, can_clear: true, clear_recovery: null }}
+        maintenanceError={null}
+        dependencyReady
+        onSaved={() => undefined}
+        onReloadSettings={() => undefined}
+        onReloadMaintenance={() => undefined}
+        onClearAll={() => undefined}
+        clearing={false}
+        onFactoryReset={() => undefined}
+        factoryResetPending
+        factoryResetArtifactValid
+      />,
+    );
+
+    expect(screen.getAllByPlaceholderText('memory.settings.baseUrlPlaceholder').every((input) => (input as HTMLInputElement).disabled)).toBe(true);
+    expect((screen.getByRole('button', { name: 'memory.settings.save' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: 'memory.clear.button' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: 'memory.factoryReset.retry' }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
   it('does not expose a provider logging switch and omits diagnostics from saves', async () => {
     const saved = {
       ...legacySettings,

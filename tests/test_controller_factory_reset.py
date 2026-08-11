@@ -34,8 +34,32 @@ def _controller(runtime: _Runtime) -> Controller:
 
 
 def _create_roots(home: Path) -> None:
-    (home / "memory").mkdir()
-    (home / "state" / "memory").mkdir(parents=True)
+    home.chmod(0o700)
+    (home / "memory").mkdir(mode=0o700)
+    (home / "state" / "memory").mkdir(mode=0o700, parents=True)
+    (home / "state").chmod(0o700)
+
+
+def test_delete_memory_roots_reports_lstat_failure_per_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from core.memory import factory_reset
+
+    _create_roots(tmp_path)
+    real_lstat = factory_reset.os.lstat
+
+    def lstat(path: Path):
+        if Path(path).as_posix().endswith("state/memory"):
+            raise OSError("unreadable root")
+        return real_lstat(path)
+
+    monkeypatch.setattr(factory_reset.os, "lstat", lstat)
+    result = factory_reset.delete_memory_roots(tmp_path)
+
+    assert len(result.roots) == 2
+    assert result.roots[0].relative_path == "memory"
+    assert result.roots[0].deleted is True
+    assert result.roots[1].relative_path == "state/memory"
+    assert result.roots[1].deleted is False
+    assert result.roots[1].error == "OSError"
 
 
 @pytest.mark.asyncio

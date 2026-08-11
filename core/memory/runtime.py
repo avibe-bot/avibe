@@ -352,6 +352,7 @@ class MemoryRuntime:
         self._activation_loop: asyncio.AbstractEventLoop | None = None
         self._artifact_installing = False
         self._retired = False
+        self._closed = False
         self._store: MemoryStore | None = None
         self._module: MemoryModule | None = None
         self._store_error: Exception | None = None
@@ -430,6 +431,12 @@ class MemoryRuntime:
         return self._retired
 
     @property
+    def closed(self) -> bool:
+        """Whether the last close attempt completed all cleanup steps."""
+
+        return self._closed
+
+    @property
     def effective_home(self) -> Path:
         """Return the pinned home used by this aggregate's mutable state."""
 
@@ -471,7 +478,7 @@ class MemoryRuntime:
 
         self._config = deepcopy(config)
         self._restart_config = deepcopy(config)
-        if self.available:
+        if self.available and config.recovery_intent is not None:
             self.module.pause_claims()
 
     async def activate_fresh(self, config: MemoryConfig) -> dict[str, Any]:
@@ -485,12 +492,17 @@ class MemoryRuntime:
         self.module.pause_claims()
         async with self._reconcile_lock:
             async with self.module.lifecycle():
-                return await self._reconcile_locked(
+                result = await self._reconcile_locked(
                     config,
                     claims_already_paused=True,
                     skip_embedding_guard=True,
                     resume_claims_on_failure=False,
                 )
+                if result.get("ok") is True:
+                    # Fresh runtimes start fenced while the child is proved;
+                    # settled recovery must leave ordinary capture admission open.
+                    self.module.resume_claims()
+                return result
 
     @property
     def module(self) -> MemoryModule | _UnavailableMemoryModule:
@@ -2156,8 +2168,12 @@ class MemoryRuntime:
     async def _close_after_rebuild(self) -> None:
         """Finish ordinary shutdown after rebuild ownership is fully released."""
 
+        cleanup_error: BaseException | None = None
         if self._maintenance is not None:
-            await self._maintenance.close()
+            try:
+                await self._maintenance.close()
+            except BaseException as error:
+                cleanup_error = error
         retained = self._restart_task
         if retained is not None and retained is not asyncio.current_task():
             try:
@@ -2175,14 +2191,33 @@ class MemoryRuntime:
                 raise
             except Exception:
                 pass
-        if self.available:
+        if self._module is not None:
+            self._module.pause_claims()
             try:
-                await self.module.prepare_shutdown()
-            finally:
                 await self._stop_worker()
-        await self._stop_call_log_retention()
-        await self._sidecar.close()
+            except BaseException as error:
+                cleanup_error = error
+            async with self._module.provider_root_lifecycle():
+                try:
+                    if self._retired and not await self._module.quiesce_claims(
+                        timeout_seconds=self._clear_drain_timeout_seconds
+                    ):
+                        logger.warning("Memory worker did not quiesce during retired close")
+                    await self._module.prepare_shutdown()
+                except BaseException as error:
+                    cleanup_error = cleanup_error or error
+        try:
+            await self._stop_call_log_retention()
+        except BaseException as error:
+            cleanup_error = cleanup_error or error
+        try:
+            await self._sidecar.close()
+        except BaseException as error:
+            cleanup_error = cleanup_error or error
         self._artifact_manager.set_activation_coordinator(None)
+        if cleanup_error is not None:
+            raise cleanup_error
+        self._closed = True
         self._advance_processing_lifecycle()
 
     def _active_provider_root_metadata(self) -> ProviderRootMetadata:

@@ -441,6 +441,8 @@ class MemoryModule:
     async def capture(self, request: CaptureRequest) -> CaptureReceipt:
         """Validate and persist one source capture without touching the provider."""
 
+        if self._retired:
+            return CaptureSkipped(reason="memory_operation_in_progress")
         if not self._is_enabled():
             return CaptureSkipped(reason="memory_disabled")
         if self._clear_active or self._is_maintenance_open():
@@ -457,6 +459,8 @@ class MemoryModule:
         )
         async with admission_lock:
             async with self._root_lifecycle_lock():
+                if self._retired:
+                    return CaptureSkipped(reason="memory_operation_in_progress")
                 if not self._is_enabled():
                     return CaptureSkipped(reason="memory_disabled")
                 if self._clear_active or self._is_maintenance_open():

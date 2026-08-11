@@ -4,8 +4,7 @@ capability:
   name: Memory factory reset recovery floor
   canonical_tests:
     - tests/scenarios/memory_factory_reset/test_memory_factory_reset_scenarios.py
-    - ui/src/components/settings/SettingsMemoryPage.test.tsx
-    - ui/src/components/settings/memory/MemorySettingsPanel.test.tsx
+    - tests/test_internal_server.py
 status_legend:
   covered: scenario coverage exists
   partial: unit or contract coverage exists but the closed loop is incomplete
@@ -13,38 +12,65 @@ status_legend:
   gap: not covered yet
 scenarios:
   - id: MEMORY-FACTORY-001
-    name: Factory reset confirmation names exact roots and retained artifact
+    name: Successful reset returns the closed two-root result
     status: covered
-    kind: destructive_confirmation
+    kind: service_boundary
     layer: scenario
-    test: tests/scenarios/memory_factory_reset/test_memory_factory_reset_scenarios.py::test_memory_factory_001_confirmation_contract
-    given: The Memory settings page can read a valid pinned memory-runtime artifact
-    when: The user opens Factory reset and waits through the destructive confirmation
-    then: The five-second confirmation names memory and state/memory as deleted and settings plus the artifact as retained
+    test: tests/scenarios/memory_factory_reset/test_memory_factory_reset_scenarios.py::test_memory_factory_001_successful_reset_is_a_closed_service_result
+    given: Both exact mutable roots exist and the pinned artifact is admissible
+    when: The Controller replacement gate executes Factory Reset
+    then: Both roots are deleted and settled recovery_intent is cleared
   - id: MEMORY-FACTORY-002
-    name: Factory reset reports each mutable root after the awaited result
+    name: Partial deletion is truthful and retryable
     status: covered
-    kind: truthful_outcome
+    kind: service_boundary
     layer: scenario
-    test: tests/scenarios/memory_factory_reset/test_memory_factory_reset_scenarios.py::test_memory_factory_002_per_root_outcome_contract
-    given: The backend returns a final factory-reset result
-    when: The operation finishes with either complete or partial deletion
-    then: The UI preserves the per-root deletion report and does not collapse it into an unqualified success
+    test: tests/scenarios/memory_factory_reset/test_memory_factory_reset_scenarios.py::test_memory_factory_002_partial_delete_is_truthful_and_retryable
+    given: The first root deletion succeeds and the second fails
+    when: Factory Reset is retried
+    then: The first response reports partial deletion and the retry completes the remaining root
+  - id: MEMORY-FACTORY-003
+    name: Remember is fenced by Controller replacement
+    status: covered
+    kind: service_boundary
+    layer: scenario
+    test: tests/scenarios/memory_factory_reset/test_memory_factory_reset_scenarios.py::test_memory_factory_003_stale_remember_waits_for_controller_replacement_gate
+    given: A capture is queued while replacement owns the gate
+    when: The old runtime is retired
+    then: The stale capture cannot write and returns operation_in_progress
   - id: MEMORY-FACTORY-101
-    name: Invalid pinned artifact routes the user to Repair
+    name: Invalid artifact disables reset
     status: covered
-    kind: validation
+    kind: service_boundary
     layer: scenario
-    test: tests/scenarios/memory_factory_reset/test_memory_factory_reset_scenarios.py::test_memory_factory_101_invalid_artifact_repair_contract
-    given: memory-runtime is missing, invalid, or not ready
-    when: The user reaches Memory destructive actions
-    then: Factory reset is disabled and the Dependencies Repair route is offered
+    test: tests/scenarios/memory_factory_reset/test_memory_factory_reset_scenarios.py::test_memory_factory_101_disabled_reset_fails_closed_without_deletion
+    given: The pinned memory-runtime artifact is not admissible
+    when: Factory Reset is requested
+    then: Both roots remain untouched and the result reports the repair reason
   - id: MEMORY-FACTORY-201
-    name: Durable factory reset recovery is retried without polling
+    name: Worker and process death are quiesced before deletion
     status: covered
-    kind: recovery
+    kind: service_boundary
     layer: scenario
-    test: tests/scenarios/memory_factory_reset/test_memory_factory_reset_scenarios.py::test_memory_factory_201_retry_contract
-    given: A durable factory_reset intent remains after a crash during deletion
-    when: The user returns to Memory Settings
-    then: The action is labeled Retry factory reset, all Memory controls stay disabled during the request, and no polling loop is introduced
+    test: tests/scenarios/memory_factory_reset/test_memory_factory_reset_scenarios.py::test_memory_factory_201_worker_and_process_death_are_quiesced_before_delete
+    given: The old aggregate has active worker/process ownership
+    when: Factory Reset retires it
+    then: close is awaited before the deletion result is returned
+  - id: MEMORY-FACTORY-202
+    name: Supervisor-down recovery keeps exact root outcomes
+    status: covered
+    kind: service_boundary
+    layer: scenario
+    test: tests/scenarios/memory_factory_reset/test_memory_factory_reset_scenarios.py::test_memory_factory_202_supervisor_down_still_returns_two_root_outcomes
+    given: A retained supervisor is already down
+    when: The exact root deletion primitive runs
+    then: The final result still contains two truthful root outcomes
+  - id: MEMORY-FACTORY-301
+    name: Post-delete activation failure retains recovery intent
+    status: covered
+    kind: service_boundary
+    layer: scenario
+    test: tests/scenarios/memory_factory_reset/test_memory_factory_reset_scenarios.py::test_memory_factory_301_post_delete_activation_failure_retains_recovery_intent
+    given: Both roots are deleted but fresh activation fails
+    when: The Controller publishes the replacement outcome
+    then: The closed envelope reports deletion truth and leaves retryable intent persisted

@@ -51,7 +51,7 @@ from core.show_git import ShowGitCheckpointService
 from core.update_checker import UpdateChecker
 from core.watches import ManagedWatchService
 from core.vibe_agents import VibeAgent, VibeAgentStore
-from core.memory import CaptureRequest
+from core.memory import CaptureReceipt, CaptureRequest, CaptureSkipped
 from core.memory.admission import CaptureAdmission, InboundTurnFacts
 from core.memory.blocking import run_blocking
 from vibe.i18n import get_supported_languages, t as i18n_t
@@ -651,6 +651,17 @@ class Controller:
                 self.config.memory = memory_config
             return result
 
+    async def capture_memory(self, request: CaptureRequest) -> CaptureReceipt:
+        """Capture through the replacement gate so stale modules cannot write."""
+
+        async with self._memory_replacement_lock():
+            runtime = getattr(self, "memory_runtime", None)
+            if runtime is None or getattr(runtime, "retired", False):
+                return CaptureSkipped(reason="memory_operation_in_progress")
+            if not runtime.available:
+                return CaptureSkipped(reason="memory_store_unavailable")
+            return await runtime.module.capture(request)
+
     async def factory_reset_memory(self) -> dict[str, Any]:
         """Delete Memory's two mutable roots and atomically publish a fresh Runtime.
 
@@ -703,6 +714,7 @@ class Controller:
             if not runtime.retired:
                 runtime.adopt_recovery_intent(candidate)
                 runtime.retire()
+            if not getattr(runtime, "closed", False):
                 try:
                     await runtime.close()
                 except Exception:
@@ -726,20 +738,39 @@ class Controller:
                 }
 
             settled = replace(candidate, recovery_intent=None)
-            fresh = create_memory_runtime(
-                settled,
-                artifact_manager=runtime.artifact_manager,
-                process_factory=runtime.process_factory,
-                effective_home=runtime.effective_home,
-                processing_event=self._send_memory_processing_event,
-                on_config_settled=self._adopt_settled_memory_config,
-            )
-            activation = await fresh.activate_fresh(settled)
+            fresh = None
+            try:
+                fresh = create_memory_runtime(
+                    settled,
+                    artifact_manager=runtime.artifact_manager,
+                    process_factory=runtime.process_factory,
+                    effective_home=runtime.effective_home,
+                    processing_event=self._send_memory_processing_event,
+                    on_config_settled=self._adopt_settled_memory_config,
+                )
+                activation = await fresh.activate_fresh(settled)
+            except Exception:
+                logger.exception("Memory factory reset could not activate fresh Runtime")
+                if fresh is not None:
+                    fresh.retire()
+                    try:
+                        await fresh.close()
+                    except Exception:
+                        logger.exception("Failed fresh Memory Runtime could not close")
+                return {
+                    "ok": False,
+                    "error": "memory_factory_reset_failed",
+                    "result": "deleted_activation_failed",
+                    **payload,
+                }
             self.memory_runtime = fresh
             self.memory_module = fresh.module
             if activation.get("ok") is not True:
-                if fresh.available:
-                    fresh.module.pause_claims()
+                fresh.retire()
+                try:
+                    await fresh.close()
+                except Exception:
+                    logger.exception("Failed fresh Memory Runtime could not close")
                 return {
                     "ok": False,
                     "error": "memory_factory_reset_failed",
@@ -749,8 +780,11 @@ class Controller:
             try:
                 persisted = await asyncio.to_thread(self._clear_factory_reset_intent)
             except Exception:
-                if fresh.available:
-                    fresh.module.pause_claims()
+                fresh.retire()
+                try:
+                    await fresh.close()
+                except Exception:
+                    logger.exception("Unsettled fresh Memory Runtime could not close")
                 return {
                     "ok": False,
                     "error": "memory_factory_reset_failed",
@@ -778,9 +812,22 @@ class Controller:
         roots: list[dict[str, Any]] = []
         for relative_path in ("memory", "state/memory"):
             try:
-                existed = os.path.lexists(home / relative_path)
-            except OSError:
+                os.lstat(home / relative_path)
+            except FileNotFoundError:
+                existed = False
+            except OSError as error:
                 # An unreadable root is conservatively treated as remaining.
+                existed = True
+                roots.append(
+                    {
+                        "path": relative_path,
+                        "existed": True,
+                        "deleted": False,
+                        "error": type(error).__name__,
+                    }
+                )
+                continue
+            else:
                 existed = True
             roots.append(
                 {

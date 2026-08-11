@@ -57,14 +57,19 @@ class FactoryResetDeletionResult:
 _ROOT_RELATIVE_PATHS = ("memory", "state/memory")
 
 
-def _entry_exists(path: Path) -> bool:
-    """Observe an entry without following a symlink."""
+def _entry_state(path: Path) -> tuple[bool, str | None]:
+    """Observe an entry without following a symlink, preserving lstat errors."""
 
     try:
         os.lstat(path)
     except FileNotFoundError:
-        return False
-    return True
+        return False, None
+    except OSError as error:
+        # An unreadable root is conservatively treated as remaining. The reset
+        # envelope must still include an outcome for this root so a retry can
+        # report the same closed shape.
+        return True, type(error).__name__
+    return True, None
 
 
 def delete_memory_roots(effective_home: Path) -> FactoryResetDeletionResult:
@@ -79,7 +84,17 @@ def delete_memory_roots(effective_home: Path) -> FactoryResetDeletionResult:
     outcomes: list[FactoryResetRootOutcome] = []
     for relative_path in _ROOT_RELATIVE_PATHS:
         path = home / relative_path
-        existed = _entry_exists(path)
+        existed, observation_error = _entry_state(path)
+        if observation_error is not None:
+            outcomes.append(
+                FactoryResetRootOutcome(
+                    relative_path,
+                    existed=True,
+                    deleted=False,
+                    error=observation_error,
+                )
+            )
+            continue
         if not existed:
             outcomes.append(FactoryResetRootOutcome(relative_path, False, True))
             continue
@@ -95,7 +110,17 @@ def delete_memory_roots(effective_home: Path) -> FactoryResetDeletionResult:
                 )
             )
         else:
-            if _entry_exists(path):
+            remaining, observation_error = _entry_state(path)
+            if observation_error is not None:
+                outcomes.append(
+                    FactoryResetRootOutcome(
+                        relative_path,
+                        existed=True,
+                        deleted=False,
+                        error=observation_error,
+                    )
+                )
+            elif remaining:
                 outcomes.append(
                     FactoryResetRootOutcome(
                         relative_path,

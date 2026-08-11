@@ -175,6 +175,7 @@ export const MemorySettingsPanel: React.FC<{
   }, [settings]);
 
   const rebuildRequired = settings.rebuild_required === true;
+  const factoryResetRequired = factoryResetPending;
   const canClearKeys = !enabledDraft;
   const canClearMemory = maintenance?.can_clear === true;
   const busy = saving || rebuildBusy || factoryResetBusy;
@@ -320,7 +321,7 @@ export const MemorySettingsPanel: React.FC<{
         <Switch
           checked={enabledDraft}
           onCheckedChange={setEnabledDraft}
-          disabled={busy || rebuildRequired || (!enabledDraft && !dependencyReady)}
+          disabled={busy || factoryResetRequired || rebuildRequired || (!enabledDraft && !dependencyReady)}
           label={t('memory.settings.enableLabel')}
         />
       </div>
@@ -330,7 +331,7 @@ export const MemorySettingsPanel: React.FC<{
         draft={llmDraft}
         original={settings.processing.llm}
         onChange={setLlmDraft}
-        disabled={busy}
+        disabled={busy || factoryResetRequired}
         canClearKey={canClearKeys}
       />
 
@@ -339,7 +340,7 @@ export const MemorySettingsPanel: React.FC<{
         draft={embeddingDraft}
         original={settings.processing.embedding}
         onChange={setEmbeddingDraft}
-        disabled={busy}
+        disabled={busy || factoryResetRequired}
         identityHint={t('memory.settings.embeddingIdentityHint')}
         canClearKey={canClearKeys}
       />
@@ -354,11 +355,11 @@ export const MemorySettingsPanel: React.FC<{
 
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-2">
-          <Button onClick={() => void save()} disabled={busy}>
+          <Button onClick={() => void save()} disabled={busy || factoryResetRequired}>
             {saving ? <Loader2 className="size-3.5 animate-spin" /> : null}
             {saving ? t('memory.settings.saving') : t('memory.settings.save')}
           </Button>
-          {rebuildRequired ? (
+          {rebuildRequired && !factoryResetRequired ? (
             <Button variant="secondary" onClick={() => void retryRebuild()} disabled={busy}>
               {rebuildBusy ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
               {rebuildBusy ? t('memory.settings.retryingRebuild') : t('memory.settings.retryRebuild')}
@@ -370,7 +371,7 @@ export const MemorySettingsPanel: React.FC<{
             variant="destructive"
             size="sm"
             onClick={onClearAll}
-            disabled={clearing || !canClearMemory || busy}
+            disabled={clearing || !canClearMemory || busy || factoryResetRequired}
           >
             <Trash2 className="size-3.5" />
             {t('memory.clear.button')}

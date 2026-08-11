@@ -1424,8 +1424,7 @@ def create_app(
             return JSONResponse(status_code=403, content={"status": "failed", "error": "memory_access_denied"})
         principal_id, project_id = scope
         runtime = _memory_runtime()
-        module = getattr(runtime, "module", None) if runtime is not None else None
-        if module is None:
+        if runtime is None:
             return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_runtime_missing"})
         payload = await _safe_json(request)
         if (
@@ -1445,7 +1444,13 @@ def create_app(
         source_digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
 
         try:
-            receipt = await module.capture(
+            capture = getattr(controller, "capture_memory", None)
+            if not callable(capture):
+                return JSONResponse(
+                    status_code=503,
+                    content={"status": "failed", "error": "memory_runtime_missing"},
+                )
+            receipt = await capture(
                 CaptureRequest(
                     source_message_id=(
                         f"agent:{principal_id}:{project_id}:{session_id}:{source_digest}"
