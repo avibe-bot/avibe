@@ -24,6 +24,7 @@ export type SessionInfo =
       email: string;
       sub?: string;
       instance_role: 'owner' | 'editor' | 'viewer';
+      temporary_unrestricted_org_app_access: boolean;
       capabilities: InstanceCapabilities;
     };
 
@@ -101,6 +102,8 @@ export const normalizeSessionInfo = (value: unknown): SessionInfo => {
     email: typeof value.email === 'string' ? value.email : '',
     ...(typeof value.sub === 'string' ? { sub: value.sub } : {}),
     instance_role: instanceRole,
+    temporary_unrestricted_org_app_access:
+      value.temporary_unrestricted_org_app_access === true,
     capabilities,
   };
 };

@@ -19,6 +19,7 @@ import threading
 import time
 from collections import OrderedDict, deque
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
@@ -2303,9 +2304,13 @@ def enforce_remote_access_cookie():
         if request.method == "GET" and context.instance_access_source != "show_page_email":
             show_page_id = _show_page_id_from_private_route(request.path)
             if show_page_id is not None:
-                resource_allowed = context.can_use_show_page(
-                    show_page_id
-                ) or _show_page_resource_access_allowed(context, show_page_id)
+                from vibe.authorization import has_temporary_unrestricted_org_app_access
+
+                resource_allowed = (
+                    has_temporary_unrestricted_org_app_access(context)
+                    or context.can_use_show_page(show_page_id)
+                    or _show_page_resource_access_allowed(context, show_page_id)
+                )
                 reauth_attempted = request.args.get(REMOTE_SHOW_PAGE_REAUTH_PARAM) == "1"
                 wants_html = "text/html" in request.headers.get("Accept", "")
                 raw_next = request.full_path if request.query_string else request.path
@@ -2379,6 +2384,23 @@ def enforce_show_page_email_scope():
     if public_static or exact_show_page:
         return None
     return jsonify({"ok": False, "error": "show_page_access_forbidden"}), 403
+
+
+def _temporary_org_app_resource_context(context: Any = None):
+    """Return a request-scoped resource context for the temporary Org policy.
+
+    The real authorization context remains on ``g`` for downstream identity,
+    renewal, and audit behavior. Only resource-service calls receive this copy,
+    which preserves the remote subject/Organization claims while bypassing the
+    Show Page ACL until avibe#1313 replaces the temporary full-access policy.
+    """
+
+    from vibe.authorization import has_temporary_unrestricted_org_app_access
+
+    resolved = context if context is not None else getattr(g, "authorization_context", None)
+    if not has_temporary_unrestricted_org_app_access(resolved):
+        return resolved
+    return replace(resolved, is_trusted_local=True)
 
 
 @app.before_request
@@ -2551,14 +2573,20 @@ async def enforce_remote_local_execution_boundary():
     if context is None or not context.is_remote:
         return None
     from vibe.authorization import (
+        REMOTE_HTTP_ACTIVE_ORGANIZATION_MEMBER,
         REMOTE_HTTP_LOCAL_ONLY,
         REMOTE_HTTP_PAYLOAD_FILTERED,
+        has_temporary_unrestricted_org_app_access,
         http_authorization_policy,
     )
 
     policy = getattr(g, "http_authorization_policy", None)
     if policy is None:
         policy = http_authorization_policy(request.method, request.path)
+    if policy.remote_access == REMOTE_HTTP_ACTIVE_ORGANIZATION_MEMBER:
+        if has_temporary_unrestricted_org_app_access(context):
+            return None
+        return _remote_execution_disabled_response()
     if policy.remote_access == REMOTE_HTTP_LOCAL_ONLY:
         return _remote_execution_disabled_response()
     if policy.remote_access != REMOTE_HTTP_PAYLOAD_FILTERED:
@@ -2609,8 +2637,13 @@ def enforce_project_role_capabilities():
         return None
 
     kind, resource_id = resource
-    if kind == "show_page" and context.can_use_show_page(resource_id):
-        return None
+    if kind == "show_page":
+        from vibe.authorization import has_temporary_unrestricted_org_app_access
+
+        if has_temporary_unrestricted_org_app_access(context) or context.can_use_show_page(
+            resource_id
+        ):
+            return None
     engine = create_sqlite_engine()
     with engine.connect() as conn:
         role = (
@@ -3082,7 +3115,11 @@ async def terminal_websocket(websocket: WebSocket, session_id: str):
     if not _terminal_origin_allowed(websocket):
         await websocket.close(code=1008)
         return
-    if not _show_runtime_websocket_authorized(websocket, minimum_role="owner"):
+    if not _show_runtime_websocket_authorized(
+        websocket,
+        minimum_role="viewer",
+        require_unrestricted_org_apps=True,
+    ):
         await websocket.close(code=1008)
         return
 
@@ -3090,9 +3127,6 @@ async def terminal_websocket(websocket: WebSocket, session_id: str):
     remote_payload = _remote_access_websocket_session_claims(websocket, config)
     if remote_payload is None and not _websocket_is_local_request(websocket, config):
         await websocket.close(code=_AUTHORIZATION_REFRESH_WEBSOCKET_CLOSE_CODE)
-        return
-    if remote_payload is not None:
-        await websocket.close(code=1008)
         return
     await websocket.accept()
     remote_addr = _websocket_client_host(websocket) or "unknown"
@@ -3186,7 +3220,11 @@ async def terminal_session_delete(session_id: str):
     terminal_request = _terminal_http_request_adapter()
     if not _terminal_origin_allowed(terminal_request):
         return jsonify({"ok": False, "error": "terminal_origin_forbidden"}), 403
-    if not _show_runtime_websocket_authorized(terminal_request, minimum_role="owner"):
+    if not _show_runtime_websocket_authorized(
+        terminal_request,
+        minimum_role="viewer",
+        require_unrestricted_org_apps=True,
+    ):
         return jsonify({"ok": False, "error": "terminal_unauthorized"}), 403
 
     remote_subject = _remote_access_websocket_subject(terminal_request)
@@ -3215,6 +3253,7 @@ def _show_runtime_websocket_authorized(
     *,
     minimum_role: str = "viewer",
     project_session_id: str | None = None,
+    require_unrestricted_org_apps: bool = False,
 ) -> bool:
     config = _load_remote_access_config()
     if config is None:
@@ -3226,10 +3265,17 @@ def _show_runtime_websocket_authorized(
     payload = _remote_access_websocket_session_payload(websocket, config)
     if payload is None:
         return False
-    from vibe.authorization import context_from_session_payload
+    from vibe.authorization import (
+        context_from_session_payload,
+        has_temporary_unrestricted_org_app_access,
+    )
 
     context = context_from_session_payload(payload)
     if not context.has_role(minimum_role):
+        return False
+    if require_unrestricted_org_apps and not has_temporary_unrestricted_org_app_access(
+        context
+    ):
         return False
     if project_session_id is None or context.is_instance_owner:
         return True
@@ -3238,8 +3284,13 @@ def _show_runtime_websocket_authorized(
 
 def _project_session_access_allowed(context: Any, session_id: str, minimum_role: str) -> bool:
     from storage import project_access_service
+    from vibe.authorization import has_temporary_unrestricted_org_app_access
 
-    if context is None or context.is_instance_owner:
+    if (
+        context is None
+        or context.is_instance_owner
+        or has_temporary_unrestricted_org_app_access(context)
+    ):
         return True
     if not context.has_role(minimum_role):
         return False
@@ -3275,8 +3326,9 @@ async def _wait_for_project_session_access_loss(
 
 def _show_page_resource_access_allowed(context: Any, session_id: str) -> bool:
     from storage import resource_access_service
+    from vibe.authorization import has_temporary_unrestricted_org_app_access
 
-    if context is None:
+    if context is None or has_temporary_unrestricted_org_app_access(context):
         return True
     try:
         return resource_access_service.can_use_resource(
@@ -3309,10 +3361,12 @@ def _show_runtime_websocket_resource_context(websocket: Any):
     payload = _remote_access_websocket_session_payload(websocket, config)
     if payload is None:
         return resource_access_service.ResourceUserContext()
-    return resource_access_service.current_resource_context(
-        payload,
-        is_remote=True,
-        is_trusted_local=False,
+    return _temporary_org_app_resource_context(
+        resource_access_service.current_resource_context(
+            payload,
+            is_remote=True,
+            is_trusted_local=False,
+        )
     )
 
 
@@ -4905,8 +4959,9 @@ def show_pages_list_get():
     from storage import project_access_service
     from vibe import api
 
-    payload = api.list_show_pages()
     context = getattr(g, "authorization_context", None)
+    resource_context = _temporary_org_app_resource_context(context)
+    payload = api.list_show_pages(user_context=resource_context)
     if _is_remote_show_page_request():
         payload = {
             **payload,
@@ -4915,7 +4970,11 @@ def show_pages_list_get():
                 for page in payload.get("pages", [])
             ],
         }
-    if context is not None and not context.is_instance_owner:
+    if (
+        context is not None
+        and not context.is_instance_owner
+        and not getattr(resource_context, "is_trusted_local", False)
+    ):
         engine = _projects_engine()
         with engine.connect() as conn:
             payload["pages"] = [
@@ -4941,7 +5000,13 @@ def show_page_visibility_post(session_id):
 
     payload = request.json or {}
     try:
-        return jsonify(api.set_show_page_visibility(session_id, str(payload.get("visibility") or "")))
+        return jsonify(
+            api.set_show_page_visibility(
+                session_id,
+                str(payload.get("visibility") or ""),
+                user_context=_temporary_org_app_resource_context(),
+            )
+        )
     except ShowPageError as exc:
         return _show_page_error_response(exc)
 
@@ -4952,7 +5017,14 @@ def show_page_ensure_post(session_id):
     from vibe import api
 
     try:
-        return jsonify(_show_page_payload_for_request(api.ensure_show_page(session_id)))
+        return jsonify(
+            _show_page_payload_for_request(
+                api.ensure_show_page(
+                    session_id,
+                    user_context=_temporary_org_app_resource_context(),
+                )
+            )
+        )
     except ShowPageError as exc:
         return _show_page_error_response(exc)
 
@@ -4963,7 +5035,12 @@ def show_page_access_get(session_id):
     from vibe import api
 
     try:
-        response = jsonify(api.get_show_page_access(session_id))
+        response = jsonify(
+            api.get_show_page_access(
+                session_id,
+                user_context=_temporary_org_app_resource_context(),
+            )
+        )
         response.headers["Cache-Control"] = "no-store, private"
         response.headers["Vary"] = "Cookie"
         return response
@@ -4977,7 +5054,12 @@ def show_page_authorized_emails_get(session_id):
     from vibe import api
 
     try:
-        response = jsonify(api.get_show_page_authorized_emails(session_id))
+        response = jsonify(
+            api.get_show_page_authorized_emails(
+                session_id,
+                user_context=_temporary_org_app_resource_context(),
+            )
+        )
         response.headers["Cache-Control"] = "no-store, private"
         response.headers["Vary"] = "Cookie"
         return response
@@ -5001,7 +5083,13 @@ def show_page_authorized_emails_put(session_id):
             ShowPageError("Invalid Show Page email audience.", code="invalid_email")
         )
     try:
-        return jsonify(api.replace_show_page_authorized_emails(session_id, emails))
+        return jsonify(
+            api.replace_show_page_authorized_emails(
+                session_id,
+                emails,
+                user_context=_temporary_org_app_resource_context(),
+            )
+        )
     except ShowPageError as exc:
         return _show_page_error_response(exc)
 
@@ -5012,7 +5100,12 @@ def show_page_rotate_share_post(session_id):
     from vibe import api
 
     try:
-        return jsonify(api.rotate_show_page_share(session_id))
+        return jsonify(
+            api.rotate_show_page_share(
+                session_id,
+                user_context=_temporary_org_app_resource_context(),
+            )
+        )
     except ShowPageError as exc:
         return _show_page_error_response(exc)
 
@@ -5024,7 +5117,13 @@ def show_page_set_share_id_post(session_id):
 
     payload = request.json or {}
     try:
-        return jsonify(api.set_show_page_share_id(session_id, str(payload.get("share_id") or "")))
+        return jsonify(
+            api.set_show_page_share_id(
+                session_id,
+                str(payload.get("share_id") or ""),
+                user_context=_temporary_org_app_resource_context(),
+            )
+        )
     except ShowPageError as exc:
         return _show_page_error_response(exc)
 
@@ -5063,7 +5162,10 @@ def show_page_icon_get(session_id):
     try:
         store = ShowPageStore()
         try:
-            page = store.require_access(session_id)
+            page = store.require_access(
+                session_id,
+                user_context=_temporary_org_app_resource_context(),
+            )
             # Any of the user's own pages — private, public, OR offline — may serve
             # its static icon: the payload advertises an icon token for all of them
             # and the inventory lists them, so gating by visibility would strand
@@ -5121,7 +5223,7 @@ def _dock_error_response(exc):
 def dock_get():
     from vibe import api
 
-    return jsonify(api.get_dock())
+    return jsonify(api.get_dock(user_context=_temporary_org_app_resource_context()))
 
 
 @app.route("/api/dock/pins", methods=["POST"])
@@ -5132,7 +5234,12 @@ def dock_pin_post():
 
     payload = request.json or {}
     try:
-        return jsonify(api.pin_dock_show_page(str(payload.get("session_id") or "")))
+        return jsonify(
+            api.pin_dock_show_page(
+                str(payload.get("session_id") or ""),
+                user_context=_temporary_org_app_resource_context(),
+            )
+        )
     except (DockError, ShowPageError) as exc:
         return _dock_error_response(exc)
 
@@ -5144,7 +5251,12 @@ def dock_unpin_delete(session_id):
     from vibe import api
 
     try:
-        return jsonify(api.unpin_dock_show_page(session_id))
+        return jsonify(
+            api.unpin_dock_show_page(
+                session_id,
+                user_context=_temporary_org_app_resource_context(),
+            )
+        )
     except (DockError, ShowPageError) as exc:
         return _dock_error_response(exc)
 
@@ -5161,7 +5273,13 @@ def dock_order_put():
         # concurrency — set_dock_order rejects the write as stale when it no
         # longer matches the server's, so a stale tab can't silently undock a pin
         # another tab installed.
-        return jsonify(api.set_dock_order(payload.get("order"), known=payload.get("known")))
+        return jsonify(
+            api.set_dock_order(
+                payload.get("order"),
+                known=payload.get("known"),
+                user_context=_temporary_org_app_resource_context(),
+            )
+        )
     except (DockError, ShowPageError) as exc:
         return _dock_error_response(exc)
 
@@ -6439,7 +6557,11 @@ def remote_access_auth_callback():
 @app.route("/api/session", methods=["GET"])
 def api_session():
     from vibe import remote_access
-    from vibe.authorization import context_from_session_payload, trusted_local_context
+    from vibe.authorization import (
+        context_from_session_payload,
+        has_temporary_unrestricted_org_app_access,
+        trusted_local_context,
+    )
 
     config = _load_remote_access_config()
     if config is None or not _is_remote_access_request(config):
@@ -6474,6 +6596,9 @@ def api_session():
                     "email": str(payload.get("email", "")),
                     "sub": str(payload.get("sub", "")),
                     "instance_role": context.instance_role,
+                    "temporary_unrestricted_org_app_access": (
+                        has_temporary_unrestricted_org_app_access(context)
+                    ),
                     "capabilities": context.capability_projection(),
                 }
             )
@@ -9528,6 +9653,7 @@ async def show_page_icon_upload(session_id: str, starlette_request: FastAPIReque
                     data,
                     filename=upload.filename,
                     content_type=upload.content_type,
+                    user_context=_temporary_org_app_resource_context(),
                 )
                 # Broadcast so EVERY already-mounted inventory (Dock, WindowLayer, mobile
                 # drawer, app search) reloads and picks up the new icon_version — the
@@ -9836,10 +9962,18 @@ def _media_row_show_page_access_allowed(context: Any, row: dict[str, Any]) -> bo
 
 def _request_can_read_media_row(conn, token: str, row: dict[str, Any]) -> bool:
     from storage import media_service, project_access_service
+    from vibe.authorization import has_temporary_unrestricted_org_app_access
 
     context = getattr(g, "authorization_context", None)
     if not _media_row_show_page_access_allowed(context, row):
         return False
+    if row.get("source") == "show_annotation" and has_temporary_unrestricted_org_app_access(
+        context
+    ):
+        # Annotation screenshots are part of the Show Page surface. During the
+        # temporary unrestricted Organization rollout they follow the page,
+        # while all unrelated media keeps its existing Project/session ACL.
+        return True
     if context is None or context.is_instance_owner:
         return True
     session_ids = media_service.referenced_session_ids(conn, token)
@@ -10919,6 +11053,12 @@ def _workbench_event_visible_to_context(context, event_type: str, payload: str) 
             return False
         if not _show_page_resource_access_allowed(context, session_id):
             return False
+        from vibe.authorization import has_temporary_unrestricted_org_app_access
+
+        if has_temporary_unrestricted_org_app_access(context):
+            # Show events are page content. Keep them aligned with the same
+            # temporary all-pages policy instead of reapplying Project ACL here.
+            return True
     if context.is_instance_owner:
         return True
     if event_type in {"authorization.changed", "workbench.events.bridge.status"}:
@@ -13680,7 +13820,10 @@ def redirect_private_show_page_to_canonical_path(session_id):
     store = ShowPageStore()
     try:
         try:
-            page = store.require_access(session_id)
+            page = store.require_access(
+                session_id,
+                user_context=_temporary_org_app_resource_context(),
+            )
         except ShowPageError as exc:
             if exc.code == "resource_access_forbidden":
                 return _show_page_access_forbidden_response()
@@ -13711,7 +13854,10 @@ async def serve_private_show_page(session_id, asset_path):
     store = ShowPageStore()
     try:
         try:
-            page = store.require_access(session_id)
+            page = store.require_access(
+                session_id,
+                user_context=_temporary_org_app_resource_context(),
+            )
         except ShowPageError as exc:
             if exc.code == "resource_access_forbidden":
                 return _show_page_access_forbidden_response()

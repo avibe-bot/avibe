@@ -928,7 +928,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
                   canManageMetadata={project.capabilities.can_chat}
                   canManageProjects={capabilities.can_manage_projects}
                   canArchive={capabilities.can_manage_projects && canArchiveProjects({ remote })}
-                  canOpenInEditor={capabilities.can_use_files}
+                  canOpenInEditor
                   canEditAgentsMd={capabilities.can_manage_projects && canEditProjectInstructions({ remote })}
                   unreadBySession={unreadBySession}
                   onRename={(next) => renameProject(project.id, next)}

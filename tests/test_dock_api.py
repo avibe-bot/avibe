@@ -68,6 +68,7 @@ def test_dock_default_is_builtins_only(monkeypatch, tmp_path):
 
     result = api.get_dock()
 
+    assert BUILTIN_DOCK_IDS == ("files", "terminal", "editor", "library")
     assert result["ok"] is True
     assert result["dock"]["order"] == list(BUILTIN_DOCK_IDS)
     assert result["dock"]["pins"] == []

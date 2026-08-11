@@ -680,7 +680,7 @@ def test_remote_show_page_ensure_redacts_local_path(monkeypatch, tmp_path):
     config = _save_config(tmp_path)
     monkeypatch.setattr(
         "vibe.api.ensure_show_page",
-        lambda session_id: {
+        lambda session_id, **_kwargs: {
             "ok": True,
             "existed": False,
             "session_id": session_id,
@@ -3421,7 +3421,10 @@ def test_private_show_events_stream_ends_when_project_access_is_revoked(monkeypa
     assert len(asyncio.run(_collect_until_revoked())) == 1
 
 
-def test_private_show_events_stream_ends_when_resource_access_is_revoked(monkeypatch, tmp_path):
+def test_remote_org_show_events_stream_stays_open_when_resource_access_is_revoked(
+    monkeypatch,
+    tmp_path,
+):
     from storage.db import create_sqlite_engine
     from vibe.authorization import AuthorizationContext
     from vibe.sse_broker import broker
@@ -3454,7 +3457,7 @@ def test_private_show_events_stream_ends_when_resource_access_is_revoked(monkeyp
         )
     engine.dispose()
 
-    async def _collect_until_revoked() -> list[str | bytes]:
+    async def _collect_after_revocation() -> str:
         response = await _show_events_stream(
             "ses123",
             authorization_context=context,
@@ -3478,13 +3481,27 @@ def test_private_show_events_stream_ends_when_resource_access_is_revoked(monkeyp
                 "authorization.changed",
                 {"project_ids": [], "resource_kinds": ["show_page"]},
             )
-            with pytest.raises(StopAsyncIteration):
-                await asyncio.wait_for(iterator.__anext__(), timeout=1)
+            broker.publish(
+                "show.dispatch",
+                {
+                    "session_id": "ses123",
+                    "scope_id": "scope123",
+                    "show_event_id": "show_evt_after_acl_change",
+                    "event": "turn.chunk",
+                    "data": {"text": "still connected"},
+                },
+            )
+            chunks.append(await asyncio.wait_for(iterator.__anext__(), timeout=1))
         finally:
             await iterator.aclose()
-        return chunks
+        return "".join(
+            chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk
+            for chunk in chunks
+        )
 
-    assert len(asyncio.run(_collect_until_revoked())) == 1
+    body = asyncio.run(_collect_after_revocation())
+    assert "event: show.dispatch" in body
+    assert "still connected" in body
 
 
 def test_public_show_events_stream_redacts_nested_dispatch_ids(monkeypatch, tmp_path):
@@ -5872,7 +5889,10 @@ def test_private_show_page_hmr_websocket_closes_at_authorization_refresh_deadlin
     assert proxy_calls == [("started", "ses123"), ("cancelled", "ses123")]
 
 
-def test_private_show_page_hmr_websocket_closes_when_resource_access_is_revoked(monkeypatch, tmp_path):
+def test_remote_org_show_page_hmr_stays_open_when_resource_access_is_revoked(
+    monkeypatch,
+    tmp_path,
+):
     from storage.db import create_sqlite_engine
     from vibe.sse_broker import broker
 
@@ -5947,7 +5967,7 @@ def test_private_show_page_hmr_websocket_closes_when_resource_access_is_revoked(
     monkeypatch.setattr(ui_server, "_proxy_show_runtime_websocket", blocking_proxy)
     websocket = RecordingWebSocket()
 
-    async def _run_until_revoked() -> None:
+    async def _run_after_revocation() -> None:
         task = asyncio.create_task(ui_server.show_runtime_hmr_websocket(websocket, "ses123"))
         await asyncio.wait_for(proxy_started.wait(), timeout=1)
         revoke_engine = create_sqlite_engine()
@@ -5967,14 +5987,15 @@ def test_private_show_page_hmr_websocket_closes_when_resource_access_is_revoked(
             "authorization.changed",
             {"project_ids": [], "resource_kinds": ["show_page"]},
         )
-        await asyncio.wait_for(task, timeout=1)
+        await asyncio.sleep(0.05)
+        assert task.done() is False
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
 
-    asyncio.run(_run_until_revoked())
+    asyncio.run(_run_after_revocation())
 
-    assert websocket.calls == [
-        ("accept", "vite-hmr"),
-        ("close", ui_server._AUTHORIZATION_REFRESH_WEBSOCKET_CLOSE_CODE),
-    ]
+    assert websocket.calls == [("accept", "vite-hmr")]
     assert proxy_calls == [("started", "ses123"), ("cancelled", "ses123")]
 
 

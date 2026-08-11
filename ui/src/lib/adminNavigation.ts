@@ -12,9 +12,9 @@ export const isMemorySettingsPath = (pathname: string): boolean =>
  * `/api/control`; Remote Access drives pair / start / stop / optimize / settings
  * / diagnose (only its status read is remote-permitted); the service, platform,
  * backend, Model Hub, dependency, diagnostics, logs and users pages save or
- * reveal protected local state; Harness opens on `/api/harness/bootstrap`; and
- * the Library's Show Page controls are local-only. They therefore need the
- * trusted-local `can_use_system` capability on top, otherwise a remote owner
+ * reveal protected local state; and Harness opens on `/api/harness/bootstrap`.
+ * They therefore need the trusted-local `can_use_system` capability on top,
+ * otherwise a remote owner
  * gets partial or empty state and every mutation ends in
  * `remote_execution_disabled`.
  *
@@ -38,7 +38,6 @@ export const LOCAL_SYSTEM_ROUTES = [
   '/admin/settings/diagnostics',
   '/admin/settings/logs',
   '/harness',
-  '/apps/library',
 ] as const;
 
 const LOCAL_ONLY_MESSAGING_FIELDS = new Set([

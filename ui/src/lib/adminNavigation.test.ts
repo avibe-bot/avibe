@@ -47,7 +47,6 @@ describe('isLocalSystemPath', () => {
     expect(isLocalSystemPath('/admin/settings/diagnostics')).toBe(true);
     expect(isLocalSystemPath('/admin/settings/logs')).toBe(true);
     expect(isLocalSystemPath('/harness')).toBe(true);
-    expect(isLocalSystemPath('/apps/library')).toBe(true);
   });
 
   it('matches nested paths under a gated destination', () => {
@@ -58,6 +57,11 @@ describe('isLocalSystemPath', () => {
   it('leaves remotely usable destinations open', () => {
     expect(isLocalSystemPath('/admin/settings/messaging')).toBe(false);
     expect(isLocalSystemPath('/admin/organization/overview')).toBe(false);
+    expect(isLocalSystemPath('/apps/files')).toBe(false);
+    expect(isLocalSystemPath('/apps/editor')).toBe(false);
+    expect(isLocalSystemPath('/apps/terminal')).toBe(false);
+    expect(isLocalSystemPath('/apps/library')).toBe(false);
+    expect(isLocalSystemPath('/apps/show/session-1')).toBe(false);
     expect(isLocalSystemPath('/')).toBe(false);
   });
 

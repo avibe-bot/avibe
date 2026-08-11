@@ -22,15 +22,23 @@ export const InstanceAuthorizationProvider = ({
       return {
         remote: false,
         instanceRole: session.instance_role ?? 'owner',
+        hasTemporaryUnrestrictedOrgAppAccess: false,
         capabilities: session.capabilities ?? OWNER_INSTANCE_CAPABILITIES,
       };
     }
     if (!session.authenticated) {
-      return { remote: true, instanceRole: null, capabilities: DENIED_INSTANCE_CAPABILITIES };
+      return {
+        remote: true,
+        instanceRole: null,
+        hasTemporaryUnrestrictedOrgAppAccess: false,
+        capabilities: DENIED_INSTANCE_CAPABILITIES,
+      };
     }
     return {
       remote: true,
       instanceRole: session.instance_role,
+      hasTemporaryUnrestrictedOrgAppAccess:
+        session.temporary_unrestricted_org_app_access,
       capabilities: session.capabilities,
     };
   }, [session]);

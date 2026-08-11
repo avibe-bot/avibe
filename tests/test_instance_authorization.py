@@ -3,11 +3,13 @@ import pytest
 from vibe.authorization import (
     AuthorizationContext,
     InstanceAuthorizationError,
+    REMOTE_HTTP_ACTIVE_ORGANIZATION_MEMBER,
     REMOTE_HTTP_ALLOWED,
     REMOTE_HTTP_LOCAL_ONLY,
     REMOTE_HTTP_PAYLOAD_FILTERED,
     can_receive_workbench_event,
     context_from_session_payload,
+    has_temporary_unrestricted_org_app_access,
     http_authorization_policy,
     require_instance_role,
     required_instance_role,
@@ -41,6 +43,71 @@ def test_remote_roles_allow_chat_without_enabling_local_machine_capabilities() -
     assert trusted_local_context().can_manage_instance is True
     assert trusted_local_context().can_chat is True
     assert trusted_local_context().can_use_cloud_asr is False
+
+
+def test_temporary_org_app_access_is_not_projected_as_a_capability() -> None:
+    member = AuthorizationContext(
+        instance_role="viewer",
+        subject="member-1",
+        organization_id="org-1",
+        organization_member_id="membership-1",
+        organization_role="member",
+        instance_access_source="organization_group",
+        is_remote=True,
+    )
+
+    assert has_temporary_unrestricted_org_app_access(member) is True
+    assert member.capability_projection() == {
+        "is_instance_owner": False,
+        "can_read_instance": True,
+        "can_chat": False,
+        "can_manage_projects": False,
+        "can_manage_agents": False,
+        "can_manage_instance": False,
+        "can_use_agents": False,
+        "can_use_skills": False,
+        "can_use_vault_secrets": False,
+        "can_use_show_pages": True,
+        "can_use_terminal_files": False,
+        "can_use_terminal": False,
+        "can_use_files": False,
+        "can_use_system": False,
+    }
+    assert has_temporary_unrestricted_org_app_access(
+        AuthorizationContext(
+            **{
+                **member.__dict__,
+                "organization_member_id": None,
+            }
+        )
+    ) is False
+    assert has_temporary_unrestricted_org_app_access(
+        AuthorizationContext(
+            **{
+                **member.__dict__,
+                "instance_access_source": "show_page_email",
+            }
+        )
+    ) is False
+
+
+def test_temporary_org_members_receive_show_events_at_viewer_instance_role() -> None:
+    member = AuthorizationContext(
+        instance_role="viewer",
+        organization_id="org-1",
+        organization_member_id="membership-1",
+        organization_role="member",
+        instance_access_source="organization_group",
+        is_remote=True,
+    )
+    non_member = AuthorizationContext(
+        instance_role="viewer",
+        instance_access_source="email",
+        is_remote=True,
+    )
+
+    assert can_receive_workbench_event(member, "show.event") is True
+    assert can_receive_workbench_event(non_member, "show.event") is False
 
 
 @pytest.mark.parametrize(
@@ -171,9 +238,10 @@ def test_http_policy_defaults_unknown_api_to_owner() -> None:
     assert required_instance_role("POST", "/api/sessions/ses-1/fork") == "editor"
     assert required_instance_role("POST", "/api/projects") == "owner"
     assert required_instance_role("GET", "/api/new-management-surface") == "owner"
+    assert required_instance_role("GET", "/api/dock") == "viewer"
     assert required_instance_role("GET", "/status") is None
     assert required_instance_role("GET", "/show/ses-1/") == "viewer"
-    assert required_instance_role("POST", "/show/ses-1/api/action") == "editor"
+    assert required_instance_role("POST", "/show/ses-1/api/action") == "viewer"
     assert required_instance_role("GET", "/assets/app.js") is None
 
 
@@ -254,9 +322,9 @@ def test_remote_http_policy_defaults_local_machine_and_unknown_routes_to_local_o
         ("GET", "/api/backend/codex/runtime", REMOTE_HTTP_LOCAL_ONLY),
         ("GET", "/api/opencode/permission-status", REMOTE_HTTP_LOCAL_ONLY),
         ("GET", "/api/vault/audit", REMOTE_HTTP_ALLOWED),
-        ("GET", "/api/dock", REMOTE_HTTP_ALLOWED),
-        ("POST", "/api/dock/pins", REMOTE_HTTP_LOCAL_ONLY),
-        ("PUT", "/api/dock/order", REMOTE_HTTP_LOCAL_ONLY),
+        ("GET", "/api/dock", REMOTE_HTTP_ACTIVE_ORGANIZATION_MEMBER),
+        ("POST", "/api/dock/pins", REMOTE_HTTP_ACTIVE_ORGANIZATION_MEMBER),
+        ("PUT", "/api/dock/order", REMOTE_HTTP_ACTIVE_ORGANIZATION_MEMBER),
         # A push endpoint is caller-supplied and `send_web_push()` fetches it
         # from this host, so registering or testing one from across the tunnel
         # would let a remote caller aim an outbound request at loopback, a
@@ -305,7 +373,7 @@ def test_remote_http_policy_defaults_local_machine_and_unknown_routes_to_local_o
         ("GET", "/api/bind-codes", REMOTE_HTTP_LOCAL_ONLY),
         ("DELETE", "/api/projects/proj-1", REMOTE_HTTP_LOCAL_ONLY),
         ("POST", "/api/sessions/ses-1/fork", REMOTE_HTTP_LOCAL_ONLY),
-        ("POST", "/show/ses-1/api/action", REMOTE_HTTP_LOCAL_ONLY),
+        ("POST", "/show/ses-1/api/action", REMOTE_HTTP_ACTIVE_ORGANIZATION_MEMBER),
     ],
 )
 def test_remote_http_policy_keeps_approved_management_and_read_surfaces(
@@ -314,6 +382,72 @@ def test_remote_http_policy_keeps_approved_management_and_read_surfaces(
     expected,
 ) -> None:
     assert http_authorization_policy(method, path).remote_access == expected
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("POST", "/api/dock/pins"),
+        ("GET", "/api/dock"),
+        ("DELETE", "/api/dock/pins/ses-1"),
+        ("PUT", "/api/dock/order"),
+        ("GET", "/api/files/list"),
+        ("HEAD", "/api/files/meta"),
+        ("GET", "/api/files/content"),
+        ("GET", "/api/files/search"),
+        ("GET", "/api/files/search_names"),
+        ("POST", "/api/files/upload"),
+        ("POST", "/api/files/mkdir"),
+        ("POST", "/api/files/rename"),
+        ("POST", "/api/files/move"),
+        ("POST", "/api/files/copy"),
+        ("POST", "/api/files/delete"),
+        ("POST", "/api/files/delete/undo"),
+        ("POST", "/api/files/search/replace"),
+        ("POST", "/api/files/search/undo"),
+        ("PUT", "/api/files/write"),
+        ("GET", "/api/browse/favorites"),
+        ("DELETE", "/api/terminal/term-1"),
+        ("POST", "/api/show-pages/ses-1/icon"),
+        ("POST", "/show/ses-1/api/action"),
+        ("PUT", "/show/ses-1/api/settings"),
+        ("DELETE", "/show/ses-1/api/item"),
+    ],
+)
+def test_temporary_org_app_policy_covers_only_the_explicit_app_endpoints(
+    method: str,
+    path: str,
+) -> None:
+    policy = http_authorization_policy(method, path)
+
+    assert policy.minimum_role == "viewer"
+    assert policy.remote_access == REMOTE_HTTP_ACTIVE_ORGANIZATION_MEMBER
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("POST", "/api/files/list"),
+        ("GET", "/api/files/future-operation"),
+        ("POST", "/api/browse"),
+        ("POST", "/api/browse/mkdir"),
+        ("GET", "/api/terminal/term-1"),
+        ("POST", "/api/dock/order"),
+        ("POST", "/api/show-pages/ses-1/icon/extra"),
+        ("POST", "/api/config"),
+        ("POST", "/api/control"),
+        ("POST", "/api/vault/secrets"),
+        ("GET", "/api/future-local-app-like-route"),
+    ],
+)
+def test_temporary_org_app_policy_does_not_open_adjacent_or_sensitive_endpoints(
+    method: str,
+    path: str,
+) -> None:
+    assert (
+        http_authorization_policy(method, path).remote_access
+        != REMOTE_HTTP_ACTIVE_ORGANIZATION_MEMBER
+    )
 
 
 @pytest.mark.parametrize(
@@ -392,18 +526,33 @@ def test_remote_http_policy_keeps_approved_management_and_read_surfaces(
             REMOTE_HTTP_LOCAL_ONLY,
         ),
         ("canAdministerMemory", "POST", "/api/memory/clear", REMOTE_HTTP_LOCAL_ONLY),
-        # Dock/Workbench prefs: the read is remote, the process-global writes
-        # are local until the records are keyed by the authenticated subject.
-        ("dockAndWorkbenchPrefs", "GET", "/api/dock", REMOTE_HTTP_ALLOWED),
+        # Dock is temporarily writable by active Organization members while
+        # Workbench preferences remain a trusted-local control.
+        (
+            "dockAndWorkbenchPrefs",
+            "GET",
+            "/api/dock",
+            REMOTE_HTTP_ACTIVE_ORGANIZATION_MEMBER,
+        ),
         ("dockAndWorkbenchPrefs", "GET", "/api/workbench/prefs", REMOTE_HTTP_ALLOWED),
-        ("dockAndWorkbenchPrefs", "POST", "/api/dock/pins", REMOTE_HTTP_LOCAL_ONLY),
+        (
+            "dockAndWorkbenchPrefs",
+            "POST",
+            "/api/dock/pins",
+            REMOTE_HTTP_ACTIVE_ORGANIZATION_MEMBER,
+        ),
         (
             "dockAndWorkbenchPrefs",
             "DELETE",
             "/api/dock/pins/ses-1",
-            REMOTE_HTTP_LOCAL_ONLY,
+            REMOTE_HTTP_ACTIVE_ORGANIZATION_MEMBER,
         ),
-        ("dockAndWorkbenchPrefs", "PUT", "/api/dock/order", REMOTE_HTTP_LOCAL_ONLY),
+        (
+            "dockAndWorkbenchPrefs",
+            "PUT",
+            "/api/dock/order",
+            REMOTE_HTTP_ACTIVE_ORGANIZATION_MEMBER,
+        ),
         ("dockAndWorkbenchPrefs", "PUT", "/api/workbench/prefs", REMOTE_HTTP_LOCAL_ONLY),
         # canRegisterWebPush: status reads stay remote, but registering or
         # testing an endpoint this host will call does not.

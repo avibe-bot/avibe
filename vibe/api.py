@@ -1317,7 +1317,7 @@ def _apply_session_meta(payloads: list[dict]) -> list[dict]:
     return payloads
 
 
-def list_show_pages() -> dict:
+def list_show_pages(*, user_context: Any = None) -> dict:
     """All Show Pages, newest-first, each enriched with the session title.
 
     Reuses ``ShowPageStore.list_page`` (already ordered by ``updated_at`` desc)
@@ -1330,7 +1330,7 @@ def list_show_pages() -> dict:
     config = V2Config.load()
     store = ShowPageStore()
     try:
-        result = store.list_page(page_request=None)
+        result = store.list_page(page_request=None, user_context=user_context)
         pages = [show_page_payload(page, config=config) for page in result.items]
     finally:
         store.close()
@@ -1350,11 +1350,12 @@ def _show_page_mutation_response(
     *,
     config: V2Config,
     additional_payload: dict | None = None,
+    user_context: Any = None,
 ) -> dict:
     """Return mutation details only when the caller can use the page."""
     from storage import resource_access_service
 
-    context = resource_access_service.resolve_resource_access_context()
+    context = resource_access_service.resolve_resource_access_context(user_context)
     with store.engine.connect() as connection:
         can_use = resource_access_service.can_use_resource(
             context,
@@ -1379,7 +1380,12 @@ def _show_page_mutation_response(
     }
 
 
-def set_show_page_visibility(session_id: str, visibility: str) -> dict:
+def set_show_page_visibility(
+    session_id: str,
+    visibility: str,
+    *,
+    user_context: Any = None,
+) -> dict:
     """Switch a Show Page between private / public / offline.
 
     Raises ``ShowPageError`` (a ``ValueError``) for invalid input, which the
@@ -1390,13 +1396,22 @@ def set_show_page_visibility(session_id: str, visibility: str) -> dict:
     config = V2Config.load()
     store = ShowPageStore()
     try:
-        updated = store.update_visibility(session_id, visibility)
-        return _show_page_mutation_response(store, updated, config=config)
+        updated = store.update_visibility(
+            session_id,
+            visibility,
+            user_context=user_context,
+        )
+        return _show_page_mutation_response(
+            store,
+            updated,
+            config=config,
+            user_context=user_context,
+        )
     finally:
         store.close()
 
 
-def ensure_show_page(session_id: str) -> dict:
+def ensure_show_page(session_id: str, *, user_context: Any = None) -> dict:
     """Create the session's Show Page if it doesn't exist yet; report which.
 
     ``existed`` tells the caller whether the page was already initialized, so the
@@ -1412,20 +1427,20 @@ def ensure_show_page(session_id: str) -> dict:
         # whether IT created the row (so the UI only prompts the agent on a real
         # first creation, not a concurrent ensure). Raises ShowPageError for an
         # archived session — the route maps it to a 4xx.
-        page, created = store.ensure_active(session_id)
+        page, created = store.ensure_active(session_id, user_context=user_context)
         payload = show_page_payload(page, config=config)
     finally:
         store.close()
     return {"ok": True, "existed": not created, **_apply_session_meta([payload])[0]}
 
 
-def get_show_page_access(session_id: str) -> dict:
+def get_show_page_access(session_id: str, *, user_context: Any = None) -> dict:
     """Return the applied authenticated audience and sharing authority."""
 
     from core.show_pages import ShowPageError, ShowPageStore
     from storage import resource_access_service
 
-    context = resource_access_service.resolve_resource_access_context()
+    context = resource_access_service.resolve_resource_access_context(user_context)
     store = ShowPageStore()
     try:
         page = store.get(session_id)
@@ -1481,11 +1496,15 @@ def get_show_page_access(session_id: str) -> dict:
     }
 
 
-def _require_show_page_email_access_owner(session_id: str) -> None:
+def _require_show_page_email_access_owner(
+    session_id: str,
+    *,
+    user_context: Any = None,
+) -> None:
     from core.show_pages import ShowPageError, ShowPageStore
     from storage import resource_access_service
 
-    context = resource_access_service.resolve_resource_access_context()
+    context = resource_access_service.resolve_resource_access_context(user_context)
     store = ShowPageStore()
     try:
         page = store.get(session_id)
@@ -1535,12 +1554,16 @@ def _show_page_email_access_error(exc: Exception):
     return ShowPageError(code, code=code)
 
 
-def get_show_page_authorized_emails(session_id: str) -> dict:
+def get_show_page_authorized_emails(
+    session_id: str,
+    *,
+    user_context: Any = None,
+) -> dict:
     """Return exact email grants for one owner-managed Show Page."""
 
     from vibe import remote_access
 
-    _require_show_page_email_access_owner(session_id)
+    _require_show_page_email_access_owner(session_id, user_context=user_context)
     try:
         result = remote_access.get_show_page_authorized_emails(session_id)
     except Exception as exc:
@@ -1548,12 +1571,17 @@ def get_show_page_authorized_emails(session_id: str) -> dict:
     return {"ok": True, "emails": result["emails"]}
 
 
-def replace_show_page_authorized_emails(session_id: str, emails: list[str]) -> dict:
+def replace_show_page_authorized_emails(
+    session_id: str,
+    emails: list[str],
+    *,
+    user_context: Any = None,
+) -> dict:
     """Replace one Show Page's exact email grants through paired-device auth."""
 
     from vibe import remote_access
 
-    _require_show_page_email_access_owner(session_id)
+    _require_show_page_email_access_owner(session_id, user_context=user_context)
     normalized = sorted({str(email).strip().lower() for email in emails if str(email).strip()})
     try:
         result = remote_access.replace_show_page_authorized_emails(session_id, normalized)
@@ -1566,25 +1594,34 @@ def replace_show_page_authorized_emails(session_id: str, emails: list[str]) -> d
     }
 
 
-def rotate_show_page_share(session_id: str) -> dict:
+def rotate_show_page_share(session_id: str, *, user_context: Any = None) -> dict:
     """Revoke the current public link and issue a new one (public pages only)."""
     from core.show_pages import ShowPageStore
 
     config = V2Config.load()
     store = ShowPageStore()
     try:
-        updated, previous_share_id = store.rotate_share(session_id)
+        updated, previous_share_id = store.rotate_share(
+            session_id,
+            user_context=user_context,
+        )
         return _show_page_mutation_response(
             store,
             updated,
             config=config,
             additional_payload={"previous_share_id": previous_share_id},
+            user_context=user_context,
         )
     finally:
         store.close()
 
 
-def set_show_page_share_id(session_id: str, share_id: str) -> dict:
+def set_show_page_share_id(
+    session_id: str,
+    share_id: str,
+    *,
+    user_context: Any = None,
+) -> dict:
     """Set a custom public link suffix (public pages only).
 
     Like ``rotate_show_page_share`` but with a caller-chosen value; setting it
@@ -1596,19 +1633,29 @@ def set_show_page_share_id(session_id: str, share_id: str) -> dict:
     config = V2Config.load()
     store = ShowPageStore()
     try:
-        updated, previous_share_id = store.set_share_id(session_id, share_id)
+        updated, previous_share_id = store.set_share_id(
+            session_id,
+            share_id,
+            user_context=user_context,
+        )
         return _show_page_mutation_response(
             store,
             updated,
             config=config,
             additional_payload={"previous_share_id": previous_share_id},
+            user_context=user_context,
         )
     finally:
         store.close()
 
 
 def upload_show_page_icon(
-    session_id: str, data: bytes, *, filename: str | None, content_type: str | None
+    session_id: str,
+    data: bytes,
+    *,
+    filename: str | None,
+    content_type: str | None,
+    user_context: Any = None,
 ) -> dict:
     """Write an uploaded image as the page's workspace-root favicon; return the
     refreshed page payload so the Web UI merges it like any other show-page mutation
@@ -1625,7 +1672,7 @@ def upload_show_page_icon(
     config = V2Config.load()
     store = ShowPageStore()
     try:
-        page = store.require_management(session_id)
+        page = store.require_management(session_id, user_context=user_context)
         if store.is_archived(session_id):
             # Archiving leaves the page offline and terminal; the other mutators guard it
             # with session_archived, so a direct icon upload must not slip past that.
