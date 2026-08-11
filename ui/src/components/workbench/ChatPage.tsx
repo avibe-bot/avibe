@@ -430,10 +430,10 @@ export const ChatPage: React.FC = () => {
     () => placeVaultProvisionRequests(messages, vaultRequests),
     [messages, vaultRequests],
   );
-  const transcriptTailVaultRequests = useMemo(
-    () => [...pendingApprovals, ...provisionPlacement.unanchored],
-    [pendingApprovals, provisionPlacement],
-  );
+  // Provision cards belong beside the Agent reply that owns them. Requests whose
+  // owning message is outside the retained window stay unanchored here; they are
+  // intentionally not moved into the transcript footer, so opening a Session
+  // never turns a historical form into a bottom-fixed card or a scroll target.
   // Mirror the latest messages into a ref (updated every render) so effects that
   // must NOT re-run on every message change — chiefly the deep-link jump effect,
   // whose around-fetch would otherwise be cancelled by an SSE/reconcile update —
@@ -2344,9 +2344,11 @@ export const ChatPage: React.FC = () => {
             // BEFORE the archive still holds them in state, though — the same
             // stale-tab case that reaches the archived 409 — and their
             // approve/deny buttons would write to a session that can't accept it.
+            // Only access/sign approvals belong in this footer. Provision forms
+            // are rendered next to their owning Agent message above.
             sessionId && !readOnly ? (
               <VaultChatRequests
-                requests={transcriptTailVaultRequests}
+                requests={pendingApprovals}
                 onResolved={refreshVaultRequests}
                 onOffscreenApprovalsChange={setOffscreenApprovals}
               />

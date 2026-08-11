@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { KeyRound } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
@@ -14,22 +14,23 @@ const isApproval = (request: VaultRequest): boolean => {
 };
 
 /**
- * In-scroll list of a session's pending request cards (design: Form A), rendered at the end of
- * the chat transcript. Presentational — data comes from `usePendingVaultRequests`. Each APPROVAL
- * card is observed individually so the floating bar reflects exactly which approvals have
- * scrolled off-viewport (a visible provision card mustn't suppress an off-screen approval).
+ * In-scroll list of a session's pending approval cards (design: Form A), rendered at the end of
+ * the chat transcript. Presentational — data comes from `usePendingVaultRequests`. Each card is
+ * observed individually so the floating bar reflects exactly which approvals have scrolled
+ * off-viewport.
  */
 export const VaultChatRequests: React.FC<{
   requests: VaultRequest[];
   onResolved: () => void;
   onOffscreenApprovalsChange?: (offscreen: VaultRequest[]) => void;
 }> = ({ requests, onResolved, onOffscreenApprovalsChange }) => {
+  const approvalRequests = useMemo(() => requests.filter(isApproval), [requests]);
   const cardRefs = useRef<Map<string, HTMLElement>>(new Map());
   const offscreen = useRef<Set<string>>(new Set());
 
   const report = useCallback(() => {
-    onOffscreenApprovalsChange?.(requests.filter((request) => offscreen.current.has(request.id)));
-  }, [requests, onOffscreenApprovalsChange]);
+    onOffscreenApprovalsChange?.(approvalRequests.filter((request) => offscreen.current.has(request.id)));
+  }, [approvalRequests, onOffscreenApprovalsChange]);
 
   // Observe each approval card; an approval is "off-screen" when its own card doesn't intersect.
   useEffect(() => {
@@ -48,30 +49,26 @@ export const VaultChatRequests: React.FC<{
     );
     cardRefs.current.forEach((el) => observer.observe(el));
     return () => observer.disconnect();
-  }, [requests, onOffscreenApprovalsChange, report]);
+  }, [approvalRequests, onOffscreenApprovalsChange, report]);
 
   // Drop stale ids for resolved/removed requests, then re-report.
   useEffect(() => {
-    const ids = new Set(requests.map((request) => request.id));
+    const ids = new Set(approvalRequests.map((request) => request.id));
     for (const id of [...offscreen.current]) if (!ids.has(id)) offscreen.current.delete(id);
     report();
-  }, [requests, report]);
+  }, [approvalRequests, report]);
 
-  if (requests.length === 0) return null;
+  if (approvalRequests.length === 0) return null;
   return (
     <div className="flex flex-col gap-2">
-      {requests.map((request) => (
+      {approvalRequests.map((request) => (
         <div
           key={request.id}
           data-request-id={request.id}
-          ref={
-            isApproval(request)
-              ? (el) => {
-                  if (el) cardRefs.current.set(request.id, el);
-                  else cardRefs.current.delete(request.id);
-                }
-              : undefined
-          }
+          ref={(el) => {
+            if (el) cardRefs.current.set(request.id, el);
+            else cardRefs.current.delete(request.id);
+          }}
         >
           <VaultRequestCard request={request} onResolved={onResolved} />
         </div>
