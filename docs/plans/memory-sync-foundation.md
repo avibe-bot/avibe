@@ -21,12 +21,13 @@ generate a manifest containing the sync bootstrap and scrubber digests, pass the
 release guard, and publish those assets before a product Repair action can be
 enabled. This branch intentionally does not publish artifacts, tags, or releases.
 
-The executable acceptance test builds an isolated virtual environment carrying
-a behavioral fake identified as the pinned EverOS version. It invokes the exact
-admitted argv through the artifact bootstrap and proves the expected observable
-contract: Markdown files are scanned and queued work is drained. This is honest
-evidence for Avibe's launch and acceptance boundary; it does not claim that a
-source-string scan proves upstream EverOS behavior.
+The bootstrap acceptance test uses a versionless behavioral fake only to prove
+Avibe's launch, stop-before-import, scrubber-ordering, and argv-rejection
+boundary. A separate required CI contract provisions the hash-locked EverOS
+wheel from `scripts/memory_runtime/uv.lock`, invokes the real module entrypoint
+against an isolated root, and proves that pathless sync scans one Markdown file
+and drains its queue. Neither test downloads or contacts a provider while it is
+running.
 
 `cascade fix --apply` remains deliberately absent. The pinned upstream contract
 only establishes that pathless `cascade sync` may coexist with the live server;

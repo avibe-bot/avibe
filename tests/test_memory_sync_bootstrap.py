@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.metadata
+import importlib.util
 import json
 import os
 import signal
@@ -138,8 +140,8 @@ def test_artifact_scrubber_matches_existing_persistence_redaction(monkeypatch) -
         )
 
 
-def test_pinned_pathless_sync_acceptance_scans_and_drains(tmp_path: Path) -> None:
-    """Execute the admitted argv against a hermetic pinned-artifact behavioral fake."""
+def test_artifact_bootstrap_pathless_sync_acceptance_boundary(tmp_path: Path) -> None:
+    """Exercise bootstrap ordering and argv admission with a behavioral fake."""
 
     venv_dir = tmp_path / "venv"
     subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(venv_dir)], check=True)
@@ -194,17 +196,10 @@ def test_pinned_pathless_sync_acceptance_scans_and_drains(tmp_path: Path) -> Non
     (site / "everos/entrypoints/__init__.py").write_text("", encoding="ascii")
     (main / "cli").mkdir()
     (main / "cli/__init__.py").write_text("", encoding="ascii")
-    distribution = site / f"everos-{EVEROS_VERSION}.dist-info"
-    distribution.mkdir()
-    (distribution / "METADATA").write_text(
-        f"Metadata-Version: 2.1\nName: everos\nVersion: {EVEROS_VERSION}\n",
-        encoding="ascii",
-    )
     (main / "cli/main.py").write_text(
         "import json\n"
         "import os\n"
         "import sys\n"
-        "from importlib.metadata import version\n"
         "from pathlib import Path\n"
         "assert sys.argv[1:] == ['cascade', 'sync']\n"
         "source = Path(os.environ['FAKE_MEMORY_MARKDOWN_ROOT'])\n"
@@ -218,7 +213,6 @@ def test_pinned_pathless_sync_acceptance_scans_and_drains(tmp_path: Path) -> Non
         "queue.write_text(json.dumps(rows), encoding='utf-8')\n"
         "result = {\n"
         "    'argv': sys.argv[1:],\n"
-        "    'everos_version': version('everos'),\n"
         "    'scanned': sorted(str(path.relative_to(source)) for path in source.rglob('*.md')),\n"
         "    'drained': drained,\n"
         "}\n"
@@ -261,7 +255,6 @@ def test_pinned_pathless_sync_acceptance_scans_and_drains(tmp_path: Path) -> Non
         assert scrubbed.stat().st_mtime_ns <= target.stat().st_mtime_ns
         assert json.loads(target.read_text(encoding="utf-8")) == {
             "argv": ["cascade", "sync"],
-            "everos_version": EVEROS_VERSION,
             "scanned": ["alpha.md", "nested/beta.md"],
             "drained": 2,
         }
@@ -318,3 +311,106 @@ def test_pinned_pathless_sync_acceptance_scans_and_drains(tmp_path: Path) -> Non
 
     # An ungated isolated invocation remains inert and normal.
     assert subprocess.run([str(python), "-I", "-c", "print('ok')"], env={k: v for k, v in env.items() if k != "AVIBE_MEMORY_SYNC_BOOTSTRAP"}, capture_output=True, text=True).stdout.strip() == "ok"
+
+
+def test_pinned_everos_pathless_sync_scans_and_drains(tmp_path: Path) -> None:
+    """MEMORY-REPAIR-001: run the lock-pinned CLI against isolated state."""
+
+    required = os.environ.get("AVIBE_REQUIRE_MEMORY_RUNTIME_CONTRACT") == "1"
+    if importlib.util.find_spec("everos") is None:
+        if required:
+            pytest.fail("managed EverOS runtime is required for this contract")
+        pytest.skip("managed EverOS runtime is not installed")
+    assert importlib.metadata.version("everos") == EVEROS_VERSION
+
+    home = tmp_path / "home"
+    runtime_root = tmp_path / "everos-root"
+    scratch = tmp_path / "tmp"
+    for directory in (home, scratch):
+        directory.mkdir()
+    profile = (
+        runtime_root
+        / "default_app"
+        / "default_project"
+        / "users"
+        / "contract-user"
+        / "user.md"
+    )
+    profile.parent.mkdir(parents=True)
+    profile.write_text(
+        "---\n"
+        "user_id: contract-user\n"
+        "summary: Pinned sync contract\n"
+        "explicit_info: []\n"
+        "implicit_traits: []\n"
+        "profile_timestamp_ms: 1\n"
+        "---\n"
+        "Pinned sync contract.\n",
+        encoding="utf-8",
+    )
+    env = {
+        key: os.environ[key]
+        for key in ("PATH", "SYSTEMROOT")
+        if key in os.environ
+    }
+    env.update(
+        {
+            "HOME": str(home),
+            "USERPROFILE": str(home),
+            "XDG_CACHE_HOME": str(home / ".cache"),
+            "XDG_CONFIG_HOME": str(home / ".config"),
+            "XDG_DATA_HOME": str(home / ".local" / "share"),
+            "XDG_STATE_HOME": str(home / ".local" / "state"),
+            "TMPDIR": str(scratch),
+            "EVEROS_ROOT": str(runtime_root),
+            "EVEROS_EMBEDDING__API_KEY": "",
+            "EVEROS_LLM__API_KEY": "",
+            "EVEROS_MULTIMODAL__API_KEY": "",
+            "EVEROS_RERANK__API_KEY": "",
+        }
+    )
+    command = [
+        sys.executable,
+        "-I",
+        "-m",
+        "everos.entrypoints.cli.main",
+        "cascade",
+    ]
+
+    synced = subprocess.run(
+        [*command, "sync"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert synced.returncode == 0, synced.stderr
+    assert "sync complete" in synced.stdout
+    assert "processed 1 row(s)" in synced.stdout
+
+    status = subprocess.run(
+        [*command, "status"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert status.returncode == 0, status.stderr
+    assert "pending:                  0" in status.stdout
+    assert "done:                     1" in status.stdout
+
+    drained = subprocess.run(
+        [*command, "sync"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert drained.returncode == 0, drained.stderr
+    assert "processed 0 row(s)" in drained.stdout
+
+    # ``fix --apply`` is intentionally absent: #1318 has no upstream
+    # online-safety contract for that operation.

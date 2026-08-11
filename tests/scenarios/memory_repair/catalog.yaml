@@ -39,7 +39,8 @@ scenarios:
       test: ui/src/lib/memoryRepair.test.ts
       case: posts the exact confirmed Repair contract and parses the response
     related_tests:
-      - tests/test_memory_sync_bootstrap.py::test_pinned_pathless_sync_acceptance_scans_and_drains
+      - tests/test_memory_sync_bootstrap.py::test_artifact_bootstrap_pathless_sync_acceptance_boundary
+      - tests/test_memory_sync_bootstrap.py::test_pinned_everos_pathless_sync_scans_and_drains
       - tests/test_internal_server.py::test_memory_repair_maps_runtime_status
       - tests/test_internal_client.py::test_memory_repair_signs_owner_and_posts_exact_confirmation
       - tests/test_memory_repair.py::test_repair_runs_sync_beside_live_sidecar_and_projects_health
