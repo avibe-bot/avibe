@@ -117,10 +117,14 @@ reaches a terminal result.
    for each root independently: **deleted**, **partially deleted**, **absent**,
    or **retained**. Settings also shows a generic failure status, not a
    per-root error or reason; read each root's status independently rather than
-   treating the result as a clean reset. Follow the displayed status, inspect
-   the service logs and filesystem permissions for the affected roots, correct
-   the issue, then select **Retry factory reset** to continue any remaining
-   deletion.
+   treating the result as a clean reset. If a root is **retained** or
+   **partially deleted**, inspect the service logs and filesystem permissions
+   for that root and correct the deletion failure. If deletion completed but
+   engine or sidecar activation failed because a persisted LLM or Embedding
+   URL, model, or API key is invalid, correct those processing settings in
+   Settings while the factory-reset recovery intent is pending. Endpoint repair
+   does not fix a retained or partially deleted root. After correcting the
+   applicable cause, select **Retry factory reset** to continue recovery.
    Memory stays fenced and unavailable while the factory-reset recovery intent
    is pending.
    Retry is idempotent: it continues any remaining deletion while preserving
