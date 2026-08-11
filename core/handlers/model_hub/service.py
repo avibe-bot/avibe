@@ -80,7 +80,9 @@ from .oauth import (
 from .provenance import (
     BoundedProvenanceStore,
     ExactHopBlocker,
+    TurnOutcomeProjectionInput,
     exact_hop_blockers,
+    turn_supply_facts,
 )
 from .request import ModelHubRequest
 from .resolver import (
@@ -121,6 +123,7 @@ class ModelHubError(Exception):
         supply_state: Optional[Literal["waiting", "interrupted"]] = None,
         data: Optional[Mapping[str, Any]] = None,
         blockers: Iterable[ExactHopBlocker] = (),
+        turn_outcome: TurnOutcomeProjectionInput | None = None,
     ):
         detail_key = detail or f"modelHub.errors.{code}"
         super().__init__(detail_key)
@@ -130,6 +133,7 @@ class ModelHubError(Exception):
         self.supply_state = supply_state
         self.data = dict(data or {})
         self.blockers = tuple(blockers)
+        self.turn_outcome = turn_outcome
 
 
 class EngineUnavailableError(RuntimeError):
@@ -4033,16 +4037,21 @@ class ModelHubService:
         event_agent = cast(EventAgent, backend)
         candidate_hops = list(resolution.candidate_hops)
         if not candidate_hops:
-            supply_state = (
-                "waiting"
-                if resolution.supply_status == "waiting"
-                else "interrupted"
-            )
+            facts = turn_supply_facts(config, resolution)
             raise ModelHubError(
                 "mapping_target_unavailable",
                 status=409,
-                supply_state=supply_state,
+                supply_state=facts.supply_state,
                 blockers=exact_hop_blockers(resolution),
+                turn_outcome=TurnOutcomeProjectionInput(
+                    outcome="no_candidate",
+                    discriminator=(
+                        "route_unconfigured"
+                        if resolution.route_unconfigured
+                        else "blocked_supply_state"
+                    ),
+                    supply_facts=facts,
+                ),
             )
 
         failed_source: Optional[ModelHubSourceConfig] = None
@@ -4149,6 +4158,15 @@ class ModelHubService:
                         if outcome.http_status is not None and 400 <= outcome.http_status <= 599
                         else 502
                     ),
+                    turn_outcome=TurnOutcomeProjectionInput(
+                        outcome="failed_terminal",
+                        discriminator=(
+                            "streamed_fallback"
+                            if outcome.stream_started
+                            else "request_nonfallback"
+                        ),
+                        stream_started=outcome.stream_started,
+                    ),
                 )
             if decision.action == "fallback":
                 event_reason = cast(EventReason, decision.reason)
@@ -4183,8 +4201,38 @@ class ModelHubService:
                 failed_source = source
                 failed_reason = event_reason
                 continue
-            raise ModelHubError(decision.error_code or "engine_down", status=502)
-        raise ModelHubError("mapping_target_unavailable", status=503)
+            raise ModelHubError(
+                decision.error_code or "engine_down",
+                status=502,
+                turn_outcome=TurnOutcomeProjectionInput(
+                    outcome="failed_terminal",
+                    discriminator="engine_down",
+                ),
+            )
+        final_config = self.store.load()
+        final_resolution = resolve_model_hub_turn(
+            final_config,
+            cast(BackendName, backend),
+            model_id,
+            now=self.now(),
+            unavailable_source_ids=self._unavailable_native_sources(
+                final_config,
+                cast(BackendName, backend),
+            ),
+            supply_channel=supply_channel,
+        )
+        final_facts = turn_supply_facts(final_config, final_resolution)
+        raise ModelHubError(
+            "mapping_target_unavailable",
+            status=503,
+            supply_state=final_facts.supply_state,
+            blockers=exact_hop_blockers(final_resolution),
+            turn_outcome=TurnOutcomeProjectionInput(
+                outcome="exhausted",
+                discriminator="final_supply_state",
+                supply_facts=final_facts,
+            ),
+        )
 
 
 def create_default_service(

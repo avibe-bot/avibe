@@ -46,7 +46,14 @@ from core.handlers.model_hub.events import (
 from core.handlers.model_hub.provenance import (
     BoundedProvenanceStore,
     ExactHopBlocker,
+    SupplyState,
+    TURN_OUTCOME_RENDERING_AUTHORITY,
+    TurnOutcomeProjectionInput,
+    TurnSupplyBlocker,
+    TurnSupplyFacts,
     TurnCorrelationRegistry,
+    project_turn_outcome_copy,
+    render_turn_outcome_copy,
 )
 from core.handlers.model_hub.request import ModelHubRequest
 from core.handlers.model_hub.revocations import CredentialRevocationJournal
@@ -97,48 +104,162 @@ def _assert_valid(schema_name: str, payload: dict) -> None:
     assert not errors, [error.message for error in errors]
 
 
-def test_route_unconfigured_launch_copy_exists_in_each_backend_locale() -> None:
-    locale_launch = {
-        locale: json.loads((Path(__file__).parents[1] / f"vibe/i18n/{locale}.json").read_text(encoding="utf-8"))[
-            "modelHub"
-        ]["launch"]
-        for locale in ("en", "zh")
-    }
+def _turn_outcome_matrix() -> dict[str, str]:
+    lines = (
+        Path(__file__).parents[1] / "docs/plans/model-hub.md"
+    ).read_text(encoding="utf-8").splitlines()
+    heading = next(
+        index
+        for index, line in enumerate(lines)
+        if line.startswith("**Turn-outcome copy matrix")
+    )
+    table = next(
+        index
+        for index in range(heading + 1, len(lines))
+        if lines[index].startswith("| Decision |")
+    )
+    rows: dict[str, str] = {}
+    for line in lines[table + 2 :]:
+        if not line.startswith("|"):
+            break
+        cells = [cell.strip() for cell in line.strip("|").split("|")]
+        rows[cells[0].strip("`")] = cells[1].strip("`")
+    return rows
 
-    assert locale_launch["en"].keys() == locale_launch["zh"].keys()
-    assert all("{model}" in launch["route_unconfigured"] for launch in locale_launch.values())
+
+def test_turn_outcome_rendering_authority_covers_matrix_and_locales() -> None:
+    assert _turn_outcome_matrix() == {
+        decision: rule.outcome
+        for decision, rule in TURN_OUTCOME_RENDERING_AUTHORITY.items()
+    }
+    assert len(
+        {
+            (rule.outcome, rule.discriminator)
+            for rule in TURN_OUTCOME_RENDERING_AUTHORITY.values()
+        }
+    ) == len(TURN_OUTCOME_RENDERING_AUTHORITY)
+
+    projected_keys = {
+        key
+        for rule in TURN_OUTCOME_RENDERING_AUTHORITY.values()
+        for _variant, key in rule.copy_keys
+        if key is not None
+    }
+    locale_launch_keys = None
+    for locale in ("en", "zh"):
+        payload = json.loads(
+            (Path(__file__).parents[1] / f"vibe/i18n/{locale}.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        launch_keys = {
+            f"modelHub.launch.{key}" for key in payload["modelHub"]["launch"]
+        }
+        locale_launch_keys = locale_launch_keys or launch_keys
+        assert launch_keys == locale_launch_keys
+        assert launch_keys == {
+            key for key in projected_keys if key.startswith("modelHub.launch.")
+        }
+        assert all(i18n_t(key, locale) != key for key in projected_keys)
+
+
+def test_turn_outcome_copy_projection_has_one_runtime_owner() -> None:
+    root = Path(__file__).parents[1]
+    owner = root / "core/handlers/model_hub/provenance.py"
+    runtime_files = [
+        *sorted((root / "core/handlers/model_hub").glob("*.py")),
+        root / "modules/agents/model_hub.py",
+    ]
+
+    assert "modelHub.launch." in owner.read_text(encoding="utf-8")
+    for path in runtime_files:
+        if path == owner:
+            continue
+        source = path.read_text(encoding="utf-8")
+        assert "modelHub.launch." not in source
+        assert '"copy_key"' not in source
+
+
+@pytest.mark.parametrize(
+    ("decision", "variant", "expected_key"),
+    tuple(
+        (decision, variant, key)
+        for decision, rule in TURN_OUTCOME_RENDERING_AUTHORITY.items()
+        for variant, key in rule.copy_keys
+    ),
+)
+def test_every_turn_outcome_matrix_variant_projects_or_stays_silent(
+    decision: str,
+    variant: str,
+    expected_key: str | None,
+) -> None:
+    rule = TURN_OUTCOME_RENDERING_AUTHORITY[decision]
+    supply_state = variant if variant in {"waiting", "interrupted"} else "waiting"
+    projection = TurnOutcomeProjectionInput(
+        outcome=rule.outcome,
+        discriminator=rule.discriminator,
+        supply_facts=TurnSupplyFacts(
+            backend="claude",
+            model="menu-model",
+            supply_state=cast(SupplyState, supply_state),
+            source="Exact source",
+            retry_at=NOW.isoformat(),
+            blockers=(TurnSupplyBlocker("Exact source", "model_unsupported"),),
+        ),
+        stream_started=variant == "stream_started",
+        next_current_changed=variant == "next_current",
+    )
+
+    copy = project_turn_outcome_copy(projection)
+
+    assert (copy.key if copy is not None else None) == expected_key
+    rendered = render_turn_outcome_copy(projection, "en")
+    assert (rendered is None) == (expected_key is None)
+
+
+def test_route_unconfigured_launch_copy_exists_in_each_backend_locale() -> None:
+    facts = TurnSupplyFacts(
+        backend="claude",
+        model="menu-model",
+        supply_state="interrupted",
+    )
     failure = ModelHubError(
         "no_candidate",
-        data={
-            "copy_key": "route_unconfigured",
-            "model": "menu-model",
-            "blockers": [],
-        },
+        turn_outcome=TurnOutcomeProjectionInput(
+            outcome="no_candidate",
+            discriminator="route_unconfigured",
+            supply_facts=facts,
+        ),
     )
-    for locale, launch in locale_launch.items():
+    for locale in ("en", "zh"):
         rendered = _localized_launch_error(
             SimpleNamespace(config=SimpleNamespace(language=locale)),
             "claude",
             "menu-model",
             failure,
         )
-        assert rendered.detail == launch["route_unconfigured"].format(model="menu-model")
+        assert rendered.detail == i18n_t(
+            "modelHub.launch.route_unconfigured",
+            locale,
+            model="menu-model",
+        )
 
 
 def test_structural_blocker_copy_uses_its_reason_instead_of_source_status() -> None:
     failure = ModelHubError(
         "no_candidate",
-        data={
-            "copy_key": "interrupted",
-            "model": "menu-model",
-            "blockers": [
-                {
-                    "source": "Exact source",
-                    "status": "standby",
-                    "reason": "model_unsupported",
-                }
-            ],
-        },
+        turn_outcome=TurnOutcomeProjectionInput(
+            outcome="no_candidate",
+            discriminator="blocked_supply_state",
+            supply_facts=TurnSupplyFacts(
+                backend="claude",
+                model="menu-model",
+                supply_state="interrupted",
+                blockers=(
+                    TurnSupplyBlocker("Exact source", "model_unsupported"),
+                ),
+            ),
+        ),
     )
 
     rendered = _localized_launch_error(
@@ -615,7 +736,11 @@ def test_gateway_terminalizer_records_pre_observer_engine_down_before_return(
                     headers={"Authorization": f"Bearer {token}"},
                 )
                 assert response.status == 503
-                await response.read()
+                payload = await response.json()
+                assert payload["error"]["message"] == i18n_t(
+                    "modelHub.errors.engine_down",
+                    "en",
+                )
 
             trace = gateway.correlation._traces["turn_pre_observer_engine_down"]
             assert trace.pending_attempt is None
@@ -861,6 +986,14 @@ def test_gateway_preserves_exhausted_provenance_after_all_hops_fallback(
                 assert response.status == 503
                 payload = await response.json()
                 assert payload["error"]["code"] == "mapping_target_unavailable"
+                cooled = service.store.load().sources
+                assert payload["error"]["message"] == i18n_t(
+                    "modelHub.launch.waiting",
+                    "en",
+                    model=requested_model,
+                    source=", ".join(source.display_name for source in cooled),
+                    retry_at=min(source.state.retry_at or "" for source in cooled),
+                )
         finally:
             await gateway.close()
 

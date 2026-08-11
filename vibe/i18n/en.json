@@ -717,6 +717,7 @@
       "mapping_target_unavailable": "The selected model is unavailable for this backend.",
       "mode_switch_blocked": "This operation is blocked by the current supply mode or selection.",
       "engine_down": "The local Model Hub runtime is unavailable.",
+      "engine_down_streamed": "The local Model Hub runtime is unavailable. This turn's output may be incomplete.",
       "consent_required": "Explicit consent is required for experimental subscription routing.",
       "migration_item_conflict": "This migration item conflicts with current Model Hub state.",
       "stream_interrupted": "The upstream stream was interrupted.",
@@ -759,12 +760,8 @@
       "retry": "The next turn has already switched routes. Retry directly.",
       "waiting": "Model {model} is temporarily unavailable. Waiting for {source} to recover at {retry_at}.",
       "interrupted": "Model {model} is unavailable: {blockers}. Open Models to resolve it.",
-      "native_cli_unavailable": "CLI login is not available in this process",
       "route_unconfigured": "Model {model} has no configured route. Open Models to configure one.",
-      "request_incompatible": "This request is incompatible; switching Sources will not help.",
-      "no_enabled_source": "Model {model} has no enabled source. Open Models to configure one.",
-      "no_eligible_source": "Model {model} has no source eligible for {backend}. Open Models to configure one.",
-      "model_unsupported": "No source supports model {model}. Open Models to configure one."
+      "request_incompatible": "This request is incompatible; switching Sources will not help."
     }
   },
   "remote_access": {

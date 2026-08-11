@@ -17,8 +17,12 @@ from .adapter import RawCallOutcome, RawOutcomeKind
 from .classification import classify_outcome
 from .provenance import (
     BoundedProvenanceStore,
+    ENGINE_DOWN_TURN_OUTCOME,
     GatewayTurnTerminalizer,
+    REQUEST_NONFALLBACK_TURN_OUTCOME,
+    TurnOutcomeProjectionInput,
     TurnCorrelationRegistry,
+    render_turn_outcome_copy,
 )
 from .request import ModelHubRequest
 from .service import ModelHubError, ModelHubService, ResolvedInvocation
@@ -156,20 +160,36 @@ class ModelHubTurnGateway:
             endpoint = request.match_info["endpoint"].strip("/")
             if backend not in {"claude", "codex", "opencode"} or endpoint not in _SUPPORTED_PATHS:
                 terminalizer.fail("protocol_error")
-                return self._error_response(status=404, code="not_found_error")
+                return self._error_response(
+                    status=404,
+                    code="not_found_error",
+                    turn_outcome=REQUEST_NONFALLBACK_TURN_OUTCOME,
+                )
             try:
                 payload = await request.json(loads=json.loads)
             except (json.JSONDecodeError, UnicodeDecodeError):
                 terminalizer.fail("invalid_parameter")
-                return self._error_response(status=400, code="invalid_request_error")
+                return self._error_response(
+                    status=400,
+                    code="invalid_request_error",
+                    turn_outcome=REQUEST_NONFALLBACK_TURN_OUTCOME,
+                )
             if not isinstance(payload, dict):
                 terminalizer.fail("invalid_parameter")
-                return self._error_response(status=400, code="invalid_request_error")
+                return self._error_response(
+                    status=400,
+                    code="invalid_request_error",
+                    turn_outcome=REQUEST_NONFALLBACK_TURN_OUTCOME,
+                )
             model_id = payload.get("model")
             stream = payload.get("stream", False)
             if not isinstance(model_id, str) or not model_id or not isinstance(stream, bool):
                 terminalizer.fail("invalid_parameter")
-                return self._error_response(status=400, code="invalid_request_error")
+                return self._error_response(
+                    status=400,
+                    code="invalid_request_error",
+                    turn_outcome=REQUEST_NONFALLBACK_TURN_OUTCOME,
+                )
             resolution_model = terminalizer.resolution_model(model_id)
 
             def observe_attempt(
@@ -212,11 +232,25 @@ class ModelHubTurnGateway:
                     attempt_observer=observe_attempt,
                 )
             except ModelHubError as exc:
-                if exc.code == "engine_down":
+                turn_outcome = exc.turn_outcome
+                if turn_outcome is None and exc.code == "engine_down":
+                    turn_outcome = ENGINE_DOWN_TURN_OUTCOME
+                if (
+                    turn_outcome is not None
+                    and turn_outcome.discriminator == "engine_down"
+                ):
                     terminalizer.engine_down()
-                elif exc.supply_state is not None:
+                elif (
+                    turn_outcome is not None
+                    and turn_outcome.outcome == "no_candidate"
+                    and exc.supply_state is not None
+                ):
                     terminalizer.mark_no_candidate(exc.supply_state, exc.blockers)
-                return self._error_response(status=exc.status, code=exc.code)
+                return self._error_response(
+                    status=exc.status,
+                    code=exc.code,
+                    turn_outcome=turn_outcome,
+                )
             return await self._resolved_response(
                 request,
                 resolved,
@@ -239,7 +273,11 @@ class ModelHubTurnGateway:
         handle = resolved.handle
         if handle is None or handle.stream is None:
             terminalizer.engine_down()
-            return self._error_response(status=502, code="engine_down")
+            return self._error_response(
+                status=502,
+                code="engine_down",
+                turn_outcome=ENGINE_DOWN_TURN_OUTCOME,
+            )
 
         if not stream:
             payload = bytearray()
@@ -255,6 +293,7 @@ class ModelHubTurnGateway:
                 return self._outcome_response(
                     outcome,
                     error_code=decision.error_code,
+                    turn_outcome=REQUEST_NONFALLBACK_TURN_OUTCOME,
                 )
             return web.Response(
                 status=200,
@@ -291,6 +330,7 @@ class ModelHubTurnGateway:
         outcome: RawCallOutcome,
         *,
         error_code: Optional[str] = None,
+        turn_outcome: TurnOutcomeProjectionInput | None = None,
     ) -> web.Response:
         if outcome.kind == RawOutcomeKind.SUCCESS:
             return web.Response(status=200, body=b"{}", content_type="application/json")
@@ -298,13 +338,27 @@ class ModelHubTurnGateway:
         return self._error_response(
             status=status,
             code=error_code or outcome.error_code or "api_error",
+            turn_outcome=turn_outcome,
         )
 
-    def _error_response(self, *, status: int, code: str) -> web.Response:
-        message_key = f"modelHub.launch.{code}"
-        message = i18n_t(message_key, self._language_provider() or "en")
+    def _error_response(
+        self,
+        *,
+        status: int,
+        code: str,
+        turn_outcome: TurnOutcomeProjectionInput | None = None,
+    ) -> web.Response:
+        language = self._language_provider() or "en"
+        message = (
+            render_turn_outcome_copy(turn_outcome, language)
+            if turn_outcome is not None
+            else None
+        )
+        message_key = f"modelHub.errors.{code}"
+        if message is None:
+            message = i18n_t(message_key, language)
         if message == message_key:
-            message = "Model Hub request failed"
+            message = i18n_t("modelHub.errors.upstream_error", language)
         return web.json_response(
             {
                 "error": {

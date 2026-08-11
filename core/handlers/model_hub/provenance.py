@@ -10,7 +10,9 @@ import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Literal, Optional
+from typing import Any, Iterable, Literal, Mapping, Optional
+
+from config.v2_config import ModelHubConfig
 
 from core.run_settlement import (
     SETTLED_BY_BACKEND_REFRESH,
@@ -18,11 +20,16 @@ from core.run_settlement import (
     SETTLED_BY_STOPPED,
     SETTLED_BY_TERMINAL_RESULT,
 )
+from vibe.i18n import t as i18n_t
 
 from .adapter import RawCallOutcome
 from .classification import ResolutionDecision, ResolutionReason
-from .events import EVENT_REASON_AUTHORITY, SOURCE_DETAIL_EVENT_REASONS
-from .resolver import ModelHubTurnResolution
+from .events import (
+    EVENT_REASON_AUTHORITY,
+    SOURCE_DETAIL_EVENT_REASONS,
+    event_reason_label,
+)
+from .resolver import ModelHubTurnResolution, source_eligible_for_backend
 
 
 BackendName = Literal["claude", "codex", "opencode"]
@@ -94,6 +101,271 @@ def exact_hop_blockers(
             )
         )
     return tuple(blockers)
+
+
+@dataclass(frozen=True)
+class TurnSupplyBlocker:
+    source: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class TurnSupplyFacts:
+    backend: BackendName
+    model: str
+    supply_state: SupplyState
+    source: str = ""
+    retry_at: str = ""
+    blockers: tuple[TurnSupplyBlocker, ...] = ()
+
+
+@dataclass(frozen=True)
+class TurnOutcomeRenderingRule:
+    outcome: str
+    discriminator: str
+    copy_keys: tuple[tuple[str, str | None], ...]
+
+
+# This is the only executable projection of the authoritative section 4.5 matrix.
+TURN_OUTCOME_RENDERING_AUTHORITY: dict[str, TurnOutcomeRenderingRule] = {
+    "turn.served": TurnOutcomeRenderingRule(
+        outcome="served",
+        discriminator="any",
+        copy_keys=(("default", None),),
+    ),
+    "turn.exhausted": TurnOutcomeRenderingRule(
+        outcome="exhausted",
+        discriminator="final_supply_state",
+        copy_keys=(
+            ("waiting", "modelHub.launch.waiting"),
+            ("interrupted", "modelHub.launch.interrupted"),
+        ),
+    ),
+    "turn.request_nonfallback": TurnOutcomeRenderingRule(
+        outcome="failed_terminal",
+        discriminator="request_nonfallback",
+        copy_keys=(("default", "modelHub.launch.request_incompatible"),),
+    ),
+    "turn.engine_down": TurnOutcomeRenderingRule(
+        outcome="failed_terminal",
+        discriminator="engine_down",
+        copy_keys=(
+            ("default", "modelHub.errors.engine_down"),
+            ("stream_started", "modelHub.errors.engine_down_streamed"),
+        ),
+    ),
+    "turn.streamed_fallback": TurnOutcomeRenderingRule(
+        outcome="failed_terminal",
+        discriminator="streamed_fallback",
+        copy_keys=(
+            ("next_current", "modelHub.launch.retry"),
+            ("waiting", "modelHub.launch.waiting"),
+            ("interrupted", "modelHub.launch.interrupted"),
+        ),
+    ),
+    "turn.no_candidate.unconfigured": TurnOutcomeRenderingRule(
+        outcome="no_candidate",
+        discriminator="route_unconfigured",
+        copy_keys=(("default", "modelHub.launch.route_unconfigured"),),
+    ),
+    "turn.no_candidate.blocked": TurnOutcomeRenderingRule(
+        outcome="no_candidate",
+        discriminator="blocked_supply_state",
+        copy_keys=(
+            ("waiting", "modelHub.launch.waiting"),
+            ("interrupted", "modelHub.launch.interrupted"),
+        ),
+    ),
+    "turn.canceled": TurnOutcomeRenderingRule(
+        outcome="canceled",
+        discriminator="fsm_canceled",
+        copy_keys=(("default", None),),
+    ),
+}
+
+
+@dataclass(frozen=True)
+class TurnOutcomeProjectionInput:
+    outcome: str
+    discriminator: str
+    supply_facts: TurnSupplyFacts | None = None
+    stream_started: bool = False
+    next_current_changed: bool = False
+
+
+REQUEST_NONFALLBACK_TURN_OUTCOME = TurnOutcomeProjectionInput(
+    outcome="failed_terminal",
+    discriminator="request_nonfallback",
+)
+ENGINE_DOWN_TURN_OUTCOME = TurnOutcomeProjectionInput(
+    outcome="failed_terminal",
+    discriminator="engine_down",
+)
+
+
+@dataclass(frozen=True)
+class TurnOutcomeCopy:
+    key: str
+    params: Mapping[str, Any]
+
+
+def supply_interruption_reason(
+    config: ModelHubConfig,
+    resolution: ModelHubTurnResolution,
+) -> str:
+    """Return the exact-chain structural reason used by events and copy facts."""
+
+    structural_reason = resolution.structural_blocker_reason
+    if structural_reason in {
+        "route_unconfigured",
+        "source_missing",
+        "model_unsupported",
+        "native_cli_unavailable",
+    }:
+        return structural_reason
+    order = config.effective_source_order(resolution.backend)
+    sources_by_id = {source.id: source for source in config.sources}
+    enabled_sources = [
+        sources_by_id[source_id]
+        for source_id in order
+        if source_id in sources_by_id
+    ]
+    if not enabled_sources:
+        if config.sources and not any(
+            source_eligible_for_backend(source, resolution.backend)
+            for source in config.sources
+        ):
+            return "no_eligible_source"
+        return "no_enabled_source"
+    if not any(
+        source_eligible_for_backend(source, resolution.backend)
+        for source in enabled_sources
+    ):
+        return "no_eligible_source"
+    return "model_unsupported"
+
+
+def turn_supply_facts(
+    config: ModelHubConfig,
+    resolution: ModelHubTurnResolution,
+) -> TurnSupplyFacts:
+    """Project user-visible facts from one canonical exact-chain inspection."""
+
+    model = resolution.requested_model or resolution.target_model
+    supply_state: SupplyState = (
+        "waiting" if resolution.supply_status == "waiting" else "interrupted"
+    )
+    cooling = tuple(
+        source
+        for source in resolution.matching_sources
+        if source.state.status == "cooldown" and source.state.retry_at
+    )
+    blockers: list[TurnSupplyBlocker] = []
+    for inspection in resolution.inspected_hops:
+        if inspection.runnable:
+            continue
+        source = inspection.source
+        reason = inspection.reason
+        if reason not in EVENT_REASON_AUTHORITY and source is not None:
+            reason = SOURCE_DETAIL_EVENT_REASONS.get(
+                source.state.detail_key or "",
+                reason,
+            )
+        if reason not in EVENT_REASON_AUTHORITY:
+            continue
+        blockers.append(
+            TurnSupplyBlocker(
+                source=(
+                    source.display_name
+                    if source is not None
+                    else str(inspection.source_id or "")
+                ),
+                reason=reason,
+            )
+        )
+    if supply_state == "interrupted" and not blockers:
+        blockers.append(
+            TurnSupplyBlocker(
+                source="",
+                reason=supply_interruption_reason(config, resolution),
+            )
+        )
+    return TurnSupplyFacts(
+        backend=resolution.backend,
+        model=model,
+        supply_state=supply_state,
+        source=", ".join(source.display_name for source in cooling),
+        retry_at=min(
+            (source.state.retry_at or "" for source in cooling),
+            default="",
+        ),
+        blockers=tuple(blockers),
+    )
+
+
+def project_turn_outcome_copy(
+    projection: TurnOutcomeProjectionInput,
+) -> TurnOutcomeCopy | None:
+    """Project copy from the recorded outcome and its sole matrix discriminator."""
+
+    matches = tuple(
+        rule
+        for rule in TURN_OUTCOME_RENDERING_AUTHORITY.values()
+        if rule.outcome == projection.outcome
+        and rule.discriminator == projection.discriminator
+    )
+    if len(matches) != 1:
+        raise ValueError("Turn outcome does not match its rendering discriminator")
+    rule = matches[0]
+    copy_keys = dict(rule.copy_keys)
+    variant = "default"
+    if projection.next_current_changed and "next_current" in copy_keys:
+        variant = "next_current"
+    elif projection.stream_started and "stream_started" in copy_keys:
+        variant = "stream_started"
+    elif (
+        projection.supply_facts is not None
+        and projection.supply_facts.supply_state in copy_keys
+    ):
+        variant = projection.supply_facts.supply_state
+    if variant not in copy_keys:
+        raise ValueError("Turn outcome is missing its required rendering fact")
+    key = copy_keys[variant]
+    if key is None:
+        return None
+    facts = projection.supply_facts
+    return TurnOutcomeCopy(
+        key=key,
+        params={
+            "model": facts.model if facts is not None else "",
+            "backend": facts.backend if facts is not None else "",
+            "source": facts.source if facts is not None else "",
+            "retry_at": facts.retry_at if facts is not None else "",
+            "blockers": facts.blockers if facts is not None else (),
+        },
+    )
+
+
+def render_turn_outcome_copy(
+    projection: TurnOutcomeProjectionInput,
+    language: str,
+) -> str | None:
+    copy = project_turn_outcome_copy(projection)
+    if copy is None:
+        return None
+    params = dict(copy.params)
+    blockers = params.get("blockers", ())
+    if isinstance(blockers, tuple):
+        rendered = []
+        for blocker in blockers:
+            if not isinstance(blocker, TurnSupplyBlocker):
+                continue
+            label = event_reason_label(blocker.reason, language)
+            rendered.append(
+                f"{blocker.source}: {label}" if blocker.source else label
+            )
+        params["blockers"] = ", ".join(rendered)
+    return i18n_t(copy.key, language, **params)
 
 
 @dataclass

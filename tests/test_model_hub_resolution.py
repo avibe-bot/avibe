@@ -30,6 +30,12 @@ from core.handlers.model_hub.adapter import (
 )
 from core.handlers.model_hub.events import BoundedEventLog
 from core.handlers.model_hub.errors import ModelDiscoveryError
+from core.handlers.model_hub.provenance import (
+    TurnOutcomeProjectionInput,
+    TurnSupplyBlocker,
+    project_turn_outcome_copy,
+    turn_supply_facts,
+)
 from core.handlers.model_hub.request import ModelHubRequest
 from core.handlers.model_hub.resolver import allowed_origins, resolve_model_hub_turn
 from core.handlers.model_hub.resolver import (
@@ -43,7 +49,6 @@ from core.handlers.model_hub.service import (
     _await_owned_task_before_settling,
     _matching_v1_model_id,
 )
-from modules.agents.model_hub import ModelHubRuntimeRouter
 
 
 class MemoryStore:
@@ -686,17 +691,20 @@ def test_launch_failure_reports_unsupported_exact_hop():
     config = _config([source], model="stale-model")
     resolution = resolve_model_hub_turn(config, "claude", "stale-model")
 
-    failure = ModelHubRuntimeRouter._launch_failure(config, resolution)
+    facts = turn_supply_facts(config, resolution)
+    copy = project_turn_outcome_copy(
+        TurnOutcomeProjectionInput(
+            outcome="no_candidate",
+            discriminator="blocked_supply_state",
+            supply_facts=facts,
+        )
+    )
 
-    assert failure["copy_key"] == "interrupted"
-    assert failure["blockers"] == [
-        {
-            "source": source.display_name,
-            "status": source.state.status,
-            "detail_key": source.state.detail_key,
-            "reason": "model_unsupported",
-        }
-    ]
+    assert copy is not None
+    assert copy.key == "modelHub.launch.interrupted"
+    assert facts.blockers == (
+        TurnSupplyBlocker(source.display_name, "model_unsupported"),
+    )
 
 
 def test_exact_hop_inspection_is_the_single_identity_and_supply_authority():
