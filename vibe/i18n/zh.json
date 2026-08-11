@@ -76,6 +76,7 @@
       "burstHint": "这个 callback 来源正在频繁触发。请检查相关 watch/task；如果它在循环触发，请 pause、remove 或 update。"
     },
     "run": {
+      "sessionTurnGateUnavailable": "\u672c\u6b21 Agent Run \u65e0\u6cd5\u63a5\u5165\uff1aSession turn gate \u5f53\u524d\u4e0d\u53ef\u7528\u3002\u8bf7\u7b49\u5f85\u670d\u52a1\u542f\u52a8\u5b8c\u6210\u540e\u91cd\u8bd5\u3002",
       "interrupted": {
         "noTerminalResult": "[Avibe Harness] 本次 run 结束时 Agent 没有产出结果。turn 在 Agent 回复前就被释放，因此没有记录任何输出。请检查 Agent 日志；如果这项工作仍需完成，请重新运行。",
         "stopped": "[Avibe Harness] 本次 run 在 Agent 产出结果前被停止，因此没有最终结果。Agent 此前已经发出的输出仍会保留在这次 run 上。",
@@ -91,7 +92,6 @@
         "canceled": "本次 run 在产出结果前被取消，因此没有结果。",
         "failed": "本次 run 在产出结果前失败，因此没有结果。"
       },
-      "sendNowGateUnavailable": "本次 send-now run 无法接入：Session turn gate 当前不可用。请等待服务启动完成后重试。",
       "bindingUnresolvedRetry": "绑定的 Agent 会话 {session} 无法接收请求({attempt}/{threshold})。连续 {threshold} 次出现目标会话不可用后，该定义将自动暂停。请用以下命令重新绑定:vibe task update {id} --session-id <id>。",
       "bindingUnresolvedPaused": "已暂停:绑定的 Agent 会话 {session} 无法接收请求，该定义继续运行只会反复失败。请用以下命令重新绑定:vibe task update {id} --session-id <id>;然后恢复:vibe task resume {id}。"
     },

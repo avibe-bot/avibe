@@ -240,6 +240,16 @@ def delivery_admission_context(delivery: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
+def delivery_has_history_event(delivery: dict[str, Any], *, kind: str) -> bool:
+    """Return whether a Delivery recorded an event of the requested kind."""
+
+    events = _history(delivery.get("delivery_history_json"))["events"]
+    return any(
+        isinstance(event, dict) and str(event.get("kind") or "") == kind
+        for event in events
+    )
+
+
 def active_turn(conn: Connection, session_id: str) -> dict[str, Any] | None:
     return _one(
         conn,
