@@ -192,45 +192,36 @@ def _legacy_model_hub_eligible_sources(
     return eligible
 
 
-def _legacy_model_hub_unmapped_hop_model_id(
+def _legacy_model_hub_ordered_sources(
+    raw_agent: dict,
     backend: str,
-    menu_model_id: str,
-    source: "ModelHubSourceConfig",
-    menu_ids: tuple[str, ...],
-) -> str | None:
-    """Return the model ``source`` supplied for an *unmapped* legacy menu id.
+    sources_payload: object,
+) -> list["ModelHubSourceConfig"]:
+    """Return the source walk a legacy agent resolved through, in its order.
 
-    Legacy resolution walked the source order for every menu model, not only
-    the mapped ones: an unmapped model kept its own id and was served by the
-    first ordered source whose inventory could answer it, with a Claude family
-    alias resolving to the newest discovered model. Skipping that walk would
-    give every unmapped model an empty route, so the common Hub-mode config
-    that never needed a mapping would migrate into a service that starts with
-    no model left to run.
-
-    The frozen add-time matcher decides the match, so a migrated hop is the one
-    an add would persist today, and every OpenCode identity stays computed by
-    its single authority. The plain fallback keeps a manually added model, which
-    that matcher ignores by design, routable on a fixed menu whose ids are model
-    ids already. Two legacy shapes are deliberately left behind rather than
-    reproduced with a route the live rules cannot produce: an alias served by a
-    non-native source, since v5 pins alias resolution to the native CLI, and a
-    manually added OpenCode model, whose identity only the resolver may derive.
+    A legacy ``follow`` policy did not trust the persisted order: it recomputed
+    the recommendation on every load, so the stored list could be stale by an
+    added or removed source. Migrating that stored list verbatim would freeze a
+    stale order into an explicit v5 route, so the recommendation is recomputed
+    here exactly as the load path did. A ``custom`` policy kept its order and
+    keeps it here.
     """
 
-    from core.handlers.model_hub.resolver import matching_v1_model_id
-
-    matched = matching_v1_model_id(
-        backend=backend,
-        requested_model=menu_model_id,
-        source=source,
-        checked_models=menu_ids,
-    )
-    if matched is not None or backend == "opencode":
-        return matched
-    return next(
-        (model.id for model in source.models if model.id == menu_model_id),
-        None,
+    eligible = _legacy_model_hub_eligible_sources(sources_payload, backend)
+    raw_sources = raw_agent.get("sources")
+    raw_sources = raw_sources if isinstance(raw_sources, dict) else {}
+    if raw_sources.get("policy") == "follow":
+        recommended = ModelHubConfig(sources=list(eligible.values())).recommended_source_order(backend)
+        return [eligible[source_id] for source_id in recommended]
+    order = raw_sources.get("order")
+    if not isinstance(order, list):
+        return []
+    return list(
+        {
+            source_id: eligible[source_id]
+            for source_id in order
+            if isinstance(source_id, str) and source_id in eligible
+        }.values()
     )
 
 
@@ -246,9 +237,10 @@ def _legacy_model_hub_routes(
     under its own id. A v5 hop pins model and source together, so both shapes
     are preserved by enumerating that ordered walk: the mapping's target for a
     mapped model, and whatever each source could actually answer for an
-    unmapped one. Everything a v5 route cannot express — a mapping for a model
-    the current menu no longer offers, or one with no eligible source to walk —
-    degrades to an empty route rather than inventing a supply path.
+    unmapped one. A mapping with no eligible source to walk degrades to an
+    empty route rather than inventing a supply path, and one for a model the
+    current menu no longer offers is dropped with the menu id it named; both are
+    logged so an upgrade never loses a supply path silently.
     """
 
     if backend in {"claude", "codex"}:
@@ -258,7 +250,10 @@ def _legacy_model_hub_routes(
         checked = menu.get("checked") if isinstance(menu, dict) else None
         menu_ids = tuple(item for item in checked if isinstance(item, str)) if isinstance(checked, list) else ()
 
+    from core.handlers.model_hub.resolver import legacy_supplied_model_id
+
     targets: dict[str, str] = {}
+    retired: set[str] = set()
     mappings = raw_agent.get("mappings")
     # Legacy resolution only consulted mappings for fixed menus, so an open
     # (OpenCode) menu's mappings were already inert and stay inert here.
@@ -270,23 +265,14 @@ def _legacy_model_hub_routes(
             target_model_id = mapping.get("target_model_id")
             if not isinstance(builtin_id, str) or not isinstance(target_model_id, str):
                 continue
-            if builtin_id == target_model_id or builtin_id not in menu_ids:
+            if builtin_id == target_model_id:
+                continue
+            if builtin_id not in menu_ids:
+                retired.add(builtin_id)
                 continue
             targets.setdefault(builtin_id, target_model_id)
 
-    order = raw_agent.get("sources", {}).get("order") if isinstance(raw_agent.get("sources"), dict) else None
-    eligible = _legacy_model_hub_eligible_sources(sources_payload, backend)
-    ordered_sources = (
-        list(
-            {
-                source_id: eligible[source_id]
-                for source_id in order
-                if isinstance(source_id, str) and source_id in eligible
-            }.values()
-        )
-        if isinstance(order, list)
-        else []
-    )
+    ordered_sources = _legacy_model_hub_ordered_sources(raw_agent, backend, sources_payload)
 
     routes: dict[str, dict] = {}
     for model_id in menu_ids:
@@ -295,11 +281,11 @@ def _legacy_model_hub_routes(
             supplied = (
                 (
                     source,
-                    _legacy_model_hub_unmapped_hop_model_id(
-                        backend,
-                        model_id,
-                        source,
-                        menu_ids,
+                    legacy_supplied_model_id(
+                        backend=backend,
+                        menu_model=model_id,
+                        source=source,
+                        checked_models=menu_ids,
                     ),
                 )
                 for source in ordered_sources
@@ -321,8 +307,7 @@ def _legacy_model_hub_routes(
                     model_id,
                 )
         routes[model_id] = {"hops": hops}
-    dropped = sorted(set(targets) - set(menu_ids))
-    for model_id in dropped:
+    for model_id in sorted(retired):
         logger.warning(
             "Model Hub migration dropped a '%s' mapping for '%s': the model is no longer offered",
             backend,
@@ -335,11 +320,13 @@ def _migrate_legacy_model_hub_on_load(payload: dict) -> dict:
     """Upgrade a pre-v5 ``model_hub`` payload to the current supply contract.
 
     Configs written before the v5 supply contract persist
-    ``subscription_hub_experimental``, per-agent ``mappings``, and a
-    ``sources.policy`` selector. The parser is strict about unknown fields, so
-    without this step every install that predates v5 fails to start on upgrade
-    instead of migrating. Reading the old shape here keeps that upgrade silent
-    for the user; a payload that is already v5 is returned untouched.
+    ``subscription_hub_experimental``, per-source ``experimental_consent_at``,
+    per-agent ``mappings``, and a ``sources.policy`` selector — the complete set
+    of fields the v5 dataclasses retired. The parser is strict about unknown
+    fields, so without this step every install that predates v5 fails to start
+    on upgrade instead of migrating. Reading the old shape here keeps that
+    upgrade silent for the user; a payload that is already v5 is returned
+    untouched.
     """
 
     model_hub = payload.get("model_hub")
@@ -348,6 +335,22 @@ def _migrate_legacy_model_hub_on_load(payload: dict) -> dict:
 
     migrated_model_hub = dict(model_hub)
     changed = migrated_model_hub.pop("subscription_hub_experimental", None) is not None
+
+    # Sources are sanitized before routes are built: a source still carrying
+    # retired consent metadata does not parse, and an unparsed source is not
+    # eligible to supply anything, which would migrate every route to empty.
+    sources_payload = model_hub.get("sources")
+    if isinstance(sources_payload, list):
+        sanitized = [
+            {key: value for key, value in source.items() if key != "experimental_consent_at"}
+            if isinstance(source, dict)
+            else source
+            for source in sources_payload
+        ]
+        if sanitized != sources_payload:
+            sources_payload = sanitized
+            migrated_model_hub["sources"] = sanitized
+            changed = True
 
     agents = model_hub.get("agents")
     if isinstance(agents, dict):
@@ -369,7 +372,7 @@ def _migrate_legacy_model_hub_on_load(payload: dict) -> dict:
                 migrated_agent["routes"] = _legacy_model_hub_routes(
                     raw_agent,
                     backend,
-                    model_hub.get("sources"),
+                    sources_payload,
                 )
                 agent_changed = True
 

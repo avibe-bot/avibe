@@ -243,6 +243,57 @@ def matching_v1_model_id(
     )
 
 
+def legacy_supplied_model_id(
+    *,
+    backend: BackendName,
+    menu_model: str,
+    source: ModelHubSourceConfig,
+    checked_models: tuple[str, ...] = (),
+) -> str | None:
+    """Return the model ``source`` supplied for an unmapped pre-v5 menu model.
+
+    Legacy resolution walked the agent's source order for every menu model, not
+    only the mapped ones, so config migration needs the same answer the walk
+    gave. The frozen add-time matcher decides it first, which keeps a migrated
+    hop identical to the one an add would persist today. A manually added model
+    is invisible to that matcher by design, yet it was routable pre-v5, so it
+    falls back to a plain inventory lookup under the same identity rule the
+    matcher uses: canonical ``provider/model`` for OpenCode, the bare model id
+    elsewhere. It lives here because OpenCode identity may only be computed by
+    this module.
+    """
+
+    matched = matching_v1_model_id(
+        backend=backend,
+        requested_model=menu_model,
+        source=source,
+        checked_models=checked_models,
+    )
+    if matched is not None:
+        return matched
+
+    if backend == "opencode":
+        requested = normalize_opencode_requested_model(menu_model, checked_models)
+        if not requested:
+            return None
+        manual = [
+            model.id
+            for model in source.models
+            if model.provenance != "discovered"
+            and opencode_model_id(source.vendor, model.id) == requested
+        ]
+        return manual[0] if len(manual) == 1 else None
+
+    return next(
+        (
+            model.id
+            for model in source.models
+            if model.provenance != "discovered" and model.id == menu_model
+        ),
+        None,
+    )
+
+
 def inspect_exact_hop(
     config: ModelHubConfig,
     backend: BackendName,

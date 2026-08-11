@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import re
 from dataclasses import fields
 from itertools import product
@@ -1132,13 +1133,13 @@ def test_mh_cfg_mig_001_pre_v5_model_hub_config_still_loads(tmp_path):
     assert loaded.model_hub.to_payload() == current["model_hub"]
 
 
-def test_mh_cfg_mig_001_pre_v5_mapping_becomes_a_route_over_ordered_sources(tmp_path):
+def test_mh_cfg_mig_001_pre_v5_mapping_becomes_a_route_over_ordered_sources(tmp_path, caplog):
     current = api.config_to_payload(default_config())
     legacy = _legacy_model_hub_payload(current)
     source = copy.deepcopy(_schema("source.schema.json")["examples"][0])
     legacy["model_hub"]["sources"] = [source]
     claude = legacy["model_hub"]["agents"]["claude"]
-    claude["sources"]["order"] = [source["id"]]
+    claude["sources"] = {"policy": "custom", "order": [source["id"]]}
     mapped_id, disabled_id, *_ = tuple(current["model_hub"]["agents"]["claude"]["routes"])
     claude["mappings"] = [
         {"builtin_id": mapped_id, "target_model_id": "target-model", "enabled": True},
@@ -1148,13 +1149,130 @@ def test_mh_cfg_mig_001_pre_v5_mapping_becomes_a_route_over_ordered_sources(tmp_
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps(legacy), encoding="utf-8")
 
-    routes = V2Config.load(config_path=config_path).model_hub.agents["claude"].routes
+    with caplog.at_level(logging.WARNING, logger="config.v2_config"):
+        routes = V2Config.load(config_path=config_path).model_hub.agents["claude"].routes
 
     assert set(routes) == set(current["model_hub"]["agents"]["claude"]["routes"])
     assert [(hop.source_id, hop.model_id) for hop in routes[mapped_id].hops] == [
         (source["id"], "target-model")
     ]
     assert routes[disabled_id].hops == ()
+    # A mapping for a model the current menu no longer offers is reported, not
+    # silently swallowed with the mappings it retired.
+    assert [
+        record.getMessage()
+        for record in caplog.records
+        if "retired-menu-model" in record.getMessage()
+    ] == [
+        "Model Hub migration dropped a 'claude' mapping for 'retired-menu-model': "
+        "the model is no longer offered"
+    ]
+
+
+def test_mh_cfg_mig_001_pre_v5_follow_policy_recomputes_the_source_order(tmp_path):
+    """A legacy ``follow`` order was recomputed on load, so it may be stale.
+
+    Freezing the persisted list into an explicit v5 route would drop a source
+    the recommendation had already promoted ahead of it.
+    """
+
+    current = api.config_to_payload(default_config())
+    legacy = _legacy_model_hub_payload(current)
+    native, relay = (
+        copy.deepcopy(source) for source in _schema("source.schema.json")["examples"][:2]
+    )
+    supplied_id = native["models"][0]["id"]
+    legacy["model_hub"]["sources"] = [native, relay]
+    claude = legacy["model_hub"]["agents"]["claude"]
+    claude["sources"] = {"policy": "follow", "order": [relay["id"]]}
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    routes = V2Config.load(config_path=config_path).model_hub.agents["claude"].routes
+
+    # The native subscription outranks the metered relay and is walked first,
+    # even though the stored order never mentioned it.
+    assert [(hop.source_id, hop.model_id) for hop in routes[supplied_id].hops] == [
+        (native["id"], supplied_id)
+    ]
+
+
+def test_mh_cfg_mig_001_pre_v5_custom_policy_keeps_its_source_order(tmp_path):
+    current = api.config_to_payload(default_config())
+    legacy = _legacy_model_hub_payload(current)
+    native, relay = (
+        copy.deepcopy(source) for source in _schema("source.schema.json")["examples"][:2]
+    )
+    supplied_id = native["models"][0]["id"]
+    relay["models"] = [
+        {**model, "origin": "discovered", "discovered_at": native["last_discovered_at"]}
+        for model in native["models"]
+    ]
+    legacy["model_hub"]["sources"] = [native, relay]
+    claude = legacy["model_hub"]["agents"]["claude"]
+    claude["sources"] = {"policy": "custom", "order": [relay["id"], native["id"]]}
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    routes = V2Config.load(config_path=config_path).model_hub.agents["claude"].routes
+
+    assert [(hop.source_id, hop.model_id) for hop in routes[supplied_id].hops] == [
+        (relay["id"], supplied_id),
+        (native["id"], supplied_id),
+    ]
+
+
+def test_mh_cfg_mig_001_pre_v5_retired_consent_metadata_never_blocks_migration(tmp_path):
+    """Retired per-source consent metadata is stripped before routes are built.
+
+    An unstripped source fails to parse, and a source that does not parse
+    supplies nothing, so leaving it in place would both refuse the config and
+    quietly migrate every route to empty.
+    """
+
+    current = api.config_to_payload(default_config())
+    legacy = _legacy_model_hub_payload(current)
+    source = copy.deepcopy(_schema("source.schema.json")["examples"][0])
+    source["experimental_consent_at"] = "2026-07-23T03:00:00Z"
+    supplied_id = source["models"][0]["id"]
+    legacy["model_hub"]["sources"] = [source]
+    legacy["model_hub"]["agents"]["claude"]["sources"]["order"] = [source["id"]]
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert "experimental_consent_at" not in loaded.model_hub.to_payload()["sources"][0]
+    assert [
+        (hop.source_id, hop.model_id)
+        for hop in loaded.model_hub.agents["claude"].routes[supplied_id].hops
+    ] == [(source["id"], supplied_id)]
+
+
+def test_pre_v5_only_model_hub_fields_are_all_migrated(tmp_path):
+    """Every field the v5 dataclasses retired must be handled by the migration.
+
+    A retired field that migration forgets is not a cosmetic gap: the parser
+    rejects unknown fields, so the install fails to start on upgrade.
+    """
+
+    legacy = _legacy_model_hub_payload(api.config_to_payload(default_config()))
+    source = copy.deepcopy(_schema("source.schema.json")["examples"][0])
+    source["experimental_consent_at"] = None
+    legacy["model_hub"]["sources"] = [source]
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(legacy), encoding="utf-8")
+    retired = {"subscription_hub_experimental", "experimental_consent_at", "policy", "mappings"}
+
+    def keys(payload: object) -> set[str]:
+        if isinstance(payload, dict):
+            return set(payload) | {key for value in payload.values() for key in keys(value)}
+        if isinstance(payload, list):
+            return {key for item in payload for key in keys(item)}
+        return set()
+
+    assert retired <= keys(legacy["model_hub"])
+    assert retired & keys(V2Config.load(config_path=config_path).model_hub.to_payload()) == set()
 
 
 def test_mh_cfg_mig_001_pre_v5_unmapped_menu_models_keep_their_legacy_route(tmp_path):
@@ -1223,6 +1341,34 @@ def test_mh_cfg_mig_001_pre_v5_open_menu_keeps_checked_models_routable(tmp_path)
         "origin": "discovered",
         "discovered_at": source["state"]["retry_at"],
     }
+    checked_id = opencode_model_id(source["vendor"], model_id)
+    legacy["model_hub"]["sources"] = [source]
+    opencode = legacy["model_hub"]["agents"]["opencode"]
+    opencode["sources"]["order"] = [source["id"]]
+    opencode["menu"] = {"view": "featured", "checked": [checked_id]}
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    routes = V2Config.load(config_path=config_path).model_hub.agents["opencode"].routes
+
+    assert [(hop.source_id, hop.model_id) for hop in routes[checked_id].hops] == [
+        (source["id"], model_id)
+    ]
+
+
+def test_mh_cfg_mig_001_pre_v5_manually_added_opencode_model_stays_routable(tmp_path):
+    """A checked OpenCode model the user typed in was routable before the upgrade.
+
+    Add-time matching ignores a manual model by design, so the migration falls
+    back to the source inventory under the same canonical ``provider/model``
+    identity the menu stores.
+    """
+
+    current = api.config_to_payload(default_config())
+    legacy = _legacy_model_hub_payload(current)
+    source = copy.deepcopy(_schema("source.schema.json")["examples"][1])
+    model_id = source["models"][0]["id"]
+    assert source["models"][0]["origin"] == "manual"
     checked_id = opencode_model_id(source["vendor"], model_id)
     legacy["model_hub"]["sources"] = [source]
     opencode = legacy["model_hub"]["agents"]["opencode"]
