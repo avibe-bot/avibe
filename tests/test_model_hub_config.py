@@ -914,6 +914,23 @@ def test_config_reload_preserves_legacy_claude_alias_resolution(monkeypatch, tmp
     assert loaded.load_warnings == ()
 
 
+def test_config_reload_defaults_omitted_legacy_backend_entries(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    current = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    legacy = _legacy_model_hub_payload(current["model_hub"])
+    legacy["agents"].pop("codex")
+    current["model_hub"] = legacy
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(current), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert loaded.model_hub.agents["codex"].mode == "direct"
+    assert loaded.load_warnings == ()
+    persisted = json.loads(config_path.read_text(encoding="utf-8"))
+    assert "codex" in persisted["model_hub"]["agents"]
+
+
 def test_config_reload_uses_first_enabled_duplicate_legacy_mapping(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     source = copy.deepcopy(_schema("source.schema.json")["examples"][0])
@@ -953,7 +970,10 @@ def test_config_reload_uses_first_enabled_duplicate_legacy_mapping(monkeypatch, 
     ]
 
 
-@pytest.mark.parametrize("invalid_invariant", ["healthy-detail", "hub-credential"])
+@pytest.mark.parametrize(
+    "invalid_invariant",
+    ["healthy-detail", "hub-credential", "manual-discovered-at", "subscription-api-key"],
+)
 def test_config_reload_recovers_inner_model_hub_invariant_only(
     monkeypatch,
     tmp_path,
@@ -965,9 +985,13 @@ def test_config_reload_recovers_inner_model_hub_invariant_only(
     source = copy.deepcopy(_schema("source.schema.json")["examples"][0])
     if invalid_invariant == "healthy-detail":
         source["state"]["detail_key"] = "models.source.invalid"
-    else:
+    elif invalid_invariant == "hub-credential":
         source["supply_channel"] = "hub"
         source["credential_ref"] = None
+    elif invalid_invariant == "manual-discovered-at":
+        source["models"][0]["origin"] = "manual"
+    else:
+        source["base_url"] = "https://api.anthropic.com"
     payload["model_hub"]["sources"] = [source]
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps(payload), encoding="utf-8")
@@ -978,6 +1002,27 @@ def test_config_reload_recovers_inner_model_hub_invariant_only(
     assert loaded.model_hub.to_payload() == V2Config.default().model_hub.to_payload()
     assert loaded.load_warnings and "model_hub" in loaded.load_warnings[0]
     assert json.loads(config_path.read_text(encoding="utf-8"))["model_hub"]["sources"] == [source]
+
+
+def test_invalid_json_recovery_backs_up_the_original_snapshot(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config_path = tmp_path / "config.json"
+    malformed = b'{"mode": '
+    config_path.write_bytes(malformed)
+    original_backup = v2_config._backup_config_file
+
+    def replace_before_backup(path, label, *, content=None):
+        path.write_text(json.dumps(api.config_to_payload(default_config())), encoding="utf-8")
+        return original_backup(path, label, content=content)
+
+    monkeypatch.setattr(v2_config, "_backup_config_file", replace_before_backup)
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert loaded.load_warnings and "JSON" in loaded.load_warnings[0]
+    backups = list(config_path.parent.glob("config.json.bak-invalid-json-*"))
+    assert len(backups) == 1
+    assert backups[0].read_bytes() == malformed
 
 
 def test_config_reload_does_not_overwrite_config_changed_during_migration(

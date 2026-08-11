@@ -462,7 +462,6 @@ def _migrate_legacy_model_hub_payload(payload: dict) -> tuple[dict, bool, tuple[
     for backend in MODEL_HUB_BACKENDS:
         raw_agent = agents.get(backend)
         if not isinstance(raw_agent, dict):
-            migrated_agents[backend] = raw_agent
             continue
 
         agent = copy.deepcopy(raw_agent)
@@ -553,6 +552,8 @@ def _recovery_section_for_error(error: BaseException) -> Optional[str]:
             "engine credential ref",
             "native source",
             "api-key source",
+            "manual model",
+            "subscription source",
         )
     ):
         return "model_hub"
@@ -651,11 +652,17 @@ def _reset_recoverable_config_section(payload: dict, section: str) -> bool:
     return False
 
 
-def _backup_config_file(path: Path, label: str) -> Optional[Path]:
-    if not path.exists():
+def _backup_config_file(
+    path: Path,
+    label: str,
+    *,
+    content: bytes | None = None,
+) -> Optional[Path]:
+    if content is None and not path.exists():
         return None
     try:
-        content = path.read_bytes()
+        if content is None:
+            content = path.read_bytes()
         existing = sorted(
             path.parent.glob(f"{path.name}.bak-{label}-*"),
             key=lambda candidate: candidate.stat().st_mtime,
@@ -670,7 +677,10 @@ def _backup_config_file(path: Path, label: str) -> Optional[Path]:
     stamp = datetime.now().strftime("%Y%m%d%H%M%S%f")
     backup = path.with_name(f"{path.name}.bak-{label}-{stamp}")
     try:
-        shutil.copy2(path, backup)
+        if content is not None:
+            backup.write_bytes(content)
+        else:
+            shutil.copy2(path, backup)
     except OSError as exc:
         logger.warning("Could not back up config before recovery (%s): %s", path, exc)
         return None
@@ -2073,10 +2083,12 @@ class V2Config:
         with CONFIG_LOCK:
             if not path.exists():
                 raise FileNotFoundError(f"Config not found: {path}")
+            raw_bytes = b""
             try:
-                raw = path.read_text(encoding="utf-8")
+                raw_bytes = path.read_bytes()
+                raw = raw_bytes.decode("utf-8")
             except UnicodeDecodeError as exc:
-                backup = _backup_config_file(path, "invalid-encoding")
+                backup = _backup_config_file(path, "invalid-encoding", content=raw_bytes)
                 warning = f"Config is not valid UTF-8; using recovery defaults: {exc.reason}"
                 logger.error("%s (backup=%s)", warning, backup)
                 config = cls.default()
@@ -2086,7 +2098,7 @@ class V2Config:
         try:
             payload = json.loads(raw)
         except json.JSONDecodeError as exc:
-            backup = _backup_config_file(path, "invalid-json")
+            backup = _backup_config_file(path, "invalid-json", content=raw_bytes)
             warning = f"Config JSON could not be parsed; using recovery defaults: {exc.msg}"
             logger.error("%s (backup=%s)", warning, backup)
             config = cls.default()
@@ -2094,7 +2106,7 @@ class V2Config:
             return config
 
         if not isinstance(payload, dict):
-            backup = _backup_config_file(path, "invalid-root")
+            backup = _backup_config_file(path, "invalid-root", content=raw_bytes)
             warning = "Config root is not an object; using recovery defaults"
             logger.error("%s (backup=%s)", warning, backup)
             config = cls.default()

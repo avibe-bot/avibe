@@ -226,9 +226,6 @@ type ConfigRecoveryProjection = {
 const ConfigRecoveryNotice: React.FC<{ config: ConfigRecoveryProjection | null }> = ({ config }) => {
   const { t } = useTranslation();
   if (!config?.config_recovery?.required) return null;
-  const warning = Array.isArray(config.config_recovery.warnings)
-    ? config.config_recovery.warnings.find((item: unknown): item is string => typeof item === 'string')
-    : null;
 
   return (
     <div className="fixed inset-x-2 top-2 z-[70] mx-auto flex max-w-3xl items-start gap-3 rounded-lg border border-gold/45 bg-surface px-3 py-2.5 shadow-xl" role="alert">
@@ -236,7 +233,7 @@ const ConfigRecoveryNotice: React.FC<{ config: ConfigRecoveryProjection | null }
       <div className="min-w-0 flex-1">
         <p className="text-[13px] font-semibold text-foreground">{t('configRecovery.title')}</p>
         <p className="mt-0.5 break-words text-[12px] text-muted">
-          {warning || t('configRecovery.body')}
+          {t('configRecovery.body')}
         </p>
       </div>
       <Link
