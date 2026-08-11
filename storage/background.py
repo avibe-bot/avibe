@@ -2436,6 +2436,74 @@ def attach_agent_run_delivery_in_connection(
     return True
 
 
+def apply_live_agent_run_cancellation_in_connection(
+    conn: Any,
+    run_id: str,
+    *,
+    session_id: str,
+    detach: bool,
+    updated_at: Optional[str] = None,
+) -> str:
+    """Record one live Run cancellation inside the Turn owner's transaction.
+
+    ``detach`` is the outcome of the shared-Turn ownership check made under the
+    same SQLite writer reservation. A detached participant becomes terminal and
+    suppresses its callback before any terminal writer or callback drain can run;
+    an exclusive owner only records the cancellation request before P0 Stop.
+    """
+
+    normalized_run_id = str(run_id or "").strip()
+    normalized_session_id = str(session_id or "").strip()
+    if not normalized_run_id or not normalized_session_id:
+        return "missing_run_identity"
+    row = conn.execute(
+        select(agent_runs)
+        .where(agent_runs.c.id == normalized_run_id)
+        .limit(1)
+    ).mappings().first()
+    if row is None:
+        return "run_not_found"
+    if str(row["session_id"] or "").strip() != normalized_session_id:
+        return "run_session_mismatch"
+    status = normalize_run_status(row["status"])
+    if status in TERMINAL_RUN_STATUSES:
+        return "run_already_terminal"
+    if status not in {"queued", "running"}:
+        return "run_not_cancelable"
+
+    now = updated_at or _utc_now_iso()
+    values: dict[str, Any] = {
+        "cancel_requested": 1,
+        "cancel_requested_at": row["cancel_requested_at"] or now,
+        "updated_at": now,
+    }
+    if detach:
+        values.update(status="canceled", completed_at=now)
+        callback_session_id = str(row["callback_session_id"] or "").strip()
+        callback_status = str(row["callback_status"] or "").strip()
+        if callback_session_id and callback_status not in {"sent", "skipped"}:
+            values.update(
+                callback_status="skipped",
+                callback_error=None,
+                callback_completed_at=now,
+            )
+    result = conn.execute(
+        update(agent_runs)
+        .where(agent_runs.c.id == normalized_run_id)
+        .where(agent_runs.c.session_id == normalized_session_id)
+        .where(
+            agent_runs.c.status.in_(
+                _status_query_values("queued") + _status_query_values("running")
+            )
+        )
+        .values(**values)
+    )
+    if not result.rowcount:
+        return "run_transition_lost"
+    _defer_run_ids_updated_from_connection(conn, [normalized_run_id])
+    return "run_detached" if detach else "cancel_requested"
+
+
 def agent_run_cancellation_won_in_connection(conn: Any, run_id: str) -> bool:
     """Whether cancellation already owns a refused queue handoff."""
 

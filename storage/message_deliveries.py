@@ -1830,17 +1830,30 @@ def agent_run_exclusively_owns_turn(
         "processing",
     }:
         return False, "run_not_running"
-    accepted_delivery_ids = [
+    participant_delivery_ids = [
         str(value)
         for value in conn.execute(
             select(message_deliveries.c.id)
-            .where(message_deliveries.c.turn_id == normalized_turn_id)
-            .where(message_deliveries.c.state == "accepted")
+            .where(
+                or_(
+                    and_(
+                        message_deliveries.c.turn_id == normalized_turn_id,
+                        message_deliveries.c.state == "accepted",
+                    ),
+                    and_(
+                        message_deliveries.c.current_target_turn_id
+                        == normalized_turn_id,
+                        message_deliveries.c.state.in_(
+                            ("pending_steer", "steering", "reconciling_steer")
+                        ),
+                    ),
+                )
+            )
             .order_by(message_deliveries.c.turn_position, message_deliveries.c.id)
         ).scalars()
     ]
-    if accepted_delivery_ids != [str(row["delivery_id"])]:
-        return False, "turn_has_other_accepted_inputs"
+    if participant_delivery_ids != [str(row["delivery_id"])]:
+        return False, "turn_has_other_participants"
     return True, "exclusive_run_owner"
 
 

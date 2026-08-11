@@ -60,7 +60,12 @@ from storage import messages_service
 from storage import message_deliveries as delivery_store
 from storage.agent_session_rows import reserve_write_lock
 from storage.db import get_cached_sqlite_engine
-from storage.background import OWED_FAILURE_NOTICE_KEY, normalize_run_status
+from storage.background import (
+    OWED_FAILURE_NOTICE_KEY,
+    apply_live_agent_run_cancellation_in_connection,
+    normalize_run_status,
+    run_update_event_transaction,
+)
 from storage.session_reclaim import reconcile_explicit_overrides
 from storage.models import (
     agent_runs,
@@ -2988,7 +2993,10 @@ class SessionTurnManager:
         interrupt_target_id: str | None = None
         should_interrupt = False
         joined = False
-        with self._runtime_start_owner(request.session_id, backend) as start_owner, self._sqlite_engine().begin() as conn:
+        with self._runtime_start_owner(
+            request.session_id,
+            backend,
+        ) as start_owner, run_update_event_transaction(self._sqlite_engine()) as conn:
             reserve_write_lock(conn)
             session_status = conn.execute(
                 select(agent_sessions.c.status).where(
@@ -2996,6 +3004,9 @@ class SessionTurnManager:
                 )
             ).scalar_one_or_none()
             current = delivery_store.active_turn(conn, request.session_id)
+            expected_exclusive_run_id = str(
+                request.expected_exclusive_agent_run_id or ""
+            ).strip()
             if request.content is not None and session_status != "active":
                 existing = (
                     delivery_store.get_delivery(conn, request.delivery_id)
@@ -3014,6 +3025,23 @@ class SessionTurnManager:
             current_id = str((current or {}).get("id") or "") or None
             if current is None:
                 if request.content is None:
+                    if expected_exclusive_run_id:
+                        cancellation = apply_live_agent_run_cancellation_in_connection(
+                            conn,
+                            expected_exclusive_run_id,
+                            session_id=request.session_id,
+                            detach=True,
+                        )
+                        return DeliveryResult(
+                            None,
+                            None,
+                            (
+                                "run_detached"
+                                if cancellation == "run_detached"
+                                else "settled"
+                            ),
+                            reason=cancellation,
+                        )
                     return DeliveryResult(None, None, "settled", reason="not_active")
                 delivery = self._insert_delivery(
                     conn,
@@ -3043,6 +3071,24 @@ class SessionTurnManager:
                     and expected_turn_id
                     and current_id != expected_turn_id
                 ):
+                    if expected_exclusive_run_id:
+                        cancellation = apply_live_agent_run_cancellation_in_connection(
+                            conn,
+                            expected_exclusive_run_id,
+                            session_id=request.session_id,
+                            detach=True,
+                        )
+                        return DeliveryResult(
+                            None,
+                            None,
+                            (
+                                "run_detached"
+                                if cancellation == "run_detached"
+                                else "settled"
+                            ),
+                            current_id,
+                            cancellation,
+                        )
                     return DeliveryResult(
                         None,
                         None,
@@ -3050,22 +3096,37 @@ class SessionTurnManager:
                         current_id,
                         "target_turn_changed",
                     )
-                expected_exclusive_run_id = str(
-                    request.expected_exclusive_agent_run_id or ""
-                ).strip()
                 if request.content is None and expected_exclusive_run_id:
                     exclusive, reason = delivery_store.agent_run_exclusively_owns_turn(
                         conn,
                         run_id=expected_exclusive_run_id,
                         turn_id=str(current_id or ""),
                     )
+                    cancellation = apply_live_agent_run_cancellation_in_connection(
+                        conn,
+                        expected_exclusive_run_id,
+                        session_id=request.session_id,
+                        detach=not exclusive,
+                    )
                     if not exclusive:
                         return DeliveryResult(
                             None,
                             None,
-                            "run_detached",
+                            (
+                                "run_detached"
+                                if cancellation == "run_detached"
+                                else "settled"
+                            ),
                             current_id,
-                            reason,
+                            reason if cancellation == "run_detached" else cancellation,
+                        )
+                    if cancellation != "cancel_requested":
+                        return DeliveryResult(
+                            None,
+                            None,
+                            "settled",
+                            current_id,
+                            cancellation,
                         )
                 control_in_progress = current.get("control_state") in {
                     "pending",
@@ -7370,22 +7431,15 @@ class SessionTurnManager:
         if not self._durable_schema_available():
             if agent_run_id:
                 return {
-                    "ok": True,
+                    "ok": False,
+                    "code": "atomic_run_cancel_unavailable",
                     "session_id": session_id,
-                    "status": "run_detached",
                     "reason": "durable_turn_ownership_unavailable",
                 }
             return await self._cancel_legacy_turn(session_id, turn)
         with self._sqlite_engine().connect() as conn:
             owner = delivery_store.active_turn(conn, session_id)
-        if owner is None:
-            if agent_run_id:
-                return {
-                    "ok": True,
-                    "session_id": session_id,
-                    "status": "run_detached",
-                    "reason": "not_in_flight",
-                }
+        if owner is None and not agent_run_id:
             return {
                 "ok": False,
                 "code": "not_in_flight",
@@ -7399,7 +7453,7 @@ class SessionTurnManager:
                 session_id=session_id,
                 priority="p0",
                 content=None,
-                expected_turn_id=str(owner["id"]),
+                expected_turn_id=(str(owner["id"]) if owner is not None else None),
                 expected_exclusive_agent_run_id=(
                     str(agent_run_id).strip() if agent_run_id else None
                 ),
@@ -7420,7 +7474,7 @@ class SessionTurnManager:
                 return {
                     "ok": True,
                     "session_id": session_id,
-                    "status": "run_detached",
+                    "status": "run_settled",
                     "reason": result.reason or "already_terminal",
                 }
             return {

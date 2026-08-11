@@ -6180,6 +6180,17 @@ def _recorded_only_cancel_result(*, reason_code: str, detail: object | None = No
     return result
 
 
+def _record_live_cancel_fallback(
+    store: TaskExecutionStore,
+    run_id: str,
+    *,
+    reason_code: str,
+    detail: object | None = None,
+) -> dict:
+    store.cancel_run(run_id)
+    return _recorded_only_cancel_result(reason_code=reason_code, detail=detail)
+
+
 def _initial_cancel_result(run: dict | None) -> dict:
     if not isinstance(run, dict):
         return _recorded_only_cancel_result(reason_code="run_not_found")
@@ -6246,9 +6257,19 @@ def _cancel_live_agent_run(store: TaskExecutionStore, run: dict) -> dict:
     try:
         controller_result = asyncio.run(_request_live_run_cancel(session_id, run_id))
     except internal_client.InternalServerUnavailable as exc:
-        return _recorded_only_cancel_result(reason_code="internal_unavailable", detail=str(exc))
+        return _record_live_cancel_fallback(
+            store,
+            run_id,
+            reason_code="internal_unavailable",
+            detail=str(exc),
+        )
     except Exception as exc:  # noqa: BLE001
-        return _recorded_only_cancel_result(reason_code="live_cancel_failed", detail=str(exc))
+        return _record_live_cancel_fallback(
+            store,
+            run_id,
+            reason_code="live_cancel_failed",
+            detail=str(exc),
+        )
 
     status_code = controller_result.get("status_code")
     try:
@@ -6262,18 +6283,37 @@ def _cancel_live_agent_run(store: TaskExecutionStore, run: dict) -> dict:
         and isinstance(body, dict)
         and str(body.get("status") or "").strip() == "run_detached"
     ):
-        run_terminalized = store.mark_run_canceled(run_id, skip_callback=True)
+        saved = store.get_run(run_id)
         return {
             "code": "run_canceled_without_live_stop",
             "live_cancel_attempted": False,
             "live_cancel_confirmed": False,
-            "run_terminalized": run_terminalized,
+            "run_terminalized": bool(
+                saved and normalize_run_status(saved.get("status")) == "canceled"
+            ),
             "controller_status_code": normalized_status_code,
             "controller_response": body,
             "message": "Run was canceled without stopping the shared Session turn.",
         }
+    if (
+        normalized_status_code is not None
+        and 200 <= normalized_status_code < 300
+        and isinstance(body, dict)
+        and str(body.get("status") or "").strip() == "run_settled"
+    ):
+        return {
+            "code": "run_already_settled",
+            "live_cancel_attempted": False,
+            "live_cancel_confirmed": False,
+            "run_terminalized": False,
+            "controller_status_code": normalized_status_code,
+            "controller_response": body,
+            "message": "Run had already settled before cancellation acquired ownership.",
+        }
     if not _live_cancel_was_confirmed(normalized_status_code, body):
-        return _recorded_only_cancel_result(
+        return _record_live_cancel_fallback(
+            store,
+            run_id,
             reason_code=_live_cancel_failure_code(normalized_status_code, body),
             detail={
                 "controller_status_code": normalized_status_code,
@@ -6299,13 +6339,14 @@ def cmd_runs_cancel(args):
     if existing is None:
         _print_task_error(TaskCliError(f"run '{args.run_id}' not found", code="run_not_found", details={"run_id": args.run_id}))
         return 1
-    canceled = store.cancel_run(args.run_id)
-    if not canceled:
-        _print_task_error(TaskCliError(f"run '{args.run_id}' not found", code="run_not_found", details={"run_id": args.run_id}))
-        return 1
-    cancel_result = _initial_cancel_result(existing)
     if _should_attempt_live_run_cancel(existing):
         cancel_result = _cancel_live_agent_run(store, existing)
+    else:
+        canceled = store.cancel_run(args.run_id)
+        if not canceled:
+            _print_task_error(TaskCliError(f"run '{args.run_id}' not found", code="run_not_found", details={"run_id": args.run_id}))
+            return 1
+        cancel_result = _initial_cancel_result(existing)
     run = store.get_run(args.run_id)
     _print_cli_payload(
         "agent_run",

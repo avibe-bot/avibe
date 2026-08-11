@@ -2526,17 +2526,20 @@ def test_runs_cancel_shared_turn_detaches_only_the_requested_run(
         callback_session_id="ses_callback",
     )
     assert request_store.claim(request.id) is not None
-    cancel_dispatch = AsyncMock(
-        return_value={
+    async def detach_in_controller(*_args, **_kwargs):
+        request_store.update_callback_status(request.id, status="skipped")
+        request_store.mark_run_canceled(request.id)
+        return {
             "status_code": 200,
             "body": {
                 "ok": True,
                 "session_id": "ses_shared_turn",
                 "status": "run_detached",
-                "reason": "turn_has_other_accepted_inputs",
+                "reason": "turn_has_other_participants",
             },
         }
-    )
+
+    cancel_dispatch = AsyncMock(side_effect=detach_in_controller)
 
     with (
         patch("vibe.cli._task_request_store", return_value=request_store),
@@ -2684,12 +2687,22 @@ def test_runs_cancel_running_agent_run_does_not_overwrite_already_finished_turn(
         agent_name="worker",
     )
     assert request_store.claim(request.id) is not None
-    cancel_dispatch = AsyncMock(
-        return_value={
+    async def settle_before_cancel(*_args, **_kwargs):
+        assert request_store.settle_without_result(
+            request.id,
+            terminal_status="succeeded",
+        ) == "succeeded"
+        return {
             "status_code": 200,
-            "body": {"ok": True, "session_id": "ses_already_finished", "status": "already_finished"},
+            "body": {
+                "ok": True,
+                "session_id": "ses_already_finished",
+                "status": "run_settled",
+                "reason": "run_already_terminal",
+            },
         }
-    )
+
+    cancel_dispatch = AsyncMock(side_effect=settle_before_cancel)
 
     with (
         patch("vibe.cli._task_request_store", return_value=request_store),
@@ -2701,14 +2714,13 @@ def test_runs_cancel_running_agent_run_does_not_overwrite_already_finished_turn(
     cancel_dispatch.assert_awaited_once_with("ses_already_finished", run_id=request.id)
     saved = request_store.get_run(request.id)
     assert saved is not None
-    assert saved["status"] == "running"
-    assert saved["completed_at"] is None
-    assert saved["cancel_requested"] is True
+    assert saved["status"] == "succeeded"
+    assert saved["completed_at"] is not None
+    assert saved["cancel_requested"] is False
     payload = json.loads(capsys.readouterr().out)
-    assert payload["cancel_code"] == "cancel_request_recorded_only"
-    assert payload["cancel_result"]["reason_code"] == "already_finished"
+    assert payload["cancel_code"] == "run_already_settled"
     assert payload["cancel_result"]["live_cancel_confirmed"] is False
-    assert payload["run"]["status"] == "running"
+    assert payload["run"]["status"] == "succeeded"
 
 
 def test_runs_cancel_queued_agent_run_does_not_call_live_controller(

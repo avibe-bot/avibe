@@ -4829,6 +4829,154 @@ def test_hfr_476_run_cancel_does_not_stop_a_shared_turn(monkeypatch, tmp_path):
     assert turn is not None
     assert turn["state"] == "active"
     assert turn["control_state"] is None
+    saved = request_store.get_run(run.id)
+    assert saved is not None
+    assert saved["status"] == "canceled"
+    assert saved["callback_status"] == "skipped"
+    assert saved["callback_completed_at"] is not None
+    assert request_store.list_pending_callbacks() == []
+
+
+def test_run_cancel_guard_counts_an_unresolved_steer_as_a_participant(
+    monkeypatch,
+    tmp_path,
+):
+    """A native steer in flight prevents the initial Run from stopping the Turn."""
+
+    from core.scheduled_tasks import TaskExecutionStore
+    from storage.background import attach_agent_run_delivery_in_connection
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session, turn_id = _create_active_test_turn(
+        tmp_path,
+        native_id="proj_unresolved_steer_cancel",
+    )
+    session_id = session["id"]
+    request_store = TaskExecutionStore()
+    owner_run = request_store.enqueue_agent_run(
+        session_id=session_id,
+        message="initial owner",
+        agent_name="worker",
+        callback_session_id="ses_callback",
+    )
+    assert request_store.claim(owner_run.id) is not None
+
+    with engine.begin() as conn:
+        turn = message_deliveries.get_turn(conn, turn_id)
+        initial = message_deliveries.delivery_for_turn(conn, turn_id)
+        assert turn is not None
+        assert initial is not None
+        assert attach_agent_run_delivery_in_connection(
+            conn,
+            owner_run.id,
+            session_id=session_id,
+            delivery_id=initial["id"],
+        )
+        steer = _reserve_submission(
+            conn,
+            scope_id=session["scope_id"],
+            session_id=session_id,
+            text="second input already steering",
+        )
+        steer_id = str(steer["id"])
+        claimed = message_deliveries.open_steer_attempt(
+            conn,
+            steer["id"],
+            expected_version=int(steer["version"]),
+            turn_id=turn_id,
+            attempt_id=message_deliveries.new_attempt_id(),
+            expected_native_turn_id=str(turn["native_turn_id"]),
+        )
+        assert claimed is not None
+        assert claimed["state"] == "steering"
+
+    controller = _build_controller_double()
+    app = internal_server.create_app(controller)
+    transport = httpx.ASGITransport(app=app)
+
+    async def _go():
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            return await client.post(
+                f"/internal/cancel/{session_id}",
+                params={"run_id": owner_run.id},
+            )
+
+    response = asyncio.run(_go())
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": True,
+        "session_id": session_id,
+        "status": "run_detached",
+        "reason": "turn_has_other_participants",
+    }
+    controller.command_handler.handle_stop.assert_not_awaited()
+    saved = request_store.get_run(owner_run.id)
+    assert saved is not None
+    assert saved["status"] == "canceled"
+    assert saved["callback_status"] == "skipped"
+    assert request_store.list_pending_callbacks() == []
+    with engine.connect() as conn:
+        turn = message_deliveries.get_turn(conn, turn_id)
+        steer = message_deliveries.get_delivery(conn, steer_id)
+    assert turn is not None
+    assert turn["state"] == "active"
+    assert turn["control_state"] is None
+    assert steer is not None
+    assert steer["state"] == "steering"
+
+
+def test_run_cancel_without_an_active_turn_settles_atomically(monkeypatch, tmp_path):
+    """An orphaned live projection is canceled without inventing a Session Stop."""
+
+    from core.scheduled_tasks import TaskExecutionStore
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _engine, session = _create_test_session(
+        tmp_path,
+        native_id="proj_ownerless_run_cancel",
+    )
+    request_store = TaskExecutionStore()
+    run = request_store.enqueue_agent_run(
+        session_id=session["id"],
+        message="orphaned live projection",
+        agent_name="worker",
+        callback_session_id="ses_callback",
+    )
+    assert request_store.claim(run.id) is not None
+
+    controller = _build_controller_double()
+    app = internal_server.create_app(controller)
+    transport = httpx.ASGITransport(app=app)
+
+    async def _go():
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            return await client.post(
+                f"/internal/cancel/{session['id']}",
+                params={"run_id": run.id},
+            )
+
+    response = asyncio.run(_go())
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": True,
+        "session_id": session["id"],
+        "status": "run_detached",
+        "reason": "run_detached",
+    }
+    controller.command_handler.handle_stop.assert_not_awaited()
+    saved = request_store.get_run(run.id)
+    assert saved is not None
+    assert saved["status"] == "canceled"
+    assert saved["callback_status"] == "skipped"
+    assert request_store.list_pending_callbacks() == []
 
 
 def test_run_cancel_guard_allows_the_sole_initial_run_owner(monkeypatch, tmp_path):
