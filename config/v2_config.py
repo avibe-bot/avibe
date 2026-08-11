@@ -32,6 +32,43 @@ CONFIG_LOCK = threading.RLock()
 _memory_config_tx_state = threading.local()
 
 
+def _acquire_memory_config_file_lock(descriptor: int) -> None:
+    """Acquire a cross-process exclusive lock with a platform-supported API."""
+
+    if os.name == "nt":
+        import msvcrt
+
+        # Lock one byte of the file; Windows keeps the range until unlocked.
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        try:
+            os.write(descriptor, b"\0")
+        except OSError:
+            pass
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        msvcrt.locking(descriptor, msvcrt.LK_LOCK, 1)
+        return
+    import fcntl
+
+    fcntl.flock(descriptor, fcntl.LOCK_EX)
+
+
+def _release_memory_config_file_lock(descriptor: int) -> None:
+    """Release the cross-process exclusive lock acquired by the helper above."""
+
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+    except Exception:
+        pass
+
+
 @contextmanager
 def memory_config_transaction() -> Iterator[None]:
     """Narrow cross-process exclusive section for Memory candidate+marker writes.
@@ -40,8 +77,9 @@ def memory_config_transaction() -> Iterator[None]:
     so settlement and a concurrent settings save need a shared file lock around
     the durable Memory unit. This is not a general multi-writer config service.
 
-    Nested acquisitions in the same thread only re-enter ``CONFIG_LOCK`` so
-    ``save_memory_config`` can call ``save_config`` without deadlocking the flock.
+    Lock order is always ``CONFIG_LOCK`` then the file lock, matching existing
+    callers that already hold ``CONFIG_LOCK`` when they enter ``save_config``.
+    Nested acquisitions only re-enter the process lock.
     """
 
     depth = getattr(_memory_config_tx_state, "depth", 0)
@@ -59,21 +97,19 @@ def memory_config_transaction() -> Iterator[None]:
         0o600,
     )
     _memory_config_tx_state.depth = 1
-    try:
-        import fcntl
-
-        fcntl.flock(descriptor, fcntl.LOCK_EX)
-        with CONFIG_LOCK:
-            yield
-    finally:
-        _memory_config_tx_state.depth = 0
+    # CONFIG_LOCK first so threads that already hold it (remote_access/settings
+    # helpers) never wait on the file lock while another waiter holds the file
+    # lock and waits for CONFIG_LOCK.
+    with CONFIG_LOCK:
         try:
-            import fcntl
-
-            fcntl.flock(descriptor, fcntl.LOCK_UN)
-        except Exception:
-            pass
-        os.close(descriptor)
+            _acquire_memory_config_file_lock(descriptor)
+            try:
+                yield
+            finally:
+                _release_memory_config_file_lock(descriptor)
+        finally:
+            _memory_config_tx_state.depth = 0
+            os.close(descriptor)
 
 
 DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS = 600

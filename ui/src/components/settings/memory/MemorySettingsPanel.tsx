@@ -105,6 +105,13 @@ const EndpointFields: React.FC<{
 };
 
 const identityChanged = (draft: EndpointDraft, original: MemoryEndpointConfig): boolean => {
+  // Match the backend: first-time setup from empty identity is ordinary save,
+  // not a rebuild-confirming identity change.
+  const originalBase = (original.base_url ?? '').trim();
+  const originalModel = (original.model ?? '').trim();
+  if (!originalBase && !originalModel) {
+    return false;
+  }
   const baseUrl = draft.baseUrl.trim() || null;
   const model = draft.model.trim() || null;
   return baseUrl !== (original.base_url ?? null) || model !== (original.model ?? null);

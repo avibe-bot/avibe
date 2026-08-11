@@ -689,6 +689,21 @@ class MemoryRuntime:
                 logger.warning("Memory store remains unavailable during reconciliation")
                 return {"ok": False, "error": "memory_store_unavailable"}
         async with self._reconcile_lock:
+            # A rebuild may have finished while this call reaped an orphan.
+            # Recheck ownership and prefer the durable unit so a stale pending
+            # snapshot cannot stop a just-activated sidecar.
+            if self._rebuild_running() and asyncio.current_task() is not self._rebuild_task:
+                return {"ok": False, "error": "memory_operation_in_progress"}
+            try:
+                durable = await asyncio.to_thread(lambda: V2Config.load().memory)
+            except Exception:
+                durable = None
+            if durable is not None and (
+                bool(config.embedding_change_pending)
+                != bool(durable.embedding_change_pending)
+                or not _same_memory_configuration(config, durable)
+            ):
+                config = deepcopy(durable)
             self._activation_loop = asyncio.get_running_loop()
             if self._artifact_installing:
                 return {"ok": False, "error": "memory_runtime_install_failed"}
@@ -1729,8 +1744,9 @@ class MemoryRuntime:
                 "result": "failed",
             }
 
-        # Fail closed before any destructive stop when the pinned artifact or
-        # embedding endpoint cannot rebuild a non-empty root.
+        # Fail closed before any destructive stop when the pinned artifact is
+        # unusable. Endpoint completeness is required only when a rebuild child
+        # will run against non-empty vector-bearing state.
         python = await asyncio.to_thread(self._artifact_manager.resolve_python)
         if python is None:
             error = _runtime_error_for_status(
@@ -1742,13 +1758,6 @@ class MemoryRuntime:
             candidate,
             call_log_db_path=self._call_log_db_path,
         )
-        if not _rebuild_settings_usable(rebuild_settings):
-            self._runtime_error = "memory_rebuild_failed"
-            return {
-                "ok": False,
-                "error": "memory_rebuild_failed",
-                "result": "failed",
-            }
 
         async with self.module.lifecycle():
             if self._maintenance_open():
@@ -1788,8 +1797,14 @@ class MemoryRuntime:
                     "result": "failed",
                 }
 
-            child_result = RebuildProcessResult.COMPLETED
             if has_data:
+                if not _rebuild_settings_usable(rebuild_settings):
+                    self._runtime_error = "memory_rebuild_failed"
+                    return {
+                        "ok": False,
+                        "error": "memory_rebuild_failed",
+                        "result": "failed",
+                    }
                 rebuild_process = EverOSRebuildProcess(
                     python,
                     effective_home=self._effective_home,
@@ -1802,7 +1817,6 @@ class MemoryRuntime:
                     self._runtime_error = mapped["error"]
                     return mapped
             else:
-                child_result = RebuildProcessResult.COMPLETED
                 mapped = {
                     "ok": True,
                     "result": "completed_empty",
@@ -1819,11 +1833,16 @@ class MemoryRuntime:
                     "result": "failed",
                 }
 
-            # Marker is clear. Refresh Controller/restart snapshot before any
-            # sidecar activation so activation uses the settled candidate.
-            settled = deepcopy(candidate)
+            # Marker is clear. Activate the latest durable candidate so a
+            # concurrent non-identity credential/LLM fix under the marker is not
+            # discarded by the pre-rebuild snapshot.
+            try:
+                settled = await asyncio.to_thread(lambda: V2Config.load().memory)
+            except Exception:
+                settled = deepcopy(candidate)
+                settled.embedding_change_pending = False
             settled.embedding_change_pending = False
-            self._config = settled
+            self._config = deepcopy(settled)
             self._restart_config = deepcopy(settled)
             self._configure_insight_reader(self._config)
 
@@ -2306,17 +2325,18 @@ class MemoryRuntime:
         return bool(root_has_data or stats.pending or stats.processing or stats.dead or self._store.has_provider_data_history())
 
     def _settle_embedding_change_pending(self, config: MemoryConfig) -> bool:
-        """Clear a persisted candidate marker only when its full config still matches.
+        """Clear a persisted candidate marker when the vector-space identity still matches.
 
         Compare-and-swap under the cross-process Memory config transaction so a
         newer confirmed candidate from the UI process cannot be clobbered by a
-        stale Controller snapshot.
+        stale Controller snapshot. Non-identity fields (API keys, LLM settings)
+        may change under the marker without invalidating a completed rebuild.
         """
 
         try:
             with memory_config_transaction():
                 persisted = V2Config.load()
-                if not _same_memory_configuration(persisted.memory, config):
+                if not _same_embedding_identity(persisted.memory, config):
                     return False
                 if persisted.memory.embedding_change_pending:
                     persisted.memory.embedding_change_pending = False
@@ -2363,6 +2383,12 @@ def _embedding_configuration_changed(current: MemoryConfig, candidate: MemoryCon
         current_embedding.base_url != candidate_embedding.base_url
         or current_embedding.model != candidate_embedding.model
     )
+
+
+def _same_embedding_identity(current: MemoryConfig, candidate: MemoryConfig) -> bool:
+    """Return whether two configs share the same embedding vector-space identity."""
+
+    return not _embedding_configuration_changed(current, candidate)
 
 
 _SETTLEMENT_IRRELEVANT_FIELDS = {
