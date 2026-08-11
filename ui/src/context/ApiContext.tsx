@@ -12,6 +12,7 @@ import {
 } from '../lib/workbenchEventConnection';
 import type { DockDoc } from './dockDoc';
 import { archivedConflictSessionId, selectApiErrorFields } from './apiErrorParse';
+import { SessionDraftPersistence } from '../lib/sessionDraftPersistence';
 
 // The workbench Dock API response shape ({ ok, dock }); the Dock document type
 // itself lives with the DockProvider that owns reconciliation.
@@ -2321,6 +2322,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const wakeWorkbenchEventsRef = useRef<() => void>(() => {});
   const stopWorkbenchEventsRef = useRef<() => void>(() => {});
   const sessionArchivedHandlersRef = useRef(new Set<(sessionId: string) => void>());
+  const sessionDraftPersistence = useMemo(() => new SessionDraftPersistence(), []);
 
   const handleApiError = async (res: Response, path: string) => {
     let errorMessage = `Request failed: ${path} (${res.status})`;
@@ -3124,8 +3126,14 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         session: res.ok && payload && typeof payload.id === 'string' ? payload : null,
       };
     },
-    getSessionBootstrap: (sessionId) =>
-      getJson(`/api/sessions/${encodeURIComponent(sessionId)}/bootstrap`),
+    getSessionBootstrap: async (sessionId) => {
+      await sessionDraftPersistence.waitForWrites(sessionId);
+      const readRevision = sessionDraftPersistence.revision(sessionId);
+      const payload = await getJson(`/api/sessions/${encodeURIComponent(sessionId)}/bootstrap`);
+      const serverText = payload?.draft?.text ?? '';
+      const text = sessionDraftPersistence.reconcileRead(sessionId, readRevision, serverText);
+      return text === serverText ? payload : { ...payload, draft: { ...(payload.draft ?? {}), text } };
+    },
     updateSession: async (sessionId, payload) => {
       const { payloadJson } = await requestJson(`/api/sessions/${encodeURIComponent(sessionId)}`, {
         method: 'PATCH',
@@ -3223,15 +3231,22 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
       return res.json();
     },
-    getSessionDraft: (sessionId) => getCachedJson(`/api/sessions/${encodeURIComponent(sessionId)}/draft`),
-    setSessionDraft: async (sessionId, text) => {
-      const { res, payloadJson } = await requestJson(`/api/sessions/${encodeURIComponent(sessionId)}/draft`, {
+    getSessionDraft: async (sessionId) => {
+      await sessionDraftPersistence.waitForWrites(sessionId);
+      const readRevision = sessionDraftPersistence.revision(sessionId);
+      const payload = await getCachedJson(`/api/sessions/${encodeURIComponent(sessionId)}/draft`);
+      const serverText = payload?.text ?? '';
+      const text = sessionDraftPersistence.reconcileRead(sessionId, readRevision, serverText);
+      return { text };
+    },
+    setSessionDraft: (sessionId, text) => sessionDraftPersistence.save(sessionId, text, async () => {
+      const { res } = await requestJson(`/api/sessions/${encodeURIComponent(sessionId)}/draft`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text }),
       }, `/api/sessions/${sessionId}/draft`, { handleError: false });
-      return res.ok ? payloadJson : { ok: false };
-    },
+      return res.ok ? { ok: true } : { ok: false };
+    }),
     listInbox: (params) => {
       const search = new URLSearchParams();
       if (params?.platform) search.set('platform', params.platform);
@@ -3523,7 +3538,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     getAuthSession: () => getJson('/api/session'),
     signOut: () => postJson('/auth/logout', {}),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [showToast, t]);
+  }), [sessionDraftPersistence, showToast, t]);
 
   return <ApiContext.Provider value={value}>{children}</ApiContext.Provider>;
 };
