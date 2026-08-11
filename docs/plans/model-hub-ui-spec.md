@@ -276,7 +276,7 @@ the absence is still live.
 | G-18 | 05 add-by-key, 拉取型号 and the observation 添加 runs before it saves | the route that carries a non-persisting observation of a source that does not exist yet | **The behaviour is contracted and the route is not**, so this row registers a gap *inside* the contract rather than an undecided question. AC-26 states the operation outright — 「Add Source exposes one non-persisting submission that combines connectivity classification with response-backed protocol observation」, returning classified reachability, authentication and a protocol 「without persisting a Source」 — and `model-hub.md`'s protocol-observation ruling of 2026-08-09 requires every stored `protocol` to trace back to a real response taken *before* Save, so an observation that saves nothing is not optional to the design. None of `api.md`'s 28 route rows accepts one: `POST /api/models/agents/<backend>/probe` is backend-scoped (`{model?}`) and reports on the configured chain, `POST /api/models/sources/<id>/refresh` needs an `id` only Save produces, and `POST /api/models/sources` persists on success. §1.5 keeps every Pull-origin state, because the operation is contracted and 05 draws it; what is missing is the way to invoke it |
 | G-19 | 05 add-by-key, 取消 pressed while a persisting add is in flight | what the server is left holding when the cancel lands after the transient phase | **Cancellation is contracted everywhere except the persisting half.** AC-26 requires an API-key test's success, authentication failure, adapter error, timeout **and cancellation** each to 「revoke the transient provisioned ref before the operation settles」, with a durable pending-revocation record and reconciliation behind a fault-injected revoke failure, and repeats that guarantee for unsaved model discovery; `api.md` contracts `POST /api/models/oauth/cancel` for the subscription branch. No artefact states the outcome once `POST /api/models/sources` has crossed out of that transient phase into persistence — whether a cancel there yields a Source or nothing. §1.5 states the guarantee for the phase that has one and stops at that seam rather than extending AC-26 over a boundary AC-26 does not cross |
 | G-20 | 01 source card, 被哪些链收编, **and 06's status bar, which splits `active` on the same field** — on any load that is not the creation response | a *read* that carries `adopted_by` | **The contract names this exact consumer and then gives it nothing to call.** `api.md:212` defines `AdoptedBy` as 「the stable Source-card projection of persisted references」 and FC-05 requires `agent-supply` to expose it, which is what makes the field authority rather than an invention (§0.3). Every place it is actually contracted is a creation terminal: `POST /api/models/sources` → `{source, added_to, adopted_by}`, and the OAuth completion reading — `api.md`'s *OAuth completion* section, which makes the terminal shape a function of `OAuthFlow.intent` and puts the same three arrays behind `intent: "create"` and explicitly not behind `intent: "reauth"`. The reads a loaded page can call carry no trace of it: `GET /api/models/sources` → `{sources: Source[]}` and `source.schema.json` has no backend-attribution property at all; `GET /api/models/agents` → `{agents: AgentSupply[]}` and `agent-supply.schema.json`'s 13 properties do not include `adopted_by`, nor does `api.md:628`'s CI-guarded AgentSupply serializer-completeness row. So the projection survives exactly one response and a reload has nowhere to read it from, while D-28 forbids the one derivation that would rebuild it from `hops`. This is the §0.3 shape where an FC item requires another file to carry something that file does not, rather than FC-05's `hops` shape where an FC item states a shape the frozen schema omits |
-| G-21 | 01 upstream card, 添加订阅 → 04 — **registered by frame 13** | ~~the step that picks which vendor the subscription is for~~ nothing | §1.12 registers the vendor menu drawn in frame 13. Claude Code passes `anthropic` and ChatGPT passes `openai` into §1.4 before that dialog renders its vendor-specific title, options and `POST /api/models/oauth/start` request. Kept as a registered row so the producer/consumer break and its closing frame remain auditable |
+| G-21 | 01 upstream card, 添加订阅 → 04 — **registered by frame 13** | ~~the step that picks which vendor the subscription is for~~ nothing | §1.12 registers the vendor menu drawn in frame 13. Claude 订阅 passes `anthropic` and ChatGPT 订阅 passes `openai` into §1.4 before that dialog renders its vendor-specific title, options and `POST /api/models/oauth/start` request. Kept as a registered row so the producer/consumer break and its closing frame remain auditable |
 | G-22 | 06 for a source just added — the add flow's terminal, reached from §1.4's *Awaiting sign-in* and §1.5's ② | an element that renders `added_to` | **The contract answers a question no frame asks.** `POST /api/models/sources` and the `create` OAuth terminal both return `added_to: AddedTo[]`, an entry naming `backend`, `menu_model`, `source_id`, `model_id` and `position`, the last one-based in the persisted Route chain after commit `[contract]`. Add-time placement (`model-hub.md` §4.2) is what makes it worth showing: the source the user just added has been written into chains they did not open, and this array is the only statement of where. It has the same one-response lifetime as G-20's `adopted_by` — `GET /api/models/sources` and `GET /api/models/agents` carry no trace of it, so the landing cannot be recovered by a later read — but it is the weaker of the two gaps, because nothing in this document *claims* to render it: G-20 has drawn consumers left without a read, while this row has a read left without a consumer. §1.3 states the retirement of the hint row that used to cover the old behaviour, and names this number rather than specifying the element, because §0.2 leaves that to the frame |
 | G-23 | `Qp6FI`, the shared guarded-change confirm — both callers, §1.6's *Refetch refused* and *Guard refused* | a body block that lists `would_interrupt` | **The refusal carries a list and the dialog draws a sentence.** `would_interrupt` is `SupplyGap[]`, each entry `{backend, model_id, agents}` with `model_id` the protected **menu** model and `agents` the enabled named Vibe Agents that pinned it `[contract]`, and `model-hub.md` requires that 「the confirm copy names affected Agents when any exist」. `Qp6FI` as measured has exactly one label, one count pill, one row list and one hint line, and all four are the `would_remove_hops` side; the only rendering of the gap array is `guard.hint.interrupt`, one sentence that reports the array is non-empty. The strings are specified — `guard.gap.label`, `guard.gap.subject`, `guard.gap.agents`, with `gateway.modelCount` as the pill — because copy is this document's register and an authority requires these; the block that holds them is drawing, so it is a gap rather than an invention. The same absence makes `source_last_supplier` unrenderable: its `api.md` example carries `would_remove_hops: []` beside a populated `would_interrupt`, which this dialog would draw as an empty list under a bare sentence |
 | G-24 | 01 run pill, *Unsupported host* — the one pill reading that splits a `health` value on a second field | a host-platform or installability discriminator in the runtime payload | **The pill splits `not_installed` on a field the payload does not carry.** `runtime-dependency.schema.json` v5 reports `manifest.assets[].platform` for each *published* asset and nothing that says which platform the **host** is: `status` carries `installed_version`, `verified`, `listening`, `health` and `last_check`, and no property anywhere in the document names the machine the gateway would run on. The client cannot supply it either — the browser's own platform describes whichever machine has the page open, which on a remotely opened UI is not the host, and substituting it would be the same class of error as computing supply from live chains (D-28): a value read off the wrong subject and rendered as if it were the right one. So the split has no contracted input, and §1.0 states what a build does instead of requiring the guess |
@@ -701,12 +701,13 @@ as everywhere else in this document.
 | §1.3 | Empty order, held-out sources remaining | The ordered section is empty and the held-out section is not | F5 | `order.empty.ordered` | 排进来 → Dirty. 保存顺序 stays enabled — an empty order is a real configuration |
 | §1.3 | Dirty (uncommitted moves) | 排进来, 移出, a drag, or a keyboard move | F5 — nothing has been sent, so nothing can fail | `order.action.include`, `order.action.exclude` | 保存顺序 → Saving; 取消 → discard, close |
 | §1.3 | Saving | 保存顺序 pressed — the whole order in one `PUT /api/models/agents/<backend>/sources` with `{order: string[]}` `[contract]`, which stores and re-echoes it and touches no chain | F1 | `order.save`, `order.fail.save`, `order.retry` | Success → close; 重试 → Saving again, with every move still held |
-| §1.4 | Default | A frame 13 vendor row has supplied the vendor | F5 | `addSub.title` … `addSub.hint.chatgpt` | The recommended option is pre-selected; selecting the other replaces it; 去登录 sends `POST /api/models/oauth/start` and its answer decides: accepted with `presentation.expects: none` → Awaiting sign-in, accepted with `paste_code` or `paste_callback_url` → Awaiting paste-back, refused because that backend already holds its one `native_cli` Source `[contract]` → Already bound, and any other answer that is not a flow → Start failed |
+| §1.4 | Default | A frame 13 vendor row has supplied the vendor | F5 | `addSub.title` … `addSub.hint.chatgpt` | The recommended option is pre-selected; selecting the other replaces it; 去登录 sends `POST /api/models/oauth/start` and its answer decides: an accepted flow opens its non-null `presentation.auth_url` exactly once, then `presentation.expects: none` → Awaiting sign-in, `paste_code` or `paste_callback_url` → Awaiting paste-back; refused because that backend already holds its one `native_cli` Source `[contract]` → Already bound, and any other answer that is not a flow → Start failed. Polling, re-render and reconciliation never open that URL again `[derived]` |
 | §1.4 | Second pass `[derived]` | Re-opened while this backend already holds its one `native_cli` source `[contract]` | F5 | `addSub.opt.added` | The native row is inert whichever account that source holds; the hub row stays choosable and is selected on open, whatever the recommendation says |
 | §1.4 | Awaiting sign-in | `POST /api/models/oauth/start` returned a flow whose `presentation.expects` is `none`; `GET /api/models/oauth/status/<flow_id>` is polled every 2s until `OAuthFlow.state` is terminal `[contract]` | → OAuth failed, by two different routes. **A status read that fails is a failed read and not a reading (D-16)**: it says nothing about the flow, it changes nothing this dialog is holding, and the next 2s tick is the retry the loop already carries — with the bound below still running underneath it, so a poll that never recovers ends exactly where a flow that goes silent ends. A read *refused* with `flow_not_found` or `flow_expired` `[contract]` is the other route and is a reading: the server no longer holds this `flow_id`, so no later tick can answer for it and the poll stops at once | `addSub.signIn` | `state` reads `success` → the `create` terminal answers with `flow`, `source`, `added_to` and `adopted_by` — a shape `api.md`'s *OAuth completion* section makes a function of `OAuthFlow.intent` rather than of the route polled `[contract]` — and the dialog closes **into 06 for the source that terminal names** — D-11's landing, the same one §1.5's ② already states, and the one moment `added_to` is in hand (§1.3's note on it, and G-22); `failed` → OAuth failed; `cancelled` → OAuth failed as well `[contract]`; the polling bound passes with no terminal reading → OAuth failed — the bound is `OAuthFlow.expires_at` when the flow carries one `[contract]` and 15 minutes from the start call when it does not `[derived]`; dismissed any of the three ways → Dismissing |
 | §1.4 | Awaiting paste-back | The start response carries `presentation.expects: paste_code` or `paste_callback_url` `[contract]`; the 04 paste-back exhibit replaces the option body and keeps the `flow_id` | F5 until submit | `addSub.paste.title.code`, `addSub.paste.title.callbackUrl`, `addSub.paste.subtitle`, `addSub.paste.label.code`, `addSub.paste.label.callbackUrl`, `addSub.paste.placeholder.code`, `addSub.paste.placeholder.callbackUrl`, `addSub.paste.hint.code`, `addSub.paste.hint.callbackUrl`, `addSub.paste.submit`, `addSub.cancel` | A non-empty value enables 提交 → Submitting paste-back; 取消 / close / outside press → Dismissing |
-| §1.4 | Submitting paste-back | 提交 pressed — `POST /api/models/oauth/submit` with the held `{flow_id, value}` `[contract]` | F1 → Paste-back failed | `addSub.paste.submitting` | An answer carrying the `create` terminal closes into 06 for its source; an unsuccessful terminal → OAuth failed; a request failure or lost response → Paste-back failed |
-| §1.4 | Paste-back failed `[derived]` | The submit request failed or never answered | F1, in place; the input and `flow_id` are kept | `addSub.paste.fail`, `addSub.retry`, `addSub.cancel` | 重试 first re-reads `GET /api/models/oauth/status/<flow_id>` (D-36): `success` closes into 06; `failed` / `cancelled` → OAuth failed; a non-terminal reading → Submitting paste-back with the same value; the read itself failing leaves this state unchanged. 取消 → Dismissing |
+| §1.4 | Submitting paste-back | 提交 pressed — `POST /api/models/oauth/submit` with the held `{flow_id, value}` `[contract]` | F1 → Paste-back failed | `addSub.paste.submitting` | An answer carrying the `create` terminal closes into 06 for its source; an unsuccessful terminal → OAuth failed; an allowed non-terminal `{flow}` → Awaiting paste-back completion; a request failure or lost response → Paste-back failed |
+| §1.4 | Awaiting paste-back completion `[contract]` | Submit, or the reconciliation read below, answered with `OAuthFlow.state` `starting`, `awaiting_action` or `verifying` | The same 2s status poll and expiry/15-minute bound as Awaiting sign-in; a failed status read changes nothing and the next tick retries it (D-16) | `addSub.paste.submitting`, `addSub.cancel` | `success` closes into 06 for the terminal's source; `failed` / `cancelled` → OAuth failed; another non-terminal reading stays here. 取消 / close / outside press → Dismissing |
+| §1.4 | Paste-back failed `[derived]` | The submit request failed or never answered | F1, in place; the input and `flow_id` are kept | `addSub.paste.fail`, `addSub.retry`, `addSub.cancel` | 重试 first re-reads `GET /api/models/oauth/status/<flow_id>` (D-36): `success` closes into 06; `failed` / `cancelled` → OAuth failed; a non-terminal reading → Awaiting paste-back completion, **without submitting the held value again**; the read itself failing leaves this state unchanged. 取消 → Dismissing |
 | §1.4 | Dismissing | 取消, the close icon, or a press outside, while a flow is in flight | F4 — `POST /api/models/oauth/cancel` is issued as the dialog closes and its result is not awaited (D-15) | — | The dialog is gone either way. A cancel that never lands leaves a flow that may still complete, and the source list is then the surface of truth (D-16) |
 | §1.4 | OAuth failed | The flow reached an unsuccessful terminal — `OAuthFlow.state` reads `failed` or `cancelled` `[contract]` — or the status read was refused with `flow_not_found` / `flow_expired` `[contract]`, or the polling bound above passed with no terminal reading. Read off the flow, never off a source | F1 for the retry itself; **F4 for the cleanup below**, which is a call this dialog issues and does not await | `addSub.error.oauthFailed`, `addSub.retry` | 重试, entered on a terminal reading **or on a `flow_not_found` / `flow_expired` refusal** → nothing to cancel and nothing to re-read, a flow the server does not hold being unreachable by either call: a fresh `POST /api/models/oauth/start` goes out and this becomes Awaiting sign-in on the **new** `flow_id`. 重试, entered by the bound passing → the bound is this dialog's clock rather than a reading, so it first re-reads `GET /api/models/oauth/status/<flow_id>` once for the old flow `[derived]` D-32, and that answer decides: `success` → the dialog closes into 06 for the source that terminal names, with no cancel sent and no second flow started; `failed` or `cancelled` → nothing to cancel, fresh start; still non-terminal, or the read itself failed → `POST /api/models/oauth/cancel` goes out for the old `flow_id` and is forgotten whatever it answers, then the fresh start — the same call and the same treatment *Dismissing* uses, for the same reason (D-15, D-16); 取消 → Dismissing, which cancels whichever flow is current |
 | §1.4 | Engine unavailable | The gateway is not running and gateway-upstream was chosen | F1 | `addSub.error.engineDown`, `addSub.retry` | 重试 re-sends, and that press **is** the recovery observation — nothing here watches for one — so its answer decides: whichever of *Awaiting sign-in* / *Already bound* / *Start failed* the start call then names, or still down → back here; 取消 → dismiss, nothing bound `[derived]` |
@@ -760,15 +761,18 @@ as everywhere else in this document.
 | §1.10 | Saving source | 保存 pressed — `PATCH /api/models/sources/<id>` with the changed `display_name` and/or `base_url` `[contract]` | F3 when a Base URL change is refused; F1 otherwise → Source save failed | `sourceDetail.edit.saving` | Success → close and refresh the source projection; a guard refusal → Source save refused |
 | §1.10 | Source save refused | The guarded `PATCH` names the hops or supply gaps the Base URL change would remove `[contract]` | F3 — shared `Qp6FI` | `guard.title.editSource`, `guard.subtitle.editSource`, `guard.confirm.editSource`, `guard.label`, `guard.count`, `guard.hop.position`, `guard.hint.safe`, `guard.hint.interrupt`, `guard.gap.label`, `guard.gap.subject`, `guard.gap.agents`, `gateway.modelCount`, `guard.cancel` | 仍要保存 re-sends the same `PATCH` with `force: true` → Saving source; 取消 → Edit open with both values kept |
 | §1.10 | Source save failed `[derived]` | The `PATCH` failed or never answered | F1, in the edit dialog | `sourceDetail.edit.fail`, `sourceDetail.retry` | 重试 first re-reads `GET /api/models/sources` by the held source id (D-36): the requested fields already present → close as success; source absent → §1.6 Source gone; otherwise re-send → Saving source |
-| §1.10 | Removing source | 移除来源 chosen from 06's source overflow — the non-forced `DELETE /api/models/sources/<id>` is sent `[contract]` | F3 on refusal; F1 otherwise → Source remove failed | `sourceDetail.remove.checking` | Success → §1.6 Source gone; a guard refusal → Source remove refused |
+| §1.10 | Remove confirmation `[derived]` | 移除来源 chosen from 06's source overflow | F5 — no request has been sent | `guard.title.removeSource`, `guard.hint.removeSource`, `guard.confirm.removeSource`, `guard.cancel` | 移除来源 → Removing source with the initial non-forced delete; 取消 / close / outside press → §1.6 Ready |
+| §1.10 | Removing source | The destructive primary was activated in Remove confirmation or Source remove refused — `DELETE /api/models/sources/<id>` is non-forced on the first path and carries `?force=true` only on the second `[contract]` | F3 on refusal; F1 otherwise → Source remove failed | `sourceDetail.remove.checking` | Success → §1.6 Source gone; an initial guard refusal → Source remove refused |
 | §1.10 | Source remove refused | The non-forced delete returned the guarded envelope; frame 11 renders its source-removal variant | F3 — shared refusal semantics and the frame 11 dialog | `guard.title.removeSource`, `guard.confirm.removeSource`, `guard.label.removeSource`, `guard.count`, `guard.hop.position.removeSource`, `guard.hint.removeSource`, `guard.gap.label`, `guard.gap.subject`, `guard.gap.agents`, `gateway.modelCount`, `guard.cancel` | 移除来源 re-sends the same `DELETE` with `force` → Removing source; 取消 / close / outside press → §1.6 Ready |
 | §1.10 | Source remove failed `[derived]` | Either delete request failed or never answered | F1, in place | `sourceDetail.remove.fail`, `sourceDetail.retry` | 重试 re-reads `GET /api/models/sources` by the held id (D-36): absent → §1.6 Source gone; present → re-send the same stage, non-forced before refusal and forced after one |
-| §1.11 | Needs-action card | Frame 12's card delta is rendered for a source whose status is `needs_action` | F5 | the selected `sourceDetail.status.needsAction.*` key, plus `upstream.repair.reauthorize` or `upstream.repair.replaceKey` when that cause has a credential repair | 重新授权 → Reauthorizing; 更换 Key → Replacing key; the remaining causes use their contracted vendor exits |
-| §1.11 | Reauthorizing | 重新授权 pressed — `POST /api/models/sources/<id>/reauth` `[contract]` | F1 → Repair failed | `upstream.repair.reauthorizing` | An OAuth flow answer follows §1.4's `presentation.expects` branches; its `intent: reauth` terminal updates the existing source and returns no create-only arrays `[contract]`; a failure before a flow is held → Repair failed |
-| §1.11 | Replacing key | 更换 Key pressed; the key-entry step owns the secret locally, and only its submit sends `PUT /api/models/sources/<id>/credential` `[contract]` | F3 on guard refusal; F1 otherwise → Repair failed | `upstream.repair.replaceKey`, `upstream.repair.replacingKey` | Success → re-read the card and render its reported state; refusal → shared `Qp6FI`; failure → Repair failed. The card button itself never reads or stores a key |
+| §1.11 | Needs-action card | Frame 12's card delta is rendered for a source whose status is `needs_action` | F5 | the selected `sourceDetail.status.needsAction.*` key plus `upstream.state.supplyStopped`, and `upstream.repair.reauthorize` or `upstream.repair.replaceKey` when that cause has a credential repair | 重新授权 on a `native_cli` source → Reauth confirmation; on a Hub source → Reauthorizing; 更换 Key → Replacing key; the remaining causes use their contracted vendor exits |
+| §1.11 | Reauth confirmation `[derived]` `[contract]` | 重新授权 pressed for a `native_cli` source | F5 — no request has been sent | `upstream.repair.reauthConfirm.title`, `upstream.repair.reauthConfirm.detail`, `upstream.repair.reauthConfirm.confirm`, `upstream.repair.reauthConfirm.cancel` | 继续登录 sends `POST /api/models/sources/<id>/reauth` with `{acknowledge_irreversible: true}` → Reauthorizing; 取消 / close / Escape → Needs-action card |
+| §1.11 | Reauthorizing | The Hub card action was pressed, or the native acknowledgement was confirmed — `POST /api/models/sources/<id>/reauth` sends `{}` for Hub and the acknowledged body above for `native_cli` `[contract]` | F1 → Repair failed | `upstream.repair.reauthorizing` | An OAuth flow answer follows §1.4's declarative presentation and status-poll branches; its `intent: reauth` terminal with non-empty `interrupted_pairs` → Repair impact reported; an empty array → re-read the card and render the returned source state; a failure before a flow is held → Repair failed. It never consumes create-only arrays `[contract]` |
+| §1.11 | Replacing key | 更换 Key pressed; the key-entry step owns the secret locally, and only its submit sends `PUT /api/models/sources/<id>/credential` `[contract]` | F3 on guard refusal; F1 otherwise → Repair failed | `upstream.repair.replaceKey`, `upstream.repair.replacingKey` | Success with non-empty `interrupted_pairs` → Repair impact reported; success with an empty array → re-read the card and render the returned source state; refusal → shared `Qp6FI`; failure → Repair failed. The card button itself never reads or stores a key |
+| §1.11 | Repair impact reported `[derived]` `[contract]` | A reauth or key-replacement terminal carries non-empty `interrupted_pairs: SupplyGap[]` | F5 — the successful terminal is already in hand and this one-response report is held | `upstream.repair.impact.title`, `upstream.repair.impact.detail`, `guard.gap.subject`, `guard.gap.agents`, `upstream.repair.impact.done` | 完成 → re-read the source card. Each pair renders its backend and menu model; the Agent line renders only when `agents` is non-empty |
 | §1.11 | Repair failed `[derived]` | The chosen repair failed before its terminal could be confirmed | F1, on the repair surface | `upstream.repair.fail`, `upstream.retry` | 重试 re-reads `GET /api/models/sources` by source id first (D-36); a cleared state closes as success, otherwise the same repair starts again |
 | §1.12 | Closed | 添加订阅 is rendered in 01's upstream footer | F5 | `upstream.addSubscription` | Activate → Open |
-| §1.12 | Open | The frame 13 vendor menu is visible and focus is on its first row | F5 | `addSubMenu.vendor.claude`, `addSubMenu.vendor.chatgpt`, `addSubMenu.recommendation.native`, `addSubMenu.recommendation.gateway` | Claude Code → §1.4 with `vendor: anthropic`; ChatGPT → §1.4 with `vendor: openai`; Escape / outside press → Closed |
+| §1.12 | Open | The frame 13 vendor menu is visible and focus is on its first row | F5 | `addSubMenu.vendor.claude`, `addSubMenu.vendor.chatgpt`, `addSubMenu.recommendation.native`, `addSubMenu.recommendation.gateway` | Claude 订阅 → §1.4 with `vendor: anthropic`; ChatGPT 订阅 → §1.4 with `vendor: openai`; Escape / outside press → Closed |
 
 One covered frame deliberately holds no rows: §1.2 specifies nothing (§0.2). The
 `Qp6FI` confirm is not a frame of its own — its refusal rows sit with each caller,
@@ -804,7 +808,7 @@ a different key.
 | `{{backend}}` | The backend's product name — Claude Code, Codex, opencode — never the internal id. | Always present | `adopt.subtitle`, `adopt.title`, `adopt.undo.2`, `adopt.undo.3`, `guard.gap.subject`, `order.title`, `upstream.state.supplyingNative` |
 | `{{vendor}}` | The upstream vendor's product name, as the user chose it. | Always present | `addSub.title`, `addSub.paste.title.code`, `addSub.paste.title.callbackUrl`, `adopt.effects.1` |
 | `{{host}}` | The source's host, as entered, without scheme or path. | **Absent when the source has no entered host** `[contract]`: `base_url` is `api_key`-kind only, null there means the vendor's official endpoint, and a subscription may not carry one at all. §1.6 states what the one string that interpolates it renders instead. | `sourceDetail.summary` |
-| `{{source}}` | A source's display name. | Always present | `gateway.row.current`, `gateway.row.currentTakeover`, `guard.title.editSource`, `guard.title.refetch`, `guard.title.removeModel`, `guard.title.removeSource`, `sourceDetail.edit.title` |
+| `{{source}}` | A source's display name. | Always present | `gateway.row.current`, `gateway.row.currentTakeover`, `guard.title.editSource`, `guard.title.refetch`, `guard.title.removeModel`, `guard.title.removeSource`, `sourceDetail.edit.title`, `upstream.repair.reauthConfirm.title` |
 | `{{model}}` | A model's display id, as the source reports it. | Always present | `guard.title.removeModel` |
 | `{{models}}` | Several model ids, joined by `、` / `,` — the ids that left the discovered slice on one fetch. Ids as the source reported them, never display names, because the row that carried a display name is the row that is gone. | Always present in the one key that carries it: `sourceDetail.refetch.removed` renders only when at least one id was removed, which is the same branch guarantee that keeps its `{{count}}` off zero. | `sourceDetail.refetch.removed` |
 | `{{n}}` | A hop's 1-based position in the configured order. | Always present | `guard.hop.position`, `guard.hop.position.removeSource` |
@@ -1222,6 +1226,7 @@ unable to outlive its surface, which is the cheaper answer wherever it is availa
 | `upstream.state.standby` | 备用 | Standby |
 | `upstream.state.unavailableRetry` | 暂不可用 · {{delay}} 后自动重试 | Unavailable · retrying automatically after {{delay}} |
 | `upstream.state.unavailableDue` `[derived]` | 暂不可用 · 已到重试时间 | Unavailable · the retry is due |
+| `upstream.state.supplyStopped` `[frame]` | · 已停止供给 | · stopped supplying |
 | `upstream.empty` `[derived]` | 还没有来源。先添加一个订阅或 API Key。 | No sources yet. Add a subscription or an API key first. |
 | `upstream.unread` `[derived]` | 来源列表没读到 · 网关本身正常 | Could not read the source list · the gateway itself is fine |
 | `upstream.retry` `[derived]` | 重试 | Retry |
@@ -1229,8 +1234,15 @@ unable to outlive its surface, which is the cheaper answer wherever it is availa
 | `upstream.addApiKey` | 添加 API Key | Add API key |
 | `upstream.repair.reauthorize` `[frame]` | 重新授权 | Reauthorize |
 | `upstream.repair.replaceKey` `[frame]` | 更换 Key | Replace key |
+| `upstream.repair.reauthConfirm.title` `[derived]` `[contract]` | 重新授权 {{source}} | Reauthorize {{source}} |
+| `upstream.repair.reauthConfirm.detail` `[derived]` `[contract]` | 开始登录后无法回滚本机凭据变更。来源身份和路由位置会保留,新凭据和型号结果在流程完成时生效。 | Once sign-in starts, changes to the local credential cannot be rolled back. The source identity and route positions stay in place; the new credential and model result take effect when the flow finishes. |
+| `upstream.repair.reauthConfirm.confirm` `[derived]` `[contract]` | 继续登录 | Continue to sign in |
+| `upstream.repair.reauthConfirm.cancel` `[derived]` | 取消 | Cancel |
 | `upstream.repair.reauthorizing` `[derived]` | 正在重新授权… | Reauthorizing… |
 | `upstream.repair.replacingKey` `[derived]` | 正在更换 Key… | Replacing key… |
+| `upstream.repair.impact.title` `[derived]` `[contract]` | 凭据已更新,但仍有型号中断 | The credential was updated, but some models are still interrupted |
+| `upstream.repair.impact.detail` `[derived]` `[contract]` | 以下型号当前没有可用来源。 | These models currently have no usable source. |
+| `upstream.repair.impact.done` `[derived]` | 完成 | Done |
 | `upstream.repair.fail` `[derived]` | 没能完成这次凭据修复 | The credential repair did not finish |
 | `gateway.heading` | 网关 | Gateway |
 | `gateway.sourceOrder` | 来源顺序 | Source order |
@@ -2158,8 +2170,8 @@ is **different per vendor** and for a reason that is legal, not technical.
 
 **Frame 13 supplies the vendor before this dialog opens** `[frame]` `[contract]`. Every
 line below remains per vendor — the head, both option cards, which one carries 推荐, the
-ToS note and the hint — while the producer is now explicit: Claude Code selects
-`vendor: anthropic`, ChatGPT selects `vendor: openai`, and §1.12 owns that mapping. The
+ToS note and the hint — while the producer is now explicit: Claude 订阅 selects
+`vendor: anthropic`, ChatGPT 订阅 selects `vendor: openai`, and §1.12 owns that mapping. The
 radio group here still produces only `channel`; `POST /api/models/oauth/start` combines
 the vendor already held with the channel chosen here.
 
@@ -2196,6 +2208,16 @@ value accepted by the one contracted submit route and does not define a second f
 | helper | Where to obtain the value and how to restart when it is absent | no | — |
 | 取消 | Leave the flow | yes | Dismissing |
 | 提交 | Send the held value | yes when non-empty | `POST /api/models/oauth/submit` with `{flow_id, value}` |
+
+The provider handoff belongs to the start transition, not to a second control invented
+inside this exhibit `[contract]` `[derived]`. Every accepted start flow opens its non-null
+`presentation.auth_url` once before the dialog enters either awaiting state. That is how
+the user obtains the code or callback URL the frame asks for. The URL is server-declared;
+the client keeps no vendor-to-URL table, and polling, re-rendering or reconciling a submit
+never opens it again. A submit response is not assumed terminal: `starting`,
+`awaiting_action` and `verifying` transfer ownership to the same 2s status poll as the
+no-paste branch. A reconciliation read that finds one of those states resumes that poll
+without sending the pasted value a second time.
 
 **Paste-back geometry** `[frame]`
 
@@ -3455,7 +3477,7 @@ Five rules:
 | `action.editSource` `[frame]` | 编辑来源 | Edit source |
 | `action.removeSource` `[frame]` | 移除来源 | Remove source |
 | `edit.title` `[frame]` | 编辑来源 {{source}} | Edit source {{source}} |
-| `edit.name` `[frame]` | 名称 | Name |
+| `edit.name` `[frame]` | 显示名称 | Display name |
 | `edit.baseUrl` `[frame]` | Base URL | Base URL |
 | `edit.hint` `[derived]` `[contract]` | 协议已由真实响应证明,不在这里改;改显示名称不会影响型号与路由链。改地址时会先检查供给影响。 | The protocol was proved by a real response and cannot be changed here. Renaming does not affect models or routes; changing the address first checks its supply impact. |
 | `edit.cancel` `[frame]` | 取消 | Cancel |
@@ -4171,16 +4193,16 @@ for registration and are never simultaneous runtime state `[frame]`.
 
 | Element | Displays | Data source | Interactive | On activate |
 | --- | --- | --- | --- | --- |
-| Source overflow | 编辑来源 / 移除来源 | selected source id | yes | Open the edit dialog / send the initial non-forced delete |
+| Source overflow | 编辑来源 / 移除来源 | selected source id | yes | Open the edit dialog / open the initial removal confirmation |
 | Edit head | `sourceDetail.edit.title` plus kind, credential owner and proved protocol | selected source | close | Dismiss unchanged |
-| 名称 | current `display_name` | source | yes | Edit locally |
+| 显示名称 | current `display_name` | source | yes | Edit locally |
 | Base URL | current `base_url` | API-key source | yes | Edit locally |
 | Edit helper | Why protocol is fixed and when a Base-URL edit can affect supply | static | no | — |
 | 取消 / 保存 | abandon / commit changed fields | local draft | yes | Dismiss / guarded `PATCH /api/models/sources/<id>` |
 | Remove head | `guard.title.removeSource` plus kind, endpoint and model count | selected source | close | Return without forcing |
-| Affected-hop list | `would_remove_hops`; each row names backend/menu model and, when contracted, its position | guarded refusal | no | — |
-| Remove helper | Whether `would_interrupt` is empty | guarded refusal | no | — |
-| 取消 / 移除来源 | abandon / force the exact refused delete | held refusal | yes | Dismiss / `DELETE /api/models/sources/<id>?force=true` |
+| Affected-hop list | `would_remove_hops`; each row names backend/menu model and, when contracted, its position | guarded refusal; absent before the first request | no | — |
+| Remove helper | The transaction's destructive scope before the request; after refusal, the server-backed impact | static / guarded refusal | no | — |
+| 取消 / 移除来源 | abandon / confirm the current stage | selected source / held refusal | yes | Dismiss / initial non-forced `DELETE`, then `?force=true` only after a guarded refusal |
 
 **Edit geometry** `[frame]`
 
@@ -4216,12 +4238,15 @@ the supply impact and may remove affected hops on force. `sourceDetail.edit.hint
 string of record, preserving the frame's fixed-protocol point while naming the guard
 instead of promising no consequence. This is a copy correction, not a geometry change.
 
-**Removal is staged by the first press** `[contract]`. The overflow does not open a
-locally invented confirmation before the server answers. It sends the non-forced delete;
-a safe delete succeeds and the detail becomes Source gone, while a guarded `409` supplies
-the rows frame 11 renders. The primary then re-sends the same operation with the contract's
-query `force=true`. This keeps the dialog evidentiary: every row in it came from the
-server's staged consequence, never from a client-side scan of chains.
+**Removal keeps confirmation before the first destructive request, then escalates in the
+same shell** `[frame]` `[contract]`. Choosing the overflow action opens frame 11's 520-wide
+remove dialog with the selected source identity and the transaction-scope helper, but no
+affected-hop or supply-gap rows: the client has no server evidence for those yet and does
+not scan chains to invent them. Its first 移除来源 press sends the non-forced delete.
+A safe response completes the removal; a guarded `409` fills the same dialog with the
+server's staged consequence, and only the next destructive press re-sends with
+`?force=true`. The confirmation therefore protects even a source with no route impact,
+while every consequence row remains evidentiary.
 
 The frame draws position pills and still inherits G-28 until the refusal carries those
 positions. It also inherits G-23 for a non-empty `would_interrupt`, because the registered
@@ -4230,8 +4255,8 @@ menu models and Agents. Neither open gap is filled from inference here.
 
 **States** — §0.8, rows marked §1.10. The dialogs trap focus; Tab stays inside; Escape
 and the head close take the same path as 取消. Enter submits Edit while focus is in a
-single-line field; the destructive re-send requires activating its button and is not a
-default Enter action `[derived]`.
+single-line field; both destructive stages require activating the focused button and are
+not default Enter actions `[derived]`.
 
 **Copy** is registered in the existing owners: source-menu and edit strings under
 `models.hub.sourceDetail.*`, and refusal strings under `models.hub.guard.*`. Dynamic head
@@ -4255,8 +4280,8 @@ card variants from this frame; derive downstream rollups from the normal §1.1 p
 
 | Element | Displays | Data source | Interactive | On activate |
 | --- | --- | --- | --- | --- |
-| OAuth needs-action card | Existing source identity and detail; rose dot; canonical `sourceDetail.status.needsAction.*` cause | source | card + 重新授权 | Card → 06; 重新授权 → `POST /api/models/sources/<id>/reauth` |
-| API-key needs-action card | Existing source identity and detail; rose dot; canonical cause | source | card + 更换 Key | Card → 06; 更换 Key → credential replacement entry |
+| OAuth needs-action card | Existing source identity and detail; rose dot; canonical `sourceDetail.status.needsAction.*` cause + `upstream.state.supplyStopped` | source | card + 重新授权 | Card → 06; 重新授权 → native acknowledgement or Hub reauth by channel |
+| API-key needs-action card | Existing source identity and detail; rose dot; canonical cause + `upstream.state.supplyStopped` | source | card + 更换 Key | Card → 06; 更换 Key → credential replacement entry |
 | Repair action | One action selected by credential capability and cause | source | yes | Starts the matching repair; it never also opens 06 |
 
 **Geometry** `[frame]`
@@ -4273,33 +4298,48 @@ card variants from this frame; derive downstream rollups from the normal §1.1 p
 **The copy register wins over the exhibit's abbreviated causes** `[frame]` `[contract]`.
 The PNG reads 授权已过期 and 凭据无效; §1.6 already registers the contract's four total
 `detail_key` strings and §1.1 requires cards to reuse them. Frame 12 therefore contributes
-the two action keys and rose geometry, not a second status vocabulary. The first example
-renders 需要重新登录; the second renders 凭据被吊销.
+the two action keys and rose geometry, not a second cause vocabulary. The first example
+renders 需要重新登录; the second renders 凭据被吊销. Both append the frame's
+literal `upstream.state.supplyStopped`, so the full line still states the drawn supply
+consequence without replacing the canonical cause `[frame]` `[contract]`.
 
 **Action selection is the contract's classification × credential-capability mapping**
 `[contract]`: refresh-capable auth reauthorizes; a static API key is replaced; balance is
 topped up; a banned account goes to the vendor. Frame 12 draws the first two producers.
 It does not turn the two drawn buttons into remedies for every `needs_action` cause.
 
-For a `native_cli` source, the reauth entry must collect the explicit irreversible-login
-acknowledgement before it sends the route; missing acknowledgement is API-only truth and
-has no product error slot `[contract]`. Hub reauth sends without that acknowledgement.
-The reauth flow then follows §1.4's declarative `presentation` states with
-`intent: reauth`; its terminal updates the existing source and carries `recovered` and
-`interrupted_pairs`, never create-only `added_to` or `adopted_by` `[contract]`.
+For a `native_cli` source, 重新授权 first opens the registered acknowledgement state:
+its warning names the irreversible local-credential boundary, 继续登录 is the only
+transition that sends `{acknowledge_irreversible: true}`, and cancel returns to the card
+without a request `[contract]`. A Hub source sends `{}` directly because the contract does
+not require that acknowledgement. The reauth flow then follows §1.4's declarative
+`presentation` and status-poll states with `intent: reauth`; its terminal updates the
+existing source and carries `recovered` and `interrupted_pairs`, never create-only
+`added_to` or `adopted_by` `[contract]`.
 
 The 更换 Key card action is the producer, not the secret field. It opens the key-entry
 step owned by credential repair; plaintext remains local until submit, and only submit
 sends the guarded replacement route. Frame 12 fixes the missing card affordance without
 claiming unexported modal geometry.
 
+Both repair terminals preserve a non-empty `interrupted_pairs` report until the user
+dismisses it `[contract]`. Each item is the contract's `SupplyGap`: backend + protected
+menu model, followed by the named-Agent line only when `agents` is non-empty. A source-list
+re-read cannot reconstruct which pairs this write interrupted, so it happens only after
+完成; an empty array may close straight to the returned source state. The report reuses
+`guard.gap.subject` and `guard.gap.agents` because the payload is the same noun, rather than
+creating a second spelling for it.
+
 **States** — §0.8, rows marked §1.11. Within a card, Tab reaches the card target and then
 the repair button; Enter or Space activates the focused target. Activating the nested
-repair button does not bubble into the card's open-detail action `[derived]`.
+repair button does not bubble into the card's open-detail action. The native confirmation
+traps focus; Escape is cancel; Enter activates only the focused control. The impact report
+keeps focus inside until 完成 `[derived]`.
 
-**Copy** — the causes reuse `models.hub.sourceDetail.status.needsAction.*`; actions and
-their progress/failure strings are registered under `models.hub.upstream.repair.*` in
-§1.0. No i18n file is changed by this registration.
+**Copy** — the causes reuse `models.hub.sourceDetail.status.needsAction.*`; the drawn supply
+suffix is `models.hub.upstream.state.supplyStopped`; actions, acknowledgement and terminal
+impact strings are registered under `models.hub.upstream.repair.*` in §1.0. No i18n file
+is changed by this registration.
 
 ---
 
@@ -4314,8 +4354,8 @@ the only effect of 01's 添加订阅 press `[frame]` `[contract]`.
 | Element | Displays | Interactive | On activate |
 | --- | --- | --- | --- |
 | 添加订阅 trigger | Shared `upstream.addSubscription` label and plus icon | yes | Toggle the menu |
-| Claude Code row | Vendor product name + 原生推荐 | yes | Close; open 04 with `vendor: anthropic` |
-| ChatGPT row | Vendor product name + 网关推荐 | yes | Close; open 04 with `vendor: openai` |
+| Claude 订阅 row | Vendor subscription name + 原生推荐 | yes | Close; open 04 with `vendor: anthropic` |
+| ChatGPT 订阅 row | Vendor subscription name + 网关推荐 | yes | Close; open 04 with `vendor: openai` |
 
 **Geometry** `[frame]`
 
@@ -4329,7 +4369,7 @@ the only effect of 01's 添加订阅 press `[frame]` `[contract]`.
 | Gateway badge | `padding [2,7]`, `#FFFFFF0A`, `#FFFFFF14` border, radius 999; label 10 / 600 muted |
 
 The authoring caption above the exhibit is not product text. On open, focus moves to
-Claude Code, the first row. Arrow Up/Down moves between rows, Home/End moves to the first
+Claude 订阅, the first row. Arrow Up/Down moves between rows, Home/End moves to the first
 or last row, Enter/Space selects, Escape returns focus to 添加订阅, and an outside press
 dismisses without choosing `[derived]`. A selection closes the menu before 04 opens, so
 returning from 04 never leaves a stale menu under the dialog.
@@ -4340,8 +4380,8 @@ returning from 04 never leaves a stale menu under the dialog.
 
 | Key | 中文 | English |
 | --- | --- | --- |
-| `vendor.claude` `[frame]` | Claude Code | Claude Code |
-| `vendor.chatgpt` `[frame]` | ChatGPT | ChatGPT |
+| `vendor.claude` `[frame]` | Claude 订阅 | Claude subscription |
+| `vendor.chatgpt` `[frame]` | ChatGPT 订阅 | ChatGPT subscription |
 | `recommendation.native` `[frame]` | 原生推荐 | Native recommended |
 | `recommendation.gateway` `[frame]` | 网关推荐 | Gateway recommended |
 
