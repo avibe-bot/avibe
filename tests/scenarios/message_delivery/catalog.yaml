@@ -248,5 +248,11 @@ scenarios:
     kind: concurrency
     layer: contract
     test: tests/test_scheduled_tasks.py::test_one_terminal_turn_callbacks_once_per_callback_session
+  - id: MESSAGE-DELIVERY-315
+    name: Accepted delegated messages collapse by Turn while queued deliveries remain distinct
+    status: covered
+    kind: lifecycle
+    layer: contract
+    test: tests/test_background_work_banner.py::test_agent_run_banner_collapses_accepted_turn_and_keeps_queued_deliveries
 next_priority:
-  - MESSAGE-DELIVERY-315
+  - MESSAGE-DELIVERY-316

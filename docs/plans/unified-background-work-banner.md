@@ -25,12 +25,15 @@ The banner's source of truth is a **union assembled at runtime-state build time*
      fallback for legacy tasks without provenance;
    - active delegated agent runs whose callback returns to this session (work this session
      dispatched and is waiting on). A linked Delivery still in the FIFO `queued` state is
-     presented as queued even when its executor Run has already moved to `running`.
+     presented as queued even when its executor Run has already moved to `running`. Accepted
+     Deliveries that share one target Turn project as one running item, represented by the
+     Delivery with the greatest `turn_position`; queued Deliveries remain separate items.
 
 Each unified item carries: `kind` (`backend_activity` | `watch` | `task` | `agent_run`),
 `label` (watch name / task summary / target agent + short message head / activity description),
 `since` timestamp, and a stable id. Task items also carry the durable `schedule_type` (`at` |
-`cron`) used for display classification. The banner count = union size. No controls
+`cron`) used for display classification. The banner count = projected union size after the
+accepted-Turn collapse. No controls
 (pause/cancel) in this phase — the expanded list links to the Harness page (watches/tasks) or
 run detail.
 
