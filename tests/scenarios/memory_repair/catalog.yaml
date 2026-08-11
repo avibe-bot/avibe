@@ -1,0 +1,51 @@
+version: 1
+capability:
+  id: memory_repair
+  name: Live Memory index repair via admitted artifact sync
+  canonical_tests:
+    - tests/scenarios/memory_repair/test_memory_repair_scenarios.py
+    - ui/src/components/settings/memory/MemoryStatusPanel.test.tsx
+  shared_harness: []
+status_legend:
+  covered: frontend/service-boundary evidence exists
+  partial: contract is represented but needs live backend coverage
+  manual: requires a running Memory runtime
+scenarios:
+  - id: MEMORY-REPAIR-001
+    name: Admitted artifact repair completes with a healthy cascade projection
+    status: covered
+    kind: happy_path
+    layer: ui_contract
+    test: tests/scenarios/memory_repair/test_memory_repair_scenarios.py::test_memory_repair_001_uses_exact_post_contract
+    related_tests:
+      - ui/src/components/settings/memory/MemoryStatusPanel.test.tsx
+  - id: MEMORY-REPAIR-002
+    name: Repair completion with warnings remains truthful to unhealthy cascade health
+    status: covered
+    kind: health_projection
+    layer: ui
+    test: tests/scenarios/memory_repair/test_memory_repair_scenarios.py::test_memory_repair_002_renders_warning_health
+  - id: MEMORY-REPAIR-003
+    name: A second Repair request is disabled while the first request is running
+    status: covered
+    kind: concurrency
+    layer: ui
+    test: tests/scenarios/memory_repair/test_memory_repair_scenarios.py::test_memory_repair_003_has_running_guard
+  - id: MEMORY-REPAIR-004
+    name: A failed Repair is shown as a closed error and can be retried manually
+    status: partial
+    kind: recovery
+    layer: ui_contract
+    test: tests/scenarios/memory_repair/test_memory_repair_scenarios.py::test_memory_repair_004_has_no_automatic_retry_or_polling
+  - id: MEMORY-REPAIR-005
+    name: Repair action is hidden when artifact sync capability is disabled
+    status: covered
+    kind: capability_gate
+    layer: ui
+    test: tests/scenarios/memory_repair/test_memory_repair_scenarios.py::test_memory_repair_005_fails_closed_on_capability
+  - id: MEMORY-REPAIR-006
+    name: Repair leaves the live sidecar action path untouched
+    status: covered
+    kind: lifecycle
+    layer: ui_contract
+    test: tests/scenarios/memory_repair/test_memory_repair_scenarios.py::test_memory_repair_006_does_not_stop_sidecar

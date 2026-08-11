@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   AlertTriangle,
@@ -14,12 +15,14 @@ import {
 import { Badge } from '../../ui/badge';
 import { Button } from '../../ui/button';
 import { Card, CardContent } from '../../ui/card';
+import { ConfirmDialog } from '../../ui/confirm-dialog';
 import { InfoHint } from '../../ui/info-hint';
 import type {
   MemoryClearRecovery,
   MemoryFailureLogEntry,
   MemoryLogSections,
   MemoryLogSourceStatus,
+  MemoryCascadeHealth,
   MemoryStatus,
 } from '../../../context/ApiContext';
 import { memoryErrorMessage } from '../../../lib/memoryRead';
@@ -219,6 +222,11 @@ export const MemoryStatusPanel: React.FC<{
   onRefresh: () => void;
   onResumeClear: (operationId: string) => void;
   onAbortClear: (operationId: string) => void;
+  repairSupported?: boolean;
+  repairBusy?: boolean;
+  repairError?: string | null;
+  repairHealth?: MemoryCascadeHealth | null;
+  onRepair?: () => void;
 }> = ({
   status,
   failures,
@@ -233,8 +241,14 @@ export const MemoryStatusPanel: React.FC<{
   onRefresh,
   onResumeClear,
   onAbortClear,
+  repairSupported = false,
+  repairBusy = false,
+  repairError = null,
+  repairHealth = null,
+  onRepair = () => undefined,
 }) => {
   const { t } = useTranslation();
+  const [repairConfirmOpen, setRepairConfirmOpen] = useState(false);
   const health = status?.health ?? null;
   const emptySource: MemoryLogSourceStatus = { status: 'unknown', observed_at: null };
   const sources = [
@@ -245,6 +259,7 @@ export const MemoryStatusPanel: React.FC<{
   ];
 
   return (
+    <>
     <div className="flex flex-col gap-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
@@ -325,18 +340,49 @@ export const MemoryStatusPanel: React.FC<{
                   </div>
                   <div className="min-w-0 border-t border-border pt-3 lg:col-span-2 lg:grid lg:grid-cols-2 lg:gap-4">
                     <div className="min-w-0">
-                      <div className="mb-2 flex items-center gap-1.5 text-[11.5px] font-semibold text-foreground">
-                        {t('memory.processingRecord.runtime.cascade')}
-                        <InfoHint
-                          label={t('memory.processingRecord.runtime.cascadeHelpLabel')}
-                          content={t('memory.processingRecord.runtime.cascadeHelp')}
-                        />
+                      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex items-center gap-1.5 text-[11.5px] font-semibold text-foreground">
+                          {t('memory.processingRecord.runtime.cascade')}
+                          <InfoHint
+                            label={t('memory.processingRecord.runtime.cascadeHelpLabel')}
+                            content={t('memory.processingRecord.runtime.cascadeHelp')}
+                          />
+                        </div>
+                        {repairSupported ? (
+                          <Button
+                            variant="secondary"
+                            size="xs"
+                            disabled={repairBusy}
+                            onClick={() => setRepairConfirmOpen(true)}
+                          >
+                            {repairBusy ? <Loader2 className="animate-spin" /> : <RefreshCw />}
+                            {repairBusy
+                              ? t('memory.processingRecord.repair.running')
+                              : t('memory.processingRecord.repair.action')}
+                          </Button>
+                        ) : null}
                       </div>
                       <FactList
                         facts={health.cascade}
                         emptyLabel={t('memory.processingRecord.runtime.noFacts')}
                         group="cascade"
                       />
+                      {repairError ? (
+                        <div className="mt-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-[11.5px] text-destructive">
+                          {repairError}
+                        </div>
+                      ) : null}
+                      {repairHealth ? (
+                        <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-muted">
+                          <CheckCircle2 className={repairHealth.healthy ? 'size-3.5 text-mint' : 'size-3.5 text-gold'} />
+                          <span>{t('memory.processingRecord.repair.healthResult')}</span>
+                          <Badge variant={repairHealth.healthy ? 'success' : 'warning'}>
+                            {repairHealth.healthy
+                              ? t('memory.processingRecord.repair.healthy')
+                              : t('memory.processingRecord.repair.completedWithWarnings')}
+                          </Badge>
+                        </div>
+                      ) : null}
                     </div>
                     <div className="mt-3 min-w-0 lg:mt-0">
                       <div className="mb-2 flex items-center gap-1.5 text-[11.5px] font-semibold text-foreground">
@@ -424,5 +470,17 @@ export const MemoryStatusPanel: React.FC<{
         </Card>
       </section>
     </div>
+      <ConfirmDialog
+        open={repairConfirmOpen}
+        onOpenChange={setRepairConfirmOpen}
+        title={t('memory.processingRecord.repair.confirmTitle')}
+        description={t('memory.processingRecord.repair.confirmDescription')}
+        confirmLabel={t('memory.processingRecord.repair.confirmLabel')}
+        onConfirm={() => {
+          setRepairConfirmOpen(false);
+          onRepair();
+        }}
+      />
+    </>
   );
 };

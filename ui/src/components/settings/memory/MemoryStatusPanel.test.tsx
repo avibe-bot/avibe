@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
-import type { MemoryClearRecovery, MemoryFailureLogEntry, MemoryStatus } from '../../../context/ApiContext';
+import type { MemoryCascadeHealth, MemoryClearRecovery, MemoryFailureLogEntry, MemoryStatus } from '../../../context/ApiContext';
 import { MemoryStatusPanel } from './MemoryStatusPanel';
 
 vi.mock('react-i18next', () => ({
@@ -99,6 +99,41 @@ describe('MemoryStatusPanel', () => {
     ]) {
       expect(screen.getByRole('button', { name: label })).toBeTruthy();
     }
+  });
+
+  it('only exposes Repair index when the backend capability is explicitly available', () => {
+    const { rerender } = render(<MemoryStatusPanel {...baseProps} />);
+    expect(screen.queryByRole('button', { name: 'memory.processingRecord.repair.action' })).toBeNull();
+
+    rerender(<MemoryStatusPanel {...baseProps} repairSupported />);
+    expect(screen.getByRole('button', { name: 'memory.processingRecord.repair.action' })).toBeTruthy();
+  });
+
+  it('shows the structured final health projection and running lock', () => {
+    const health: MemoryCascadeHealth = {
+      healthy: false,
+      reasons: ['drain_failures'],
+      pending: 1,
+      failed_permanent: 0,
+      failed_retryable: 1,
+      drain_consecutive_failures: 2,
+      unrecoverable_total: 0,
+      optimize_failure_streak: 0,
+      prune_stale_seconds: 60,
+    };
+    render(
+      <MemoryStatusPanel
+        {...baseProps}
+        repairSupported
+        repairBusy
+        repairHealth={health}
+        repairError="repair failed"
+      />,
+    );
+
+    expect((screen.getByRole('button', { name: 'memory.processingRecord.repair.running' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText('repair failed')).toBeTruthy();
+    expect(screen.getByText('memory.processingRecord.repair.completedWithWarnings')).toBeTruthy();
   });
 
   it('preserves the Processing Record structure and responsive class contract', () => {

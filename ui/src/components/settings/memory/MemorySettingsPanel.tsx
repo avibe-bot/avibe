@@ -134,6 +134,7 @@ export const MemorySettingsPanel: React.FC<{
   maintenanceError: string | null;
   dependencyReady: boolean;
   rebuildBusy?: boolean;
+  repairBusy?: boolean;
   onRebuildBusyChange?: (busy: boolean) => void;
   onSaved: (next: MemorySettingsOk) => void;
   onReloadSettings: () => void;
@@ -151,6 +152,7 @@ export const MemorySettingsPanel: React.FC<{
   maintenanceError,
   dependencyReady,
   rebuildBusy = false,
+  repairBusy = false,
   onRebuildBusyChange,
   onSaved,
   onReloadSettings,
@@ -185,7 +187,7 @@ export const MemorySettingsPanel: React.FC<{
   const factoryResetRequired = factoryResetPending;
   const canClearKeys = !enabledDraft;
   const canClearMemory = maintenance?.can_clear === true;
-  const busy = saving || rebuildBusy || factoryResetBusy;
+  const busy = saving || rebuildBusy || repairBusy || factoryResetBusy || factoryResetPending;
 
   const buildPatch = (): MemorySettingsPatch => {
     const patch: MemorySettingsPatch = {};
