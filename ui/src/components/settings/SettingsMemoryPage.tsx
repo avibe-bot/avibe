@@ -78,6 +78,10 @@ export const SettingsMemoryPage: React.FC = () => {
   // Forbidden is the backend's "this is not a direct-loopback browser" verdict, and it is
   // sticky per resource, so the static state never flickers away on a later request.
   const remoteUnavailable = settingsRead.forbidden || statusRead.forbidden || failuresRead.forbidden;
+  // `settings` is local-only, so remote owners derive the broad enablement bit
+  // from the permitted status read instead of letting profile/search stay
+  // permanently "disabled" just because the settings payload is absent.
+  const memoryEnabled = settings?.enabled ?? (statusRead.loaded && status ? status.state !== 'disabled' : false);
 
   // Dependency readiness comes from the authoritative Dependencies source (plan §5), NOT the
   // memory status: after a failed enable the backend rolls the setting back to disabled and a
@@ -183,7 +187,7 @@ export const SettingsMemoryPage: React.FC = () => {
   // rather than on a panel whose reads and writes it cannot make.
   const activeTab = tabs.some((entry) => entry.id === tab) ? tab : 'status';
 
-  const setupStage = memorySetupStage(runtimeInstalled, settings?.enabled ?? null);
+  const setupStage = memorySetupStage(runtimeInstalled, memoryEnabled);
   const runtimeRecoveryAvailable = memoryRuntimeRecoveryAvailable(runtimeInstalled, settings !== null);
   // Setup and runtime recovery exist to save settings, so they are unreachable
   // for a principal that cannot administer Memory at all.
@@ -298,9 +302,9 @@ export const SettingsMemoryPage: React.FC = () => {
             />
           )}
 
-          {activeTab === 'profile' && <MemoryProfilePanel enabled={!!settings?.enabled} />}
+          {activeTab === 'profile' && <MemoryProfilePanel enabled={memoryEnabled} />}
 
-          {activeTab === 'search' && <MemorySearchPanel enabled={!!settings?.enabled} />}
+          {activeTab === 'search' && <MemorySearchPanel enabled={memoryEnabled} />}
 
           {activeTab === 'log' && settings ? (
             <MemoryLogPanel

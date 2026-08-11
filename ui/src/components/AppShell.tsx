@@ -19,6 +19,7 @@ import { VersionBadge } from './VersionBadge';
 import { WorkbenchSidebar } from './workbench/WorkbenchSidebar';
 import { AppsLauncher } from './AppsLauncher';
 import { ErrorBoundary } from './ui/error-boundary';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
 import { WindowManagerProvider } from '../context/WindowManagerProvider';
 import { DockProvider } from '../context/DockProvider';
 import { ShowPageDragProvider } from '../context/ShowPageDragProvider';
@@ -231,7 +232,7 @@ export const AppShell: React.FC = () => {
   const { t } = useTranslation();
   const { status } = useStatus();
   const { totalUnread } = useWorkbenchInbox();
-  const { capabilities } = useInstanceAuthorization();
+  const { capabilities, remote } = useInstanceAuthorization();
   const api = useApi();
   const location = useLocation();
   const [enabledPlatforms, setEnabledPlatforms] = useState<string[]>([]);
@@ -335,6 +336,27 @@ export const AppShell: React.FC = () => {
   // has run — an early return before them would make those hooks conditional.
   if (location.pathname.startsWith('/admin/organization')) {
     return <OrganizationShell />;
+  }
+
+  if (location.pathname === '/setup' && remote && capabilities.can_manage_instance) {
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-background p-4 text-foreground">
+        <Card className="w-full max-w-md">
+          <CardHeader>
+            <CardTitle>{t('setup.remoteOwner.title')}</CardTitle>
+            <CardDescription>{t('setup.remoteOwner.body')}</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <p className="text-sm leading-relaxed text-muted">{t('setup.remoteOwner.hint')}</p>
+            <Button asChild>
+              <Link to={adminLandingPath(capabilities.can_use_system)}>
+                {t('setup.remoteOwner.action')}
+              </Link>
+            </Button>
+          </CardContent>
+        </Card>
+      </main>
+    );
   }
 
   const hasChannelPlatforms = enabledPlatforms.some((platform) => platformSupportsChannels(config, platform));
