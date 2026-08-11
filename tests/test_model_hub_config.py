@@ -1231,6 +1231,58 @@ def test_config_reload_recovers_invalid_optional_section_without_overwriting_fil
         loaded.save(config_path)
 
 
+def test_config_reload_recovers_runtime_with_the_canonical_default(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    payload = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    payload["runtime"] = {"log_level": "DEBUG"}
+    payload["show_duration"] = True
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert loaded.runtime.default_cwd == str(Path.home() / "work")
+    assert loaded.runtime.log_level == "INFO"
+    assert loaded.show_duration is True
+    assert loaded.load_warnings and "runtime" in loaded.load_warnings[0]
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda hub: hub["agents"]["claude"].update({"sources": "invalid"}),
+        lambda hub: hub["agents"]["claude"].update(
+            {"sources": {"policy": "custom", "order": "invalid"}}
+        ),
+        lambda hub: hub.update({"priority_order": {"invalid": True}}),
+    ],
+    ids=["sources-not-object", "custom-order-not-array", "priority-order-not-array"],
+)
+def test_config_reload_does_not_infer_malformed_legacy_source_order(
+    monkeypatch,
+    tmp_path,
+    mutate,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    payload = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    legacy = _legacy_model_hub_payload(payload["model_hub"])
+    mutate(legacy)
+    payload["model_hub"] = legacy
+    config_path = tmp_path / "config.json"
+    original = json.dumps(payload)
+    config_path.write_text(original, encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert loaded.model_hub.to_payload() == V2Config.default().model_hub.to_payload()
+    assert loaded.load_warnings and "model_hub" in " ".join(loaded.load_warnings)
+    assert config_path.read_text(encoding="utf-8") == original
+    assert list(config_path.parent.glob("config.json.bak-recovery-*"))
+
+
 def test_config_reload_recovers_invalid_json_with_backup(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config_path = tmp_path / "config.json"

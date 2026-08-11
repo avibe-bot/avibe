@@ -516,7 +516,7 @@ def test_save_claude_auth_blocks_recovery_before_external_mutation(
 ) -> None:
     from vibe import api
 
-    fake_config = type("Config", (), {"load_warnings": ("recovery required",)})()
+    fake_config = type("Config", (), {"load_warnings": ("recovery required",), "language": "zh"})()
     monkeypatch.setattr(api, "load_config", lambda: fake_config)
     applied: list[dict] = []
     monkeypatch.setattr(
@@ -534,7 +534,8 @@ def test_save_claude_auth_blocks_recovery_before_external_mutation(
     )
 
     assert result["ok"] is False
-    assert "recovery warnings" in result["message"]
+    assert result["error"] == "config_recovery"
+    assert "配置加载时发生了恢复" in result["message"]
     assert applied == []
 
 

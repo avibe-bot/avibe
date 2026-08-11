@@ -303,6 +303,28 @@ def _legacy_source_order(
     return _legacy_recommended_source_order(sources, backend)
 
 
+def _legacy_source_order_setting_is_valid(value: object, *, required: bool = False) -> bool:
+    """Validate the pre-v5 source-order shape before migration can infer hops."""
+
+    if not isinstance(value, dict):
+        return False
+    if set(value) - {"policy", "order"}:
+        return False
+    policy = value.get("policy")
+    if policy not in {None, "custom", "follow"}:
+        return False
+    if required and not isinstance(value.get("order"), list):
+        return False
+    order = value.get("order")
+    if order is None:
+        return not required
+    return (
+        isinstance(order, list)
+        and all(isinstance(source_id, str) for source_id in order)
+        and len(order) == len(set(order))
+    )
+
+
 def _legacy_claude_matching_model_id(source: dict, requested_model: str) -> str | None:
     """Resolve the pre-v5 Claude aliases against discovered native models.
 
@@ -425,6 +447,10 @@ def _migrate_legacy_model_hub_payload(payload: dict) -> tuple[dict, bool, tuple[
     raw_sources = model_hub.get("sources")
     if raw_sources is not None and not isinstance(raw_sources, list):
         return payload, False, ()
+    if "priority_order" in model_hub and not _legacy_source_order_setting_is_valid(
+        {"order": model_hub["priority_order"]}
+    ):
+        return payload, False, ()
     for source in raw_sources or []:
         if not isinstance(source, dict):
             return payload, False, ()
@@ -442,6 +468,14 @@ def _migrate_legacy_model_hub_payload(payload: dict) -> tuple[dict, bool, tuple[
         menu = agent.get("menu")
         if isinstance(menu, dict) and "checked" in menu and not isinstance(menu["checked"], list):
             return payload, False, ()
+        if "sources" in agent:
+            source_settings = agent["sources"]
+            if not _legacy_source_order_setting_is_valid(
+                source_settings,
+                required=isinstance(source_settings, dict)
+                and source_settings.get("policy") == "custom",
+            ):
+                return payload, False, ()
     has_legacy_shape = bool(
         {"priority_order", "subscription_hub_experimental"} & set(model_hub)
         or any(isinstance(agent, dict) and "mappings" in agent for agent in agents.values())
@@ -608,10 +642,15 @@ def _reset_recoverable_config_section(payload: dict, section: str) -> bool:
     loss-avoiding recovery path, and the original file is backed up first.
     """
 
+    if section == "runtime":
+        # Keep this in sync with ``V2Config.default``.  RuntimeConfig has a
+        # required cwd, so an empty object would make the recovery loop fail a
+        # second time and discard otherwise valid settings.
+        payload[section] = {"default_cwd": str(Path.home() / "work")}
+        return True
     if section in {
         "model_hub",
         "memory",
-        "runtime",
         "agents",
         "ui",
         "remote_access",

@@ -116,7 +116,7 @@ def test_save_codex_auth_falls_back_to_v2config_when_disk_empty(
 
 
 def test_save_codex_auth_blocks_recovery_before_external_mutation(monkeypatch) -> None:
-    fake_config = types.SimpleNamespace(load_warnings=("recovery required",))
+    fake_config = types.SimpleNamespace(load_warnings=("recovery required",), language="zh")
     monkeypatch.setattr(api, "load_config", lambda: fake_config)
     applied: list[dict] = []
     monkeypatch.setattr(
@@ -129,7 +129,8 @@ def test_save_codex_auth_blocks_recovery_before_external_mutation(monkeypatch) -
     )
 
     assert result["ok"] is False
-    assert "recovery warnings" in result["message"]
+    assert result["error"] == "config_recovery"
+    assert "配置加载时发生了恢复" in result["message"]
     assert applied == []
 
 
