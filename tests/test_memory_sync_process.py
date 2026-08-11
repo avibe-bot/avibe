@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import signal
 from pathlib import Path
 
 import pytest
@@ -82,6 +83,7 @@ async def test_pending_sync_record_fails_closed_without_touching_sidecar(tmp_pat
     ownership = SyncOwnership(sync_record_path(memory_dir), provider_root=root, host=host)
     ownership.write(_record(root, state="pending"))
     sidecar = memory_dir / ".rt" / "everos.sidecar.json"
+    sidecar.parent.mkdir(parents=True)
     sidecar.write_text("sidecar-owned", encoding="ascii")
 
     with pytest.raises(SyncOwnershipError, match="pending"):
@@ -273,6 +275,155 @@ async def test_retained_failed_cleanup_reconciles_while_its_parent_is_live(
     assert sync._ownership.read()["cleanup_failed"] is True
     await sync._ownership.reconcile()
     assert not sync._ownership.path.exists()
+
+
+async def test_retained_pending_cleanup_reconciles_while_its_parent_is_live(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    python = tmp_path / "runtime" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_bytes(b"python")
+    root = tmp_path / "home" / "memory" / "everos-root"
+    uid = os.getuid() if hasattr(os, "getuid") else None
+
+    class RetainedPendingHost(_Host):
+        def find_syncs(self, *, provider_root, python, nonce):
+            del provider_root, python, nonce
+            return {}
+
+    host = RetainedPendingHost(
+        {
+            99: _ProcessIdentity(
+                create_time=8.25,
+                cmdline=("avibe",),
+                uid=uid,
+                environment={},
+            )
+        }
+    )
+    sync = EverOSSyncProcess(
+        python,
+        effective_home=tmp_path / "home",
+        _host=host,
+    )
+    record = _record(root, state="pending")
+    sync._ownership.write(record)
+
+    async def cleanup_cannot_be_proven(*_args, **_kwargs) -> None:
+        raise RuntimeError("EverOS child process tree did not exit")
+
+    monkeypatch.setattr(sync, "_terminate_owned_sync_tree", cleanup_cannot_be_proven)
+
+    class Process:
+        pid = 451
+
+    await sync._cleanup_failed_launch(Process(), 451, {451: 10.5}, str(record["nonce"]))
+
+    assert sync._ownership.read()["cleanup_failed"] is True
+    await sync._ownership.reconcile()
+    assert not sync._ownership.path.exists()
+
+
+async def test_sync_cleanup_runtime_error_marks_the_finalized_record(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    python = tmp_path / "runtime" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_bytes(b"python")
+
+    class Process:
+        pid = 451
+        returncode = None
+
+        def send_signal(self, signum):
+            assert signum is signal.SIGCONT
+
+        async def wait(self):
+            self.returncode = 0
+            return 0
+
+    process = Process()
+
+    class Host:
+        environment: dict[str, str] = {}
+
+        async def spawn(self, kind, artifact_python, *, cwd, env, socket_path=None):
+            del cwd, socket_path
+            assert kind is _ProcessKind.CASCADE_SYNC
+            assert artifact_python == python
+            self.environment = dict(env)
+            return process
+
+        def process_group(self, pid):
+            assert pid == process.pid
+            return pid
+
+        def snapshot_tree(self, pid, process_group):
+            assert (pid, process_group) == (process.pid, process.pid)
+            return {pid: 10.5}
+
+        async def wait_for_stopped(self, pid, timeout_seconds):
+            del timeout_seconds
+            assert pid == process.pid
+            return True
+
+        def inspect_identity(self, pid):
+            assert pid == process.pid
+            return _ProcessIdentity(
+                create_time=10.5,
+                cmdline=(str(python), *SYNC_ARGV),
+                uid=os.getuid() if hasattr(os, "getuid") else None,
+                environment=self.environment,
+            )
+
+    sync = EverOSSyncProcess(
+        python,
+        effective_home=tmp_path / "home",
+        _host=Host(),
+    )
+    cleanup_calls = 0
+
+    async def cleanup_fails(*_args, **_kwargs) -> None:
+        nonlocal cleanup_calls
+        cleanup_calls += 1
+        raise RuntimeError("EverOS child process tree did not exit")
+
+    monkeypatch.setattr(sync, "_terminate_owned_sync_tree", cleanup_fails)
+
+    assert await sync.run() is SyncProcessResult.FAILED
+    record = sync._ownership.read()
+    assert cleanup_calls == 2
+    assert record is not None
+    assert record["state"] == "finalized"
+    assert record["cleanup_failed"] is True
+
+
+async def test_sync_ownership_is_shared_across_homes_for_one_provider_root(
+    tmp_path: Path,
+) -> None:
+    python = tmp_path / "runtime" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_bytes(b"python")
+    provider_root = tmp_path / "shared" / "everos-root"
+    provider_root.parent.mkdir()
+    owner = EverOSSyncProcess(
+        python,
+        effective_home=tmp_path / "owner-home",
+        provider_root=provider_root,
+        _host=_Host(),
+    )
+    contender = EverOSSyncProcess(
+        python,
+        effective_home=tmp_path / "contender-home",
+        provider_root=provider_root,
+        _host=_Host(),
+    )
+    owner._ownership.claim(_record(provider_root, state="pending"))
+
+    assert owner._ownership.path == contender._ownership.path
+    assert await contender.run() is SyncProcessResult.ALREADY_RUNNING
 
 
 async def test_finalized_sync_reconciliation_cleans_exact_recorded_group(tmp_path: Path) -> None:

@@ -29,6 +29,8 @@ from core.memory.process import (
     _ProcessIdentity,
     _ProcessHost,
     _ensure_owner_directory,
+    _provider_root_coordination_path,
+    _provider_roots_match,
     EverOSProcessSettings,
     _memory_child_environment,
     _positive_timeout,
@@ -37,7 +39,6 @@ from core.memory.process import (
 )
 
 
-SYNC_RECORD_FILENAME = "everos.sync.json"
 SYNC_BOOTSTRAP_ENV = "AVIBE_MEMORY_SYNC_BOOTSTRAP"
 SYNC_NONCE_ENV = "AVIBE_MEMORY_SYNC_NONCE"
 SYNC_PARENT_PID_ENV = "AVIBE_MEMORY_SYNC_PARENT_PID"
@@ -49,7 +50,7 @@ _MAX_RECORD_BYTES = 16 * 1024
 _STOP_TIMEOUT_SECONDS = 10.0
 _SYNC_TIMEOUT_SECONDS = 30 * 60.0
 _HANDSHAKE_TIMEOUT_SECONDS = 30.0
-_SYNC_LOCK_FILENAME = "everos.sync.lock"
+_SYNC_RECORD_PREFIX = "cascade-sync-"
 
 
 class SyncProcessResult(str, Enum):
@@ -72,8 +73,19 @@ class _SyncIdentityMismatch(SyncOwnershipError):
     """A disclosed child identity proves a recorded pid was recycled."""
 
 
-def sync_record_path(memory_dir: Path | str) -> Path:
-    return Path(memory_dir) / ".rt" / SYNC_RECORD_FILENAME
+def sync_record_path(
+    memory_dir: Path | str,
+    *,
+    provider_root: Path | str | None = None,
+) -> Path:
+    """Return the canonical provider-root-scoped sync ownership record path."""
+
+    root = Path(provider_root) if provider_root is not None else Path(memory_dir) / "everos-root"
+    return _provider_root_coordination_path(
+        provider_root=root,
+        prefix=_SYNC_RECORD_PREFIX,
+        suffix=".json",
+    )
 
 
 @dataclass(frozen=True)
@@ -103,7 +115,7 @@ class SyncOwnership:
     def _locked(self):
         """Serialize record mutations across independent launcher processes."""
         _ensure_owner_directory(self.path.parent)
-        lock_path = self.path.parent / _SYNC_LOCK_FILENAME
+        lock_path = self.path.with_name(f"{self.path.name}.lock")
         flags = os.O_RDWR | os.O_CREAT | int(getattr(os, "O_CLOEXEC", 0))
         no_follow = int(getattr(os, "O_NOFOLLOW", 0))
         descriptor = os.open(lock_path, flags | no_follow, 0o600)
@@ -229,8 +241,8 @@ class SyncOwnership:
             current = self.read()
             if current is None or current.get("nonce") != nonce:
                 raise SyncOwnershipError("sync ownership record changed during cleanup")
-            if current.get("state") != "finalized":
-                raise SyncOwnershipError("sync ownership record is not finalized")
+            if current.get("state") not in {"pending", "finalized"}:
+                raise SyncOwnershipError("sync ownership record has an invalid state")
             self._write_unlocked({**current, "cleanup_failed": True})
 
     def remove(self, *, nonce: str) -> None:
@@ -382,7 +394,7 @@ class EverOSSyncProcess:
         self.settings = settings or EverOSProcessSettings()
         self.host = _host or _default_host()
         self._ownership = SyncOwnership(
-            sync_record_path(self.memory_dir),
+            sync_record_path(self.memory_dir, provider_root=self.provider_root),
             provider_root=self.provider_root,
             host=self.host,
         )
@@ -478,7 +490,7 @@ class EverOSSyncProcess:
             return SyncProcessResult.INTERRUPTED
         except _SyncOwnershipBusy:
             return SyncProcessResult.ALREADY_RUNNING
-        except (OSError, SyncOwnershipError, asyncio.TimeoutError):
+        except (OSError, RuntimeError, asyncio.TimeoutError):
             await self._cleanup_failed_launch(process, group, identities, nonce)
             return SyncProcessResult.FAILED
 
@@ -607,14 +619,15 @@ def _sync_environment(
 
 
 def _validate_record(record: Mapping[str, Any], *, provider_root: Path) -> None:
-    if record.get("role") != SYNC_ROLE or record.get("provider_root") != str(provider_root):
+    if record.get("role") != SYNC_ROLE or not _provider_roots_match(
+        record.get("provider_root"),
+        provider_root,
+    ):
         raise SyncOwnershipError("sync ownership record is for another role or root")
     if record.get("state") not in {"pending", "finalized"}:
         raise SyncOwnershipError("sync ownership record state is invalid")
     cleanup_failed = record.get("cleanup_failed", False)
-    if not isinstance(cleanup_failed, bool) or (
-        cleanup_failed and record.get("state") != "finalized"
-    ):
+    if not isinstance(cleanup_failed, bool):
         raise SyncOwnershipError("sync ownership cleanup state is invalid")
     nonce = record.get("nonce")
     if not isinstance(nonce, str) or len(nonce) != 64 or any(c not in "0123456789abcdef" for c in nonce):
@@ -667,7 +680,7 @@ def _validate_child_identity(
     environment = identity.environment
     if environment is None:
         raise SyncOwnershipError("sync child environment is unavailable")
-    if environment.get("EVEROS_ROOT") != str(provider_root):
+    if not _provider_roots_match(environment.get("EVEROS_ROOT"), provider_root):
         raise _SyncIdentityMismatch("sync child provider root does not match")
     if environment.get("AVIBE_MEMORY_CHILD_ROLE") != SYNC_ROLE:
         raise _SyncIdentityMismatch("sync child role does not match")

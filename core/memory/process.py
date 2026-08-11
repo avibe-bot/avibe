@@ -1431,11 +1431,18 @@ def _release_rebuild_child(process: asyncio.subprocess.Process) -> None:
         pass
 
 
-def _provider_rebuild_lock_path(*, provider_root: Path) -> Path:
-    """Bind coordination to the canonical root location, outside provider data."""
+def _provider_root_coordination_path(
+    *,
+    provider_root: Path | str,
+    prefix: str,
+    suffix: str,
+) -> Path:
+    """Bind one coordination artifact to the canonical root, outside provider data."""
 
     canonical_root = _canonical_provider_root(provider_root)
-    canonical_parent = _physical_existing_path(canonical_root.parent.resolve(strict=True))
+    # A sync ownership path is derived before a first-run home creates its
+    # provider-root parent. Existing parents still retain their physical spelling.
+    canonical_parent = _physical_existing_path(canonical_root.parent.resolve(strict=False))
     root_identity_path = (
         _physical_existing_path(canonical_root)
         if canonical_root.exists()
@@ -1451,7 +1458,17 @@ def _provider_rebuild_lock_path(*, provider_root: Path) -> Path:
     return (
         canonical_parent
         / _REBUILD_LOCK_DIRECTORY
-        / f"{_REBUILD_LOCK_PREFIX}{root_identity}.lock"
+        / f"{prefix}{root_identity}{suffix}"
+    )
+
+
+def _provider_rebuild_lock_path(*, provider_root: Path) -> Path:
+    """Bind rebuild serialization to the canonical root location."""
+
+    return _provider_root_coordination_path(
+        provider_root=provider_root,
+        prefix=_REBUILD_LOCK_PREFIX,
+        suffix=".lock",
     )
 
 

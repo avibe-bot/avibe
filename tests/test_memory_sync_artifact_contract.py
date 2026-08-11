@@ -11,6 +11,7 @@ import pytest
 
 from core.managed_runtime import ManagedRuntimeArchive, ManagedRuntimeManifest, runtime_platform_tag
 from core.memory.artifact import (
+    ARTIFACT_ADMISSION_REVISION,
     EMBEDDED_PYTHON_VERSION,
     EVEROS_VERSION,
     PACKAGE_LOCK_SHA256,
@@ -36,8 +37,12 @@ def _digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _runtime_contract(tmp_path: Path) -> tuple[Path, tuple[int, tuple[str, ...], str, str]]:
-    root = tmp_path / "runtime"
+def _runtime_contract(
+    tmp_path: Path,
+    *,
+    runtime_root: Path | None = None,
+) -> tuple[Path, tuple[int, tuple[str, ...], str, str]]:
+    root = runtime_root or tmp_path / "runtime"
     binary = root / "bin" / "python"
     site = root / "lib" / "python3.12" / "site-packages"
     binary.parent.mkdir(parents=True)
@@ -101,6 +106,41 @@ def test_sync_admission_requires_one_exact_site_packages_location(tmp_path: Path
     (binary.parent.parent / "lib" / "python3.11" / "site-packages").mkdir(parents=True)
 
     assert not MemoryArtifactManager._admit_sync_contract(binary, contract)
+
+
+def test_sync_capability_rejects_a_nonadmitted_active_pointer(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
+    manager = MemoryArtifactManager(runtime_dir=tmp_path / "runtime", offline=True)
+    install_dir = manager.runtime_dir / "versions" / "contract"
+    binary, contract = _runtime_contract(tmp_path, runtime_root=install_dir)
+    binary.chmod(0o755)
+    pointer = {
+        "provider": "manifest",
+        "runtime_id": manager.spec.runtime_id,
+        "runtime_version": EVEROS_VERSION,
+        "platform": runtime_platform_tag(),
+        "install_dir": str(install_dir),
+        "manifest_sha256": "a" * 64,
+        "archive_sha256": "b" * 64,
+        "bin_path": "bin/python",
+        "admission_revision": ARTIFACT_ADMISSION_REVISION,
+        "admission_ok": False,
+        "sync_bootstrap_revision": contract[0],
+        "sync_argv": list(contract[1]),
+        "sync_bootstrap_sha256": contract[2],
+        "sync_scrubbers_sha256": contract[3],
+    }
+    (install_dir / manager.spec.metadata_filename).write_text(
+        json.dumps({**pointer, "binary_sha256": _digest(binary)}),
+        encoding="utf-8",
+    )
+    manager._restore_current_pointer(pointer)
+
+    assert manager._verified_active_pointer_binary(pointer) == binary
+    assert manager.sync_capability() is False
 
 
 def test_fresh_install_admits_the_manifest_sync_contract(

@@ -248,7 +248,7 @@ class MemoryArtifactManager(ManagedRuntimeManager):
             contract = _sync_contract_from_payload(pointer)
         except ValueError:
             return False
-        binary = self._verified_active_pointer_binary(pointer)
+        binary = self._admitted_active_pointer_binary(pointer)
         return contract is not None and binary is not None and self._admit_sync_contract(binary, contract)
 
     def ensure(self, *, force: bool = False) -> dict[str, Any]:
