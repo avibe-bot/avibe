@@ -76,6 +76,7 @@
       "burstHint": "This callback source is firing frequently. Inspect the related watch/task and pause, remove, or update it if it is looping."
     },
     "run": {
+      "sessionTurnGateUnavailable": "This Agent Run could not be admitted because the Session turn gate is unavailable. Retry after the service finishes starting.",
       "interrupted": {
         "noTerminalResult": "[Avibe Harness] This run ended without the Agent producing a result. The turn was released before the Agent replied, so no output was recorded. Check the Agent logs, then run it again if the work still needs doing.",
         "stopped": "[Avibe Harness] This run was stopped before the Agent produced a result, so it has no final result. Any output the Agent had already sent is still kept on the run.",

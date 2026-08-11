@@ -3522,6 +3522,83 @@ def test_agent_run_send_now_retry_keeps_its_refused_p3_fallback_queued(monkeypat
     }
 
 
+def test_legacy_send_now_re_admits_unattempted_p3_delivery(monkeypatch, tmp_path):
+    """An interrupted pre-cutover queue admission resumes as its own P1 content."""
+
+    from core.scheduled_tasks import TaskExecutionStore
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session, _owner_turn_id = _create_active_test_turn(
+        tmp_path,
+        native_id="proj_legacy_send_now_re_admission",
+    )
+    session_id = session["id"]
+    with engine.begin() as conn:
+        older = message_deliveries.enqueue_queued(
+            conn,
+            scope_id=session["scope_id"],
+            session_id=session_id,
+            text="older queued work",
+        )
+
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_id=session_id,
+        message="legacy exact content",
+        agent_name="worker",
+        delivery_intent="queue",
+    )
+    assert request_store.claim(request.id) is not None
+    controller = _build_controller_double()
+    internal_server.create_app(controller)
+    controller.session_turns._steer = AsyncMock(
+        return_value=steer_result(SteerOutcome.ACCEPTED)
+    )
+    context = MessageContext(
+        user_id="workbench",
+        channel_id=session_id,
+        platform="avibe",
+        message_id=f"agent_run:{request.id}",
+        platform_specific={
+            "task_execution_id": request.id,
+            "task_trigger_kind": "agent_run",
+        },
+    )
+
+    async def _go():
+        admitted = await controller.session_turn_gate.submit_scheduled(
+            session_id,
+            context,
+            request.message or "",
+            delivery_intent="queue",
+        )
+        resumed = await controller.session_turn_gate.submit_scheduled(
+            session_id,
+            context,
+            request.message or "",
+            delivery_intent="send_now",
+        )
+        return admitted, resumed
+
+    admitted, resumed = asyncio.run(_go())
+
+    assert admitted.delivery_status == "queued"
+    assert resumed.delivery_status == "accepted"
+    controller.session_turns._steer.assert_awaited_once()
+    with engine.connect() as conn:
+        queued = message_deliveries.list_queued(conn, session_id)
+        stored = request_store.get_run(request.id)
+        assert stored is not None
+        delivery = message_deliveries.get_delivery(conn, stored["delivery_id"])
+    assert [row["id"] for row in queued] == [older["id"]]
+    assert delivery is not None
+    assert message_deliveries.delivery_has_history_event(
+        delivery,
+        kind="legacy_send_now_re_admission",
+    )
+    assert message_deliveries.delivery_has_history_event(delivery, kind="steer")
+
+
 def test_concurrent_agent_run_send_now_callers_steer_in_fifo_order(
     monkeypatch,
     tmp_path,

@@ -245,6 +245,7 @@ def create_app(
         scope_id: str | None = None
         delivery_owner_transferred = False
         target_was_busy = False
+        legacy_send_now = str(delivery_intent or "").strip().lower() == "send_now"
         delivery_intent = normalize_delivery_intent(delivery_intent)
         effective_delivery_intent = delivery_intent
         execution_id = str(
@@ -314,23 +315,53 @@ def create_app(
                                 target_was_busy=target_was_busy,
                                 delivery_status="canceled",
                             )
-                        return TurnSubmissionResult(
-                            route=(
-                                "enqueued"
-                                if existing_state
-                                in {
-                                    "queued",
-                                    "interrupt_waiting",
-                                    "waiting_terminal",
-                                    "reconciling_steer",
-                                }
-                                else "ran"
-                            ),
-                            queue_persisted=True,
-                            target_was_busy=target_was_busy,
-                            delivery_status=existing_state,
-                            delivery_owner_transferred=True,
-                        )
+                        if (
+                            legacy_send_now
+                            and existing_state == "queued"
+                            and existing.get("priority") == "p3"
+                            and message_deliveries.delivery_has_history_event(
+                                existing,
+                                kind="admission",
+                            )
+                            and not message_deliveries.delivery_has_history_event(
+                                existing,
+                                kind="steer",
+                            )
+                        ):
+                            existing = message_deliveries.cas_delivery(
+                                conn,
+                                str(existing["id"]),
+                                expected_version=int(existing["version"]),
+                                expected_states=("queued",),
+                                values={"priority": "p1", "state": "reserved"},
+                                history_event={
+                                    "kind": "legacy_send_now_re_admission",
+                                    "from_priority": "p3",
+                                },
+                            )
+                            if existing is None:
+                                raise RuntimeError(
+                                    "legacy send-now Delivery re-admission lost"
+                                )
+                            delivery_owner_transferred = True
+                        else:
+                            return TurnSubmissionResult(
+                                route=(
+                                    "enqueued"
+                                    if existing_state
+                                    in {
+                                        "queued",
+                                        "interrupt_waiting",
+                                        "waiting_terminal",
+                                        "reconciling_steer",
+                                    }
+                                    else "ran"
+                                ),
+                                queue_persisted=True,
+                                target_was_busy=target_was_busy,
+                                delivery_status=existing_state,
+                                delivery_owner_transferred=True,
+                            )
                 if not delivery_owner_transferred:
                     return "duplicate"
             if legacy_accepted:
