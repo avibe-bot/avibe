@@ -236,6 +236,21 @@ def _legacy_model_hub_source_payload(raw_source: object) -> object:
     if not isinstance(raw_source, dict):
         return raw_source
     payload = _narrowed_legacy_payload(raw_source, _LEGACY_MODEL_HUB_SOURCE_FIELDS)
+    # Two of v5's cross-field invariants object to a field the source does not
+    # need, and pre-v5 enforced neither. A subscription has no endpoint or
+    # masked credential of its own in v5 — the vendor's is the endpoint, and the
+    # label is UI text — and a native source's auth lives in the CLI, so the
+    # engine credential ref is a pointer that channel never reads. Clearing them
+    # migrates the source to exactly the shape an add persists today, where
+    # refusing it would take the source and every route through it. The
+    # invariants that name something the source cannot do without — a hub source
+    # with no credential ref, an API-key source off the hub channel — are left to
+    # drop it in `_legacy_model_hub_sources`.
+    if payload.get("kind") == "subscription":
+        payload["base_url"] = None
+        payload["masked_credential"] = None
+    if payload.get("supply_channel") == "native_cli":
+        payload["credential_ref"] = None
     if "state" in payload:
         payload["state"] = _narrowed_legacy_payload(payload["state"], _LEGACY_MODEL_HUB_STATE_FIELDS)
     if "usage" in payload:
@@ -262,6 +277,11 @@ def _legacy_model_hub_source_payload(raw_source: object) -> object:
             if isinstance(model_id, str):
                 if model_id in seen:
                     continue
+                # A credential-shaped model *id* cannot be repaired the way a
+                # label can — it is the identity every route names — so the one
+                # model goes and the source keeps the rest. It is never logged.
+                if _contains_model_hub_credential_material(model_id):
+                    continue
                 seen.add(model_id)
             deduplicated.append(_legacy_model_hub_model_payload(model))
         payload["models"] = deduplicated
@@ -287,6 +307,20 @@ def _legacy_model_hub_model_payload(raw_model: object) -> object:
     # source and every route through that source.
     if model.get("origin") == "manual":
         model["discovered_at"] = None
+    # v5 refuses credential-shaped metadata anywhere in a model; pre-v5 checked
+    # only that an effort was a non-empty unique string and that a display name
+    # was a string. Both fields are labels — one drives a per-request effort
+    # switch, the other is UI text — so a single tainted value is dropped where
+    # it sits. Refusing it would cost the model, its source and every route
+    # through the source, and would keep exactly the same value out of the
+    # config either way.
+    efforts = model.get("reasoning_efforts")
+    if isinstance(efforts, list):
+        model["reasoning_efforts"] = [
+            effort for effort in efforts if not _contains_model_hub_credential_material(effort)
+        ]
+    if _contains_model_hub_credential_material(model.get("display_name")):
+        model["display_name"] = None
     return model
 
 
@@ -297,10 +331,13 @@ def _legacy_model_hub_sources(
 
     Each source is narrowed to the old contract first, then put through the live
     parser rather than a copy of its rules. v5 added cross-field invariants the
-    pre-v5 parser never had — a hub source now requires an engine credential
-    ref, a native one must not carry it, an API-key source must use the hub
-    channel — so a source that was legal then can be impossible to represent
-    now. Dropping such a source is the graceful degradation this migration
+    pre-v5 parser never had, and the ones that object to something the source
+    cannot do without survive the narrowing — a hub source with no engine
+    credential ref, an API-key source off the hub channel — so a source that was
+    legal then can be impossible to represent now. (An API-key source off the
+    hub channel was already supplying nothing: the frozen pre-v5 eligibility
+    rule below offered it to no backend.) Dropping such a source is the graceful
+    degradation this migration
     exists for: the models it supplied migrate to empty routes, the service
     starts, and the user re-adds it. Keeping it would fail the very load this
     function is here to rescue, and re-implementing the invariants here would

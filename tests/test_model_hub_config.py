@@ -2255,6 +2255,128 @@ def test_mh_cfg_mig_001_pre_v5_api_key_usage_projection_keeps_its_source(tmp_pat
     ] == [(source["id"], model_id)]
 
 
+def test_mh_cfg_mig_001_pre_v5_credential_shaped_model_metadata_keeps_its_source(
+    tmp_path,
+    caplog,
+):
+    """v5 refuses credential-shaped model metadata; pre-v5 only type-checked it.
+
+    A tainted reasoning effort or display name is a label, so it is dropped
+    where it sits rather than costing the model, its source and every route
+    through the source — and it is never logged either way.
+    """
+
+    legacy = _legacy_model_hub_payload(api.config_to_payload(default_config()))
+    source = copy.deepcopy(_schema("source.schema.json")["examples"][0])
+    supplied_id = source["models"][0]["id"]
+    source["models"][0] |= {
+        "reasoning_efforts": ["high", "sk-live-should-never-be-logged"],
+        "display_name": "Opus 4.6 authorization: sk-live-should-never-be-logged",
+    }
+    legacy["model_hub"]["sources"] = [source]
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING, logger="config.v2_config"):
+        loaded = V2Config.load(config_path=config_path)
+
+    assert [
+        (model.id, model.reasoning_efforts, model.display_name)
+        for model in loaded.model_hub.sources[0].models
+    ] == [(supplied_id, ["high"], None)]
+    assert [
+        (hop.source_id, hop.model_id)
+        for hop in loaded.model_hub.agents["claude"].routes[supplied_id].hops
+    ] == [(source["id"], supplied_id)]
+    assert not any("sk-live" in record.getMessage() for record in caplog.records)
+
+
+def test_mh_cfg_mig_001_pre_v5_credential_shaped_model_id_costs_only_that_model(
+    tmp_path,
+    caplog,
+):
+    """An id cannot be repaired the way a label can — it is what routes name.
+
+    So the one model goes and the source keeps the rest, where the strict parser
+    would have refused the whole source.
+    """
+
+    legacy = _legacy_model_hub_payload(api.config_to_payload(default_config()))
+    source = copy.deepcopy(_schema("source.schema.json")["examples"][0])
+    supplied_id = source["models"][0]["id"]
+    source["models"].append(
+        {**source["models"][0], "id": "sk-live-should-never-be-logged"}
+    )
+    legacy["model_hub"]["sources"] = [source]
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING, logger="config.v2_config"):
+        loaded = V2Config.load(config_path=config_path)
+
+    assert [model.id for model in loaded.model_hub.sources[0].models] == [supplied_id]
+    assert [
+        (hop.source_id, hop.model_id)
+        for hop in loaded.model_hub.agents["claude"].routes[supplied_id].hops
+    ] == [(source["id"], supplied_id)]
+    assert not any("sk-live" in record.getMessage() for record in caplog.records)
+
+
+def test_mh_cfg_mig_001_pre_v5_subscription_endpoint_fields_are_cleared_not_fatal(tmp_path):
+    """A subscription has no endpoint or masked credential of its own in v5.
+
+    Pre-v5 enforced neither rule, so an install can hold both fields. Clearing
+    them migrates the source to the shape an add persists today; refusing it
+    would take a native subscription and every route through it.
+    """
+
+    legacy = _legacy_model_hub_payload(api.config_to_payload(default_config()))
+    source = copy.deepcopy(_schema("source.schema.json")["examples"][0]) | {
+        "base_url": "https://relay.example/v1",
+        "masked_credential": "sk-live…abcd",
+    }
+    supplied_id = source["models"][0]["id"]
+    legacy["model_hub"]["sources"] = [source]
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert (loaded.model_hub.sources[0].base_url, loaded.model_hub.sources[0].masked_credential) == (
+        None,
+        None,
+    )
+    assert [
+        (hop.source_id, hop.model_id)
+        for hop in loaded.model_hub.agents["claude"].routes[supplied_id].hops
+    ] == [(source["id"], supplied_id)]
+
+
+def test_mh_cfg_mig_001_pre_v5_native_credential_ref_is_cleared_not_fatal(tmp_path):
+    """A native source's auth lives in the CLI, so the engine ref is unread.
+
+    v5 forbids the pair and pre-v5 allowed it, so clearing the pointer keeps the
+    native source the whole backend supplies from.
+    """
+
+    legacy = _legacy_model_hub_payload(api.config_to_payload(default_config()))
+    source = copy.deepcopy(_schema("source.schema.json")["examples"][0]) | {
+        "credential_ref": "cred_strayref1",
+    }
+    supplied_id = source["models"][0]["id"]
+    legacy["model_hub"]["sources"] = [source]
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert loaded.model_hub.sources[0].credential_ref is None
+    assert [
+        (hop.source_id, hop.model_id)
+        for hop in loaded.model_hub.agents["claude"].routes[supplied_id].hops
+    ] == [(source["id"], supplied_id)]
+
+
 def test_current_model_hub_config_survives_load_unchanged(tmp_path):
     """A v5 config is returned untouched — the other half of MH-CFG-MIG-001."""
 
