@@ -44,47 +44,39 @@ Rows remain readable until normal expiry or Clear all. Retention runs while
 Memory is disabled as well: rows expire after 14 days and only the newest 5,000
 calls are kept.
 
-## Recovery and Clear
+## Recovery ladder
 
-While Memory is enabled, **Restart engine** replaces only the managed sidecar;
-it does not change Memory settings or delete retained data. Use it when the
-recorder reports a transient failure. If the call-log database is corrupt,
-recording remains degraded across restarts; use **Clear all** to remove the
-corrupt owned files before recording can resume.
+Use these actions in order, from least to most destructive:
 
-Changing the embedding endpoint or model requires confirmation because Avibe
-must rebuild the local vector index. The confirmed settings are saved first,
-Markdown memory is preserved, and **Restart engine** stays unavailable until
-the rebuild completes. If rebuilding fails, correct the API key if needed and
-select **Retry rebuild**; the warning remains until a retry succeeds.
-
-When the installed Memory Runtime reports the admitted artifact sync capability,
-Processing Record offers **Repair index** in the Memory Runtime section, even
-when the current health projection cannot be loaded. Repair runs the
-pathless `cascade sync` command while the live sidecar remains available; it
-rescans Markdown memory and drains pending work without replacing the index.
-Avibe asks for confirmation because embedding work may use API quota. The action
-is unavailable while rebuild, factory reset, clear, restart, or another Memory
-mutation is active. Completion is judged from the returned cascade health
-projection: the UI accepts only the exact final response envelope, treating any
-malformed or extended response as a repair failure. A healthy projection is
-completed, while an unhealthy projection is shown as completed with warnings.
-A failed request is a closed error that can be retried manually after the
-conflicting condition is resolved; the UI does not
-poll, parse command output, or create a repair history.
-
-Clear all first creates and verifies a private snapshot of the queue, provider
-root, call log, and pinned attachments. It then removes those four owned
-surfaces under a maintenance fence and records each step in an independent
-journal. An interrupted operation is never resumed automatically: Processing
-Record exposes explicit Resume and Abort actions for the exact operation. Abort
-restores every surface from the verified snapshot.
-
-Completed clear removes the dedicated local Memory data, processing queue,
-indexes, pinned attachment copies, and retained provider-call diagnostics owned
-by this installation. It does not remove original Avibe chats, copies already
-sent to a provider, general logs, crash reports, backups, or data outside the
-dedicated Memory directory. It is not a secure wipe of the storage device.
+1. **Restart engine**: Use it for a temporary recorder or engine failure.
+   It is available while Memory is enabled and no other Memory maintenance
+   action is running. It restarts the Memory engine without changing settings,
+   rebuilding indexes, or deleting retained data.
+2. **Repair index**: Use it when restarting does not clear index health
+   warnings or pending work. It appears under **Processing Record > Runtime and
+   capabilities** only when the installed Memory Runtime supports repair, and
+   it can remain available when the current health snapshot is unavailable.
+   Repair rescans Markdown memory and drains pending work while keeping the
+   engine available; it preserves the existing index and may use Embedding API
+   quota. **Memory index repair completed with health warnings.** means the
+   repair finished but the returned health is still unhealthy. Address the
+   reported condition, then select **Repair index** again; a failed repair can
+   be retried the same way.
+3. **Rebuild index**: Use it after changing the Embedding endpoint or model,
+   or to recover a pending rebuild. Confirming **Save and rebuild** saves the
+   new settings before rebuilding the local vector index and preserves Markdown
+   memory. If rebuilding fails, the confirmed change remains saved, the rebuild
+   warning remains visible, and **Restart engine** stays unavailable. Correct
+   the endpoint or API key as needed, then select **Retry rebuild**.
+4. **Factory reset**: Use it only as a last resort when the earlier actions
+   cannot recover Memory. It is available under **Settings > Memory** only when
+   the pinned, installed Memory artifact is valid and no other Memory action is
+   running. It permanently deletes exactly the installed Memory root
+   (`memory`) and the mutable Memory state root (`state/memory`), then starts
+   fresh Memory state. It preserves Memory settings and credentials, the
+   pinned, installed Memory artifact, original Avibe chats, and data outside
+   those two roots. If a reset only partly succeeds, review the per-root result
+   and select **Retry factory reset**.
 
 ### Factory reset
 
