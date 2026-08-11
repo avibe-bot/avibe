@@ -83,11 +83,12 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   // Every Inbox read shares one ordering fence. This covers page-one refresh,
   // cursor reads, resume reconcile, and the targeted foreground-restore read.
   const readOwnershipRef = useRef(createWorkbenchSessionReadOwnership());
-  // Broad reads and cursor reads both own the feed. Preserve broad intents while
-  // a cursor request is active so either start order commits the requested page
-  // before the broad refresh/reconcile runs.
+  // Broad reads and cursor reads both own the feed. Run only one broad read at a
+  // time and preserve trailing intents while it or a cursor request is active,
+  // so a later failed duplicate cannot discard an earlier successful recovery.
   const refreshPendingRef = useRef(false);
   const reconcilePendingRef = useRef(false);
+  const broadReadInFlightRef = useRef(false);
   const cursorReadsInFlightRef = useRef(0);
   const refreshRunnerRef = useRef<() => void>(() => {});
   const reconcileRunnerRef = useRef<() => void>(() => {});
@@ -101,7 +102,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   const targetedSnapshotsRef = useRef<Map<string, TargetedInboxSnapshot>>(new Map());
 
   const flushBroadReadIntent = useCallback(() => {
-    if (cursorReadsInFlightRef.current > 0) return;
+    if (broadReadInFlightRef.current || cursorReadsInFlightRef.current > 0) return;
     if (refreshPendingRef.current) {
       refreshPendingRef.current = false;
       // A replacement refresh owns the same top-of-feed recovery as a pending
@@ -183,10 +184,11 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   }, []);
 
   const refresh = useCallback(async function refresh() {
-    if (cursorReadsInFlightRef.current > 0) {
+    if (broadReadInFlightRef.current || cursorReadsInFlightRef.current > 0) {
       queueRefreshIntent();
       return;
     }
+    broadReadInFlightRef.current = true;
     refreshPendingRef.current = false;
     reconcilePendingRef.current = false;
     const read = readOwnershipRef.current.beginRead(['inbox-feed', 'inbox-unread', 'inbox-feed-refresh']);
@@ -229,8 +231,10 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
       if (!retryAfterInvalidation()) console.error('[inbox] refresh failed', err);
     } finally {
       if (refreshLoadingGenerationRef.current === loadingGeneration) setLoading(false);
+      broadReadInFlightRef.current = false;
+      flushBroadReadIntent();
     }
-  }, [acceptFeedRows, api, applyUnreadMap, mergeTargetedSnapshots, queueRefreshIntent]);
+  }, [acceptFeedRows, api, applyUnreadMap, flushBroadReadIntent, mergeTargetedSnapshots, queueRefreshIntent]);
 
   const loadMore = useCallback(async function loadMore() {
     const cursor = cursorRef.current;
@@ -297,10 +301,11 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   // that arrived during the gap surface at top. No loading flag — the user
   // already has content; this is a silent catch-up.
   const reconcile = useCallback(async () => {
-    if (cursorReadsInFlightRef.current > 0) {
+    if (broadReadInFlightRef.current || cursorReadsInFlightRef.current > 0) {
       queueReconcileIntent();
       return;
     }
+    broadReadInFlightRef.current = true;
     reconcilePendingRef.current = false;
     const read = readOwnershipRef.current.beginRead(['inbox-feed', 'inbox-unread', 'inbox-feed-reconcile']);
     const retryAfterInvalidation = () => {
@@ -368,8 +373,11 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
       }
     } catch (err) {
       if (!retryAfterInvalidation()) console.error('[inbox] reconcile failed', err);
+    } finally {
+      broadReadInFlightRef.current = false;
+      flushBroadReadIntent();
     }
-  }, [acceptFeedRows, api, applyUnreadMap, mergeTargetedSnapshots, queueReconcileIntent]);
+  }, [acceptFeedRows, api, applyUnreadMap, flushBroadReadIntent, mergeTargetedSnapshots, queueReconcileIntent]);
 
   // Targeted reconcile for one session (contract A6 foreground restore): fetch
   // that exact session by id and upsert its card, so a restored session

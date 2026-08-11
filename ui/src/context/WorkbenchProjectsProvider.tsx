@@ -129,8 +129,42 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
   // paginated read, or targeted row read that started before a newer mutation
   // must not commit its snapshot after that mutation is accepted.
   const readOwnershipRef = useRef(createWorkbenchSessionReadOwnership());
-  const bootstrapRetryPendingRef = useRef(false);
-  const projectTreeRetryPendingRef = useRef(false);
+  // Initial/manual project fetches and reconnect bootstraps claim the same
+  // global resources. Serialize them and retain trailing intents so a later
+  // failed recovery cannot invalidate an earlier successful snapshot.
+  const bootstrapReadInFlightRef = useRef(false);
+  const fetchProjectsPendingRef = useRef<{ cache?: boolean } | null>(null);
+  const projectTreePendingRef = useRef(false);
+  const fetchProjectsRunnerRef = useRef<(options?: { cache?: boolean }) => void>(() => {});
+  const projectTreeRunnerRef = useRef<() => void>(() => {});
+
+  const flushBootstrapReadIntent = useCallback(() => {
+    if (bootstrapReadInFlightRef.current) return;
+    const pendingFetch = fetchProjectsPendingRef.current;
+    if (pendingFetch) {
+      fetchProjectsPendingRef.current = null;
+      fetchProjectsRunnerRef.current(pendingFetch);
+      return;
+    }
+    if (projectTreePendingRef.current) {
+      projectTreePendingRef.current = false;
+      projectTreeRunnerRef.current();
+    }
+  }, []);
+
+  const queueFetchProjectsIntent = useCallback((options?: { cache?: boolean }) => {
+    const pending = fetchProjectsPendingRef.current;
+    fetchProjectsPendingRef.current =
+      options?.cache === false || pending?.cache === false
+        ? { cache: false }
+        : pending ?? options ?? {};
+    queueMicrotask(flushBootstrapReadIntent);
+  }, [flushBootstrapReadIntent]);
+
+  const queueProjectTreeIntent = useCallback(() => {
+    projectTreePendingRef.current = true;
+    queueMicrotask(flushBootstrapReadIntent);
+  }, [flushBootstrapReadIntent]);
 
   const acceptSessionMutation = useCallback((projectId?: string | null, sessionId?: string) => {
     const resources = ['projects-bootstrap'];
@@ -199,20 +233,16 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
   }, [acceptProjectRows]);
 
   const fetchProjects = useCallback(async (options?: { cache?: boolean }) => {
+    if (bootstrapReadInFlightRef.current) {
+      queueFetchProjectsIntent(options);
+      return;
+    }
+    bootstrapReadInFlightRef.current = true;
     const read = readOwnershipRef.current.beginRead(['projects', 'projects-bootstrap']);
     const retryAfterMutation = () => {
-      if (
-        readOwnershipRef.current.isCurrent(read, ['projects', 'projects-bootstrap']) ||
-        !readOwnershipRef.current.isLatestRead(read) ||
-        bootstrapRetryPendingRef.current
-      ) {
-        return;
-      }
-      bootstrapRetryPendingRef.current = true;
-      queueMicrotask(() => {
-        bootstrapRetryPendingRef.current = false;
-        void fetchProjects({ cache: false });
-      });
+      if (readOwnershipRef.current.isCurrent(read, ['projects', 'projects-bootstrap'])) return;
+      // Upgrade any already-pending cached fetch to the authoritative retry.
+      queueFetchProjectsIntent({ cache: false });
     };
     try {
       const result = await api.getWorkbenchProjectsBootstrap({ cache: options?.cache });
@@ -241,8 +271,11 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       } else {
         retryAfterMutation();
       }
+    } finally {
+      bootstrapReadInFlightRef.current = false;
+      flushBootstrapReadIntent();
     }
-  }, [api, applyBootstrapSessions]);
+  }, [api, applyBootstrapSessions, flushBootstrapReadIntent, queueFetchProjectsIntent]);
 
   useEffect(() => {
     void fetchProjects();
@@ -314,19 +347,14 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
   );
 
   const reconcileProjectTree = useCallback(async function reconcileProjectTree() {
+    if (bootstrapReadInFlightRef.current) {
+      queueProjectTreeIntent();
+      return;
+    }
+    bootstrapReadInFlightRef.current = true;
     const retryAfterInvalidation = (read: WorkbenchSessionReadStamp) => {
-      if (
-        readOwnershipRef.current.isCurrent(read, 'projects-bootstrap') ||
-        !readOwnershipRef.current.isLatestRead(read) ||
-        projectTreeRetryPendingRef.current
-      ) {
-        return;
-      }
-      projectTreeRetryPendingRef.current = true;
-      queueMicrotask(() => {
-        projectTreeRetryPendingRef.current = false;
-        void reconcileProjectTree();
-      });
+      if (readOwnershipRef.current.isCurrent(read, 'projects-bootstrap')) return;
+      queueProjectTreeIntent();
     };
     const bootstrapGroups = new Map<number, string[]>();
     const largeProjectIds: string[] = [];
@@ -407,8 +435,14 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       for (const projectId of [...projectIds, ...largeProjectIds]) {
         void reconcileSessions(projectId);
       }
+    } finally {
+      bootstrapReadInFlightRef.current = false;
+      flushBootstrapReadIntent();
     }
-  }, [api, applyBootstrapSessions, queueReconcile, reconcileSessions]);
+  }, [api, applyBootstrapSessions, flushBootstrapReadIntent, queueProjectTreeIntent, queueReconcile, reconcileSessions]);
+
+  fetchProjectsRunnerRef.current = (options) => void fetchProjects(options);
+  projectTreeRunnerRef.current = () => void reconcileProjectTree();
 
   const refreshCachedSessionRow = useCallback(async function refreshCachedSessionRow(sessionId: string) {
     if (cachedRowRefreshInFlightRef.current.has(sessionId)) {

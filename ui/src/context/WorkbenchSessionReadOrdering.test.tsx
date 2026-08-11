@@ -208,6 +208,56 @@ describe('Workbench session read ownership', () => {
     expect(tree?.sessionsOf(project.id).sessions).toEqual([session]);
   });
 
+  it('serializes the initial project bootstrap with reconnect recovery', async () => {
+    const initialBootstrap = deferred({
+      projects: [project],
+      sessions: { [project.id]: { sessions: [session], next_before_id: null } },
+    });
+    const getWorkbenchProjectsBootstrap = vi.fn()
+      .mockReturnValueOnce(initialBootstrap.promise)
+      .mockRejectedValueOnce(new Error('later reconnect failed'));
+    let handlers: WorkbenchEventHandlers | null = null;
+    apiRef.current = {
+      getWorkbenchProjectsBootstrap,
+      connectWorkbenchEvents: vi.fn((next) => {
+        handlers = next;
+        return vi.fn();
+      }),
+    };
+    let tree: ReturnType<typeof useWorkbenchProjectsTree> | null = null;
+    const Probe = () => {
+      const value = useWorkbenchProjectsTree();
+      useEffect(() => {
+        tree = value;
+      }, [value]);
+      return null;
+    };
+
+    render(
+      <WorkbenchProjectsProvider>
+        <Probe />
+      </WorkbenchProjectsProvider>,
+    );
+    await settle();
+    act(() => {
+      handlers?.onConnected?.({ sub_id: 2, source: 'browser' });
+    });
+    await settle();
+    expect(getWorkbenchProjectsBootstrap).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      initialBootstrap.resolve({
+        projects: [project],
+        sessions: { [project.id]: { sessions: [session], next_before_id: null } },
+      });
+      await initialBootstrap.promise;
+    });
+    await settle();
+
+    expect(getWorkbenchProjectsBootstrap).toHaveBeenCalledTimes(2);
+    expect(tree?.projects).toEqual([project]);
+    expect(tree?.sessionsOf(project.id).sessions).toEqual([session]);
+  });
+
   it('retries a cold project list invalidated by a local project upsert', async () => {
     const staleBootstrap = deferred({
       projects: [project, projectB],
@@ -1261,6 +1311,125 @@ describe('Workbench session read ownership', () => {
       sessionB.id,
     ]);
     expect(inbox?.nextCursor).toBe('cursor_after_load_more');
+  });
+
+  it('serializes duplicate resume reconciles so a later failure cannot discard an earlier success', async () => {
+    const reconciledRow = { ...inboxRow, title: 'Recovered from the first reconcile' };
+    const firstReconcile = deferred({
+      sessions: [reconciledRow],
+      next_cursor: 'cursor_after_reconcile',
+      unread_by_session: { [session.id]: 3 },
+    });
+    const laterFailure = new Error('later reconcile failed');
+    const listInbox = vi.fn()
+      .mockResolvedValueOnce({
+        sessions: [inboxRow],
+        next_cursor: 'cursor_a',
+        unread_by_session: { [session.id]: 3 },
+      })
+      .mockReturnValueOnce(firstReconcile.promise)
+      .mockRejectedValueOnce(laterFailure);
+    apiRef.current = {
+      listInbox,
+      connectWorkbenchEvents: vi.fn(() => vi.fn()),
+    };
+    let inbox: ReturnType<typeof useWorkbenchInbox> | null = null;
+    const Probe = () => {
+      const value = useWorkbenchInbox();
+      useEffect(() => {
+        inbox = value;
+      }, [value]);
+      return null;
+    };
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    render(
+      <WorkbenchInboxProvider>
+        <Probe />
+      </WorkbenchInboxProvider>,
+    );
+    await settle();
+    act(() => {
+      document.dispatchEvent(new Event('visibilitychange'));
+      window.dispatchEvent(new Event('focus'));
+    });
+    await settle();
+    expect(listInbox).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      firstReconcile.resolve({
+        sessions: [reconciledRow],
+        next_cursor: 'cursor_after_reconcile',
+        unread_by_session: { [session.id]: 3 },
+      });
+      await firstReconcile.promise;
+    });
+    await settle();
+
+    expect(listInbox).toHaveBeenCalledTimes(3);
+    expect(inbox?.inboxSessions).toEqual([reconciledRow]);
+    expect(inbox?.nextCursor).toBe('cursor_a');
+    expect(consoleError).toHaveBeenCalledWith('[inbox] reconcile failed', laterFailure);
+    consoleError.mockRestore();
+  });
+
+  it('serializes duplicate refreshes so a later failure cannot discard an earlier success', async () => {
+    const refreshedRow = { ...inboxRow, title: 'Recovered from the first refresh' };
+    const firstRefresh = deferred({
+      sessions: [refreshedRow],
+      next_cursor: 'cursor_after_refresh',
+      unread_by_session: { [session.id]: 3 },
+    });
+    const laterFailure = new Error('later refresh failed');
+    const listInbox = vi.fn()
+      .mockResolvedValueOnce({
+        sessions: [inboxRow],
+        next_cursor: 'cursor_a',
+        unread_by_session: { [session.id]: 3 },
+      })
+      .mockReturnValueOnce(firstRefresh.promise)
+      .mockRejectedValueOnce(laterFailure);
+    apiRef.current = {
+      listInbox,
+      connectWorkbenchEvents: vi.fn(() => vi.fn()),
+    };
+    let inbox: ReturnType<typeof useWorkbenchInbox> | null = null;
+    const Probe = () => {
+      const value = useWorkbenchInbox();
+      useEffect(() => {
+        inbox = value;
+      }, [value]);
+      return null;
+    };
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    render(
+      <WorkbenchInboxProvider>
+        <Probe />
+      </WorkbenchInboxProvider>,
+    );
+    await settle();
+    act(() => {
+      void inbox?.refresh();
+      void inbox?.refresh();
+    });
+    await settle();
+    expect(listInbox).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      firstRefresh.resolve({
+        sessions: [refreshedRow],
+        next_cursor: 'cursor_after_refresh',
+        unread_by_session: { [session.id]: 3 },
+      });
+      await firstRefresh.promise;
+    });
+    await settle();
+
+    expect(listInbox).toHaveBeenCalledTimes(3);
+    expect(inbox?.inboxSessions).toEqual([refreshedRow]);
+    expect(inbox?.nextCursor).toBe('cursor_after_refresh');
+    expect(inbox?.loading).toBe(false);
+    expect(consoleError).toHaveBeenCalledWith('[inbox] refresh failed', laterFailure);
+    consoleError.mockRestore();
   });
 
   it('clears independent Inbox loading flags when reads overlap', async () => {
