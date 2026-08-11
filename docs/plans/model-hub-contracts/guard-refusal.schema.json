@@ -2,6 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "model-hub/guard-refusal.schema.json",
   "title": "GuardRefusal",
+  "$comment": "<!-- authority-consumer: guard.error_plan guard_error.source_in_route_chain guard_error.source_model_in_route_chain guard_error.source_last_supplier -->",
   "description": "The shared HTTP 409 envelope for a guarded Model Hub mutation with a nonempty current guarded-impact plan. A forced retry confirms this plan by echoing would_remove_hops and would_interrupt unchanged; the server recomputes the plan and commits only when both arrays match exactly.",
   "type": "object",
   "required": [
@@ -21,6 +22,39 @@
     {
       "properties": {
         "would_interrupt": { "minItems": 1 }
+      }
+    }
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "error": {
+            "enum": [
+              "source_in_route_chain",
+              "source_model_in_route_chain"
+            ]
+          }
+        },
+        "required": ["error"]
+      },
+      "then": {
+        "properties": {
+          "would_remove_hops": { "minItems": 1 }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "error": { "const": "source_last_supplier" }
+        },
+        "required": ["error"]
+      },
+      "then": {
+        "properties": {
+          "would_interrupt": { "minItems": 1 }
+        }
       }
     }
   ],

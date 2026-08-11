@@ -645,6 +645,23 @@
       ]
     },
     {
+      "id": "D18",
+      "domain": "guard refusal error-to-plan relation",
+      "authority": {
+        "kind": "markdown_table",
+        "file": "docs/plans/model-hub.md",
+        "heading": "Guard error-plan relation",
+        "column": "Decision"
+      },
+      "consumers": [
+        {
+          "kind": "marker_tail",
+          "file": "docs/plans/model-hub-contracts/guard-refusal.schema.json",
+          "marker": "authority-consumer: guard.error_plan "
+        }
+      ]
+    },
+    {
       "id": "D19",
       "domain": "network failure phase totality",
       "authority": {

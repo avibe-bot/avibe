@@ -438,6 +438,47 @@ def test_every_frozen_schema_example_is_valid_and_json_round_trips():
             assert _canonical(json.loads(_canonical(example))) == _canonical(example)
 
 
+def test_guard_refusal_error_requires_its_corresponding_nonempty_plan_array():
+    validator = Draft7Validator(_schema("guard-refusal.schema.json"))
+    hop = {
+        "backend": "claude",
+        "menu_model": "claude-opus-4-6",
+        "source_id": "src_anthkey01",
+        "model_id": "claude-opus-4-6",
+        "position": 1,
+    }
+    gap = {
+        "backend": "claude",
+        "model_id": "claude-opus-4-6",
+        "agents": ["pm"],
+    }
+
+    route_refusal = {
+        "ok": False,
+        "contract_version": 5,
+        "error": "source_in_route_chain",
+        "would_remove_hops": [hop],
+        "would_interrupt": [],
+    }
+    model_refusal = {**route_refusal, "error": "source_model_in_route_chain"}
+    supplier_refusal = {
+        **route_refusal,
+        "error": "source_last_supplier",
+        "would_remove_hops": [],
+        "would_interrupt": [gap],
+    }
+    for payload in (route_refusal, model_refusal, supplier_refusal):
+        validator.validate(payload)
+
+    for payload in (
+        {**route_refusal, "would_remove_hops": [], "would_interrupt": [gap]},
+        {**model_refusal, "would_remove_hops": [], "would_interrupt": [gap]},
+        {**supplier_refusal, "would_remove_hops": [hop], "would_interrupt": []},
+    ):
+        with pytest.raises(ValidationError):
+            validator.validate(payload)
+
+
 def test_agent_supply_contract_accepts_unmapped_native_alias_selection():
     payload = {
         "backend": "claude",

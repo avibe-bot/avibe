@@ -1071,6 +1071,16 @@ Every destructive guarded impact that commits therefore exactly matches the echo
 that now recomputes to an empty plan, including one carrying its old plan echo, follows the
 ordinary success path without a fabricated guard error or request-validation variant.
 
+**Guard error-plan relation (authoritative and exhaustive; owner ruling 2026-08-11
+21:58).** The lead error always names a nonempty array that proves the refused impact;
+the other array remains a complete projection and may independently be empty or nonempty.
+
+| Decision | `error` | Required nonempty plan array | Other array |
+| --- | --- | --- | --- |
+| `guard_error.source_in_route_chain` | `source_in_route_chain` | `would_remove_hops` | `would_interrupt` remains complete |
+| `guard_error.source_model_in_route_chain` | `source_model_in_route_chain` | `would_remove_hops` | `would_interrupt` remains complete |
+| `guard_error.source_last_supplier` | `source_last_supplier` | `would_interrupt` | `would_remove_hops` remains complete |
+
 **Source-mutation envelope matrix (authoritative and exhaustive; owner rulings
 2026-08-09, confirmation binding simplified 2026-08-11 20:35).** These are all Source/inventory mutations, including writes that cannot
 remove supply. Prose may describe their guard rationale but cannot define a request or

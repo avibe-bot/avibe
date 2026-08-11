@@ -502,6 +502,11 @@ Every guarded Source/inventory mutation uses the §4.5 envelope matrix and the c
 }
 ```
 
+The lead error and its evidence array are inseparable: `source_in_route_chain` and
+`source_model_in_route_chain` require nonempty `would_remove_hops`, while
+`source_last_supplier` requires nonempty `would_interrupt`. The other array remains a
+complete projection and may independently be empty or nonempty.
+
 The shared guard planner stages the complete post-mutation Source/Route result and its
 ordered guard-report arrays. On confirmation the client resends the same substantive
 mutation with `force: true` and byte-for-byte equivalent JSON values for the refusal's
@@ -1001,6 +1006,7 @@ contract harness and API-boundary tests enforce:
 | Source observation rejects unregistered request/status evidence fields; clients consume only the contracted outcome, reachability, authentication, protocol, discovery, and models facts | observation schema and API payload tests |
 | network fixtures cover shaped/transport × before/after-first-byte: shaped results at either phase enter only their existing non-permanent Source classifier; unclassified pre-stream connection failure creates bounded live backoff with no config write; unclassified post-first-byte interruption is event-only with no backoff/state mutation or replay; simultaneous native-process unavailability takes reason precedence while preserving backoff health/deadline and yields interrupted | table-driven resolver/API/event and AgentChain schema tests |
 | every `GuardRefusal` validates against `guard-refusal.schema.json` and has a nonempty current plan; fixtures cover every guard-decision row, including unforced refusal, exact echoed-plan confirmation, missing/different echo returning the new plan, and old-echo empty-plan ordinary success without a fabricated 409 | API payload and concurrent-mutation test |
+| each `source_in_route_chain` or `source_model_in_route_chain` refusal has nonempty `would_remove_hops`; each `source_last_supplier` refusal has nonempty `would_interrupt`; mismatched code/empty-required-array combinations fail schema validation even when the other array is nonempty | guard schema relation fixture |
 | contract and in-repo adapter interface copies are byte-identical; the five retained-material enum members and ref-pairing predicates are mutation-tested | contract harness |
 
 Serializer completeness follows the issue #939 pattern. Persisted fields must
