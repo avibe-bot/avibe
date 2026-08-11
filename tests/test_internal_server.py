@@ -4979,6 +4979,120 @@ def test_run_cancel_without_an_active_turn_settles_atomically(monkeypatch, tmp_p
     assert request_store.list_pending_callbacks() == []
 
 
+def test_run_cancel_retires_every_pre_native_delivery_atomically(monkeypatch, tmp_path):
+    """A canceled Run cannot leave any not-yet-written input eligible to dispatch."""
+
+    from core.inbox_events import bus
+    from core.scheduled_tasks import TaskExecutionStore
+    from storage.background import attach_agent_run_delivery_in_connection
+    from storage.delivery_states import RUN_CANCEL_RETIRE_STATES
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session, turn_id = _create_active_test_turn(
+        tmp_path,
+        native_id="proj_pre_native_run_cancel",
+    )
+    session_id = session["id"]
+    request_store = TaskExecutionStore()
+    runs_and_deliveries: list[tuple[str, str]] = []
+    runs_by_state = []
+    for delivery_state in RUN_CANCEL_RETIRE_STATES:
+        run = request_store.enqueue_agent_run(
+            session_id=session_id,
+            message=f"cancel {delivery_state} input",
+            agent_name="worker",
+            callback_session_id="ses_callback",
+        )
+        assert request_store.claim(run.id) is not None
+        runs_by_state.append((delivery_state, run))
+
+    with engine.begin() as conn:
+        for delivery_state, run in runs_by_state:
+            delivery = _reserve_submission(
+                conn,
+                scope_id=session["scope_id"],
+                session_id=session_id,
+                text=f"cancel {delivery_state} input",
+            )
+            if delivery_state == "queued":
+                delivery = message_deliveries.cas_delivery(
+                    conn,
+                    str(delivery["id"]),
+                    expected_version=int(delivery["version"]),
+                    expected_states=("reserved",),
+                    values={"state": "queued"},
+                )
+                assert delivery is not None
+            elif delivery_state == "pending_steer":
+                pending = message_deliveries.open_pending_steer_batch(
+                    conn,
+                    deliveries=[delivery],
+                    turn_id=turn_id,
+                    attempt_id=message_deliveries.new_attempt_id(),
+                )
+                assert len(pending) == 1
+                delivery = pending[0]
+            else:
+                assert delivery_state == "reserved"
+            assert attach_agent_run_delivery_in_connection(
+                conn,
+                run.id,
+                session_id=session_id,
+                delivery_id=str(delivery["id"]),
+            )
+            runs_and_deliveries.append((run.id, str(delivery["id"])))
+
+    published: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        bus,
+        "publish",
+        lambda event, payload: published.append((event, payload)),
+    )
+    controller = _build_controller_double()
+    app = internal_server.create_app(controller)
+    transport = httpx.ASGITransport(app=app)
+
+    async def _go():
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            return [
+                await client.post(
+                    f"/internal/cancel/{session_id}",
+                    params={"run_id": run_id},
+                )
+                for run_id, _delivery_id in runs_and_deliveries
+            ]
+
+    responses = asyncio.run(_go())
+
+    assert all(response.status_code == 200 for response in responses)
+    assert [response.json()["status"] for response in responses] == [
+        "run_detached"
+    ] * len(RUN_CANCEL_RETIRE_STATES)
+    controller.command_handler.handle_stop.assert_not_awaited()
+    with engine.connect() as conn:
+        retired = [
+            message_deliveries.get_delivery(conn, delivery_id)
+            for _run_id, delivery_id in runs_and_deliveries
+        ]
+    assert [row["state"] for row in retired] == [
+        "retired"
+    ] * len(RUN_CANCEL_RETIRE_STATES)
+    assert all(row["current_attempt_id"] is None for row in retired)
+    assert all(row["current_target_turn_id"] is None for row in retired)
+    for run_id, _delivery_id in runs_and_deliveries:
+        saved = request_store.get_run(run_id)
+        assert saved is not None
+        assert saved["status"] == "canceled"
+        assert saved["callback_status"] == "skipped"
+    assert request_store.list_pending_callbacks() == []
+    assert published.count(("queue.updated", {"session_id": session_id})) == len(
+        RUN_CANCEL_RETIRE_STATES
+    )
+
+
 def test_run_cancel_guard_allows_the_sole_initial_run_owner(monkeypatch, tmp_path):
     """A Run remains allowed to stop the backend when it owns the whole Turn."""
 

@@ -883,6 +883,7 @@ _RUN_PROJECTIONS: tuple[_RunProjection, ...] = (
     ),
 )
 _DEFERRED_RUN_EVENT_ROWS_KEY = "avibe.deferred_run_event_rows"
+_DEFERRED_QUEUE_UPDATED_SESSION_IDS_KEY = "avibe.deferred_queue_updated_session_ids"
 _TERMINAL_STATUS_PRIORITY = {
     "succeeded": 0,
     "canceled": 1,
@@ -2094,6 +2095,21 @@ def _publish_queue_updated(session_id: str) -> None:
         )
 
 
+def _defer_queue_updated_from_connection(conn: Any, session_id: str) -> None:
+    normalized_session_id = str(session_id or "").strip()
+    if not normalized_session_id:
+        return
+    pending = conn.info.setdefault(_DEFERRED_QUEUE_UPDATED_SESSION_IDS_KEY, set())
+    pending.add(normalized_session_id)
+
+
+def _pop_deferred_queue_updated_session_ids_from_connection(conn: Any) -> list[str]:
+    pending = conn.info.pop(_DEFERRED_QUEUE_UPDATED_SESSION_IDS_KEY, set())
+    if not isinstance(pending, set):
+        return []
+    return sorted(str(session_id) for session_id in pending if session_id)
+
+
 def _defer_run_rows_updated_from_connection(conn: Any, rows: list[Any]) -> None:
     if not rows:
         return
@@ -2119,14 +2135,21 @@ def run_update_event_transaction(engine: Any):
     """Commit DB writes before publishing deferred ``runs.updated`` snapshots."""
 
     pending_rows: list[dict[str, Any]] = []
+    pending_queue_session_ids: list[str] = []
     with engine.begin() as conn:
         try:
             yield conn
             pending_rows = pop_deferred_run_event_rows_from_connection(conn)
+            pending_queue_session_ids = (
+                _pop_deferred_queue_updated_session_ids_from_connection(conn)
+            )
         except Exception:
             conn.info.pop(_DEFERRED_RUN_EVENT_ROWS_KEY, None)
+            conn.info.pop(_DEFERRED_QUEUE_UPDATED_SESSION_IDS_KEY, None)
             raise
     _publish_run_rows_updated(pending_rows)
+    for session_id in pending_queue_session_ids:
+        _publish_queue_updated(session_id)
 
 
 def _run_rows_for_ids(conn: Any, run_ids: list[str]) -> list[Any]:
@@ -2447,9 +2470,10 @@ def apply_live_agent_run_cancellation_in_connection(
     """Record one live Run cancellation inside the Turn owner's transaction.
 
     ``detach`` is the outcome of the shared-Turn ownership check made under the
-    same SQLite writer reservation. A detached participant becomes terminal and
-    suppresses its callback before any terminal writer or callback drain can run;
-    an exclusive owner only records the cancellation request before P0 Stop.
+    same SQLite writer reservation. A detached participant becomes terminal,
+    retires its exact input when the Delivery state proves no native side effect,
+    and suppresses its callback before any terminal writer or callback drain can
+    run; an exclusive owner only records the cancellation request before P0 Stop.
     """
 
     normalized_run_id = str(run_id or "").strip()
@@ -2478,6 +2502,16 @@ def apply_live_agent_run_cancellation_in_connection(
         "updated_at": now,
     }
     if detach:
+        delivery_id = str(row["delivery_id"] or "").strip()
+        if delivery_id:
+            from storage import message_deliveries as delivery_store
+
+            if delivery_store.retire_for_run_cancellation(
+                conn,
+                normalized_session_id,
+                delivery_id,
+            ):
+                _defer_queue_updated_from_connection(conn, normalized_session_id)
         values.update(status="canceled", completed_at=now)
         callback_session_id = str(row["callback_session_id"] or "").strip()
         callback_status = str(row["callback_status"] or "").strip()
