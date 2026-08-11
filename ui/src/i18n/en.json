@@ -710,6 +710,11 @@
         "startNow": "Start now",
         "starting": "Starting"
       },
+      "install": {
+        "fail": {
+          "detail": "The install did not finish, and the component may be left incomplete. Retrying installs it again from scratch."
+        }
+      },
       "experimental": "Experimental",
       "agents": {
         "title": "Agent",
@@ -1225,6 +1230,9 @@
         "rate_limited": "Rate limited",
         "quota_exhausted": "Cycle quota used up",
         "server_error": "Upstream server error"
+      },
+      "backoff": {
+        "connection_failed": "Connection failed, retrying shortly"
       },
       "needs_action": {
         "oauth_expired": "Needs a new sign-in",

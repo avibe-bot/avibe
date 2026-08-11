@@ -438,6 +438,49 @@ def test_every_frozen_schema_example_is_valid_and_json_round_trips():
             assert _canonical(json.loads(_canonical(example))) == _canonical(example)
 
 
+def test_guard_refusal_error_requires_its_corresponding_nonempty_plan_array():
+    validator = Draft7Validator(_schema("guard-refusal.schema.json"))
+    hop = {
+        "backend": "claude",
+        "menu_model": "claude-opus-4-6",
+        "source_id": "src_anthkey01",
+        "model_id": "claude-opus-4-6",
+        "position": 1,
+    }
+    gap = {
+        "backend": "claude",
+        "model_id": "claude-opus-4-6",
+        "agents": ["pm"],
+    }
+
+    route_refusal = {
+        "ok": False,
+        "contract_version": 5,
+        "error": "source_in_route_chain",
+        "would_remove_hops": [hop],
+        "would_interrupt": [],
+    }
+    model_refusal = {**route_refusal, "error": "source_model_in_route_chain"}
+    supplier_refusal = {
+        **route_refusal,
+        "error": "source_last_supplier",
+        "would_remove_hops": [],
+        "would_interrupt": [gap],
+    }
+    for payload in (route_refusal, model_refusal, supplier_refusal):
+        validator.validate(payload)
+
+    for payload in (
+        {**route_refusal, "would_remove_hops": [], "would_interrupt": [gap]},
+        {**model_refusal, "would_remove_hops": [], "would_interrupt": [gap]},
+        {**supplier_refusal, "would_remove_hops": [hop], "would_interrupt": []},
+        {**route_refusal, "would_remove_hops": [hop, hop]},
+        {**supplier_refusal, "would_interrupt": [gap, gap]},
+    ):
+        with pytest.raises(ValidationError):
+            validator.validate(payload)
+
+
 def test_agent_supply_contract_accepts_unmapped_native_alias_selection():
     payload = {
         "backend": "claude",
@@ -526,6 +569,62 @@ def test_v5_mirror_registry_mutation_probes_detect_every_comparable_drift():
                 _validate_mirror_entry(entry, mutated)
 
 
+def test_d21_live_backoff_reason_consumers_match_authority_individually():
+    registry = json.loads(
+        (CONTRACTS / "mirror-registry.json").read_text(encoding="utf-8")
+    )
+    decision = next(
+        item for item in registry["decision_tables"] if item["id"] == "D21"
+    )
+    authority_spec = decision["authority"]
+    authority = _vocabulary(
+        _schema(authority_spec["schema"]), authority_spec["paths"]
+    )
+
+    observed = []
+    for consumer in decision["consumers"]:
+        if consumer["kind"] == "schema_vocabulary":
+            observed.append(
+                _vocabulary(
+                    _schema(consumer["schema"]),
+                    consumer["paths"],
+                    exclude=consumer.get("exclude", ()),
+                )
+            )
+        elif consumer["kind"] == "marker_tail":
+            values = set()
+            for line in Path(consumer["file"]).read_text(encoding="utf-8").splitlines():
+                if consumer["marker"] in line:
+                    tail = line.split(consumer["marker"], 1)[1].split("-->", 1)[0]
+                    values.update(tail.split())
+            observed.append(values)
+        elif consumer["kind"] == "json_object_keys":
+            payload = json.loads(Path(consumer["file"]).read_text(encoding="utf-8"))
+            keys = _json_pointer(payload, consumer["path"])
+            observed.append({f"{consumer.get('prefix', '')}{key}" for key in keys})
+        else:
+            raise AssertionError(consumer)
+
+    assert observed
+    assert all(values == authority for values in observed)
+
+    mutated_probe = _schema("probe-result.schema.json")
+    mutated_probe["properties"]["error"]["enum"].remove(
+        "models.source.backoff.connection_failed"
+    )
+    probe_spec = next(
+        item for item in decision["consumers"] if item["kind"] == "schema_vocabulary"
+    )
+    assert (
+        _vocabulary(
+            mutated_probe,
+            probe_spec["paths"],
+            exclude=probe_spec.get("exclude", ()),
+        )
+        != authority
+    )
+
+
 def test_model_hub_authority_closure_is_generated_from_live_files():
     result = check_model_hub_authorities(Path.cwd())
     assert result["input_mode"] == "same_run_live_files"
@@ -579,7 +678,119 @@ def test_targeted_permission_denial_contract_is_request_scoped_and_mirrored():
         )
 
 
+def test_oauth_nonce_explicit_cancel_totality_is_closed():
+    api_contract = (CONTRACTS / "api.md").read_text(encoding="utf-8")
+    model_hub_plan = (CONTRACTS.parent / "model-hub.md").read_text(encoding="utf-8")
+    implementation_plan = (
+        CONTRACTS.parent / "model-hub-implementation.md"
+    ).read_text(encoding="utf-8")
+
+    cancel_route = next(
+        line
+        for line in api_contract.splitlines()
+        if "POST `/api/models/oauth/cancel`" in line
+    )
+    assert "Cancels and forgets the flow." not in api_contract
+    assert "committed flow with `client_nonce`" in cancel_route
+    assert '`state: "cancelled"`' in cancel_route
+    assert "existing `expires_at`" in cancel_route
+    assert "flow without a nonce is forgotten" in cancel_route
+
+    api_oauth = api_contract.split("## OAuth completion", 1)[1].split(
+        "## Chain and probe", 1
+    )[0]
+    plan_oauth = model_hub_plan.split(
+        "**OAuth-start nonce state machine", 1
+    )[1].split("**Protocol observation", 1)[0]
+    for section in (api_oauth, plan_oauth):
+        assert section.count("| `oauth_nonce.released` |") == 1
+        assert section.count("| `oauth_nonce.in_flight` |") == 1
+        assert section.count("| `oauth_nonce.committed` |") == 1
+        assert "retained canceled flow" in section
+        assert "existing `expires_at`" in section
+        assert 'retained `state: "cancelled"` flow' in section
+        assert "none" in next(
+            line
+            for line in section.splitlines()
+            if line.startswith("| `oauth_nonce.committed` |")
+        )
+
+    nonce_description = _schema("oauth-flow.schema.json")["properties"][
+        "client_nonce"
+    ]["description"]
+    assert "Explicit cancellation retains that committed flow" in nonce_description
+    assert "starts no provider on a same-tuple retry" in nonce_description
+
+    oauth_schema = _schema("oauth-flow.schema.json")
+    oauth_validator = Draft7Validator(oauth_schema, format_checker=FormatChecker())
+    nonce_with_expiry = copy.deepcopy(oauth_schema["examples"][0])
+    oauth_validator.validate(nonce_with_expiry)
+
+    nonce_without_expiry = copy.deepcopy(nonce_with_expiry)
+    nonce_without_expiry["expires_at"] = None
+    with pytest.raises(ValidationError):
+        oauth_validator.validate(nonce_without_expiry)
+
+    ordinary_without_expiry = copy.deepcopy(nonce_without_expiry)
+    ordinary_without_expiry.pop("client_nonce")
+    oauth_validator.validate(ordinary_without_expiry)
+
+    ac_48 = implementation_plan.split("### AC-48", 1)[1].split("### AC-49", 1)[0]
+    for fixture_pattern in (
+        r"same-tuple canceled replay with zero provider calls",
+        r"existing-expiry\s+release followed by one fresh provider start",
+        r"no-nonce\s+forget",
+    ):
+        assert re.search(fixture_pattern, ac_48)
+
+
 def test_v5_shape_amendments_reject_the_false_states_they_replace():
+    api_contract = (CONTRACTS / "api.md").read_text(encoding="utf-8")
+    credential_contract = api_contract.split(
+        "## Credential replacement and reauth", 1
+    )[1].split("## Source refresh and blocked-source recovery", 1)[0]
+    assert "{source, recovered, interrupted_pairs}" not in credential_contract
+    assert '"recovered"' not in credential_contract
+    assert '"interrupted_pairs"' not in credential_contract
+    assert api_contract.count("| `oauth_terminal.reauth_success` |") == 1
+    reauth_contract = api_contract.split(
+        "## Credential replacement and reauth", 1
+    )[1].split("## Source refresh and blocked-source recovery", 1)[0]
+    assert "Hub-channel repair does not require this acknowledgement" not in reauth_contract
+    assert "For both Hub OAuth and\n   `native_cli` Sources" in reauth_contract
+    assert re.search(
+        r"Missing or false returns\s+`reauth_confirmation_required` before any OAuth adapter call",
+        reauth_contract,
+    )
+    assert "Transactional API-key repair through `PUT …/credential` remains outside" in reauth_contract
+
+    runtime_schema = _schema("runtime-dependency.schema.json")
+    runtime_validator = Draft7Validator(runtime_schema)
+    installing_runtime = copy.deepcopy(runtime_schema["examples"][0])
+    installing_runtime["status"].update(
+        {
+            "installed_version": None,
+            "verified": False,
+            "listening": None,
+            "health": "installing",
+            "error_key": None,
+        }
+    )
+    runtime_validator.validate(installing_runtime)
+    for field, contradiction in (
+        ("installed_version", "v7.2.95"),
+        ("verified", True),
+        ("listening", {"host": "127.0.0.1", "port": 15220}),
+    ):
+        invalid_installing = copy.deepcopy(installing_runtime)
+        invalid_installing["status"][field] = contradiction
+        with pytest.raises(ValidationError):
+            runtime_validator.validate(invalid_installing)
+    missing_installing_shape = copy.deepcopy(installing_runtime)
+    del missing_installing_shape["status"]["listening"]
+    with pytest.raises(ValidationError):
+        runtime_validator.validate(missing_installing_shape)
+
     supply_schema = _schema("agent-supply.schema.json")
     supply_validator = Draft7Validator(supply_schema)
     base_supply = {
@@ -681,10 +892,55 @@ def test_v5_shape_amendments_reject_the_false_states_they_replace():
     with pytest.raises(ValidationError):
         event_validator.validate(invalid_event)
 
-    probe = copy.deepcopy(_schema("probe-result.schema.json")["examples"][0])
+    probe_schema = _schema("probe-result.schema.json")
+    probe_validator = Draft7Validator(probe_schema)
+    connection_failure = next(
+        copy.deepcopy(example)
+        for example in probe_schema["examples"]
+        if example["error"] == "models.source.backoff.connection_failed"
+    )
+    probe_validator.validate(connection_failure)
+    for contradiction in (
+        {"channel": "native_cli"},
+        {"latency_ms": 1},
+    ):
+        invalid_connection_failure = {**connection_failure, **contradiction}
+        with pytest.raises(ValidationError):
+            probe_validator.validate(invalid_connection_failure)
+
+    probe = copy.deepcopy(probe_schema["examples"][0])
     probe["source_id"] = "direct"
     with pytest.raises(ValidationError):
-        Draft7Validator(_schema("probe-result.schema.json")).validate(probe)
+        probe_validator.validate(probe)
+
+    chain_schema = _schema("agent-chain.schema.json")
+    chain_validator = Draft7Validator(chain_schema)
+    ordinary_backoff = next(
+        copy.deepcopy(example)
+        for example in chain_schema["examples"]
+        if example["chain"]
+        and example["chain"][0]["reason"]
+        == "models.source.backoff.connection_failed"
+    )
+    for blocker in (
+        {
+            "health": "needs_action",
+            "reason": "models.source.needs_action.credential_revoked",
+            "retry_at": None,
+        },
+        {
+            "health": "healthy",
+            "reason": "model_unsupported",
+            "retry_at": None,
+        },
+    ):
+        blocked = copy.deepcopy(ordinary_backoff)
+        blocked["chain"][0].update(blocker)
+        blocked["supply_state"] = "interrupted"
+        chain_validator.validate(blocked)
+        mislabeled_waiting = {**blocked, "supply_state": "waiting"}
+        with pytest.raises(ValidationError):
+            chain_validator.validate(mislabeled_waiting)
 
     canceled = next(
         example
@@ -701,6 +957,11 @@ def test_v5_shape_amendments_reject_the_false_states_they_replace():
     chain_validator = Draft7Validator(chain_schema)
     for example in chain_schema["examples"]:
         chain_validator.validate(example)
+    for waiting in chain_schema["examples"][:2]:
+        interrupted = copy.deepcopy(waiting)
+        interrupted["supply_state"] = "interrupted"
+        with pytest.raises(ValidationError):
+            chain_validator.validate(interrupted)
     exact_hop = {
         "contract_version": 5,
         "backend": "claude",
@@ -728,6 +989,20 @@ def test_v5_shape_amendments_reject_the_false_states_they_replace():
     with pytest.raises(ValidationError):
         chain_validator.validate(invalid_reason)
 
+    model_supply_validator = Draft7Validator(
+        supply_schema["properties"]["model_supply"]["items"]
+    )
+    empty_model_supply = {
+        "model_id": "claude-opus-4-6",
+        "chain_length": 0,
+        "has_runnable_hop": False,
+    }
+    model_supply_validator.validate(empty_model_supply)
+    with pytest.raises(ValidationError):
+        model_supply_validator.validate(
+            {**empty_model_supply, "has_runnable_hop": True}
+        )
+
     probe_schema = _schema("probe-result.schema.json")
     probe_validator = Draft7Validator(probe_schema)
     native_ready = copy.deepcopy(probe_schema["examples"][-2])
@@ -747,6 +1022,108 @@ def test_v5_shape_amendments_reject_the_false_states_they_replace():
     timed_native_not_ready["latency_ms"] = 12
     with pytest.raises(ValidationError):
         probe_validator.validate(timed_native_not_ready)
+
+
+def test_oauth_terminal_materialization_matrix_and_handoffs_are_total():
+    api_contract = (CONTRACTS / "api.md").read_text(encoding="utf-8")
+    model_hub_plan = (CONTRACTS.parent / "model-hub.md").read_text(encoding="utf-8")
+    implementation_plan = (
+        CONTRACTS.parent / "model-hub-implementation.md"
+    ).read_text(encoding="utf-8")
+    mirror_registry = _schema("mirror-registry.json")
+
+    decisions = (
+        "oauth_terminal.flow_only",
+        "oauth_terminal.create_success",
+        "oauth_terminal.reauth_success",
+        "oauth_terminal.materialization_interrupted",
+        "oauth_terminal.materialization_plain_error",
+    )
+    api_oauth = api_contract.split("## OAuth completion", 1)[1].split(
+        "## Chain and probe", 1
+    )[0]
+    plan_oauth = model_hub_plan.split(
+        "**OAuth terminal response and materialization-error matrix", 1
+    )[1].split("**Protocol observation", 1)[0]
+    for section in (api_oauth, plan_oauth):
+        for decision in decisions:
+            assert section.count(f"| `{decision}` |") == 1
+
+        reauth_success = next(
+            line
+            for line in section.splitlines()
+            if line.startswith("| `oauth_terminal.reauth_success` |")
+        )
+        interrupted_error = next(
+            line
+            for line in section.splitlines()
+            if line.startswith("| `oauth_terminal.materialization_interrupted` |")
+        )
+        plain_error = next(
+            line
+            for line in section.splitlines()
+            if line.startswith("| `oauth_terminal.materialization_plain_error` |")
+        )
+        assert "may be empty" in reauth_success
+        assert "present and nonempty" in interrupted_error
+        assert "no `flow`" in interrupted_error or "`flow` is absent" in interrupted_error
+        assert "absent" in plain_error
+        assert "empty placeholder" in plain_error
+
+    d22 = next(
+        rule for rule in mirror_registry["decision_tables"] if rule["id"] == "D22"
+    )
+    assert d22["authority"]["heading"] == (
+        "OAuth terminal response and materialization-error matrix"
+    )
+    assert d22["consumers"] == [
+        {
+            "kind": "marker",
+            "file": "docs/plans/model-hub-contracts/api.md",
+            "prefix": "oauth_terminal.",
+        }
+    ]
+
+    ac_52 = implementation_plan.split("### AC-52", 1)[1].split("### AC-53", 1)[0]
+    i3_lane = next(
+        line
+        for line in implementation_plan.splitlines()
+        if line.startswith("| **I3 subscription custody and native import**")
+    )
+    auth_setup_landing = next(
+        line
+        for line in implementation_plan.splitlines()
+        if line.startswith("| `tests/scenarios/auth_setup/")
+    )
+    for section in (ac_52, i3_lane, auth_setup_landing):
+        assert "AUTH-SETUP-109" in section
+    for path in (
+        "tests/scenarios/auth_setup/catalog.yaml",
+        "tests/scenarios/auth_setup/test_auth_setup_scenarios.py",
+    ):
+        assert path in ac_52
+    assert "After K4, #1312, and K6 merge" in ac_52
+    assert "earlier K4 + #1312 edge" in ac_52
+    assert "missing and false acknowledgement" in ac_52
+    assert "before any adapter/provider call" in ac_52
+    assert "starts exactly one Hub flow" in ac_52
+    assert "terminal status and the\nrepair read projection agree" in ac_52
+
+    ac_53 = implementation_plan.split("### AC-53", 1)[1].split(
+        "### K4 open contract-gap registry", 1
+    )[0]
+    assert "all five rows" in ac_53
+    for path in (
+        "core/handlers/model_hub/{service,errors}.py",
+        "vibe/{ui_server,model_hub_client}.py",
+        "tests/test_model_hub_api.py",
+        "ui/src/components/settings/models/{modelsApi.ts,OAuthConnectDialog.tsx,apiFailure.test.ts,oauthResult.test.ts}",
+    ):
+        assert path in ac_53
+    assert "After K4, #1312, and K6 merge" in ac_53
+    assert "After K4 merges, K5 round 2" in ac_53
+    assert "After\nthat K5 round and the I7 payload fixtures freeze" in ac_53
+    assert "same-error/no-gap negative fixture" in ac_53
 
 
 def test_model_hub_config_round_trip_and_serializer_completeness(monkeypatch, tmp_path):

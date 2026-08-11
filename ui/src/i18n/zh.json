@@ -710,6 +710,11 @@
         "startNow": "立即启动",
         "starting": "正在启动"
       },
+      "install": {
+        "fail": {
+          "detail": "这次安装没有完成,组件可能处于未完成状态。重试会重新装一遍。"
+        }
+      },
       "experimental": "实验",
       "agents": {
         "title": "Agent",
@@ -1225,6 +1230,9 @@
         "rate_limited": "触发限流",
         "quota_exhausted": "本周期额度用完",
         "server_error": "上游服务异常"
+      },
+      "backoff": {
+        "connection_failed": "连接失败，短暂退避"
       },
       "needs_action": {
         "oauth_expired": "需要重新登录",
