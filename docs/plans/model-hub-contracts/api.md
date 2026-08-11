@@ -189,13 +189,13 @@ every other existing field and enum meaning remains unchanged.
 | `Source.models[].retired` | discovered-model DELETE | Source detail inventory | Omission means false; only a discovered row may be true; true rows remain readable and never supply. |
 | `Source.adopted_by` | Source read assembler | Source cards and Source detail status | Complete unique persisted-reference projection sorted by backend then menu model; clients do not derive it from `hops`. |
 | `AgentSupply.cli_present` | backend CLI detector | zero-installed-backend state | Boolean installation fact only; it does not imply login or process readiness. |
-| `AgentSupply.model_supply[].has_runnable_hop` | exact-chain live annotator | backend-group collapse predicate | Uses the AgentChain runnability axiom; it is independent of configured `chain_length`. |
+| `AgentSupply.model_supply[].has_runnable_hop` | exact-chain live annotator | backend-group collapse predicate | Uses the AgentChain runnability axiom rather than inferring liveness from configured membership. `chain_length: 0` forces false; a nonzero length may carry either value. |
 | `RuntimeDependency.host_platform` | server host detector | unsupported-host runtime pill | Names the Avibe host, not the browser; exact membership in `manifest.assets[].platform` decides install support. |
 | `RuntimeDependency.status.error_key` | runtime installer | install-failed runtime state | Closed persisted i18n key: `settings.models.install.fail.detail` after installation fails; null after a new attempt begins and in every non-failure state. |
 | `RouteHopRef.position` | guarded mutation planner | guarded-change hop row | One-based position in the named Route before the attempted mutation. |
 | `OAuthStart.client_nonce` | OAuth client before send | OAuth start idempotency | Optional client-generated correlation; the server claims its exact tuple with vendor and channel before provider work, coalesces an in-flight retry, releases after failed/canceled cleanup, and converts success atomically to the flow. |
 | `OAuthFlow.client_nonce` | OAuth start echo | lost-start reconciliation | When the request supplied the nonce, every flow response echoes it unchanged. |
-| `AgentChain.chain[].health: backoff` | configured-chain live annotator | chain/AgentSupply health reads | Source-scoped in-memory pre-first-byte connection throttle with future `retry_at`, never persisted in Source/config. Its reason is `models.source.backoff.connection_failed` unless simultaneous native-process unavailability takes the single reason slot as `native_cli_unavailable`; the ordinary case rolls up as self-healing `waiting`, while that process-blocked case is `interrupted`. |
+| `AgentChain.chain[].health: backoff` | configured-chain live annotator | chain/AgentSupply health reads | Source-scoped in-memory connection throttle before the first user-visible model-output byte, with future `retry_at`, never persisted in Source/config. Its reason is `models.source.backoff.connection_failed` unless simultaneous native-process unavailability takes the single reason slot as `native_cli_unavailable`; the ordinary case rolls up as self-healing `waiting`, while that process-blocked case is `interrupted`. |
 
 ## AgentSupply read projection
 
@@ -279,9 +279,10 @@ may be inferred from `cli_present`.
 
 Each `model_supply` row carries both configured `chain_length` and live
 `has_runnable_hop`. A nonzero length with false is an all-stale Route; zero with false is
-structurally empty. The boolean is computed from the complete exact chain with the same
-source-health AND process-availability rule as `AgentChain`, so the page never issues a
-chain read per row and never treats configured membership as live supply.
+structurally empty, and zero with true is invalid. The boolean is computed from the
+complete exact chain with the same source-health AND process-availability rule as
+`AgentChain`, so the page never issues a chain read per row and never treats configured
+membership as live supply.
 
 The `sources.eligibility` inventory is also the one complete source-signal
 projection. Every existing source remains represented, including a source outside
@@ -842,21 +843,24 @@ No candidate is an API error with a typed model-scoped state:
 }
 ```
 
-The §4.3 network-failure matrix is mirrored here in full. The first-byte boundary is
-measured by the server transport; neither the client nor an HTTP timeout label may infer
-it. A shaped result is one of the existing explicit closed classifiers, while transport
-means there is no explicit code:
+The §4.3 network-failure matrix is mirrored here in full. The retained `*_first_byte`
+decision ids refer specifically to the existing `stream_started` boundary: the first
+user-visible model-output byte, not HTTP status, headers, or another response byte. The
+server transport supplies that fact; neither the client nor an HTTP timeout label may
+infer it. A shaped result is one of the existing explicit closed classifiers, while
+transport means there is no explicit code:
 
 | Decision | Failure shape | Phase | Source/config write | Backoff/read projection | Execution result |
 | --- | --- | --- | --- | --- | --- |
-| `network_failure.shaped_before_first_byte` | explicit closed quota/rate/auth/server classification | before first byte | existing non-permanent family only | none | existing retry/fallback and redacted event |
-| `network_failure.transport_before_first_byte` | no explicit code; connection failure | before first byte | none | Source-scoped in-memory `backoff`, delays 1/2/4/8/16/30 seconds, reason `models.source.backoff.connection_failed`, future `retry_at` | continue to next runnable hop; redacted `network` event |
-| `network_failure.shaped_after_first_byte` | explicit closed classification after output started | after first byte | existing non-permanent family only, with its unchanged recovery rule | none | terminal, no replay; existing redacted event only |
-| `network_failure.transport_after_first_byte` | no explicit code; stream interruption | after first byte | none | none | terminal, no replay; redacted `network` event only |
+| `network_failure.shaped_before_first_byte` | explicit closed quota/rate/auth/server classification | `stream_started: false`; before first user-visible model output | existing non-permanent family only | none | existing retry/fallback and redacted event |
+| `network_failure.transport_before_first_byte` | no explicit code; connection failure | `stream_started: false`; before first user-visible model output | none | Source-scoped in-memory `backoff`, delays 1/2/4/8/16/30 seconds, reason `models.source.backoff.connection_failed`, future `retry_at` | continue to next runnable hop; redacted `network` event |
+| `network_failure.shaped_after_first_byte` | explicit closed classification after output started | `stream_started: true`; after first user-visible model output | existing non-permanent family only, with its unchanged recovery rule | none | terminal, no replay; existing redacted event only |
+| `network_failure.transport_after_first_byte` | no explicit code; stream interruption | `stream_started: true`; after first user-visible model output | none | none | terminal, no replay; redacted `network` event only |
 
 The backoff deadline expiring makes the hop runnable without persistence. The first
-later response byte, Source endpoint/credential replacement, or process reconstruction
-clears its deadline and consecutive-failure streak. The delay is capped at 30 seconds.
+later user-visible model-output byte, Source endpoint/credential replacement, or process
+reconstruction clears its deadline and consecutive-failure streak. The delay is capped
+at 30 seconds.
 For a native hop whose process is simultaneously unavailable, the live deadline remains
 visible but `native_cli_unavailable` takes the single reason slot and the chain remains
 `interrupted`; restoring the process reveals any still-live connection backoff.
@@ -1004,9 +1008,11 @@ contract harness and API-boundary tests enforce:
 | every RuntimeDependency API payload includes server-derived `host_platform` and `status.error_key`; only supported `not_installed` starts a download, installed states are state-preserving no-ops, page reload preserves a live `installing` job, and service bootstrap reconciles an orphan before serving runtime endpoints | API payload test |
 | Source create reserves `client_nonce` in process before work; the client reads Sources before any lost-response retry; fixtures cover `nonce.in_flight` (`source_create_in_progress`/no work), `nonce.released` (atomic reserve/exactly one fresh attempt), and `nonce.committed` (`source_nonce_conflict` followed by a list read that finds exactly one Source with that nonce), while AC-26 cleanup or process restart releases any live reservation and Source deletion releases its committed nonce; after restart or deletion and a list miss, same-nonce create is positively asserted as a fresh creation | config, API payload, cancellation/restart, Source-delete, and client retry tests |
 | Source observation rejects unregistered request/status evidence fields; clients consume only the contracted outcome, reachability, authentication, protocol, discovery, and models facts | observation schema and API payload tests |
-| network fixtures cover shaped/transport × before/after-first-byte: shaped results at either phase enter only their existing non-permanent Source classifier; unclassified pre-stream connection failure creates bounded live backoff with no config write; unclassified post-first-byte interruption is event-only with no backoff/state mutation or replay; simultaneous native-process unavailability takes reason precedence while preserving backoff health/deadline and yields interrupted | table-driven resolver/API/event and AgentChain schema tests |
+| network fixtures cover shaped/transport × `stream_started: false/true`, where the boundary is the first user-visible model-output byte: shaped results at either phase enter only their existing non-permanent Source classifier; unclassified pre-output connection failure creates bounded live backoff with no config write; unclassified post-output interruption is event-only with no backoff/state mutation or replay; simultaneous native-process unavailability takes reason precedence while preserving backoff health/deadline and yields interrupted; a pure cooldown/backoff chain validates only as waiting | table-driven resolver/API/event and AgentChain schema tests |
 | every `GuardRefusal` validates against `guard-refusal.schema.json` and has a nonempty current plan; fixtures cover every guard-decision row, including unforced refusal, exact echoed-plan confirmation, missing/different echo returning the new plan, and old-echo empty-plan ordinary success without a fabricated 409 | API payload and concurrent-mutation test |
 | each `source_in_route_chain` or `source_model_in_route_chain` refusal has nonempty `would_remove_hops`; each `source_last_supplier` refusal has nonempty `would_interrupt`; mismatched code/empty-required-array combinations fail schema validation even when the other array is nonempty | guard schema relation fixture |
+| both GuardRefusal plan arrays contain unique objects; duplicate hop and supply-gap entries fail schema validation | guard schema uniqueness fixture |
+| `model_supply[].chain_length: 0` implies `has_runnable_hop: false`; the opposite pair fails schema validation | AgentSupply schema correlation fixture |
 | contract and in-repo adapter interface copies are byte-identical; the five retained-material enum members and ref-pairing predicates are mutation-tested | contract harness |
 
 Serializer completeness follows the issue #939 pattern. Persisted fields must

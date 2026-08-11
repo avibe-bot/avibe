@@ -38,7 +38,7 @@
           "channel": { "enum": ["hub", "native_cli"] },
           "health": {
             "enum": ["healthy", "cooldown", "backoff", "needs_action", "error"],
-            "description": "Source-global health mapped to this hop, plus live backoff. backoff is an in-memory pre-first-byte connection throttle and is never persisted on Source or configuration."
+            "description": "Source-global health mapped to this hop, plus live backoff. backoff is an in-memory connection throttle before the first user-visible model-output byte and is never persisted on Source or configuration."
           },
           "runnable": { "type": "boolean" },
           "reason": {
@@ -128,6 +128,29 @@
               "required": ["health", "runnable", "reason"]
             }
           }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "chain": {
+            "minItems": 1,
+            "items": {
+              "properties": {
+                "health": { "enum": ["cooldown", "backoff"] },
+                "runnable": { "const": false },
+                "reason": { "enum": [null, "models.source.backoff.connection_failed"] }
+              },
+              "required": ["health", "runnable", "reason"]
+            }
+          }
+        },
+        "required": ["chain"]
+      },
+      "then": {
+        "properties": {
+          "supply_state": { "const": "waiting" }
         }
       }
     }

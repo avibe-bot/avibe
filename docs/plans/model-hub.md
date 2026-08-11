@@ -528,11 +528,13 @@ Parameter, protocol, and tool-compatibility failures are terminal without fallth
 A local Gateway start, listener, or process loss at **any** request phase is terminal
 `engine_down`: it mutates no Source, does not replay output, and does not walk another
 hop. Credential failures follow the authoritative matrix below. The network-failure
-matrix owns every upstream transport branch: before the first response byte, shaped
+matrix owns every upstream transport branch. While `stream_started` is false, shaped
 quota/429/authentication/5xx results retain their existing classifier while an
-unclassified connection failure creates only live short backoff; after the first byte,
-a stream interruption creates only its existing redacted event and never mutates Source
-health or creates backoff. No post-first-byte failure is replayed.
+unclassified connection failure creates only live short backoff. The fact flips only at
+the first user-visible model-output byte, never at HTTP status, headers, or another
+response byte. After it flips, a stream interruption creates only its existing redacted
+event and never mutates Source health or creates backoff. No post-output failure is
+replayed.
 
 The read projection is `C` with live annotations plus `current`, never a reconstructed
 provider list. Takeover remains derived: the current hop is not `C[0]` and `C[0]` is
@@ -559,14 +561,16 @@ credential-failure branch.
 2026-08-11 19:44–19:56).** “Shaped” means the adapter received an explicit, closed
 machine classification such as quota exhaustion/429, an authentication-family result,
 or 5xx. “Transport” means connection or stream failure without such a code. The phase is
-decided only by whether the first response byte was observed.
+the existing `stream_started` fact: false until the first user-visible model-output byte,
+and true from that byte onward. HTTP status, headers, and other response bytes do not
+start the model-output stream.
 
 | Decision | Failure shape | Phase | Persisted Source judgment | Live backoff | Route/event effect |
 | --- | --- | --- | --- | --- | --- |
-| `network_failure.shaped_before_first_byte` | explicit closed code/classification | before first byte | apply the existing non-permanent quota/rate/auth/server family and its unchanged recovery rule | none | before output, follow that family's existing retry/fallback rule and emit its existing redacted event |
-| `network_failure.transport_before_first_byte` | no explicit code; connection failed | before first byte | none; retain the prior Source state byte-for-byte | set Source-scoped in-memory connection backoff, then continue to the next runnable hop | emit redacted `network` event; no configuration mutation |
-| `network_failure.shaped_after_first_byte` | explicit closed code/classification arrives only after streaming began | after first byte | apply that existing non-permanent family and its unchanged recovery rule | none | terminal, no replay; emit only the existing redacted event |
-| `network_failure.transport_after_first_byte` | stream interrupted without explicit code | after first byte | none; the successful connection/authentication/output evidence wins | none | terminal, no replay; emit only the existing redacted `network` event |
+| `network_failure.shaped_before_first_byte` | explicit closed code/classification | `stream_started: false`; before first user-visible model output | apply the existing non-permanent quota/rate/auth/server family and its unchanged recovery rule | none | before output, follow that family's existing retry/fallback rule and emit its existing redacted event |
+| `network_failure.transport_before_first_byte` | no explicit code; connection failed | `stream_started: false`; before first user-visible model output | none; retain the prior Source state byte-for-byte | set Source-scoped in-memory connection backoff, then continue to the next runnable hop | emit redacted `network` event; no configuration mutation |
+| `network_failure.shaped_after_first_byte` | explicit closed code/classification arrives only after model output began | `stream_started: true`; after first user-visible model output | apply that existing non-permanent family and its unchanged recovery rule | none | terminal, no replay; emit only the existing redacted event |
+| `network_failure.transport_after_first_byte` | stream interrupted without explicit code | `stream_started: true`; after first user-visible model output | none; the successful connection/authentication/output evidence wins | none | terminal, no replay; emit only the existing redacted `network` event |
 
 Connection backoff is live execution state, never Source/configuration state. For the
 same Source, consecutive `transport_before_first_byte` decisions use delays
@@ -577,7 +581,7 @@ for that Source reads `health: backoff`, `runnable: false`, and that deadline as
 takes the single reason slot as `native_cli_unavailable`, while the backoff health and
 deadline remain visible and the chain is `interrupted`.
 Deadline expiry makes the hop runnable again without a write. The first subsequent
-response byte clears both deadline and streak automatically; Source endpoint/credential
+user-visible model-output byte clears both deadline and streak automatically; Source endpoint/credential
 replacement and process reconstruction also clear them because the state is in-memory
 and identity-specific. The maximum is 30 seconds. This family never uses
 `models.source.cooldown.*`, never writes `Source.state`, and never creates a permanent

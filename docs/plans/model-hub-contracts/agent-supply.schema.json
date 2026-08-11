@@ -167,7 +167,18 @@
             "type": "boolean",
             "description": "True exactly when at least one exact stored hop is runnable under the same source-health AND process-availability axiom as AgentChain. False distinguishes an all-stale or empty Route from a Route with live supply without changing chain_length. OPTIONAL in the reusable schema and REQUIRED on AgentSupply API payloads."
           }
-        }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": { "chain_length": { "const": 0 } },
+              "required": ["chain_length"]
+            },
+            "then": {
+              "properties": { "has_runnable_hop": { "const": false } }
+            }
+          }
+        ]
       }
     },
     "named_agents": {

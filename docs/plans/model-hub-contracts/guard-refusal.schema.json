@@ -71,11 +71,13 @@
     },
     "would_remove_hops": {
       "type": "array",
-      "items": { "$ref": "#/definitions/RouteHopRef" }
+      "items": { "$ref": "#/definitions/RouteHopRef" },
+      "uniqueItems": true
     },
     "would_interrupt": {
       "type": "array",
-      "items": { "$ref": "#/definitions/SupplyGap" }
+      "items": { "$ref": "#/definitions/SupplyGap" },
+      "uniqueItems": true
     }
   },
   "definitions": {

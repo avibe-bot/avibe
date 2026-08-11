@@ -474,6 +474,8 @@ def test_guard_refusal_error_requires_its_corresponding_nonempty_plan_array():
         {**route_refusal, "would_remove_hops": [], "would_interrupt": [gap]},
         {**model_refusal, "would_remove_hops": [], "would_interrupt": [gap]},
         {**supplier_refusal, "would_remove_hops": [hop], "would_interrupt": []},
+        {**route_refusal, "would_remove_hops": [hop, hop]},
+        {**supplier_refusal, "would_interrupt": [gap, gap]},
     ):
         with pytest.raises(ValidationError):
             validator.validate(payload)
@@ -742,6 +744,11 @@ def test_v5_shape_amendments_reject_the_false_states_they_replace():
     chain_validator = Draft7Validator(chain_schema)
     for example in chain_schema["examples"]:
         chain_validator.validate(example)
+    for waiting in chain_schema["examples"][:2]:
+        interrupted = copy.deepcopy(waiting)
+        interrupted["supply_state"] = "interrupted"
+        with pytest.raises(ValidationError):
+            chain_validator.validate(interrupted)
     exact_hop = {
         "contract_version": 5,
         "backend": "claude",
@@ -768,6 +775,20 @@ def test_v5_shape_amendments_reject_the_false_states_they_replace():
     invalid_reason["chain"][0]["reason"] = "invented"
     with pytest.raises(ValidationError):
         chain_validator.validate(invalid_reason)
+
+    model_supply_validator = Draft7Validator(
+        supply_schema["properties"]["model_supply"]["items"]
+    )
+    empty_model_supply = {
+        "model_id": "claude-opus-4-6",
+        "chain_length": 0,
+        "has_runnable_hop": False,
+    }
+    model_supply_validator.validate(empty_model_supply)
+    with pytest.raises(ValidationError):
+        model_supply_validator.validate(
+            {**empty_model_supply, "has_runnable_hop": True}
+        )
 
     probe_schema = _schema("probe-result.schema.json")
     probe_validator = Draft7Validator(probe_schema)

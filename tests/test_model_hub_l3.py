@@ -2326,10 +2326,12 @@ def test_probe_transport_failures_await_ac50_backoff_contract(tmp_path: Path) ->
         ("network", RawOutcomeKind.NETWORK_ERROR),
         ("timeout", RawOutcomeKind.TIMEOUT),
     ):
+        outcome = _outcome(kind)
+        assert outcome.stream_started is False
         service = _service(
             tmp_path / name,
             sources=[_source("src_primary01", "Primary")],
-            outcomes=[_outcome(kind)],
+            outcomes=[outcome],
         )
         menu_model = _canonicalize_fixed_test_routes(service)["claude"]
         config_before = json.loads(json.dumps(service.store.load().to_payload()))

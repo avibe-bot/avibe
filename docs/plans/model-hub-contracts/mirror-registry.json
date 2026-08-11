@@ -714,6 +714,18 @@
           "kind": "marker_tail",
           "file": "docs/plans/model-hub-contracts/api.md",
           "marker": "authority-consumer: live_backoff.reason "
+        },
+        {
+          "kind": "json_object_keys",
+          "file": "ui/src/i18n/en.json",
+          "path": "/models/source/backoff",
+          "prefix": "models.source.backoff."
+        },
+        {
+          "kind": "json_object_keys",
+          "file": "ui/src/i18n/zh.json",
+          "path": "/models/source/backoff",
+          "prefix": "models.source.backoff."
         }
       ]
     }
