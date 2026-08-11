@@ -2368,6 +2368,44 @@ def test_cancel_returns_404_when_session_not_in_flight(tmp_path, monkeypatch):
     assert body["code"] == "not_in_flight"
 
 
+def test_cancel_rejects_a_blank_explicit_run_id(tmp_path, monkeypatch):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session, turn_id = _create_active_test_turn(
+        tmp_path,
+        native_id="proj_blank_run_cancel",
+    )
+    session_id = session["id"]
+    controller = _build_controller_double()
+    app = internal_server.create_app(controller)
+    transport = httpx.ASGITransport(app=app)
+
+    async def _go():
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            return await client.post(
+                f"/internal/cancel/{session_id}",
+                params={"run_id": "   "},
+            )
+
+    response = asyncio.run(_go())
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "ok": False,
+        "code": "invalid_run_id",
+        "session_id": session_id,
+        "reason": "run_id_required",
+    }
+    controller.command_handler.handle_stop.assert_not_awaited()
+    with engine.connect() as conn:
+        turn = message_deliveries.get_turn(conn, turn_id)
+    assert turn is not None
+    assert turn["state"] == "active"
+    assert turn["control_state"] is None
+
+
 def test_cancel_releases_stale_turn_when_backend_not_active(tmp_path, monkeypatch):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     engine, session, turn_id = _create_active_test_turn(
@@ -5043,6 +5081,128 @@ def test_run_cancel_guard_preserves_an_in_flight_replacement(monkeypatch, tmp_pa
     assert turn["control_successor_turn_id"] == successor_turn_id
     assert successor is not None and successor["state"] == "waiting"
     assert replacement is not None and replacement["state"] == "interrupt_waiting"
+
+
+def test_run_cancel_retires_its_own_in_flight_replacement(monkeypatch, tmp_path):
+    """Canceling a replacement Run cannot leave its waiting prompt activatable."""
+
+    from core.scheduled_tasks import TaskExecutionStore
+    from storage.background import attach_agent_run_delivery_in_connection
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session, turn_id = _create_active_test_turn(
+        tmp_path,
+        native_id="proj_replacement_owner_cancel",
+    )
+    session_id = session["id"]
+    request_store = TaskExecutionStore()
+    replacement_run = request_store.enqueue_agent_run(
+        session_id=session_id,
+        message="replacement from this Run",
+        agent_name="worker",
+        callback_session_id="ses_callback",
+    )
+    assert request_store.claim(replacement_run.id) is not None
+
+    with engine.begin() as conn:
+        turn = message_deliveries.get_turn(conn, turn_id)
+        assert turn is not None
+        replacement = _reserve_submission(
+            conn,
+            scope_id=session["scope_id"],
+            session_id=session_id,
+            text="replacement from this Run",
+        )
+        replacement_id = str(replacement["id"])
+        successor_turn_id = message_deliveries.new_turn_id()
+        message_deliveries.insert_turn(
+            conn,
+            turn_id=successor_turn_id,
+            session_id=session_id,
+            initial_delivery_id=replacement_id,
+            state="waiting",
+            backend="claude",
+        )
+        replacement = message_deliveries.cas_delivery(
+            conn,
+            replacement_id,
+            expected_version=int(replacement["version"]),
+            expected_states=("reserved",),
+            values={
+                "priority": "p0",
+                "state": "interrupt_waiting",
+                "turn_id": successor_turn_id,
+                "turn_role": "initial",
+                "turn_position": 0,
+            },
+        )
+        assert replacement is not None
+        assert attach_agent_run_delivery_in_connection(
+            conn,
+            replacement_run.id,
+            session_id=session_id,
+            delivery_id=replacement_id,
+        )
+        controlled = message_deliveries.cas_turn(
+            conn,
+            turn_id,
+            expected_version=int(turn["version"]),
+            expected_states=("active",),
+            values={
+                "control_state": "interrupting",
+                "control_mode": "replace",
+                "control_attempt_id": message_deliveries.new_attempt_id(),
+                "control_expected_native_turn_id": turn["native_turn_id"],
+                "control_successor_delivery_id": replacement_id,
+                "control_successor_turn_id": successor_turn_id,
+            },
+        )
+        assert controlled is not None
+
+    controller = _build_controller_double()
+    app = internal_server.create_app(controller)
+    transport = httpx.ASGITransport(app=app)
+
+    async def _go():
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            return await client.post(
+                f"/internal/cancel/{session_id}",
+                params={"run_id": replacement_run.id},
+            )
+
+    response = asyncio.run(_go())
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": True,
+        "session_id": session_id,
+        "status": "run_detached",
+        "reason": "run_not_owned_by_turn",
+    }
+    controller.command_handler.handle_stop.assert_not_awaited()
+    saved = request_store.get_run(replacement_run.id)
+    assert saved is not None
+    assert saved["status"] == "canceled"
+    assert saved["callback_status"] == "skipped"
+    with engine.connect() as conn:
+        turn = message_deliveries.get_turn(conn, turn_id)
+        successor = message_deliveries.get_turn(conn, successor_turn_id)
+        replacement = message_deliveries.get_delivery(conn, replacement_id)
+    assert turn is not None
+    assert turn["state"] == "active"
+    assert turn["control_state"] == "interrupting"
+    assert turn["control_mode"] == "stop_only"
+    assert turn["control_successor_delivery_id"] is None
+    assert turn["control_successor_turn_id"] is None
+    assert successor is not None
+    assert successor["state"] == "terminal"
+    assert successor["terminal_outcome"] == "not_written"
+    assert replacement is not None
+    assert replacement["state"] == "retired"
+    assert replacement["turn_id"] is None
 
 
 def test_run_cancel_keeps_a_sole_starting_owner_attached(monkeypatch, tmp_path):

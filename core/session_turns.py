@@ -7419,9 +7419,19 @@ class SessionTurnManager:
         agent_run_id: str | None = None,
     ) -> dict:
         """Cancel a Session Turn or detach one exact Run from a shared Turn."""
+        normalized_agent_run_id = (
+            str(agent_run_id).strip() if agent_run_id is not None else None
+        )
+        if agent_run_id is not None and not normalized_agent_run_id:
+            return {
+                "ok": False,
+                "code": "invalid_run_id",
+                "session_id": session_id,
+                "reason": "run_id_required",
+            }
         turn = self.in_flight.get(session_id)
         if not self._durable_schema_available():
-            if agent_run_id:
+            if normalized_agent_run_id:
                 return {
                     "ok": False,
                     "code": "atomic_run_cancel_unavailable",
@@ -7447,7 +7457,7 @@ class SessionTurnManager:
                 content=None,
                 expected_turn_id=(str(owner["id"]) if owner is not None else None),
                 expected_exclusive_agent_run_id=(
-                    str(agent_run_id).strip() if agent_run_id else None
+                    normalized_agent_run_id
                 ),
             ),
             context=turn.context if turn is not None else None,
@@ -7462,7 +7472,7 @@ class SessionTurnManager:
         if result.state in {"waiting_terminal", "interrupt_waiting"}:
             return {"ok": True, "session_id": session_id, "status": "cancel_requested"}
         if result.state == "settled":
-            if agent_run_id:
+            if normalized_agent_run_id:
                 return {
                     "ok": True,
                     "session_id": session_id,

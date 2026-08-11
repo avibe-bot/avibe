@@ -1368,6 +1368,8 @@ def create_app(
         code = result.get("code")
         if code == "not_in_flight":
             return JSONResponse(status_code=404, content=result)
+        if code == "invalid_run_id":
+            return JSONResponse(status_code=400, content=result)
         if code in {"stop_failed", "stop_unknown"}:
             return JSONResponse(status_code=409, content=result)
         return result

@@ -2039,12 +2039,92 @@ def retire_for_run_cancellation(
 ) -> bool:
     """Retire an exact Run input only when its state proves no native side effect."""
 
-    return retire_not_written(
+    if retire_not_written(
         conn,
         session_id,
         delivery_id,
         reason="agent_run_canceled_before_native_write",
+    ):
+        return True
+    delivery = get_delivery(conn, delivery_id)
+    if (
+        delivery is None
+        or delivery["session_id"] != session_id
+        or delivery["state"] != "interrupt_waiting"
+    ):
+        return False
+    successor_turn_id = str(delivery.get("turn_id") or "")
+    successor = get_turn(conn, successor_turn_id)
+    if (
+        successor is None
+        or successor["session_id"] != session_id
+        or successor["state"] != "waiting"
+        or successor["initial_delivery_id"] != delivery_id
+    ):
+        return False
+    predecessor = _one(
+        conn,
+        select(session_turns)
+        .where(session_turns.c.session_id == session_id)
+        .where(session_turns.c.control_successor_delivery_id == delivery_id)
+        .where(session_turns.c.control_successor_turn_id == successor_turn_id)
+        .order_by(session_turns.c.created_at.desc(), session_turns.c.id.desc())
+        .limit(1),
     )
+    terminalized = terminalize_turn(
+        conn,
+        successor_turn_id,
+        outcome="not_written",
+        settled_by="agent_run_canceled",
+        evidence_kind="replacement_run_canceled",
+    )
+    retired = cas_delivery(
+        conn,
+        delivery_id,
+        expected_version=int(delivery["version"]),
+        expected_states=("interrupt_waiting",),
+        values={
+            "state": "retired",
+            "retired_at": utc_now_iso(),
+            "turn_id": None,
+            "turn_role": None,
+            "turn_position": None,
+        },
+        history_event={
+            "kind": "retire",
+            "reason": "replacement_agent_run_canceled",
+        },
+    )
+    if not terminalized["changed"] or retired is None:
+        raise RuntimeError("replacement Run cancellation lost its waiting successor")
+    if predecessor is not None:
+        predecessor_values: dict[str, Any] = {
+            "control_successor_delivery_id": None,
+            "control_successor_turn_id": None,
+        }
+        if predecessor["state"] == "terminal":
+            predecessor_values["control_mode"] = None
+        elif predecessor.get("control_state") == "pending":
+            predecessor_values.update(
+                control_state=None,
+                control_mode=None,
+                control_attempt_id=None,
+                control_expected_native_turn_id=None,
+                control_receipt_outcome=None,
+                control_receipt_json="{}",
+            )
+        else:
+            predecessor_values["control_mode"] = "stop_only"
+        unlinked = cas_turn(
+            conn,
+            str(predecessor["id"]),
+            expected_version=int(predecessor["version"]),
+            expected_states=(str(predecessor["state"]),),
+            values=predecessor_values,
+        )
+        if unlinked is None:
+            raise RuntimeError("replacement Run cancellation lost predecessor unlink")
+    return True
 
 
 def retire_for_archive(conn: Connection, session_id: str) -> dict[str, Any]:
