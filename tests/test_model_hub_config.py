@@ -26,6 +26,7 @@ from config.v2_config import (
     is_model_hub_enabled,
 )
 from core.services.settings import default_config
+from core.handlers.model_hub.identifiers import opencode_model_id
 from core.handlers.model_hub.adapter import (
     OBSERVATION_TERMINAL_RULES,
     ObservationDiscovery,
@@ -1153,9 +1154,88 @@ def test_mh_cfg_mig_001_pre_v5_mapping_becomes_a_route_over_ordered_sources(tmp_
     assert [(hop.source_id, hop.model_id) for hop in routes[mapped_id].hops] == [
         (source["id"], "target-model")
     ]
-    assert all(
-        routes[model_id].hops == () for model_id in routes if model_id != mapped_id
-    )
+    assert routes[disabled_id].hops == ()
+
+
+def test_mh_cfg_mig_001_pre_v5_unmapped_menu_models_keep_their_legacy_route(tmp_path):
+    """An unmapped menu model walked the same order, so it must stay routable.
+
+    A Hub-mode install that never needed a mapping is the common shape; leaving
+    those models with empty routes would migrate it into a service that starts
+    with nothing left to run.
+    """
+
+    current = api.config_to_payload(default_config())
+    legacy = _legacy_model_hub_payload(current)
+    source = copy.deepcopy(_schema("source.schema.json")["examples"][0])
+    supplied_id = source["models"][0]["id"]
+    legacy["model_hub"]["sources"] = [source]
+    claude = legacy["model_hub"]["agents"]["claude"]
+    claude["sources"]["order"] = [source["id"]]
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    routes = V2Config.load(config_path=config_path).model_hub.agents["claude"].routes
+
+    assert [(hop.source_id, hop.model_id) for hop in routes[supplied_id].hops] == [
+        (source["id"], supplied_id)
+    ]
+    # The family alias resolved to the newest discovered model, not to itself.
+    assert [(hop.source_id, hop.model_id) for hop in routes["opus"].hops] == [
+        (source["id"], supplied_id)
+    ]
+    assert routes["sonnet"].hops == ()
+
+
+def test_mh_cfg_mig_001_pre_v5_manually_added_model_stays_routable(tmp_path):
+    current = api.config_to_payload(default_config())
+    legacy = _legacy_model_hub_payload(current)
+    source = copy.deepcopy(_schema("source.schema.json")["examples"][1])
+    menu_id = next(iter(current["model_hub"]["agents"]["codex"]["routes"]))
+    source["models"] = [
+        {
+            "id": menu_id,
+            "display_name": None,
+            "origin": "manual",
+            "reasoning_efforts": [],
+            "discovered_at": None,
+        }
+    ]
+    legacy["model_hub"]["sources"] = [source]
+    codex = legacy["model_hub"]["agents"]["codex"]
+    codex["sources"]["order"] = [source["id"]]
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    routes = V2Config.load(config_path=config_path).model_hub.agents["codex"].routes
+
+    assert [(hop.source_id, hop.model_id) for hop in routes[menu_id].hops] == [
+        (source["id"], menu_id)
+    ]
+
+
+def test_mh_cfg_mig_001_pre_v5_open_menu_keeps_checked_models_routable(tmp_path):
+    current = api.config_to_payload(default_config())
+    legacy = _legacy_model_hub_payload(current)
+    source = copy.deepcopy(_schema("source.schema.json")["examples"][1])
+    model_id = source["models"][0]["id"]
+    source["models"][0] |= {
+        "origin": "discovered",
+        "discovered_at": source["state"]["retry_at"],
+    }
+    checked_id = opencode_model_id(source["vendor"], model_id)
+    legacy["model_hub"]["sources"] = [source]
+    opencode = legacy["model_hub"]["agents"]["opencode"]
+    opencode["sources"]["order"] = [source["id"]]
+    opencode["menu"] = {"view": "featured", "checked": [checked_id]}
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    routes = V2Config.load(config_path=config_path).model_hub.agents["opencode"].routes
+
+    assert [(hop.source_id, hop.model_id) for hop in routes[checked_id].hops] == [
+        (source["id"], model_id)
+    ]
 
 
 def test_mh_cfg_mig_001_pre_v5_mapping_without_eligible_source_degrades_to_empty_route(tmp_path):

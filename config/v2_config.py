@@ -167,8 +167,11 @@ def model_hub_fixed_menu_ids(backend: str) -> tuple[str, ...]:
     )
 
 
-def _legacy_model_hub_eligible_source_ids(sources_payload: object, backend: str) -> set[str]:
-    """Return the ids in ``sources_payload`` a legacy agent could have supplied from.
+def _legacy_model_hub_eligible_sources(
+    sources_payload: object,
+    backend: str,
+) -> dict[str, "ModelHubSourceConfig"]:
+    """Return the sources in ``sources_payload`` a legacy agent could have supplied from.
 
     Eligibility is decided by the live rule rather than a copy of it, so a
     migrated hop can never reference a source the parser then rejects. A source
@@ -177,16 +180,58 @@ def _legacy_model_hub_eligible_source_ids(sources_payload: object, backend: str)
     """
 
     if not isinstance(sources_payload, list):
-        return set()
-    eligible: set[str] = set()
+        return {}
+    eligible: dict[str, ModelHubSourceConfig] = {}
     for raw_source in sources_payload:
         try:
             source = ModelHubSourceConfig.from_payload(raw_source)
         except (ValueError, TypeError):
             continue
         if ModelHubConfig.source_eligible_for_backend(source, backend):
-            eligible.add(source.id)
+            eligible[source.id] = source
     return eligible
+
+
+def _legacy_model_hub_unmapped_hop_model_id(
+    backend: str,
+    menu_model_id: str,
+    source: "ModelHubSourceConfig",
+    menu_ids: tuple[str, ...],
+) -> str | None:
+    """Return the model ``source`` supplied for an *unmapped* legacy menu id.
+
+    Legacy resolution walked the source order for every menu model, not only
+    the mapped ones: an unmapped model kept its own id and was served by the
+    first ordered source whose inventory could answer it, with a Claude family
+    alias resolving to the newest discovered model. Skipping that walk would
+    give every unmapped model an empty route, so the common Hub-mode config
+    that never needed a mapping would migrate into a service that starts with
+    no model left to run.
+
+    The frozen add-time matcher decides the match, so a migrated hop is the one
+    an add would persist today, and every OpenCode identity stays computed by
+    its single authority. The plain fallback keeps a manually added model, which
+    that matcher ignores by design, routable on a fixed menu whose ids are model
+    ids already. Two legacy shapes are deliberately left behind rather than
+    reproduced with a route the live rules cannot produce: an alias served by a
+    non-native source, since v5 pins alias resolution to the native CLI, and a
+    manually added OpenCode model, whose identity only the resolver may derive.
+    """
+
+    from core.handlers.model_hub.resolver import matching_v1_model_id
+
+    matched = matching_v1_model_id(
+        backend=backend,
+        requested_model=menu_model_id,
+        source=source,
+        checked_models=menu_ids,
+    )
+    if matched is not None or backend == "opencode":
+        return matched
+    return next(
+        (model.id for model in source.models if model.id == menu_model_id),
+        None,
+    )
 
 
 def _legacy_model_hub_routes(
@@ -197,12 +242,13 @@ def _legacy_model_hub_routes(
     """Build v5 routes for a pre-v5 agent that only persisted ``mappings``.
 
     A legacy mapping rewrote the requested menu model and left source choice to
-    the agent's ``sources.order``; a v5 hop pins both. The rewrite is therefore
-    preserved by enumerating the ordered eligible sources for that target model,
-    which reproduces the old "rewrite, then walk the order" behavior. Everything
-    a v5 route cannot express — a mapping for a model the current menu no longer
-    offers, or one with no eligible source to walk — degrades to an empty route
-    rather than inventing a supply path.
+    the agent's ``sources.order``; an unmapped model walked that same order
+    under its own id. A v5 hop pins model and source together, so both shapes
+    are preserved by enumerating that ordered walk: the mapping's target for a
+    mapped model, and whatever each source could actually answer for an
+    unmapped one. Everything a v5 route cannot express — a mapping for a model
+    the current menu no longer offers, or one with no eligible source to walk —
+    degrades to an empty route rather than inventing a supply path.
     """
 
     if backend in {"claude", "codex"}:
@@ -212,28 +258,32 @@ def _legacy_model_hub_routes(
         checked = menu.get("checked") if isinstance(menu, dict) else None
         menu_ids = tuple(item for item in checked if isinstance(item, str)) if isinstance(checked, list) else ()
 
+    targets: dict[str, str] = {}
     mappings = raw_agent.get("mappings")
     # Legacy resolution only consulted mappings for fixed menus, so an open
     # (OpenCode) menu's mappings were already inert and stay inert here.
-    if not isinstance(mappings, list) or raw_agent.get("menu_kind") != "fixed":
-        return {model_id: {"hops": []} for model_id in menu_ids}
-
-    targets: dict[str, str] = {}
-    for mapping in mappings:
-        if not isinstance(mapping, dict) or mapping.get("enabled") is not True:
-            continue
-        builtin_id = mapping.get("builtin_id")
-        target_model_id = mapping.get("target_model_id")
-        if not isinstance(builtin_id, str) or not isinstance(target_model_id, str):
-            continue
-        if builtin_id == target_model_id or builtin_id not in menu_ids:
-            continue
-        targets.setdefault(builtin_id, target_model_id)
+    if isinstance(mappings, list) and raw_agent.get("menu_kind") == "fixed":
+        for mapping in mappings:
+            if not isinstance(mapping, dict) or mapping.get("enabled") is not True:
+                continue
+            builtin_id = mapping.get("builtin_id")
+            target_model_id = mapping.get("target_model_id")
+            if not isinstance(builtin_id, str) or not isinstance(target_model_id, str):
+                continue
+            if builtin_id == target_model_id or builtin_id not in menu_ids:
+                continue
+            targets.setdefault(builtin_id, target_model_id)
 
     order = raw_agent.get("sources", {}).get("order") if isinstance(raw_agent.get("sources"), dict) else None
-    eligible = _legacy_model_hub_eligible_source_ids(sources_payload, backend)
-    ordered_source_ids = (
-        [source_id for source_id in order if isinstance(source_id, str) and source_id in eligible]
+    eligible = _legacy_model_hub_eligible_sources(sources_payload, backend)
+    ordered_sources = (
+        list(
+            {
+                source_id: eligible[source_id]
+                for source_id in order
+                if isinstance(source_id, str) and source_id in eligible
+            }.values()
+        )
         if isinstance(order, list)
         else []
     )
@@ -241,20 +291,35 @@ def _legacy_model_hub_routes(
     routes: dict[str, dict] = {}
     for model_id in menu_ids:
         target_model_id = targets.get(model_id)
-        hops = (
-            [
-                {"source_id": source_id, "model_id": target_model_id}
-                for source_id in ordered_source_ids
-            ]
-            if target_model_id is not None
-            else []
-        )
-        if target_model_id is not None and not hops:
-            logger.warning(
-                "Model Hub migration dropped a '%s' mapping for '%s': no eligible source to route through",
-                backend,
-                model_id,
+        if target_model_id is None:
+            supplied = (
+                (
+                    source,
+                    _legacy_model_hub_unmapped_hop_model_id(
+                        backend,
+                        model_id,
+                        source,
+                        menu_ids,
+                    ),
+                )
+                for source in ordered_sources
             )
+            hops = [
+                {"source_id": source.id, "model_id": hop_model_id}
+                for source, hop_model_id in supplied
+                if hop_model_id is not None
+            ]
+        else:
+            hops = [
+                {"source_id": source.id, "model_id": target_model_id}
+                for source in ordered_sources
+            ]
+            if not hops:
+                logger.warning(
+                    "Model Hub migration dropped a '%s' mapping for '%s': no eligible source to route through",
+                    backend,
+                    model_id,
+                )
         routes[model_id] = {"hops": hops}
     dropped = sorted(set(targets) - set(menu_ids))
     for model_id in dropped:
