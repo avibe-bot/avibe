@@ -2293,8 +2293,9 @@ def enforce_instance_role_capabilities():
 _REMOTE_CONFIG_MUTABLE_FIELDS = frozenset(
     {
         "ack_mode",
+        # Remote owners may choose how progress is presented, but the heartbeat
+        # cadence stays trusted-local because it directly controls edit timing.
         "agent_progress_style",
-        "agent_status_heartbeat_ms",
         "agent_status_no_output_ms",
         "include_time_info",
         "include_user_info",
