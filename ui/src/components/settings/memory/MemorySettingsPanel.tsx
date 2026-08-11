@@ -423,7 +423,9 @@ export const MemorySettingsPanel: React.FC<{
                 <li key={root.path}>{t('memory.factoryReset.rootOutcome', {
                   path: root.path ?? t('memory.factoryReset.unknownRoot'),
                   deleted: root.deleted === true
-                    ? t('memory.factoryReset.deleted')
+                    ? root.error
+                      ? t('memory.factoryReset.partial')
+                      : t('memory.factoryReset.deleted')
                     : root.existed === false
                       ? t('memory.factoryReset.absent')
                       : t('memory.factoryReset.retained'),

@@ -3999,6 +3999,7 @@
       "rootOutcome": "{{path}}: {{deleted}}",
       "unknownRoot": "unknown root",
       "deleted": "deleted",
+      "partial": "partially deleted",
       "absent": "absent",
       "retained": "retained",
       "completed": "Memory factory reset completed.",

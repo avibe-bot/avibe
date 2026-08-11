@@ -181,6 +181,39 @@ describe('MemorySettingsPanel', () => {
     ).toBeTruthy();
   });
 
+  it('labels a root with deletion progress and an error as partial', () => {
+    const result: MemoryFactoryResetResult = {
+      ok: false,
+      result: 'partial',
+      error: 'memory_factory_reset_failed',
+      data_deleted: true,
+      data_remaining: true,
+      roots: [
+        { path: 'memory', existed: true, deleted: true, error: 'ConfinedFilesystemError' },
+        { path: 'state/memory', existed: false, deleted: false },
+      ],
+    };
+
+    render(
+      <MemorySettingsPanel
+        settings={legacySettings}
+        maintenance={null}
+        maintenanceError={null}
+        dependencyReady
+        onSaved={() => undefined}
+        onReloadSettings={() => undefined}
+        onReloadMaintenance={() => undefined}
+        onClearAll={() => undefined}
+        clearing={false}
+        factoryResetResult={result}
+      />,
+    );
+
+    expect(
+      screen.getByText('memory.factoryReset.rootOutcome:memory.factoryReset.partial'),
+    ).toBeTruthy();
+  });
+
   it('does not expose a provider logging switch and omits diagnostics from saves', async () => {
     const saved = {
       ...legacySettings,

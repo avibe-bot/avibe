@@ -3999,6 +3999,7 @@
       "rootOutcome": "{{path}}：{{deleted}}",
       "unknownRoot": "未知根目录",
       "deleted": "已删除",
+      "partial": "已部分删除",
       "absent": "不存在",
       "retained": "已保留",
       "completed": "记忆工厂重置已完成。",

@@ -83,3 +83,12 @@ scenarios:
     given: Both roots are deleted but fresh activation fails
     when: The Controller publishes the replacement outcome
     then: The closed envelope reports deletion truth and leaves retryable intent persisted
+  - id: MEMORY-FACTORY-302
+    name: Durable reset marker blocks captures after preflight
+    status: covered
+    kind: service_boundary
+    layer: scenario
+    test: tests/scenarios/memory_factory_reset/test_memory_factory_reset_scenarios.py::test_memory_factory_302_durable_reset_marker_blocks_capture_after_preflight
+    given: A settled factory_reset marker remains in the runtime configuration
+    when: A direct capture is attempted after reset preflight
+    then: Capture is rejected without invoking the runtime module
