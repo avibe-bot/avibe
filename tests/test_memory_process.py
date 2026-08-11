@@ -4086,6 +4086,23 @@ def test_sync_discovery_ignores_foreign_uid_candidates(
             nonce="a" * 64,
         )
 
+    class InaccessibleCmdlineCandidate(_RebuildDiscoveryCandidate):
+        def cmdline(self) -> list[str]:
+            raise psutil.AccessDenied(pid=self.pid)
+
+    inaccessible = InaccessibleCmdlineCandidate(
+        cmdline=command,
+        uid=own_uid,
+        environment=environment,
+    )
+    monkeypatch.setattr(memory_process.psutil, "process_iter", lambda: [inaccessible])
+    with pytest.raises(RuntimeError, match="command line could not be verified"):
+        _processes_syncing_owned_root(
+            provider_root=tmp_path,
+            python=Path(sys.executable),
+            nonce="a" * 64,
+        )
+
 
 def test_sidecar_root_discovery_requires_exact_uid_argv_root_and_role(
     monkeypatch,

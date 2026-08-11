@@ -143,6 +143,30 @@ async def test_pending_record_is_retired_only_after_exact_discovery_finds_no_chi
     assert not ownership.path.exists()
 
 
+async def test_pending_record_is_preserved_when_discovery_cannot_inspect_a_child(
+    tmp_path: Path,
+) -> None:
+    memory_dir = tmp_path / "memory"
+    root = memory_dir / "everos-root"
+
+    class UnverifiableDiscoveryHost(_Host):
+        def find_syncs(self, *, provider_root, python, nonce):
+            del provider_root, python, nonce
+            raise RuntimeError("sync child command line could not be verified")
+
+    ownership = SyncOwnership(
+        sync_record_path(memory_dir),
+        provider_root=root,
+        host=UnverifiableDiscoveryHost(),
+    )
+    ownership.write(_record(root, state="pending"))
+
+    with pytest.raises(SyncOwnershipError, match="could not be verified"):
+        await ownership.reconcile()
+
+    assert ownership.path.exists()
+
+
 async def test_finalized_gone_sync_record_is_retired_independently(tmp_path: Path) -> None:
     memory_dir = tmp_path / "memory"
     root = memory_dir / "everos-root"
@@ -200,6 +224,55 @@ async def test_live_parent_keeps_singleton_sync_record_and_child_untouched(tmp_p
 
     assert ownership.path.exists()
     assert host.signals == []
+
+
+async def test_retained_failed_cleanup_reconciles_while_its_parent_is_live(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    python = tmp_path / "runtime" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_bytes(b"python")
+    root = tmp_path / "home" / "memory" / "everos-root"
+    uid = os.getuid() if hasattr(os, "getuid") else None
+
+    class RetainedCleanupHost(_Host):
+        def recorded_group_members(self, process_group, *, socket_path, provider_root, role=None):
+            del process_group, socket_path, provider_root
+            assert role is _MemoryChildRole.CASCADE_SYNC
+            return {}, []
+
+    host = RetainedCleanupHost(
+        {
+            99: _ProcessIdentity(
+                create_time=8.25,
+                cmdline=("avibe",),
+                uid=uid,
+                environment={},
+            )
+        }
+    )
+    sync = EverOSSyncProcess(
+        python,
+        effective_home=tmp_path / "home",
+        _host=host,
+    )
+    record = _record(root, state="finalized", pid=451)
+    sync._ownership.write(record)
+
+    async def cleanup_cannot_be_proven(*_args, **_kwargs) -> None:
+        raise SyncOwnershipError("sync process group death is unproven")
+
+    monkeypatch.setattr(sync, "_terminate_owned_sync_tree", cleanup_cannot_be_proven)
+
+    class Process:
+        pid = 451
+
+    await sync._cleanup_failed_launch(Process(), 451, {451: 10.5}, str(record["nonce"]))
+
+    assert sync._ownership.read()["cleanup_failed"] is True
+    await sync._ownership.reconcile()
+    assert not sync._ownership.path.exists()
 
 
 async def test_finalized_sync_reconciliation_cleans_exact_recorded_group(tmp_path: Path) -> None:

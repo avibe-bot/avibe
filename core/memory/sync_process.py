@@ -222,6 +222,17 @@ class SyncOwnership:
                 raise SyncOwnershipError("sync ownership record is no longer pending")
             self._write_unlocked(payload)
 
+    def mark_cleanup_failed(self, *, nonce: str) -> None:
+        """Allow the owning parent to retry reconciling a retained final record."""
+
+        with self._locked():
+            current = self.read()
+            if current is None or current.get("nonce") != nonce:
+                raise SyncOwnershipError("sync ownership record changed during cleanup")
+            if current.get("state") != "finalized":
+                raise SyncOwnershipError("sync ownership record is not finalized")
+            self._write_unlocked({**current, "cleanup_failed": True})
+
     def remove(self, *, nonce: str) -> None:
         with self._locked():
             current = self.read()
@@ -251,6 +262,7 @@ class SyncOwnership:
             if (
                 parent_identity.create_time == float(record["parent_create_time"])
                 and parent_identity.uid == expected_uid
+                and record.get("cleanup_failed") is not True
             ):
                 raise SyncOwnershipError("sync operation is already owned by a live parent")
         state = record["state"]
@@ -259,11 +271,16 @@ class SyncOwnership:
             finder = getattr(self.host, "find_syncs", None)
             if not callable(finder):
                 raise SyncOwnershipError("pending sync ownership record requires process discovery")
-            candidates = finder(
-                provider_root=self.provider_root,
-                python=Path(record["argv"][0]),
-                nonce=str(record["nonce"]),
-            )
+            try:
+                candidates = finder(
+                    provider_root=self.provider_root,
+                    python=Path(record["argv"][0]),
+                    nonce=str(record["nonce"]),
+                )
+            except RuntimeError as exc:
+                raise SyncOwnershipError(
+                    "pending sync child identity could not be verified"
+                ) from exc
             if not candidates:
                 self.remove(nonce=str(record["nonce"]))
                 return
@@ -544,6 +561,10 @@ class EverOSSyncProcess:
         except Exception:
             # The pending/finalized record is retained so boot reconciliation
             # remains fail-closed when exact cleanup cannot be proven.
+            try:
+                self._ownership.mark_cleanup_failed(nonce=nonce)
+            except SyncOwnershipError:
+                pass
             return
 
 
@@ -590,6 +611,11 @@ def _validate_record(record: Mapping[str, Any], *, provider_root: Path) -> None:
         raise SyncOwnershipError("sync ownership record is for another role or root")
     if record.get("state") not in {"pending", "finalized"}:
         raise SyncOwnershipError("sync ownership record state is invalid")
+    cleanup_failed = record.get("cleanup_failed", False)
+    if not isinstance(cleanup_failed, bool) or (
+        cleanup_failed and record.get("state") != "finalized"
+    ):
+        raise SyncOwnershipError("sync ownership cleanup state is invalid")
     nonce = record.get("nonce")
     if not isinstance(nonce, str) or len(nonce) != 64 or any(c not in "0123456789abcdef" for c in nonce):
         raise SyncOwnershipError("sync ownership nonce is invalid")

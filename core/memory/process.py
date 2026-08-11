@@ -3033,10 +3033,16 @@ def _processes_syncing_owned_root(
             cmdline = _disclosed_identity_field(candidate.cmdline)
             created_at = _disclosed_identity_field(candidate.create_time)
             environment = _disclosed_process_environment(candidate)
-        except (psutil.NoSuchProcess, psutil.Error):
+        except psutil.NoSuchProcess:
             continue
+        except psutil.Error as exc:
+            raise RuntimeError(
+                f"sync child identity could not be verified (pid {candidate.pid})"
+            ) from exc
         if cmdline is None:
-            continue
+            raise RuntimeError(
+                f"sync child command line could not be verified (pid {candidate.pid})"
+            )
         rendered = tuple(str(value) for value in cmdline)
         if not _cmdline_matches_role(
             rendered,

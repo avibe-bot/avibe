@@ -384,6 +384,18 @@ class MemoryArtifactManager(ManagedRuntimeManager):
             return False
         return True
 
+    def _prepare_binary_for_manifest(
+        self,
+        binary: Path,
+        manifest: ManagedRuntimeManifest,
+    ) -> dict[str, Any]:
+        """Admit fresh archives against the sync contract they advertise."""
+
+        return self._prepare_binary(
+            binary,
+            sync_contract=_sync_contract_from_payload(manifest.payload),
+        )
+
     def _reuse_existing_install(
         self,
         binary: Path,

@@ -1,13 +1,20 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import shutil
+import tarfile
 from pathlib import Path
 
 import pytest
 
+from core.managed_runtime import ManagedRuntimeArchive, ManagedRuntimeManifest, runtime_platform_tag
 from core.memory.artifact import (
+    EMBEDDED_PYTHON_VERSION,
+    EVEROS_VERSION,
+    PACKAGE_LOCK_SHA256,
+    RUNTIME_BUILDER_UV_VERSION,
     FakeMemoryArtifactManager,
     MemoryArtifactManager,
     _sync_contract_from_payload,
@@ -94,6 +101,79 @@ def test_sync_admission_requires_one_exact_site_packages_location(tmp_path: Path
     (binary.parent.parent / "lib" / "python3.11" / "site-packages").mkdir(parents=True)
 
     assert not MemoryArtifactManager._admit_sync_contract(binary, contract)
+
+
+def test_fresh_install_admits_the_manifest_sync_contract(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.delenv("AVIBE_MEMORY_DEV_RUNTIME", raising=False)
+    binary_payload = b"python"
+    archive_path = tmp_path / "memory-runtime.tar.gz"
+    with tarfile.open(archive_path, "w:gz") as archive_file:
+        binary = tarfile.TarInfo("bin/python")
+        binary.mode = 0o755
+        binary.size = len(binary_payload)
+        archive_file.addfile(binary, io.BytesIO(binary_payload))
+
+    expected_contract = (
+        SYNC_BOOTSTRAP_REVISION,
+        tuple(SYNC_ARGV),
+        "a" * 64,
+        "b" * 64,
+    )
+    archive = ManagedRuntimeArchive(
+        platform=runtime_platform_tag(),
+        name=archive_path.name,
+        url=archive_path.as_uri(),
+        sha256=hashlib.sha256(archive_path.read_bytes()).hexdigest(),
+        binary_sha256=hashlib.sha256(binary_payload).hexdigest(),
+        size=archive_path.stat().st_size,
+        bin_path="bin/python",
+    )
+    manifest = ManagedRuntimeManifest(
+        schema_version=1,
+        runtime_version=EVEROS_VERSION,
+        source="avibe-bot/avibe",
+        source_url=None,
+        archives={archive.platform: archive},
+        digest="c" * 64,
+        loaded_from=str(tmp_path / "manifest.json"),
+        payload={
+            "release_state": "published",
+            "python_version": EMBEDDED_PYTHON_VERSION,
+            "lock_sha256": PACKAGE_LOCK_SHA256,
+            "lock_id": f"uv-lock-sha256:{PACKAGE_LOCK_SHA256}",
+            "uv_version": RUNTIME_BUILDER_UV_VERSION,
+            "provider_root_format": "everos-1.2.3",
+            "compatible_provider_root_formats": ["everos-1.2.3"],
+            "sync_bootstrap_revision": expected_contract[0],
+            "sync_argv": list(expected_contract[1]),
+            "sync_bootstrap_sha256": expected_contract[2],
+            "sync_scrubbers_sha256": expected_contract[3],
+        },
+    )
+    manager = MemoryArtifactManager(
+        runtime_dir=tmp_path / "runtime",
+        provider_root=tmp_path / "memory" / "everos-root",
+        offline=True,
+    )
+    observed: list[tuple[int, tuple[str, ...], str, str] | None] = []
+
+    monkeypatch.setattr(manager, "_load_manifest", lambda *, allow_network: manifest)
+    monkeypatch.setattr(manager, "_resolve_manifest_archive", lambda _archive: archive_path)
+    monkeypatch.setattr(manager, "_binary_matches_manifest", lambda *_args: True)
+    monkeypatch.setattr(manager, "_write_current_pointer", lambda *_args: None)
+
+    def prepare(binary: Path, *, sync_contract=None) -> dict[str, bool]:
+        assert binary.name == "python"
+        observed.append(sync_contract)
+        return {"ok": sync_contract == expected_contract}
+
+    monkeypatch.setattr(manager, "_prepare_binary", prepare)
+
+    assert manager.ensure()["ok"] is True
+    assert observed == [expected_contract]
 
 
 def test_release_guard_hashes_packaged_sync_modules(tmp_path: Path) -> None:
