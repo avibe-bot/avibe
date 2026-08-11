@@ -1480,6 +1480,32 @@ def test_config_reload_recovers_invalid_optional_section_without_overwriting_fil
         loaded.save(config_path)
 
 
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda source: source["state"].update({"status": {}}),
+        lambda source: source.update({"kind": []}),
+        lambda source: source.update({"protocol": {}}),
+    ],
+    ids=["state-status", "source-kind", "source-protocol"],
+)
+def test_config_reload_recovers_non_scalar_model_hub_enums(monkeypatch, tmp_path, mutate):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    payload = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    source = copy.deepcopy(_schema("source.schema.json")["examples"][0])
+    mutate(source)
+    payload["model_hub"]["sources"] = [source]
+    payload["show_duration"] = True
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert loaded.show_duration is True
+    assert loaded.model_hub.to_payload() == V2Config.default().model_hub.to_payload()
+    assert loaded.load_warnings and "model_hub" in " ".join(loaded.load_warnings)
+
+
 def test_client_config_recovery_projection_redacts_validator_details(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     payload = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
@@ -1522,10 +1548,28 @@ def test_config_reload_recovers_runtime_with_the_canonical_default(
         lambda hub: hub["agents"]["claude"].update(
             {"sources": {"policy": "custom", "order": "invalid"}}
         ),
+        lambda hub: hub["agents"]["claude"].update(
+            {"sources": {"order": ["src_missing001"]}}
+        ),
+        lambda hub: hub["agents"]["claude"].update(
+            {"sources": {"policy": {}, "order": []}}
+        ),
         lambda hub: hub.update({"priority_order": {"invalid": True}}),
         lambda hub: hub.update({"priority_order": ["src_missing001"]}),
         lambda hub: hub.update({"subscription_hub_experimental": "false"}),
         lambda hub: hub["sources"].append({"experimental_consent_at": 1}),
+        lambda hub: hub["sources"].append(
+            {
+                "models": [
+                    {
+                        "id": "legacy-model",
+                        "origin": "manual",
+                        "provenance": "discovered",
+                        "reasoning_efforts": [],
+                    }
+                ]
+            }
+        ),
         lambda hub: hub["agents"]["claude"].update({"mappings": ["invalid"]}),
         lambda hub: hub["agents"]["claude"].update(
             {
@@ -1588,10 +1632,13 @@ def test_config_reload_recovers_runtime_with_the_canonical_default(
     ids=[
         "sources-not-object",
         "custom-order-not-array",
+        "order-only-dangling",
+        "policy-not-scalar",
         "priority-order-not-array",
         "priority-order-dangling",
         "subscription-hub-experimental-not-bool",
         "experimental-consent-not-date-time",
+        "provenance-conflict",
         "mapping-not-object",
         "mapping-empty-builtin",
         "agent-invalid-mode",

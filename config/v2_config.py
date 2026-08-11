@@ -309,6 +309,8 @@ def _legacy_source_order_setting_is_valid(value: object, *, required: bool = Fal
     if set(value) - {"policy", "order"}:
         return False
     policy = value.get("policy")
+    if policy is not None and not isinstance(policy, str):
+        return False
     if policy not in {None, "custom", "follow"}:
         return False
     if required and not isinstance(value.get("order"), list):
@@ -511,6 +513,14 @@ def _migrate_legacy_model_hub_payload(payload: dict) -> tuple[dict, bool, tuple[
             return payload, False, ()
         if isinstance(models, list) and any(not isinstance(model, dict) for model in models):
             return payload, False, ()
+        for model in models or []:
+            if "provenance" not in model:
+                continue
+            provenance = model["provenance"]
+            if not isinstance(provenance, str) or provenance not in {"discovered", "manual"}:
+                return payload, False, ()
+            if "origin" in model and model["origin"] != provenance:
+                return payload, False, ()
         if "experimental_consent_at" in source:
             try:
                 _validate_optional_datetime(
@@ -568,7 +578,8 @@ def _migrate_legacy_model_hub_payload(payload: dict) -> tuple[dict, bool, tuple[
                 return payload, False, ()
             if (
                 isinstance(source_settings, dict)
-                and source_settings.get("policy") == "custom"
+                and source_settings.get("policy") in {None, "custom"}
+                and isinstance(source_settings.get("order"), list)
                 and any(
                     source_id not in legacy_sources_by_id
                     or not _legacy_source_eligible_for_backend(
@@ -904,16 +915,26 @@ def _backup_config_file(
     return backup
 
 
+def _config_file_lock(path: Path):
+    """Return the shared cross-process lock for one config path."""
+
+    # Import lazily because storage's package initializer imports V2Config.
+    from storage.lock import MigrationFileLock
+
+    return MigrationFileLock(path.with_name(f".{path.name}.lock"))
+
+
 def _write_config_payload(path: Path, payload: dict) -> None:
     content = json.dumps(payload, indent=2)
     path.parent.mkdir(parents=True, exist_ok=True)
     with CONFIG_LOCK:
-        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as tmp:
-            tmp.write(content)
-            tmp.flush()
-            os.fsync(tmp.fileno())
-            temp_name = tmp.name
-        os.replace(temp_name, path)
+        with _config_file_lock(path):
+            with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as tmp:
+                tmp.write(content)
+                tmp.flush()
+                os.fsync(tmp.fileno())
+                temp_name = tmp.name
+            os.replace(temp_name, path)
 
 
 def _write_config_payload_if_unchanged(
@@ -960,23 +981,27 @@ def _persist_migrated_config_payload(
 ) -> tuple[Optional[Path], Optional[str]]:
     """Persist a migration only when the snapshot read at load is unchanged."""
 
-    with CONFIG_LOCK:
-        try:
-            current_raw = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError) as exc:
-            return None, f"Could not verify config before migration persistence: {exc}"
-        if current_raw != expected_raw:
-            return None, "Skipped config migration because the file changed during load"
-        backup = _backup_config_file(
-            path,
-            "model-hub-migration",
-            content=expected_raw.encode("utf-8"),
-        )
-        if backup is None:
-            return None, "Skipped config migration because the original file could not be backed up"
-        if not _write_config_payload_if_unchanged(path, payload, expected_raw):
-            return backup, "Skipped config migration because the file changed before replacement"
-        return backup, None
+    try:
+        with CONFIG_LOCK:
+            with _config_file_lock(path):
+                try:
+                    current_raw = path.read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError) as exc:
+                    return None, f"Could not verify config before migration persistence: {exc}"
+                if current_raw != expected_raw:
+                    return None, "Skipped config migration because the file changed during load"
+                backup = _backup_config_file(
+                    path,
+                    "model-hub-migration",
+                    content=expected_raw.encode("utf-8"),
+                )
+                if backup is None:
+                    return None, "Skipped config migration because the original file could not be backed up"
+                if not _write_config_payload_if_unchanged(path, payload, expected_raw):
+                    return backup, "Skipped config migration because the file changed before replacement"
+                return backup, None
+    except TimeoutError as exc:
+        return None, f"Could not acquire config migration lock: {exc}"
 
 
 _MODEL_HUB_CREDENTIAL_QUERY_KEYS = {
@@ -1524,7 +1549,7 @@ class ModelHubModelConfig:
         discovered_at = payload.get("discovered_at")
         if not isinstance(model_id, str) or not model_id or _contains_model_hub_credential_material(model_id):
             raise ValueError("Config 'model_hub.sources.models.id' must be a non-empty string")
-        if origin not in {"discovered", "manual"}:
+        if not isinstance(origin, str) or origin not in {"discovered", "manual"}:
             raise ValueError("Config 'model_hub.sources.models.origin' is invalid")
         if (
             not isinstance(reasoning_efforts, list)
@@ -1578,7 +1603,13 @@ class ModelHubSourceStateConfig:
         status = payload.get("status")
         retry_at = payload.get("retry_at")
         detail_key = payload.get("detail_key")
-        if status not in {"active", "standby", "cooldown", "needs_action", "error"}:
+        if not isinstance(status, str) or status not in {
+            "active",
+            "standby",
+            "cooldown",
+            "needs_action",
+            "error",
+        }:
             raise ValueError("Config 'model_hub.sources.state.status' is invalid")
         if detail_key is not None and not isinstance(detail_key, str):
             raise ValueError("Config 'model_hub.sources.state.detail_key' must be a string or null")
@@ -1719,16 +1750,20 @@ class ModelHubSourceConfig:
         billing = payload.get("billing")
         if not isinstance(source_id, str) or re.fullmatch(r"src_[a-z0-9]{8,}", source_id) is None:
             raise ValueError("Config 'model_hub.sources.id' is invalid")
-        if kind not in {"subscription", "api_key"}:
+        if not isinstance(kind, str) or kind not in {"subscription", "api_key"}:
             raise ValueError("Config 'model_hub.sources.kind' is invalid")
         vendor = normalize_model_hub_vendor_id(vendor)
         if not isinstance(display_name, str) or not display_name or len(display_name) > 64:
             raise ValueError("Config 'model_hub.sources.display_name' is invalid")
-        if protocol not in {"anthropic", "openai_responses", "openai_chat"}:
+        if not isinstance(protocol, str) or protocol not in {
+            "anthropic",
+            "openai_responses",
+            "openai_chat",
+        }:
             raise ValueError("Config 'model_hub.sources.protocol' is invalid")
-        if supply_channel not in {"native_cli", "hub"}:
+        if not isinstance(supply_channel, str) or supply_channel not in {"native_cli", "hub"}:
             raise ValueError("Config 'model_hub.sources.supply_channel' is invalid")
-        if billing not in {"monthly", "metered"}:
+        if not isinstance(billing, str) or billing not in {"monthly", "metered"}:
             raise ValueError("Config 'model_hub.sources.billing' is invalid")
         models_payload = payload.get("models")
         if not isinstance(models_payload, list):
@@ -1876,7 +1911,7 @@ class ModelHubMenuConfig:
             raise ValueError("Config 'model_hub.agents.menu' contains unknown fields")
         view = payload.get("view")
         checked = payload.get("checked")
-        if view not in {"featured", "full"}:
+        if not isinstance(view, str) or view not in {"featured", "full"}:
             raise ValueError("Config 'model_hub.agents.menu.view' is invalid")
         if not isinstance(checked, list) or not all(isinstance(item, str) for item in checked):
             raise ValueError("Config 'model_hub.agents.menu.checked' must be an array of strings")
@@ -1939,17 +1974,18 @@ class ModelHubAgentSupplyConfig:
             raise ValueError("Config 'model_hub.agents' entries must be objects")
         if set(payload) - {"backend", "mode", "menu_kind", "sources", "routes", "menu"}:
             raise ValueError("Config 'model_hub.agents' contains unknown fields")
-        backend = payload.get("backend") or expected_backend
+        raw_backend = payload.get("backend")
+        backend = expected_backend if raw_backend is None else raw_backend
         mode = payload.get("mode")
         menu_kind = payload.get("menu_kind")
-        if backend not in {"claude", "codex", "opencode"} or (
+        if not isinstance(backend, str) or backend not in {"claude", "codex", "opencode"} or (
             expected_backend is not None and backend != expected_backend
         ):
             raise ValueError("Config 'model_hub.agents.backend' is invalid")
-        if mode not in {"hub", "direct"}:
+        if not isinstance(mode, str) or mode not in {"hub", "direct"}:
             raise ValueError("Config 'model_hub.agents.mode' is invalid")
         expected_menu_kind = "open" if backend == "opencode" else "fixed"
-        if menu_kind != expected_menu_kind:
+        if not isinstance(menu_kind, str) or menu_kind != expected_menu_kind:
             raise ValueError("Config 'model_hub.agents.menu_kind' is invalid for backend")
         routes_payload = payload.get("routes", {})
         if not isinstance(routes_payload, dict):
