@@ -83,26 +83,26 @@ vi.mock('./memory/MemorySettingsPanel', () => ({
     onRebuildBusyChange: (busy: boolean) => void;
     onSavingChange?: (busy: boolean) => void;
     repairBusy?: boolean;
+    mutationBusy?: boolean;
   }) => (
     <div>
       <span>{maintenance?.can_clear ? 'maintenance-ready' : 'maintenance-unknown'}</span>
-      <button type="button" disabled={repairBusy || factoryResetBusy || factoryResetPending} onClick={onClearAll}>open-clear</button>
-      <button type="button" onClick={onFactoryReset} disabled={repairBusy || factoryResetBusy || factoryResetPending || !factoryResetArtifactValid}>
+      <button type="button" disabled={repairBusy || mutationBusy || factoryResetBusy || factoryResetPending} onClick={onClearAll}>open-clear</button>
+      <button type="button" onClick={onFactoryReset} disabled={repairBusy || mutationBusy || factoryResetBusy || !factoryResetArtifactValid}>
         {factoryResetPending ? 'retry-factory' : 'open-factory'}
       </button>
-      <button type="button" disabled={repairBusy || factoryResetBusy || factoryResetPending} onClick={() => onRebuildBusyChange(true)}>
+      <button type="button" disabled={repairBusy || mutationBusy || factoryResetBusy || factoryResetPending} onClick={() => onRebuildBusyChange(true)}>
         begin-rebuild
       </button>
       <button type="button" onClick={() => onRebuildBusyChange(false)}>
         end-rebuild
       </button>
-    </div>
-  ),
-    mutationBusy?: boolean;
       <button type="button" disabled={repairBusy || mutationBusy || factoryResetBusy || factoryResetPending} onClick={() => onSavingChange?.(true)}>
         begin-save
       </button>
       <button type="button" onClick={() => onSavingChange?.(false)}>end-save</button>
+    </div>
+  ),
 }));
 
 const endpoint = {

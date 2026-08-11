@@ -938,6 +938,11 @@ def create_app(
                 status_code=503,
                 content={"ok": False, "error": "memory_runtime_missing", "result": "failed"},
             )
+        if getattr(runtime, "factory_reset_pending", False):
+            return JSONResponse(
+                status_code=409,
+                content={"ok": False, "error": "memory_operation_in_progress", "result": "failed"},
+            )
         payload = await _safe_json(request)
         if payload != {"confirm": True}:
             return JSONResponse(
@@ -1000,6 +1005,8 @@ def create_app(
         status_code = 200 if result.get("ok") is True else (
             409 if result.get("error") == "memory_operation_in_progress" else 503
         )
+        return JSONResponse(status_code=status_code, content=result)
+
     @app.post("/internal/memory/repair")
     async def _memory_repair(request: Request) -> Any:
         """Run one retained live cascade sync and return its final health."""

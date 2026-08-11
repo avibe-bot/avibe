@@ -722,6 +722,24 @@ class Controller:
                 )
 
             try:
+                repair_running = getattr(runtime, "_repair_running", None)
+                if callable(repair_running) and repair_running():
+                    return {
+                        "ok": False,
+                        "error": "memory_operation_in_progress",
+                        "result": "failed",
+                    }
+                reap_sync = getattr(runtime, "_reap_recorded_sync_if_unowned", None)
+                if callable(reap_sync):
+                    await reap_sync(fail_closed=True)
+            except Exception:
+                logger.exception("Memory factory reset could not reap a recorded cascade sync")
+                return unchanged_memory_reset_result(
+                    runtime.effective_home,
+                    reason="sync_recovery_failed",
+                )
+
+            try:
                 try:
                     # A restart can construct a Runtime with no in-memory
                     # supervisor even while its recorded sidecar survives.

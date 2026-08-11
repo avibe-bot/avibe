@@ -773,7 +773,7 @@ class MemoryRuntime:
                 return False
             return True
 
-    async def _reap_recorded_sync_if_unowned(self) -> bool:
+    async def _reap_recorded_sync_if_unowned(self, *, fail_closed: bool = False) -> bool:
         """Retire only an authenticated sync orphan from a prior controller."""
 
         try:
@@ -788,6 +788,8 @@ class MemoryRuntime:
             # A live owner or unprovable record must not block sidecar boot.
             # The record remains fail-closed for a later Repair admission.
             logger.warning("Recorded EverOS sync recovery did not finish: %s", exc)
+            if fail_closed:
+                raise
             return False
         return True
 
@@ -1601,26 +1603,14 @@ class MemoryRuntime:
         return maintenance
     async def install_artifact(self) -> dict[str, Any]:
         """Install or repair EverOS through this controller-owned lifecycle."""
-
-        lease = MemoryOperationLease(self._effective_home)
-        try:
-            await run_blocking(lease.acquire)
-            return await self._install_artifact()
-        except MemoryOperationBusy:
-            return {
-                "ok": False,
-                "reason": "memory_operation_in_progress",
-                "download_error": None,
-            }
-        finally:
-            await run_blocking(lease.release)
+        return await self._install_artifact()
 
     async def _install_artifact(self) -> dict[str, Any]:
         """Run one artifact install while retaining its blocking ensure call."""
 
         if not self.available:
             return {"ok": False, "reason": "memory_store_unavailable", "download_error": None}
-        if self._rebuild_running() or self._repair_running():
+        if self._rebuild_running():
             return {
                 "ok": False,
                 "reason": "memory_operation_in_progress",
@@ -1820,6 +1810,7 @@ class MemoryRuntime:
 
         if (
             self._closing
+            or self.factory_reset_pending
             or self._rebuild_running()
             or self._restart_running()
             or self._reconcile_lock.locked()
@@ -1847,6 +1838,7 @@ class MemoryRuntime:
             await run_blocking(lease.acquire)
             if (
                 self._closing
+                or self.factory_reset_pending
                 or self._rebuild_running()
                 or self._restart_running()
                 or self._reconcile_lock.locked()

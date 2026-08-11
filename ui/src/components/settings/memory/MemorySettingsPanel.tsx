@@ -191,7 +191,7 @@ export const MemorySettingsPanel: React.FC<{
   const factoryResetRequired = factoryResetPending;
   const canClearKeys = !enabledDraft;
   const canClearMemory = maintenance?.can_clear === true;
-  const busy = saving || rebuildBusy || repairBusy || mutationBusy || factoryResetBusy || factoryResetPending;
+  const busy = saving || rebuildBusy || repairBusy || mutationBusy || factoryResetBusy;
 
   const buildPatch = (): MemorySettingsPatch => {
     const patch: MemorySettingsPatch = {};

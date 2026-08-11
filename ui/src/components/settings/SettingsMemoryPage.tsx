@@ -87,7 +87,7 @@ export const SettingsMemoryPage: React.FC = () => {
   const remoteUnavailable =
     settingsRead.forbidden || processingRecordRead.forbidden || maintenanceRead.forbidden;
   const repairMutationBusy =
-    restarting || rebuildBusy || clearing || clearOpen || recoveryAction !== null || settingsSaving;
+    restarting || rebuildBusy || clearing || clearOpen || recoveryAction !== null || settingsSaving || factoryResetBusy || settings?.factory_reset_required === true;
 
   // Dependency readiness comes from the authoritative Dependencies source. Processing Record
   // health is observational and never doubles as installation or enablement state.

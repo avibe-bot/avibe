@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -117,6 +118,21 @@ async def test_repair_runs_sync_beside_live_sidecar_and_projects_health(
     assert children[0][1]["provider_root"] == tmp_path / "memory" / "everos-root"
     assert sidecar.running is True
     assert sidecar.stops == 0
+
+
+async def test_repair_is_fenced_by_durable_factory_reset_intent(
+    tmp_path: Path,
+    memory_runtime_factory,
+) -> None:
+    runtime, _sidecar = _runtime(memory_runtime_factory, tmp_path)
+    runtime._config = replace(runtime._config, recovery_intent="factory_reset")
+    runtime._restart_config = replace(runtime._restart_config, recovery_intent="factory_reset")
+
+    assert await runtime.repair() == {
+        "ok": False,
+        "error": "memory_operation_in_progress",
+        "result": "failed",
+    }
 
 
 async def test_repair_rejects_artifact_without_sync_capability(
