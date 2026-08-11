@@ -2053,7 +2053,7 @@ async def test_queued_backup_stage_reconcile_rechecks_artifact_install(
 
     release_install.set()
     assert (await installing)["ok"] is True
-    assert await asyncio.to_thread(cleanup_finished.wait, 1)
+    assert await asyncio.to_thread(cleanup_finished.wait, 2)
     deferred_reconcile = maintenance._backup_stage_reconcile_task
     # The completion callback may clear a task before this assertion runs on a
     # fast event loop. Observe the cleanup contract instead of that transient

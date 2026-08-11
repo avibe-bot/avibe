@@ -1352,6 +1352,24 @@ def _recording_ownership(
     return reaps
 
 
+async def test_recorded_orphan_recovery_can_fail_closed_for_root_deletion(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    memory_runtime_factory,
+) -> None:
+    reaps = _recording_ownership(monkeypatch, failure=RuntimeError("orphan still serving"))
+    runtime = memory_runtime_factory(
+        MemoryConfig(enabled=False),
+        artifact_manager=_installed_artifact(),
+        effective_home=tmp_path,
+    )
+
+    with pytest.raises(RuntimeError, match="orphan still serving"):
+        await runtime._reap_recorded_sidecar_if_unowned(fail_closed=True)
+    assert len(reaps) == 1
+    await memory_runtime_factory.close(runtime)
+
+
 async def test_recorded_orphan_recovery_routes_through_provider_root_exclusion(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
