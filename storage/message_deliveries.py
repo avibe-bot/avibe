@@ -1969,29 +1969,39 @@ def retire_for_archive(conn: Connection, session_id: str) -> dict[str, Any]:
 
 
 def set_draft(conn: Connection, session_id: str, text: str | None) -> bool:
-    now = utc_now_iso()
+    # A clear is a real draft revision too: retaining its timestamp prevents an
+    # offline client based on the previous revision from recreating text that a
+    # successful send already cleared. Microseconds keep rapid edits distinct.
+    now = turn_now_iso()
     result = conn.execute(
         update(agent_sessions)
         .where(agent_sessions.c.id == session_id)
         .values(
             composer_draft_text=text if text and text.strip() else None,
-            composer_draft_updated_at=now if text and text.strip() else None,
+            composer_draft_updated_at=now,
             updated_at=now,
         )
     )
     return result.rowcount == 1
 
 
-def get_draft(conn: Connection, session_id: str) -> dict[str, Any] | None:
+def get_draft_state(conn: Connection, session_id: str) -> dict[str, Any] | None:
     row = conn.execute(
         select(
             agent_sessions.c.composer_draft_text,
             agent_sessions.c.composer_draft_updated_at,
         ).where(agent_sessions.c.id == session_id)
     ).first()
-    if row is None or not row[0]:
+    if row is None:
         return None
-    return {"text": str(row[0]), "updated_at": row[1]}
+    return {"text": str(row[0] or ""), "updated_at": row[1]}
+
+
+def get_draft(conn: Connection, session_id: str) -> dict[str, Any] | None:
+    state = get_draft_state(conn, session_id)
+    if state is None or not state["text"]:
+        return None
+    return state
 
 
 def pending_control_for_turn(conn: Connection, turn_id: str) -> dict[str, Any] | None:

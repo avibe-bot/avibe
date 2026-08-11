@@ -6785,7 +6785,7 @@ async def sessions_bootstrap(session_id: str):
         from storage import message_deliveries
 
         queued = message_deliveries.list_queued(conn, session_id)
-        draft = message_deliveries.get_draft(conn, session_id)
+        draft = message_deliveries.get_draft_state(conn, session_id)
 
     try:
         agents_payload = vibe_api.get_vibe_agents(include_disabled=False, include_archived=True)
@@ -6829,7 +6829,7 @@ async def sessions_bootstrap(session_id: str):
             "next_after_id": messages_result.get("next_after_id"),
             "next_before_id": messages_result.get("next_before_id"),
             "queued": queued,
-            "draft": {"text": (draft or {}).get("text") or ""},
+            "draft": _session_draft_payload(draft),
             "turn_state": turn_state,
         }
     )
@@ -8899,6 +8899,13 @@ async def sessions_queue_send_now(session_id: str, message_id: str):
     return jsonify(body), status
 
 
+def _session_draft_payload(draft: dict | None) -> dict:
+    return {
+        "text": (draft or {}).get("text") or "",
+        "updated_at": (draft or {}).get("updated_at"),
+    }
+
+
 @app.route("/api/sessions/<session_id>/draft", methods=["GET"])
 def sessions_draft_get(session_id: str):
     """The session's saved unsent compose text (restored on open / device switch)."""
@@ -8906,8 +8913,8 @@ def sessions_draft_get(session_id: str):
 
     engine = _projects_engine()
     with engine.connect() as conn:
-        draft = message_deliveries.get_draft(conn, session_id)
-    return jsonify({"text": (draft or {}).get("text") or ""})
+        draft = message_deliveries.get_draft_state(conn, session_id)
+    return jsonify(_session_draft_payload(draft))
 
 
 @app.route("/api/sessions/<session_id>/draft", methods=["PUT"])
@@ -8918,6 +8925,10 @@ def sessions_draft_set(session_id: str):
 
     payload = request.json or {}
     text = payload.get("text")
+    expected_supplied = "expected_updated_at" in payload
+    expected_updated_at = payload.get("expected_updated_at")
+    if expected_supplied and expected_updated_at is not None and not isinstance(expected_updated_at, str):
+        return jsonify({"ok": False, "code": "invalid_expected_updated_at"}), 400
     engine = _projects_engine()
     try:
         with engine.begin() as conn:
@@ -8926,15 +8937,26 @@ def sessions_draft_set(session_id: str):
             # composer flushing as it unmounts right after archive) so it can't
             # recreate a draft on a session whose drafts were just reclaimed.
             if session.get("status") == "archived":
-                return jsonify({"ok": True})
+                current = message_deliveries.get_draft_state(conn, session_id)
+                return jsonify({"ok": True, "draft": _session_draft_payload(current)})
+            current = message_deliveries.get_draft_state(conn, session_id)
+            if expected_supplied and (current or {}).get("updated_at") != expected_updated_at:
+                return jsonify(
+                    {
+                        "ok": False,
+                        "code": "draft_conflict",
+                        "draft": _session_draft_payload(current),
+                    }
+                ), 409
             message_deliveries.set_draft(
                 conn,
                 session_id,
                 text if isinstance(text, str) else None,
             )
+            saved = message_deliveries.get_draft_state(conn, session_id)
     except LookupError as err:
         return jsonify({"error": str(err)}), 404
-    return jsonify({"ok": True})
+    return jsonify({"ok": True, "draft": _session_draft_payload(saved)})
 
 
 @app.route("/api/events", methods=["GET"])

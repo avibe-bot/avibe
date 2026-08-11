@@ -12,7 +12,12 @@ import {
 } from '../lib/workbenchEventConnection';
 import type { DockDoc } from './dockDoc';
 import { archivedConflictSessionId, selectApiErrorFields } from './apiErrorParse';
-import { SessionDraftPersistence } from '../lib/sessionDraftPersistence';
+import {
+  SessionDraftPersistence,
+  type SessionDraftSaveResult,
+  type SessionDraftServerState,
+  type SessionDraftWrite,
+} from '../lib/sessionDraftPersistence';
 
 // The workbench Dock API response shape ({ ok, dock }); the Dock document type
 // itself lives with the DockProvider that owns reconciliation.
@@ -716,6 +721,9 @@ export type ApiContextType = {
   removeQueuedMessage: (sessionId: string, messageId: string) => Promise<{ removed: boolean }>;
   sendQueuedNow: (sessionId: string, messageId: string) => Promise<{ ok: boolean; status?: string; code?: string; detail?: string }>;
   getTurnState: (sessionId: string, options?: { handleError?: boolean }) => Promise<SessionRuntimeState>;
+  getCachedSessionDraft: (sessionId: string) => string | null;
+  cacheSessionDraft: (sessionId: string, text: string) => void;
+  syncSessionDraft: (sessionId: string) => Promise<{ ok: boolean }>;
   getSessionDraft: (sessionId: string) => Promise<{ text: string }>;
   setSessionDraft: (sessionId: string, text: string) => Promise<{ ok: boolean }>;
   listInbox: (params?: { platform?: string; unreadOnly?: boolean; limit?: number; before?: string; onlySession?: string; cache?: boolean; handleError?: boolean }) => Promise<InboxFeedResult>;
@@ -1248,9 +1256,19 @@ export type WorkbenchSessionBootstrap = {
   next_after_id: string | null;
   next_before_id?: string | null;
   queued: WorkbenchMessage[];
-  draft: { text: string };
+  draft: { text: string; updated_at: string | null };
   turn_state: SessionRuntimeState;
 };
+
+function sessionDraftServerState(payload: unknown): SessionDraftServerState {
+  const draft = payload && typeof payload === 'object'
+    ? payload as { text?: unknown; updated_at?: unknown }
+    : {};
+  return {
+    text: typeof draft.text === 'string' ? draft.text : '',
+    updatedAt: typeof draft.updated_at === 'string' ? draft.updated_at : null,
+  };
+}
 
 // One row of the per-session ("Slack-like") inbox feed from ``GET /api/inbox``.
 // Aggregated per session at query time: ``preview_text`` is the session's latest
@@ -2738,6 +2756,33 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return { res, payloadJson };
   };
 
+  const writeSessionDraft = async (
+    sessionId: string,
+    draft: SessionDraftWrite,
+  ): Promise<SessionDraftSaveResult> => {
+    const { res, payloadJson } = await requestJson(
+      `/api/sessions/${encodeURIComponent(sessionId)}/draft`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: draft.text,
+          expected_updated_at: draft.expectedUpdatedAt,
+        }),
+      },
+      `/api/sessions/${sessionId}/draft`,
+      { handleError: false },
+    );
+    const hasServerDraft = payloadJson?.draft && typeof payloadJson.draft === 'object';
+    const server = sessionDraftServerState(payloadJson?.draft);
+    if (res.status === 409 && payloadJson?.code === 'draft_conflict') {
+      return { ok: false, conflict: true, server };
+    }
+    return res.ok
+      ? { ok: true, ...(hasServerDraft ? { server } : {}) }
+      : { ok: false };
+  };
+
   const postJson = async (path: string, payload: any, opts?: { handleError?: boolean }) => {
     const { payloadJson } = await requestJson(
       path,
@@ -3138,9 +3183,15 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           sessionDraftPersistence.clearSession(sessionId);
           return payload;
         }
-        const serverText = payload?.draft?.text ?? '';
-        const text = sessionDraftPersistence.reconcileRead(sessionId, read, serverText);
-        return text === serverText ? payload : { ...payload, draft: { ...(payload.draft ?? {}), text } };
+        const server = sessionDraftServerState(payload?.draft);
+        const text = sessionDraftPersistence.reconcileRead(sessionId, read, server);
+        void sessionDraftPersistence.retry(
+          sessionId,
+          (draft) => writeSessionDraft(sessionId, draft),
+        );
+        return text === server.text
+          ? payload
+          : { ...payload, draft: { ...(payload.draft ?? {}), text } };
       } catch (error) {
         sessionDraftPersistence.releaseRead(sessionId, read);
         throw error;
@@ -3247,26 +3298,33 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
       return res.json();
     },
+    getCachedSessionDraft: (sessionId) => sessionDraftPersistence.peek(sessionId),
+    cacheSessionDraft: (sessionId, text) => sessionDraftPersistence.cache(sessionId, text),
+    syncSessionDraft: (sessionId) => sessionDraftPersistence.retry(
+      sessionId,
+      (draft) => writeSessionDraft(sessionId, draft),
+    ),
     getSessionDraft: async (sessionId) => {
       const read = sessionDraftPersistence.beginRead(sessionId);
       try {
-        const payload = await getCachedJson(`/api/sessions/${encodeURIComponent(sessionId)}/draft`);
-        const serverText = payload?.text ?? '';
-        const text = sessionDraftPersistence.reconcileRead(sessionId, read, serverText);
+        const payload = await getJson(`/api/sessions/${encodeURIComponent(sessionId)}/draft`);
+        const server = sessionDraftServerState(payload);
+        const text = sessionDraftPersistence.reconcileRead(sessionId, read, server);
+        void sessionDraftPersistence.retry(
+          sessionId,
+          (draft) => writeSessionDraft(sessionId, draft),
+        );
         return { text };
       } catch (error) {
         sessionDraftPersistence.releaseRead(sessionId, read);
         throw error;
       }
     },
-    setSessionDraft: (sessionId, text) => sessionDraftPersistence.save(sessionId, text, async () => {
-      const { res } = await requestJson(`/api/sessions/${encodeURIComponent(sessionId)}/draft`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text }),
-      }, `/api/sessions/${sessionId}/draft`, { handleError: false });
-      return res.ok ? { ok: true } : { ok: false };
-    }),
+    setSessionDraft: (sessionId, text) => sessionDraftPersistence.save(
+      sessionId,
+      text,
+      (draft) => writeSessionDraft(sessionId, draft),
+    ),
     listInbox: (params) => {
       const search = new URLSearchParams();
       if (params?.platform) search.set('platform', params.platform);

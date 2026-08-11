@@ -1172,11 +1172,80 @@ def test_chat_bootstrap_returns_first_screen_payload(isolated_state, tmp_path):
     assert [message["type"] for message in body["messages"]] == ["user", "result"]
     assert body["queued"][0]["text"] == "follow-up"
     assert body["draft"]["text"] == "draft text"
+    assert body["draft"]["updated_at"] is not None
     assert body["turn_state"]["in_flight"] is True
     assert body["turn_state"]["foreground"] == "running"
     assert body["turn_state"]["pending_input_count"] == 1
     assert body["turn_state"]["background_activities"][0]["id"] == "task-1"
     assert body["turn_state"]["connection"] == "connected"
+
+
+def test_session_draft_compare_and_set_protects_newer_writes_and_clears(
+    isolated_state,
+    tmp_path,
+):
+    from vibe.ui_server import app
+
+    _, session_id = _make_session(tmp_path)
+    client = app.test_client()
+    headers = csrf_headers(client)
+    path = f"/api/sessions/{session_id}/draft"
+
+    created = client.put(
+        path,
+        json={"text": "first", "expected_updated_at": None},
+        headers=headers,
+    )
+    assert created.status_code == 200
+    created_draft = created.get_json()["draft"]
+    assert created_draft["text"] == "first"
+    first_revision = created_draft["updated_at"]
+    assert first_revision is not None
+
+    fetched = client.get(path)
+    assert fetched.status_code == 200
+    assert fetched.get_json() == created_draft
+
+    stale = client.put(
+        path,
+        json={"text": "stale", "expected_updated_at": None},
+        headers=headers,
+    )
+    assert stale.status_code == 409
+    assert stale.get_json() == {
+        "ok": False,
+        "code": "draft_conflict",
+        "draft": created_draft,
+    }
+
+    updated = client.put(
+        path,
+        json={"text": "second", "expected_updated_at": first_revision},
+        headers=headers,
+    )
+    assert updated.status_code == 200
+    updated_draft = updated.get_json()["draft"]
+    assert updated_draft["text"] == "second"
+    second_revision = updated_draft["updated_at"]
+    assert second_revision not in (None, first_revision)
+
+    cleared = client.put(
+        path,
+        json={"text": "", "expected_updated_at": second_revision},
+        headers=headers,
+    )
+    assert cleared.status_code == 200
+    cleared_draft = cleared.get_json()["draft"]
+    assert cleared_draft["text"] == ""
+    assert cleared_draft["updated_at"] not in (None, second_revision)
+
+    resurrect = client.put(
+        path,
+        json={"text": "resurrected", "expected_updated_at": second_revision},
+        headers=headers,
+    )
+    assert resurrect.status_code == 409
+    assert resurrect.get_json()["draft"] == cleared_draft
 
 
 def test_queue_row_send_now_passes_the_exact_delivery_id(isolated_state, tmp_path):

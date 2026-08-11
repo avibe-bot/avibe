@@ -107,3 +107,26 @@ describe('Composer attachment retry', () => {
     expect(uploadWorkbenchAttachment).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('Composer draft retry', () => {
+  it('re-caches optimistically cleared text when a send cannot start', async () => {
+    const onDraftChange = vi.fn();
+    render(providers(
+      <Composer
+        onSend={async () => false}
+        onDraftChange={onDraftChange}
+      />,
+    ));
+
+    const textbox = screen.getByRole('textbox') as HTMLTextAreaElement;
+    fireEvent.change(textbox, { target: { value: 'keep this' } });
+    fireEvent.click(screen.getByLabelText(en.chat.compose.send));
+
+    await waitFor(() => expect(textbox.value).toBe('keep this'));
+    expect(onDraftChange.mock.calls.map(([text]) => text)).toEqual([
+      'keep this',
+      '',
+      'keep this',
+    ]);
+  });
+});

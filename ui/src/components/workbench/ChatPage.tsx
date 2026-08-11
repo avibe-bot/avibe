@@ -1271,12 +1271,12 @@ export const ChatPage: React.FC = () => {
     }
   }, [api, sessionId, scheduleActivityRefresh]);
 
-  // Persist the composer's unsent text server-side (debounced) so it survives a
-  // reload / device switch. The send path clears it server-side; this only
-  // saves while typing.
+  // Cache every edit synchronously so navigation, a tab close, or a disconnected
+  // network cannot lose it. Cloud persistence remains debounced and serialized.
   const onDraftChange = useCallback(
     (text: string) => {
       if (!sessionId) return;
+      api.cacheSessionDraft(sessionId, text);
       // Tag the pending save with THIS session so the timer (and the
       // session-change flush) save to the right session even if the user has
       // since navigated away.
@@ -1306,6 +1306,13 @@ export const ChatPage: React.FC = () => {
       if (pending) void api.setSessionDraft(pending.sessionId, pending.text);
     };
   }, [sessionId, api]);
+
+  useEffect(() => {
+    if (!sessionId) return undefined;
+    const syncLocalDraft = () => void api.syncSessionDraft(sessionId);
+    window.addEventListener('online', syncLocalDraft);
+    return () => window.removeEventListener('online', syncLocalDraft);
+  }, [api, sessionId]);
 
   // The fire-and-forget turn survives browser disconnects, so a freshly loaded /
   // reconnected page asks the controller whether a turn is still in flight and
@@ -1487,7 +1494,7 @@ export const ChatPage: React.FC = () => {
     setWorking(false);
     setRuntimeState(emptyRuntimeState());
     setQueue([]);
-    setInitialDraft(null);
+    setInitialDraft(sessionId ? api.getCachedSessionDraft(sessionId) : null);
     // Clear all Agent Activity state so the previous session's groups / live buffer
     // never leak into the new chat (refresh re-reads the toggle + summary).
     setActivityGroups([]);
@@ -1508,7 +1515,7 @@ export const ChatPage: React.FC = () => {
       window.clearTimeout(graceResyncRef.current);
       graceResyncRef.current = null;
     }
-  }, [sessionId]);
+  }, [api, sessionId]);
 
   // Persistent per-session subscription: append every transcript-visible
   // ``message.new`` for THIS session for as long as the page is open. An agent
