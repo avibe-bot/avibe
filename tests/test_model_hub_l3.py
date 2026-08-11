@@ -67,6 +67,7 @@ from modules.agents.model_hub import (
     bind_turn_mode,
 )
 from storage.models import agent_sessions, messages, metadata
+from vibe.i18n import t as i18n_t
 from vibe.model_hub_runtime.adapter import (
     _AuthenticationEvidence,
     CLIProxyEngineAdapter,
@@ -876,6 +877,75 @@ def test_gateway_preserves_exhausted_provenance_after_all_hops_fallback(
             first.id,
             second.id,
         ]
+        _assert_valid("turn-provenance.schema.json", record)
+
+    asyncio.run(exercise())
+
+
+def test_gateway_localizes_terminal_permission_denial_without_switching(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        source = _source("src_primary01", "Primary")
+        service = _service(
+            tmp_path,
+            sources=[source],
+            outcomes=[
+                _outcome(
+                    RawOutcomeKind.HTTP_ERROR,
+                    status=403,
+                    code="permission_error",
+                    source_id=source.id,
+                )
+            ],
+        )
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        gateway = ModelHubTurnGateway(service, language_provider=lambda: "zh")
+        base_url, token = await gateway.endpoint(
+            "codex",
+            process_scope="/repo",
+            turn_id="turn_permission_denied",
+            requested_model_id=requested_model,
+            resolved_model_id="shared-model",
+            source_id=source.id,
+        )
+        try:
+            async with aiohttp.ClientSession(trust_env=False) as client:
+                response = await client.post(
+                    f"{base_url}/v1/responses",
+                    json={"model": "shared-model", "input": "ping", "stream": False},
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                assert response.status == 403
+                payload = await response.json()
+                assert payload["error"] == {
+                    "type": "request_incompatible",
+                    "code": "request_incompatible",
+                    "message": i18n_t("modelHub.launch.request_incompatible", "zh"),
+                }
+        finally:
+            await gateway.close()
+
+        assert service.adapter.invocations == [
+            (source.id, "shared-model", "codex")
+        ]
+        assert service.store.load().sources[0].state.status == "standby"
+        gateway.correlation.settle(
+            "turn_permission_denied",
+            settled_by=SETTLED_BY_TERMINAL_RESULT,
+            ts=NOW.isoformat(),
+        )
+        record = service.provenance.get("turn_permission_denied")
+        assert record is not None
+        assert record["outcome"] == "failed_terminal"
+        assert record["failed_attempts"] == []
+        assert record["terminal_error"] == {
+            "source_id": source.id,
+            "configured_model_id": "shared-model",
+            "channel": "hub",
+            "reason": "invalid_parameter",
+            "stream_started": False,
+        }
         _assert_valid("turn-provenance.schema.json", record)
 
     asyncio.run(exercise())

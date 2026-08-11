@@ -761,6 +761,7 @@
       "interrupted": "Model {model} is unavailable: {blockers}. Open Models to resolve it.",
       "native_cli_unavailable": "CLI login is not available in this process",
       "route_unconfigured": "Model {model} has no configured route. Open Models to configure one.",
+      "request_incompatible": "This request is incompatible; switching Sources will not help.",
       "no_enabled_source": "Model {model} has no enabled source. Open Models to configure one.",
       "no_eligible_source": "Model {model} has no source eligible for {backend}. Open Models to configure one.",
       "model_unsupported": "No source supports model {model}. Open Models to configure one."

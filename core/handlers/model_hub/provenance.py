@@ -239,7 +239,7 @@ def _terminal_reason(decision: ResolutionDecision) -> str:
     code = decision.error_code or ""
     if code == "stream_interrupted":
         return "stream_interrupted"
-    if code == "upstream_request_invalid":
+    if code in {"request_incompatible", "upstream_request_invalid"}:
         return "invalid_parameter"
     if code == "tool_incompatible":
         return "tool_incompatible"

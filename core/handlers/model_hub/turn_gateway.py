@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import json
 import socket
+from collections.abc import Callable
 from typing import Final, Optional
 
 from aiohttp import web
 
 from config import paths
+from vibe.i18n import t as i18n_t
 
 from .adapter import RawCallOutcome, RawOutcomeKind
 from .classification import classify_outcome
@@ -52,8 +54,10 @@ class ModelHubTurnGateway:
         service: ModelHubService,
         *,
         correlation: Optional[TurnCorrelationRegistry] = None,
+        language_provider: Callable[[], str] | None = None,
     ) -> None:
         self.service = service
+        self._language_provider = language_provider or (lambda: "en")
         self.correlation = correlation or TurnCorrelationRegistry(
             getattr(
                 service,
@@ -282,8 +286,8 @@ class ModelHubTurnGateway:
         await response.write_eof()
         return response
 
-    @staticmethod
     def _outcome_response(
+        self,
         outcome: RawCallOutcome,
         *,
         error_code: Optional[str] = None,
@@ -291,19 +295,22 @@ class ModelHubTurnGateway:
         if outcome.kind == RawOutcomeKind.SUCCESS:
             return web.Response(status=200, body=b"{}", content_type="application/json")
         status = outcome.http_status if outcome.http_status and 400 <= outcome.http_status <= 599 else 502
-        return ModelHubTurnGateway._error_response(
+        return self._error_response(
             status=status,
             code=error_code or outcome.error_code or "api_error",
         )
 
-    @staticmethod
-    def _error_response(*, status: int, code: str) -> web.Response:
+    def _error_response(self, *, status: int, code: str) -> web.Response:
+        message_key = f"modelHub.launch.{code}"
+        message = i18n_t(message_key, self._language_provider() or "en")
+        if message == message_key:
+            message = "Model Hub request failed"
         return web.json_response(
             {
                 "error": {
                     "type": code,
                     "code": code,
-                    "message": "Model Hub request failed",
+                    "message": message,
                 }
             },
             status=status,

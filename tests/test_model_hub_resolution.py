@@ -442,7 +442,7 @@ def test_permission_denial_is_terminal_without_switch_or_source_mutation(tmp_pat
             )
         )
 
-    assert exc.value.code == "upstream_request_invalid"
+    assert exc.value.code == "request_incompatible"
     assert exc.value.status == 403
     assert decisions[-1].action == "surface"
     assert adapter.invocations == [(source.id, "upstream-first")]
