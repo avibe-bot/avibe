@@ -353,7 +353,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
     }
     bootstrapReadInFlightRef.current = true;
     const retryAfterInvalidation = (read: WorkbenchSessionReadStamp) => {
-      if (readOwnershipRef.current.isCurrent(read, 'projects-bootstrap')) return;
+      if (readOwnershipRef.current.isCurrent(read, ['projects', 'projects-bootstrap'])) return;
       queueProjectTreeIntent();
     };
     const bootstrapGroups = new Map<number, string[]>();
@@ -417,7 +417,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
         );
         applyBootstrapSessions(read, currentPages);
       }
-      if (!readOwnershipRef.current.isCurrent(read, 'projects-bootstrap')) {
+      if (!readOwnershipRef.current.isCurrent(read, ['projects', 'projects-bootstrap'])) {
         retryAfterInvalidation(read);
         return;
       }
@@ -426,7 +426,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
         void reconcileSessions(projectId);
       }
     } catch (err) {
-      if (!readOwnershipRef.current.isCurrent(read, 'projects-bootstrap')) {
+      if (!readOwnershipRef.current.isCurrent(read, ['projects', 'projects-bootstrap'])) {
         retryAfterInvalidation(read);
         return;
       }
