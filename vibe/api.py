@@ -929,7 +929,9 @@ def save_config(
     payload = _strip_preserved_config_secrets(payload)
     payload = _mark_explicit_audio_asr_enabled(payload)
 
-    with CONFIG_LOCK:
+    # Share the Memory candidate+marker transaction with Controller settlement so
+    # a whole-config writer cannot re-persist a stale embedding marker over it.
+    with memory_config_transaction():
         base_payload: dict = {}
         base_config: Optional[V2Config] = None
         try:
@@ -961,6 +963,20 @@ def save_config(
         merged_payload = _deep_merge_dicts(base_payload, payload) if base_payload else payload
         merged_payload = _merge_legacy_discord_guild_scope_fields(merged_payload, payload, base_config)
         sanitized_payload, guild_scope_update = _extract_settings_scopes_from_config_payload(merged_payload)
+        if not allow_memory:
+            # Re-read the Memory unit immediately before the final write so a
+            # Controller settlement that cleared the marker after the initial
+            # load is not overwritten by a stale whole-config snapshot.
+            try:
+                from config.v2_config import memory_config_to_payload
+
+                sanitized_payload["memory"] = memory_config_to_payload(
+                    load_config().memory,
+                    include_secrets=True,
+                    include_internal=True,
+                )
+            except Exception:
+                pass
         config = V2Config.from_payload(sanitized_payload)
         connector_controls_changed = (
             base_config is not None

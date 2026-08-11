@@ -1397,3 +1397,39 @@ def test_memory_restart_route_isolates_remote_session_cookie_renewal(
     assert second_response.status_code == 200
     assert renewed_subject(first_response) == "user-1"
     assert renewed_subject(second_response) == "user-2"
+
+
+def test_memory_disable_under_pending_marker_still_reconciles(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    current = V2Config.load()
+    current.memory = MemoryConfig(
+        enabled=True,
+        embedding_change_pending=True,
+        processing=MemoryProcessingConfig(
+            llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-key"),
+            embedding=MemoryEndpointConfig("https://embed.example.test/v1", "embed-v1", "embed-key"),
+        ),
+    )
+    current.save()
+    reconcile_calls = []
+
+    async def reconcile():
+        reconcile_calls.append(True)
+        return {"status_code": 200, "body": {"ok": True, "state": "disabled"}}
+
+    monkeypatch.setattr(internal_client, "reconcile_memory", reconcile)
+    client = app.test_client()
+    response = client.patch(
+        "/api/memory/settings",
+        json={"enabled": False},
+        headers=csrf_headers(client, "http://127.0.0.1:15131"),
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 200
+    assert reconcile_calls == [True]
+    persisted = V2Config.load().memory
+    assert persisted.enabled is False
+    assert persisted.embedding_change_pending is True

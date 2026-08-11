@@ -29,6 +29,7 @@ from vibe.i18n import normalize_language
 logger = logging.getLogger(__name__)
 
 CONFIG_LOCK = threading.RLock()
+_memory_config_tx_state = threading.local()
 
 
 @contextmanager
@@ -38,7 +39,16 @@ def memory_config_transaction() -> Iterator[None]:
     UI and Controller run in different processes. ``CONFIG_LOCK`` is process-local,
     so settlement and a concurrent settings save need a shared file lock around
     the durable Memory unit. This is not a general multi-writer config service.
+
+    Nested acquisitions in the same thread only re-enter ``CONFIG_LOCK`` so
+    ``save_memory_config`` can call ``save_config`` without deadlocking the flock.
     """
+
+    depth = getattr(_memory_config_tx_state, "depth", 0)
+    if depth > 0:
+        with CONFIG_LOCK:
+            yield
+        return
 
     paths.ensure_data_dirs()
     lock_path = paths.get_config_dir() / "memory-config.tx.lock"
@@ -48,6 +58,7 @@ def memory_config_transaction() -> Iterator[None]:
         os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0),
         0o600,
     )
+    _memory_config_tx_state.depth = 1
     try:
         import fcntl
 
@@ -55,6 +66,7 @@ def memory_config_transaction() -> Iterator[None]:
         with CONFIG_LOCK:
             yield
     finally:
+        _memory_config_tx_state.depth = 0
         try:
             import fcntl
 

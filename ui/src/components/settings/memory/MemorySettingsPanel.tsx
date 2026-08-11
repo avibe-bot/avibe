@@ -189,11 +189,12 @@ export const MemorySettingsPanel: React.FC<{
       const res = await api.saveMemorySettings(patch);
       if (isMemoryOk(res)) {
         onSaved(res);
-        if (res.rebuild_required) {
-          const runtimeOk = (res.runtime as { ok?: boolean } | undefined)?.ok;
+        const runtime = res.runtime as { ok?: boolean } | undefined;
+        if (runtime && typeof runtime.ok === 'boolean') {
+          // Only announce rebuild outcomes when the backend actually ran rebuild.
           showToast(
-            runtimeOk === false ? t('memory.settings.rebuildFailed') : t('memory.settings.rebuildCompleted'),
-            runtimeOk === false ? 'error' : 'success',
+            runtime.ok ? t('memory.settings.rebuildCompleted') : t('memory.settings.rebuildFailed'),
+            runtime.ok ? 'success' : 'error',
           );
         } else {
           showToast(t('memory.settings.saved'), 'success');
@@ -202,13 +203,18 @@ export const MemorySettingsPanel: React.FC<{
         setPendingPatch(null);
       } else {
         setError(memoryErrorMessage(t, (res as { error?: string })?.error));
-        // Confirmed rebuild keeps the candidate on failure; reload both resources
-        // so Retry / rebuild_required reflect the durable marker.
+        // Confirmed rebuild keeps the candidate on failure. Exit the confirm
+        // modal so a second click cannot re-submit a now-non-identity patch;
+        // Retry rebuild is the recovery control under the pending marker.
+        setConfirmRebuildOpen(false);
+        setPendingPatch(null);
         onReloadSettings();
         onReloadMaintenance();
       }
     } catch {
       setError(t('memory.settings.saveFailed'));
+      setConfirmRebuildOpen(false);
+      setPendingPatch(null);
       onReloadSettings();
       onReloadMaintenance();
     } finally {

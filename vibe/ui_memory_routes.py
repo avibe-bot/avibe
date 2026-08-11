@@ -340,9 +340,11 @@ async def _apply_memory_settings_patch(
                 status_code=409,
             )
 
-        # API-key (or other non-identity) updates under an existing marker update
-        # the candidate only. They do not reconcile, clear the fence, or roll back.
-        if pending_marker and not identity_changed:
+        # Credential-only updates under an existing marker update the candidate
+        # only. Operational fields (especially enabled) still reconcile so a
+        # disable cannot leave a live runtime admitting captures.
+        enabled_changed = bool(candidate.memory.enabled) != bool(current.memory.enabled)
+        if pending_marker and not identity_changed and not enabled_changed:
             try:
                 saved = await asyncio.to_thread(
                     api.save_memory_config,
@@ -397,8 +399,8 @@ async def _apply_memory_settings_patch(
                 )
                 payload["status"] = "failed"
                 payload["error"] = error
-                # Confirmed candidate stays; surface rebuild_required for Retry.
-                payload["rebuild_required"] = True
+                # Keep the durable marker projection from latest config. Do not
+                # re-arm Retry after settlement if only activation failed later.
                 return _memory_response(payload, status_code=status_code if status_code >= 400 else 409)
             return _memory_response(payload)
 
