@@ -780,6 +780,34 @@ class Controller:
                 )
                 payload = deletion.payload()
                 if deletion.data_remaining:
+                    repairable = None
+                    try:
+                        repairable = create_memory_runtime(
+                            candidate,
+                            artifact_manager=getattr(runtime, "artifact_manager", None),
+                            process_factory=getattr(runtime, "process_factory", None),
+                            effective_home=runtime.effective_home,
+                            processing_event=self._send_memory_processing_event,
+                            on_config_settled=self._adopt_settled_memory_config,
+                        )
+                        if not await self._retain_failed_factory_reset_runtime(
+                            repairable,
+                            candidate,
+                        ):
+                            repairable.retire()
+                            await repairable.close()
+                    except Exception:
+                        logger.exception(
+                            "Memory factory reset could not retain a repairable Runtime"
+                        )
+                        if repairable is not None and not getattr(repairable, "closed", False):
+                            try:
+                                repairable.retire()
+                                await repairable.close()
+                            except Exception:
+                                logger.exception(
+                                    "Failed partial-reset Runtime could not close"
+                                )
                     return {
                         "ok": False,
                         "error": "memory_factory_reset_failed",

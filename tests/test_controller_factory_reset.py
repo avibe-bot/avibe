@@ -174,11 +174,19 @@ async def test_factory_reset_reaps_recorded_sidecar_before_marker_or_delete(
             }
 
     monkeypatch.setattr(factory_reset, "delete_memory_roots", lambda _home: _PartialDeletion())
+    fresh = _ClosableRuntime(tmp_path)
+    monkeypatch.setattr(
+        "core.memory.runtime.create_memory_runtime",
+        lambda *args, **kwargs: fresh,
+    )
 
     result = await controller._factory_reset_memory_once()
 
     assert result["result"] == "partial"
     assert events == ["reap", "mark", "close", "delete"]
+    assert controller.memory_runtime is fresh
+    assert fresh.retired is False
+    assert fresh.closed is False
 
 
 @pytest.mark.asyncio
