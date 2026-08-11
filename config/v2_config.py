@@ -228,7 +228,7 @@ def _legacy_model_hub_ordered_sources(
 def _legacy_model_hub_routes(
     raw_agent: dict,
     backend: str,
-    sources_payload: object,
+    ordered_sources: list["ModelHubSourceConfig"],
 ) -> dict:
     """Build v5 routes for a pre-v5 agent that only persisted ``mappings``.
 
@@ -265,14 +265,16 @@ def _legacy_model_hub_routes(
             target_model_id = mapping.get("target_model_id")
             if not isinstance(builtin_id, str) or not isinstance(target_model_id, str):
                 continue
-            if builtin_id == target_model_id:
-                continue
+            # The legacy resolver took the first enabled entry for a menu id,
+            # including one that mapped the id to itself, and an identity
+            # mapping still counted as explicit: it pinned the model to a source
+            # that stocked that exact id instead of resolving an alias. Nothing
+            # enforced unique ids, so keeping the first entry is what stops a
+            # later duplicate from rerouting the model across the upgrade.
             if builtin_id not in menu_ids:
                 retired.add(builtin_id)
                 continue
             targets.setdefault(builtin_id, target_model_id)
-
-    ordered_sources = _legacy_model_hub_ordered_sources(raw_agent, backend, sources_payload)
 
     routes: dict[str, dict] = {}
     for model_id in menu_ids:
@@ -306,11 +308,13 @@ def _legacy_model_hub_routes(
                 if any(model.id == target_model_id for model in source.models)
             ]
             if not hops:
+                # The target itself is never logged: a legacy mapping accepted
+                # any non-empty string, so it can carry credential-shaped
+                # material that must not be copied into the application log.
                 logger.warning(
-                    "Model Hub migration dropped a '%s' mapping for '%s': no eligible source supplies '%s'",
+                    "Model Hub migration dropped a '%s' mapping for '%s': no eligible source supplies its target",
                     backend,
                     model_id,
-                    target_model_id,
                 )
         routes[model_id] = {"hops": hops}
     for model_id in sorted(retired):
@@ -322,73 +326,104 @@ def _legacy_model_hub_routes(
     return routes
 
 
+def _legacy_model_hub_payload(model_hub: dict, agents: dict) -> bool:
+    """Report whether ``model_hub`` was written before the v5 supply contract.
+
+    Migration is gated on this rather than run over every config so that a v5
+    payload keeps the strict parse: an unknown root key there is a typo or a
+    corrupted write, not a legacy shape, and must not be silently discarded on
+    the way in. Recognition therefore never rests on an unknown key — only on
+    fields the pre-v5 contract defined, plus the absence of the ``routes`` v5
+    always persists.
+    """
+
+    if "subscription_hub_experimental" in model_hub:
+        return True
+    if any(
+        isinstance(source, dict) and "experimental_consent_at" in source
+        for source in (model_hub.get("sources") or [])
+    ):
+        return True
+    return any(
+        "mappings" in agent
+        or "routes" not in agent
+        or (isinstance(agent.get("sources"), dict) and "policy" in agent["sources"])
+        for agent in agents.values()
+        if isinstance(agent, dict)
+    )
+
+
 def _migrate_legacy_model_hub_on_load(payload: dict) -> dict:
     """Upgrade a pre-v5 ``model_hub`` payload to the current supply contract.
 
-    Configs written before the v5 supply contract persist
-    ``subscription_hub_experimental``, per-source ``experimental_consent_at``,
-    per-agent ``mappings``, and a ``sources.policy`` selector — the complete set
-    of fields the v5 dataclasses retired. The parser is strict about unknown
-    fields, so without this step every install that predates v5 fails to start
-    on upgrade instead of migrating. Reading the old shape here keeps that
-    upgrade silent for the user; a payload that is already v5 is returned
-    untouched.
+    Configs written before the v5 supply contract persist per-source
+    ``experimental_consent_at``, per-agent ``mappings``, a ``sources.policy``
+    selector, and any root key an even older build left behind — the pre-v5
+    parser accepted and discarded unknown root keys such as ``priority_order``,
+    while the v5 parser rejects them. The parser is strict about unknown fields,
+    so without this step every install that predates v5 fails to start on
+    upgrade instead of migrating. Reading the old shape here keeps that upgrade
+    silent for the user; a payload that is already v5 is returned untouched, so
+    a v5 config keeps its strict parse.
     """
 
     model_hub = payload.get("model_hub")
     if not isinstance(model_hub, dict):
         return payload
+    agents = model_hub.get("agents")
+    agents = agents if isinstance(agents, dict) else {}
+    if not _legacy_model_hub_payload(model_hub, agents):
+        return payload
 
-    migrated_model_hub = dict(model_hub)
-    changed = migrated_model_hub.pop("subscription_hub_experimental", None) is not None
+    # Root keys are narrowed to the v5 contract rather than popped one by one:
+    # the pre-v5 parser read `sources` and `agents` and silently discarded the
+    # rest, so a build older than the fields named above can carry a root key
+    # this one has never heard of.
+    migrated_model_hub = {
+        key: value for key, value in model_hub.items() if key in {"sources", "agents"}
+    }
 
     # Sources are sanitized before routes are built: a source still carrying
     # retired consent metadata does not parse, and an unparsed source is not
     # eligible to supply anything, which would migrate every route to empty.
     sources_payload = model_hub.get("sources")
     if isinstance(sources_payload, list):
-        sanitized = [
+        sources_payload = [
             {key: value for key, value in source.items() if key != "experimental_consent_at"}
             if isinstance(source, dict)
             else source
             for source in sources_payload
         ]
-        if sanitized != sources_payload:
-            sources_payload = sanitized
-            migrated_model_hub["sources"] = sanitized
-            changed = True
+        migrated_model_hub["sources"] = sources_payload
 
-    agents = model_hub.get("agents")
-    if isinstance(agents, dict):
-        migrated_agents = dict(agents)
-        for backend, raw_agent in agents.items():
-            if not isinstance(raw_agent, dict):
-                continue
-            migrated_agent = dict(raw_agent)
-            agent_changed = migrated_agent.pop("mappings", None) is not None
+    migrated_agents = dict(agents)
+    for backend, raw_agent in agents.items():
+        if not isinstance(raw_agent, dict):
+            continue
+        migrated_agent = dict(raw_agent)
+        migrated_agent.pop("mappings", None)
 
-            raw_sources = migrated_agent.get("sources")
-            if isinstance(raw_sources, dict) and "policy" in raw_sources:
-                migrated_agent["sources"] = {
-                    key: value for key, value in raw_sources.items() if key != "policy"
-                }
-                agent_changed = True
+        raw_sources = migrated_agent.get("sources")
+        raw_sources = raw_sources if isinstance(raw_sources, dict) else {}
+        migrated_sources = {key: value for key, value in raw_sources.items() if key != "policy"}
+        migrated_agent["sources"] = migrated_sources
 
-            if "routes" not in migrated_agent:
-                migrated_agent["routes"] = _legacy_model_hub_routes(
-                    raw_agent,
-                    backend,
-                    sources_payload,
-                )
-                agent_changed = True
+        if "routes" not in migrated_agent:
+            ordered_sources = _legacy_model_hub_ordered_sources(raw_agent, backend, sources_payload)
+            migrated_agent["routes"] = _legacy_model_hub_routes(raw_agent, backend, ordered_sources)
+            # The walk the routes were built from is also the order v5 reads
+            # back. A legacy `follow` order was recomputed on every load, so
+            # persisting the stored list instead would leave settings showing
+            # sources as disabled while turns route straight through them.
+            migrated_agent["sources"] = {
+                **migrated_sources,
+                "order": [source.id for source in ordered_sources],
+            }
 
-            if agent_changed:
-                migrated_agents[backend] = migrated_agent
-                changed = True
+        migrated_agents[backend] = migrated_agent
+    if agents:
         migrated_model_hub["agents"] = migrated_agents
 
-    if not changed:
-        return payload
     migrated_payload = dict(payload)
     migrated_payload["model_hub"] = migrated_model_hub
     return migrated_payload

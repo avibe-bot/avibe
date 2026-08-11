@@ -1170,6 +1170,71 @@ def test_mh_cfg_mig_001_pre_v5_mapping_becomes_a_route_over_ordered_sources(tmp_
     ]
 
 
+def test_mh_cfg_mig_001_pre_v5_root_keys_the_v5_contract_dropped_never_block_startup(tmp_path):
+    """The pre-v5 parser read two root keys and silently discarded the rest.
+
+    ``priority_order`` is the known one, but a build old enough to persist it
+    can carry others, so migration narrows the root to the v5 contract instead
+    of popping known names.
+    """
+
+    legacy = _legacy_model_hub_payload(api.config_to_payload(default_config()))
+    legacy["model_hub"]["priority_order"] = {"legacy": "shape-does-not-matter"}
+    legacy["model_hub"]["a_key_this_build_never_heard_of"] = ["anything"]
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert set(loaded.model_hub.to_payload()) == {"sources", "agents"}
+
+
+def test_current_model_hub_config_still_rejects_an_unknown_root_key(tmp_path):
+    """Migration must not soften the v5 parse for a config that is already v5.
+
+    An unknown root key there is a typo or a corrupted write, not a legacy
+    shape, and silently dropping it would lose whatever it was meant to say.
+    """
+
+    current = api.config_to_payload(default_config())
+    current["model_hub"]["priority_order"] = ["not-a-legacy-config"]
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(current), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="model_hub"):
+        V2Config.load(config_path=config_path)
+
+
+def test_mh_cfg_mig_001_pre_v5_first_enabled_mapping_wins_including_an_identity_one(tmp_path):
+    """The legacy resolver took the first enabled entry for a menu id.
+
+    Nothing enforced unique ids, and an identity mapping counted as explicit —
+    it pinned the model to a source stocking that exact id rather than letting
+    an alias resolve — so a later duplicate must not reroute it on upgrade.
+    """
+
+    current = api.config_to_payload(default_config())
+    legacy = _legacy_model_hub_payload(current)
+    source = copy.deepcopy(_schema("source.schema.json")["examples"][0])
+    identity_id = source["models"][0]["id"]
+    source["models"].append({**source["models"][0], "id": "later-target"})
+    legacy["model_hub"]["sources"] = [source]
+    claude = legacy["model_hub"]["agents"]["claude"]
+    claude["sources"] = {"policy": "custom", "order": [source["id"]]}
+    claude["mappings"] = [
+        {"builtin_id": identity_id, "target_model_id": identity_id, "enabled": True},
+        {"builtin_id": identity_id, "target_model_id": "later-target", "enabled": True},
+    ]
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    routes = V2Config.load(config_path=config_path).model_hub.agents["claude"].routes
+
+    assert [(hop.source_id, hop.model_id) for hop in routes[identity_id].hops] == [
+        (source["id"], identity_id)
+    ]
+
+
 def test_mh_cfg_mig_001_pre_v5_mapping_skips_sources_that_do_not_stock_the_target(tmp_path):
     """The legacy walk skipped a source whose inventory lacked the mapped target.
 
@@ -1219,13 +1284,16 @@ def test_mh_cfg_mig_001_pre_v5_follow_policy_recomputes_the_source_order(tmp_pat
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps(legacy), encoding="utf-8")
 
-    routes = V2Config.load(config_path=config_path).model_hub.agents["claude"].routes
+    claude_config = V2Config.load(config_path=config_path).model_hub.agents["claude"]
 
     # The native subscription outranks the metered relay and is walked first,
     # even though the stored order never mentioned it.
-    assert [(hop.source_id, hop.model_id) for hop in routes[supplied_id].hops] == [
+    assert [(hop.source_id, hop.model_id) for hop in claude_config.routes[supplied_id].hops] == [
         (native["id"], supplied_id)
     ]
+    # v5 has no follow policy to recompute it again, so the walk the routes were
+    # built from is also what settings must read back.
+    assert claude_config.sources.order == [native["id"], relay["id"]]
 
 
 def test_mh_cfg_mig_001_pre_v5_custom_policy_keeps_its_source_order(tmp_path):
@@ -1415,20 +1483,29 @@ def test_mh_cfg_mig_001_pre_v5_manually_added_opencode_model_stays_routable(tmp_
     ]
 
 
-def test_mh_cfg_mig_001_pre_v5_mapping_without_eligible_source_degrades_to_empty_route(tmp_path):
+def test_mh_cfg_mig_001_pre_v5_mapping_without_eligible_source_degrades_to_empty_route(
+    tmp_path,
+    caplog,
+):
     current = api.config_to_payload(default_config())
     legacy = _legacy_model_hub_payload(current)
     claude = legacy["model_hub"]["agents"]["claude"]
     mapped_id = next(iter(current["model_hub"]["agents"]["claude"]["routes"]))
+    # The legacy mapping parser accepted any non-empty target, so the value can
+    # be credential-shaped and must never reach the application log.
+    secret_target = "api_key=sk-live-should-never-be-logged"
     claude["mappings"] = [
-        {"builtin_id": mapped_id, "target_model_id": "target-model", "enabled": True}
+        {"builtin_id": mapped_id, "target_model_id": secret_target, "enabled": True}
     ]
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps(legacy), encoding="utf-8")
 
-    loaded = V2Config.load(config_path=config_path)
+    with caplog.at_level(logging.WARNING, logger="config.v2_config"):
+        loaded = V2Config.load(config_path=config_path)
 
     assert loaded.model_hub.to_payload() == current["model_hub"]
+    assert any(mapped_id in record.getMessage() for record in caplog.records)
+    assert not any("sk-live" in record.getMessage() for record in caplog.records)
 
 
 def test_current_model_hub_config_survives_load_unchanged(tmp_path):
