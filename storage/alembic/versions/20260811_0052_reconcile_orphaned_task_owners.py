@@ -1,7 +1,7 @@
 """pause enabled scheduled Tasks whose owner is no longer available
 
-Revision ID: 20260811_0051
-Revises: 20260811_0050
+Revision ID: 20260811_0052
+Revises: 20260811_0051
 Create Date: 2026-08-11
 """
 
@@ -12,8 +12,8 @@ from datetime import datetime, timezone
 from alembic import op
 import sqlalchemy as sa
 
-revision = "20260811_0051"
-down_revision = "20260811_0050"
+revision = "20260811_0052"
+down_revision = "20260811_0051"
 branch_labels = None
 depends_on = None
 
@@ -43,12 +43,14 @@ def upgrade() -> None:
         sa.text(
             "UPDATE run_definitions "
             "SET enabled = 0, "
-            "last_error = 'task owner session unavailable: ' || (" + owner_expr + "), "
+            "metadata_json = json_set(metadata_json, '$.orphaned_task_owner', "
+            "json_object('reason_code', 'task_owner_session_unavailable', "
+            "'owner_session_id', (" + owner_expr + "))), "
             "updated_at = :updated_at "
             "WHERE definition_type = 'scheduled' "
             "AND enabled <> 0 "
             "AND deleted_at IS NULL "
-            "AND session_id IS NULL "
+            "AND nullif(trim(session_id), '') IS NULL "
             "AND (" + owner_expr + ") IS NOT NULL "
             "AND NOT EXISTS ("
             "SELECT 1 FROM agent_sessions "
@@ -61,7 +63,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # The previous enabled/error values are not recoverable without a separate
+    # The previous enabled/metadata values are not recoverable without a separate
     # audit table; leaving reconciled definitions paused is safer than resuming
     # work with no Session owner or execution target.
     pass

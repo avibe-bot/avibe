@@ -317,7 +317,12 @@ def reclaim_bound_definitions(
     # A scheduled Task is managed by its creating Session for projection, but
     # teardown must also reclaim Tasks whose execution target is the Session being
     # removed. Otherwise an owner-targeted Task can keep firing into a dead target.
-    from storage.background import scheduled_definition_reclaimable_by_session_expression
+    from storage.background import (
+        ORPHANED_TASK_OWNER_METADATA_KEY,
+        TASK_OWNER_UNAVAILABLE_REASON_CODE,
+        definition_owner_session_id,
+        scheduled_definition_reclaimable_by_session_expression,
+    )
 
     definition_binding = or_(
         and_(
@@ -336,6 +341,7 @@ def reclaim_bound_definitions(
                 run_definitions.c.id,
                 run_definitions.c.definition_type,
                 run_definitions.c.enabled,
+                run_definitions.c.session_id,
                 run_definitions.c.metadata_json,
             )
             .where(definition_binding)
@@ -355,11 +361,29 @@ def reclaim_bound_definitions(
     for row in rows:
         values: dict[str, Any] = {"updated_at": now}
         counters: list[str] = []
+        metadata = _json_object(row["metadata_json"])
+        metadata_changed = False
         if snapshot is not None:
-            metadata = _json_object(row["metadata_json"])
             metadata[SESSION_SETTINGS_SNAPSHOT_KEY] = snapshot
-            values["metadata_json"] = _dump_json(metadata)
+            metadata_changed = True
             counters.append("snapshotted")
+        if (
+            mode == RECLAIM_PAUSE
+            and row["definition_type"] == "scheduled"
+            and not str(row["session_id"] or "").strip()
+            and definition_owner_session_id(metadata) == sid
+        ):
+            # A pure-command/create-per-run Task has no execution target to fall
+            # back to once its managing Session disappears. Preserve one stable
+            # marker for migration and live teardown alike so every resume path
+            # applies the same policy instead of making it fire invisibly.
+            metadata[ORPHANED_TASK_OWNER_METADATA_KEY] = {
+                "reason_code": TASK_OWNER_UNAVAILABLE_REASON_CODE,
+                "owner_session_id": sid,
+            }
+            metadata_changed = True
+        if metadata_changed:
+            values["metadata_json"] = _dump_json(metadata)
         changed = False
         if mode == RECLAIM_DELETE:
             values["deleted_at"] = now

@@ -31,7 +31,7 @@ from vibe.message_types import build_partial_index_predicate
 pytestmark = pytest.mark.no_sqlite_template
 
 
-HEAD_REVISION = "20260811_0051"
+HEAD_REVISION = "20260811_0052"
 MESSAGE_PARTIAL_INDEX_PREDICATES = {
     "ix_messages_inbox_activity": (
         "session_id is not null and type in "
@@ -1968,9 +1968,9 @@ def test_retirement_marker_migration_is_forward_only(tmp_path: Path) -> None:
 
 
 def test_orphaned_owner_task_migration_pauses_unbound_definitions(tmp_path: Path) -> None:
-    """0051 stops enabled pure-command/create-per-run Tasks with no live owner."""
+    """0052 stops enabled pure-command/create-per-run Tasks with no live owner."""
     db_path = tmp_path / "vibe.sqlite"
-    run_migrations(db_path, revision="20260811_0050")
+    run_migrations(db_path, revision="20260811_0051")
 
     with sqlite3.connect(db_path) as conn:
         _insert_scope(conn, "sc1")
@@ -2029,6 +2029,7 @@ def test_orphaned_owner_task_migration_pauses_unbound_definitions(tmp_path: Path
 
         insert_task("missing-owner", "ses-removed-owner")
         insert_task("pure-command", "ses-removed-owner", session_policy=None)
+        insert_task("blank-target", "ses-removed-owner", session_id="   ")
         insert_task("archived-owner", "ses-archived-owner")
         insert_task("live-owner", "ses-live-owner")
         insert_task("target-fallback", "ses-removed-owner", session_id="ses-target")
@@ -2047,29 +2048,33 @@ def test_orphaned_owner_task_migration_pauses_unbound_definitions(tmp_path: Path
         rows = {
             row[0]: row[1:]
             for row in conn.execute(
-                "select id, enabled, session_id, last_error from run_definitions"
+                "select id, enabled, session_id, last_error, metadata_json from run_definitions"
             )
         }
 
-    assert rows["missing-owner"] == (
-        0,
-        None,
-        "task owner session unavailable: ses-removed-owner",
-    )
-    assert rows["pure-command"] == (
-        0,
-        None,
-        "task owner session unavailable: ses-removed-owner",
-    )
-    assert rows["archived-owner"] == (
-        0,
-        None,
-        "task owner session unavailable: ses-archived-owner",
-    )
-    assert rows["live-owner"] == (1, None, None)
-    assert rows["target-fallback"] == (1, "ses-target", None)
-    assert rows["legacy-unowned"] == (1, None, None)
-    assert rows["already-paused"] == (0, None, "manual pause")
+    def owner_marker(task_id: str) -> dict | None:
+        metadata = json.loads(rows[task_id][3])
+        return metadata.get("orphaned_task_owner")
+
+    expected_paused = {
+        "missing-owner": (None, "ses-removed-owner"),
+        "pure-command": (None, "ses-removed-owner"),
+        "blank-target": ("   ", "ses-removed-owner"),
+        "archived-owner": (None, "ses-archived-owner"),
+    }
+    for task_id, (session_id, owner_session_id) in expected_paused.items():
+        assert rows[task_id][:3] == (0, session_id, None)
+        assert owner_marker(task_id) == {
+            "reason_code": "task_owner_session_unavailable",
+            "owner_session_id": owner_session_id,
+        }
+
+    assert rows["live-owner"][:3] == (1, None, None)
+    assert rows["target-fallback"][:3] == (1, "ses-target", None)
+    assert rows["legacy-unowned"][:3] == (1, None, None)
+    assert rows["already-paused"][:3] == (0, None, "manual pause")
+    for task_id in ("live-owner", "target-fallback", "legacy-unowned", "already-paused"):
+        assert owner_marker(task_id) is None
 
 
 def test_show_annotation_migration_changes_only_the_user_send_index(

@@ -1245,6 +1245,7 @@
     "retry": "重试"
   },
   "errors": {
+    "task_owner_session_unavailable": "这个 Task 的管理 Session 已不可用。请从可用的 Agent Session 创建替代 Task。",
     "share_id_taken": "这个自定义链接已被占用，换一个。",
     "invalid_share_id": "自定义链接只能用 3–64 位字母、数字、短横线或下划线，且首尾为字母或数字。",
     "missing_share_id": "请先输入自定义链接。",
@@ -2955,6 +2956,7 @@
       "runtime": "运行时",
       "eventProcessing": "事件处理",
       "lastError": "上次错误",
+      "pauseReason": "暂停原因",
       "type": "类型",
       "triggeredBy": "触发来源",
       "result": "结果",
@@ -2986,6 +2988,9 @@
     },
     "taskKind": {
       "command": "命令"
+    },
+    "taskPauseReason": {
+      "ownerSessionUnavailable": "管理这个 Task 的 Session 已不可用。请从可用的 Agent Session 创建替代 Task。"
     },
     "onFailure": {
       "none": "仅通知（无 Agent）",

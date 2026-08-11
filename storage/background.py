@@ -334,6 +334,44 @@ _BLANK_DEFINITION_SUMMARY: dict[str, Any] = {
 # Where a definition's session binding hides when it has no ``session_id``: a
 # legacy IM binding, then a ``create_per_run`` delivery target. Precedence order.
 _DEFINITION_SESSION_KEY_FIELDS = ("session_key", "deliver_key")
+ORPHANED_TASK_OWNER_METADATA_KEY = "orphaned_task_owner"
+TASK_OWNER_UNAVAILABLE_REASON_CODE = "task_owner_session_unavailable"
+
+
+def definition_owner_session_id(metadata: Any) -> Optional[str]:
+    """Return a valid creation-owner Session ID from definition metadata."""
+
+    if not isinstance(metadata, dict):
+        return None
+    created_by = metadata.get("created_by")
+    if not isinstance(created_by, dict):
+        return None
+    caller = created_by.get("caller")
+    if not isinstance(caller, dict):
+        return None
+    raw_owner = caller.get("session_id")
+    if not isinstance(raw_owner, str):
+        return None
+    return raw_owner.strip() or None
+
+
+def task_resume_block(metadata: Any, session_id: Any) -> Optional[dict[str, str]]:
+    """Return the durable reason an orphaned Task cannot be resumed yet."""
+
+    if str(session_id or "").strip() or not isinstance(metadata, dict):
+        return None
+    marker = metadata.get(ORPHANED_TASK_OWNER_METADATA_KEY)
+    if not isinstance(marker, dict):
+        return None
+    if marker.get("reason_code") != TASK_OWNER_UNAVAILABLE_REASON_CODE:
+        return None
+    owner_session_id = str(marker.get("owner_session_id") or "").strip()
+    if not owner_session_id:
+        return None
+    return {
+        "code": TASK_OWNER_UNAVAILABLE_REASON_CODE,
+        "owner_session_id": owner_session_id,
+    }
 
 
 def definition_owner_session_id_expression() -> Any:
@@ -499,6 +537,31 @@ class DefinitionWriteConflict(RuntimeError):
         )
         self.definition_id = str(definition_id)
         self.definition_type = str(definition_type)
+
+
+class TaskResumeBlocked(RuntimeError):
+    """A paused Task has neither a surviving owner nor an execution target."""
+
+    code = TASK_OWNER_UNAVAILABLE_REASON_CODE
+
+    def __init__(self, definition_id: str, owner_session_id: str) -> None:
+        super().__init__(
+            f"task {definition_id} cannot be resumed because its owner Session "
+            f"{owner_session_id} is unavailable and it has no execution target"
+        )
+        self.definition_id = str(definition_id)
+        self.owner_session_id = str(owner_session_id)
+
+
+def require_task_resumable(
+    definition_id: str,
+    *,
+    metadata: Any,
+    session_id: Any,
+) -> None:
+    blocked = task_resume_block(metadata, session_id)
+    if blocked is not None:
+        raise TaskResumeBlocked(definition_id, blocked["owner_session_id"])
 
 
 @dataclass(frozen=True)
@@ -2991,6 +3054,7 @@ class SQLiteBackgroundTaskStore:
                             run_definitions.c.definition_type,
                             run_definitions.c.mode,
                             run_definitions.c.enabled,
+                            run_definitions.c.session_id,
                             run_definitions.c.metadata_json,
                         )
                         .where(run_definitions.c.id == definition_id)
@@ -3000,6 +3064,12 @@ class SQLiteBackgroundTaskStore:
                     .first()
                 )
                 if current is not None and not current["enabled"]:
+                    if current["definition_type"] == "scheduled":
+                        require_task_resumable(
+                            definition_id,
+                            metadata=_json_loads(current["metadata_json"], {}),
+                            session_id=current["session_id"],
+                        )
                     clear_columns = definition_resume_clear_columns(
                         current["definition_type"], current["mode"]
                     )
@@ -7776,6 +7846,7 @@ class SQLiteBackgroundTaskStore:
 
     @staticmethod
     def _scheduled_task_from_row(row: Any) -> dict[str, Any]:
+        metadata = _json_loads(row["metadata_json"], {})
         return {
             "id": row["id"],
             "name": row["name"],
@@ -7803,7 +7874,8 @@ class SQLiteBackgroundTaskStore:
             "last_run_at": row["last_run_at"],
             "last_run_id": row["last_run_id"],
             "last_error": row["last_error"],
-            "metadata": _json_loads(row["metadata_json"], {}),
+            "metadata": metadata,
+            "resume_blocked": task_resume_block(metadata, row["session_id"]),
             "lifecycle_state": _row_lifecycle_state(row),
         }
 

@@ -121,6 +121,7 @@ from storage.background import (
     compute_next_run_at,
     notice_write_expectation,
     owed_notice_eligible,
+    require_task_resumable,
     resolve_run_at,
 )
 from storage.models import agent_sessions, scope_settings, scopes
@@ -1651,6 +1652,12 @@ class ScheduledTaskStore:
     @_serialize_task_mirror
     def set_enabled(self, task_id: str, enabled: bool) -> ScheduledTask:
         task = self._tasks[task_id]
+        if enabled and not task.enabled:
+            require_task_resumable(
+                task_id,
+                metadata=task.metadata,
+                session_id=task.session_id,
+            )
         expect = self._read_state(task)
         task.enabled = enabled
         task.updated_at = _utc_now_iso()

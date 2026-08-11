@@ -4162,6 +4162,22 @@ def _project_agent_unavailable_response(exc):
     )
 
 
+def _task_resume_blocked_response(exc):
+    from core.services import settings as settings_service
+
+    lang = settings_service.load_config_or_default().language
+    return _coded_error_response(
+        exc.code,
+        t("error.taskOwnerUnavailable.message", lang),
+        409,
+        hint=t("error.taskOwnerUnavailable.hint", lang, id=exc.definition_id),
+        details={
+            "task_id": exc.definition_id,
+            "owner_session_id": exc.owner_session_id,
+        },
+    )
+
+
 def _show_page_error_response(exc):
     code = getattr(exc, "code", "invalid_show_page_request")
     # A conflict (not a malformed request) when the page is in the wrong state or
@@ -9190,10 +9206,15 @@ def harness_task_patch(task_id: str):
     if "enabled" not in payload:
         return jsonify({"ok": False, "code": "invalid_payload", "message": "missing 'enabled'"}), 400
     enabled = bool(payload["enabled"])
+    from storage.background import TaskResumeBlocked
+
     with _harness_store() as store:
         if not store.get_scheduled_task(task_id):
             return jsonify({"ok": False, "code": "task_not_found"}), 404
-        store.set_definition_enabled(task_id, enabled, definition_type="scheduled")
+        try:
+            store.set_definition_enabled(task_id, enabled, definition_type="scheduled")
+        except TaskResumeBlocked as exc:
+            return _task_resume_blocked_response(exc)
         task = store.get_scheduled_task(task_id)
     from core.inbox_events import publish_definitions_updated
 

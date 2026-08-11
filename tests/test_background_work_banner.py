@@ -21,11 +21,11 @@ from core.session_activities import SessionActivityRegistry
 from core.session_turns import SessionTurnManager
 from storage import message_deliveries as delivery_store
 from storage.agent_session_rows import create_agent_session_row
-from storage.background import SQLiteBackgroundTaskStore
+from storage.background import SQLiteBackgroundTaskStore, task_resume_block
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
 from storage.models import agent_runs, run_definitions
-from storage.session_reclaim import RECLAIM_DELETE, reclaim_bound_definitions
+from storage.session_reclaim import RECLAIM_DELETE, RECLAIM_PAUSE, reclaim_bound_definitions
 from storage.workbench_sessions_service import (
     count_bound_resources,
     derive_session_harness_activities,
@@ -452,6 +452,59 @@ def test_owner_session_teardown_reclaims_task_even_when_execution_target_differs
     assert row is not None
     assert target_summary["deleted"] == 1
     assert target_row is not None
+
+
+def test_owner_session_pause_marks_unbound_task_as_not_resumable(tmp_path: Path):
+    """Live /new teardown and upgrade reconciliation share one resume policy."""
+
+    engine, _ = _make_engine(tmp_path)
+    with engine.begin() as conn:
+        create_agent_session_row(
+            conn,
+            scope_id=None,
+            session_id="ses-owner",
+            session_anchor="anchor-owner",
+            agent_backend="codex",
+            workdir="/tmp",
+            now=_NOW,
+        )
+    _insert_definition(
+        engine,
+        id="task-owner-only",
+        definition_type="scheduled",
+        name="owner-only",
+        session_id="   ",
+        metadata_json=json.dumps(
+            {"created_by": {"caller": {"session_id": "ses-owner"}}}
+        ),
+    )
+
+    with engine.begin() as conn:
+        summary = reclaim_bound_definitions(
+            conn,
+            "ses-owner",
+            mode=RECLAIM_PAUSE,
+            reason="session cleared by /new",
+        )
+        row = (
+            conn.execute(
+                select(
+                    run_definitions.c.enabled,
+                    run_definitions.c.session_id,
+                    run_definitions.c.metadata_json,
+                ).where(run_definitions.c.id == "task-owner-only")
+            )
+            .mappings()
+            .one()
+        )
+
+    metadata = json.loads(row["metadata_json"])
+    assert summary["paused"] == 1
+    assert row["enabled"] == 0
+    assert task_resume_block(metadata, row["session_id"]) == {
+        "code": "task_owner_session_unavailable",
+        "owner_session_id": "ses-owner",
+    }
 
 
 def test_archived_owner_teardown_reclaims_task_by_creation_provenance(tmp_path: Path):
