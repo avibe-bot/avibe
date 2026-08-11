@@ -233,12 +233,30 @@ def test_terminal_event_renderer_uses_native_protocol_shape(
 
 
 def test_responses_terminal_event_continues_sequence_and_closes_partial_frame() -> None:
-    wire = _SSEWireState()
+    wire = _SSEWireState("openai_responses")
     wire.observe(b'data: {"type":"response.output_text.delta","sequence_number":7}\n\n')
     wire.observe(b'data: {"type":"response.output_text.delta","sequence_number":8}')
 
     assert wire.next_sequence_number == 8
     assert wire.close_partial_frame() == b"\n\n"
+    assert wire.next_sequence_number == 9
+    event = render_protocol_terminal_event(
+        "openai_responses",
+        "modelHub.launch.retry",
+        "Retry directly.",
+        next_sequence_number=wire.next_sequence_number,
+    )
+    assert event["sequence_number"] == 9
+
+
+def test_responses_terminal_event_continues_sequence_on_cr_only_frames() -> None:
+    wire = _SSEWireState("openai_responses")
+    wire.observe(
+        b'data: {"type":"response.output_text.delta","sequence_number":7}\r\r'
+        b'data: {"type":"response.output_text.delta","sequence_number":8}\r\r'
+    )
+
+    assert wire.close_partial_frame() == b""
     assert wire.next_sequence_number == 9
     event = render_protocol_terminal_event(
         "openai_responses",

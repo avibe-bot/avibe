@@ -37,24 +37,25 @@ class SourceSettlementRule:
     priority: int
 
 
-# A needs_action state is credential-owned and outranks transient failures.
+# One strict authority order prevents late weaker verdicts from changing history.
 SOURCE_SETTLEMENT_AUTHORITY: Mapping[str, SourceSettlementRule] = {
     "quota_exhausted": SourceSettlementRule("cooldown", 10),
     "rate_limited": SourceSettlementRule("cooldown", 10),
     "server_error": SourceSettlementRule("cooldown", 10),
     "network": SourceSettlementRule("cooldown", 10),
-    "credential_expired": SourceSettlementRule("needs_action", 20),
-    "credential_revoked": SourceSettlementRule("needs_action", 20),
-    "balance_exhausted": SourceSettlementRule("needs_action", 20),
-    "account_banned": SourceSettlementRule("needs_action", 20),
-    "unclassified_error": SourceSettlementRule("error", 10),
+    "unclassified_error": SourceSettlementRule("error", 20),
+    "credential_expired": SourceSettlementRule("needs_action", 30),
+    "credential_revoked": SourceSettlementRule("needs_action", 30),
+    "balance_exhausted": SourceSettlementRule("needs_action", 30),
+    "account_banned": SourceSettlementRule("needs_action", 30),
 }
-_SOURCE_STATE_PRIORITY: Mapping[str, int] = {
+_SOURCE_STATE_PRIORITY = {
     "active": 0,
     "standby": 0,
-    "cooldown": 10,
-    "error": 10,
-    "needs_action": 20,
+    **{
+        rule.status: rule.priority
+        for rule in SOURCE_SETTLEMENT_AUTHORITY.values()
+    },
 }
 
 

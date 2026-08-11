@@ -29,7 +29,9 @@ from core.handlers.model_hub.adapter import (
     SourceObservation,
 )
 from core.handlers.model_hub.classification import (
+    SOURCE_SETTLEMENT_AUTHORITY,
     classify_outcome,
+    source_settlement_allowed,
     terminal_outcome_category,
 )
 from core.handlers.model_hub.events import BoundedEventLog
@@ -67,6 +69,29 @@ class MemoryStore:
 
     def requested_model(self, backend: str) -> str:
         return self.requested_models.get(backend, "")
+
+
+def test_source_settlement_authority_never_downgrades_a_decided_error() -> None:
+    assert source_settlement_allowed("error", "network") is False
+    assert source_settlement_allowed("cooldown", "unclassified_error") is True
+
+
+def test_source_settlement_authority_is_transitive() -> None:
+    representatives = {
+        rule.status: reason
+        for reason, rule in SOURCE_SETTLEMENT_AUTHORITY.items()
+    }
+    assert set(representatives) == {"cooldown", "error", "needs_action"}
+    assert len({rule.priority for rule in SOURCE_SETTLEMENT_AUTHORITY.values()}) == len(
+        representatives
+    )
+    for existing_status in ("active", "standby", *representatives):
+        for middle_status, middle_reason in representatives.items():
+            for final_reason in representatives.values():
+                if source_settlement_allowed(
+                    existing_status, middle_reason
+                ) and source_settlement_allowed(middle_status, final_reason):
+                    assert source_settlement_allowed(existing_status, final_reason)
 
 
 class FakeInvokeHandle:

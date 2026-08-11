@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import socket
 import urllib.error
 import urllib.parse
@@ -14,6 +15,7 @@ import aiohttp
 
 from config.v2_config import normalize_model_hub_base_url
 from core.handlers.model_hub.adapter import RawCallOutcome, RawOutcomeKind
+from core.handlers.model_hub.stream_wire import ProtocolSSEState
 from vibe.model_hub_runtime.state import SourceRecord
 
 
@@ -51,6 +53,7 @@ _OFFICIAL_BASE_URLS = {
     "codex": "https://api.openai.com/v1",
 }
 _PROTOCOL_HEADERS = frozenset({"anthropic-beta", "anthropic-version", "openai-beta"})
+logger = logging.getLogger(__name__)
 
 
 class EngineClientError(RuntimeError):
@@ -299,6 +302,7 @@ class EngineClient:
                 first=first,
                 source=source,
                 model_id=model_id,
+                protocol=request_protocol,
                 outcome_future=outcome_future,
             )
 
@@ -488,13 +492,17 @@ async def _response_stream(
     first: bytes,
     source: SourceRecord,
     model_id: str,
+    protocol: str,
     outcome_future: asyncio.Future[RawCallOutcome],
 ) -> AsyncIterator[bytes]:
     outcome: RawCallOutcome | None = None
+    wire_state = ProtocolSSEState(protocol)
     try:
+        wire_state.observe(first)
         yield first
         async for chunk in response.content.iter_chunked(_STREAM_CHUNK_BYTES):
             if chunk:
+                wire_state.observe(chunk)
                 yield chunk
         outcome = _outcome(
             kind=RawOutcomeKind.SUCCESS,
@@ -504,29 +512,52 @@ async def _response_stream(
             stream_started=True,
         )
     except asyncio.TimeoutError:
-        outcome = _outcome(
-            kind=RawOutcomeKind.TIMEOUT,
-            source=source,
-            model_id=model_id,
-            http_status=response.status,
-            message="upstream response timed out after streaming started",
-            stream_started=True,
-        )
+        if wire_state.terminal_seen:
+            outcome = _served_stream_outcome(source, model_id, response.status)
+        else:
+            outcome = _outcome(
+                kind=RawOutcomeKind.TIMEOUT,
+                source=source,
+                model_id=model_id,
+                http_status=response.status,
+                message="upstream response timed out after streaming started",
+                stream_started=True,
+            )
     except aiohttp.ClientError:
-        outcome = _outcome(
-            kind=RawOutcomeKind.NETWORK_ERROR,
-            source=source,
-            model_id=model_id,
-            http_status=response.status,
-            error_code="engine_down",
-            message="upstream response failed after streaming started",
-            stream_started=True,
-        )
+        if wire_state.terminal_seen:
+            logger.debug("ignoring transport error after protocol terminal marker")
+            outcome = _served_stream_outcome(source, model_id, response.status)
+        else:
+            outcome = _outcome(
+                kind=RawOutcomeKind.NETWORK_ERROR,
+                source=source,
+                model_id=model_id,
+                http_status=response.status,
+                error_code="engine_down",
+                message="upstream response failed after streaming started",
+                stream_started=True,
+            )
     finally:
+        if outcome is None and wire_state.terminal_seen:
+            outcome = _served_stream_outcome(source, model_id, response.status)
         response.close()
         await session.close()
         if outcome is not None and not outcome_future.done():
             outcome_future.set_result(outcome)
+
+
+def _served_stream_outcome(
+    source: SourceRecord,
+    model_id: str,
+    http_status: int,
+) -> RawCallOutcome:
+    return _outcome(
+        kind=RawOutcomeKind.SUCCESS,
+        source=source,
+        model_id=model_id,
+        http_status=http_status,
+        stream_started=True,
+    )
 
 
 def completed_handle(outcome: RawCallOutcome) -> EngineInvokeHandle:

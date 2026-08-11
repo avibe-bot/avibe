@@ -1558,6 +1558,77 @@ def test_engine_client_marks_loopback_stream_disconnect_as_engine_down(
     asyncio.run(run())
 
 
+@pytest.mark.parametrize(
+    ("protocol", "terminal_chunk"),
+    [
+        ("anthropic", b'data: {"type":"message_stop"}\n\n'),
+        (
+            "openai_responses",
+            b'data: {"type":"response.completed","sequence_number":4}\n\n',
+        ),
+        ("openai_chat", b"data: [DONE]\n\n"),
+    ],
+)
+def test_engine_client_keeps_served_after_terminal_marker_then_disconnect(
+    monkeypatch: pytest.MonkeyPatch,
+    protocol: str,
+    terminal_chunk: bytes,
+) -> None:
+    async def run() -> None:
+        class Content:
+            async def read(self, _size: int) -> bytes:
+                return terminal_chunk
+
+            async def iter_chunked(self, _size: int):
+                raise client_module.aiohttp.ClientConnectionError("late disconnect")
+                yield b""
+
+        class Response:
+            status = 200
+            content = Content()
+
+            def close(self) -> None:
+                return None
+
+        class Session:
+            async def post(self, *_args, **_kwargs):
+                return Response()
+
+            async def close(self) -> None:
+                return None
+
+        monkeypatch.setattr(
+            client_module.aiohttp,
+            "ClientSession",
+            lambda **_kwargs: Session(),
+        )
+        source = SourceRecord(
+            source_id="src_fixture123",
+            vendor="custom",
+            protocol=protocol,
+            base_url="https://api.example.test/v1",
+            credential_ref="cred_fixture123",
+            allowed_origins=(),
+            model_ids=("model-a",),
+            prefix="source-fixture123",
+        )
+        handle = await EngineClient(
+            EngineConnection(
+                base_url="http://127.0.0.1:15220",
+                management_key="management-key",
+                gateway_token="gateway-token",
+            )
+        ).invoke(source, "model-a", {}, stream=True, request_protocol=protocol)
+
+        assert handle.stream is not None
+        assert [chunk async for chunk in handle.stream] == [terminal_chunk]
+        outcome = await handle.outcome()
+        assert outcome.kind is RawOutcomeKind.SUCCESS
+        assert outcome.stream_started is True
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("phase", ["connect", "first_byte"])
 def test_engine_client_cancellation_closes_pre_handle_resources(
     monkeypatch: pytest.MonkeyPatch,

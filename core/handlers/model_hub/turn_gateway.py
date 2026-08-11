@@ -7,7 +7,7 @@ import json
 import socket
 from collections.abc import Callable
 from contextlib import AsyncExitStack
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Final, Optional
 
 from aiohttp import web
@@ -27,6 +27,7 @@ from .provenance import (
     render_turn_outcome_copy,
 )
 from .request import ModelHubRequest
+from .stream_wire import ProtocolSSEState, render_protocol_terminal_event
 from .service import (
     HandleSettlement,
     HandleTerminationOrigin,
@@ -51,63 +52,6 @@ _REQUEST_PROTOCOLS: Final = {
 }
 
 
-def _anthropic_terminal_event(
-    _key: str,
-    message: str,
-    _next_sequence_number: int,
-) -> dict[str, object]:
-    return {"type": "error", "error": {"type": "api_error", "message": message}}
-
-
-def _responses_terminal_event(
-    key: str,
-    message: str,
-    next_sequence_number: int,
-) -> dict[str, object]:
-    return {
-        "type": "error",
-        "code": key,
-        "message": message,
-        "param": None,
-        "sequence_number": next_sequence_number,
-    }
-
-
-def _chat_terminal_event(
-    key: str,
-    message: str,
-    _next_sequence_number: int,
-) -> dict[str, object]:
-    return {
-        "object": "chat.completion.chunk",
-        "type": "error",
-        "error": {"type": "server_error", "code": key, "message": message},
-        "choices": [],
-    }
-
-
-_PROTOCOL_TERMINAL_EVENT_RENDERERS: Final = {
-    "anthropic": _anthropic_terminal_event,
-    "openai_responses": _responses_terminal_event,
-    "openai_chat": _chat_terminal_event,
-}
-
-
-def render_protocol_terminal_event(
-    protocol: str,
-    key: str,
-    message: str,
-    next_sequence_number: int,
-) -> dict[str, object]:
-    """Render a terminal outcome in the requested protocol's wire shape."""
-
-    try:
-        renderer = _PROTOCOL_TERMINAL_EVENT_RENDERERS[protocol]
-    except KeyError as exc:
-        raise ValueError(f"unsupported terminal event protocol: {protocol}") from exc
-    return renderer(key, message, next_sequence_number)
-
-
 _PROTOCOL_HEADERS: Final = frozenset(
     {
         "anthropic-beta",
@@ -127,62 +71,8 @@ class _TurnExecution:
     settlement_origin: HandleTerminationOrigin | None = None
 
 
-@dataclass
-class _SSEWireState:
-    """Track forwarded SSE frames without buffering the response body."""
-
-    pending: bytearray = field(default_factory=bytearray)
-    last_sequence_number: int = -1
-
-    def observe(self, chunk: bytes) -> None:
-        self.pending.extend(chunk)
-        while True:
-            boundaries = [
-                (self.pending.find(b"\r\n\r\n"), 4),
-                (self.pending.find(b"\n\n"), 2),
-            ]
-            boundaries = [(index, size) for index, size in boundaries if index >= 0]
-            if not boundaries:
-                return
-            index, size = min(boundaries)
-            frame = bytes(self.pending[:index])
-            del self.pending[: index + size]
-            self._observe_frame(frame)
-
-    def _observe_frame(self, frame: bytes) -> None:
-        data = [
-            line[5:].lstrip()
-            for line in frame.replace(b"\r\n", b"\n").split(b"\n")
-            if line.startswith(b"data:")
-        ]
-        if not data:
-            return
-        try:
-            payload = json.loads(b"\n".join(data))
-        except (TypeError, ValueError):
-            return
-        sequence_number = (
-            payload.get("sequence_number") if isinstance(payload, dict) else None
-        )
-        if isinstance(sequence_number, int) and not isinstance(sequence_number, bool):
-            self.last_sequence_number = max(self.last_sequence_number, sequence_number)
-
-    @property
-    def next_sequence_number(self) -> int:
-        return self.last_sequence_number + 1
-
-    def close_partial_frame(self) -> bytes:
-        if not self.pending:
-            return b""
-        self._observe_frame(bytes(self.pending))
-        if self.pending.endswith(b"\r\n"):
-            prefix = b"\r\n"
-        elif self.pending.endswith(b"\n"):
-            prefix = b"\n"
-        else:
-            prefix = b"\n\n"
-        self.pending.clear()
-        return prefix
+class _SSEWireState(ProtocolSSEState):
+    """Gateway-local name for the shared protocol stream tracker."""
 
 
 class _DownstreamDisconnected(ConnectionError):
@@ -510,7 +400,7 @@ class ModelHubTurnGateway:
             },
         )
         await self._downstream_io(response.prepare(request))
-        wire_state = _SSEWireState()
+        wire_state = _SSEWireState(protocol)
         async for chunk in handle.stream:
             terminalizer.mark_stream_started()
             await self._downstream_io(response.write(chunk))

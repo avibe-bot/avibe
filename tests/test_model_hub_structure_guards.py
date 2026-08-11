@@ -1,7 +1,14 @@
 from __future__ import annotations
 
 import ast
+from itertools import product
 from pathlib import Path
+
+from core.handlers.model_hub.stream_wire import (
+    PROTOCOL_STREAM_TAXONOMY,
+    SSE_LINE_ENDINGS,
+    ProtocolSSEState,
+)
 
 
 ROOT = Path(__file__).parents[1]
@@ -11,6 +18,15 @@ PROVENANCE = ROOT / "core/handlers/model_hub/provenance.py"
 ROUTER = ROOT / "modules/agents/model_hub.py"
 ADAPTER = ROOT / "vibe/model_hub_runtime/adapter.py"
 CLIENT = ROOT / "vibe/model_hub_runtime/client.py"
+
+# Owner rulings 19:50-23:36: enumerate every stream-lifecycle boundary here.
+STREAM_BOUNDARY_DIMENSIONS = {
+    "protocol": tuple(PROTOCOL_STREAM_TAXONOMY),
+    "transport_event": ("eof", "client_error"),
+    "settlement_state": ("pending", "served"),
+    "line_ending": SSE_LINE_ENDINGS,
+}
+STREAM_BOUNDARY_CASES = tuple(product(*STREAM_BOUNDARY_DIMENSIONS.values()))
 
 
 def _tree(path: Path) -> ast.Module:
@@ -128,3 +144,19 @@ def test_machine_error_field_access_has_one_extractor() -> None:
                 continue
             if node.func.attr == "get" and node.args and isinstance(node.args[0], ast.Constant):
                 assert node.args[0].value not in {"type", "code"}, (path, node.lineno)
+
+
+def test_stream_boundary_catalog_exercises_every_enumerated_dimension() -> None:
+    expected_count = 1
+    for values in STREAM_BOUNDARY_DIMENSIONS.values():
+        expected_count *= len(values)
+    assert len(STREAM_BOUNDARY_CASES) == expected_count
+
+    for protocol, transport_event, settlement_state, line_ending in STREAM_BOUNDARY_CASES:
+        taxonomy = PROTOCOL_STREAM_TAXONOMY[protocol]
+        data = taxonomy.terminal_fixture() if settlement_state == "served" else b"{}"
+        state = ProtocolSSEState(protocol)
+        state.observe(b"data: " + data + line_ending + line_ending)
+        if transport_event == "client_error":
+            state.observe(b"data: truncated")
+        assert state.terminal_seen is (settlement_state == "served")
