@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import re
 from typing import Any, Callable
 
@@ -114,6 +115,15 @@ def _memory_settings_projection(memory: object) -> dict:
     return payload
 
 
+def _memory_repair_available() -> bool:
+    from core.memory.artifact import get_memory_artifact_manager
+
+    try:
+        return get_memory_artifact_manager().sync_capability()
+    except Exception:
+        return False
+
+
 def _memory_settings_payload() -> dict:
     # Tag the response, not `memory_config_to_payload` itself: the same helper
     # feeds the persisted config, which must stay free of result envelopes.
@@ -123,6 +133,8 @@ def _memory_settings_payload() -> dict:
     # Read-only projection while a durable rebuild marker is pending.
     payload["rebuild_required"] = memory.recovery_intent == "rebuild"
     payload["factory_reset_required"] = memory.recovery_intent == "factory_reset"
+    payload["repair_available"] = _memory_repair_available()
+ 
     return payload
 
 
@@ -378,6 +390,103 @@ def _memory_factory_reset_result(payload: dict, status_code: int) -> tuple[dict,
     if isinstance(payload.get("reason"), str):
         public["reason"] = payload["reason"]
     return public, 409 if error == "memory_operation_in_progress" else 503
+_REPAIR_HEALTH_KEYS = frozenset(
+    {
+        "healthy",
+        "reasons",
+        "pending",
+        "failed_permanent",
+        "failed_retryable",
+        "drain_consecutive_failures",
+        "unrecoverable_total",
+        "optimize_failure_streak",
+        "prune_stale_seconds",
+    }
+)
+_REPAIR_COUNT_KEYS = _REPAIR_HEALTH_KEYS - {
+    "healthy",
+    "reasons",
+    "prune_stale_seconds",
+}
+
+
+def _memory_repair_health(value: object) -> dict[str, object] | None:
+    """Validate and copy only the existing bounded cascade projection."""
+
+    if not isinstance(value, dict) or set(value) != _REPAIR_HEALTH_KEYS:
+        return None
+    if type(value.get("healthy")) is not bool:
+        return None
+    reasons = value.get("reasons")
+    if (
+        not isinstance(reasons, list)
+        or len(reasons) > 8
+        or any(not isinstance(item, str) or len(item.encode("utf-8")) > 64 for item in reasons)
+    ):
+        return None
+    if any(
+        type(value.get(key)) is not int or not 0 <= value[key] <= 2**53
+        for key in _REPAIR_COUNT_KEYS
+    ):
+        return None
+    stale = value.get("prune_stale_seconds")
+    if (
+        isinstance(stale, bool)
+        or not isinstance(stale, (int, float))
+        or not math.isfinite(float(stale))
+        or not 0 <= float(stale) <= 10**12
+    ):
+        return None
+    return {
+        "healthy": value["healthy"],
+        "reasons": list(reasons),
+        **{key: value[key] for key in sorted(_REPAIR_COUNT_KEYS)},
+        "prune_stale_seconds": float(stale),
+    }
+
+
+def _memory_repair_result(payload: dict, status_code: int) -> tuple[dict, int]:
+    """Normalize one exact final Repair response without leaking internals."""
+
+    protocol_failure = {
+        "ok": False,
+        "error": "memory_repair_failed",
+        "result": "failed",
+    }
+    if status_code not in {200, 409, 503}:
+        return protocol_failure, 503
+
+    if payload.get("ok") is True:
+        if set(payload) != {"ok", "result", "health"} or status_code != 200:
+            return protocol_failure, 503
+        health = _memory_repair_health(payload.get("health"))
+        result = payload.get("result")
+        if health is None or result not in {"completed", "completed_with_warnings"}:
+            return protocol_failure, 503
+        if (result == "completed") is not (health["healthy"] is True):
+            return protocol_failure, 503
+        return {"ok": True, "result": result, "health": health}, 200
+
+    if set(payload) != {"ok", "error", "result"} or payload.get("ok") is not False:
+        return protocol_failure, 503
+    error = payload.get("error")
+    result = payload.get("result")
+    expected_status = {
+        "memory_disabled": 409,
+        "memory_operation_in_progress": 409,
+        "memory_runtime_unsupported": 409,
+        "memory_store_unavailable": 503,
+        "memory_sidecar_unavailable": 503,
+        "memory_repair_failed": 503,
+    }.get(error)
+    if expected_status is None or expected_status != status_code:
+        return protocol_failure, 503
+    if error == "memory_repair_failed":
+        if result not in {"interrupted", "timed_out", "failed"}:
+            return protocol_failure, 503
+    elif result != "failed":
+        return protocol_failure, 503
+    return {"ok": False, "error": error, "result": result}, status_code
 
 
 _settings_write_lock: asyncio.Lock | None = None
@@ -388,6 +497,8 @@ _rebuild_request_task: asyncio.Task[tuple[dict, int]] | None = None
 _rebuild_request_task_loop: asyncio.AbstractEventLoop | None = None
 _factory_reset_request_task: asyncio.Task[tuple[dict, int]] | None = None
 _factory_reset_request_task_loop: asyncio.AbstractEventLoop | None = None
+_repair_request_task: asyncio.Task[tuple[dict, int]] | None = None
+_repair_request_task_loop: asyncio.AbstractEventLoop | None = None
 
 
 def _memory_settings_write_lock() -> asyncio.Lock:
@@ -433,6 +544,26 @@ async def _run_memory_restart_request() -> tuple[dict, int]:
         return {"status": "failed", "error": "memory_operation_in_progress"}, 409
     async with _memory_settings_write_lock():
         if _memory_rebuild_request_running() or _memory_factory_reset_request_running():
+def _memory_repair_request_running() -> bool:
+    loop = asyncio.get_running_loop()
+    return bool(
+        _repair_request_task_loop is loop
+        and _repair_request_task is not None
+        and not _repair_request_task.done()
+    )
+
+
+def _memory_mutation_request_running() -> bool:
+    return _memory_rebuild_request_running() or _memory_repair_request_running()
+
+
+async def _run_memory_restart_request() -> tuple[dict, int]:
+    from vibe import internal_client
+
+    if _memory_mutation_request_running():
+        return {"status": "failed", "error": "memory_operation_in_progress"}, 409
+    async with _memory_settings_write_lock():
+        if _memory_mutation_request_running():
             return {"status": "failed", "error": "memory_operation_in_progress"}, 409
         return await _memory_internal_result(internal_client.memory_restart)
 
@@ -523,6 +654,36 @@ def _memory_factory_reset_request_task(*, user_key: str) -> asyncio.Task[tuple[d
 
         task.add_done_callback(clear_finished)
     return _factory_reset_request_task
+async def _run_memory_repair_request(user_key: str) -> tuple[dict, int]:
+    from vibe import internal_client
+
+    body, status_code = await _memory_internal_result(
+        lambda: internal_client.memory_repair(user_key=user_key)
+    )
+    return _memory_repair_result(body, status_code)
+
+
+def _memory_repair_request_task(*, user_key: str) -> asyncio.Task[tuple[dict, int]]:
+    """Create or join the UI process' loop-scoped Repair request owner."""
+
+    global _repair_request_task, _repair_request_task_loop
+
+    loop = asyncio.get_running_loop()
+    if _repair_request_task_loop is not loop:
+        _repair_request_task = None
+        _repair_request_task_loop = loop
+    if _repair_request_task is None:
+        task = loop.create_task(_run_memory_repair_request(user_key))
+        _repair_request_task = task
+
+        def clear_finished(finished: asyncio.Task[tuple[dict, int]]) -> None:
+            global _repair_request_task
+
+            if _repair_request_task is finished:
+                _repair_request_task = None
+
+        task.add_done_callback(clear_finished)
+    return _repair_request_task
 
 
 def _settings_ok_payload(memory, runtime_payload: dict | None = None) -> dict:
@@ -530,6 +691,7 @@ def _settings_ok_payload(memory, runtime_payload: dict | None = None) -> dict:
     payload["status"] = "ok"
     payload["rebuild_required"] = getattr(memory, "recovery_intent", None) == "rebuild"
     payload["factory_reset_required"] = getattr(memory, "recovery_intent", None) == "factory_reset"
+    payload["repair_available"] = _memory_repair_available()
     if runtime_payload is not None:
         payload["runtime"] = runtime_payload
     return payload
@@ -554,14 +716,14 @@ async def _apply_memory_settings_patch(
     from vibe import api, internal_client
     from config.v2_config import memory_config_to_payload
 
-    if _memory_rebuild_request_running() or _memory_factory_reset_request_running():
+    if _memory_mutation_request_running() or _memory_factory_reset_request_running():
         return _memory_response(
             {"status": "failed", "error": "memory_operation_in_progress"},
             status_code=409,
         )
 
     async with _memory_settings_write_lock():
-        if _memory_rebuild_request_running() or _memory_factory_reset_request_running():
+        if _memory_mutation_request_running() or _memory_factory_reset_request_running():
             return _memory_response(
                 {"status": "failed", "error": "memory_operation_in_progress"},
                 status_code=409,
@@ -955,7 +1117,7 @@ def register_memory_routes(app) -> None:
                     {"status": "failed", "error": "memory_invalid_input"},
                     status_code=400,
                 )
-            if _memory_factory_reset_request_running():
+            if _memory_factory_reset_request_running() or _memory_repair_request_running():
                 return _memory_response(
                     {"status": "failed", "error": "memory_operation_in_progress"},
                     status_code=409,
@@ -967,6 +1129,14 @@ def register_memory_routes(app) -> None:
             )
             if task is None:
                 async with _memory_settings_write_lock():
+                    if _memory_factory_reset_request_running() or _memory_repair_request_running():
+                        return _memory_response(
+                            {
+                                "status": "failed",
+                                "error": "memory_operation_in_progress",
+                            },
+                            status_code=409,
+                        )
                     task = (
                         _rebuild_request_task
                         if _rebuild_request_task_loop is asyncio.get_running_loop()
@@ -996,7 +1166,7 @@ def register_memory_routes(app) -> None:
                     {"status": "failed", "error": "memory_invalid_input"},
                     status_code=400,
                 )
-            if _memory_rebuild_request_running():
+            if _memory_rebuild_request_running() or _memory_repair_request_running():
                 return _memory_response(
                     {"status": "failed", "error": "memory_operation_in_progress"},
                     status_code=409,
@@ -1008,7 +1178,7 @@ def register_memory_routes(app) -> None:
             )
             if task is None:
                 async with _memory_settings_write_lock():
-                    if _memory_rebuild_request_running():
+                    if _memory_rebuild_request_running() or _memory_repair_request_running():
                         return _memory_response(
                             {"status": "failed", "error": "memory_operation_in_progress"},
                             status_code=409,
@@ -1020,6 +1190,43 @@ def register_memory_routes(app) -> None:
                     )
                     if task is None:
                         task = _memory_factory_reset_request_task(user_key=user_key)
+            body, status_code = await asyncio.shield(task)
+            return _memory_response(body, status_code=status_code)
+
+        return await app.dispatch_native_request(starlette_request, handler)
+
+    @app.post("/api/memory/runtime/repair", include_in_schema=False)
+    async def memory_runtime_repair_post(starlette_request: FastAPIRequest):
+        """Wait for one retained live cascade sync and its final health."""
+
+        async def handler():
+            user_key = _memory_ui_user_key()
+            if user_key is None:
+                return _memory_forbidden_response()
+            try:
+                payload = await starlette_request.json()
+            except Exception:
+                payload = None
+            if payload != {"confirm": True}:
+                return _memory_response(
+                    {"status": "failed", "error": "memory_invalid_input"}, status_code=400
+                )
+            if _memory_rebuild_request_running() or _memory_factory_reset_request_running():
+                return _memory_response(
+                    {"ok": False, "error": "memory_operation_in_progress", "result": "failed"},
+                    status_code=409,
+                )
+            task = _repair_request_task if _repair_request_task_loop is asyncio.get_running_loop() else None
+            if task is None:
+                async with _memory_settings_write_lock():
+                    if _memory_rebuild_request_running() or _memory_factory_reset_request_running():
+                        return _memory_response(
+                            {"ok": False, "error": "memory_operation_in_progress", "result": "failed"},
+                            status_code=409,
+                        )
+                    task = _repair_request_task if _repair_request_task_loop is asyncio.get_running_loop() else None
+                    if task is None:
+                        task = _memory_repair_request_task(user_key=user_key)
             body, status_code = await asyncio.shield(task)
             return _memory_response(body, status_code=status_code)
 
@@ -1037,7 +1244,7 @@ def register_memory_routes(app) -> None:
                 payload = None
             if payload != {"confirm": True}:
                 return _memory_response({"status": "failed", "error": "memory_invalid_input"}, status_code=400)
-            if _memory_rebuild_request_running() or _memory_factory_reset_request_running():
+            if _memory_mutation_request_running() or _memory_factory_reset_request_running():
                 return _memory_response(
                     {"status": "failed", "error": "memory_operation_in_progress"},
                     status_code=409,
@@ -1072,7 +1279,7 @@ def register_memory_routes(app) -> None:
                 {"status": "failed", "error": "memory_invalid_input"},
                 status_code=400,
             )
-        if _memory_rebuild_request_running() or _memory_factory_reset_request_running():
+        if _memory_mutation_request_running() or _memory_factory_reset_request_running():
             return _memory_response(
                 {"status": "failed", "error": "memory_operation_in_progress"},
                 status_code=409,

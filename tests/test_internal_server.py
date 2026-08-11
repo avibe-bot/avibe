@@ -761,6 +761,121 @@ def test_memory_rebuild_rejects_non_exact_confirmation(payload: object) -> None:
     runtime.rebuild.assert_not_awaited()
 
 
+def test_memory_repair_requires_signed_user_and_exact_confirmation() -> None:
+    from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+    from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+
+    secret = "test-memory-ui-secret"
+    path = "/internal/memory/repair"
+    user_key = "avibe:local"
+    runtime = SimpleNamespace(
+        repair=AsyncMock(
+            return_value={
+                "ok": False,
+                "error": "memory_operation_in_progress",
+                "result": "failed",
+            }
+        )
+    )
+    controller = _build_controller_double()
+    controller.memory_runtime = runtime
+    app = internal_server.create_app(controller, memory_ui_secret=secret)
+    signed = {
+        MEMORY_USER_KEY_HEADER: user_key,
+        MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
+            secret,
+            method="POST",
+            path=path,
+            user_key=user_key,
+        ),
+    }
+
+    async def _exercise() -> tuple[httpx.Response, httpx.Response, httpx.Response]:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            unsigned = await client.post(path, json={"confirm": True})
+            malformed = await client.post(path, json={"confirm": False}, headers=signed)
+            conflict = await client.post(path, json={"confirm": True}, headers=signed)
+        return unsigned, malformed, conflict
+
+    unsigned, malformed, conflict = asyncio.run(_exercise())
+    assert unsigned.status_code == 403
+    assert unsigned.json() == {
+        "ok": False,
+        "error": "memory_access_denied",
+        "result": "failed",
+    }
+    assert malformed.status_code == 400
+    assert malformed.json() == {
+        "ok": False,
+        "error": "memory_invalid_input",
+        "result": "failed",
+    }
+    assert conflict.status_code == 409
+    assert conflict.json() == {
+        "ok": False,
+        "error": "memory_operation_in_progress",
+        "result": "failed",
+    }
+    runtime.repair.assert_awaited_once_with()
+
+
+@pytest.mark.parametrize(
+    ("result", "expected_status"),
+    [
+        ({"ok": True, "result": "completed", "health": {}}, 200),
+        (
+            {
+                "ok": False,
+                "error": "memory_runtime_unsupported",
+                "result": "failed",
+            },
+            409,
+        ),
+        (
+            {
+                "ok": False,
+                "error": "memory_repair_failed",
+                "result": "timed_out",
+            },
+            503,
+        ),
+    ],
+)
+def test_memory_repair_maps_runtime_status(result: dict, expected_status: int) -> None:
+    from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+    from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+
+    secret = "test-memory-ui-secret"
+    path = "/internal/memory/repair"
+    user_key = "avibe:local"
+    runtime = SimpleNamespace(repair=AsyncMock(return_value=result))
+    controller = _build_controller_double()
+    controller.memory_runtime = runtime
+    app = internal_server.create_app(controller, memory_ui_secret=secret)
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post(
+                path,
+                json={"confirm": True},
+                headers={
+                    MEMORY_USER_KEY_HEADER: user_key,
+                    MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
+                        secret,
+                        method="POST",
+                        path=path,
+                        user_key=user_key,
+                    ),
+                },
+            )
+
+    response = asyncio.run(_exercise())
+    assert response.status_code == expected_status
+    assert response.json() == result
+
+
 def test_processing_record_degrades_signed_operator_lookup_failure() -> None:
     from core.memory.http_headers import MEMORY_USER_KEY_HEADER
     from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof

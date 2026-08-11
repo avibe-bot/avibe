@@ -4577,7 +4577,7 @@ async def test_cancelled_artifact_install_owns_ensure_until_restart_can_enter(
     await asyncio.sleep(0)
     assert await runtime.restart() == {
         "ok": False,
-        "error": "memory_restart_failed",
+        "error": "memory_operation_in_progress",
     }
     await asyncio.sleep(0)
     assert installing.done() is False
@@ -4586,7 +4586,7 @@ async def test_cancelled_artifact_install_owns_ensure_until_restart_can_enter(
     assert installing.done() is False
     assert await runtime.restart() == {
         "ok": False,
-        "error": "memory_restart_failed",
+        "error": "memory_operation_in_progress",
     }
 
     release.set()

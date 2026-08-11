@@ -394,6 +394,21 @@ async def memory_factory_reset(
 
     path = "/internal/memory/factory-reset"
     return await _memory_request(
+        "POST", path, payload={"confirm": True},
+        headers=_memory_user_key_headers("POST", path, user_key),
+        socket_path=socket_path, timeout=None,
+    )
+
+
+async def memory_repair(
+    *,
+    user_key: str,
+    socket_path: Optional[Path] = None,
+) -> dict[str, Any]:
+    """Wait without a reporting deadline for the retained Runtime repair."""
+
+    path = "/internal/memory/repair"
+    return await _memory_request(
         "POST",
         path,
         payload={"confirm": True},
