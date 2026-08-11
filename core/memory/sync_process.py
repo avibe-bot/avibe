@@ -426,8 +426,7 @@ class EverOSSyncProcess:
             except asyncio.CancelledError:
                 result = SyncProcessResult.INTERRUPTED
             identities[process.pid] = float(identity.create_time)
-            await _terminate_owned_process_tree(
-                self._ownership.host,
+            await self._terminate_owned_sync_tree(
                 process,
                 process_group=group,
                 owned_processes=identities,
@@ -443,6 +442,47 @@ class EverOSSyncProcess:
         except (OSError, SyncOwnershipError, asyncio.TimeoutError):
             await self._cleanup_failed_launch(process, group, identities, nonce)
             return SyncProcessResult.FAILED
+
+    async def _terminate_owned_sync_tree(
+        self,
+        process: asyncio.subprocess.Process,
+        *,
+        process_group: int | None,
+        owned_processes: Mapping[int, float],
+        stop_timeout_seconds: float,
+    ) -> None:
+        """Authenticate late group members before retiring sync ownership."""
+
+        identities = dict(owned_processes)
+        if process_group is not None:
+            claimed, foreign = self._ownership.host.recorded_group_members(
+                process_group,
+                socket_path=self.memory_dir / ".rt" / "everos.sock",
+                provider_root=self.provider_root,
+                role=_MemoryChildRole.CASCADE_SYNC,
+            )
+            if foreign:
+                raise SyncOwnershipError("sync process group contains unverifiable members")
+            for pid, created_at in claimed.items():
+                identities.setdefault(pid, created_at)
+
+        await _terminate_owned_process_tree(
+            self._ownership.host,
+            process,
+            process_group=process_group,
+            owned_processes=identities,
+            stop_timeout_seconds=stop_timeout_seconds,
+        )
+
+        if process_group is not None:
+            remaining, foreign = self._ownership.host.recorded_group_members(
+                process_group,
+                socket_path=self.memory_dir / ".rt" / "everos.sock",
+                provider_root=self.provider_root,
+                role=_MemoryChildRole.CASCADE_SYNC,
+            )
+            if foreign or self._ownership.host.live(remaining):
+                raise SyncOwnershipError("sync process group death is unproven")
 
     async def _cleanup_failed_launch(
         self,
@@ -472,8 +512,7 @@ class EverOSSyncProcess:
                     pass
             return
         try:
-            await _terminate_owned_process_tree(
-                self._ownership.host,
+            await self._terminate_owned_sync_tree(
                 process,
                 process_group=group,
                 owned_processes=identities,

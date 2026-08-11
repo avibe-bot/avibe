@@ -168,17 +168,18 @@ def build_manifest(*, archive_dir: Path, tag: str, repo: str, output: Path) -> d
         raise SystemExit("Missing Memory Runtime archives: " + ", ".join(missing))
 
     archive_sync = {
-        _sync_digests(archive)
+        _platform_from_archive(archive): _sync_digests(archive)
         for archive in archive_dir.glob(f"{ARCHIVE_PREFIX}*{ARCHIVE_SUFFIX}")
     }
-    bootstrap_values = {values[0] for values in archive_sync}
-    scrubber_values = {values[1] for values in archive_sync}
-    sync_contract = (
-        len(bootstrap_values) == 1
-        and None not in bootstrap_values
-        and len(scrubber_values) == 1
-        and None not in scrubber_values
-    )
+    sync_values = set(archive_sync.values())
+    if sync_values == {(None, None)}:
+        sync_contract = False
+    elif len(sync_values) != 1 or (None, None) in sync_values:
+        raise SystemExit("Memory Runtime sync contract differs across platform archives")
+    else:
+        sync_contract = True
+    bootstrap_values = {values[0] for values in sync_values}
+    scrubber_values = {values[1] for values in sync_values}
     manifest = {
         "schema_version": 1,
         "everos_version": EVEROS_VERSION,

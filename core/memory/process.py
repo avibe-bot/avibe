@@ -3028,6 +3028,8 @@ def _processes_syncing_owned_root(
             continue
         try:
             uid = _process_real_uid(candidate)
+            if own_uid is not None and uid is not None and uid != own_uid:
+                continue
             cmdline = _disclosed_identity_field(candidate.cmdline)
             created_at = _disclosed_identity_field(candidate.create_time)
             environment = _disclosed_process_environment(candidate)
@@ -3043,11 +3045,9 @@ def _processes_syncing_owned_root(
             python=python,
         ):
             continue
-        if (
-            (own_uid is not None and uid != own_uid)
-            or created_at is None
-            or environment is None
-        ):
+        if own_uid is not None and uid is None:
+            raise RuntimeError(f"sync child uid could not be verified (pid {candidate.pid})")
+        if created_at is None or environment is None:
             raise RuntimeError(
                 f"sync child identity could not be verified (pid {candidate.pid})"
             )

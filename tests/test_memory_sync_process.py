@@ -373,6 +373,10 @@ async def test_sync_finalizes_ownership_before_sigcont_and_cleans_group(tmp_path
             assert process_group == pid
             return {pid: 10.5} if self.alive else {}
 
+        def recorded_group_members(self, process_group, *, socket_path, provider_root, role=None):
+            del process_group, socket_path, provider_root, role
+            return {}, []
+
         async def wait_for_stopped(self, pid, timeout_seconds):
             del timeout_seconds
             assert pid == process.pid
@@ -411,3 +415,31 @@ async def test_sync_finalizes_ownership_before_sigcont_and_cleans_group(tmp_path
     assert events[:4] == ["spawned", "stopped", "validated", "continued"]
     assert events[-1] == "cleaned"
     assert not record_path.exists()
+
+
+async def test_sync_cleanup_rescans_a_group_after_the_leader_exits(tmp_path: Path) -> None:
+    helper = _ProcessIdentity(
+        create_time=11.5,
+        cmdline=("/runtime/bin/python", *SYNC_ARGV),
+        uid=os.getuid() if hasattr(os, "getuid") else None,
+        environment={},
+    )
+    host = _Host({777: helper})
+    sync = EverOSSyncProcess(
+        "/runtime/bin/python",
+        effective_home=tmp_path / "home",
+        _host=host,
+    )
+
+    class ExitedProcess:
+        pid = 451
+        returncode = 0
+
+    await sync._terminate_owned_sync_tree(
+        ExitedProcess(),
+        process_group=451,
+        owned_processes={451: 10.5},
+        stop_timeout_seconds=1.0,
+    )
+
+    assert host.signals[0][0] == {451: 10.5, 777: 11.5}

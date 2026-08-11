@@ -49,10 +49,14 @@ def test_artifact_bootstrap_self_stops_before_scrubber_imports_everos(monkeypatc
     )
     monkeypatch.setattr(sys, "argv", ["-m", "everos.entrypoints.cli.main", "cascade", "sync"])
     monkeypatch.setattr(sys, "orig_argv", ["python", "-I", "-m", "everos.entrypoints.cli.main", "cascade", "sync"], raising=False)
+    def install_scrubbers() -> None:
+        assert "AVIBE_MEMORY_SYNC_BOOTSTRAP" not in os.environ
+        events.append("scrubbers")
+
     monkeypatch.setitem(
         sys.modules,
         "avibe_memory_sync_scrubbers",
-        SimpleNamespace(install_error_scrubbers=lambda: events.append("scrubbers")),
+        SimpleNamespace(install_error_scrubbers=install_scrubbers),
     )
 
     bootstrap.bootstrap()

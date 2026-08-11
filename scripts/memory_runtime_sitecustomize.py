@@ -64,6 +64,9 @@ def bootstrap() -> None:
         os.kill(os.getpid(), signal.SIGSTOP)
     except BaseException as exc:
         _fail_closed("Memory sync bootstrap stop failed", exc)
+    # The gate is only for this one startup handshake. Clearing it after SIGCONT
+    # prevents Python helpers launched by the sync process from re-entering it.
+    os.environ.pop(_GATE, None)
     try:
         from avibe_memory_sync_scrubbers import install_error_scrubbers
 
