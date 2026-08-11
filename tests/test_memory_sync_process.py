@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+import core.memory.sync_process as memory_sync_process
 from core.memory.process import _MemoryChildRole, _ProcessIdentity, _ProcessKind, _SystemProcessHost
 from core.memory.sync_process import (
     SYNC_ARGV,
@@ -169,6 +170,26 @@ async def test_pending_record_is_preserved_when_discovery_cannot_inspect_a_child
     assert ownership.path.exists()
 
 
+@pytest.mark.parametrize("socket_path", [None, 451])
+async def test_sync_run_fails_closed_for_a_malformed_record_socket_path(
+    tmp_path: Path,
+    socket_path: object,
+) -> None:
+    python = tmp_path / "runtime" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_bytes(b"python")
+    sync = EverOSSyncProcess(python, effective_home=tmp_path / "home", _host=_Host())
+    record = _record(sync.provider_root, state="finalized", pid=451)
+    if socket_path is None:
+        record.pop("socket_path")
+    else:
+        record["socket_path"] = socket_path
+    sync._ownership.write(record)
+
+    assert await sync.run() is SyncProcessResult.ALREADY_RUNNING
+    assert sync._ownership.path.exists()
+
+
 async def test_finalized_gone_sync_record_is_retired_independently(tmp_path: Path) -> None:
     memory_dir = tmp_path / "memory"
     root = memory_dir / "everos-root"
@@ -325,6 +346,51 @@ async def test_retained_pending_cleanup_reconciles_while_its_parent_is_live(
     assert not sync._ownership.path.exists()
 
 
+async def test_handleless_spawn_failure_marks_discovered_pending_record_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    python = tmp_path / "runtime" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_bytes(b"python")
+    uid = os.getuid() if hasattr(os, "getuid") else None
+    parent = _ParentIdentity(pid=99, create_time=8.25, uid=uid)
+
+    class HandlelessSpawnHost(_Host):
+        child_is_present = True
+
+        async def spawn(self, *_args, **_kwargs):
+            raise OSError("child was created before the spawn handoff failed")
+
+        def find_syncs(self, *, provider_root, python, nonce):
+            del provider_root, python
+            assert len(nonce) == 64
+            return {451: 10.5} if self.child_is_present else {}
+
+    host = HandlelessSpawnHost(
+        {
+            parent.pid: _ProcessIdentity(
+                create_time=parent.create_time,
+                cmdline=("avibe",),
+                uid=uid,
+                environment={},
+            )
+        }
+    )
+    sync = EverOSSyncProcess(python, effective_home=tmp_path / "home", _host=host)
+    monkeypatch.setattr(memory_sync_process, "_parent_identity", lambda: parent)
+
+    assert await sync.run() is SyncProcessResult.FAILED
+    record = sync._ownership.read()
+    assert record is not None
+    assert record["state"] == "pending"
+    assert record["cleanup_failed"] is True
+
+    host.child_is_present = False
+    await sync._ownership.reconcile()
+    assert not sync._ownership.path.exists()
+
+
 async def test_sync_cleanup_runtime_error_marks_the_finalized_record(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -398,6 +464,58 @@ async def test_sync_cleanup_runtime_error_marks_the_finalized_record(
     assert record is not None
     assert record["state"] == "finalized"
     assert record["cleanup_failed"] is True
+
+
+async def test_sync_cleanup_survives_a_second_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    python = tmp_path / "runtime" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_bytes(b"python")
+    handshake_started = asyncio.Event()
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+
+    class Process:
+        pid = 451
+
+    class Host:
+        async def spawn(self, *_args, **_kwargs):
+            return Process()
+
+        def process_group(self, pid):
+            assert pid == 451
+            return pid
+
+        def snapshot_tree(self, pid, process_group):
+            assert (pid, process_group) == (451, 451)
+            return {pid: 10.5}
+
+        async def wait_for_stopped(self, pid, timeout_seconds):
+            del pid, timeout_seconds
+            handshake_started.set()
+            await asyncio.Future()
+
+    sync = EverOSSyncProcess(python, effective_home=tmp_path / "home", _host=Host())
+
+    async def block_cleanup(*_args, **_kwargs) -> None:
+        cleanup_started.set()
+        await release_cleanup.wait()
+
+    monkeypatch.setattr(sync, "_terminate_owned_sync_tree", block_cleanup)
+    task = asyncio.create_task(sync.run())
+    await asyncio.wait_for(handshake_started.wait(), timeout=0.5)
+
+    task.cancel()
+    await asyncio.wait_for(cleanup_started.wait(), timeout=0.5)
+    task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done()
+
+    release_cleanup.set()
+    assert await task is SyncProcessResult.INTERRUPTED
+    assert not sync._ownership.path.exists()
 
 
 async def test_sync_ownership_is_shared_across_homes_for_one_provider_root(

@@ -34,6 +34,7 @@ from core.memory.process import (
     EverOSProcessSettings,
     _memory_child_environment,
     _positive_timeout,
+    _finish_cleanup_despite_cancellation,
     _finish_handoff_despite_cancellation,
     _terminate_owned_process_tree,
 )
@@ -235,7 +236,7 @@ class SyncOwnership:
             self._write_unlocked(payload)
 
     def mark_cleanup_failed(self, *, nonce: str) -> None:
-        """Allow the owning parent to retry reconciling a retained final record."""
+        """Allow the owning parent to retry reconciling a retained ownership record."""
 
         with self._locked():
             current = self.read()
@@ -486,7 +487,9 @@ class EverOSSyncProcess:
             self._ownership.remove(nonce=nonce)
             return result
         except asyncio.CancelledError:
-            await self._cleanup_failed_launch(process, group, identities, nonce)
+            await _finish_cleanup_despite_cancellation(
+                self._cleanup_failed_launch(process, group, identities, nonce)
+            )
             return SyncProcessResult.INTERRUPTED
         except _SyncOwnershipBusy:
             return SyncProcessResult.ALREADY_RUNNING
@@ -558,6 +561,10 @@ class EverOSSyncProcess:
                         )
                         if not candidates:
                             self._ownership.remove(nonce=nonce)
+                        else:
+                            # The exact child exists, but no Process handle was
+                            # returned. Let this same live parent retry discovery.
+                            self._ownership.mark_cleanup_failed(nonce=nonce)
                 except Exception:
                     # Preserve the record when discovery is uncertain.
                     pass
@@ -641,6 +648,9 @@ def _validate_record(record: Mapping[str, Any], *, provider_root: Path) -> None:
         or tuple(argv[1:]) != SYNC_ARGV
     ):
         raise SyncOwnershipError("sync ownership argv is not exact")
+    socket_path = record.get("socket_path")
+    if not isinstance(socket_path, str) or not Path(socket_path).is_absolute():
+        raise SyncOwnershipError("sync ownership socket path is invalid")
     parent_pid = record.get("parent_pid")
     parent_create_time = record.get("parent_create_time")
     parent_uid = record.get("parent_uid")
