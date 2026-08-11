@@ -2148,6 +2148,113 @@ def test_mh_cfg_mig_001_pre_v5_empty_routes_never_outrank_a_checked_menu(tmp_pat
     )
 
 
+def test_mh_cfg_mig_001_pre_v5_collapsed_native_keeps_the_inventory_it_absorbs(tmp_path):
+    """The old walk continued past a native that did not stock the model.
+
+    Two natives with different inventories each served the models only they
+    held, so dropping the loser's inventory would migrate those models to empty
+    routes. The keeper absorbs them instead, and keeps its own entry for a
+    repeated id.
+    """
+
+    legacy = _legacy_model_hub_payload(api.config_to_payload(default_config()))
+    kept = copy.deepcopy(_schema("source.schema.json")["examples"][0])
+    shared_id = kept["models"][0]["id"]
+    absorbed = copy.deepcopy(kept) | {"id": "src_claudepro2", "account_label": "other@gmail.com"}
+    absorbed["models"] = [
+        {**absorbed["models"][0], "display_name": "Opus 4.6 (stale copy)"},
+        {**absorbed["models"][0], "id": "claude-sonnet-4-6", "display_name": "Sonnet 4.6"},
+    ]
+    legacy["model_hub"]["sources"] = [kept, absorbed]
+    legacy["model_hub"]["agents"]["claude"]["sources"] = {
+        "policy": "custom",
+        "order": [kept["id"], absorbed["id"]],
+    }
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert [source.id for source in loaded.model_hub.sources] == [kept["id"]]
+    assert [(model.id, model.display_name) for model in loaded.model_hub.sources[0].models] == [
+        (shared_id, kept["models"][0]["display_name"]),
+        ("claude-sonnet-4-6", "Sonnet 4.6"),
+    ]
+    routes = loaded.model_hub.agents["claude"].routes
+    for menu_id in (shared_id, "claude-sonnet-4-6"):
+        assert [(hop.source_id, hop.model_id) for hop in routes[menu_id].hops] == [
+            (kept["id"], menu_id)
+        ]
+
+
+def test_mh_cfg_mig_001_pre_v5_manual_model_discovery_timestamp_keeps_its_source(tmp_path):
+    """v5 reads a discovery date on a manual model as a contradiction; pre-v5 stored it.
+
+    The old parser had no such rule, so an install can hold the pair, and
+    refusing it would take the source and every route through it over a
+    provenance field no resolution reads.
+    """
+
+    legacy = _legacy_model_hub_payload(api.config_to_payload(default_config()))
+    source = copy.deepcopy(_schema("source.schema.json")["examples"][0])
+    supplied_id = source["models"][0]["id"]
+    source["models"][0] |= {"origin": "manual", "discovered_at": "2026-07-23T03:00:00Z"}
+    legacy["model_hub"]["sources"] = [source]
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert [(model.id, model.provenance, model.discovered_at) for model in loaded.model_hub.sources[0].models] == [
+        (supplied_id, "manual", None)
+    ]
+    assert [
+        (hop.source_id, hop.model_id)
+        for hop in loaded.model_hub.agents["claude"].routes[supplied_id].hops
+    ] == [(source["id"], supplied_id)]
+
+
+def test_mh_cfg_mig_001_pre_v5_api_key_usage_projection_keeps_its_source(tmp_path):
+    """Metered spend has no cycle to exhaust — a v5 rule pre-v5 did not have.
+
+    The projection is a recomputed estimate, so clearing it costs a number the
+    Hub refreshes; refusing the source would cost its credential and every
+    route through it. The rest of the usage block survives.
+    """
+
+    legacy = _legacy_model_hub_payload(api.config_to_payload(default_config()))
+    source = copy.deepcopy(_schema("source.schema.json")["examples"][1])
+    source["models"][0] |= {"origin": "discovered", "discovered_at": "2026-07-23T03:00:00Z"}
+    source["usage"] = {
+        "cycle_used_pct": None,
+        "month_spend_cents": 1234,
+        "currency": "USD",
+        "projected_exhaust_at": "2026-08-01T00:00:00Z",
+    }
+    model_id = source["models"][0]["id"]
+    checked_id = opencode_model_id(source["vendor"], model_id)
+    legacy["model_hub"]["sources"] = [source]
+    legacy["model_hub"]["agents"]["opencode"]["menu"] = {
+        "view": "featured",
+        "checked": [checked_id],
+    }
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert loaded.model_hub.sources[0].usage.to_payload() == {
+        "cycle_used_pct": None,
+        "month_spend_cents": 1234,
+        "currency": "USD",
+        "projected_exhaust_at": None,
+    }
+    assert [
+        (hop.source_id, hop.model_id)
+        for hop in loaded.model_hub.agents["opencode"].routes[checked_id].hops
+    ] == [(source["id"], model_id)]
+
+
 def test_current_model_hub_config_survives_load_unchanged(tmp_path):
     """A v5 config is returned untouched — the other half of MH-CFG-MIG-001."""
 

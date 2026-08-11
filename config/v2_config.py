@@ -240,6 +240,14 @@ def _legacy_model_hub_source_payload(raw_source: object) -> object:
         payload["state"] = _narrowed_legacy_payload(payload["state"], _LEGACY_MODEL_HUB_STATE_FIELDS)
     if "usage" in payload:
         payload["usage"] = _narrowed_legacy_payload(payload["usage"], _LEGACY_MODEL_HUB_USAGE_FIELDS)
+        # A projected exhaustion date on an API-key source is a v5 contradiction
+        # — metered spend has no cycle to exhaust — and pre-v5 had no such rule,
+        # so an install can hold one. It is a usage *estimate*: dropping it
+        # costs a number the Hub recomputes, where refusing it costs the source,
+        # its credential and every route through it. The rest of the usage
+        # block is kept.
+        if payload.get("kind") == "api_key" and isinstance(payload["usage"], dict):
+            payload["usage"] = {**payload["usage"], "projected_exhaust_at": None}
     models = payload.get("models")
     if isinstance(models, list):
         # A repeated model id was legal before v5 and is rejected now. The old
@@ -271,6 +279,14 @@ def _legacy_model_hub_model_payload(raw_model: object) -> object:
     # parser performed, and it costs a model — and the source holding it —
     # nothing.
     model.setdefault("reasoning_efforts", [])
+    # v5 reads a discovery timestamp on a manual model as a contradiction: the
+    # user typed the id, so nothing discovered it. Pre-v5 had no such rule and
+    # its parser stored whatever was written, so an install can hold the pair.
+    # Clearing the timestamp is the smallest possible loss — the field is
+    # provenance metadata no resolution reads — and it keeps the model, its
+    # source and every route through that source.
+    if model.get("origin") == "manual":
+        model["discovered_at"] = None
     return model
 
 
@@ -369,9 +385,23 @@ def _legacy_model_hub_native_sources(
     the aggregate check and fail the load. When the walk reaches neither, the
     legacy-eligible one is kept: it is the one the old install could use, and
     the mis-spelled twin supplied nothing.
+
+    A collapse must not cost supply. The old resolver walked *past* a native
+    source that did not stock a model and asked the next one, so two natives
+    with different inventories — a stale discovery, a different plan tier — each
+    served the models only they held. Dropping the loser's inventory would
+    migrate those models to empty routes, which is the failure this whole
+    migration exists to prevent, so its models are merged into the keeper
+    instead. The keeper's own entry wins a repeated id, the same first-wins rule
+    the inventory dedup uses, and a merged entry keeps the provenance it was
+    persisted with. The keeper may end up naming a model its own account cannot
+    serve; that is the lesser risk by far, because discovery rewrites the
+    keeper's inventory on the next refresh, while an empty route is a
+    regression the user cannot see the cause of and nothing repairs.
     """
 
     dropped: dict[str, str] = {}
+    absorbed: dict[str, list[str]] = {}
     for backend in MODEL_HUB_BACKENDS:
         natives = [
             source.id
@@ -403,6 +433,7 @@ def _legacy_model_hub_native_sources(
         for source_id in natives:
             if source_id != keeper:
                 dropped[source_id] = backend
+                absorbed.setdefault(keeper, []).append(source_id)
     if not dropped:
         return payloads, sources
     for source_id, backend in dropped.items():
@@ -411,8 +442,29 @@ def _legacy_model_hub_native_sources(
             source_id,
             backend,
         )
-    kept = [(payload, source) for payload, source in zip(payloads, sources) if source.id not in dropped]
-    return [payload for payload, _ in kept], [source for _, source in kept]
+    inventories = {source.id: source.models for source in sources}
+    merged_payloads: list = []
+    merged_sources: list[ModelHubSourceConfig] = []
+    for payload, source in zip(payloads, sources):
+        if source.id in dropped:
+            continue
+        held = {model.id for model in source.models}
+        extras: list[ModelHubModelConfig] = []
+        for absorbed_id in absorbed.get(source.id, []):
+            for model in inventories[absorbed_id]:
+                if model.id in held:
+                    continue
+                held.add(model.id)
+                extras.append(model)
+        if extras:
+            payload = {
+                **payload,
+                "models": [*payload.get("models", []), *(model.to_payload() for model in extras)],
+            }
+            source = replace(source, models=[*source.models, *extras])
+        merged_payloads.append(payload)
+        merged_sources.append(source)
+    return merged_payloads, merged_sources
 
 
 def _legacy_model_hub_ordered_sources(
