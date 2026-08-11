@@ -422,6 +422,26 @@ def _migrate_legacy_model_hub_payload(payload: dict) -> tuple[dict, bool, tuple[
     agents = model_hub.get("agents")
     if not isinstance(agents, dict):
         return payload, False, ()
+    raw_sources = model_hub.get("sources")
+    if raw_sources is not None and not isinstance(raw_sources, list):
+        return payload, False, ()
+    for source in raw_sources or []:
+        if not isinstance(source, dict):
+            return payload, False, ()
+        models = source.get("models")
+        if "models" in source and not isinstance(models, list):
+            return payload, False, ()
+        if isinstance(models, list) and any(not isinstance(model, dict) for model in models):
+            return payload, False, ()
+    for agent in agents.values():
+        if not isinstance(agent, dict):
+            return payload, False, ()
+        mappings = agent.get("mappings")
+        if "mappings" in agent and not isinstance(mappings, list):
+            return payload, False, ()
+        menu = agent.get("menu")
+        if isinstance(menu, dict) and "checked" in menu and not isinstance(menu["checked"], list):
+            return payload, False, ()
     has_legacy_shape = bool(
         {"priority_order", "subscription_hub_experimental"} & set(model_hub)
         or any(isinstance(agent, dict) and "mappings" in agent for agent in agents.values())
@@ -431,7 +451,7 @@ def _migrate_legacy_model_hub_payload(payload: dict) -> tuple[dict, bool, tuple[
                 isinstance(model, dict) and "provenance" in model
                 for model in source.get("models") or []
             )
-            for source in model_hub.get("sources") or []
+            for source in raw_sources or []
         )
     )
     if not has_legacy_shape:
@@ -537,6 +557,8 @@ def _recovery_section_for_error(error: BaseException) -> Optional[str]:
     match = re.search(r"Config '([^']+)'", message)
     if match:
         path = match.group(1)
+        if path == "platform":
+            return "platforms"
         if path.startswith("agents."):
             backend = path.split(".", 2)[1]
             if backend in MODEL_HUB_BACKENDS or backend == "avault":
@@ -544,6 +566,8 @@ def _recovery_section_for_error(error: BaseException) -> Optional[str]:
         return path.split(".", 1)[0]
 
     lowered = message.lower()
+    if "unsupported enabled platform" in lowered:
+        return "platforms"
     if any(
         marker in lowered
         for marker in (
@@ -669,20 +693,34 @@ def _backup_config_file(
             reverse=True,
         )
         for candidate in existing:
-            if candidate.read_bytes() == content:
-                return candidate
+            try:
+                if candidate.read_bytes() == content:
+                    candidate.chmod(0o600)
+                    return candidate
+            except OSError:
+                continue
     except OSError:
         pass
 
     stamp = datetime.now().strftime("%Y%m%d%H%M%S%f")
     backup = path.with_name(f"{path.name}.bak-{label}-{stamp}")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     try:
-        if content is not None:
-            backup.write_bytes(content)
-        else:
-            shutil.copy2(path, backup)
+        file_descriptor = os.open(backup, flags, 0o600)
+        with os.fdopen(file_descriptor, "wb") as destination:
+            if content is None:
+                with path.open("rb") as source:
+                    shutil.copyfileobj(source, destination)
+            else:
+                destination.write(content)
+            destination.flush()
+            os.fsync(destination.fileno())
     except OSError as exc:
         logger.warning("Could not back up config before recovery (%s): %s", path, exc)
+        try:
+            backup.unlink(missing_ok=True)
+        except OSError:
+            pass
         return None
     return backup
 
@@ -714,6 +752,8 @@ def _persist_migrated_config_payload(
         if current_raw != expected_raw:
             return None, "Skipped config migration because the file changed during load"
         backup = _backup_config_file(path, "model-hub-migration")
+        if backup is None:
+            return None, "Skipped config migration because the original file could not be backed up"
         _write_config_payload(path, payload)
         return backup, None
 
@@ -2185,8 +2225,11 @@ class V2Config:
         if platforms_payload is not None and not isinstance(platforms_payload, dict):
             raise ValueError("Config 'platforms' must be an object")
         if platforms_payload:
+            enabled_payload = platforms_payload.get("enabled")
+            if enabled_payload is not None and not isinstance(enabled_payload, list):
+                raise ValueError("Config 'platforms.enabled' must be an array")
             platforms = PlatformsConfig(
-                enabled=list(platforms_payload.get("enabled") or []),
+                enabled=list(enabled_payload or []),
                 primary=platforms_payload.get("primary") or platform,
             )
         else:

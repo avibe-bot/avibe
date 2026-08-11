@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import re
+import stat
 from dataclasses import fields
 from itertools import product
 from pathlib import Path
@@ -845,7 +846,93 @@ def test_config_reload_migrates_v3_model_hub_shape_and_persists_backup(monkeypat
     persisted = json.loads(config_path.read_text(encoding="utf-8"))
     assert set(persisted["model_hub"]) == {"sources", "agents"}
     assert persisted["migration_sentinel"] == {"keep": True}
-    assert list(config_path.parent.glob("config.json.bak-model-hub-migration-*"))
+    backups = list(config_path.parent.glob("config.json.bak-model-hub-migration-*"))
+    assert backups
+    assert stat.S_IMODE(backups[0].stat().st_mode) == 0o600
+
+
+def test_config_reload_recovers_malformed_legacy_collections(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    current = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    legacy = _legacy_model_hub_payload(current["model_hub"])
+    source = copy.deepcopy(_schema("source.schema.json")["examples"][0])
+    malformed_values = [
+        42,
+        [dict(source, models=42)],
+    ]
+
+    for index, malformed_sources in enumerate(malformed_values):
+        payload = copy.deepcopy(current)
+        payload["show_duration"] = True
+        malformed = copy.deepcopy(legacy)
+        malformed["sources"] = malformed_sources
+        payload["model_hub"] = malformed
+        config_path = tmp_path / f"config-{index}.json"
+        original = json.dumps(payload)
+        config_path.write_text(original, encoding="utf-8")
+
+        loaded = V2Config.load(config_path=config_path)
+
+        assert loaded.show_duration is True
+        assert loaded.model_hub.to_payload() == V2Config.default().model_hub.to_payload()
+        assert loaded.load_warnings and "model_hub" in loaded.load_warnings[0]
+        assert config_path.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.parametrize("invalid_platform", ["enabled", "enabled-type", "legacy"])
+def test_config_reload_recovers_invalid_platform_metadata_only(monkeypatch, tmp_path, invalid_platform):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    payload = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    payload["show_duration"] = True
+    if invalid_platform == "enabled":
+        payload["platforms"]["enabled"] = ["not-a-platform"]
+        payload["platforms"]["primary"] = "not-a-platform"
+    elif invalid_platform == "enabled-type":
+        payload["platforms"]["enabled"] = {"slack": True}
+    else:
+        payload.pop("platforms", None)
+        payload["platform"] = "not-a-platform"
+    config_path = tmp_path / f"{invalid_platform}-platform.json"
+    original = json.dumps(payload)
+    config_path.write_text(original, encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert loaded.show_duration is True
+    assert loaded.platforms.enabled == []
+    assert loaded.platform == "avibe"
+    assert loaded.load_warnings and "platforms" in loaded.load_warnings[0]
+    assert config_path.read_text(encoding="utf-8") == original
+
+
+def test_backup_deduplication_repairs_permissions(tmp_path):
+    config_path = tmp_path / "config.json"
+    content = b"sensitive config"
+    config_path.write_bytes(content)
+    backup = config_path.with_name("config.json.bak-test-existing")
+    backup.write_bytes(content)
+    backup.chmod(0o644)
+
+    result = v2_config._backup_config_file(config_path, "test", content=content)
+
+    assert result == backup
+    assert stat.S_IMODE(backup.stat().st_mode) == 0o600
+
+
+def test_config_reload_does_not_replace_file_when_migration_backup_fails(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    payload = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    payload["model_hub"] = _legacy_model_hub_payload(payload["model_hub"])
+    config_path = tmp_path / "config.json"
+    original = json.dumps(payload)
+    config_path.write_text(original, encoding="utf-8")
+    monkeypatch.setattr(v2_config, "_backup_config_file", lambda *args, **kwargs: None)
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert loaded.model_hub.to_payload() != payload["model_hub"]
+    assert config_path.read_text(encoding="utf-8") == original
+    assert loaded.load_warnings and "could not be backed up" in loaded.load_warnings[0]
 
 
 def test_config_reload_migrates_legacy_mapping_to_exact_route_hop(monkeypatch, tmp_path):
