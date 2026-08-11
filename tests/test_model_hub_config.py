@@ -1137,6 +1137,7 @@ def test_mh_cfg_mig_001_pre_v5_mapping_becomes_a_route_over_ordered_sources(tmp_
     current = api.config_to_payload(default_config())
     legacy = _legacy_model_hub_payload(current)
     source = copy.deepcopy(_schema("source.schema.json")["examples"][0])
+    source["models"].append({**source["models"][0], "id": "target-model"})
     legacy["model_hub"]["sources"] = [source]
     claude = legacy["model_hub"]["agents"]["claude"]
     claude["sources"] = {"policy": "custom", "order": [source["id"]]}
@@ -1166,6 +1167,36 @@ def test_mh_cfg_mig_001_pre_v5_mapping_becomes_a_route_over_ordered_sources(tmp_
     ] == [
         "Model Hub migration dropped a 'claude' mapping for 'retired-menu-model': "
         "the model is no longer offered"
+    ]
+
+
+def test_mh_cfg_mig_001_pre_v5_mapping_skips_sources_that_do_not_stock_the_target(tmp_path):
+    """The legacy walk skipped a source whose inventory lacked the mapped target.
+
+    Migrating a hop onto it anyway would leave the route permanently reported as
+    degraded over a chain that never resolved.
+    """
+
+    current = api.config_to_payload(default_config())
+    legacy = _legacy_model_hub_payload(current)
+    empty, stocked = (
+        copy.deepcopy(source) for source in _schema("source.schema.json")["examples"][:2]
+    )
+    stocked["models"] = [{**stocked["models"][0], "id": "target-model"}]
+    mapped_id = next(iter(current["model_hub"]["agents"]["claude"]["routes"]))
+    legacy["model_hub"]["sources"] = [empty, stocked]
+    claude = legacy["model_hub"]["agents"]["claude"]
+    claude["sources"] = {"policy": "custom", "order": [empty["id"], stocked["id"]]}
+    claude["mappings"] = [
+        {"builtin_id": mapped_id, "target_model_id": "target-model", "enabled": True}
+    ]
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    routes = V2Config.load(config_path=config_path).model_hub.agents["claude"].routes
+
+    assert [(hop.source_id, hop.model_id) for hop in routes[mapped_id].hops] == [
+        (stocked["id"], "target-model")
     ]
 
 

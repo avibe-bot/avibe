@@ -296,15 +296,21 @@ def _legacy_model_hub_routes(
                 if hop_model_id is not None
             ]
         else:
+            # A mapped model was still only served by a source that stocked the
+            # target; the legacy walk skipped the others rather than trying and
+            # failing, and a v5 hop onto one of them would report the route as
+            # degraded over a chain that never existed.
             hops = [
                 {"source_id": source.id, "model_id": target_model_id}
                 for source in ordered_sources
+                if any(model.id == target_model_id for model in source.models)
             ]
             if not hops:
                 logger.warning(
-                    "Model Hub migration dropped a '%s' mapping for '%s': no eligible source to route through",
+                    "Model Hub migration dropped a '%s' mapping for '%s': no eligible source supplies '%s'",
                     backend,
                     model_id,
+                    target_model_id,
                 )
         routes[model_id] = {"hops": hops}
     for model_id in sorted(retired):
