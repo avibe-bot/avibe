@@ -10,7 +10,7 @@ import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Iterable, Literal, Optional
 
 from core.run_settlement import (
     SETTLED_BY_BACKEND_REFRESH,
@@ -43,6 +43,20 @@ class AttemptIdentity:
         }
 
 
+@dataclass(frozen=True)
+class ExactHopBlocker:
+    source_id: str
+    model_id: str
+    reason: str
+
+    def payload(self) -> dict:
+        return {
+            "source_id": self.source_id,
+            "model_id": self.model_id,
+            "reason": self.reason,
+        }
+
+
 @dataclass
 class TurnTrace:
     turn_id: str
@@ -54,6 +68,7 @@ class TurnTrace:
     terminal_error: Optional[dict] = None
     pending_attempt: Optional[AttemptIdentity] = None
     model_supply_state: Optional[SupplyState] = None
+    blockers: list[dict] = field(default_factory=list)
     gateway_source_id: Optional[str] = None
     gateway_model_id: Optional[str] = None
     ambiguous: bool = False
@@ -126,10 +141,23 @@ class GatewayTurnTerminalizer:
             force=True,
         )
 
-    def mark_no_candidate(self, supply_state: SupplyState) -> None:
+    def engine_down(self) -> None:
+        self._registry._terminalize_gateway_exit(
+            self.turn_id,
+            reason="engine_down",
+            stream_started=self._stream_started,
+            force=True,
+        )
+
+    def mark_no_candidate(
+        self,
+        supply_state: SupplyState,
+        blockers: Iterable[ExactHopBlocker] = (),
+    ) -> None:
         self._registry.mark_gateway_no_candidate(
             self.turn_id,
             supply_state,
+            blockers,
         )
 
     def begin_attempt(
@@ -487,7 +515,11 @@ class TurnCorrelationRegistry:
         self,
         turn_id: Optional[str],
         *,
-        reason: Literal["invalid_parameter", "protocol_error"] = "protocol_error",
+        reason: Literal[
+            "invalid_parameter",
+            "protocol_error",
+            "engine_down",
+        ] = "protocol_error",
         stream_started: bool,
         force: bool = False,
     ) -> None:
@@ -506,6 +538,19 @@ class TurnCorrelationRegistry:
                     and bool(trace.failed_attempts)
                 )
             ):
+                return
+            if reason == "engine_down":
+                trace.pending_attempt = None
+                trace.served = None
+                trace.model_supply_state = None
+                trace.blockers = []
+                trace.terminal_error = {
+                    "source_id": None,
+                    "configured_model_id": None,
+                    "channel": None,
+                    "reason": reason,
+                    "stream_started": stream_started,
+                }
                 return
             identity = trace.pending_attempt
             if identity is None and (
@@ -569,6 +614,7 @@ class TurnCorrelationRegistry:
         turn_id: Optional[str],
         requested_model_id: str,
         supply_state: SupplyState,
+        blockers: Iterable[ExactHopBlocker] = (),
     ) -> None:
         token = self.credentials(backend, process_scope, turn_id)
         normalized_turn_id = str(turn_id or "").strip()
@@ -588,11 +634,13 @@ class TurnCorrelationRegistry:
                 ),
             )
             trace.model_supply_state = supply_state
+            trace.blockers = [blocker.payload() for blocker in blockers]
 
     def mark_gateway_no_candidate(
         self,
         turn_id: Optional[str],
         supply_state: SupplyState,
+        blockers: Iterable[ExactHopBlocker] = (),
     ) -> None:
         if turn_id is None:
             return
@@ -603,6 +651,7 @@ class TurnCorrelationRegistry:
                 trace.served = None
                 trace.terminal_error = None
                 trace.model_supply_state = supply_state
+                trace.blockers = [blocker.payload() for blocker in blockers]
 
     def begin_attempt(
         self,
@@ -797,6 +846,10 @@ class TurnCorrelationRegistry:
                     "terminal_error": terminal_error,
                     "canceled_attempt": canceled_attempt,
                     "model_supply_state": supply_state,
-                    "blockers": [],
+                    "blockers": (
+                        list(trace.blockers)
+                        if outcome == "no_candidate"
+                        else []
+                    ),
                 }
             )

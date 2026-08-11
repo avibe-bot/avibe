@@ -208,7 +208,9 @@ class ModelHubTurnGateway:
                     attempt_observer=observe_attempt,
                 )
             except ModelHubError as exc:
-                if exc.supply_state is not None:
+                if exc.code == "engine_down":
+                    terminalizer.engine_down()
+                elif exc.supply_state is not None:
                     terminalizer.mark_no_candidate(exc.supply_state)
                 return self._error_response(status=exc.status, code=exc.code)
             return await self._resolved_response(
@@ -232,6 +234,7 @@ class ModelHubTurnGateway:
             return self._outcome_response(resolved.outcome)
         handle = resolved.handle
         if handle is None or handle.stream is None:
+            terminalizer.engine_down()
             return self._error_response(status=502, code="engine_down")
 
         if not stream:

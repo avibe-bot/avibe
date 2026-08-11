@@ -45,6 +45,7 @@ from core.handlers.model_hub.events import (
 )
 from core.handlers.model_hub.provenance import (
     BoundedProvenanceStore,
+    ExactHopBlocker,
     TurnCorrelationRegistry,
 )
 from core.handlers.model_hub.request import ModelHubRequest
@@ -618,10 +619,10 @@ def test_gateway_terminalizer_records_pre_observer_engine_down_before_return(
             trace = gateway.correlation._traces["turn_pre_observer_engine_down"]
             assert trace.pending_attempt is None
             assert trace.terminal_error == {
-                "source_id": "src_primary01",
-                "configured_model_id": "shared-model",
-                "channel": "hub",
-                "reason": "protocol_error",
+                "source_id": None,
+                "configured_model_id": None,
+                "channel": None,
+                "reason": "engine_down",
                 "stream_started": False,
             }
         finally:
@@ -635,9 +636,85 @@ def test_gateway_terminalizer_records_pre_observer_engine_down_before_return(
         record = service.provenance.get("turn_pre_observer_engine_down")
         assert record is not None
         assert record["outcome"] == "failed_terminal"
+        assert record["terminal_error"] == {
+            "source_id": None,
+            "configured_model_id": None,
+            "channel": None,
+            "reason": "engine_down",
+            "stream_started": False,
+        }
         _assert_valid("turn-provenance.schema.json", record)
 
     asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("entry", ["process", "gateway"])
+def test_no_candidate_provenance_carries_exact_hop_blockers_from_each_entry(
+    tmp_path: Path,
+    entry: str,
+) -> None:
+    turn_id = f"turn_blocked_{entry}"
+    store = BoundedProvenanceStore(tmp_path / f"blocked-{entry}.json")
+    registry = TurnCorrelationRegistry(store)
+    blockers = (
+        ExactHopBlocker(
+            source_id="src_primary01",
+            model_id="shared-model",
+            reason="model_unsupported",
+        ),
+        ExactHopBlocker(
+            source_id="src_backup001",
+            model_id="shared-model",
+            reason="credential_revoked",
+        ),
+    )
+    if entry == "process":
+        registry.mark_no_candidate(
+            backend="claude",
+            process_scope="/repo",
+            turn_id=turn_id,
+            requested_model_id="shared-model",
+            supply_state="interrupted",
+            blockers=blockers,
+        )
+    else:
+        token = registry.credentials("claude", "/repo", turn_id)
+        registry.prepare_gateway_turn(
+            backend="claude",
+            token=token,
+            requested_model_id="shared-model",
+            resolved_model_id="shared-model",
+            source_id="src_primary01",
+            via_mapping=False,
+        )
+        with registry.gateway_terminalizer(
+            backend="claude",
+            token=token,
+        ) as terminalizer:
+            terminalizer.mark_no_candidate("interrupted", blockers)
+
+    registry.settle(
+        turn_id,
+        settled_by=SETTLED_BY_TERMINAL_RESULT,
+        ts=NOW.isoformat(),
+    )
+
+    record = store.get(turn_id)
+    assert record is not None
+    assert record["outcome"] == "no_candidate"
+    assert record["blockers"] == [
+        {
+            "source_id": "src_primary01",
+            "model_id": "shared-model",
+            "reason": "model_unsupported",
+        },
+        {
+            "source_id": "src_backup001",
+            "model_id": "shared-model",
+            "reason": "credential_revoked",
+        },
+    ]
+    _assert_valid("turn-provenance.schema.json", record)
 
 
 def test_gateway_provenance_retains_pre_mapping_model_identity(
