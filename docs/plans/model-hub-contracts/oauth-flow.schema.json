@@ -16,7 +16,7 @@
     },
     "intent": {
       "enum": ["create", "reauth"],
-      "description": "The flow intent determines its terminal response: create returns `{flow, source, added_to, adopted_by}`; reauth returns `{flow, source, recovered, interrupted_pairs}`. It is explicit because source_id cannot distinguish create from reauth and clients must not infer response shape from remembered UI state."
+      "description": "The flow intent determines its successful terminal response: create returns `{flow, source, added_to, adopted_by}`; reauth returns `{flow, source, recovered, interrupted_pairs}`. A local terminal materialization error instead uses the standard error envelope; only a nonempty acquisition-stage interruption report adds `interrupted_pairs`. Intent is explicit because source_id cannot distinguish create from reauth and clients must not infer response shape from remembered UI state."
     },
     "source_id": { "type": ["string", "null"], "description": "Pending or existing Source this flow binds to. Both hub and native_cli create/reauth flows set it; null is reserved for presentation-only flows outside Model Hub." },
     "vendor": { "type": "string" },

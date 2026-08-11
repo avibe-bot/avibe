@@ -690,11 +690,26 @@ start. Canceling a flow created without a nonce forgets it because no D-36 corre
 promise exists. Every returned flow echoes the nonce. A new user action generates a new
 nonce. Omitting it otherwise preserves ordinary one-action/one-start behavior.
 
-`OAuthFlow.intent` makes the terminal shape a function of the flow:
+`OAuthFlow.intent` and local materialization make the terminal shape total. A
+materialization error is an error raised only after the upstream flow reached terminal
+success while the service was committing the created or repaired Source. Its
+`interrupted_pairs` uses the existing `SupplyGap` shape and reports persisted impact that
+already happened; it never aliases the future-tense guard field `would_interrupt`.
 
-- non-terminal, failed, or canceled → `{flow}`;
-- terminal `intent: "create"` → `{flow, source, added_to, adopted_by}`;
-- terminal `intent: "reauth"` → `{flow, source, recovered, interrupted_pairs}`.
+| Decision | Flow/service condition | HTTP/API result | `interrupted_pairs` |
+| --- | --- | --- | --- |
+| `oauth_terminal.flow_only` | non-terminal flow, or adapter terminal `failed`/`cancelled` without local materialization error | successful `{flow}` | absent |
+| `oauth_terminal.create_success` | terminal create and Source materialization succeed | `{flow, source, added_to, adopted_by}` | absent |
+| `oauth_terminal.reauth_success` | terminal re-auth and existing-Source materialization succeed | `{flow, source, recovered, interrupted_pairs}` | present as the complete report and may be empty |
+| `oauth_terminal.materialization_interrupted` | local terminal materialization fails after an acquisition-stage Source mutation has already produced at least one exact supply gap | standard `{ok: false, contract_version, error, detail?}` envelope plus the exact report; `flow` is absent | present and nonempty |
+| `oauth_terminal.materialization_plain_error` | local terminal materialization fails before such an interruption or its exact report is empty | standard error envelope; `flow` is absent | absent, never an empty placeholder |
+
+The same existing materialization error code may enter either error row. The server adds
+`interrupted_pairs` if and only if the acquisition-stage mutation produced a nonempty
+report; every other error envelope omits the field. Native re-auth `discovery_failed`
+after clearing/marking the Source is the positive fixture. The same error before an
+interruption, and any materialization failure whose computed report is empty, are
+negative fixtures. A later Source read cannot recreate the historical report.
 
 Status and submit return the same terminal shape:
 
@@ -1025,6 +1040,7 @@ contract harness and API-boundary tests enforce:
 <!-- authority-consumer: guard.error source_last_supplier source_in_route_chain source_model_in_route_chain -->
 <!-- authority-consumer: guard.decision guard_decision.unforced_no_impact guard_decision.unforced_confirmation guard_decision.forced_no_impact guard_decision.forced_confirmed guard_decision.forced_unconfirmed -->
 <!-- authority-consumer: oauth.start_nonce oauth_nonce.released oauth_nonce.in_flight oauth_nonce.committed -->
+<!-- authority-consumer: oauth.terminal oauth_terminal.flow_only oauth_terminal.create_success oauth_terminal.reauth_success oauth_terminal.materialization_interrupted oauth_terminal.materialization_plain_error -->
 <!-- authority-consumer: network.failure network_failure.shaped_before_first_byte network_failure.transport_before_first_byte network_failure.shaped_after_first_byte network_failure.transport_after_first_byte -->
 <!-- authority-consumer: live_backoff.health backoff -->
 <!-- authority-consumer: live_backoff.reason models.source.backoff.connection_failed -->
@@ -1052,6 +1068,7 @@ contract harness and API-boundary tests enforce:
 | network fixtures cover shaped/transport × `stream_started: false/true`, where the boundary is the first user-visible model-output byte: shaped results at either phase enter only their existing non-permanent Source classifier; unclassified pre-output connection failure creates bounded live backoff with no config write; only later output from that same Source clears its streak, while another Source's successful fallback does not; the API/read assembler emits a future deadline for a live overlay and normalizes an expired overlay before serialization; concurrent cooldown/needs-action/error/missing-Source/unsupported-model facts suppress the overlay and keep stronger projections, so waiting never hides a durable blocker; simultaneous native-process unavailability alone preserves backoff health/deadline while taking reason precedence and yielding interrupted; probe `connection_failed` requires the exact Hub/unreachable/null-latency shape | clocked table-driven resolver/API/event, AgentChain precedence, ProbeResult relation, and concurrent-transition tests |
 | every `GuardRefusal` validates against `guard-refusal.schema.json` and has a nonempty current plan; fixtures cover every guard-decision row, including unforced refusal, exact echoed-plan confirmation, missing/different echo returning the new plan, and old-echo empty-plan ordinary success without a fabricated 409 | API payload and concurrent-mutation test |
 | `PUT /sources/<id>/credential` success contains exactly the standard `{source, removed_hops, interrupted}` mutation tail; `{recovered, interrupted_pairs}` is absent there and remains owned only by terminal OAuth `intent: "reauth"` | contract negative fixture and API payload test |
+| OAuth status/submit covers every `oauth_terminal.*` row; a native re-auth materialization error with a nonempty acquired-side-effect report emits that exact `interrupted_pairs`, while the same error with no report and every non-materialization error omit the field rather than sending `[]` | contract totality fixture plus positive/negative API and client payload tests |
 | each `source_in_route_chain` or `source_model_in_route_chain` refusal has nonempty `would_remove_hops`; each `source_last_supplier` refusal has nonempty `would_interrupt`; mismatched code/empty-required-array combinations fail schema validation even when the other array is nonempty | guard schema relation fixture |
 | both GuardRefusal plan arrays contain unique objects; duplicate hop and supply-gap entries fail schema validation; producers emit SupplyGap rows in ascending `(backend, model_id)` order and each `agents` array in stable-id lexicographic order, with permutation fixtures proving canonical output | guard schema uniqueness and producer-order fixtures |
 | `model_supply[].chain_length: 0` implies `has_runnable_hop: false`; the opposite pair fails schema validation | AgentSupply schema correlation fixture |

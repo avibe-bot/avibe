@@ -745,6 +745,23 @@
           "prefix": "models.source.backoff."
         }
       ]
+    },
+    {
+      "id": "D22",
+      "domain": "OAuth terminal response and materialization-error totality",
+      "authority": {
+        "kind": "markdown_table",
+        "file": "docs/plans/model-hub.md",
+        "heading": "OAuth terminal response and materialization-error matrix",
+        "column": "Decision"
+      },
+      "consumers": [
+        {
+          "kind": "marker",
+          "file": "docs/plans/model-hub-contracts/api.md",
+          "prefix": "oauth_terminal."
+        }
+      ]
     }
   ],
   "ownership_checks": [

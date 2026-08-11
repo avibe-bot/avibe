@@ -752,10 +752,7 @@ def test_v5_shape_amendments_reject_the_false_states_they_replace():
     assert "{source, recovered, interrupted_pairs}" not in credential_contract
     assert '"recovered"' not in credential_contract
     assert '"interrupted_pairs"' not in credential_contract
-    assert api_contract.count(
-        '- terminal `intent: "reauth"` → '
-        '`{flow, source, recovered, interrupted_pairs}`.'
-    ) == 1
+    assert api_contract.count("| `oauth_terminal.reauth_success` |") == 1
     reauth_contract = api_contract.split(
         "## Credential replacement and reauth", 1
     )[1].split("## Source refresh and blocked-source recovery", 1)[0]
@@ -1025,6 +1022,107 @@ def test_v5_shape_amendments_reject_the_false_states_they_replace():
     timed_native_not_ready["latency_ms"] = 12
     with pytest.raises(ValidationError):
         probe_validator.validate(timed_native_not_ready)
+
+
+def test_oauth_terminal_materialization_matrix_and_handoffs_are_total():
+    api_contract = (CONTRACTS / "api.md").read_text(encoding="utf-8")
+    model_hub_plan = (CONTRACTS.parent / "model-hub.md").read_text(encoding="utf-8")
+    implementation_plan = (
+        CONTRACTS.parent / "model-hub-implementation.md"
+    ).read_text(encoding="utf-8")
+    mirror_registry = _schema("mirror-registry.json")
+
+    decisions = (
+        "oauth_terminal.flow_only",
+        "oauth_terminal.create_success",
+        "oauth_terminal.reauth_success",
+        "oauth_terminal.materialization_interrupted",
+        "oauth_terminal.materialization_plain_error",
+    )
+    api_oauth = api_contract.split("## OAuth completion", 1)[1].split(
+        "## Chain and probe", 1
+    )[0]
+    plan_oauth = model_hub_plan.split(
+        "**OAuth terminal response and materialization-error matrix", 1
+    )[1].split("**Protocol observation", 1)[0]
+    for section in (api_oauth, plan_oauth):
+        for decision in decisions:
+            assert section.count(f"| `{decision}` |") == 1
+
+        reauth_success = next(
+            line
+            for line in section.splitlines()
+            if line.startswith("| `oauth_terminal.reauth_success` |")
+        )
+        interrupted_error = next(
+            line
+            for line in section.splitlines()
+            if line.startswith("| `oauth_terminal.materialization_interrupted` |")
+        )
+        plain_error = next(
+            line
+            for line in section.splitlines()
+            if line.startswith("| `oauth_terminal.materialization_plain_error` |")
+        )
+        assert "may be empty" in reauth_success
+        assert "present and nonempty" in interrupted_error
+        assert "no `flow`" in interrupted_error or "`flow` is absent" in interrupted_error
+        assert "absent" in plain_error
+        assert "empty placeholder" in plain_error
+
+    d22 = next(
+        rule for rule in mirror_registry["decision_tables"] if rule["id"] == "D22"
+    )
+    assert d22["authority"]["heading"] == (
+        "OAuth terminal response and materialization-error matrix"
+    )
+    assert d22["consumers"] == [
+        {
+            "kind": "marker",
+            "file": "docs/plans/model-hub-contracts/api.md",
+            "prefix": "oauth_terminal.",
+        }
+    ]
+
+    ac_52 = implementation_plan.split("### AC-52", 1)[1].split("### AC-53", 1)[0]
+    i3_lane = next(
+        line
+        for line in implementation_plan.splitlines()
+        if line.startswith("| **I3 subscription custody and native import**")
+    )
+    auth_setup_landing = next(
+        line
+        for line in implementation_plan.splitlines()
+        if line.startswith("| `tests/scenarios/auth_setup/")
+    )
+    for section in (ac_52, i3_lane, auth_setup_landing):
+        assert "AUTH-SETUP-109" in section
+    for path in (
+        "tests/scenarios/auth_setup/catalog.yaml",
+        "tests/scenarios/auth_setup/test_auth_setup_scenarios.py",
+    ):
+        assert path in ac_52
+    assert "After K4 and #1312 merge" in ac_52
+    assert "missing and false acknowledgement" in ac_52
+    assert "before any adapter/provider call" in ac_52
+    assert "starts exactly one Hub flow" in ac_52
+    assert "terminal status and the\nrepair read projection agree" in ac_52
+
+    ac_53 = implementation_plan.split("### AC-53", 1)[1].split(
+        "### K4 open contract-gap registry", 1
+    )[0]
+    assert "all five rows" in ac_53
+    for path in (
+        "core/handlers/model_hub/{service,errors}.py",
+        "vibe/{ui_server,model_hub_client}.py",
+        "tests/test_model_hub_api.py",
+        "ui/src/components/settings/models/{modelsApi.ts,OAuthConnectDialog.tsx,apiFailure.test.ts,oauthResult.test.ts}",
+    ):
+        assert path in ac_53
+    assert "After K4 and #1312 merge" in ac_53
+    assert "After K4 merges, K5 round 2" in ac_53
+    assert "After\nthat K5 round and the I7 payload fixtures freeze" in ac_53
+    assert "same-error/no-gap negative fixture" in ac_53
 
 
 def test_model_hub_config_round_trip_and_serializer_completeness(monkeypatch, tmp_path):

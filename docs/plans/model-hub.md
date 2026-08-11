@@ -303,6 +303,27 @@ new user action uses a new nonce. Source-create and OAuth-start correlation ther
 share D-36's rule: reconciliation is possible only when the client held the subject
 correlation before sending.
 
+**OAuth terminal response and materialization-error matrix (authoritative and exhaustive;
+PM ruling 2026-08-12 01:28).** This matrix governs status/submit settlement.
+`interrupted_pairs` uses the existing `SupplyGap` shape and reports a persisted effect
+that already happened; it is never a refusal plan and never aliases `would_interrupt`.
+
+| Decision | Flow/service condition | HTTP/API result | `interrupted_pairs` | First consumer |
+| --- | --- | --- | --- | --- |
+| `oauth_terminal.flow_only` | flow is non-terminal, or the adapter terminal is `failed` or `cancelled` without a local materialization error | successful `{flow}` | absent | OAuth poll/submit state machine |
+| `oauth_terminal.create_success` | terminal create succeeds and its Source materializes | `{flow, source, added_to, adopted_by}` | absent | Add Subscription completion |
+| `oauth_terminal.reauth_success` | terminal re-auth succeeds and its existing Source materializes | `{flow, source, recovered, interrupted_pairs}` | present as the complete report; may be empty | repair completion UI |
+| `oauth_terminal.materialization_interrupted` | local terminal materialization fails after an acquisition-stage Source mutation has already left at least one sibling `(backend, model_id)` without supply | standard error envelope with the existing materialization error, no `flow`, and the exact nonempty report | present and nonempty | re-auth failure gap report and Source-list refetch |
+| `oauth_terminal.materialization_plain_error` | local terminal materialization fails before any such interruption, or its exact report is empty | standard error envelope with the existing materialization error and no `flow` | absent, never an empty placeholder | ordinary OAuth failure rendering and Source-list refetch |
+
+The same materialization error code can enter either error row; the deciding fact is the
+persisted acquisition-stage route impact, not the error name. In particular, native
+re-auth discovery failure after the Source has been cleared and marked unavailable
+enters `oauth_terminal.materialization_interrupted` only when the computed report is
+nonempty. Create materialization and re-auth failures with no stranded sibling enter the
+plain-error row. No later Source read can reconstruct the historical report, so the
+error envelope carries it exactly once.
+
 **Protocol observation (owner ruling 2026-08-09, superseding AC-27's 2026-08-07
 manual-choice ruling).** Every stored `protocol` is traceable to a real response from
 that upstream before Save. Avibe never infers the value from vendor name or Base URL;
