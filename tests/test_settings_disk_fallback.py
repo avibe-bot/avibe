@@ -511,6 +511,56 @@ def test_claude_settings_json_takes_precedence_over_legacy_v2config(
     assert state["settings_conflict"] is False
 
 
+def test_save_claude_auth_blocks_recovery_before_external_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vibe import api
+
+    fake_config = type("Config", (), {"load_warnings": ("recovery required",)})()
+    monkeypatch.setattr(api, "load_config", lambda: fake_config)
+    applied: list[dict] = []
+    monkeypatch.setattr(
+        "vibe.claude_config.apply_claude_auth",
+        lambda **kwargs: applied.append(kwargs),
+    )
+
+    result = api.save_claude_auth(
+        {
+            "auth_mode": "api_key",
+            "api_key": "sk-new",
+            "credential_type": "api_key",
+            "base_url": "https://example.invalid",
+        }
+    )
+
+    assert result["ok"] is False
+    assert "recovery warnings" in result["message"]
+    assert applied == []
+
+
+def test_remove_claude_api_key_blocks_recovery_before_external_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vibe import api
+
+    fake_config = type("Config", (), {"load_warnings": ("recovery required",)})()
+    monkeypatch.setattr(api, "load_config", lambda: fake_config)
+    applied: list[dict] = []
+    monkeypatch.setattr(
+        "vibe.claude_config.apply_claude_auth",
+        lambda **kwargs: applied.append(kwargs),
+    )
+
+    result = api.remove_backend_api_key("claude")
+
+    assert result == {
+        "ok": False,
+        "error": "config_recovery",
+        "message": "Config was loaded with recovery warnings; repair the backed-up config before changing backend credentials",
+    }
+    assert applied == []
+
+
 def test_save_claude_explicit_auth_token_clears_v2_secret(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

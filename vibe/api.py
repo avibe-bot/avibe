@@ -671,6 +671,22 @@ def load_config() -> V2Config:
     return V2Config.load()
 
 
+def _config_recovery_message() -> Optional[str]:
+    """Return a stable guard message before mutating backend-owned auth files."""
+
+    with CONFIG_LOCK:
+        try:
+            config = load_config()
+        except FileNotFoundError:
+            return None
+    if getattr(config, "load_warnings", ()):
+        return (
+            "Config was loaded with recovery warnings; repair the backed-up "
+            "config before changing backend credentials"
+        )
+    return None
+
+
 def _deep_merge_dicts(base: dict, patch: dict) -> dict:
     merged = dict(base)
     for key, value in patch.items():
@@ -8984,6 +9000,9 @@ def remove_backend_api_key(backend: str) -> dict:
     backend = (backend or "").strip().lower()
     if backend not in {"claude", "codex"}:
         return {"ok": False, "error": "unsupported_backend"}
+    recovery_message = _config_recovery_message()
+    if recovery_message:
+        return {"ok": False, "error": "config_recovery", "message": recovery_message}
 
     notices: list = []
     if backend == "codex":
@@ -9241,6 +9260,10 @@ def save_codex_auth(payload: dict) -> dict:
         base_url_change = raw_base_url.strip() if isinstance(raw_base_url, str) else None
         if base_url_change == "":
             base_url_change = None
+
+    recovery_message = _config_recovery_message()
+    if recovery_message:
+        return {"ok": False, "message": recovery_message}
 
     if auth_mode == "api_key" and not api_key:
         # Allow callers to PATCH base_url alone by reusing the stored key.
@@ -9510,6 +9533,10 @@ def save_claude_auth(payload: dict) -> dict:
         base_url_change = raw_base_url.strip() if isinstance(raw_base_url, str) else None
         if base_url_change == "":
             base_url_change = None
+
+    recovery_message = _config_recovery_message()
+    if recovery_message:
+        return {"ok": False, "message": recovery_message}
 
     settings_env: dict[str, str] = {}
     existing_credential_type: str | None = None

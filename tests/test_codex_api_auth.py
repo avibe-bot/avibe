@@ -113,3 +113,40 @@ def test_save_codex_auth_falls_back_to_v2config_when_disk_empty(
 
     auth = json.loads((tmp_path / ".codex" / "auth.json").read_text(encoding="utf-8"))
     assert auth["OPENAI_API_KEY"] == "sk-from-cache"
+
+
+def test_save_codex_auth_blocks_recovery_before_external_mutation(monkeypatch) -> None:
+    fake_config = types.SimpleNamespace(load_warnings=("recovery required",))
+    monkeypatch.setattr(api, "load_config", lambda: fake_config)
+    applied: list[dict] = []
+    monkeypatch.setattr(
+        "vibe.codex_config.apply_codex_auth",
+        lambda **kwargs: applied.append(kwargs),
+    )
+
+    result = api.save_codex_auth(
+        {"auth_mode": "api_key", "api_key": "sk-new", "base_url": "https://example.invalid"}
+    )
+
+    assert result["ok"] is False
+    assert "recovery warnings" in result["message"]
+    assert applied == []
+
+
+def test_remove_codex_api_key_blocks_recovery_before_external_mutation(monkeypatch) -> None:
+    fake_config = types.SimpleNamespace(load_warnings=("recovery required",))
+    monkeypatch.setattr(api, "load_config", lambda: fake_config)
+    applied: list[dict] = []
+    monkeypatch.setattr(
+        "vibe.codex_config.apply_codex_auth",
+        lambda **kwargs: applied.append(kwargs),
+    )
+
+    result = api.remove_backend_api_key("codex")
+
+    assert result == {
+        "ok": False,
+        "error": "config_recovery",
+        "message": "Config was loaded with recovery warnings; repair the backed-up config before changing backend credentials",
+    }
+    assert applied == []

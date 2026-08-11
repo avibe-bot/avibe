@@ -905,6 +905,42 @@ def test_config_reload_recovers_invalid_platform_metadata_only(monkeypatch, tmp_
     assert config_path.read_text(encoding="utf-8") == original
 
 
+@pytest.mark.parametrize(
+    ("platform", "invalid_fields"),
+    [
+        ("slack", {"bot_token": "invalid"}),
+        ("discord", {"thread_auto_archive_minutes": 1}),
+        ("telegram", {"bot_token": "invalid"}),
+        ("lark", {"domain": "invalid"}),
+    ],
+)
+def test_config_reload_recovers_invalid_platform_adapter_only(
+    monkeypatch,
+    tmp_path,
+    platform,
+    invalid_fields,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    payload = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    payload["show_duration"] = True
+    payload["platform"] = platform
+    payload["platforms"] = {"enabled": [platform], "primary": platform}
+    platform_payload = dict(payload.get(platform) or {})
+    platform_payload.update(invalid_fields)
+    payload[platform] = platform_payload
+    config_path = tmp_path / f"{platform}-adapter.json"
+    original = json.dumps(payload)
+    config_path.write_text(original, encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert loaded.show_duration is True
+    assert loaded.platforms.enabled == []
+    assert loaded.platform == "avibe"
+    assert loaded.load_warnings and platform in loaded.load_warnings[0]
+    assert config_path.read_text(encoding="utf-8") == original
+
+
 def test_backup_deduplication_repairs_permissions(tmp_path):
     config_path = tmp_path / "config.json"
     content = b"sensitive config"
@@ -933,6 +969,29 @@ def test_config_reload_does_not_replace_file_when_migration_backup_fails(monkeyp
     assert loaded.model_hub.to_payload() != payload["model_hub"]
     assert config_path.read_text(encoding="utf-8") == original
     assert loaded.load_warnings and "could not be backed up" in loaded.load_warnings[0]
+
+
+def test_config_reload_recovery_backs_up_original_snapshot(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    payload = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    payload["model_hub"] = {"sources": "invalid", "agents": {}}
+    config_path = tmp_path / "config.json"
+    original = json.dumps(payload).encode("utf-8")
+    config_path.write_bytes(original)
+    original_backup = v2_config._backup_config_file
+
+    def replace_before_backup(path, label, *, content=None):
+        path.write_text(json.dumps(api.config_to_payload(default_config())), encoding="utf-8")
+        return original_backup(path, label, content=content)
+
+    monkeypatch.setattr(v2_config, "_backup_config_file", replace_before_backup)
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert loaded.load_warnings
+    backups = list(config_path.parent.glob("config.json.bak-recovery-*"))
+    assert len(backups) == 1
+    assert backups[0].read_bytes() == original
 
 
 def test_config_reload_migrates_legacy_mapping_to_exact_route_hop(monkeypatch, tmp_path):

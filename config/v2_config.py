@@ -568,6 +568,9 @@ def _recovery_section_for_error(error: BaseException) -> Optional[str]:
     lowered = message.lower()
     if "unsupported enabled platform" in lowered:
         return "platforms"
+    for platform_id in supported_platform_ids():
+        if f"invalid {platform_id.lower()}" in lowered:
+            return platform_id
     if any(
         marker in lowered
         for marker in (
@@ -2197,7 +2200,7 @@ class V2Config:
                 logger.info("Migrated Model Hub config in place (backup=%s)", backup)
         elif migration_warnings or recovery_warnings:
             label = "model-hub-migration" if migration_warnings and not recovery_warnings else "recovery"
-            backup = _backup_config_file(path, label)
+            backup = _backup_config_file(path, label, content=raw_bytes)
             logger.warning(
                 "Started with a recovered config; original file preserved at %s",
                 backup,
