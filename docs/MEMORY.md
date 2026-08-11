@@ -85,8 +85,15 @@ finish before starting another one.
    artifact, original Avibe chats, and data outside those two roots. If engine
    or sidecar activation fails after deletion, the old contents under `memory`
    and `state/memory` stay deleted, but construction of the fresh runtime may
-   have recreated empty or partial roots. Memory stays fenced and unavailable.
-   Fix the runtime problem, then select **Retry factory reset**.
+   have recreated empty or partial roots. Factory reset reports a terminal
+   result for each root independently, so a partial-delete result can show one
+   root deleted while the other is retained or reports a deletion error; read
+   each root's outcome independently rather than as a clean reset.
+   Memory stays fenced and unavailable while the factory-reset recovery intent
+   is pending.
+   Correct the filesystem or reported cause, then select **Retry factory reset**.
+   Retry is idempotent: it continues any remaining deletion while preserving
+   the truthful outcome reported for each root.
 
 ### Factory reset
 
