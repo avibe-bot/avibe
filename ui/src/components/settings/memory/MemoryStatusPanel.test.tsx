@@ -110,6 +110,18 @@ describe('MemoryStatusPanel', () => {
     expect(screen.getByRole('button', { name: 'memory.processingRecord.repair.action' })).toBeTruthy();
   });
 
+  it('places Repair beside the Cascade subsection', () => {
+    render(<MemoryStatusPanel {...baseProps} repairSupported />);
+
+    const cascadeLabel = screen.getByText('memory.processingRecord.runtime.cascade');
+    const repairButton = screen.getByRole('button', { name: 'memory.processingRecord.repair.action' });
+    const cascadeHeader = cascadeLabel.parentElement?.parentElement;
+    const runtimeHeader = screen.getByText('memory.processingRecord.runtime.title').parentElement;
+
+    expect(cascadeHeader?.contains(repairButton)).toBe(true);
+    expect(runtimeHeader?.contains(repairButton)).toBe(false);
+  });
+
   it('keeps Repair reachable when the processing health projection is unavailable', () => {
     render(<MemoryStatusPanel {...baseProps} status={null} statusError="health failed" repairSupported />);
     expect(screen.getByRole('button', { name: 'memory.processingRecord.repair.action' })).toBeTruthy();

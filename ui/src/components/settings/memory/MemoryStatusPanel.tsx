@@ -260,6 +260,20 @@ export const MemoryStatusPanel: React.FC<{
     { key: 'capture', label: t('memory.log.section.capture'), value: logSections?.capture ?? emptySource },
     { key: 'calls', label: t('memory.log.section.calls'), value: logSections?.calls ?? emptySource },
   ];
+  const repairButton = repairSupported ? (
+    <Button
+      className={!health ? 'ml-auto' : undefined}
+      variant="secondary"
+      size="xs"
+      disabled={repairBusy || mutationBusy}
+      onClick={() => setRepairConfirmOpen(true)}
+    >
+      {repairBusy ? <Loader2 className="animate-spin" /> : <RefreshCw />}
+      {repairBusy
+        ? t('memory.processingRecord.repair.running')
+        : t('memory.processingRecord.repair.action')}
+    </Button>
+  ) : null;
 
   return (
     <>
@@ -285,20 +299,7 @@ export const MemoryStatusPanel: React.FC<{
             label={t('memory.processingRecord.runtime.helpLabel')}
             content={t('memory.processingRecord.runtime.help')}
           />
-          {repairSupported ? (
-            <Button
-              className="ml-auto"
-              variant="secondary"
-              size="xs"
-              disabled={repairBusy || mutationBusy}
-              onClick={() => setRepairConfirmOpen(true)}
-            >
-              {repairBusy ? <Loader2 className="animate-spin" /> : <RefreshCw />}
-              {repairBusy
-                ? t('memory.processingRecord.repair.running')
-                : t('memory.processingRecord.repair.action')}
-            </Button>
-          ) : null}
+          {!health ? repairButton : null}
         </div>
         <Card>
           <CardContent className="flex flex-col gap-4 py-4">
@@ -365,6 +366,7 @@ export const MemoryStatusPanel: React.FC<{
                             content={t('memory.processingRecord.runtime.cascadeHelp')}
                           />
                         </div>
+                        {repairButton}
                       </div>
                       <FactList
                         facts={health.cascade}
