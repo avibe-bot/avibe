@@ -3918,9 +3918,38 @@ def test_run_watch_enqueues_the_branch_hook_when_the_result_stamp_lands(tmp_path
     reached at all. Here the same wiring, minus the reclaim, must enqueue exactly one
     hook carrying that branch's own text.
     """
-    _store, service, watch, request_store, _session_id, calls = _hook_branch_service(tmp_path, branch)
+    store, service, watch, request_store, _session_id, calls = _hook_branch_service(tmp_path, branch)
 
-    asyncio.run(service._run_watch(watch.id))
+    async def _run() -> None:
+        if branch != "lifetime_expiry":
+            await service._run_watch(watch.id)
+            return
+
+        # The lifetime now begins when the Watch is created, so a tiny real-time
+        # deadline can expire during fixture setup on a busy CI runner. Hold a wide
+        # deadline until the retry result has landed, then expire it from the exact
+        # monotonic origin that _run_watch is using.
+        watch.lifetime_timeout_seconds = 60
+        store.upsert_watch(watch)
+        cycle_completed = asyncio.Event()
+        release_cycle = asyncio.Event()
+
+        async def _expire_after_completed_cycle(watch_arg, *, lifetime_started):  # noqa: ANN001
+            cycle_completed.set()
+            await release_cycle.wait()
+            watch_arg.lifetime_timeout_seconds = max(
+                asyncio.get_running_loop().time() - lifetime_started,
+                sys.float_info.min,
+            )
+            store.upsert_watch(watch_arg)
+
+        service._sleep_before_retry = _expire_after_completed_cycle  # type: ignore[method-assign]
+        task = asyncio.create_task(service._run_watch(watch.id))
+        await asyncio.wait_for(cycle_completed.wait(), timeout=2)
+        release_cycle.set()
+        await asyncio.wait_for(task, timeout=2)
+
+    asyncio.run(_run())
 
     _assert_branch_was_reached(branch, calls)
     pending = request_store.list_pending()
