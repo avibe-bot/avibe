@@ -21,6 +21,8 @@ EXPECTED_PLATFORMS = {
     "linux-arm64",
     "linux-x64",
 }
+SYNC_BOOTSTRAP_REVISION = 1
+SYNC_ARGV = ["-I", "-m", "everos.entrypoints.cli.main", "cascade", "sync"]
 
 
 def _sha256(path: Path) -> str:
@@ -29,6 +31,14 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: file.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _valid_sha256(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
 
 
 def _platform_from_archive(path: Path) -> str:
@@ -99,6 +109,21 @@ def build_manifest(*, archive_dir: Path, tag: str, repo: str, output: Path) -> d
             "size": size,
             "bin_path": BIN_PATH,
         }
+        if "sync_bootstrap_sha256" in metadata:
+            if not _valid_sha256(metadata.get("sync_bootstrap_sha256")) or not _valid_sha256(
+                metadata.get("sync_scrubbers_sha256")
+            ):
+                raise SystemExit(
+                    f"Memory Runtime sync build metadata is invalid: {metadata_path.name}"
+                )
+            expected_metadata.update(
+                {
+                    "sync_bootstrap_revision": SYNC_BOOTSTRAP_REVISION,
+                    "sync_bootstrap_sha256": metadata["sync_bootstrap_sha256"],
+                    "sync_scrubbers_sha256": metadata.get("sync_scrubbers_sha256"),
+                    "sync_argv": SYNC_ARGV,
+                }
+            )
         if metadata != expected_metadata:
             raise SystemExit(f"Memory Runtime build metadata mismatch: {metadata_path.name}")
         if size > MAX_ARCHIVE_BYTES:
@@ -116,6 +141,24 @@ def build_manifest(*, archive_dir: Path, tag: str, repo: str, output: Path) -> d
     if missing:
         raise SystemExit("Missing Memory Runtime archives: " + ", ".join(missing))
 
+    bootstrap_values = {
+        json.loads(
+            archive.with_suffix("").with_suffix(".json").read_text(encoding="utf-8")
+        ).get("sync_bootstrap_sha256")
+        for archive in archive_dir.glob(f"{ARCHIVE_PREFIX}*{ARCHIVE_SUFFIX}")
+    }
+    scrubber_values = {
+        json.loads(
+            archive.with_suffix("").with_suffix(".json").read_text(encoding="utf-8")
+        ).get("sync_scrubbers_sha256")
+        for archive in archive_dir.glob(f"{ARCHIVE_PREFIX}*{ARCHIVE_SUFFIX}")
+    }
+    sync_contract = (
+        len(bootstrap_values) == 1
+        and None not in bootstrap_values
+        and len(scrubber_values) == 1
+        and None not in scrubber_values
+    )
     manifest = {
         "schema_version": 1,
         "everos_version": EVEROS_VERSION,
@@ -131,6 +174,15 @@ def build_manifest(*, archive_dir: Path, tag: str, repo: str, output: Path) -> d
         "compatible_provider_root_formats": [],
         "archives": archives,
     }
+    if sync_contract:
+        manifest.update(
+            {
+                "sync_bootstrap_revision": SYNC_BOOTSTRAP_REVISION,
+                "sync_argv": SYNC_ARGV,
+                "sync_bootstrap_sha256": next(iter(bootstrap_values)),
+                "sync_scrubbers_sha256": next(iter(scrubber_values)),
+            }
+        )
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return manifest

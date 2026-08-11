@@ -22,6 +22,8 @@ EXPECTED_PYTHON_VERSION = "3.12.12"
 EXPECTED_LOCK_SHA256 = "e6acc17e4c0969563d380326e90134965af0822259bb4a9adb4d54433e9737fe"
 EXPECTED_UV_VERSION = "0.9.18"
 EXPECTED_PLATFORMS = frozenset({"darwin-arm64", "linux-arm64", "linux-x64"})
+EXPECTED_SYNC_BOOTSTRAP_REVISION = 1
+EXPECTED_SYNC_ARGV = ["-I", "-m", "everos.entrypoints.cli.main", "cascade", "sync"]
 MAX_ARCHIVE_BYTES = 1024 * 1024 * 1024
 
 
@@ -67,6 +69,8 @@ class ReleaseSpec:
     manifest_bytes: bytes
     release_tag: str
     archives: tuple[ArchiveSpec, ...]
+    sync_bootstrap_sha256: str | None = None
+    sync_scrubbers_sha256: str | None = None
 
     @property
     def expected_asset_names(self) -> set[str]:
@@ -111,6 +115,27 @@ def load_release_spec(manifest_path: Path) -> ReleaseSpec:
         or payload.get("uv_version") != provenance.uv_version
     ):
         raise ReleaseGuardError("Memory Runtime manifest provenance is invalid")
+    sync_revision = payload.get("sync_bootstrap_revision")
+    sync_argv = payload.get("sync_argv")
+    sync_digest = payload.get("sync_bootstrap_sha256")
+    sync_scrubbers_digest = payload.get("sync_scrubbers_sha256")
+    if (
+        sync_revision is not None
+        or sync_argv is not None
+        or sync_digest is not None
+        or sync_scrubbers_digest is not None
+    ):
+        if (
+            sync_revision != EXPECTED_SYNC_BOOTSTRAP_REVISION
+            or sync_argv != EXPECTED_SYNC_ARGV
+            or not isinstance(sync_digest, str)
+            or len(sync_digest) != 64
+            or any(character not in "0123456789abcdef" for character in sync_digest)
+            or not isinstance(sync_scrubbers_digest, str)
+            or len(sync_scrubbers_digest) != 64
+            or any(character not in "0123456789abcdef" for character in sync_scrubbers_digest)
+        ):
+            raise ReleaseGuardError("Memory Runtime sync bootstrap contract is invalid")
 
     release_tag = _required_string(payload, "release_tag", "manifest")
     release_root = f"{RELEASE_DOWNLOAD_ROOT}/{release_tag}"
@@ -141,7 +166,13 @@ def load_release_spec(manifest_path: Path) -> ReleaseSpec:
         if Path(bin_path).is_absolute() or ".." in Path(bin_path).parts:
             raise ReleaseGuardError(f"{context}.bin_path is unsafe")
         archives.append(ArchiveSpec(platform, name, url, sha256, binary_sha256, size, bin_path))
-    return ReleaseSpec(manifest_bytes=manifest_bytes, release_tag=release_tag, archives=tuple(archives))
+    return ReleaseSpec(
+        manifest_bytes=manifest_bytes,
+        release_tag=release_tag,
+        archives=tuple(archives),
+        sync_bootstrap_sha256=sync_digest,
+        sync_scrubbers_sha256=sync_scrubbers_digest,
+    )
 
 
 def verify_release_assets(manifest_path: Path, asset_dir: Path) -> ReleaseSpec:
@@ -168,11 +199,42 @@ def verify_release_assets(manifest_path: Path, asset_dir: Path) -> ReleaseSpec:
                 member = bundle.getmember(archive.bin_path)
                 binary = bundle.extractfile(member)
                 digest = hashlib.sha256(binary.read()).hexdigest() if binary is not None and member.isfile() else ""
+                if spec.sync_bootstrap_sha256 is not None:
+                    bootstrap_digest = _archive_member_sha256(
+                        bundle,
+                        "lib/python3.12/site-packages/avibe_memory_sync_bootstrap.py",
+                    )
+                    scrubbers_digest = _archive_member_sha256(
+                        bundle,
+                        "lib/python3.12/site-packages/avibe_memory_sync_scrubbers.py",
+                    )
+                    marker = bundle.extractfile(
+                        bundle.getmember(
+                            "lib/python3.12/site-packages/avibe_memory_sync_bootstrap.pth"
+                        )
+                    )
+                    if (
+                        bootstrap_digest != spec.sync_bootstrap_sha256
+                        or scrubbers_digest != spec.sync_scrubbers_sha256
+                        or marker is None
+                        or marker.read() != b"import avibe_memory_sync_bootstrap\n"
+                    ):
+                        raise ReleaseGuardError(
+                            f"Memory Runtime sync contract mismatch: {archive.name}"
+                        )
         except (KeyError, OSError, tarfile.TarError) as exc:
             raise ReleaseGuardError(f"invalid Memory Runtime archive: {archive.name}") from exc
         if digest != archive.binary_sha256:
             raise ReleaseGuardError(f"Memory Runtime binary integrity mismatch: {archive.name}")
     return spec
+
+
+def _archive_member_sha256(bundle: tarfile.TarFile, name: str) -> str:
+    member = bundle.getmember(name)
+    stream = bundle.extractfile(member)
+    if stream is None or not member.isfile():
+        return ""
+    return hashlib.sha256(stream.read()).hexdigest()
 
 
 def _download(url: str, destination: Path, expected_size: int, attempts: int = 3) -> None:

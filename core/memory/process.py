@@ -88,11 +88,13 @@ class _ProcessKind(Enum):
     SIDECAR = "sidecar"
     PROCESSING_PROBE = "processing_probe"
     CASCADE_REBUILD = "cascade_rebuild"
+    CASCADE_SYNC = "cascade_sync"
 
 
 class _MemoryChildRole(Enum):
     SIDECAR = "sidecar"
     CASCADE_REBUILD = "cascade_rebuild"
+    CASCADE_SYNC = "cascade_sync"
 
 
 class RebuildProcessResult(str, Enum):
@@ -2749,6 +2751,14 @@ def _cmdline_matches_role(
             "--uds",
             str(socket_path),
         )
+    if role is _MemoryChildRole.CASCADE_SYNC:
+        return cmdline[1:] == (
+            "-I",
+            "-m",
+            "everos.entrypoints.cli.main",
+            "cascade",
+            "sync",
+        )
     return cmdline[1:] == (
         "-m",
         _REBUILD_ENTRYPOINT_MODULE,
@@ -2995,6 +3005,56 @@ def _processes_rebuilding_owned_root(
             )
             or environment.get("AVIBE_MEMORY_CHILD_ROLE")
             != _MemoryChildRole.CASCADE_REBUILD.value
+        ):
+            continue
+        claimed[candidate.pid] = float(created_at)
+    return claimed
+
+
+def _processes_syncing_owned_root(
+    *,
+    provider_root: Path,
+    python: Path,
+    nonce: str,
+) -> dict[int, float]:
+    """Discover the exact nonce-bearing sync child for pending recovery."""
+
+    claimed: dict[int, float] = {}
+    own_pid = os.getpid()
+    getuid = getattr(os, "getuid", None)
+    own_uid = getuid() if callable(getuid) else None
+    for candidate in psutil.process_iter():
+        if candidate.pid == own_pid:
+            continue
+        try:
+            uid = _process_real_uid(candidate)
+            cmdline = _disclosed_identity_field(candidate.cmdline)
+            created_at = _disclosed_identity_field(candidate.create_time)
+            environment = _disclosed_process_environment(candidate)
+        except (psutil.NoSuchProcess, psutil.Error):
+            continue
+        if cmdline is None:
+            continue
+        rendered = tuple(str(value) for value in cmdline)
+        if not _cmdline_matches_role(
+            rendered,
+            role=_MemoryChildRole.CASCADE_SYNC,
+            socket_path=Path(),
+            python=python,
+        ):
+            continue
+        if (
+            (own_uid is not None and uid != own_uid)
+            or created_at is None
+            or environment is None
+        ):
+            raise RuntimeError(
+                f"sync child identity could not be verified (pid {candidate.pid})"
+            )
+        if (
+            not _provider_roots_match(environment.get("EVEROS_ROOT"), provider_root)
+            or environment.get("AVIBE_MEMORY_CHILD_ROLE") != _MemoryChildRole.CASCADE_SYNC.value
+            or environment.get("AVIBE_MEMORY_SYNC_NONCE") != nonce
         ):
             continue
         claimed[candidate.pid] = float(created_at)
@@ -3349,6 +3409,15 @@ class _SystemProcessHost:
                 "rebuild",
                 "--yes",
             ]
+        elif kind is _ProcessKind.CASCADE_SYNC:
+            arguments = [
+                str(python),
+                "-I",
+                "-m",
+                "everos.entrypoints.cli.main",
+                "cascade",
+                "sync",
+            ]
         else:
             arguments = [str(python), "-m", _SIDECAR_ENTRYPOINT_MODULE]
         if kind is _ProcessKind.SIDECAR:
@@ -3406,6 +3475,19 @@ class _SystemProcessHost:
         return _processes_rebuilding_owned_root(
             provider_root=provider_root,
             python=python,
+        )
+
+    def find_syncs(
+        self,
+        *,
+        provider_root: Path,
+        python: Path,
+        nonce: str,
+    ) -> dict[int, float]:
+        return _processes_syncing_owned_root(
+            provider_root=provider_root,
+            python=python,
+            nonce=nonce,
         )
 
     def live(self, identities: Mapping[int, float]) -> dict[int, float]:
@@ -3648,3 +3730,13 @@ class FakeEverOSProcessFactory:
     @property
     def last(self) -> FakeEverOSProcess | None:
         return self.created[-1] if self.created else None
+
+
+def __getattr__(name: str) -> object:
+    """Lazily expose the auxiliary sync process without a module cycle."""
+
+    if name in {"EverOSSyncProcess", "SyncProcessResult", "sync_record_path"}:
+        from core.memory import sync_process
+
+        return getattr(sync_process, name)
+    raise AttributeError(name)
