@@ -39,6 +39,7 @@ import clsx from 'clsx';
 
 import { useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
 import { useWindowManager } from '../../context/WindowManagerContext';
+import { useStandaloneAppTab } from '../../context/StandaloneAppTabContext';
 import { isEditableFile, isEditableMeta, previewWindowKind } from '../../lib/filePreview';
 import {
   contentUrl,
@@ -206,6 +207,10 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
   const { t } = useTranslation();
   const wm = useWindowManager();
   const routerNavigate = useNavigate();
+  // A single-app browser tab (`?standalone=1`) frames the app exactly like a window body —
+  // full-bleed, no page header or card border — since the shell drops its chrome there too.
+  const standalone = useStandaloneAppTab();
+  const fullBleed = windowed || standalone;
   const { projects } = useWorkbenchProjectsTree();
   const [cwd, setCwd] = useState('');
   const [listing, setListing] = useState<FsListing | null>(null);
@@ -1322,15 +1327,15 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
     : 0;
 
   return (
-    <div className={windowed ? 'relative flex h-full w-full flex-col bg-surface' : 'relative flex h-[calc(100dvh-7rem)] min-h-[460px] flex-col gap-3 md:h-[calc(100vh-8rem)]'}>
-      {!windowed && (
+    <div className={fullBleed ? 'relative flex h-full w-full flex-col bg-surface' : 'relative flex h-[calc(100dvh-7rem)] min-h-[460px] flex-col gap-3 md:h-[calc(100vh-8rem)]'}>
+      {!fullBleed && (
         <div>
           <h1 className="text-[18px] font-semibold text-foreground">{t('apps.fileBrowser.label')}</h1>
           <p className="text-[12px] text-muted">{t('apps.fileBrowser.tagline')}</p>
         </div>
       )}
 
-      <div className={clsx('flex min-h-0 flex-1 flex-col overflow-hidden', !windowed && 'rounded-xl border border-border')}>
+      <div className={clsx('flex min-h-0 flex-1 flex-col overflow-hidden', !fullBleed && 'rounded-xl border border-border')}>
         {/* Toolbar: breadcrumb (left) + search + New File / New Folder (right) */}
         <div className="flex items-center gap-2 border-b border-border bg-surface-2/60 px-3 py-2">
           <div className="flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto">

@@ -4,6 +4,7 @@ import copy
 import json
 import re
 from dataclasses import fields
+from itertools import product
 from pathlib import Path
 from typing import NamedTuple
 
@@ -16,9 +17,9 @@ from config.v2_config import (
     ModelHubAgentSourcesConfig,
     ModelHubAgentSupplyConfig,
     ModelHubConfig,
-    ModelHubMappingConfig,
     ModelHubMenuConfig,
     ModelHubModelConfig,
+    ModelHubRouteConfig,
     ModelHubSourceConfig,
     ModelHubSourceStateConfig,
     ModelHubSourceUsageConfig,
@@ -26,12 +27,21 @@ from config.v2_config import (
     is_model_hub_enabled,
 )
 from core.services.settings import default_config
+from core.handlers.model_hub.adapter import (
+    OBSERVATION_TERMINAL_RULES,
+    ObservationDiscovery,
+    ObservationOutcome,
+    SOURCE_PROTOCOLS,
+    SourceObservation,
+    validate_source_observation,
+)
 from scripts.check_model_hub_authorities import check as check_model_hub_authorities
 from scripts.check_model_hub_ui_states import ROOT, SPEC
 from scripts.check_model_hub_ui_states import check as check_model_hub_ui_states
 from vibe import api
 
 CONTRACTS = Path("docs/plans/model-hub-contracts")
+UI_MODEL_CONSUMERS = Path("ui/src/components/settings/models")
 
 
 def _schema(name: str) -> dict:
@@ -44,6 +54,231 @@ def _assert_valid(name: str, payload: dict) -> None:
         key=lambda error: list(error.path),
     )
     assert not errors, [error.message for error in errors]
+
+
+def test_protocol_vocabulary_matches_authority_and_rejects_removed_alias():
+    protocols = tuple(_schema("source.schema.json")["properties"]["protocol"]["enum"])
+    assert SOURCE_PROTOCOLS == protocols
+
+    type_source = (UI_MODEL_CONSUMERS / "types.ts").read_text(encoding="utf-8")
+    type_match = re.search(
+        r"export type SourceProtocol\s*=\s*(.*?);",
+        type_source,
+        re.DOTALL,
+    )
+    assert type_match is not None
+    assert tuple(re.findall(r"'([^']+)'", type_match.group(1))) == protocols
+
+    retired_alias = "openai" + "_compatible"
+    for filename in (
+        "types.ts",
+        "vendorMeta.ts",
+        "modelsApi.ts",
+        "mockData.ts",
+        "modelRows.test.ts",
+    ):
+        assert retired_alias not in (UI_MODEL_CONSUMERS / filename).read_text(
+            encoding="utf-8"
+        )
+
+    example = copy.deepcopy(_schema("source.schema.json")["examples"][0])
+    example["protocol"] = retired_alias
+    with pytest.raises(ValidationError):
+        Draft7Validator(_schema("source.schema.json")).validate(example)
+    with pytest.raises(ValueError):
+        ModelHubSourceConfig.from_payload(example)
+
+
+def test_unsaved_observation_schema_closes_all_terminal_shapes():
+    schema = _schema("observation-result.schema.json")
+    assert schema["properties"]["contract_version"]["const"] == 5
+    assert tuple(schema["properties"]["outcome"]["enum"]) == tuple(
+        member.value for member in ObservationOutcome
+    )
+    assert tuple(schema["properties"]["discovery"]["enum"]) == tuple(
+        member.value for member in ObservationDiscovery
+    )
+    for example in schema["examples"]:
+        _assert_valid("observation-result.schema.json", example)
+    invalid = copy.deepcopy(schema["examples"][0])
+    invalid["protocol"] = "openai" + "_compatible"
+    with pytest.raises(ValidationError):
+        Draft7Validator(schema).validate(invalid)
+
+
+def test_observation_terminal_authority_and_schema_accept_the_same_products():
+    schema = Draft7Validator(_schema("observation-result.schema.json"))
+    reachable_domain = frozenset({True, False, None})
+    authenticated_domain = frozenset({True, False, None})
+    protocol_domain = frozenset({None, *SOURCE_PROTOCOLS})
+    discovery_domain = frozenset(ObservationDiscovery)
+
+    def payload(observation: SourceObservation) -> dict:
+        return {
+            "contract_version": 5,
+            "outcome": observation.outcome.value,
+            "reachable": observation.reachable,
+            "authenticated": (
+                "authenticated"
+                if observation.authenticated is True
+                else "rejected"
+                if observation.authenticated is False
+                else "unknown"
+            ),
+            "protocol": observation.protocol,
+            "discovery": observation.discovery.value,
+            "models": list(observation.model_ids),
+        }
+
+    assert set(OBSERVATION_TERMINAL_RULES) == set(ObservationOutcome)
+    for outcome, rule in OBSERVATION_TERMINAL_RULES.items():
+        legal_products = product(
+            rule.reachable,
+            rule.authenticated,
+            rule.protocols,
+            rule.discoveries,
+        )
+        for reachable, authenticated, protocol, discovery in legal_products:
+            observation = SourceObservation(
+                outcome=outcome,
+                reachable=reachable,
+                authenticated=authenticated,
+                protocol=protocol,
+                discovery=discovery,
+                model_ids=(),
+            )
+            assert validate_source_observation(observation) is observation
+            schema.validate(payload(observation))
+
+        baseline = SourceObservation(
+            outcome=outcome,
+            reachable=next(iter(rule.reachable)),
+            authenticated=next(iter(rule.authenticated)),
+            protocol=next(iter(rule.protocols)),
+            discovery=next(iter(rule.discoveries)),
+            model_ids=(),
+        )
+        invalid_fields = {
+            "reachable": reachable_domain - rule.reachable,
+            "authenticated": authenticated_domain - rule.authenticated,
+            "protocol": protocol_domain - rule.protocols,
+            "discovery": discovery_domain - rule.discoveries,
+        }
+        for field_name, rejected_values in invalid_fields.items():
+            for rejected in rejected_values:
+                invalid_observation = SourceObservation(
+                    **{**baseline.__dict__, field_name: rejected}
+                )
+                with pytest.raises(ValueError):
+                    validate_source_observation(invalid_observation)
+                with pytest.raises(ValidationError):
+                    schema.validate(payload(invalid_observation))
+
+        if rule.models_must_be_empty:
+            invalid_inventory = SourceObservation(
+                **{**baseline.__dict__, "model_ids": ("model-id",)}
+            )
+            with pytest.raises(ValueError):
+                validate_source_observation(invalid_inventory)
+            with pytest.raises(ValidationError):
+                schema.validate(payload(invalid_inventory))
+        else:
+            succeeded = SourceObservation(
+                **{
+                    **baseline.__dict__,
+                    "discovery": ObservationDiscovery.SUCCEEDED,
+                    "model_ids": ("model-id",),
+                }
+            )
+            assert validate_source_observation(succeeded) is succeeded
+            schema.validate(payload(succeeded))
+            failed_with_inventory = SourceObservation(
+                **{
+                    **baseline.__dict__,
+                    "discovery": ObservationDiscovery.FAILED,
+                    "model_ids": ("model-id",),
+                }
+            )
+            with pytest.raises(ValueError):
+                validate_source_observation(failed_with_inventory)
+            with pytest.raises(ValidationError):
+                schema.validate(payload(failed_with_inventory))
+
+
+def test_final_model_validator_requires_explicit_credential_free_efforts():
+    example = copy.deepcopy(_schema("source.schema.json")["examples"][0]["models"][0])
+    example.pop("reasoning_efforts")
+    with pytest.raises(ValueError):
+        ModelHubModelConfig.from_payload(example)
+    example["reasoning_efforts"] = ["authorization: sk-test-credential-material"]
+    with pytest.raises(ValueError):
+        ModelHubModelConfig.from_payload(example)
+
+
+def test_source_validator_enforces_final_cross_field_and_inventory_rules():
+    native = copy.deepcopy(_schema("source.schema.json")["examples"][0])
+    native["models"] = [native["models"][0], copy.deepcopy(native["models"][0])]
+    with pytest.raises(ValueError):
+        ModelHubSourceConfig.from_payload(native)
+
+    manual = copy.deepcopy(_schema("source.schema.json")["examples"][1])
+    manual["models"][0]["discovered_at"] = "2026-08-09T00:00:00Z"
+    with pytest.raises(ValueError):
+        ModelHubSourceConfig.from_payload(manual)
+
+    hub_without_ref = copy.deepcopy(_schema("source.schema.json")["examples"][1])
+    hub_without_ref["credential_ref"] = None
+    with pytest.raises(ValueError):
+        ModelHubSourceConfig.from_payload(hub_without_ref)
+
+    duplicate_native = ModelHubConfig().to_payload()
+    native_example = copy.deepcopy(_schema("source.schema.json")["examples"][0])
+    duplicate_native["sources"] = [native_example, {**native_example, "id": "src_claudepro2"}]
+    with pytest.raises(ValueError):
+        ModelHubConfig.from_payload(duplicate_native)
+
+    credential_url = copy.deepcopy(_schema("source.schema.json")["examples"][1])
+    credential_url["base_url"] = "https://relay.example/v1?api_key=secret"
+    with pytest.raises(ValueError):
+        ModelHubSourceConfig.from_payload(credential_url)
+
+    safe_query_url = copy.deepcopy(_schema("source.schema.json")["examples"][1])
+    safe_query_url["base_url"] = "https://relay.example/v1/?api-version=2026-07-23"
+    canonical_vendor = copy.deepcopy(safe_query_url)
+    canonical_vendor["vendor"] = " OpenAI "
+    assert ModelHubSourceConfig.from_payload(canonical_vendor).vendor == "openai"
+    parsed = ModelHubSourceConfig.from_payload(safe_query_url)
+    assert parsed.base_url == "https://relay.example/v1?api-version=2026-07-23"
+
+
+def test_persisted_model_hub_identifiers_share_the_canonical_validation_boundary():
+    payload = ModelHubConfig().to_payload()
+    opencode = payload["agents"]["opencode"]
+    opencode["menu"]["checked"] = ["gpt-5"]
+    opencode["routes"]["gpt-5"] = {"hops": []}
+    with pytest.raises(ValueError):
+        ModelHubConfig.from_payload(payload)
+
+    payload = ModelHubConfig().to_payload()
+    opencode = payload["agents"]["opencode"]
+    opencode["routes"]["custom/authorization: sk-test-credential-material"] = {
+        "hops": []
+    }
+    with pytest.raises(ValueError):
+        ModelHubConfig.from_payload(payload)
+
+    payload = ModelHubConfig().to_payload()
+    source = copy.deepcopy(_schema("source.schema.json")["examples"][1])
+    payload["sources"] = [source]
+    codex_route = next(iter(payload["agents"]["codex"]["routes"].values()))
+    codex_route["hops"] = [
+        {
+            "source_id": source["id"],
+            "model_id": "authorization: sk-test-credential-material",
+        }
+    ]
+    with pytest.raises(ValueError):
+        ModelHubConfig.from_payload(payload)
 
 
 def _canonical(payload: dict) -> bytes:
@@ -172,24 +407,28 @@ def test_frozen_source_and_agent_examples_round_trip_byte_faithfully():
         assert _canonical(serialized) == _canonical(expected)
         _assert_valid("source.schema.json", serialized)
 
-    for example in _schema("agent-supply.schema.json")["examples"]:
+    for raw_example in _schema("agent-supply.schema.json")["examples"]:
+        example = {
+            key: value
+            for key, value in raw_example.items()
+            if key not in {"builtin_models", "standard_vendors"}
+        }
         agent = ModelHubAgentSupplyConfig.from_payload(example)
         # `builtin_models` and `standard_vendors` are read-only endpoint
         # projections (v1.2), not persisted config — reconstruct them
         # the way `_agent_payload` merges them onto to_payload().
         serialized = {
             **agent.to_payload(),
-            "builtin_models": example.get("builtin_models"),
-            "standard_vendors": example.get("standard_vendors"),
+            "builtin_models": raw_example.get("builtin_models"),
+            "standard_vendors": raw_example.get("standard_vendors"),
         }
-        # AgentSupply is the API projection; the dormant pre-I1 config object
-        # still carries its old mapping list behind the default-off gate.
-        serialized.pop("mappings", None)
-        if "sources" not in example:
+        if "routes" not in raw_example:
+            serialized.pop("routes", None)
+        if "sources" not in raw_example:
             serialized.pop("sources")
         else:
-            serialized["sources"]["eligibility"] = example["sources"].get("eligibility")
-        assert _canonical(serialized) == _canonical(example)
+            serialized["sources"]["eligibility"] = raw_example["sources"].get("eligibility")
+        assert _canonical(serialized) == _canonical(raw_example)
         _assert_valid("agent-supply.schema.json", serialized)
 
 
@@ -3071,42 +3310,34 @@ def test_v5_shape_amendments_reject_the_false_states_they_replace():
 
     chain_schema = _schema("agent-chain.schema.json")
     chain_validator = Draft7Validator(chain_schema)
-    native_alias = next(
-        example
-        for example in chain_schema["examples"]
-        if example["model_id"] == "claude-opus-4-5"
-        and example["chain"]
-        and example["chain"][0]["resolved_model_id"] is not None
-        and example["chain"][0]["via_mapping"] is False
-    )
-    chain_validator.validate(native_alias)
-    invalid_native_alias = copy.deepcopy(native_alias)
-    invalid_native_alias["chain"][0]["resolved_model_id"] = "glm-5.2"
+    for example in chain_schema["examples"]:
+        chain_validator.validate(example)
+    exact_hop = {
+        "contract_version": 5,
+        "backend": "claude",
+        "model_id": "claude-opus-4-6",
+        "chain": [{
+            "source_id": "src_claudepro1",
+            "model_id": "claude-opus-4-6",
+            "channel": "native_cli",
+            "health": "healthy",
+            "runnable": True,
+            "reason": None,
+            "retry_at": None,
+        }],
+        "current": {"source_id": "src_claudepro1", "model_id": "claude-opus-4-6"},
+        "supply_state": "ok",
+    }
+    chain_validator.validate(exact_hop)
+    for retired in ("via_mapping", "resolved_model_id"):
+        invalid = copy.deepcopy(exact_hop)
+        invalid["chain"][0][retired] = False if retired == "via_mapping" else "old"
+        with pytest.raises(ValidationError):
+            chain_validator.validate(invalid)
+    invalid_reason = copy.deepcopy(exact_hop)
+    invalid_reason["chain"][0]["reason"] = "invented"
     with pytest.raises(ValidationError):
-        chain_validator.validate(invalid_native_alias)
-
-    native_unavailable = copy.deepcopy(chain_schema["examples"][-1])
-    chain_validator.validate(native_unavailable)
-
-    unavailable_needs_action = copy.deepcopy(native_unavailable)
-    unavailable_needs_action["chain"][0]["health"] = "needs_action"
-    unavailable_needs_action["chain"][0]["retry_at"] = None
-    chain_validator.validate(unavailable_needs_action)
-
-    unmarked_healthy_unavailable = copy.deepcopy(chain_schema["examples"][-2])
-    unmarked_healthy_unavailable["chain"][0]["reason"] = None
-    with pytest.raises(ValidationError):
-        chain_validator.validate(unmarked_healthy_unavailable)
-
-    mislabeled_waiting = copy.deepcopy(native_unavailable)
-    mislabeled_waiting["supply_state"] = "waiting"
-    with pytest.raises(ValidationError):
-        chain_validator.validate(mislabeled_waiting)
-
-    unavailable_hub = copy.deepcopy(native_unavailable)
-    unavailable_hub["chain"][0]["channel"] = "hub"
-    with pytest.raises(ValidationError):
-        chain_validator.validate(unavailable_hub)
+        chain_validator.validate(invalid_reason)
 
     probe_schema = _schema("probe-result.schema.json")
     probe_validator = Draft7Validator(probe_schema)
@@ -3134,7 +3365,6 @@ def test_model_hub_config_round_trip_and_serializer_completeness(monkeypatch, tm
     source_example = {
         **_schema("source.schema.json")["examples"][0],
         "supply_channel": "hub",
-        "experimental_consent_at": "2026-07-23T03:00:00Z",
         "credential_ref": "cred_serializer_test",
     }
     hub_payload = {
@@ -3143,7 +3373,6 @@ def test_model_hub_config_round_trip_and_serializer_completeness(monkeypatch, tm
             backend: ModelHubAgentSupplyConfig.default(backend, mode="hub").to_payload()
             for backend in ("claude", "codex", "opencode")
         },
-        "subscription_hub_experimental": True,
     }
     config = default_config()
     config.model_hub = ModelHubConfig.from_payload(hub_payload)
@@ -3154,9 +3383,6 @@ def test_model_hub_config_round_trip_and_serializer_completeness(monkeypatch, tm
     api_payload = api.config_to_payload(loaded)
     expected_root = {field.name for field in fields(ModelHubConfig)}
     source_fields = {field.name for field in fields(ModelHubSourceConfig)}
-    # Retired consent metadata remains an internal compatibility attribute for
-    # in-memory fixtures but is intentionally absent from the final payload.
-    source_fields.discard("experimental_consent_at")
     source_state_fields = {field.name for field in fields(ModelHubSourceStateConfig)}
     source_usage_fields = {field.name for field in fields(ModelHubSourceUsageConfig)}
     source_model_fields = {field.name for field in fields(ModelHubModelConfig)}
@@ -3164,7 +3390,7 @@ def test_model_hub_config_round_trip_and_serializer_completeness(monkeypatch, tm
     source_model_fields.add("origin")
     agent_fields = {field.name for field in fields(ModelHubAgentSupplyConfig)}
     agent_sources_fields = {field.name for field in fields(ModelHubAgentSourcesConfig)}
-    mapping_fields = {field.name for field in fields(ModelHubMappingConfig)}
+    route_fields = {field.name for field in fields(ModelHubRouteConfig)}
     menu_fields = {field.name for field in fields(ModelHubMenuConfig)}
 
     assert expected_root == set(api_payload["model_hub"])
@@ -3181,7 +3407,7 @@ def test_model_hub_config_round_trip_and_serializer_completeness(monkeypatch, tm
         assert source_model_fields == set(serialized_source["models"][0]), label
         assert agent_fields == set(serialized_hub["agents"]["claude"]), label
         assert agent_sources_fields == set(serialized_hub["agents"]["claude"]["sources"]), label
-        assert mapping_fields == set(ModelHubMappingConfig("builtin", "target", True).to_payload()), label
+        assert route_fields == set(ModelHubRouteConfig().to_payload()), label
         assert menu_fields == set(serialized_hub["agents"]["opencode"]["menu"]), label
 
     stale_hub_payload = json.loads(json.dumps(api_payload["model_hub"]))
@@ -3210,26 +3436,25 @@ def test_model_hub_release_capability_defaults_and_fails_closed(value):
     assert is_model_hub_enabled({MODEL_HUB_ENABLED_ENV: value}) is False
 
 
-def test_hub_subscription_load_ignores_retired_consent_metadata():
+def test_final_config_rejects_retired_consent_metadata():
     source = _schema("source.schema.json")["examples"][0]
     source = {**source, "supply_channel": "hub"}
     payload = {
         "sources": [source],
         "agents": {},
-        "subscription_hub_experimental": True,
     }
 
-    loaded = ModelHubConfig.from_payload(payload)
-    assert loaded.sources[0].supply_channel == "hub"
+    payload["sources"][0]["experimental_consent_at"] = "2026-07-23T03:00:00Z"
+    with pytest.raises(ValueError):
+        ModelHubConfig.from_payload(payload)
 
 
-def test_legacy_global_priority_key_is_dropped_without_validation():
+def test_final_config_rejects_retired_global_priority_key():
     payload = ModelHubConfig().to_payload()
     payload["priority_order"] = {"legacy": "shape-does-not-matter"}
 
-    loaded = ModelHubConfig.from_payload(payload)
-
-    assert "priority_order" not in loaded.to_payload()
+    with pytest.raises(ValueError):
+        ModelHubConfig.from_payload(payload)
 
 
 def test_agent_source_orders_validate_existence_eligibility_and_uniqueness():
@@ -3240,7 +3465,6 @@ def test_agent_source_orders_validate_existence_eligibility_and_uniqueness():
     base = ModelHubConfig().to_payload()
     base["sources"] = [source]
     base["agents"]["claude"]["sources"] = {
-        "policy": "custom",
         "order": [source["id"]],
     }
 
@@ -3257,11 +3481,58 @@ def test_agent_source_orders_validate_existence_eligibility_and_uniqueness():
 
     ineligible = json.loads(json.dumps(base))
     ineligible["agents"]["codex"]["sources"] = {
-        "policy": "custom",
         "order": [source["id"]],
     }
     with pytest.raises(ValueError):
         ModelHubConfig.from_payload(ineligible)
+
+
+def test_route_hops_allow_one_source_to_supply_distinct_models():
+    route = ModelHubRouteConfig.from_payload(
+        {
+            "hops": [
+                {"source_id": "src_same0001", "model_id": "model-a"},
+                {"source_id": "src_same0001", "model_id": "model-b"},
+            ]
+        }
+    )
+
+    assert [(hop.source_id, hop.model_id) for hop in route.hops] == [
+        ("src_same0001", "model-a"),
+        ("src_same0001", "model-b"),
+    ]
+    source = ModelHubSourceConfig.from_payload(
+        _schema("source.schema.json")["examples"][0]
+    )
+    source.models.append(
+        ModelHubModelConfig(id="claude-opus-4-5", provenance="manual")
+    )
+    config = ModelHubConfig(sources=[source])
+    config.agents["claude"].sources.order = [source.id]
+    config.agents["claude"].routes["claude-opus-4-6"] = ModelHubRouteConfig.from_payload(
+        {
+            "hops": [
+                {"source_id": source.id, "model_id": "claude-opus-4-6"},
+                {"source_id": source.id, "model_id": "claude-opus-4-5"},
+            ]
+        }
+    )
+
+    canonical = ModelHubConfig.from_payload(config.to_payload())
+
+    assert [hop.model_id for hop in canonical.agents["claude"].routes["claude-opus-4-6"].hops] == [
+        "claude-opus-4-6",
+        "claude-opus-4-5",
+    ]
+    with pytest.raises(ValueError, match="unique pairs"):
+        ModelHubRouteConfig.from_payload(
+            {
+                "hops": [
+                    {"source_id": "src_same0001", "model_id": "model-a"},
+                    {"source_id": "src_same0001", "model_id": "model-a"},
+                ]
+            }
+        )
 
 
 def _ordering_source(
@@ -3283,7 +3554,6 @@ def _ordering_source(
         state=ModelHubSourceStateConfig(status="standby"),
         models=[],
         created_at=created_at,
-        experimental_consent_at=("2026-07-29T02:00:00Z" if kind == "subscription" and channel == "hub" else None),
     )
 
 
@@ -3350,7 +3620,6 @@ def test_recommended_order_is_backend_native_then_created_at_and_id():
             native,
             legacy_a,
         ],
-        subscription_hub_experimental=True,
     )
 
     assert config.recommended_source_order("claude") == [
@@ -3364,6 +3633,7 @@ def test_recommended_order_is_backend_native_then_created_at_and_id():
     ]
     assert config.recommended_source_order("codex") == [
         wrong_vendor_subscription.id,
+        hub_subscription.id,
         legacy_a.id,
         legacy_b.id,
         newer.id,
@@ -3371,12 +3641,77 @@ def test_recommended_order_is_backend_native_then_created_at_and_id():
         same_time_b.id,
     ]
     assert config.recommended_source_order("opencode") == [
+        hub_subscription.id,
         legacy_a.id,
         legacy_b.id,
         newer.id,
         same_time_a.id,
         same_time_b.id,
     ]
+
+
+def test_persisted_hub_config_requires_explicit_complete_route_rows():
+    payload = ModelHubConfig().to_payload()
+
+    missing = json.loads(json.dumps(payload))
+    del missing["agents"]["claude"]["routes"]
+    with pytest.raises(ValueError, match="routes.*required"):
+        ModelHubConfig.from_payload(missing)
+
+    non_object = json.loads(json.dumps(payload))
+    non_object["agents"]["claude"]["routes"] = []
+    with pytest.raises(ValueError, match="routes.*object"):
+        ModelHubConfig.from_payload(non_object)
+
+    incomplete = json.loads(json.dumps(payload))
+    incomplete["agents"]["claude"]["routes"].pop("claude-opus-4-6")
+    with pytest.raises(ValueError, match="missing menu model"):
+        ModelHubConfig.from_payload(incomplete)
+
+    extra = json.loads(json.dumps(payload))
+    extra["agents"]["claude"]["routes"]["claude-hidden-model"] = {
+        "hops": []
+    }
+    with pytest.raises(ValueError, match="contains non-menu model"):
+        ModelHubConfig.from_payload(extra)
+
+    dynamic = json.loads(json.dumps(payload))
+    dynamic["agents"]["opencode"]["mode"] = "hub"
+    dynamic["agents"]["opencode"]["menu"] = {
+        "view": "featured",
+        "checked": ["custom/model"],
+    }
+    dynamic["agents"]["opencode"]["routes"] = {}
+    with pytest.raises(ValueError, match="missing menu model 'custom/model'"):
+        ModelHubConfig.from_payload(dynamic)
+
+
+def test_config_reload_migrates_fixed_routes_when_bundled_catalog_changes(monkeypatch, tmp_path):
+    payload = api.config_to_payload(default_config())
+    original_ids = tuple(payload["model_hub"]["agents"]["claude"]["routes"])
+    removed_id = original_ids[0]
+    added_id = "claude-catalog-added-after-save"
+    stale_id = "claude-catalog-removed-after-save"
+    routes = payload["model_hub"]["agents"]["claude"]["routes"]
+    routes.pop(removed_id)
+    routes[stale_id] = {"hops": []}
+
+    def changed_catalog_ids(backend: str) -> tuple[str, ...]:
+        if backend == "claude":
+            return (*original_ids[1:], added_id)
+        return tuple(payload["model_hub"]["agents"][backend]["routes"])
+
+    monkeypatch.setattr("config.v2_config.model_hub_fixed_menu_ids", changed_catalog_ids)
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+    migrated_routes = loaded.model_hub.agents["claude"].routes
+
+    assert set(migrated_routes) == set(changed_catalog_ids("claude"))
+    assert migrated_routes[added_id].hops == ()
+    assert removed_id not in migrated_routes
+    assert stale_id not in migrated_routes
 
 
 @pytest.mark.parametrize(

@@ -4153,6 +4153,128 @@ scenarios:
     # The handler-to-facade contract forwards the resolved route at Turn start;
     # the refreshed chat header remains a residual manual UI check.
     test: tests/test_message_handler_typing.py::MessageHandlerTypingTests::test_workbench_inherited_route_materializes_at_turn_start
+  - id: HFR-463
+    name: once Watch retries until its first reportable event
+    status: covered
+    kind: lifecycle
+    layer: scenario
+    backend: shared
+    # An explicitly allowed retry result keeps a once Watch armed. The first exit
+    # zero queues exactly one follow-up and retires the definition.
+    test: tests/test_watches.py::test_managed_watch_service_once_retries_until_first_success
+  - id: HFR-464
+    name: forever Watch follow-ups serialize waiter re-arm
+    status: covered
+    kind: concurrency
+    layer: scenario
+    backend: shared
+    # A queued/running event Run holds the next waiter closed. Terminal settlement
+    # starts the fixed safety delay, and only then may the next cycle begin.
+    test: tests/test_watches.py::test_forever_watch_waits_for_previous_follow_up_before_rearming
+  - id: HFR-465
+    name: rapid successful waiter circuit pauses once and preserves evidence
+    status: covered
+    kind: failure_recovery
+    layer: scenario
+    backend: shared
+    # Five successes are delivered. The sixth pauses without an ordinary event
+    # Run, atomically records bounded evidence and queues one repair Run; restart
+    # cannot create a second repair request.
+    test: tests/test_watches.py::test_forever_watch_sixth_rapid_success_pauses_and_queues_one_repair_run
+  - id: HFR-466
+    name: Watch outbox rejects concurrent unfinished follow-ups
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # The SQLite writer checks queued/running Watch Runs under the same writer lock
+    # as the definition stamp and outbox insert, closing a second-admission race.
+    test: tests/test_watches.py::test_atomic_watch_outbox_rejects_a_second_unsettled_follow_up
+  - id: HFR-467
+    name: circuit resume clears burst state but retains the repair fence
+    status: covered
+    kind: recovery
+    layer: contract
+    backend: shared
+    # Resume starts a fresh rate window but keeps the repair Run id, so the waiter
+    # cannot re-arm while the Agent that resumed it is still finishing.
+    test: tests/test_watches.py::test_resuming_circuit_paused_watch_clears_window_but_keeps_repair_fence
+  - id: HFR-468
+    name: storage and CLI circuit resume rules stay identical
+    status: covered
+    kind: safety
+    layer: contract
+    backend: shared
+    # The Web UI storage doorway clears the active burst window and marks the
+    # incident resumed without deleting the repair Run fence.
+    test: tests/test_watches.py::test_storage_resume_applies_the_same_circuit_reset_as_cli
+  - id: HFR-469
+    name: edge-triggered forever Watch re-arms without duplicate delivery
+    status: covered
+    kind: lifecycle
+    layer: scenario
+    backend: shared
+    # After the event Run settles, the next cycle sees the durable delivery stamp;
+    # quiet cycles keep the Watch armed without moving that acknowledgement.
+    test: tests/test_watches.py::test_a_cycle_is_told_when_this_watch_last_had_a_report_delivered
+  - id: HFR-470
+    name: Watch lifetime is one durable armed episode
+    status: covered
+    kind: timeout
+    layer: contract
+    backend: shared
+    # Creation or explicit resume starts the deadline. Supervisor restarts retain it,
+    # including legacy rows derived from created_at; retry sleeps cannot extend it.
+    test: tests/test_watches.py::test_watch_lifetime_origin_survives_supervisor_restart
+  - id: HFR-471
+    name: once Watch timeout retries only by explicit policy
+    status: covered
+    kind: timeout
+    layer: contract
+    backend: shared
+    # Exit 124 keeps a once Watch waiting only when listed, then the first event
+    # queues one Run and retires normally.
+    test: tests/test_watches.py::test_once_watch_retries_timeout_only_when_124_is_allowed
+  - id: HFR-472
+    name: empty failed Turn owns one fallback across all accepted Runs
+    status: covered
+    kind: failure_recovery
+    layer: contract
+    backend: shared
+    # The shared dispatcher stamps one Turn failure identity before participants
+    # arrive; backend, handler, and auth-recovery delivery paths preserve an already
+    # shown primary at its resolved delivery target, and atomic settlement elects
+    # one owner only when Runs exist.
+    test: tests/test_message_dispatcher_result_fallback.py::MessageDispatcherResultFallbackTests::test_hfr_472_empty_failed_turn_creates_one_shared_fallback_contract
+  - id: HFR-473
+    name: dead Codex transport releases its stale Turn fence for the next request
+    status: covered
+    kind: failure_recovery
+    layer: scenario
+    backend: codex
+    # A definitive process death makes the old local Turn fence non-authoritative;
+    # only unknown ownership or an active Activity can still veto replacement.
+    test: tests/test_codex_agent.py::CodexTransportCwdStalenessTests::test_hfr_473_dead_transport_restarts_past_stale_turn_ownership
+  - id: HFR-474
+    name: upgrade recovery collapses legacy restart notices by durable Turn ownership
+    status: covered
+    kind: failure_recovery
+    layer: scenario
+    backend: shared
+    # Before the notice lane starts, accepted Delivery ownership repairs legacy
+    # per-Run restart notices into one Turn fallback. A notice already sent remains
+    # authoritative and suppresses every pending sibling.
+    test: tests/test_session_delivery_fsm.py::test_hfr_474_startup_collapses_legacy_restart_notices_by_durable_turn
+  - id: HFR-475
+    name: restart notices stay concise and hide opaque internal identities
+    status: covered
+    kind: failure_recovery
+    layer: contract
+    backend: shared
+    # A service restart renders one calm recovery action. Readable definition names
+    # remain visible, while deleted definitions never leak their opaque id or append
+    # internal error, origin, lifecycle, and inspection lines.
+    test: tests/test_harness_failure_visibility.py::test_hfr_475_restart_notice_is_one_calm_action_without_internal_details
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor
@@ -4161,3 +4283,4 @@ plans:
   - docs/plans/harness-session-failure-recovery.md
   - docs/plans/agent-run-zombie-settlement.md
   - docs/plans/harness-watch-run-failure-boundary.md
+  - docs/plans/watch-follow-up-circuit-breaker.md

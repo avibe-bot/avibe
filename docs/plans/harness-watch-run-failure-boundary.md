@@ -66,6 +66,12 @@ snapshot plus the indexed Delivery-to-Turn ownership relation, not a Run-history
 scan. Canceled and cancel-requested parents are excluded only before a callback is
 armed; an accepted callback child remains delivery evidence after parent cancellation.
 
+After the shared liveness monitor terminalizes a Turn whose Codex app-server is
+definitively dead, the next request may retire that exact dead generation despite
+its stale process-local Turn fence. Unknown ownership and active Activities still
+block replacement because their native effects can outlive the transport; Delivery,
+Turn, and Run rows do not make a dead process reusable.
+
 Terminal output replay is idempotent for status and content but monotonic for
 delivery evidence. A later same-Turn notification acknowledgement upgrades the
 existing owed notice without resetting its attempts, state, or fallback owner, so
@@ -140,8 +146,8 @@ does not claim that an event was detected.
   complete Turn fallback; pending callback delivery defers it.
 - `HFR-441`: persistence under `suppress_delivery` cannot satisfy or shadow a
   later outward receipt, including in a foreground callback target Session.
-- `HFR-442`: bare Turn provenance without a notification contract does not
-  bypass definition-level failure-notice suppression.
+- `HFR-442`: a visible direct error with bare Turn provenance does not bypass
+  definition-level failure-notice suppression.
 - `HFR-443`: a deferred participant's pending callback remains part of the Turn
   callback aggregate and blocks an immediate sibling fallback.
 - `HFR-444`: a Watch in its first in-flight waiter cycle reports unknown waiter
@@ -174,6 +180,28 @@ does not claim that an event was detected.
   receipt through the shared Turn output even when another Run owns the Message.
 - `HFR-459`: independent Activity completions reserve the SQLite writer before
   reading deferred participants and electing their shared Turn fallback owner.
+- `HFR-472`: an empty failed Harness Turn synthesizes the existing Turn failure
+  contract before its immutable snapshot, even before the first participant is
+  attached, so every accepted Run shares one fallback owner instead of emitting
+  one notice per Run. A primary error already delivered through the shared
+  backend-failure path, the message-handler exception path, or auth recovery
+  carries its acknowledgement into the same monotonic contract. All visible
+  paths resolve the Harness delivery override before sending or persisting, so
+  acknowledgement can never be attributed to a different target.
+- `HFR-473`: a definitively dead Codex transport can be replaced for the next
+  request even while stale Turn ownership from that dead generation remains;
+  unknown ownership and active Activities continue to fail closed.
+- `HFR-474`: result-less settlement carries the durable Turn failure contract
+  into every accepted Run. During an old-to-new upgrade, startup repairs legacy
+  per-Run restart notices from the exact accepted `Run -> Delivery -> Turn`
+  relation before activating the notice lane. It never groups by Session or
+  timestamp. If one legacy notice was already sent, that delivery evidence owns
+  the Turn and all pending siblings stand down; otherwise one stable participant
+  becomes the only fallback.
+- `HFR-475`: a service-restart notice is one calm recovery action rather than a
+  diagnostic dump. It names a readable definition when one still exists, never
+  substitutes an opaque deleted-definition id, and leaves error, origin,
+  lifecycle, Run, and Watch details on their inspection surfaces.
 
 Residual manual check: trigger two one-shot Watches into one failing Turn and
 confirm that the conversation contains one backend error, both Runs are failed,

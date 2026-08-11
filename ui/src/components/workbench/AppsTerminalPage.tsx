@@ -2,6 +2,7 @@ import { useMemo } from 'react';
 import { useLocation } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 
+import { useStandaloneAppTab } from '../../context/StandaloneAppTabContext';
 import { TerminalTabs } from './TerminalTabs';
 
 // A start directory handed to the terminal when navigating in from the File Browser on mobile
@@ -25,11 +26,24 @@ export const AppsTerminalPage: React.FC<{ windowed?: boolean; windowId?: string;
   // from `params.cwd` instead). location.key is unique per navigation, so TerminalTabs opens
   // exactly one tab per launch and leaves the persistent first tab as a reattach.
   const launchCwd = useMemo(() => readCwd(location.state), [location.state]);
+  // A single-app browser tab (`/apps/terminal?standalone=1`): the shell drops its chrome, so the
+  // terminal fills the whole web area — no page header, no card border, no padding around it.
+  // Still the ROUTE mount, so the first tab keeps its persistent reattachable session (unlike
+  // `windowed`, whose tabs are ephemeral).
+  const standalone = useStandaloneAppTab();
 
   if (windowed) {
     return (
       <div className="h-full w-full overflow-hidden bg-surface">
         <TerminalTabs windowed windowId={windowId} params={params} />
+      </div>
+    );
+  }
+
+  if (standalone) {
+    return (
+      <div className="flex h-full w-full overflow-hidden bg-surface">
+        <TerminalTabs launchCwd={launchCwd} launchKey={launchCwd ? location.key : undefined} />
       </div>
     );
   }

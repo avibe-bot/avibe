@@ -69,6 +69,135 @@ describe('apiFetch remote auth recovery', () => {
     expect(remoteAuth.deferRemoteAuthRedirect).not.toHaveBeenCalled();
   });
 
+  it('replays a rejected mutation with the cookie that replaced its header token', async () => {
+    let cookie = 'vibe_csrf_token=stale-token';
+    vi.stubGlobal('document', {
+      get cookie() {
+        return cookie;
+      },
+      set cookie(value: string) {
+        cookie = value.includes('Max-Age=0') ? '' : value.split(';', 1)[0];
+      },
+    });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const token = new Headers(init?.headers).get('X-Vibe-CSRF-Token');
+      if (token === 'stale-token') {
+        document.cookie = 'vibe_csrf_token=fresh-token; path=/';
+        return Response.json({ ok: false, message: 'Forbidden: invalid csrf token' }, { status: 403 });
+      }
+      return Response.json({ ok: true }, { status: 201 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const response = await apiFetch('/api/sessions/ses-1/attachments', {
+      method: 'POST',
+      body: new FormData(),
+    });
+
+    expect(response.status).toBe(201);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(new Headers(fetchMock.mock.calls[1][1]?.headers).get('X-Vibe-CSRF-Token')).toBe('fresh-token');
+  });
+
+  it('shares a CSRF refresh with mutations that start while the cookie is cleared', async () => {
+    let cookie = 'vibe_csrf_token=stale-token';
+    let resolveToken!: (response: Response) => void;
+    vi.stubGlobal('document', {
+      get cookie() {
+        return cookie;
+      },
+      set cookie(value: string) {
+        cookie = value.includes('Max-Age=0') ? '' : value.split(';', 1)[0];
+      },
+    });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (input === '/api/csrf-token') {
+        return new Promise<Response>((resolve) => {
+          resolveToken = resolve;
+        });
+      }
+      const token = new Headers(init?.headers).get('X-Vibe-CSRF-Token');
+      if (token === 'stale-token') {
+        cookie = '';
+        return Response.json({ ok: false, message: 'Forbidden: invalid csrf token' }, { status: 403 });
+      }
+      return Response.json({ ok: true }, { status: 201 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const retrying = apiFetch('/api/attachments', { method: 'POST', body: new FormData() });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    const concurrent = apiFetch('/api/settings', { method: 'POST' });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(fetchMock.mock.calls.filter(([input]) => input === '/api/csrf-token')).toHaveLength(1);
+
+    document.cookie = 'vibe_csrf_token=fresh-token; path=/';
+    resolveToken(Response.json({ csrf_token: 'fresh-token' }));
+
+    await expect(Promise.all([retrying, concurrent])).resolves.toEqual([
+      expect.objectContaining({ status: 201 }),
+      expect.objectContaining({ status: 201 }),
+    ]);
+    expect(fetchMock.mock.calls.filter(([input]) => input === '/api/csrf-token')).toHaveLength(1);
+  });
+
+  it('rechecks a token cookie overwritten by another tab before replaying', async () => {
+    let cookie = 'vibe_csrf_token=stale-token';
+    let resolveToken!: (response: Response) => void;
+    let mutationCalls = 0;
+    const currentToken = () => cookie.startsWith('vibe_csrf_token=')
+      ? cookie.slice('vibe_csrf_token='.length)
+      : '';
+    vi.stubGlobal('document', {
+      get cookie() {
+        return cookie;
+      },
+      set cookie(value: string) {
+        cookie = value.includes('Max-Age=0') ? '' : value.split(';', 1)[0];
+      },
+    });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (input === '/api/csrf-token') {
+        return new Promise<Response>((resolve) => {
+          resolveToken = resolve;
+        });
+      }
+      mutationCalls += 1;
+      const token = new Headers(init?.headers).get('X-Vibe-CSRF-Token');
+      if (mutationCalls === 1) {
+        cookie = '';
+        return Response.json({ ok: false, message: 'Forbidden: invalid csrf token' }, { status: 403 });
+      }
+      return Response.json({ ok: token === currentToken() }, {
+        status: token === currentToken() ? 201 : 403,
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const request = apiFetch('/api/attachments', { method: 'POST', body: new FormData() });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    document.cookie = 'vibe_csrf_token=tab-a-token; path=/';
+    resolveToken(Response.json({ csrf_token: 'tab-a-token' }));
+    document.cookie = 'vibe_csrf_token=tab-b-token; path=/';
+
+    await expect(request).resolves.toEqual(expect.objectContaining({ status: 201 }));
+    expect(new Headers(fetchMock.mock.calls.at(-1)?.[1]?.headers).get('X-Vibe-CSRF-Token'))
+      .toBe('tab-b-token');
+  });
+
+  it('does not retry an unrelated forbidden mutation', async () => {
+    vi.stubGlobal('document', { cookie: 'vibe_csrf_token=token' });
+    const fetchMock = vi.fn(async () =>
+      Response.json({ ok: false, message: 'Forbidden' }, { status: 403 }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const response = await apiFetch('/api/settings', { method: 'POST' });
+
+    expect(response.status).toBe(403);
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
   it('honors the request signal while a shared CSRF request is pending', async () => {
     let resolveCsrf!: (response: Response) => void;
     const fetchMock = vi.fn(
@@ -136,5 +265,57 @@ describe('apiFetch remote auth recovery', () => {
       status: 200,
     });
     expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('evicts a stalled shared CSRF refresh after a rejected mutation aborts', async () => {
+    let cookie = 'vibe_csrf_token=stale-token';
+    let tokenFetches = 0;
+    let mutationCalls = 0;
+    vi.stubGlobal('document', {
+      get cookie() {
+        return cookie;
+      },
+      set cookie(value: string) {
+        cookie = value.includes('Max-Age=0') ? '' : value.split(';', 1)[0];
+      },
+    });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (input === '/api/csrf-token') {
+        tokenFetches += 1;
+        if (tokenFetches === 1) {
+          return new Promise<Response>(() => undefined);
+        }
+        document.cookie = 'vibe_csrf_token=fresh-token; path=/';
+        return Response.json({ csrf_token: 'fresh-token' });
+      }
+
+      mutationCalls += 1;
+      if (mutationCalls === 1) {
+        cookie = '';
+        return Response.json({ ok: false, message: 'Forbidden: invalid csrf token' }, { status: 403 });
+      }
+      const token = new Headers(init?.headers).get('X-Vibe-CSRF-Token');
+      return Response.json({ ok: token === 'fresh-token' }, {
+        status: token === 'fresh-token' ? 200 : 403,
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const controller = new AbortController();
+
+    const stalled = apiFetch('/api/attachments', {
+      method: 'POST',
+      body: new FormData(),
+      signal: controller.signal,
+    });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    const stalledResult = expect(stalled).rejects.toMatchObject({ name: 'TimeoutError' });
+    controller.abort(new DOMException('upload timed out', 'TimeoutError'));
+
+    await stalledResult;
+    await expect(apiFetch('/api/settings', { method: 'POST' })).resolves.toMatchObject({
+      status: 200,
+    });
+    expect(tokenFetches).toBe(2);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
   });
 });

@@ -35,7 +35,7 @@ const agent = (over: Partial<AgentSupply> = {}): AgentSupply => ({
 const read = (over: Partial<Extract<ModelChainRead, { kind: 'ready' }>['chain']> = {}): ModelChainRead => ({
   kind: 'ready',
   chain: {
-    contract_version: 4,
+    contract_version: 5,
     backend: 'claude',
     model_id: 'builtin-model',
     supply_state: 'ok',
@@ -54,7 +54,7 @@ const read = (over: Partial<Extract<ModelChainRead, { kind: 'ready' }>['chain']>
 });
 
 const runtime = (health: RuntimeDependency['status']['health']): RuntimeDependency => ({
-  contract_version: 4,
+  contract_version: 5,
   manifest: { name: 'cliproxyapi', version: '1', source_sha: 'a', assets: [] },
   status: { health, verified: health === 'ok' },
 });
@@ -64,7 +64,7 @@ const source = (id: string): Source => ({
   kind: 'api_key',
   vendor: 'custom',
   display_name: id,
-  protocol: 'openai_compatible',
+  protocol: 'openai_chat',
   supply_channel: 'hub',
   billing: 'metered',
   state: { status: 'active' },

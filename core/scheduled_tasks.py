@@ -94,6 +94,7 @@ from core.process_isolation import (
 )
 from core.watch_worker import decode_watch_worker_error, localize_worker_error
 from storage.background import (
+    CALLBACK_TERMINAL_TURN_ID_METADATA_KEY,
     COMMAND_SNAPSHOT_METADATA_KEY,
     COMMAND_TIMED_OUT_METADATA_KEY,
     COMMAND_WORKER_METADATA_KEY,
@@ -113,6 +114,7 @@ from storage.background import (
     SWEEP_REASON_QUEUE_HOLD_EXPIRED,
     SWEEP_REASON_TRANSPORT_UNAVAILABLE,
     SweptRun,
+    WATCH_HOOK_OUTCOME_CIRCUIT_REPAIR,
     WATCH_HOOK_OUTCOME_EVENT,
     WATCH_HOOK_OUTCOME_METADATA_KEY,
     WATCH_HOOK_OUTCOME_WAITER_FAILURE,
@@ -920,6 +922,7 @@ def enqueue_session_callback(
     session_id: str,
     message: str,
     source_actor: str,
+    source_session_id: Optional[str] = None,
     parent_run_id: Optional[str] = None,
     metadata: Optional[dict[str, Any]] = None,
 ) -> Optional["TaskExecutionRequest"]:
@@ -934,6 +937,10 @@ def enqueue_session_callback(
         return None
     target = resolve_session_id_target(session_id)
     from core.message_priority import delivery_intent_for_trigger
+
+    callback_metadata = dict(metadata or {})
+    if source_session_id:
+        callback_metadata["source_session_id"] = str(source_session_id)
 
     return request_store.enqueue_agent_run(
         session_id=session_id,
@@ -950,7 +957,7 @@ def enqueue_session_callback(
         parent_run_id=parent_run_id,
         delivery_intent=delivery_intent_for_trigger("callback"),
         metadata={
-            **(metadata or {}),
+            **callback_metadata,
             **({"callback_parent_run_id": parent_run_id} if parent_run_id else {}),
         },
         callback_parent_to_arm=parent_run_id,
@@ -2568,9 +2575,14 @@ class TaskExecutionStore:
             stored = self._sqlite.get_run(callback_run_id)
             return TaskExecutionRequest.from_dict(stored) if stored is not None else request
         if normalized_callback_parent:
+            terminal_turn_id = str(
+                run_metadata.get(CALLBACK_TERMINAL_TURN_ID_METADATA_KEY) or ""
+            ).strip()
             existing = self.find_callback_run(
                 parent_run_id=normalized_callback_parent,
                 source_actor=str(source_actor or ""),
+                terminal_turn_id=terminal_turn_id or None,
+                callback_session_id=session_id,
             )
             if existing is not None:
                 self.update_callback_status(
@@ -2659,6 +2671,23 @@ class TaskExecutionStore:
         if self._sqlite is not None:
             return self._sqlite.list_runs(status=status)
         return self._list_file_runs(status=status)
+
+    def get_unsettled_watch_run(self, definition_id: str) -> Optional[dict[str, Any]]:
+        """Return the oldest queued/running Watch follow-up for the admission fence."""
+
+        if self._sqlite is not None:
+            return self._sqlite.get_unsettled_watch_run(definition_id)
+        for run in self._list_file_runs():
+            if str(run.get("task_id") or run.get("definition_id") or "") != str(
+                definition_id
+            ):
+                continue
+            if str(run.get("request_type") or run.get("run_type") or "") != "watch":
+                continue
+            status = _normalize_requested_run_status(run.get("status"))
+            if status in {"queued", "running"}:
+                return run
+        return None
 
     def consecutive_definition_failures_with_code(
         self,
@@ -2761,13 +2790,30 @@ class TaskExecutionStore:
         *,
         parent_run_id: str,
         source_actor: str,
+        terminal_turn_id: Optional[str] = None,
+        callback_session_id: Optional[str] = None,
     ) -> Optional[dict[str, Any]]:
         if self._sqlite is not None:
             return self._sqlite.find_callback_run(
                 parent_run_id=parent_run_id,
                 source_actor=source_actor,
+                terminal_turn_id=terminal_turn_id,
+                callback_session_id=callback_session_id,
             )
+        normalized_turn_id = str(terminal_turn_id or "").strip()
+        normalized_session_id = str(callback_session_id or "").strip()
         for run in self._list_file_runs():
+            metadata = run.get("metadata")
+            if (
+                normalized_turn_id
+                and normalized_session_id
+                and run.get("request_type") == "agent_run"
+                and run.get("source_kind") == "callback"
+                and run.get("session_id") == normalized_session_id
+                and isinstance(metadata, dict)
+                and metadata.get(CALLBACK_TERMINAL_TURN_ID_METADATA_KEY) == normalized_turn_id
+            ):
+                return run
             if (
                 run.get("request_type") == "agent_run"
                 and run.get("source_kind") == "callback"
@@ -6669,9 +6715,11 @@ class ScheduledTaskService:
             else None
         )
         is_watch = watch is not None or str(run.get("run_type") or "").strip().startswith("watch")
+        explicit_name = (task.name if task else None) or (
+            str((watch or {}).get("name") or "").strip() or None
+        )
         name = (
-            (task.name if task else None)
-            or (str((watch or {}).get("name") or "").strip() or None)
+            explicit_name
             or definition_id
             or str(run["id"])
         )
@@ -6686,6 +6734,14 @@ class ScheduledTaskService:
             )
         reason = str(notice.get("interrupt_reason") or "").strip()
         error = str(run.get("error") or "").strip() or self._t("harness.notice.unknownError")
+        if reason == SETTLED_BY_RESTARTED:
+            # A service restart is a lifecycle event, not a diagnosis. Keep its
+            # notification to one calm action and leave internal Run/definition
+            # details on the inspection surfaces. A deleted definition has no
+            # trustworthy display name, so never substitute its opaque id.
+            if explicit_name:
+                return self._t("harness.notice.restartStopped", name=explicit_name)
+            return self._t("harness.notice.restartStoppedUnnamed")
         if failure_notices.is_interruption(notice):
             # The reason is rendered INSIDE a translated sentence, so it is copy: the
             # wire value went through a closed label map, never interpolated raw. An
@@ -6696,6 +6752,18 @@ class ScheduledTaskService:
                 name=name,
                 reason=self._t(failure_notices.notice_reason_i18n_key(reason)),
             )
+        elif is_watch and str(
+            ((run.get("metadata") or {}).get(WATCH_HOOK_OUTCOME_METADATA_KEY) or "")
+        ).strip() == WATCH_HOOK_OUTCOME_CIRCUIT_REPAIR:
+            if watch is not None and not watch.get("enabled") and not watch.get(
+                "retired_at"
+            ):
+                headline = self._t(
+                    "harness.notice.watchCircuitRepairFailed",
+                    name=name,
+                )
+            else:
+                headline = self._t("harness.notice.watchFollowUpFailed", name=name)
         elif is_watch and str(
             ((run.get("metadata") or {}).get(WATCH_HOOK_OUTCOME_METADATA_KEY) or "")
         ).strip() == WATCH_HOOK_OUTCOME_EVENT:
@@ -7202,6 +7270,17 @@ class ScheduledTaskService:
         status = _normalize_requested_run_status(run.get("status")) or str(
             run.get("status") or ""
         )
+        run_metadata = run.get("metadata")
+        terminal_turn_id = (
+            str(run_metadata.get("turn_id") or "").strip()
+            if isinstance(run_metadata, dict)
+            else ""
+        )
+        callback_metadata = (
+            {CALLBACK_TERMINAL_TURN_ID_METADATA_KEY: terminal_turn_id}
+            if terminal_turn_id
+            else None
+        )
         if status in {"failed", "canceled"}:
             terminal_message = self._fallback_callback_result(run, status=status)
             terminal_callback = enqueue_session_callback(
@@ -7209,7 +7288,9 @@ class ScheduledTaskService:
                 session_id=callback_session_id,
                 message=terminal_message,
                 source_actor=f"{run_id}:terminal:{status}",
+                source_session_id=str(run.get("session_id") or "").strip() or None,
                 parent_run_id=run_id or None,
+                metadata=callback_metadata,
             )
             if terminal_callback is not None:
                 return terminal_callback
@@ -7218,7 +7299,9 @@ class ScheduledTaskService:
             session_id=callback_session_id,
             message=self._build_callback_message(run),
             source_actor=run_id,
+            source_session_id=str(run.get("session_id") or "").strip() or None,
             parent_run_id=run_id or None,
+            metadata=callback_metadata,
         )
 
     def _build_callback_message(self, run: dict[str, Any]) -> str:
@@ -8725,10 +8808,77 @@ class ScheduledTaskService:
         """Settle late accepted Runs from their immutable Turn snapshot."""
 
         if settled_by in SETTLEMENTS_WITHOUT_RESULT:
-            self.settle_agent_runs_without_result(
-                execution_ids,
-                settled_by=str(settled_by),
+            normalized_settlement = str(settled_by)
+            store = self.request_store.sqlite_backend
+            if store is None:
+                self.settle_agent_runs_without_result(
+                    execution_ids,
+                    settled_by=normalized_settlement,
+                )
+                return
+            normalized_execution_ids = list(
+                dict.fromkeys(
+                    execution_id
+                    for value in execution_ids
+                    if (execution_id := str(value or "").strip())
+                )
             )
+            terminal_status = SETTLEMENT_TERMINAL_STATUS.get(
+                normalized_settlement,
+                "failed",
+            )
+            error_text = self._t(
+                SETTLEMENT_I18N_KEYS.get(
+                    normalized_settlement,
+                    SETTLEMENT_I18N_KEYS[SETTLED_BY_NO_TERMINAL_RESULT],
+                )
+            )
+            provenance: dict[str, Any] = {
+                "turn_id": turn_id,
+                "evidence_kind": evidence_kind,
+                "settled_by": normalized_settlement,
+                "interrupt_reason": normalized_settlement,
+            }
+            if terminal_status == "failed":
+                provenance["turn_failure_notification"] = {
+                    "failure_id": f"turn:{turn_id}",
+                    "delivered": False,
+                }
+            results = store.record_turn_run_outputs(
+                normalized_execution_ids,
+                output_id=f"resultless:{normalized_settlement}",
+                text="",
+                provenance=provenance,
+                terminal_status=terminal_status,
+                error=error_text,
+            )
+            repaired_ids = (
+                store.reconcile_resultless_turn_failure_notices(
+                    normalized_execution_ids,
+                    turn_id=turn_id,
+                    settled_by=normalized_settlement,
+                )
+                if terminal_status == "failed"
+                else []
+            )
+            transitioned = False
+            for execution_id, result in results.items():
+                if not result.get("terminal_transition"):
+                    continue
+                transitioned = True
+                run = result.get("run")
+                expected_status = str((run or {}).get("status") or terminal_status)
+                self._project_terminal_definition_result(
+                    run,
+                    execution_id=execution_id,
+                    expected_status=expected_status,
+                )
+            if transitioned or repaired_ids:
+                self._wake_runtime_work(
+                    RuntimeWorkLane.REQUESTS,
+                    RuntimeWorkLane.RUN_CALLBACKS,
+                    RuntimeWorkLane.FAILURE_NOTICES,
+                )
             return
         if evidence.get("settles_run") is not True:
             return
@@ -10140,6 +10290,7 @@ class ScheduledTaskService:
                 "vibe_agent_id": agent_id,
                 "source_kind": (metadata or {}).get("source_kind"),
                 "source_actor": (metadata or {}).get("source_actor"),
+                "source_session_id": (metadata or {}).get("source_session_id"),
                 "vault_request_type": (metadata or {}).get("vault_request_type"),
                 "vault_request_status": (metadata or {}).get("vault_request_status"),
                 "parent_run_id": (metadata or {}).get("parent_run_id"),

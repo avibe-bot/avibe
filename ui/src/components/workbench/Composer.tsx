@@ -44,6 +44,11 @@ import {
   VoiceRealtimeSession,
   type VoiceRealtimeFinal,
 } from '../../lib/voiceRealtime';
+import {
+  isWorkbenchUploadRetryable,
+  uploadWorkbenchAttachment,
+  workbenchUploadErrorTranslationKey,
+} from '../../lib/workbenchUpload';
 import { Button } from '../ui/button';
 import {
   MentionEditor,
@@ -67,33 +72,20 @@ export type ComposerAttachment = {
   width?: number;
   height?: number;
   status: 'uploading' | 'ready' | 'error';
+  retryable?: boolean;
 };
 
-// Read a File/Blob as bare base64 (no ``data:...,`` prefix) for the JSON upload
-// + transcribe endpoints — the auth/CSRF-guarded compat route parses JSON, not
-// multipart, so binaries ride as base64.
-function readFileAsBase64(file: Blob): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onerror = () => reject(reader.error);
-    reader.onload = () => {
-      const result = String(reader.result || '');
-      const comma = result.indexOf(',');
-      resolve(comma >= 0 ? result.slice(comma + 1) : result);
-    };
-    reader.readAsDataURL(file);
-  });
-}
-
-// Parallel-upload pool size. A multi-file batch reads each file as base64
-// (~33% larger) and POSTs it; cap how many are in flight so a big drop of large
-// files (up to 25 MB each) doesn't materialize every request body at once.
+// Parallel-upload pool size. Multipart keeps each request binary, but bounded
+// concurrency still prevents a large drop from saturating the connection.
 const UPLOAD_CONCURRENCY = 4;
 
 // Unique-enough id for an optimistic attachment chip before the server token
 // lands. Date.now() collides within a batch, so the random suffix separates
 // files staged in the same tick.
-const newLocalId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+const newLocalId = () => (
+  globalThis.crypto?.randomUUID?.()
+  ?? `${Date.now()}-${Math.random().toString(36).slice(2, 14)}`
+);
 
 type VoiceSegment = VoiceTranscriptionSegment & {
   task: Promise<void>;
@@ -404,6 +396,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // Blocks a same-tick double-submit before the optimistic clear re-renders.
   const pendingRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const attachmentFilesRef = useRef(new Map<string, File>());
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
   const [asrAvailable, setAsrAvailable] = useState(false);
   const [asrMaxFileBytes, setAsrMaxFileBytes] = useState<number | null>(null);
@@ -541,6 +534,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // the composer by session.
   useEffect(() => {
     setAttachments([]);
+    attachmentFilesRef.current.clear();
     setRealtimeAnnouncement('');
     setVoiceRetainedSession(null);
     setRestoringRecording(
@@ -549,23 +543,17 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   }, [sessionId]);
 
   const removeAttachment = (localId: string) => {
+    attachmentFilesRef.current.delete(localId);
     setAttachments((cur) => cur.filter((a) => a.localId !== localId));
   };
 
-  // Upload one already-staged file (its chip exists as 'uploading'): POST it as
-  // base64-JSON, then flip the chip to ready (carrying the server token + proxy
-  // URL) or to error. ``sid`` is threaded in so the fan-out below stays typed
-  // after the session guard.
+  // Upload one already-staged file, then flip its chip to ready or retryable.
+  // ``sid`` is threaded in so the fan-out below stays typed after the guard.
   const uploadOne = async (file: File, localId: string, sid: string) => {
     try {
-      const data = await readFileAsBase64(file);
-      const res = await apiFetch(`/api/sessions/${encodeURIComponent(sid)}/attachments`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: file.name, mime: file.type, data }),
-      });
-      const json = await res.json().catch(() => null);
-      if (!res.ok || !json?.token) throw new Error('upload failed');
+      const json = await uploadWorkbenchAttachment(sid, file, localId);
+      if (attachmentFilesRef.current.get(localId) !== file) return;
+      attachmentFilesRef.current.delete(localId);
       setAttachments((cur) =>
         cur.map((a) =>
           a.localId === localId
@@ -579,13 +567,30 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                 width: typeof json.width === 'number' ? json.width : undefined,
                 height: typeof json.height === 'number' ? json.height : undefined,
                 status: 'ready',
+                retryable: undefined,
               }
             : a,
         ),
       );
-    } catch {
-      setAttachments((cur) => cur.map((a) => (a.localId === localId ? { ...a, status: 'error' } : a)));
+    } catch (error) {
+      if (attachmentFilesRef.current.get(localId) !== file) return;
+      const retryable = isWorkbenchUploadRetryable(error);
+      if (!retryable) attachmentFilesRef.current.delete(localId);
+      setAttachments((cur) => cur.map((a) => (
+        a.localId === localId ? { ...a, status: 'error', retryable } : a
+      )));
+      showToast(t(workbenchUploadErrorTranslationKey(error)), 'error');
     }
+  };
+
+  const retryAttachment = (localId: string) => {
+    if (!sessionId || disabledRef.current || voiceDraftReadOnly) return;
+    const file = attachmentFilesRef.current.get(localId);
+    if (!file) return;
+    setAttachments((cur) => cur.map((a) => (
+      a.localId === localId ? { ...a, status: 'uploading', retryable: undefined } : a
+    )));
+    void uploadOne(file, localId, sessionId);
   };
 
   // Upload a whole batch — multi-select from the picker or a chat-page drag-drop
@@ -596,6 +601,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     if (!sessionId) return;
     const sid = sessionId;
     const staged = files.map((file) => ({ file, localId: newLocalId() }));
+    for (const { file, localId } of staged) attachmentFilesRef.current.set(localId, file);
     setAttachments((cur) => [
       ...cur,
       ...staged.map(({ file, localId }) => ({
@@ -1211,6 +1217,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     setHasText(false);
     onDraftChange?.('');
     setAttachments([]);
+    attachmentFilesRef.current.clear();
     referencesRef.current = [];
     if (useMentions) mentionRef.current?.clear();
     try {
@@ -1256,6 +1263,19 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               <span className={clsx('max-w-[160px] truncate', att.status === 'error' ? 'text-pink' : 'text-foreground')}>
                 {att.name}
               </span>
+              {att.status === 'error' && att.retryable && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  disabled={disabled || voiceDraftReadOnly}
+                  onClick={() => retryAttachment(att.localId)}
+                  aria-label={t('chat.compose.retryAttachment')}
+                  className="size-5 shrink-0 text-muted hover:text-foreground"
+                >
+                  <RotateCcw className="size-3.5" />
+                </Button>
+              )}
               <Button
                 type="button"
                 variant="ghost"

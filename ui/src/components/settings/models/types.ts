@@ -12,17 +12,16 @@
 // for every route that did not move. This file changes in lockstep with the
 // schemas — never ahead of them.
 
-export const CONTRACT_VERSION = 3 as const;
-export const AGENT_CHAIN_CONTRACT_VERSION = 4 as const;
-export const PROBE_RESULT_CONTRACT_VERSION = 4 as const;
+export const CONTRACT_VERSION = 5 as const;
+export const AGENT_CHAIN_CONTRACT_VERSION = 5 as const;
+export const PROBE_RESULT_CONTRACT_VERSION = 5 as const;
 
 // ── source.schema.json ──────────────────────────────────────────────────
 export type SourceKind = 'subscription' | 'api_key';
 export type SourceProtocol =
   | 'anthropic'
   | 'openai_responses'
-  | 'openai_chat'
-  | 'openai_compatible';
+  | 'openai_chat';
 export type SupplyChannel = 'native_cli' | 'hub';
 /** v3 (§4.5): classified by whether the state heals itself. cooldown carries a
  *  `retry_at` and clears on its own; needs_action never recovers unattended;
@@ -461,7 +460,7 @@ export type OAuthFlow = {
 export type RuntimeHealth = 'ok' | 'degraded' | 'down' | 'not_started' | 'not_installed';
 
 export type RuntimeDependency = {
-  contract_version: 4;
+  contract_version: typeof CONTRACT_VERSION;
   manifest: {
     name: 'cliproxyapi';
     version: string;

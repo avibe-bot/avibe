@@ -6,20 +6,30 @@ import secrets
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from enum import Enum
 from typing import Any, Mapping, Sequence
 
+import aiohttp
+
+from config.v2_config import normalize_model_hub_base_url
 from core.handlers.model_hub.adapter import (
     EngineHealth,
     EngineStatus,
+    ObservationDiscovery,
+    ObservationOutcome,
     OAuthFlowState,
     OriginNotAllowedError,
     RawCallOutcome,
     RawOutcomeKind,
     RetainedMaterialDisposition,
+    SOURCE_PROTOCOLS,
+    SourceObservation,
     SourceBinding,
+    make_source_observation,
 )
 from core.handlers.model_hub.errors import ModelDiscoveryError
 from vibe.model_hub_runtime.client import (
+    _OFFICIAL_BASE_URLS,
     EngineClient,
     EngineClientError,
     EngineInvokeHandle,
@@ -38,19 +48,438 @@ _OAUTH_ENDPOINTS = {
     "anthropic": ("/anthropic-auth-url", "anthropic", "claude"),
     "openai": ("/codex-auth-url", "codex", "codex"),
     "codex": ("/codex-auth-url", "codex", "codex"),
-    "antigravity": ("/antigravity-auth-url", "antigravity", "antigravity"),
-    "kimi": ("/kimi-auth-url", "kimi", "kimi"),
-    "xai": ("/xai-auth-url", "xai", "xai"),
 }
-_WEBUI_OAUTH_VENDORS = frozenset({"anthropic", "openai", "codex", "antigravity"})
+_WEBUI_OAUTH_VENDORS = frozenset(_OAUTH_ENDPOINTS)
+
+
+class _ProtocolProof(Enum):
+    PROVEN = "proven"
+    UNPROVEN = "unproven"
+
+
+class _AuthenticationEvidence(Enum):
+    ACCEPTED = "accepted"
+    REJECTED = "rejected"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class _ProtocolEvidence:
+    protocol: _ProtocolProof
+    authentication: _AuthenticationEvidence
+
+
+@dataclass(frozen=True)
+class _ProtocolEvidenceRule:
+    statuses: frozenset[int]
+    protocol: _ProtocolProof
+    authentication: _AuthenticationEvidence
+    top_level_field: str | None = None
+    top_level_values: frozenset[str] = frozenset()
+    error_identifiers: frozenset[str] = frozenset()
+    error_params: frozenset[str] | None = None
+
+    def matches(self, status: int, payload: Mapping[str, Any]) -> bool:
+        if status not in self.statuses:
+            return False
+        if self.top_level_field is not None:
+            value = payload.get(self.top_level_field)
+            if not isinstance(value, str) or value.strip().lower() not in self.top_level_values:
+                return False
+        error = payload.get("error")
+        if self.error_identifiers or self.error_params is not None:
+            if not isinstance(error, dict):
+                return False
+        if self.error_identifiers:
+            identifiers = {
+                value.strip().lower() for value in (error.get("type"), error.get("code")) if isinstance(value, str)
+            }
+            if self.error_identifiers.isdisjoint(identifiers):
+                return False
+        if self.error_params is not None and error.get("param") not in self.error_params:
+            return False
+        return True
+
+
+@dataclass(frozen=True)
+class _ProtocolObservationTaxonomy:
+    """One protocol's request shape and response evidence table.
+
+    The request path and body are part of the same authority as the response
+    taxonomy. OpenAI probes deliberately provide the common ``model`` field
+    while omitting the candidate-specific ``input`` or ``messages`` field, so
+    each endpoint reaches its own protocol-shaped validation error.
+    """
+
+    request_path: str
+    request_body: Mapping[str, Any]
+    oauth_path: str | None
+    evidence_rules: tuple[_ProtocolEvidenceRule, ...]
+
+
+_SUCCESS_STATUSES = frozenset(range(200, 300))
+_REQUEST_ERROR_STATUSES = frozenset({400, 404, 422})
+_AUTHENTICATION_ERROR_STATUSES = frozenset({401, 403})
+_RATE_LIMIT_STATUSES = frozenset({429})
+_SERVER_ERROR_STATUSES = frozenset(range(500, 600))
+
+_REQUEST_ERROR_IDENTIFIERS = frozenset(
+    {
+        "invalid_parameter",
+        "invalid_request_error",
+        "validation_error",
+    }
+)
+_MODEL_ERROR_IDENTIFIERS = frozenset({"model_not_found", "not_found_error"})
+_AUTHENTICATION_ERROR_IDENTIFIERS = frozenset({"authentication_error", "invalid_api_key", "permission_error"})
+_SERVER_ERROR_IDENTIFIERS = frozenset({"api_error", "internal_error", "overloaded", "overloaded_error", "server_error"})
+_RATE_LIMIT_ERROR_IDENTIFIERS = frozenset({"rate_limit_error", "rate_limit_exceeded"})
+
+_OPENAI_RESPONSES_PARAMS = frozenset(
+    {
+        "input",
+        "instructions",
+        "max_output_tokens",
+        "previous_response_id",
+        "reasoning",
+        "text",
+        "truncation",
+    }
+)
+_OPENAI_CHAT_PARAMS = frozenset(
+    {
+        "messages",
+        "max_completion_tokens",
+        "max_tokens",
+        "response_format",
+        "stop",
+        "temperature",
+        "tool_choice",
+        "top_p",
+    }
+)
+
+
+def _openai_evidence_rules(
+    success_objects: frozenset[str],
+    request_params: frozenset[str],
+) -> tuple[_ProtocolEvidenceRule, ...]:
+    return (
+        _ProtocolEvidenceRule(
+            statuses=_SUCCESS_STATUSES,
+            top_level_field="object",
+            top_level_values=success_objects,
+            protocol=_ProtocolProof.PROVEN,
+            authentication=_AuthenticationEvidence.ACCEPTED,
+        ),
+        _ProtocolEvidenceRule(
+            statuses=_REQUEST_ERROR_STATUSES,
+            error_identifiers=_REQUEST_ERROR_IDENTIFIERS,
+            error_params=request_params,
+            protocol=_ProtocolProof.PROVEN,
+            authentication=_AuthenticationEvidence.ACCEPTED,
+        ),
+        _ProtocolEvidenceRule(
+            statuses=frozenset({404}),
+            error_identifiers=_MODEL_ERROR_IDENTIFIERS,
+            protocol=_ProtocolProof.PROVEN,
+            authentication=_AuthenticationEvidence.ACCEPTED,
+        ),
+        _ProtocolEvidenceRule(
+            statuses=_AUTHENTICATION_ERROR_STATUSES,
+            error_params=request_params,
+            protocol=_ProtocolProof.PROVEN,
+            authentication=_AuthenticationEvidence.REJECTED,
+        ),
+        _ProtocolEvidenceRule(
+            statuses=_AUTHENTICATION_ERROR_STATUSES,
+            error_identifiers=_AUTHENTICATION_ERROR_IDENTIFIERS,
+            protocol=_ProtocolProof.UNPROVEN,
+            authentication=_AuthenticationEvidence.REJECTED,
+        ),
+        _ProtocolEvidenceRule(
+            statuses=_SERVER_ERROR_STATUSES,
+            error_identifiers=_SERVER_ERROR_IDENTIFIERS,
+            protocol=_ProtocolProof.PROVEN,
+            authentication=_AuthenticationEvidence.UNKNOWN,
+        ),
+        _ProtocolEvidenceRule(
+            statuses=_RATE_LIMIT_STATUSES,
+            error_identifiers=_RATE_LIMIT_ERROR_IDENTIFIERS,
+            protocol=_ProtocolProof.PROVEN,
+            authentication=_AuthenticationEvidence.UNKNOWN,
+        ),
+    )
+
+
+_PROTOCOL_OBSERVATION_TAXONOMY = {
+    "anthropic": _ProtocolObservationTaxonomy(
+        request_path="/v1/messages",
+        request_body={
+            "model": "__avibe_model_hub_probe__",
+            "max_tokens": 1,
+            "messages": [{"role": "user", "content": "ping"}],
+        },
+        oauth_path="/v1/messages?beta=true",
+        evidence_rules=(
+            _ProtocolEvidenceRule(
+                statuses=_SUCCESS_STATUSES,
+                top_level_field="type",
+                top_level_values=frozenset({"message"}),
+                protocol=_ProtocolProof.PROVEN,
+                authentication=_AuthenticationEvidence.ACCEPTED,
+            ),
+            _ProtocolEvidenceRule(
+                statuses=_REQUEST_ERROR_STATUSES,
+                top_level_field="type",
+                top_level_values=frozenset({"error"}),
+                error_identifiers=_REQUEST_ERROR_IDENTIFIERS | _MODEL_ERROR_IDENTIFIERS,
+                protocol=_ProtocolProof.PROVEN,
+                authentication=_AuthenticationEvidence.ACCEPTED,
+            ),
+            _ProtocolEvidenceRule(
+                statuses=_AUTHENTICATION_ERROR_STATUSES,
+                top_level_field="type",
+                top_level_values=frozenset({"error"}),
+                error_identifiers=_AUTHENTICATION_ERROR_IDENTIFIERS,
+                protocol=_ProtocolProof.PROVEN,
+                authentication=_AuthenticationEvidence.REJECTED,
+            ),
+            _ProtocolEvidenceRule(
+                statuses=_SERVER_ERROR_STATUSES,
+                top_level_field="type",
+                top_level_values=frozenset({"error"}),
+                error_identifiers=_SERVER_ERROR_IDENTIFIERS,
+                protocol=_ProtocolProof.PROVEN,
+                authentication=_AuthenticationEvidence.UNKNOWN,
+            ),
+            _ProtocolEvidenceRule(
+                statuses=_RATE_LIMIT_STATUSES,
+                top_level_field="type",
+                top_level_values=frozenset({"error"}),
+                error_identifiers=_RATE_LIMIT_ERROR_IDENTIFIERS,
+                protocol=_ProtocolProof.PROVEN,
+                authentication=_AuthenticationEvidence.UNKNOWN,
+            ),
+        ),
+    ),
+    "openai_responses": _ProtocolObservationTaxonomy(
+        request_path="/v1/responses",
+        request_body={"model": "__avibe_model_hub_probe__"},
+        oauth_path="/backend-api/codex/responses",
+        evidence_rules=_openai_evidence_rules(
+            frozenset({"response"}),
+            _OPENAI_RESPONSES_PARAMS,
+        ),
+    ),
+    "openai_chat": _ProtocolObservationTaxonomy(
+        request_path="/v1/chat/completions",
+        request_body={"model": "__avibe_model_hub_probe__"},
+        oauth_path=None,
+        evidence_rules=_openai_evidence_rules(
+            frozenset({"chat.completion", "chat.completion.chunk"}),
+            _OPENAI_CHAT_PARAMS,
+        ),
+    ),
+}
+
+
+def _parse_protocol_authenticated_evidence(
+    protocol: str,
+    status: int,
+    body: str | bytes,
+) -> _ProtocolEvidence:
+    """Classify protocol proof and authentication as independent evidence.
+
+    Observation is sequential and stops at the first authenticated proof.
+    Status, vendor, URL, and probe order never prove a protocol or credential
+    by themselves; a generic response therefore remains unproven even when its
+    HTTP status is conventionally associated with authentication or validation.
+    A structured authentication error may prove credential rejection without
+    distinguishing the attempted OpenAI protocol. Accepted, rejected, and unknown
+    are all positive table entries; there is no default authentication result for
+    a shaped response. The observation result exposes a non-null protocol if and
+    only if a protocol-specific response shape also proves authentication
+    acceptance.
+    """
+
+    try:
+        payload = json.loads(body)
+    except (TypeError, UnicodeDecodeError, ValueError):
+        return _ProtocolEvidence(
+            protocol=_ProtocolProof.UNPROVEN,
+            authentication=_AuthenticationEvidence.UNKNOWN,
+        )
+    if not isinstance(payload, dict):
+        return _ProtocolEvidence(
+            protocol=_ProtocolProof.UNPROVEN,
+            authentication=_AuthenticationEvidence.UNKNOWN,
+        )
+
+    taxonomy = _PROTOCOL_OBSERVATION_TAXONOMY.get(protocol)
+    for rule in taxonomy.evidence_rules if taxonomy is not None else ():
+        if rule.matches(status, payload):
+            return _ProtocolEvidence(
+                protocol=rule.protocol,
+                authentication=rule.authentication,
+            )
+    return _ProtocolEvidence(
+        protocol=(
+            _ProtocolProof.PROVEN if _response_shape_proves_protocol(protocol, payload) else _ProtocolProof.UNPROVEN
+        ),
+        authentication=_AuthenticationEvidence.UNKNOWN,
+    )
+
+
+async def _probe_protocol_response(
+    *,
+    vendor: str,
+    protocol: str,
+    base_url: str | None,
+    secret: str,
+    timeout: float = 15.0,
+) -> _ProtocolEvidence:
+    """Require a response from the candidate protocol's distinct request path."""
+
+    root = base_url or _OFFICIAL_BASE_URLS.get(vendor)
+    if not root:
+        raise EngineClientError("source requires a base URL for protocol observation")
+    taxonomy = _PROTOCOL_OBSERVATION_TAXONOMY.get(protocol)
+    if taxonomy is None:
+        raise EngineClientError("unsupported source protocol")
+    endpoint = taxonomy.request_path.removeprefix("/v1")
+    try:
+        url = normalize_model_hub_base_url(root, append_path=endpoint)
+    except (TypeError, ValueError):
+        raise EngineClientError("source base URL is invalid")
+    assert url is not None
+    headers = {
+        "Authorization": f"Bearer {secret}",
+        "Accept": "application/json",
+    }
+    if protocol == "anthropic":
+        headers = {
+            "x-api-key": secret,
+            "anthropic-version": "2023-06-01",
+            "Accept": "application/json",
+        }
+    client_timeout = aiohttp.ClientTimeout(total=timeout)
+    try:
+        async with aiohttp.ClientSession(timeout=client_timeout) as session:
+            async with session.post(
+                url,
+                headers=headers,
+                json=dict(taxonomy.request_body),
+                allow_redirects=False,
+            ) as response:
+                body = await response.content.read(64 * 1024)
+                return _parse_protocol_authenticated_evidence(
+                    protocol,
+                    response.status,
+                    body,
+                )
+    except asyncio.TimeoutError:
+        raise EngineClientError("protocol observation timed out", error_type="timeout") from None
+    except aiohttp.ClientError:
+        raise EngineClientError(
+            "protocol observation failed",
+            error_type="network_error",
+        ) from None
 
 
 @dataclass(frozen=True)
 class _AuthRecord:
     identity: str
+    auth_index: str
     name: str
     provider: str
     fingerprint: str
+    account_id: str | None = None
+
+
+def _response_shape_proves_protocol(
+    protocol: str,
+    body: Mapping[str, Any],
+) -> bool:
+    """Recognize protocol-specific shapes without inferring authentication."""
+
+    if protocol == "anthropic":
+        error = body.get("error")
+        return body.get("type") == "message" or (
+            body.get("type") == "error" and isinstance(error, dict) and isinstance(error.get("type"), str)
+        )
+    error = body.get("error")
+    if protocol == "openai_responses":
+        return body.get("object") == "response" or (
+            isinstance(error, dict) and error.get("param") in _OPENAI_RESPONSES_PARAMS
+        )
+    if protocol == "openai_chat":
+        return body.get("object") in {"chat.completion", "chat.completion.chunk"} or (
+            isinstance(error, dict) and error.get("param") in _OPENAI_CHAT_PARAMS
+        )
+    return False
+
+
+def _probe_oauth_protocol_response(
+    *,
+    client: EngineClient,
+    auth: _AuthRecord,
+    vendor: str,
+    protocol: str,
+) -> _ProtocolEvidence:
+    """Probe one allowlisted OAuth upstream through the engine-held credential."""
+
+    taxonomy = _PROTOCOL_OBSERVATION_TAXONOMY.get(protocol)
+    if taxonomy is None:
+        raise EngineClientError("unsupported source protocol")
+    if vendor == "anthropic" and protocol == "anthropic":
+        url = f"https://api.anthropic.com{taxonomy.oauth_path or taxonomy.request_path}"
+        headers = {
+            "Authorization": "Bearer $TOKEN$",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "Anthropic-Version": "2023-06-01",
+            "Anthropic-Beta": "oauth-2025-04-20",
+            "X-App": "cli",
+        }
+    elif vendor in {"openai", "codex"} and protocol == "openai_responses":
+        url = f"https://chatgpt.com{taxonomy.oauth_path or taxonomy.request_path}"
+        headers = {
+            "Authorization": "Bearer $TOKEN$",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "Originator": "codex-tui",
+        }
+        if auth.account_id:
+            headers["Chatgpt-Account-Id"] = auth.account_id
+    else:
+        raise EngineClientError(
+            "OAuth credential does not support this protocol path",
+            status_code=404,
+        )
+    payload = client.management_request(
+        "POST",
+        "/api-call",
+        payload={
+            "auth_index": auth.auth_index,
+            "method": "POST",
+            "url": url,
+            "header": headers,
+            "data": json.dumps(taxonomy.request_body, separators=(",", ":")),
+        },
+    )
+    status = payload.get("status_code")
+    if not isinstance(status, int) or isinstance(status, bool):
+        raise EngineClientError(
+            "protocol observation returned an invalid status",
+            error_type="invalid_json",
+        )
+    body = payload.get("body")
+    return _parse_protocol_authenticated_evidence(
+        protocol,
+        status,
+        body if isinstance(body, str) else "",
+    )
 
 
 @dataclass
@@ -177,6 +606,65 @@ class CLIProxyEngineAdapter:
             base_url=base_url,
         )
 
+    async def retarget_api_key_credential(
+        self,
+        credential_ref: str,
+        vendor: str,
+        protocol: str,
+        base_url: str | None,
+    ) -> str:
+        metadata = await asyncio.to_thread(
+            self.state_store.credential_metadata,
+            credential_ref,
+        )
+        normalized_vendor = vendor.strip().lower()
+        if (
+            metadata.get("kind") != "api_key"
+            or metadata.get("vendor") != normalized_vendor
+            or metadata.get("protocol") != protocol
+        ):
+            raise EngineStateError("credential does not match retarget request")
+        secret = await asyncio.to_thread(
+            self.state_store.read_api_key,
+            credential_ref,
+        )
+        return await asyncio.to_thread(
+            self.state_store.store_api_key,
+            secret,
+            vendor=normalized_vendor,
+            protocol=protocol,
+            base_url=base_url,
+        )
+
+    async def credential_supports_refresh(self, credential_ref: str) -> bool:
+        metadata = await asyncio.to_thread(
+            self.state_store.credential_metadata,
+            credential_ref,
+        )
+        return metadata.get("kind") == "oauth"
+
+    async def provision_transient_credential(
+        self,
+        vendor: str,
+        secret: str,
+        base_url: str | None,
+    ) -> str:
+        """Store an unbound observation key until the observation settles.
+
+        The observation seam determines protocol from upstream responses, so the
+        temporary record deliberately uses a neutral engine-store protocol marker;
+        ``observe_source`` reads only the opaque ref's secret and never treats that
+        marker as a protocol conclusion.
+        """
+
+        return await asyncio.to_thread(
+            self.state_store.store_api_key,
+            secret,
+            vendor=vendor,
+            protocol="openai_chat",
+            base_url=base_url,
+        )
+
     async def revoke_credential(self, credential_ref: str) -> None:
         await asyncio.to_thread(
             self.state_store.assert_credential_unbound,
@@ -273,12 +761,180 @@ class CLIProxyEngineAdapter:
         except EngineClientError as exc:
             raise ModelDiscoveryError("model discovery failed") from exc
 
+    async def observe_source(
+        self,
+        vendor: str,
+        base_url: str | None,
+        credential_ref: str,
+        protocol_order: Sequence[str],
+    ) -> SourceObservation:
+        """Observe sequentially and stop at the first authenticated proof.
+
+        ``protocol_order`` orders attempts only. A protocol-specific response
+        with accepted authentication proves the current attempt and terminates
+        observation. A shaped credential rejection is recorded while later
+        candidates continue. Vendor, URL, and order never create a conclusion;
+        exhausting the order without any shaped response is the ambiguous
+        boundary. This is the require-proven reading of AC-27.
+        """
+
+        metadata = await asyncio.to_thread(
+            self.state_store.credential_metadata,
+            credential_ref,
+        )
+        normalized_vendor = vendor.strip().lower()
+        try:
+            normalized_base_url = normalize_model_hub_base_url(base_url)
+        except (TypeError, ValueError):
+            raise EngineStateError("invalid source base URL") from None
+        if metadata.get("vendor") != normalized_vendor:
+            raise EngineStateError("credential does not match observation target")
+        credential_kind = metadata.get("kind")
+        secret: str | None = None
+        oauth_auth: _AuthRecord | None = None
+        if credential_kind == "api_key":
+            if metadata.get("base_url") != normalized_base_url:
+                raise EngineStateError("credential does not match observation target")
+            secret = await asyncio.to_thread(self.state_store.read_api_key, credential_ref)
+        elif credential_kind == "oauth":
+            if normalized_base_url is not None:
+                raise EngineStateError("credential does not match observation target")
+            client = await asyncio.to_thread(self.supervisor.client)
+            inventory = await asyncio.to_thread(_auth_inventory, client)
+            auth_name = str(metadata.get("auth_name") or "")
+            matches = [auth for auth in inventory.values() if auth.name == auth_name or auth.identity == auth_name]
+            if len(matches) != 1 or not matches[0].auth_index:
+                raise EngineStateError("OAuth credential binding is unavailable")
+            oauth_auth = matches[0]
+        else:
+            raise EngineStateError("credential does not match observation target")
+
+        failures: list[EngineClientError] = []
+        received_rejection = False
+        received_proven_unknown = False
+        received_unproven_response = False
+        for protocol in protocol_order:
+            if protocol not in SOURCE_PROTOCOLS:
+                raise EngineStateError("unsupported source protocol")
+            try:
+                if credential_kind == "api_key":
+                    evidence = await _probe_protocol_response(
+                        vendor=normalized_vendor,
+                        protocol=protocol,
+                        base_url=base_url,
+                        secret=secret or "",
+                    )
+                else:
+                    assert oauth_auth is not None
+                    evidence = await asyncio.to_thread(
+                        _probe_oauth_protocol_response,
+                        client=client,
+                        auth=oauth_auth,
+                        vendor=normalized_vendor,
+                        protocol=protocol,
+                    )
+            except EngineClientError as exc:
+                failures.append(exc)
+                continue
+            if evidence.authentication is _AuthenticationEvidence.REJECTED:
+                received_rejection = True
+                continue
+            if evidence.protocol is _ProtocolProof.PROVEN:
+                if evidence.authentication is _AuthenticationEvidence.UNKNOWN:
+                    received_proven_unknown = True
+                    continue
+            else:
+                received_unproven_response = True
+                continue
+            try:
+                if credential_kind == "api_key":
+                    models = await probe_models(
+                        vendor=normalized_vendor,
+                        protocol=protocol,
+                        base_url=base_url,
+                        secret=secret or "",
+                    )
+                else:
+                    models = await self.discover_models(
+                        normalized_vendor,
+                        protocol,
+                        None,
+                        credential_ref,
+                    )
+            except (EngineClientError, ModelDiscoveryError):
+                discovery = ObservationDiscovery.FAILED
+                models = ()
+            else:
+                discovery = ObservationDiscovery.SUCCEEDED
+            return make_source_observation(
+                outcome=ObservationOutcome.OBSERVED,
+                reachable=True,
+                authenticated=True,
+                protocol=protocol,
+                discovery=discovery,
+                model_ids=tuple(models),
+            )
+
+        if received_rejection:
+            return make_source_observation(
+                outcome=ObservationOutcome.AUTHENTICATION_FAILED,
+                reachable=True,
+                authenticated=False,
+                protocol=None,
+                discovery=ObservationDiscovery.NOT_ATTEMPTED,
+                model_ids=(),
+            )
+        if received_proven_unknown:
+            return make_source_observation(
+                outcome=ObservationOutcome.ADAPTER_ERROR,
+                reachable=True,
+                authenticated=None,
+                protocol=None,
+                discovery=ObservationDiscovery.NOT_ATTEMPTED,
+                model_ids=(),
+            )
+        if received_unproven_response:
+            return make_source_observation(
+                outcome=ObservationOutcome.AMBIGUOUS,
+                reachable=True,
+                authenticated=None,
+                protocol=None,
+                discovery=ObservationDiscovery.NOT_ATTEMPTED,
+                model_ids=(),
+            )
+        if any(error.error_type == "timeout" for error in failures):
+            return make_source_observation(
+                outcome=ObservationOutcome.TIMEOUT,
+                reachable=None,
+                authenticated=None,
+                protocol=None,
+                discovery=ObservationDiscovery.NOT_ATTEMPTED,
+                model_ids=(),
+            )
+        if any(error.error_type in {"network_error", "ConnectionError", "URLError"} for error in failures):
+            return make_source_observation(
+                outcome=ObservationOutcome.UNREACHABLE,
+                reachable=False,
+                authenticated=None,
+                protocol=None,
+                discovery=ObservationDiscovery.NOT_ATTEMPTED,
+                model_ids=(),
+            )
+        return make_source_observation(
+            outcome=ObservationOutcome.ADAPTER_ERROR,
+            reachable=None,
+            authenticated=None,
+            protocol=None,
+            discovery=ObservationDiscovery.NOT_ATTEMPTED,
+            model_ids=(),
+        )
+
     async def start_oauth(self, source_id: str, vendor: str) -> OAuthFlowState:
         await asyncio.to_thread(self.state_store.validate_source_id, source_id)
         normalized_vendor = vendor.strip().lower()
         endpoint = _OAUTH_ENDPOINTS.get(normalized_vendor)
         if endpoint is None:
-            raise EngineStateError("unsupported OAuth vendor")
+            raise EngineStateError("OAuth vendor lacks Model Hub response-backed observation")
         engine_endpoint, callback_provider, auth_provider = endpoint
         with self._oauth_lock:
             self._expire_oauth_flows_locked()
@@ -417,9 +1073,7 @@ class CLIProxyEngineAdapter:
             if source is None:
                 raise EngineStateError("source is not registered")
             if source.allowed_origins and origin not in source.allowed_origins:
-                raise OriginNotAllowedError(
-                    f"origin {origin!r} is not allowed to use source {source_id!r}"
-                )
+                raise OriginNotAllowedError(f"origin {origin!r} is not allowed to use source {source_id!r}")
             try:
                 client = await asyncio.to_thread(self.supervisor.client)
             except EngineUnavailableError:
@@ -692,9 +1346,14 @@ def _auth_inventory(client: EngineClient) -> dict[str, _AuthRecord]:
     for item in files:
         if not isinstance(item, dict):
             continue
-        identity = str(item.get("id") or item.get("auth_index") or item.get("name") or "").strip()
+        auth_index = str(item.get("auth_index") or "").strip()
+        identity = str(item.get("id") or auth_index or item.get("name") or "").strip()
         name = str(item.get("name") or item.get("id") or "").strip()
         provider = str(item.get("provider") or item.get("type") or "").strip().lower()
+        id_token = item.get("id_token")
+        account_id = (
+            str(id_token.get("chatgpt_account_id") or "").strip() or None if isinstance(id_token, dict) else None
+        )
         if identity and name and provider:
             fingerprint = json.dumps(
                 {
@@ -715,9 +1374,11 @@ def _auth_inventory(client: EngineClient) -> dict[str, _AuthRecord]:
             )
             inventory[identity] = _AuthRecord(
                 identity=identity,
+                auth_index=auth_index,
                 name=name,
                 provider=provider,
                 fingerprint=fingerprint,
+                account_id=account_id,
             )
     return inventory
 

@@ -204,9 +204,20 @@ class _StubController:
         is_error=False,
         level="normal",
         output=None,
+        terminal_error=None,
+        delivery=None,
     ):
         # Terminal error results settle the dot + release the SSE waiter via the
         # outbound chokepoint; a no-op here (these are IM turns, no workbench dot).
+        if message_type == "notify":
+            delivered_id = await self.get_im_client_for_context(context).send_message(
+                context,
+                text,
+            )
+            if delivery is not None:
+                delivery.send_returned = True
+                delivery.delivered_id = delivered_id
+            return delivered_id
         return None
 
     def get_im_client_for_context(self, context):
@@ -491,8 +502,12 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(error, "context preparation failed")
-        controller.emit_agent_message.assert_awaited_once()
-        call = controller.emit_agent_message.await_args
+        self.assertEqual(controller.emit_agent_message.await_count, 2)
+        notify_call, call = controller.emit_agent_message.await_args_list
+        self.assertEqual(
+            notify_call.args[:3],
+            (context, "notify", "Error: context preparation failed"),
+        )
         self.assertEqual(call.args[:3], (context, "result", ""))
         output = call.kwargs["output"]
         self.assertTrue(output.completes_turn)
@@ -1512,6 +1527,17 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
     async def test_scheduled_turn_returns_error_string_after_notifying_im(self):
         controller = _StubController(platform="slack", ack_mode="reaction", typing_result=True)
         controller.agent_service.error = RuntimeError("boom")
+
+        async def emit(context, message_type, text, **kwargs):
+            if message_type == "notify":
+                delivered_id = await controller.im_client.send_message(context, text)
+                delivery = kwargs["delivery"]
+                delivery.send_returned = True
+                delivery.delivered_id = delivered_id
+                return delivered_id
+            return None
+
+        controller.emit_agent_message = AsyncMock(side_effect=emit)
         handler = MessageHandler(controller)
         handler.set_session_handler(_StubSessionHandler())
         context = MessageContext(
@@ -1519,12 +1545,69 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
             channel_id="C1",
             message_id="scheduled:task-1:abc",
             platform="slack",
+            platform_specific={
+                "turn_token": "turn-scheduled-error",
+                "task_execution_id": "run-scheduled-error",
+            },
         )
 
         result = await handler.handle_scheduled_message(context, "hello")
 
         self.assertEqual(result, "boom")
         self.assertEqual(controller.im_client.sent_messages, [("C1", "Error: boom")])
+        self.assertEqual(controller.emit_agent_message.await_count, 2)
+        notify_call, _terminal_call = controller.emit_agent_message.await_args_list
+        self.assertEqual(notify_call.args[:3], (context, "notify", "Error: boom"))
+        terminal_output = controller.emit_agent_message.await_args.kwargs["output"]
+        self.assertEqual(
+            terminal_output.metadata["turn_failure_notification"],
+            {
+                "failure_id": "turn:turn-scheduled-error",
+                "ack_evidence": "delivery_only",
+                "delivered": True,
+            },
+        )
+
+    async def test_handled_backend_key_error_is_not_reclassified_as_missing_agent(self):
+        controller = _StubController(platform="slack", ack_mode="reaction", typing_result=True)
+
+        async def fail_after_dispatch(_agent_name, request):
+            error = KeyError("backend config")
+            request.failure_handled = True
+            await request.failure_handler(error)
+            raise error
+
+        controller.agent_service.handle_message = fail_after_dispatch
+
+        async def emit(context, message_type, text, **kwargs):
+            if message_type == "notify":
+                delivered_id = await controller.im_client.send_message(context, text)
+                delivery = kwargs["delivery"]
+                delivery.send_returned = True
+                delivery.delivered_id = delivered_id
+                return delivered_id
+            return None
+
+        controller.emit_agent_message = AsyncMock(side_effect=emit)
+        handler = MessageHandler(controller)
+        handler.set_session_handler(_StubSessionHandler())
+        context = MessageContext(
+            user_id="scheduled",
+            channel_id="C1",
+            message_id="scheduled:task-1:key-error",
+            platform="slack",
+            platform_specific={
+                "turn_token": "turn-scheduled-key-error",
+                "task_execution_id": "run-scheduled-key-error",
+            },
+        )
+
+        result = await handler.handle_scheduled_message(context, "hello")
+
+        self.assertEqual(result, "'backend config'")
+        self.assertEqual(controller.im_client.sent_messages, [("C1", "Error: 'backend config'")])
+        self.assertEqual(controller.emit_agent_message.await_count, 2)
+        self.assertNotIn("not available", controller.im_client.sent_messages[0][1])
 
     async def test_durable_scheduled_turn_does_not_mirror_before_acceptance(self):
         controller = _StubController(platform="slack", ack_mode="reaction", typing_result=True)

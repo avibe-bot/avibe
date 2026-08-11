@@ -93,7 +93,11 @@ import {
   transcriptSelectionActions,
   type SessionReadOnlyReason,
 } from './sessionArchived';
-import { createSessionRowRefreshGate } from './sessionRowRefresh';
+import {
+  createSessionRowRefreshGate,
+  sessionRowWithBootstrapFallback,
+} from './sessionRowRefresh';
+import { chatSessionViewState } from './chatSessionViewState';
 import { InstallHint } from '../InstallHint';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
@@ -1382,8 +1386,14 @@ export const ChatPage: React.FC = () => {
       if (bootstrapIsCurrent()) {
         setSession(bootstrap.session);
       } else {
-        // A newer turn-end/activity read won the row race. Keep its route-bearing
-        // snapshot and repair a cold page if that read has not hydrated it yet.
+        // A newer turn-end/activity read won the row race. Preserve its row if
+        // it landed, but keep this successful bootstrap as the fallback while a
+        // cold-page recovery is pending or if both bounded attempts fail.
+        setSession((current) => sessionRowWithBootstrapFallback(
+          current,
+          sessionId,
+          bootstrap.session,
+        ));
         void refreshSessionRow();
       }
       setAgents(bootstrap.agents);
@@ -2463,15 +2473,16 @@ export const ChatPage: React.FC = () => {
     return <ChatMissing onBack={goBack} />;
   }
 
-  // A direct session→session switch re-renders this SAME ChatPage instance with
-  // the new :sessionId while every piece of state still belongs to the PREVIOUS
-  // session — the reset effect only clears it after this render commits.
-  // Rendering the chat body in those mismatch frames leaks the old session under
-  // the new route: the composer remounts (key change) seeded with the OLD
-  // session's draft and its seed-change would be persisted under the NEW
-  // session id. Treat the mismatch as loading so nothing of the old session
-  // ever mounts under the new route.
-  if ((loading && !session) || (session && session.id !== sessionId)) {
+  // A direct session→session switch reuses this ChatPage instance. Until the
+  // current row arrives, the state can still hold the previous row or be empty
+  // while a newer recovery read supersedes bootstrap. Neither means not-found.
+  const viewState = chatSessionViewState({
+    routeSessionId: sessionId,
+    loadedSessionId: session?.id ?? null,
+    loading,
+    error,
+  });
+  if (viewState === 'loading') {
     return (
       <div className="flex h-[60vh] flex-col items-center justify-center gap-2 text-muted">
         <Loader2 className="size-5 animate-spin" />
@@ -2480,7 +2491,7 @@ export const ChatPage: React.FC = () => {
     );
   }
 
-  if (!session) {
+  if (viewState === 'failed' || !session) {
     return (
       <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 py-8">
         <button

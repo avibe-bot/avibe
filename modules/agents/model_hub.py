@@ -16,12 +16,15 @@ from typing import Any, Callable, Literal, Mapping, Optional, cast
 from config import paths
 from config.v2_config import ModelHubConfig, ModelHubSourceConfig
 from core.handlers.model_hub.classification import ResolutionDecision
-from core.handlers.model_hub.events import EventAgent, EventReason
-from core.handlers.model_hub.identifiers import parse_opencode_model_id
+from core.handlers.model_hub.events import (
+    EVENT_REASON_AUTHORITY,
+    EventAgent,
+    EventReason,
+    event_reason_label,
+)
 from core.handlers.model_hub.resolver import (
     BackendName,
     ModelHubTurnResolution,
-    normalize_opencode_requested_model,
     resolve_model_hub_turn,
     source_after_cooldown_recovery,
     source_eligible_for_backend,
@@ -260,15 +263,12 @@ def _localized_launch_error(
             source = str(blocker.get("source") or "")
             detail_key = str(blocker.get("detail_key") or "")
             blocker_reason = str(blocker.get("reason") or "")
-            if blocker_reason == "native_cli_unavailable":
-                detail = i18n_t(
-                    "modelHub.launch.native_cli_unavailable",
-                    language,
-                )
+            if blocker_reason in EVENT_REASON_AUTHORITY:
+                detail = event_reason_label(blocker_reason, language)
             else:
                 reason = _SOURCE_DETAIL_EVENT_REASONS.get(detail_key)
                 detail = (
-                    i18n_t(f"modelHub.events.reason.{reason}", language)
+                    event_reason_label(reason, language)
                     if reason is not None
                     else str(blocker.get("status") or "")
                 )
@@ -345,16 +345,13 @@ def build_codex_hub_launch(
     return overrides + list(base_args), env
 
 
-def _provider_package(protocol: str) -> str:
-    if protocol == "anthropic":
-        return "@ai-sdk/anthropic"
-    if protocol == "openai_responses":
-        return "@ai-sdk/openai"
+def _provider_package() -> str:
+    # OpenCode speaks one stable frontend protocol to the local Gateway. The
+    # persisted exact hop selects the upstream protocol behind that boundary.
     return "@ai-sdk/openai-compatible"
 
 
-def _provider_base_url(gateway_base_url: str, protocol: str) -> str:
-    # All supported OpenCode SDK adapters expect their versioned API root.
+def _provider_base_url(gateway_base_url: str) -> str:
     return f"{gateway_base_url.rstrip('/')}/v1"
 
 
@@ -687,6 +684,14 @@ class ModelHubRuntimeRouter:
         config: ModelHubConfig,
         resolution: ModelHubTurnResolution,
     ) -> EventReason:
+        structural_reason = resolution.structural_blocker_reason
+        if structural_reason in {
+            "route_unconfigured",
+            "source_missing",
+            "model_unsupported",
+            "native_cli_unavailable",
+        }:
+            return cast(EventReason, structural_reason)
         order = config.effective_source_order(resolution.backend)
         sources_by_id = {source.id: source for source in config.sources}
         enabled_sources = [
@@ -714,6 +719,11 @@ class ModelHubRuntimeRouter:
         resolution: ModelHubTurnResolution,
     ) -> dict[str, Any]:
         model = resolution.requested_model or resolution.target_model
+        if resolution.route_reason == "route_unconfigured":
+            return {
+                "copy_key": "route_unconfigured",
+                "model": model,
+            }
         if resolution.supply_status == "waiting":
             cooling = [
                 source
@@ -731,23 +741,15 @@ class ModelHubRuntimeRouter:
                 "retry_at": recovery,
             }
         if resolution.matching_sources:
-            candidate_ids = {
-                source.id for source in resolution.candidates
-            }
             blockers = [
                 {
-                    "source": source.display_name,
-                    "status": source.state.status,
-                    "detail_key": source.state.detail_key,
-                    "reason": (
-                        "native_cli_unavailable"
-                        if source.supply_channel == "native_cli"
-                        and source.state.status in {"active", "standby"}
-                        and source.id not in candidate_ids
-                        else None
-                    ),
+                    "source": inspection.source.display_name,
+                    "status": inspection.source.state.status,
+                    "detail_key": inspection.source.state.detail_key,
+                    "reason": inspection.reason,
                 }
-                for source in resolution.matching_sources
+                for inspection in resolution.inspected_hops
+                if inspection.source is not None
             ]
             return {
                 "copy_key": "interrupted",
@@ -787,7 +789,10 @@ class ModelHubRuntimeRouter:
                 requested_model_id=requested_model,
                 supply_state=supply_state,
             )
-        if not resolution.matching_sources:
+        if (
+            not resolution.matching_sources
+            or resolution.structural_blocker_reason is not None
+        ):
             reason = self._supply_interruption_reason(config, resolution)
             supply_key = (backend, requested_model)
             current_state = ("interrupted", reason)
@@ -876,15 +881,6 @@ class ModelHubRuntimeRouter:
             )
 
         target_model = resolution.target_model
-        if resolution.mapping_applied:
-            self.service._record_event(
-                agent=cast(EventAgent, backend),
-                kind="mapping_applied",
-                model_id=target_model,
-                reason="mapping",
-                from_label=requested_model,
-                now=self.service.now(),
-            )
         source = resolution.source
         self._last_supply_state[(backend, requested_model)] = ("ok", None)
         if source.supply_channel == "native_cli":
@@ -910,7 +906,7 @@ class ModelHubRuntimeRouter:
                     requested_model_id=requested_model,
                     source_id=source.id,
                     resolved_model_id=target_model,
-                    via_mapping=resolution.mapping_applied,
+                    via_mapping=False,
                 )
         else:
             gateway_base_url, gateway_token = await self._gateway_credentials(
@@ -920,7 +916,7 @@ class ModelHubRuntimeRouter:
                 requested_model_id=requested_model,
                 resolved_model_id=target_model,
                 source_id=source.id,
-                via_mapping=resolution.mapping_applied,
+                via_mapping=False,
             )
             runtime_model = target_model
             if self.turn_gateway is None:
@@ -1054,34 +1050,39 @@ class ModelHubRuntimeRouter:
         available_identifiers: list[str] = []
         launches: list[ModelHubLaunch] = []
         for identifier in dict.fromkeys(checked):
-            try:
-                provider_id, model_id = parse_opencode_model_id(identifier)
-            except ValueError:
-                raise ModelHubError("mapping_target_unavailable", status=409) from None
             config, resolution = await self._resolve_turn(
                 config,
                 "opencode",
                 identifier,
                 supply_channel="hub",
             )
-            available_source = resolution.source
-            source = available_source
-            if source is None:
-                # Keep a cooling/error route's public identifier stable in the
-                # overlay. Per-turn resolution still rejects that requested
-                # route, while unrelated checked models remain usable.
-                source = next(
-                    (
-                        candidate
-                        for candidate in resolution.matching_sources
-                        if candidate.supply_channel == "hub"
-                    ),
-                    None,
+            provider_id = resolution.menu_provider_id
+            menu_model_id = resolution.menu_model_id
+            if provider_id is None or menu_model_id is None:
+                raise ModelHubError("mapping_target_unavailable", status=409)
+            inspection = (
+                resolution.candidate_hops[0]
+                if resolution.candidate_hops
+                else None
+            )
+            if inspection is None:
+                # Keep every configured route's public identifier stable in the
+                # overlay. Per-turn resolution still rejects unavailable hops.
+                inspection = (
+                    resolution.projectable_hops[0]
+                    if resolution.projectable_hops
+                    else None
                 )
-            if source is None:
+            if (
+                inspection is None
+                or inspection.source is None
+                or inspection.model_id is None
+            ):
                 continue
-            package = _provider_package(source.protocol)
-            base_url = _provider_base_url(gateway_base_url, source.protocol)
+            source = inspection.source
+            exact_model_id = inspection.model_id
+            package = _provider_package()
+            base_url = _provider_base_url(gateway_base_url)
             provider = providers.setdefault(
                 provider_id,
                 {
@@ -1091,26 +1092,31 @@ class ModelHubRuntimeRouter:
                     "models": {},
                 },
             )
-            if provider["npm"] != package or provider["options"]["baseURL"] != base_url:
-                raise ModelHubError("mapping_target_unavailable", status=409)
-            model = next(item for item in source.models if item.id == model_id)
+            model = next(
+                (item for item in source.models if item.id == exact_model_id),
+                None,
+            )
             runtime_model = identifier
             if self.turn_gateway is None:
                 prefix = await self._source_prefix(source.id)
-                runtime_model = f"{prefix}/{model_id}"
-            provider["models"][model_id] = {
+                runtime_model = f"{prefix}/{exact_model_id}"
+            provider["models"][menu_model_id] = {
                 "id": runtime_model,
-                "name": model.display_name or model_id,
+                "name": (
+                    model.display_name
+                    if model is not None and model.display_name
+                    else menu_model_id
+                ),
             }
             projected_identifiers.append(identifier)
-            if available_source is not None:
+            if resolution.candidate_hops:
                 available_identifiers.append(identifier)
                 launches.append(
                     ModelHubLaunch(
                         backend="opencode",
                         channel="hub",
                         requested_model=identifier,
-                        target_model=model_id,
+                        target_model=exact_model_id,
                         runtime_model=runtime_model,
                         source_id=source.id,
                         gateway_base_url=gateway_base_url,
@@ -1174,10 +1180,6 @@ def opencode_model_for_overlay(model: str | None, overlay: OpenCodeOverlay | Non
         if not overlay.available_identifiers:
             raise ModelHubError("mapping_target_unavailable", status=409)
         return overlay.available_identifiers[0]
-    normalized = normalize_opencode_requested_model(
-        candidate,
-        overlay.checked_identifiers,
-    )
-    if normalized is not None:
-        return normalized
+    if candidate in overlay.checked_identifiers:
+        return candidate
     raise ModelHubError("mapping_target_unavailable", status=409)

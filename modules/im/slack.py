@@ -1391,7 +1391,7 @@ class SlackBot(BaseIMClient):
         (e.g. ``ok_hand``), NOT the raw unicode character — sending the codepoint
         returns ``invalid_name``. Every emoji used as a reaction by the processing
         indicator / handlers must be mapped here: 👀 ack, 👌 queued, 🤖 subagent,
-        ✍️ steered, 🤔 unconfirmed, 🤷 not delivered.
+        ✍️ steered, 🤔 unconfirmed, 🤷 not delivered, ⏹️ stopped, ⚠️ interrupted.
         """
         name = (emoji or "").strip()
         if name.startswith(":") and name.endswith(":") and len(name) > 2:
@@ -1407,6 +1407,12 @@ class SlackBot(BaseIMClient):
             "✍": "writing_hand",
             "🤔": "thinking_face",
             "🤷": "shrug",
+            # Terminal receipts. Both forms of each are listed because the
+            # constants carry U+FE0F and callers may strip it.
+            "⏹️": "black_square_for_stop",
+            "⏹": "black_square_for_stop",
+            "⚠️": "warning",
+            "⚠": "warning",
         }
         return aliases.get(name, name)
 
