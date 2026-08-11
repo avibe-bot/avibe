@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useEffect, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
+import { requestMemoryRuntimeRepair } from '../lib/memoryRepair';
 import { useToast } from './ToastContext';
 import { apiFetch } from '../lib/apiFetch';
 import type { TurnActivityGroupWire } from '../lib/agentActivity';
@@ -3052,8 +3053,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     restartMemoryRuntime: () => postJson('/api/memory/runtime/restart', {}, { handleError: false }),
     rebuildMemoryRuntime: () =>
       postJson('/api/memory/runtime/rebuild', { confirm: true }, { handleError: false }),
-    repairMemoryIndex: () =>
-      postJson('/api/memory/runtime/repair', { confirm: true }, { handleError: false }),
+    repairMemoryIndex: () => requestMemoryRuntimeRepair(postJson),
     getBackendRuntime: (name) => getJson(`/api/backend/${encodeURIComponent(name)}/runtime`),
     restartBackend: (name) => postJson(`/api/backend/${encodeURIComponent(name)}/restart`, {}),
     getCodexAuth: () => getJson('/api/backend/codex/auth'),

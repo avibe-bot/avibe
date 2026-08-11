@@ -6,6 +6,8 @@ capability:
     - tests/scenarios/memory_repair/test_memory_repair_scenarios.py
     - tests/test_memory_repair.py
     - tests/test_memory_sync_bootstrap.py
+    - ui/src/lib/memoryRepair.test.ts
+    - ui/src/components/settings/SettingsMemoryPage.test.tsx
     - ui/src/components/settings/memory/MemoryStatusPanel.test.tsx
   shared_harness:
     - tests/conftest.py::memory_runtime_factory
@@ -25,6 +27,7 @@ scenarios:
       - tests/test_internal_server.py::test_memory_repair_maps_runtime_status
       - tests/test_internal_client.py::test_memory_repair_signs_owner_and_posts_exact_confirmation
       - tests/scenarios/memory_repair/test_memory_repair_scenarios.py::test_memory_repair_001_uses_exact_post_contract
+      - ui/src/lib/memoryRepair.test.ts
       - ui/src/components/settings/memory/MemoryStatusPanel.test.tsx
   - id: MEMORY-REPAIR-002
     name: Repair completion with warnings remains truthful to unhealthy cascade health
@@ -34,6 +37,7 @@ scenarios:
     test: tests/test_memory_repair.py::test_repair_runs_sync_beside_live_sidecar_and_projects_health
     related_tests:
       - tests/scenarios/memory_repair/test_memory_repair_scenarios.py::test_memory_repair_002_renders_warning_health
+      - ui/src/components/settings/memory/MemoryStatusPanel.test.tsx
   - id: MEMORY-REPAIR-003
     name: A second Repair request is disabled while the first request is running
     status: covered
@@ -42,6 +46,8 @@ scenarios:
     test: tests/test_memory_repair.py::test_repair_is_retained_joined_and_holds_lease_after_caller_cancel
     related_tests:
       - tests/scenarios/memory_repair/test_memory_repair_scenarios.py::test_memory_repair_003_has_running_guard
+      - ui/src/components/settings/SettingsMemoryPage.test.tsx
+      - tests/test_memory_repair.py::test_repair_gates_other_runtime_mutations
   - id: MEMORY-REPAIR-004
     name: A failed Repair is shown as a closed error and can be retried manually
     status: partial
@@ -50,6 +56,7 @@ scenarios:
     test: tests/test_memory_repair.py::test_repair_maps_closed_child_results
     related_tests:
       - tests/scenarios/memory_repair/test_memory_repair_scenarios.py::test_memory_repair_004_has_no_automatic_retry_or_polling
+      - ui/src/lib/memoryRepair.test.ts
   - id: MEMORY-REPAIR-005
     name: Repair action is hidden when artifact sync capability is disabled
     status: covered
@@ -58,6 +65,7 @@ scenarios:
     test: tests/test_memory_repair.py::test_repair_rejects_artifact_without_sync_capability
     related_tests:
       - tests/scenarios/memory_repair/test_memory_repair_scenarios.py::test_memory_repair_005_fails_closed_on_capability
+      - ui/src/components/settings/memory/MemoryStatusPanel.test.tsx
   - id: MEMORY-REPAIR-006
     name: Repair leaves the live sidecar action path untouched
     status: covered
@@ -66,3 +74,4 @@ scenarios:
     test: tests/test_memory_repair.py::test_repair_runs_sync_beside_live_sidecar_and_projects_health
     related_tests:
       - tests/scenarios/memory_repair/test_memory_repair_scenarios.py::test_memory_repair_006_does_not_stop_sidecar
+      - ui/src/components/settings/SettingsMemoryPage.test.tsx

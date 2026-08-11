@@ -224,6 +224,7 @@ export const MemoryStatusPanel: React.FC<{
   onAbortClear: (operationId: string) => void;
   repairSupported?: boolean;
   repairBusy?: boolean;
+  mutationBusy?: boolean;
   repairError?: string | null;
   repairHealth?: MemoryCascadeHealth | null;
   onRepair?: () => void;
@@ -243,6 +244,7 @@ export const MemoryStatusPanel: React.FC<{
   onAbortClear,
   repairSupported = false,
   repairBusy = false,
+  mutationBusy = false,
   repairError = null,
   repairHealth = null,
   onRepair = () => undefined,
@@ -282,6 +284,20 @@ export const MemoryStatusPanel: React.FC<{
             label={t('memory.processingRecord.runtime.helpLabel')}
             content={t('memory.processingRecord.runtime.help')}
           />
+          {repairSupported ? (
+            <Button
+              className="ml-auto"
+              variant="secondary"
+              size="xs"
+              disabled={repairBusy || mutationBusy}
+              onClick={() => setRepairConfirmOpen(true)}
+            >
+              {repairBusy ? <Loader2 className="animate-spin" /> : <RefreshCw />}
+              {repairBusy
+                ? t('memory.processingRecord.repair.running')
+                : t('memory.processingRecord.repair.action')}
+            </Button>
+          ) : null}
         </div>
         <Card>
           <CardContent className="flex flex-col gap-4 py-4">
@@ -348,19 +364,6 @@ export const MemoryStatusPanel: React.FC<{
                             content={t('memory.processingRecord.runtime.cascadeHelp')}
                           />
                         </div>
-                        {repairSupported ? (
-                          <Button
-                            variant="secondary"
-                            size="xs"
-                            disabled={repairBusy}
-                            onClick={() => setRepairConfirmOpen(true)}
-                          >
-                            {repairBusy ? <Loader2 className="animate-spin" /> : <RefreshCw />}
-                            {repairBusy
-                              ? t('memory.processingRecord.repair.running')
-                              : t('memory.processingRecord.repair.action')}
-                          </Button>
-                        ) : null}
                       </div>
                       <FactList
                         facts={health.cascade}
@@ -478,7 +481,7 @@ export const MemoryStatusPanel: React.FC<{
         confirmLabel={t('memory.processingRecord.repair.confirmLabel')}
         onConfirm={() => {
           setRepairConfirmOpen(false);
-          onRepair();
+          if (!mutationBusy) onRepair();
         }}
       />
     </>

@@ -5,20 +5,29 @@ keep the frontend pinned to the public contract while remaining safe to run
 without a live sidecar, provider, artifact, or user state.
 """
 
+import subprocess
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[3]
-API_CONTEXT = (ROOT / "ui/src/context/ApiContext.tsx").read_text(encoding="utf-8")
+UI_ROOT = ROOT / "ui"
 MEMORY_PAGE = (ROOT / "ui/src/components/settings/SettingsMemoryPage.tsx").read_text(encoding="utf-8")
+
+
+def _run_vitest(path: str, name: str) -> None:
+    result = subprocess.run(
+        ["npm", "run", "test", "--", "--run", path, "-t", name],
+        cwd=UI_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, f"Vitest failed:\n{result.stdout}\n{result.stderr}"
 
 
 def test_memory_repair_001_uses_exact_post_contract() -> None:
     """Scenario: MEMORY-REPAIR-001"""
-    assert "repairMemoryIndex: () =>" in API_CONTEXT
-    assert "postJson('/api/memory/runtime/repair', { confirm: true }, { handleError: false })" in API_CONTEXT
-    assert "result: 'completed' | 'completed_with_warnings'" in API_CONTEXT
-    assert "health: MemoryCascadeHealth" in API_CONTEXT
+    _run_vitest("src/lib/memoryRepair.test.ts", "posts the exact confirmed Repair contract")
 
 
 def test_memory_repair_004_has_no_automatic_retry_or_polling() -> None:
@@ -42,22 +51,23 @@ def test_memory_repair_002_renders_warning_health() -> None:
 
 def test_memory_repair_003_has_running_guard() -> None:
     """Scenario: MEMORY-REPAIR-003"""
-    panel = (ROOT / "ui/src/components/settings/memory/MemoryStatusPanel.tsx").read_text(encoding="utf-8")
-    assert "disabled={repairBusy}" in panel
-    assert "repairBusy ?" in panel
+    _run_vitest(
+        "src/components/settings/SettingsMemoryPage.test.tsx",
+        "locks restart and settings clear for the full Repair request lifetime",
+    )
 
 
 def test_memory_repair_005_fails_closed_on_capability() -> None:
     """Scenario: MEMORY-REPAIR-005"""
-    assert "settings.repair_available === true" in MEMORY_PAGE
-    panel = (ROOT / "ui/src/components/settings/memory/MemoryStatusPanel.tsx").read_text(encoding="utf-8")
-    assert "{repairSupported ? (" in panel
+    _run_vitest(
+        "src/components/settings/memory/MemoryStatusPanel.test.tsx",
+        "only exposes Repair index when the backend capability is explicitly available",
+    )
 
 
 def test_memory_repair_006_does_not_stop_sidecar() -> None:
     """Scenario: MEMORY-REPAIR-006"""
-    repair_start = MEMORY_PAGE.index("const repairIndex = async () =>")
-    repair_end = MEMORY_PAGE.index("  const tabs = useMemo", repair_start)
-    repair_block = MEMORY_PAGE[repair_start:repair_end]
-    assert "restartMemoryRuntime" not in repair_block
-    assert "stopMemory" not in repair_block
+    _run_vitest(
+        "src/components/settings/SettingsMemoryPage.test.tsx",
+        "locks restart and settings clear for the full Repair request lifetime",
+    )

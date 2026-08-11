@@ -109,6 +109,16 @@ describe('MemoryStatusPanel', () => {
     expect(screen.getByRole('button', { name: 'memory.processingRecord.repair.action' })).toBeTruthy();
   });
 
+  it('keeps Repair reachable when the processing health projection is unavailable', () => {
+    render(<MemoryStatusPanel {...baseProps} status={null} statusError="health failed" repairSupported />);
+    expect(screen.getByRole('button', { name: 'memory.processingRecord.repair.action' })).toBeTruthy();
+  });
+
+  it('blocks Repair while another Memory mutation owns the page', () => {
+    render(<MemoryStatusPanel {...baseProps} repairSupported mutationBusy />);
+    expect((screen.getByRole('button', { name: 'memory.processingRecord.repair.action' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
   it('shows the structured final health projection and running lock', () => {
     const health: MemoryCascadeHealth = {
       healthy: false,

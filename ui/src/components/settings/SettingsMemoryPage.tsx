@@ -119,6 +119,7 @@ export const SettingsMemoryPage: React.FC = () => {
   }, [loadSettings, loadProcessingRecord, loadMaintenance, loadDependency]);
 
   const confirmClear = async () => {
+    if (repairBusy || restarting || rebuildBusy) return;
     setClearing(true);
     // Clear can delete provider payloads before a failed receipt or a lost
     // response, so purge cached payloads for every confirmed attempt.
@@ -212,6 +213,7 @@ export const SettingsMemoryPage: React.FC = () => {
   };
 
   const restartEngine = async () => {
+    if (repairBusy || rebuildBusy || clearing || clearOpen) return;
     setRestarting(true);
     try {
       const res = await api.restartMemoryRuntime();
@@ -229,6 +231,7 @@ export const SettingsMemoryPage: React.FC = () => {
   };
 
   const repairIndex = async () => {
+    if (restarting || rebuildBusy || clearing || clearOpen) return;
     setRepairBusy(true);
     setRepairError(null);
     setRepairHealth(null);
@@ -384,6 +387,7 @@ export const SettingsMemoryPage: React.FC = () => {
                 onAbortClear={(operationId) => void runClearRecovery('abort', operationId)}
                 repairSupported={settings.repair_available === true}
                 repairBusy={repairBusy}
+                mutationBusy={restarting || rebuildBusy || clearing || clearOpen}
                 repairError={repairError}
                 repairHealth={repairHealth}
                 onRepair={() => void repairIndex()}

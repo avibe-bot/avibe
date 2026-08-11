@@ -59,15 +59,18 @@ the rebuild completes. If rebuilding fails, correct the API key if needed and
 select **Retry rebuild**; the warning remains until a retry succeeds.
 
 When the installed Memory Runtime reports the admitted artifact sync capability,
-Processing Record offers **Repair index** beside Cascade. Repair runs the
+Processing Record offers **Repair index** in the Memory Runtime section, even
+when the current health projection cannot be loaded. Repair runs the
 pathless `cascade sync` command while the live sidecar remains available; it
 rescans Markdown memory and drains pending work without replacing the index.
 Avibe asks for confirmation because embedding work may use API quota. The action
 is unavailable while rebuild, factory reset, clear, restart, or another Memory
 mutation is active. Completion is judged from the returned cascade health
-projection: a healthy projection is completed, while an unhealthy projection is
-shown as completed with warnings. A failed request is a closed error that can be
-retried manually after the conflicting condition is resolved; the UI does not
+projection: the UI accepts only the exact final response envelope, treating any
+malformed or extended response as a repair failure. A healthy projection is
+completed, while an unhealthy projection is shown as completed with warnings.
+A failed request is a closed error that can be retried manually after the
+conflicting condition is resolved; the UI does not
 poll, parse command output, or create a repair history.
 
 Clear all first creates and verifies a private snapshot of the queue, provider
