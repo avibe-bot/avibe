@@ -1359,15 +1359,17 @@ def create_app(
         return {"ok": True, "queued": True}
 
     @app.post("/internal/cancel/{session_id}")
-    async def _cancel(session_id: str) -> Any:
+    async def _cancel(session_id: str, run_id: str | None = None) -> Any:
         """HTTP adapter: delegate Stop to the turn owner (FSM, Phase 1b) and map its
         result ``code`` to a status — ``not_in_flight`` -> 404, ``stop_failed`` ->
         409. ``session_id`` is the dispatch key the turn registered under, so the UI
         Stop button works with just the URL it already has."""
-        result = await manager.cancel(session_id)
+        result = await manager.cancel(session_id, agent_run_id=run_id)
         code = result.get("code")
         if code == "not_in_flight":
             return JSONResponse(status_code=404, content=result)
+        if code == "invalid_run_id":
+            return JSONResponse(status_code=400, content=result)
         if code in {"stop_failed", "stop_unknown"}:
             return JSONResponse(status_code=409, content=result)
         return result
