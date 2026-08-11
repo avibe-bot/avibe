@@ -1,7 +1,7 @@
-"""Reclaim the definitions owned by a Session that is going away.
+"""Reclaim the definitions managed by or targeting a Session that is going away.
 
 Two teardown paths, one contract. ``archive_session`` already reclaimed —
-it vacates the anchor and soft-deletes owned ``run_definitions`` — while the IM
+it vacates the anchor and soft-deletes affected ``run_definitions`` — while the IM
 ``/new`` path hard-deleted the session rows and reclaimed nothing, so a
 ``create_once`` task pinned to that session fired and failed forever with nobody
 told. This module owns the shared half so a new teardown path cannot forget it.
@@ -294,7 +294,7 @@ def reclaim_bound_definitions(
     mode: ReclaimMode,
     reason: str | None = None,
 ) -> dict[str, int]:
-    """Detach scheduled tasks / watches owned by a session that is going away.
+    """Detach scheduled tasks / watches affected by a session going away.
 
     ``mode`` is required: ``delete`` soft-deletes (terminal teardown), ``pause``
     sets ``enabled=0`` and records ``last_error`` (recoverable teardown). Runs in
@@ -314,11 +314,10 @@ def reclaim_bound_definitions(
     if not sid:
         return summary
 
-    # A scheduled Task is managed by the Session that created it, while a Watch
-    # belongs to its callback target. Keep teardown on the same owner contract as
-    # the banner and Harness filters; otherwise an owner-targeted Task can keep
-    # firing after its creating Session is archived.
-    from storage.background import scheduled_definition_owned_by_session_expression
+    # A scheduled Task is managed by its creating Session for projection, but
+    # teardown must also reclaim Tasks whose execution target is the Session being
+    # removed. Otherwise an owner-targeted Task can keep firing into a dead target.
+    from storage.background import scheduled_definition_reclaimable_by_session_expression
 
     definition_binding = or_(
         and_(
@@ -327,7 +326,7 @@ def reclaim_bound_definitions(
         ),
         and_(
             run_definitions.c.definition_type == "scheduled",
-            scheduled_definition_owned_by_session_expression(sid),
+            scheduled_definition_reclaimable_by_session_expression(sid),
         ),
     )
 
@@ -393,14 +392,14 @@ def reclaim_bound_definitions(
         current_binding = (
             run_definitions.c.session_id == sid
             if row["definition_type"] == "watch"
-            else scheduled_definition_owned_by_session_expression(sid)
+            else scheduled_definition_reclaimable_by_session_expression(sid)
         )
         reclaimed = conn.execute(
             update(run_definitions)
             .where(run_definitions.c.id == row["id"])
-            # Still owned by the session that is going away. The scheduled-task
-            # branch uses creation provenance; the Watch branch uses its callback
-            # target.
+            # Still reclaimable by the Session that is going away. The scheduled-task
+            # branch covers either creation ownership or the execution target; the
+            # Watch branch uses its callback target.
             .where(current_binding)
             # Still live: a definition deleted inside the window stays deleted, and its
             # ``deleted_at`` must not be restamped with this teardown's clock.
@@ -437,7 +436,7 @@ def reclaim_bound_definitions(
 
     if summary["paused"] or summary["deleted"]:
         logger.info(
-            "Reclaimed definitions owned by session %s mode=%s paused=%d deleted=%d",
+            "Reclaimed definitions for session %s mode=%s paused=%d deleted=%d",
             sid,
             mode,
             summary["paused"],

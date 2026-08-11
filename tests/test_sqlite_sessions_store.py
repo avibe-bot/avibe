@@ -5920,14 +5920,21 @@ def _bind_definition(
     )
 
 
-#: The decision read of ``reclaim_bound_definitions``: every live definition bound to
-#: the session going away. Everything the loop then writes -- pause / soft-delete, the
-#: settings snapshot, the summary counters and the teardown ledger -- is decided from
-#: this one row set.
+#: The decision read of ``reclaim_bound_definitions``: every live definition that
+#: either belongs to the session or targets it for execution. Everything the loop then
+#: writes -- pause / soft-delete, the settings snapshot, the summary counters and the
+#: teardown ledger -- is decided from this one row set.
 _RECLAIM_DECISION_SELECT = (
     "SELECT run_definitions.id, run_definitions.definition_type, run_definitions.enabled, "
-    "run_definitions.metadata_json FROM run_definitions WHERE run_definitions.session_id = ? "
-    "AND run_definitions.deleted_at IS NULL"
+    "run_definitions.metadata_json FROM run_definitions WHERE "
+    "(run_definitions.definition_type = ? AND run_definitions.session_id = ? OR "
+    "run_definitions.definition_type = ? AND (CASE WHEN (json_valid(run_definitions.metadata_json) = ?) "
+    "THEN CASE WHEN (json_type(run_definitions.metadata_json, ?) = ?) THEN "
+    "nullif(trim(json_extract(run_definitions.metadata_json, ?)), ?) END END = ? OR "
+    "CASE WHEN (json_valid(run_definitions.metadata_json) = ?) THEN CASE WHEN "
+    "(json_type(run_definitions.metadata_json, ?) = ?) THEN nullif(trim(json_extract("
+    "run_definitions.metadata_json, ?)), ?) END END IS NULL AND run_definitions.session_id = ? OR "
+    "run_definitions.session_id = ?)) AND run_definitions.deleted_at IS NULL"
 )
 
 

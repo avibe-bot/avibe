@@ -848,11 +848,14 @@ def is_session_archived(conn: Connection, session_id: str) -> bool:
 
 
 def count_bound_resources(conn: Connection, session_id: str) -> dict[str, int]:
-    """Count what archiving ``session_id`` will permanently reclaim: owned
-    scheduled tasks + callback-targeted watches (live, not-yet-deleted definitions) and
-    not-yet-terminal runs. Shared by the archive teardown and the confirm-dialog
-    preview so both agree on the numbers shown vs. acted on."""
-    from storage.background import scheduled_definition_owned_by_session_expression
+    """Count what archiving ``session_id`` will permanently reclaim.
+
+    Scheduled Tasks are counted when either their creation owner or execution
+    target is this Session; Watches remain callback-targeted. This is deliberately
+    broader than the owner-first banner projection so the archive preview matches
+    teardown and no Task survives with a dead execution target.
+    """
+    from storage.background import scheduled_definition_reclaimable_by_session_expression
 
     definition_binding = or_(
         and_(
@@ -861,7 +864,7 @@ def count_bound_resources(conn: Connection, session_id: str) -> dict[str, int]:
         ),
         and_(
             run_definitions.c.definition_type == "scheduled",
-            scheduled_definition_owned_by_session_expression(session_id),
+            scheduled_definition_reclaimable_by_session_expression(session_id),
         ),
     )
     types = (
@@ -1137,8 +1140,8 @@ def archive_session(conn: Connection, session_id: str) -> dict[str, Any]:
 
     Archive is terminal (there is no un-archive) — so we don't just flip a flag,
     we tear down the resources that would otherwise keep firing into a hidden
-    session: owned scheduled tasks + callback-targeted watches are soft-deleted, queued/running
-    runs are cancelled, and the Show Page is taken offline. All of it rides the
+    session: affected scheduled tasks + callback-targeted watches are soft-deleted,
+    queued/running runs are cancelled, and the Show Page is taken offline. All of it rides the
     caller's transaction so the teardown is atomic with the status flip.
 
     The one piece that can't live here is cancelling an in-flight chat turn: it
@@ -1195,7 +1198,8 @@ def archive_session(conn: Connection, session_id: str) -> dict[str, Any]:
     # Tally before teardown so the response reports what was reclaimed.
     reclaimed = count_bound_resources(conn, session_id)
 
-    # 2) Soft-delete owned scheduled tasks + callback-targeted watches (same table, distinguished by
+    # 2) Soft-delete scheduled tasks affected by this Session (creation owner or
+    #    execution target) + callback-targeted watches (same table, distinguished by
     #    ``definition_type``). Deleting — not pausing — is deliberate: a paused
     #    definition could be re-enabled later and would then target a dead session.
     #    Shared with the hard-delete teardown path, which passes ``pause`` instead

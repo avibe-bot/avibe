@@ -379,6 +379,21 @@ def scheduled_definition_owned_by_session_expression(session_id: str) -> Any:
     )
 
 
+def scheduled_definition_reclaimable_by_session_expression(session_id: str) -> Any:
+    """Return the teardown predicate for scheduled Tasks touching a Session.
+
+    Teardown is broader than banner projection: removing an execution target must
+    also stop a Task created by a different Session from firing into that dead
+    target. Owner-first remains the projection rule; this expression is only for
+    reclaim and archive accounting.
+    """
+
+    return or_(
+        scheduled_definition_owned_by_session_expression(session_id),
+        run_definitions.c.session_id == session_id,
+    )
+
+
 # The exit code a waiter that ran out of lifetime carries. Written by
 # ``core/watches.py`` (the ``timeout`` convention), read here to tell an ending
 # that ran out of time from one that failed.

@@ -316,10 +316,13 @@ def test_definition_banner_uses_creation_owner_before_execution_target(tmp_path:
 def test_owner_session_teardown_reclaims_task_even_when_execution_target_differs(
     tmp_path: Path,
 ):
-    """Owner-first projection also governs archive/delete cleanup and its counts."""
+    """Teardown covers both the managing owner and a dying execution target."""
     engine, _ = _make_engine(tmp_path)
     owner_metadata = json.dumps(
         {"created_by": {"caller": {"session_id": "ses-owner"}}}
+    )
+    foreign_owner_metadata = json.dumps(
+        {"created_by": {"caller": {"session_id": "ses-other"}}}
     )
     with engine.begin() as conn:
         create_agent_session_row(
@@ -331,6 +334,15 @@ def test_owner_session_teardown_reclaims_task_even_when_execution_target_differs
             workdir="/tmp",
             now=_NOW,
         )
+        create_agent_session_row(
+            conn,
+            scope_id=None,
+            session_id="ses-execution",
+            session_anchor="anchor-execution",
+            agent_backend="codex",
+            workdir="/tmp",
+            now=_NOW,
+        )
     _insert_definition(
         engine,
         id="task-owner-targeted",
@@ -338,6 +350,14 @@ def test_owner_session_teardown_reclaims_task_even_when_execution_target_differs
         name="owner-targeted",
         session_id="ses-execution",
         metadata_json=owner_metadata,
+    )
+    _insert_definition(
+        engine,
+        id="task-target-only",
+        definition_type="scheduled",
+        name="target-only",
+        session_id="ses-execution",
+        metadata_json=foreign_owner_metadata,
     )
 
     with engine.begin() as conn:
@@ -353,9 +373,23 @@ def test_owner_session_teardown_reclaims_task_even_when_execution_target_differs
                 run_definitions.c.id == "task-owner-targeted"
             )
         ).scalar_one()
+        assert count_bound_resources(conn, "ses-execution")["tasks"] == 1
+        target_summary = reclaim_bound_definitions(
+            conn,
+            "ses-execution",
+            mode=RECLAIM_DELETE,
+            reason="archive_session:ses-execution",
+        )
+        target_row = conn.execute(
+            select(run_definitions.c.deleted_at).where(
+                run_definitions.c.id == "task-target-only"
+            )
+        ).scalar_one()
 
     assert summary["deleted"] == 1
     assert row is not None
+    assert target_summary["deleted"] == 1
+    assert target_row is not None
 
 
 def test_excludes_disabled_deleted_and_foreign_and_terminal(tmp_path: Path):
