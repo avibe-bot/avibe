@@ -41,10 +41,24 @@ _MODEL_SURFACE_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 _MODEL_NOT_FOUND_ERROR_CODES = frozenset({"not_found_error"})
-_MACHINE_ERROR_CODE_DECISIONS: dict[str, tuple[ResolutionAction, str]] = {
-    "engine_down": ("surface", "engine_down"),
-    "permission_error": ("surface", "request_incompatible"),
-    "request_too_large": ("surface", "upstream_request_invalid"),
+
+
+@dataclass(frozen=True)
+class _MachineErrorRule:
+    """One machine-code row, including the downstream status projection."""
+
+    specificity: int
+    action: ResolutionAction | None
+    error_code: str | None
+    downstream_status: int | None
+
+
+# This table is the sole owner of machine-code specificity and projection.
+_MACHINE_ERROR_TAXONOMY: Mapping[str, _MachineErrorRule] = {
+    "permission_error": _MachineErrorRule(100, "surface", "request_incompatible", 403),
+    "engine_down": _MachineErrorRule(100, "surface", "engine_down", 502),
+    "request_too_large": _MachineErrorRule(80, "surface", "upstream_request_invalid", 400),
+    "api_error": _MachineErrorRule(0, None, None, None),
 }
 _QUOTA_PATTERNS = re.compile(
     r"(?:quota[_ -]?(?:exhausted|exceeded)|insufficient[_ -]?(?:quota|credits)|"
@@ -64,6 +78,7 @@ class ResolutionDecision:
     reason: Optional[ResolutionReason] = None
     error_code: Optional[str] = None
     cooldown_seconds: int = 0
+    downstream_status: int | None = None
 
 
 _TERMINAL_OUTCOME_CATEGORIES: Mapping[
@@ -94,7 +109,28 @@ def terminal_outcome_category(
 
 
 def _error_text(outcome: RawCallOutcome) -> str:
-    return " ".join(value for value in (outcome.error_code, outcome.redacted_message) if isinstance(value, str))
+    return " ".join((*machine_error_codes(outcome), outcome.redacted_message or ""))
+
+
+def machine_error_codes(outcome: RawCallOutcome) -> tuple[str, ...]:
+    """Collect and rank every raw machine-code candidate by the authority table."""
+
+    def specificity(value: str) -> int:
+        row = _MACHINE_ERROR_TAXONOMY.get(value)
+        return row.specificity if row is not None else -1
+
+    raw_values = (*outcome.error_candidates, outcome.error_type, outcome.error_code)
+    candidates = {
+        value.strip().lower()
+        for value in raw_values
+        if isinstance(value, str) and value.strip()
+    }
+    return tuple(
+        sorted(
+            candidates,
+            key=lambda value: (-specificity(value), value),
+        )
+    )
 
 
 def _classify_unstreamed(
@@ -103,11 +139,18 @@ def _classify_unstreamed(
     refresh_attempted: bool = False,
 ) -> ResolutionDecision:
     # Signed machine-code rows precede every transport and status heuristic.
-    normalized_error_code = str(outcome.error_code or "").strip().lower()
-    machine_row = _MACHINE_ERROR_CODE_DECISIONS.get(normalized_error_code)
-    if machine_row is not None:
-        action, error_code = machine_row
-        return ResolutionDecision(action, error_code=error_code)
+    machine_rows = (
+        (_MACHINE_ERROR_TAXONOMY[code], code)
+        for code in machine_error_codes(outcome)
+        if code in _MACHINE_ERROR_TAXONOMY
+    )
+    for machine_row, _machine_code in machine_rows:
+        if machine_row.action is not None:
+            return ResolutionDecision(
+                machine_row.action,
+                error_code=machine_row.error_code,
+                downstream_status=machine_row.downstream_status,
+            )
 
     if outcome.kind in {RawOutcomeKind.NETWORK_ERROR, RawOutcomeKind.TIMEOUT}:
         return ResolutionDecision("fallback", reason="network", cooldown_seconds=30)
@@ -130,7 +173,7 @@ def _classify_unstreamed(
         )
     model_not_found = _MODEL_SURFACE_PATTERNS.search(error_text) or (
         outcome.http_status == 404
-        and normalized_error_code in _MODEL_NOT_FOUND_ERROR_CODES
+        and any(code in _MODEL_NOT_FOUND_ERROR_CODES for code in machine_error_codes(outcome))
     )
     if (
         _SURFACE_PATTERNS.search(error_text)

@@ -56,6 +56,7 @@ from .adapter import (
 from .classification import (
     ResolutionDecision,
     classify_outcome,
+    machine_error_codes,
     terminal_outcome_category,
 )
 from .events import (
@@ -3162,11 +3163,7 @@ class ModelHubService:
             return "models.source.cooldown.network", "network"
         if outcome.kind == RawOutcomeKind.TIMEOUT:
             return "models.source.cooldown.timeout", "network"
-        text = " ".join(
-            value
-            for value in (outcome.error_code, outcome.redacted_message)
-            if isinstance(value, str)
-        ).lower()
+        text = " ".join((*machine_error_codes(outcome), outcome.redacted_message or "")).lower()
         if outcome.http_status == 401 and decision.reason in {
             "credential_expired",
             "credential_revoked",
@@ -4416,7 +4413,7 @@ class ModelHubService:
                     )
                 raise ModelHubError(
                     decision.error_code or outcome.error_code or "engine_down",
-                    status=(
+                    status=decision.downstream_status or (
                         outcome.http_status
                         if outcome.http_status is not None and 400 <= outcome.http_status <= 599
                         else 502

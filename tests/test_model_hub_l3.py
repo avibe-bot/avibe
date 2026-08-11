@@ -61,7 +61,7 @@ from core.handlers.model_hub.service import (
     ModelHubService,
     ResolvedInvocation,
 )
-from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
+from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway, render_protocol_terminal_event
 from core.run_settlement import (
     SETTLED_BY_NO_TERMINAL_RESULT,
     SETTLED_BY_STOPPED,
@@ -164,6 +164,45 @@ def test_turn_outcome_rendering_authority_covers_matrix_and_locales() -> None:
             key for key in projected_keys if key.startswith("modelHub.launch.")
         }
         assert all(i18n_t(key, locale) != key for key in projected_keys)
+
+
+@pytest.mark.parametrize(
+    ("protocol", "expected_shape"),
+    [
+        ("anthropic", "anthropic"),
+        ("openai_responses", "responses"),
+        ("openai_chat", "chat"),
+    ],
+)
+def test_terminal_event_renderer_uses_native_protocol_shape(
+    protocol: str,
+    expected_shape: str,
+) -> None:
+    event = render_protocol_terminal_event(protocol, "modelHub.launch.retry", "Retry directly.")
+
+    assert "model_hub_terminal" not in str(event)
+    if expected_shape == "anthropic":
+        assert event == {
+            "type": "error",
+            "error": {"type": "api_error", "message": "Retry directly."},
+        }
+    elif expected_shape == "responses":
+        assert event == {
+            "type": "error",
+            "code": "modelHub.launch.retry",
+            "message": "Retry directly.",
+        }
+    else:
+        assert event == {
+            "object": "chat.completion.chunk",
+            "type": "error",
+            "error": {
+                "type": "server_error",
+                "code": "modelHub.launch.retry",
+                "message": "Retry directly.",
+            },
+            "choices": [],
+        }
 
 
 def test_turn_outcome_copy_projection_has_one_runtime_owner() -> None:

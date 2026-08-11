@@ -548,7 +548,7 @@ def test_machine_permission_denial_precedes_every_status_heuristic(
         )
 
     assert exc.value.code == "request_incompatible"
-    assert exc.value.status == status
+    assert exc.value.status == 403
     assert decisions[-1].action == "surface"
     assert adapter.invocations == [(source.id, "upstream-first")]
     assert adapter.capability_queries == []

@@ -51,11 +51,6 @@ _OFFICIAL_BASE_URLS = {
     "codex": "https://api.openai.com/v1",
 }
 _PROTOCOL_HEADERS = frozenset({"anthropic-beta", "anthropic-version", "openai-beta"})
-_ERROR_CODE_PATHS = (
-    ("error", "code"),
-    ("code",),
-    ("error", "type"),
-)
 
 
 class EngineClientError(RuntimeError):
@@ -65,10 +60,14 @@ class EngineClientError(RuntimeError):
         *,
         status_code: int | None = None,
         error_type: str | None = None,
+        error_code: str | None = None,
+        error_candidates: tuple[str, ...] = (),
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.error_type = error_type
+        self.error_code = error_code
+        self.error_candidates = error_candidates
 
 
 class _ResponseTooLargeError(RuntimeError):
@@ -223,12 +222,15 @@ class EngineClient:
                     )
                 except (_ResponseTooLargeError, asyncio.TimeoutError, aiohttp.ClientError):
                     payload = b""
+                error_type, error_code, error_candidates = _raw_error_fields(payload)
                 outcome = _outcome(
                     kind=RawOutcomeKind.HTTP_ERROR,
                     source=source,
                     model_id=model_id,
                     http_status=response.status,
-                    error_code=_error_code(payload),
+                    error_code=error_code,
+                    error_type=error_type,
+                    error_candidates=error_candidates,
                     message=f"upstream returned HTTP {response.status}",
                 )
                 response.close()
@@ -371,10 +373,13 @@ class EngineClient:
                 raw = response.read(_MAX_RESPONSE_BYTES + 1)
         except urllib.error.HTTPError as exc:
             raw = exc.read(_MAX_RESPONSE_BYTES)
+            error_type, error_code, error_candidates = _raw_error_fields(raw)
             raise EngineClientError(
                 f"engine API returned HTTP {exc.code}",
                 status_code=exc.code,
-                error_type=_error_code(raw),
+                error_type=error_type,
+                error_code=error_code,
+                error_candidates=error_candidates,
             ) from None
         except (urllib.error.URLError, TimeoutError, socket.timeout, OSError) as exc:
             raise EngineClientError("engine API is unavailable", error_type=type(exc).__name__) from None
@@ -537,6 +542,8 @@ def _outcome(
     model_id: str,
     http_status: int | None = None,
     error_code: str | None = None,
+    error_type: str | None = None,
+    error_candidates: tuple[str, ...] = (),
     message: str | None = None,
     stream_started: bool = False,
 ) -> RawCallOutcome:
@@ -548,6 +555,8 @@ def _outcome(
         stream_started=stream_started,
         model_id=model_id,
         source_id=source.source_id,
+        error_type=error_type,
+        error_candidates=error_candidates,
     )
 
 
@@ -561,24 +570,34 @@ def _endpoint_for_protocol(protocol: str) -> str:
     raise ValueError("unsupported source protocol")
 
 
-def _error_code(payload: bytes) -> str | None:
+def _raw_error_fields(payload: bytes) -> tuple[str | None, str | None, tuple[str, ...]]:
     try:
         decoded = json.loads(payload.decode("utf-8"))
     except (UnicodeDecodeError, ValueError):
-        return None
+        return None, None, ()
     if not isinstance(decoded, dict):
-        return None
-    for path in _ERROR_CODE_PATHS:
-        value: object = decoded
-        for component in path:
-            if not isinstance(value, dict) or component not in value:
-                value = None
-                break
-            value = value[component]
-        safe_value = _safe_error_code(value)
-        if safe_value is not None:
-            return safe_value
-    return None
+        return None, None, ()
+    types: list[str] = []
+    codes: list[str] = []
+
+    def visit(value: object) -> None:
+        if isinstance(value, list):
+            for nested in value:
+                visit(nested)
+            return
+        if not isinstance(value, dict):
+            return
+        for key, nested in value.items():
+            safe_value = _safe_error_code(nested)
+            if key == "type" and safe_value is not None:
+                types.append(safe_value)
+            elif key == "code" and safe_value is not None:
+                codes.append(safe_value)
+            visit(nested)
+
+    visit(decoded)
+    candidates = tuple(dict.fromkeys((*types, *codes)))
+    return (types[0] if types else None, codes[0] if codes else None, candidates)
 
 
 def _safe_error_code(value: object) -> str | None:

@@ -87,6 +87,8 @@ class RawCallOutcome:
     stream_started: bool
     model_id: str
     source_id: str
+    error_type: str | None = None  # raw upstream error type, if present
+    error_candidates: tuple[str, ...] = ()  # unsorted raw type/code candidates
 
 
 class ObservationOutcome(str, Enum):

@@ -10,6 +10,7 @@ SERVICE = ROOT / "core/handlers/model_hub/service.py"
 PROVENANCE = ROOT / "core/handlers/model_hub/provenance.py"
 ROUTER = ROOT / "modules/agents/model_hub.py"
 ADAPTER = ROOT / "vibe/model_hub_runtime/adapter.py"
+CLIENT = ROOT / "vibe/model_hub_runtime/client.py"
 
 
 def _tree(path: Path) -> ast.Module:
@@ -106,3 +107,17 @@ def test_auth_status_heuristics_are_parser_only() -> None:
             continue
         for node in ast.walk(fn):
             assert not _auth_status_branch(node)
+
+
+def test_machine_error_field_access_has_one_extractor() -> None:
+    # A second error-code ``.get`` is a deliberate extraction-owner violation.
+    paths = [*sorted((ROOT / "core/handlers/model_hub").glob("*.py")), CLIENT]
+    for path in paths:
+        if path.name == "migration.py":
+            continue  # its ``type`` field is an auth-record kind, not an error code
+        tree = _tree(path)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                continue
+            if node.func.attr == "get" and node.args and isinstance(node.args[0], ast.Constant):
+                assert node.args[0].value not in {"type", "code"}, (path, node.lineno)

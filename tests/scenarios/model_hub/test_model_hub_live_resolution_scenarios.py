@@ -459,7 +459,12 @@ def test_mh_res_live_003_started_stream_never_retries(tmp_path: Path) -> None:
                 stream=True,
             )
             assert status == 200
-            assert body == b"data: partial\n\n"
+            prefix, terminal = body.split(b"event: error\ndata: ", 1)
+            assert prefix == b"data: partial\n\n"
+            terminal_event = json.loads(terminal.rstrip(b"\n"))
+            assert terminal_event["type"] == "error"
+            assert terminal_event["error"]["type"] == "api_error"
+            assert terminal_event["error"]["message"]
             assert [call[0] for call in adapter.invocations] == ["src_primary1"]
             assert store.load().sources[0].state.status == "cooldown"
         finally:

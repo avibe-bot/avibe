@@ -1138,7 +1138,7 @@ def test_adapter_enforces_origin_and_returns_raw_outcomes(tmp_path: Path) -> Non
         failure = await failed.outcome()
         assert failure.kind is RawOutcomeKind.HTTP_ERROR
         assert failure.http_status == 429
-        assert failure.error_code == "quota_exceeded"
+        assert failure.error_type == "quota_exceeded"
         assert "upstream-secret" not in (failure.redacted_message or "")
         unsafe_code = await adapter.invoke("src_fixture123", "unsafe-error-code", {}, False, "codex")
         assert (await unsafe_code.outcome()).error_code is None
@@ -1149,7 +1149,7 @@ def test_adapter_enforces_origin_and_returns_raw_outcomes(tmp_path: Path) -> Non
         ):
             banned = await adapter.invoke("src_fixture123", model_id, {}, False, "codex")
             banned_outcome = await banned.outcome()
-            assert banned_outcome.error_code == error_code
+            assert error_code in banned_outcome.error_candidates
             assert banned_outcome.redacted_message == "upstream returned HTTP 403"
             assert classify_outcome(banned_outcome).reason == "account_banned"
         free_text = await adapter.invoke(
@@ -1636,17 +1636,26 @@ def test_engine_client_cancellation_closes_pre_handle_resources(
     asyncio.run(run())
 
 
-def test_engine_error_code_parser_prefers_specific_nested_code() -> None:
-    payload = json.dumps(
-        {"error": {"type": "api_error", "code": "permission_error"}}
-    ).encode()
+@pytest.mark.parametrize(
+    ("error_type", "error_code"),
+    [
+        ("permission_error", "api_error"),
+        ("api_error", "permission_error"),
+        ("permission_error", "permission_error"),
+        ("api_error", "api_error"),
+    ],
+)
+def test_engine_error_fields_preserve_nested_candidates(
+    error_type: str,
+    error_code: str,
+) -> None:
+    payload = json.dumps({"error": {"type": error_type, "code": error_code}}).encode()
 
-    error_code = client_module._error_code(payload)
+    raw_type, raw_code, candidates = client_module._raw_error_fields(payload)
 
-    assert error_code == "permission_error"
-    assert client_module._ERROR_CODE_PATHS.index(("error", "code")) < (
-        client_module._ERROR_CODE_PATHS.index(("error", "type"))
-    )
+    assert raw_type == error_type
+    assert raw_code == error_code
+    assert set(candidates) == {error_type, error_code}
     decision = classify_outcome(
         client_module._outcome(
             kind=RawOutcomeKind.HTTP_ERROR,
@@ -1661,13 +1670,20 @@ def test_engine_error_code_parser_prefers_specific_nested_code() -> None:
                 prefix="source-fixture123",
             ),
             model_id="model-a",
-            http_status=403,
-            error_code=error_code,
+            http_status=503,
+            error_type=raw_type,
+            error_code=raw_code,
+            error_candidates=candidates,
             message="permission denied",
         )
     )
-    assert decision.action == "surface"
-    assert decision.error_code == "request_incompatible"
+    if "permission_error" in {error_type, error_code}:
+        assert decision.action == "surface"
+        assert decision.error_code == "request_incompatible"
+        assert decision.downstream_status == 403
+    else:
+        assert decision.action == "fallback"
+        assert decision.reason == "server_error"
 
 
 @pytest.mark.parametrize(

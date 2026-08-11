@@ -49,6 +49,46 @@ _REQUEST_PROTOCOLS: Final = {
     "responses": "openai_responses",
     "chat/completions": "openai_chat",
 }
+
+
+def _anthropic_terminal_event(_key: str, message: str) -> dict[str, object]:
+    return {"type": "error", "error": {"type": "api_error", "message": message}}
+
+
+def _responses_terminal_event(key: str, message: str) -> dict[str, object]:
+    return {"type": "error", "code": key, "message": message}
+
+
+def _chat_terminal_event(key: str, message: str) -> dict[str, object]:
+    return {
+        "object": "chat.completion.chunk",
+        "type": "error",
+        "error": {"type": "server_error", "code": key, "message": message},
+        "choices": [],
+    }
+
+
+_PROTOCOL_TERMINAL_EVENT_RENDERERS: Final = {
+    "anthropic": _anthropic_terminal_event,
+    "openai_responses": _responses_terminal_event,
+    "openai_chat": _chat_terminal_event,
+}
+
+
+def render_protocol_terminal_event(
+    protocol: str,
+    key: str,
+    message: str,
+) -> dict[str, object]:
+    """Render a terminal outcome in the requested protocol's wire shape."""
+
+    try:
+        renderer = _PROTOCOL_TERMINAL_EVENT_RENDERERS[protocol]
+    except KeyError as exc:
+        raise ValueError(f"unsupported terminal event protocol: {protocol}") from exc
+    return renderer(key, message)
+
+
 _PROTOCOL_HEADERS: Final = frozenset(
     {
         "anthropic-beta",
@@ -328,6 +368,7 @@ class ModelHubTurnGateway:
         return await self._resolved_response(
             request,
             resolved,
+            protocol=_REQUEST_PROTOCOLS[endpoint],
             stream=stream,
             terminalizer=terminalizer,
             execution=execution,
@@ -338,6 +379,7 @@ class ModelHubTurnGateway:
         request: web.Request,
         resolved: ResolvedInvocation,
         *,
+        protocol: str,
         stream: bool,
         terminalizer: GatewayTurnTerminalizer,
         execution: _TurnExecution,
@@ -371,6 +413,7 @@ class ModelHubTurnGateway:
                 return self._outcome_response(
                     outcome,
                     error_code=settlement.decision.error_code,
+                    status_override=settlement.decision.downstream_status,
                     turn_outcome=settlement.turn_outcome,
                 )
             return web.Response(
@@ -399,13 +442,14 @@ class ModelHubTurnGateway:
             termination_origin="upstream_terminal",
         )
         terminalizer.record_turn_outcome(settlement.turn_outcome)
-        await self._write_stream_terminal_copy(response, settlement.turn_outcome)
+        await self._write_stream_terminal_copy(response, protocol, settlement.turn_outcome)
         await self._downstream_io(response.write_eof())
         return response
 
     async def _write_stream_terminal_copy(
         self,
         response: web.StreamResponse,
+        protocol: str,
         turn_outcome: TurnOutcomeProjectionInput | None,
     ) -> None:
         if turn_outcome is None:
@@ -415,13 +459,7 @@ class ModelHubTurnGateway:
         if copy is None or message is None:
             return
         payload = json.dumps(
-            {
-                "error": {
-                    "type": "model_hub_terminal",
-                    "code": copy.key,
-                    "message": message,
-                }
-            },
+            render_protocol_terminal_event(protocol, copy.key, message),
             ensure_ascii=False,
             separators=(",", ":"),
         ).encode("utf-8")
@@ -514,11 +552,16 @@ class ModelHubTurnGateway:
         outcome: RawCallOutcome,
         *,
         error_code: Optional[str] = None,
+        status_override: int | None = None,
         turn_outcome: TurnOutcomeProjectionInput | None = None,
     ) -> web.Response:
         if outcome.kind == RawOutcomeKind.SUCCESS:
             return web.Response(status=200, body=b"{}", content_type="application/json")
-        status = outcome.http_status if outcome.http_status and 400 <= outcome.http_status <= 599 else 502
+        status = status_override or (
+            outcome.http_status
+            if outcome.http_status and 400 <= outcome.http_status <= 599
+            else 502
+        )
         return self._error_response(
             status=status,
             code=error_code or outcome.error_code or "api_error",
