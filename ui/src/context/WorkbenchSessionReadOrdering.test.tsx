@@ -208,6 +208,54 @@ describe('Workbench session read ownership', () => {
     expect(tree?.sessionsOf(project.id).sessions).toEqual([session]);
   });
 
+  it('retries a cold project list invalidated by a local project upsert', async () => {
+    const staleBootstrap = deferred({
+      projects: [project, projectB],
+      sessions: { [project.id]: { sessions: [session], next_before_id: null } },
+    });
+    const getWorkbenchProjectsBootstrap = vi.fn()
+      .mockReturnValueOnce(staleBootstrap.promise)
+      .mockResolvedValueOnce({
+        projects: [project, projectB],
+        sessions: { [project.id]: { sessions: [session], next_before_id: null } },
+      });
+    apiRef.current = {
+      getWorkbenchProjectsBootstrap,
+      listSessions: vi.fn().mockResolvedValue({ sessions: [session], next_before_id: null }),
+      connectWorkbenchEvents: vi.fn(() => vi.fn()),
+    };
+    let tree: ReturnType<typeof useWorkbenchProjectsTree> | null = null;
+    const Probe = () => {
+      const value = useWorkbenchProjectsTree();
+      useEffect(() => {
+        tree = value;
+      }, [value]);
+      return null;
+    };
+
+    render(
+      <WorkbenchProjectsProvider>
+        <Probe />
+      </WorkbenchProjectsProvider>,
+    );
+    await settle();
+    act(() => {
+      tree?.upsertProjectToTop(project);
+    });
+    await settle();
+    await act(async () => {
+      staleBootstrap.resolve({
+        projects: [project, projectB],
+        sessions: { [project.id]: { sessions: [session], next_before_id: null } },
+      });
+      await staleBootstrap.promise;
+    });
+    await settle();
+
+    expect(getWorkbenchProjectsBootstrap).toHaveBeenCalledTimes(2);
+    expect(tree?.projects).toEqual([project, projectB]);
+  });
+
   it('retries an expanded project first-page read invalidated by activity', async () => {
     const staleFirstPage = deferred({ sessions: [session], next_before_id: null });
     const listSessions = vi.fn()
@@ -962,6 +1010,103 @@ describe('Workbench session read ownership', () => {
     expect(inbox?.nextCursor).toBe('cursor_after_load_more');
   });
 
+  it('defers a resume retry until a later load-more completes', async () => {
+    const pageRow = {
+      ...inboxRow,
+      session_id: sessionB.id,
+      scope_id: sessionB.scope_id,
+      title: sessionB.title,
+      preview_message_id: 'msg_b',
+      last_activity_at: '2026-08-10T23:00:00Z',
+    };
+    const staleReconcile = deferred({
+      sessions: [inboxRow],
+      next_cursor: 'stale_cursor',
+      unread_by_session: { [session.id]: 3 },
+    });
+    const loadMoreRead = deferred({
+      sessions: [pageRow],
+      next_cursor: 'cursor_after_load_more',
+      unread_by_session: { [session.id]: 3 },
+    });
+    const retryReconcile = deferred({
+      sessions: [inboxRow],
+      next_cursor: 'cursor_after_reconcile',
+      unread_by_session: { [session.id]: 3 },
+    });
+    const listInbox = vi.fn()
+      .mockResolvedValueOnce({
+        sessions: [inboxRow],
+        next_cursor: 'cursor_a',
+        unread_by_session: { [session.id]: 3 },
+      })
+      .mockReturnValueOnce(staleReconcile.promise)
+      .mockReturnValueOnce(loadMoreRead.promise)
+      .mockReturnValueOnce(retryReconcile.promise);
+    apiRef.current = {
+      listInbox,
+      connectWorkbenchEvents: vi.fn(() => vi.fn()),
+    };
+    let inbox: ReturnType<typeof useWorkbenchInbox> | null = null;
+    const Probe = () => {
+      const value = useWorkbenchInbox();
+      useEffect(() => {
+        inbox = value;
+      }, [value]);
+      return null;
+    };
+
+    render(
+      <WorkbenchInboxProvider>
+        <Probe />
+      </WorkbenchInboxProvider>,
+    );
+    await settle();
+    act(() => {
+      window.dispatchEvent(new Event('focus'));
+    });
+    await settle();
+    act(() => {
+      void inbox?.loadMore();
+    });
+    await settle();
+    await act(async () => {
+      staleReconcile.resolve({
+        sessions: [inboxRow],
+        next_cursor: 'stale_cursor',
+        unread_by_session: { [session.id]: 3 },
+      });
+      await staleReconcile.promise;
+    });
+    await settle();
+    expect(listInbox).toHaveBeenCalledTimes(3);
+    await act(async () => {
+      loadMoreRead.resolve({
+        sessions: [pageRow],
+        next_cursor: 'cursor_after_load_more',
+        unread_by_session: { [session.id]: 3 },
+      });
+      await loadMoreRead.promise;
+    });
+    await settle();
+    expect(listInbox).toHaveBeenCalledTimes(4);
+    await act(async () => {
+      retryReconcile.resolve({
+        sessions: [inboxRow],
+        next_cursor: 'cursor_after_reconcile',
+        unread_by_session: { [session.id]: 3 },
+      });
+      await retryReconcile.promise;
+    });
+    await settle();
+
+    expect(inbox?.inboxSessions.map((row) => row.session_id).sort()).toEqual([
+      session.id,
+      sessionB.id,
+    ]);
+    expect(inbox?.nextCursor).toBe('cursor_after_load_more');
+  });
+
   it('clears independent Inbox loading flags when reads overlap', async () => {
     const refreshRead = deferred({ sessions: [inboxRow], next_cursor: 'cursor_refresh', unread_by_session: { [session.id]: 3 } });
     const loadMoreRead = deferred({ sessions: [], next_cursor: null, unread_by_session: { [session.id]: 3 } });
@@ -1060,6 +1205,60 @@ describe('Workbench session read ownership', () => {
     expect(inbox?.inboxSessions.map((row) => row.session_id)).toEqual([session.id]);
     expect(inbox?.unreadBySession).toEqual({ [session.id]: 3 });
     expect(inbox?.nextCursor).toBe('cursor_before_restore');
+  });
+
+  it('revalidates a targeted snapshot omitted after a missed removal event', async () => {
+    const listInbox = vi.fn()
+      .mockResolvedValueOnce({ sessions: [], next_cursor: 'cursor_a', unread_by_session: {} })
+      .mockResolvedValueOnce({
+        sessions: [inboxRow],
+        next_cursor: null,
+        unread_by_session: { [session.id]: 3 },
+      })
+      .mockResolvedValueOnce({ sessions: [], next_cursor: 'cursor_after_refresh', unread_by_session: {} })
+      .mockResolvedValueOnce({ sessions: [], next_cursor: null, unread_by_session: {} });
+    let handlers: WorkbenchEventHandlers | null = null;
+    apiRef.current = {
+      listInbox,
+      connectWorkbenchEvents: vi.fn((next) => {
+        handlers = next;
+        return vi.fn();
+      }),
+    };
+    let inbox: ReturnType<typeof useWorkbenchInbox> | null = null;
+    const Probe = () => {
+      const value = useWorkbenchInbox();
+      useEffect(() => {
+        inbox = value;
+      }, [value]);
+      return null;
+    };
+
+    render(
+      <WorkbenchInboxProvider>
+        <Probe />
+      </WorkbenchInboxProvider>,
+    );
+    await settle();
+    act(() => {
+      handlers?.onSessionActivity?.({
+        session_id: session.id,
+        scope_id: session.scope_id,
+        event: 'updated',
+        visibility: 'foreground',
+      });
+    });
+    await settle();
+    expect(inbox?.inboxSessions).toEqual([inboxRow]);
+    act(() => {
+      void inbox?.refresh();
+    });
+    await settle();
+
+    expect(listInbox).toHaveBeenCalledTimes(4);
+    expect(inbox?.inboxSessions).toEqual([]);
+    expect(inbox?.unreadBySession).toEqual({});
+    expect(inbox?.nextCursor).toBe('cursor_after_refresh');
   });
 
   it('keeps a targeted restore without replacing a newer broad unread map', async () => {
@@ -1243,7 +1442,8 @@ describe('Workbench session read ownership', () => {
     const listInbox = vi.fn()
       .mockResolvedValueOnce({ sessions: [], next_cursor: 'cursor_before_restore', unread_by_session: {} })
       .mockReturnValueOnce(targetedRead.promise)
-      .mockReturnValueOnce(broadRead.promise);
+      .mockReturnValueOnce(broadRead.promise)
+      .mockResolvedValueOnce({ sessions: [inboxRow], next_cursor: null, unread_by_session: {} });
     let handlers: WorkbenchEventHandlers | null = null;
     apiRef.current = {
       listInbox,
@@ -1288,6 +1488,7 @@ describe('Workbench session read ownership', () => {
     });
     await settle();
 
+    expect(listInbox).toHaveBeenCalledTimes(4);
     expect(inbox?.inboxSessions.map((row) => row.session_id)).toEqual([session.id]);
     expect(inbox?.unreadBySession).toEqual({});
     expect(inbox?.nextCursor).toBe('cursor_after_refresh');

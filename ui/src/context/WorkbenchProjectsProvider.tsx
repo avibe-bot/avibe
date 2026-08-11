@@ -129,7 +129,6 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
   // paginated read, or targeted row read that started before a newer mutation
   // must not commit its snapshot after that mutation is accepted.
   const readOwnershipRef = useRef(createWorkbenchSessionReadOwnership());
-  const authoritativeProjectsLoadedRef = useRef(false);
   const bootstrapRetryPendingRef = useRef(false);
   const projectTreeRetryPendingRef = useRef(false);
 
@@ -203,8 +202,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
     const read = readOwnershipRef.current.beginRead(['projects', 'projects-bootstrap']);
     const retryAfterMutation = () => {
       if (
-        authoritativeProjectsLoadedRef.current ||
-        readOwnershipRef.current.isCurrent(read, 'projects-bootstrap') ||
+        readOwnershipRef.current.isCurrent(read, ['projects', 'projects-bootstrap']) ||
         !readOwnershipRef.current.isLatestRead(read) ||
         bootstrapRetryPendingRef.current
       ) {
@@ -213,12 +211,13 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       bootstrapRetryPendingRef.current = true;
       queueMicrotask(() => {
         bootstrapRetryPendingRef.current = false;
-        if (!authoritativeProjectsLoadedRef.current) void fetchProjects({ cache: false });
+        void fetchProjects({ cache: false });
       });
     };
     try {
       const result = await api.getWorkbenchProjectsBootstrap({ cache: options?.cache });
-      if (readOwnershipRef.current.isCurrent(read, 'projects')) setProjects(result.projects);
+      const projectsCurrent = readOwnershipRef.current.isCurrent(read, 'projects');
+      if (projectsCurrent) setProjects(result.projects);
       if (!readOwnershipRef.current.isCurrent(read, 'projects-bootstrap')) {
         retryAfterMutation();
         return;
@@ -229,8 +228,11 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
         ),
       );
       applyBootstrapSessions(read, pages);
-      if (readOwnershipRef.current.isCurrent(read, 'projects')) setProjectsError(null);
-      authoritativeProjectsLoadedRef.current = true;
+      if (!projectsCurrent) {
+        retryAfterMutation();
+        return;
+      }
+      setProjectsError(null);
     } catch (err) {
       // Don't strand consumers on an empty-state for a transient failure — keep
       // any list we had and surface the error (mobile shows a retry).

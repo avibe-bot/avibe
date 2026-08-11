@@ -87,13 +87,43 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   // neither operation owns the full top-of-feed snapshot requested by refresh.
   const refreshRetryPendingRef = useRef(false);
   const reconcileRetryPendingRef = useRef(false);
+  const cursorReadsInFlightRef = useRef(0);
+  const refreshRetryRunnerRef = useRef<() => void>(() => {});
+  const reconcileRetryRunnerRef = useRef<() => void>(() => {});
+  const reconcileSessionRef = useRef<(sessionId: string) => void>(() => {});
   const refreshLoadingGenerationRef = useRef(0);
   const loadMoreLoadingGenerationRef = useRef(0);
   // Targeted foreground restores own one session independently from the
   // windowed feed. Keep their latest committed values so a later whole-feed
   // replacement cannot erase a restored card merely because the row sorts
-  // outside the page.
+  // outside the page; a later broad omission revalidates them by exact id.
   const targetedSnapshotsRef = useRef<Map<string, TargetedInboxSnapshot>>(new Map());
+
+  const flushBroadReadRetry = useCallback(() => {
+    if (cursorReadsInFlightRef.current > 0) return;
+    if (refreshRetryPendingRef.current) {
+      refreshRetryPendingRef.current = false;
+      // A replacement refresh owns the same top-of-feed recovery as a pending
+      // reconcile, so one authoritative read satisfies both intents.
+      reconcileRetryPendingRef.current = false;
+      refreshRetryRunnerRef.current();
+      return;
+    }
+    if (reconcileRetryPendingRef.current) {
+      reconcileRetryPendingRef.current = false;
+      reconcileRetryRunnerRef.current();
+    }
+  }, []);
+
+  const queueRefreshRetry = useCallback(() => {
+    refreshRetryPendingRef.current = true;
+    queueMicrotask(flushBroadReadRetry);
+  }, [flushBroadReadRetry]);
+
+  const queueReconcileRetry = useCallback(() => {
+    reconcileRetryPendingRef.current = true;
+    queueMicrotask(flushBroadReadRetry);
+  }, [flushBroadReadRetry]);
 
   const acceptSessionMutation = useCallback((sessionId: string) => {
     readOwnershipRef.current.acceptMutation([
@@ -138,6 +168,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   }, []);
 
   const acceptFeedRows = useCallback((read: WorkbenchSessionReadStamp, rows: InboxSession[]) => {
+    const returnedIds = new Set(rows.map((row) => row.session_id));
     for (const row of rows) {
       const resource = `inbox-session:${row.session_id}`;
       readOwnershipRef.current.claimRead(read, resource);
@@ -145,9 +176,14 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
         targetedSnapshotsRef.current.delete(row.session_id);
       }
     }
+    return Array.from(targetedSnapshotsRef.current.entries())
+      .filter(([sessionId, snapshot]) => snapshot.row && !returnedIds.has(sessionId))
+      .map(([sessionId]) => sessionId);
   }, []);
 
   const refresh = useCallback(async function refresh() {
+    refreshRetryPendingRef.current = false;
+    reconcileRetryPendingRef.current = false;
     const read = readOwnershipRef.current.beginRead(['inbox-feed', 'inbox-unread', 'inbox-feed-refresh']);
     const loadingGeneration = ++refreshLoadingGenerationRef.current;
     const retryAfterInvalidation = () => {
@@ -166,11 +202,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
       ) {
         return false;
       }
-      refreshRetryPendingRef.current = true;
-      queueMicrotask(() => {
-        refreshRetryPendingRef.current = false;
-        void refresh();
-      });
+      queueRefreshRetry();
       return true;
     };
     setLoading(true);
@@ -180,9 +212,10 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
       if (!feedCurrent) {
         retryAfterInvalidation();
       } else {
-        acceptFeedRows(read, result.sessions);
+        const snapshotsToRevalidate = acceptFeedRows(read, result.sessions);
         setInboxSessions(() => mergeTargetedSnapshots(result.sessions));
         setNextCursor(result.next_cursor);
+        for (const sessionId of snapshotsToRevalidate) reconcileSessionRef.current(sessionId);
       }
       if (readOwnershipRef.current.isCurrent(read, 'inbox-unread')) {
         applyUnreadMap(result.unread_by_session ?? {});
@@ -192,12 +225,13 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
     } finally {
       if (refreshLoadingGenerationRef.current === loadingGeneration) setLoading(false);
     }
-  }, [acceptFeedRows, api, applyUnreadMap, mergeTargetedSnapshots]);
+  }, [acceptFeedRows, api, applyUnreadMap, mergeTargetedSnapshots, queueRefreshRetry]);
 
   const loadMore = useCallback(async function loadMore() {
     const cursor = cursorRef.current;
     if (!cursor) return;
     const read = readOwnershipRef.current.beginRead(['inbox-feed', 'inbox-feed-cursor']);
+    cursorReadsInFlightRef.current += 1;
     const loadingGeneration = ++loadMoreLoadingGenerationRef.current;
     let retryAfterInvalidation = false;
     setLoadingMore(true);
@@ -215,10 +249,12 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
         readOwnershipRef.current.isLatestRead(read);
       if (!retryAfterInvalidation) console.error('[inbox] load more failed', err);
     } finally {
+      cursorReadsInFlightRef.current -= 1;
       if (loadMoreLoadingGenerationRef.current === loadingGeneration) setLoadingMore(false);
       if (retryAfterInvalidation) queueMicrotask(() => void loadMore());
+      else flushBroadReadRetry();
     }
-  }, [api]);
+  }, [api, flushBroadReadRetry]);
 
   const markRead = useCallback(
     async (sessionId: string, untilMessageId?: string) => {
@@ -256,6 +292,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   // that arrived during the gap surface at top. No loading flag — the user
   // already has content; this is a silent catch-up.
   const reconcile = useCallback(async () => {
+    reconcileRetryPendingRef.current = false;
     const read = readOwnershipRef.current.beginRead(['inbox-feed', 'inbox-unread', 'inbox-feed-reconcile']);
     const retryAfterInvalidation = () => {
       const invalidatedByMutation = !readOwnershipRef.current.isMutationCurrent(read, 'inbox-feed');
@@ -273,11 +310,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
       ) {
         return false;
       }
-      reconcileRetryPendingRef.current = true;
-      queueMicrotask(() => {
-        reconcileRetryPendingRef.current = false;
-        void reconcile();
-      });
+      queueReconcileRetry();
       return true;
     };
     // Snapshot loaded ids up front: sizes the re-read window, and lets us tell
@@ -299,7 +332,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
       if (!feedCurrent || supersededByCursorRead || supersededByReconcileRead) {
         retryAfterInvalidation();
       } else {
-        acceptFeedRows(read, result.sessions);
+        const snapshotsToRevalidate = acceptFeedRows(read, result.sessions);
         setInboxSessions((prev) => {
           const incoming = new Map(result.sessions.map((s) => [s.session_id, s]));
           const merged = prev.map((s) => incoming.get(s.session_id) ?? s);
@@ -308,6 +341,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
           merged.sort(byActivityDesc);
           return mergeTargetedSnapshots(merged);
         });
+        for (const sessionId of snapshotsToRevalidate) reconcileSessionRef.current(sessionId);
         // Cursor: the loaded feed is always a contiguous run from the top, and
         // this reads the newest `limit` rows. If the read shares ANY row with what
         // we had (overlap), the two runs are contiguous — no gap below the read —
@@ -326,7 +360,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
     } catch (err) {
       if (!retryAfterInvalidation()) console.error('[inbox] reconcile failed', err);
     }
-  }, [acceptFeedRows, api, applyUnreadMap, mergeTargetedSnapshots]);
+  }, [acceptFeedRows, api, applyUnreadMap, mergeTargetedSnapshots, queueReconcileRetry]);
 
   // Targeted reconcile for one session (contract A6 foreground restore): fetch
   // that exact session by id and upsert its card, so a restored session
@@ -375,6 +409,9 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
     },
     [api],
   );
+  refreshRetryRunnerRef.current = () => void refresh();
+  reconcileRetryRunnerRef.current = () => void reconcile();
+  reconcileSessionRef.current = (sessionId) => void reconcileSession(sessionId);
 
   useEffect(() => {
     // First mount loads page one; every later rerun reconciles the loaded window
