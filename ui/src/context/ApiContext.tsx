@@ -2362,6 +2362,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // must never change whether/what this handler throws.
     const archivedSessionId = archivedConflictSessionId(errorCode, path);
     if (archivedSessionId) {
+      sessionDraftPersistence.clearSession(archivedSessionId);
       for (const handler of Array.from(sessionArchivedHandlersRef.current)) {
         try {
           handler(archivedSessionId);
@@ -2554,6 +2555,9 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (!envelope) return;
       if (envelope.data.session_id) {
         clearSessionReadCache(envelope.data.session_id);
+        if (envelope.data.event === 'archived') {
+          sessionDraftPersistence.clearSession(envelope.data.session_id);
+        }
       } else {
         clearReadCacheMatching((path) => path.startsWith('/api/inbox') || path.startsWith('/api/sessions'));
       }
@@ -3127,12 +3131,20 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       };
     },
     getSessionBootstrap: async (sessionId) => {
-      await sessionDraftPersistence.waitForWrites(sessionId);
-      const readRevision = sessionDraftPersistence.revision(sessionId);
-      const payload = await getJson(`/api/sessions/${encodeURIComponent(sessionId)}/bootstrap`);
-      const serverText = payload?.draft?.text ?? '';
-      const text = sessionDraftPersistence.reconcileRead(sessionId, readRevision, serverText);
-      return text === serverText ? payload : { ...payload, draft: { ...(payload.draft ?? {}), text } };
+      const read = sessionDraftPersistence.beginRead(sessionId);
+      try {
+        const payload = await getJson(`/api/sessions/${encodeURIComponent(sessionId)}/bootstrap`);
+        if (payload?.session?.status === 'archived') {
+          sessionDraftPersistence.clearSession(sessionId);
+          return payload;
+        }
+        const serverText = payload?.draft?.text ?? '';
+        const text = sessionDraftPersistence.reconcileRead(sessionId, read, serverText);
+        return text === serverText ? payload : { ...payload, draft: { ...(payload.draft ?? {}), text } };
+      } catch (error) {
+        sessionDraftPersistence.releaseRead(sessionId, read);
+        throw error;
+      }
     },
     updateSession: async (sessionId, payload) => {
       const { payloadJson } = await requestJson(`/api/sessions/${encodeURIComponent(sessionId)}`, {
@@ -3142,7 +3154,11 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }, `PATCH /api/sessions/${sessionId}`);
       return payloadJson;
     },
-    archiveSession: (sessionId) => deleteJson(`/api/sessions/${encodeURIComponent(sessionId)}`),
+    archiveSession: async (sessionId) => {
+      const payload = await deleteJson(`/api/sessions/${encodeURIComponent(sessionId)}`);
+      sessionDraftPersistence.clearSession(sessionId);
+      return payload;
+    },
     onSessionArchived,
     getArchivePreview: (sessionId) =>
       getJson(`/api/sessions/${encodeURIComponent(sessionId)}/archive-preview`),
@@ -3232,12 +3248,16 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return res.json();
     },
     getSessionDraft: async (sessionId) => {
-      await sessionDraftPersistence.waitForWrites(sessionId);
-      const readRevision = sessionDraftPersistence.revision(sessionId);
-      const payload = await getCachedJson(`/api/sessions/${encodeURIComponent(sessionId)}/draft`);
-      const serverText = payload?.text ?? '';
-      const text = sessionDraftPersistence.reconcileRead(sessionId, readRevision, serverText);
-      return { text };
+      const read = sessionDraftPersistence.beginRead(sessionId);
+      try {
+        const payload = await getCachedJson(`/api/sessions/${encodeURIComponent(sessionId)}/draft`);
+        const serverText = payload?.text ?? '';
+        const text = sessionDraftPersistence.reconcileRead(sessionId, read, serverText);
+        return { text };
+      } catch (error) {
+        sessionDraftPersistence.releaseRead(sessionId, read);
+        throw error;
+      }
     },
     setSessionDraft: (sessionId, text) => sessionDraftPersistence.save(sessionId, text, async () => {
       const { res } = await requestJson(`/api/sessions/${encodeURIComponent(sessionId)}/draft`, {

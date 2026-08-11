@@ -1,4 +1,8 @@
 export type SessionDraftSaveResult = { ok: boolean };
+export type SessionDraftRead = {
+  revision: number;
+  pending: boolean;
+};
 
 type DraftEntry = {
   revision: number;
@@ -16,6 +20,7 @@ type DraftSave = () => Promise<SessionDraftSaveResult>;
  */
 export class SessionDraftPersistence {
   private readonly entries = new Map<string, DraftEntry>();
+  private readonly activeReads = new Map<string, Set<SessionDraftRead>>();
 
   save(sessionId: string, text: string, write: DraftSave): Promise<SessionDraftSaveResult> {
     const previous = this.entries.get(sessionId);
@@ -42,7 +47,9 @@ export class SessionDraftPersistence {
       const current = this.entries.get(sessionId);
       if (current?.revision === revision) {
         if (result.ok) {
-          this.entries.delete(sessionId);
+          current.pending = null;
+          current.dirty = false;
+          if (!this.activeReads.has(sessionId)) this.entries.delete(sessionId);
         } else {
           current.pending = null;
           current.dirty = true;
@@ -55,30 +62,53 @@ export class SessionDraftPersistence {
     return pending;
   }
 
-  async waitForWrites(sessionId: string): Promise<void> {
-    while (true) {
-      const pending = this.entries.get(sessionId)?.pending;
-      if (!pending) return;
-      await pending;
-      if (this.entries.get(sessionId)?.pending !== pending) continue;
-      return;
-    }
+  beginRead(sessionId: string): SessionDraftRead {
+    const current = this.entries.get(sessionId);
+    const read: SessionDraftRead = {
+      revision: current?.revision ?? 0,
+      pending: Boolean(current?.pending),
+    };
+    const reads = this.activeReads.get(sessionId) ?? new Set<SessionDraftRead>();
+    reads.add(read);
+    this.activeReads.set(sessionId, reads);
+    return read;
+  }
+
+  releaseRead(sessionId: string, read: SessionDraftRead): void {
+    this.finishRead(sessionId, read);
+    this.cleanupSuccessfulEntry(sessionId);
   }
 
   revision(sessionId: string): number {
     return this.entries.get(sessionId)?.revision ?? 0;
   }
 
-  /**
-   * Prefer local text when a write failed or changed while the read was in
-   * flight. Once a clean write is known to predate the read, the server is the
-   * source of truth and the temporary entry can be retired.
-   */
-  reconcileRead(sessionId: string, readRevision: number, serverText: string): string {
+  reconcileRead(sessionId: string, read: SessionDraftRead, serverText: string): string {
     const current = this.entries.get(sessionId);
+    this.finishRead(sessionId, read);
     if (!current) return serverText;
-    if (current.revision > readRevision || current.pending || current.dirty) return current.text;
+    const localWins = read.pending || current.revision > read.revision || current.pending || current.dirty;
+    const text = localWins ? current.text : serverText;
+    this.cleanupSuccessfulEntry(sessionId);
+    return text;
+  }
+
+  clearSession(sessionId: string): void {
     this.entries.delete(sessionId);
-    return serverText;
+    this.activeReads.delete(sessionId);
+  }
+
+  private finishRead(sessionId: string, read: SessionDraftRead): void {
+    const reads = this.activeReads.get(sessionId);
+    if (!reads) return;
+    reads.delete(read);
+    if (!reads.size) this.activeReads.delete(sessionId);
+  }
+
+  private cleanupSuccessfulEntry(sessionId: string): void {
+    const current = this.entries.get(sessionId);
+    if (current && !current.pending && !current.dirty && !this.activeReads.has(sessionId)) {
+      this.entries.delete(sessionId);
+    }
   }
 }

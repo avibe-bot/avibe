@@ -50,32 +50,48 @@ describe('SessionDraftPersistence', () => {
     first.resolve({ ok: true });
   });
 
-  it('waits for a write before a bootstrap read', async () => {
+  it('keeps the local text when a read starts during a pending write', async () => {
     const persistence = new SessionDraftPersistence();
     const first = deferred<{ ok: boolean }>();
-    let readStarted = false;
     persistence.save('session-a', 'draft', async () => first.promise);
 
-    const read = (async () => {
-      await persistence.waitForWrites('session-a');
-      readStarted = true;
-    })();
-    await Promise.resolve();
-    expect(readStarted).toBe(false);
+    const read = persistence.beginRead('session-a');
+    expect(persistence.reconcileRead('session-a', read, '')).toBe('draft');
     first.resolve({ ok: true });
-    await read;
-    expect(readStarted).toBe(true);
+    await Promise.resolve();
   });
 
-  it('returns the local text when a read races a newer or failed write', async () => {
+  it('retains a successful revision until an older read reconciles', async () => {
+    const persistence = new SessionDraftPersistence();
+    const read = persistence.beginRead('session-a');
+    await persistence.save('session-a', 'newer', async () => ({ ok: true }));
+
+    expect(persistence.reconcileRead('session-a', read, 'old')).toBe('newer');
+    expect(persistence.revision('session-a')).toBe(0);
+  });
+
+  it('returns the local text when a read races a failed write', async () => {
     const persistence = new SessionDraftPersistence();
     const failed = persistence.save('session-a', 'local', async () => ({ ok: false }));
     await failed;
-    expect(persistence.reconcileRead('session-a', 1, '')).toBe('local');
+    const failedRead = persistence.beginRead('session-a');
+    expect(persistence.reconcileRead('session-a', failedRead, '')).toBe('local');
 
     const pending = deferred<{ ok: boolean }>();
+    const newerRead = persistence.beginRead('session-a');
     persistence.save('session-a', 'newer', async () => pending.promise);
-    expect(persistence.reconcileRead('session-a', 1, 'old')).toBe('newer');
+    expect(persistence.reconcileRead('session-a', newerRead, 'old')).toBe('newer');
     pending.resolve({ ok: true });
+    await Promise.resolve();
+  });
+
+  it('clears pending and failed state when a session is archived', async () => {
+    const persistence = new SessionDraftPersistence();
+    persistence.save('session-a', 'draft', async () => ({ ok: false }));
+    await Promise.resolve();
+    persistence.clearSession('session-a');
+
+    expect(persistence.revision('session-a')).toBe(0);
+    expect(persistence.beginRead('session-a').pending).toBe(false);
   });
 });
