@@ -20,3 +20,18 @@ must build all supported `linux-x64`, `linux-arm64`, and `darwin-arm64` bundles,
 generate a manifest containing the sync bootstrap and scrubber digests, pass the
 release guard, and publish those assets before a product Repair action can be
 enabled. This branch intentionally does not publish artifacts, tags, or releases.
+
+The bootstrap acceptance test uses a versionless behavioral fake only to prove
+Avibe's launch, stop-before-import, scrubber-ordering, and argv-rejection
+boundary. A separate required CI contract provisions the hash-locked EverOS
+wheel from `scripts/memory_runtime/uv.lock`, invokes the real module entrypoint
+against an isolated root, and proves that pathless sync scans one Markdown file
+and drains its queue. Neither test downloads or contacts a provider while it is
+running.
+
+`cascade fix --apply` remains deliberately absent. The pinned upstream contract
+only establishes that pathless `cascade sync` may coexist with the live server;
+similar-looking implementation code is not an online-safety guarantee. The same
+executable acceptance test proves the artifact bootstrap rejects `fix --apply`
+before its CLI can mutate state. Adding that operation requires a separate issue
+and an explicit upstream live-safety contract.

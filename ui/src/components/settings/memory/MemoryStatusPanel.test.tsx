@@ -5,6 +5,7 @@ import { cleanup, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 import type { MemoryClearRecovery, MemoryFailureLogEntry, MemoryStatus } from '../../../context/ApiContext';
+import { memoryCascadeHealth } from '../../../test/memoryFixtures';
 import { MemoryStatusPanel } from './MemoryStatusPanel';
 
 vi.mock('react-i18next', () => ({
@@ -99,6 +100,87 @@ describe('MemoryStatusPanel', () => {
     ]) {
       expect(screen.getByRole('button', { name: label })).toBeTruthy();
     }
+  });
+
+  it('only exposes Repair index when the backend capability is explicitly available', () => {
+    const { rerender } = render(<MemoryStatusPanel {...baseProps} />);
+    expect(screen.queryByRole('button', { name: 'memory.processingRecord.repair.action' })).toBeNull();
+
+    rerender(<MemoryStatusPanel {...baseProps} repairSupported />);
+    expect(screen.getByRole('button', { name: 'memory.processingRecord.repair.action' })).toBeTruthy();
+  });
+
+  it('places Repair beside the Cascade subsection', () => {
+    render(<MemoryStatusPanel {...baseProps} repairSupported />);
+
+    const cascadeLabel = screen.getByText('memory.processingRecord.runtime.cascade');
+    const repairButton = screen.getByRole('button', { name: 'memory.processingRecord.repair.action' });
+    const cascadeHeader = cascadeLabel.parentElement?.parentElement;
+    const runtimeHeader = screen.getByText('memory.processingRecord.runtime.title').parentElement;
+
+    expect(cascadeHeader?.contains(repairButton)).toBe(true);
+    expect(runtimeHeader?.contains(repairButton)).toBe(false);
+  });
+
+  it('keeps Repair reachable when the processing health projection is unavailable', () => {
+    render(<MemoryStatusPanel {...baseProps} status={null} statusError="health failed" repairSupported />);
+    expect(screen.getByRole('button', { name: 'memory.processingRecord.repair.action' })).toBeTruthy();
+  });
+
+  it('renders the Repair result when the processing health projection is unavailable', () => {
+    render(
+      <MemoryStatusPanel
+        {...baseProps}
+        status={null}
+        repairError="repair failed"
+        repairHealth={memoryCascadeHealth({ healthy: false, reasons: ['drain_failures'] })}
+      />,
+    );
+
+    expect(screen.getByText('repair failed')).toBeTruthy();
+    expect(screen.getByText('memory.processingRecord.repair.completedWithWarnings')).toBeTruthy();
+  });
+
+  it('blocks Repair while another Memory mutation owns the page', () => {
+    render(<MemoryStatusPanel {...baseProps} repairSupported mutationBusy />);
+    expect((screen.getByRole('button', { name: 'memory.processingRecord.repair.action' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('blocks Clear recovery while Repair owns the page', () => {
+    render(
+      <MemoryStatusPanel
+        {...baseProps}
+        recovery={{ operation_id: 'clear-locked', state: 'recovery_needed', can_resume: true, can_abort: true }}
+        repairBusy
+      />,
+    );
+
+    expect((screen.getByRole('button', { name: 'memory.processingRecord.clearRecovery.resume' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: 'memory.processingRecord.clearRecovery.abort' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('shows the structured final health projection and running lock', () => {
+    const health = memoryCascadeHealth({
+      healthy: false,
+      reasons: ['drain_failures'],
+      pending: 1,
+      failed_retryable: 1,
+      drain_consecutive_failures: 2,
+      prune_stale_seconds: 60,
+    });
+    render(
+      <MemoryStatusPanel
+        {...baseProps}
+        repairSupported
+        repairBusy
+        repairHealth={health}
+        repairError="repair failed"
+      />,
+    );
+
+    expect((screen.getByRole('button', { name: 'memory.processingRecord.repair.running' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText('repair failed')).toBeTruthy();
+    expect(screen.getByText('memory.processingRecord.repair.completedWithWarnings')).toBeTruthy();
   });
 
   it('preserves the Processing Record structure and responsive class contract', () => {

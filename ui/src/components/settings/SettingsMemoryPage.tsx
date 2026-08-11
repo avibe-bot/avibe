@@ -17,6 +17,7 @@ import { useMemoryResource } from './memory/useMemoryResource';
 import { useApi } from '../../context/ApiContext';
 import type {
   MemoryMaintenanceResult,
+  MemoryCascadeHealth,
   MemoryProcessingRecordResult,
   MemorySettingsResult,
   MemoryStatus,
@@ -47,6 +48,10 @@ export const SettingsMemoryPage: React.FC = () => {
   const [runtimeInstalled, setRuntimeInstalled] = useState<boolean | null>(null);
   const [restarting, setRestarting] = useState(false);
   const [rebuildBusy, setRebuildBusy] = useState(false);
+  const [repairBusy, setRepairBusy] = useState(false);
+  const [settingsSaving, setSettingsSaving] = useState(false);
+  const [repairError, setRepairError] = useState<string | null>(null);
+  const [repairHealth, setRepairHealth] = useState<MemoryCascadeHealth | null>(null);
   const [logGeneration, setLogGeneration] = useState(0);
   const [logRefreshToken, setLogRefreshToken] = useState(0);
   const [recoveryAction, setRecoveryAction] = useState<'resume' | 'abort' | null>(null);
@@ -81,6 +86,8 @@ export const SettingsMemoryPage: React.FC = () => {
   // sticky per resource, so the static state never flickers away on a later request.
   const remoteUnavailable =
     settingsRead.forbidden || processingRecordRead.forbidden || maintenanceRead.forbidden;
+  const repairMutationBusy =
+    restarting || rebuildBusy || clearing || clearOpen || recoveryAction !== null || settingsSaving || factoryResetBusy || settings?.factory_reset_required === true;
 
   // Dependency readiness comes from the authoritative Dependencies source. Processing Record
   // health is observational and never doubles as installation or enablement state.
@@ -115,6 +122,7 @@ export const SettingsMemoryPage: React.FC = () => {
   }, [loadSettings, loadProcessingRecord, loadMaintenance, loadDependency]);
 
   const confirmClear = async () => {
+    if (repairBusy || restarting || rebuildBusy || clearing || recoveryAction !== null || settingsSaving) return;
     setClearing(true);
     // Clear can delete provider payloads before a failed receipt or a lost
     // response, so purge cached payloads for every confirmed attempt.
@@ -184,6 +192,7 @@ export const SettingsMemoryPage: React.FC = () => {
   };
 
   const runClearRecovery = async (action: 'resume' | 'abort', operationId: string) => {
+    if (repairBusy || restarting || rebuildBusy || clearing || clearOpen || recoveryAction !== null || settingsSaving) return;
     setRecoveryAction(action);
     try {
       const res = action === 'resume'
@@ -208,10 +217,11 @@ export const SettingsMemoryPage: React.FC = () => {
   };
 
   const restartEngine = async () => {
+    if (repairBusy || rebuildBusy || clearing || clearOpen || recoveryAction !== null || settingsSaving) return;
     setRestarting(true);
     try {
       const res = await api.restartMemoryRuntime();
-      if (res.ok) {
+      if ('ok' in res && res.ok === true) {
         showToast(t('memory.status.engineRestartCompleted'), 'success');
         void loadProcessingRecord();
       } else {
@@ -221,6 +231,34 @@ export const SettingsMemoryPage: React.FC = () => {
       showToast(t('memory.status.engineRestartFailed'), 'error');
     } finally {
       setRestarting(false);
+    }
+  };
+
+  const repairIndex = async () => {
+    if (settings?.enabled !== true || repairBusy || repairMutationBusy) return;
+    setRepairBusy(true);
+    setRepairError(null);
+    setRepairHealth(null);
+    try {
+      const res = await api.repairMemoryIndex();
+      if ('ok' in res && res.ok === true) {
+        setRepairHealth(res.health);
+        showToast(
+          res.result === 'completed'
+            ? t('memory.processingRecord.repair.completed')
+            : t('memory.processingRecord.repair.completedWithWarnings'),
+          res.result === 'completed' ? 'success' : 'warning',
+        );
+        await loadProcessingRecord();
+      } else {
+        setRepairError(memoryErrorMessage(t, 'error' in res ? res.error : undefined));
+        await loadProcessingRecord();
+      }
+    } catch {
+      setRepairError(t('memory.processingRecord.repair.failed'));
+      await loadProcessingRecord();
+    } finally {
+      setRepairBusy(false);
     }
   };
 
@@ -243,7 +281,10 @@ export const SettingsMemoryPage: React.FC = () => {
       maintenanceError={maintenanceRead.error}
       dependencyReady={dependencyReady}
       rebuildBusy={rebuildBusy}
+      repairBusy={repairBusy}
+      mutationBusy={restarting || recoveryAction !== null}
       onRebuildBusyChange={setRebuildBusy}
+      onSavingChange={setSettingsSaving}
       onSaved={(next) => {
         setSettings(next);
         window.dispatchEvent(new Event('avibe:memory-settings-changed'));
@@ -283,7 +324,7 @@ export const SettingsMemoryPage: React.FC = () => {
             variant="secondary"
             size="xs"
             onClick={() => void restartEngine()}
-            disabled={restarting || rebuildRequired || rebuildBusy || factoryResetBusy || factoryResetPending}
+            disabled={restarting || rebuildRequired || rebuildBusy || repairBusy || repairMutationBusy || factoryResetBusy || factoryResetPending}
           >
             {restarting ? <Loader2 className="animate-spin" /> : <RotateCw />}
             {t('memory.status.restartEngine')}
@@ -350,6 +391,12 @@ export const SettingsMemoryPage: React.FC = () => {
                 onRefresh={refreshProcessingRecord}
                 onResumeClear={(operationId) => void runClearRecovery('resume', operationId)}
                 onAbortClear={(operationId) => void runClearRecovery('abort', operationId)}
+                repairSupported={settings.enabled === true && settings.repair_available === true}
+                repairBusy={repairBusy}
+                mutationBusy={repairMutationBusy}
+                repairError={repairError}
+                repairHealth={repairHealth}
+                onRepair={() => void repairIndex()}
               />
               <section className="flex flex-col gap-2" aria-labelledby="memory-timeline-title">
                 <div className="flex items-center gap-1.5">

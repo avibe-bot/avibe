@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useEffect, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
+import { requestMemoryRuntimeRepair } from '../lib/memoryRepair';
 import { useToast } from './ToastContext';
 import { apiFetch } from '../lib/apiFetch';
 import type { TurnActivityGroupWire } from '../lib/agentActivity';
@@ -544,6 +545,7 @@ export type ApiContextType = {
   factoryResetMemory: () => Promise<MemoryFactoryResetResult>;
   restartMemoryRuntime: () => Promise<MemoryRuntimeRestartResult>;
   rebuildMemoryRuntime: () => Promise<MemoryRuntimeRebuildResult>;
+  repairMemoryIndex: () => Promise<MemoryRuntimeRepairResult>;
   getBackendRuntime: (name: string) => Promise<BackendRuntimeInfo>;
   restartBackend: (name: string) => Promise<BackendRestartResult>;
   getCodexAuth: () => Promise<CodexAuthState>;
@@ -1743,6 +1745,7 @@ export type MemoryProcessingConfig = {
 export type MemorySettings = {
   status: 'ok';
   enabled: boolean;
+  repair_available?: boolean;
   processing: MemoryProcessingConfig;
   rebuild_required?: boolean;
   /** Derived recovery state; raw durable intent never crosses the UI contract. */
@@ -2013,6 +2016,31 @@ export type MemoryRuntimeRestartResult = { ok: true; state?: string } | { ok: fa
 export type MemoryRuntimeRebuildResult =
   | { ok: true; result?: string; state?: string }
   | { ok: false; error?: string; result?: string };
+
+export type MemoryRuntimeRepairResult =
+  | {
+      ok: true;
+      result: 'completed' | 'completed_with_warnings';
+      health: MemoryCascadeHealth;
+    }
+  | {
+      ok: false;
+      error: string;
+      result: 'failed' | 'interrupted' | 'timed_out';
+    }
+  | MemoryFailure;
+
+export type MemoryCascadeHealth = {
+  healthy: boolean;
+  reasons: string[];
+  pending: number;
+  failed_permanent: number;
+  failed_retryable: number;
+  drain_consecutive_failures: number;
+  unrecoverable_total: number;
+  optimize_failure_streak: number;
+  prune_stale_seconds: number;
+};
 
 export type BackendRuntimeInfo = {
   ok: boolean;
@@ -3025,6 +3053,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     restartMemoryRuntime: () => postJson('/api/memory/runtime/restart', {}, { handleError: false }),
     rebuildMemoryRuntime: () =>
       postJson('/api/memory/runtime/rebuild', { confirm: true }, { handleError: false }),
+    repairMemoryIndex: () => requestMemoryRuntimeRepair(postJson),
     getBackendRuntime: (name) => getJson(`/api/backend/${encodeURIComponent(name)}/runtime`),
     restartBackend: (name) => postJson(`/api/backend/${encodeURIComponent(name)}/restart`, {}),
     getCodexAuth: () => getJson('/api/backend/codex/auth'),

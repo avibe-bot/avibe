@@ -927,6 +927,12 @@ def create_app(
                 status_code=403,
                 content={"ok": False, "error": "memory_access_denied", "result": "failed"},
             )
+        payload = await _safe_json(request)
+        if payload != {"confirm": True}:
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": "memory_invalid_input", "result": "failed"},
+            )
         if _memory_factory_reset_running():
             return JSONResponse(
                 status_code=409,
@@ -938,11 +944,10 @@ def create_app(
                 status_code=503,
                 content={"ok": False, "error": "memory_runtime_missing", "result": "failed"},
             )
-        payload = await _safe_json(request)
-        if payload != {"confirm": True}:
+        if getattr(runtime, "factory_reset_pending", False):
             return JSONResponse(
-                status_code=400,
-                content={"ok": False, "error": "memory_invalid_input", "result": "failed"},
+                status_code=409,
+                content={"ok": False, "error": "memory_operation_in_progress", "result": "failed"},
             )
         try:
             result = await runtime.rebuild()
@@ -971,8 +976,14 @@ def create_app(
                 content={"ok": False, "error": "memory_invalid_input", "result": "failed"},
             )
         runtime = _memory_runtime()
+        if runtime is None:
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": "memory_runtime_missing", "result": "failed"},
+            )
         rebuild_running = getattr(runtime, "_rebuild_running", None)
-        if callable(rebuild_running) and rebuild_running():
+        repair_running = getattr(runtime, "_repair_running", None)
+        if (callable(rebuild_running) and rebuild_running()) or (callable(repair_running) and repair_running()):
             return JSONResponse(
                 status_code=409,
                 content={"ok": False, "error": "memory_operation_in_progress", "result": "failed"},
@@ -994,6 +1005,52 @@ def create_app(
         status_code = 200 if result.get("ok") is True else (
             409 if result.get("error") == "memory_operation_in_progress" else 503
         )
+        return JSONResponse(status_code=status_code, content=result)
+
+    @app.post("/internal/memory/repair")
+    async def _memory_repair(request: Request) -> Any:
+        """Run one retained live cascade sync and return its final health."""
+
+        if _verified_memory_ui_user_key(request) is None:
+            return JSONResponse(
+                status_code=403,
+                content={"ok": False, "error": "memory_access_denied", "result": "failed"},
+            )
+        payload = await _safe_json(request)
+        if payload != {"confirm": True}:
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": "memory_invalid_input", "result": "failed"},
+            )
+        if _memory_factory_reset_running():
+            return JSONResponse(
+                status_code=409,
+                content={"ok": False, "error": "memory_operation_in_progress", "result": "failed"},
+            )
+        runtime = _memory_runtime()
+        if runtime is None:
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": "memory_runtime_missing", "result": "failed"},
+            )
+        try:
+            result = await runtime.repair()
+        except Exception:
+            logger.exception("internal memory repair failed")
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": "memory_repair_failed", "result": "failed"},
+            )
+        if result.get("ok") is True:
+            status_code = 200
+        elif result.get("error") in {
+            "memory_disabled",
+            "memory_operation_in_progress",
+            "memory_runtime_unsupported",
+        }:
+            status_code = 409
+        else:
+            status_code = 503
         return JSONResponse(status_code=status_code, content=result)
 
     @app.post("/internal/memory/install-runtime")

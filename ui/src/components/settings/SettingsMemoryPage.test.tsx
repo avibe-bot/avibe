@@ -7,6 +7,7 @@ import { MemoryRouter } from 'react-router-dom';
 
 import { SettingsMemoryPage } from './SettingsMemoryPage';
 import type { MemoryProcessingRecordSummary } from '../../context/ApiContext';
+import { memoryCascadeHealth } from '../../test/memoryFixtures';
 
 const api = vi.hoisted(() => ({
   abortMemoryClear: vi.fn(),
@@ -16,6 +17,7 @@ const api = vi.hoisted(() => ({
   getMemoryProcessingRecord: vi.fn(),
   getMemorySettings: vi.fn(),
   listDependencies: vi.fn(),
+  repairMemoryIndex: vi.fn(),
   restartMemoryRuntime: vi.fn(),
   resumeMemoryClear: vi.fn(),
 }));
@@ -68,6 +70,9 @@ vi.mock('./memory/MemorySettingsPanel', () => ({
     factoryResetArtifactValid,
     factoryResetPending,
     onRebuildBusyChange,
+    onSavingChange,
+    repairBusy = false,
+    mutationBusy = false,
   }: {
     maintenance: { can_clear: boolean } | null;
     onClearAll: () => void;
@@ -76,19 +81,26 @@ vi.mock('./memory/MemorySettingsPanel', () => ({
     factoryResetArtifactValid?: boolean;
     factoryResetPending?: boolean;
     onRebuildBusyChange: (busy: boolean) => void;
+    onSavingChange?: (busy: boolean) => void;
+    repairBusy?: boolean;
+    mutationBusy?: boolean;
   }) => (
     <div>
       <span>{maintenance?.can_clear ? 'maintenance-ready' : 'maintenance-unknown'}</span>
-      <button type="button" onClick={onClearAll}>open-clear</button>
-      <button type="button" onClick={onFactoryReset} disabled={factoryResetBusy || !factoryResetArtifactValid}>
+      <button type="button" disabled={repairBusy || mutationBusy || factoryResetBusy || factoryResetPending} onClick={onClearAll}>open-clear</button>
+      <button type="button" onClick={onFactoryReset} disabled={repairBusy || mutationBusy || factoryResetBusy || !factoryResetArtifactValid}>
         {factoryResetPending ? 'retry-factory' : 'open-factory'}
       </button>
-      <button type="button" onClick={() => onRebuildBusyChange(true)}>
+      <button type="button" disabled={repairBusy || mutationBusy || factoryResetBusy || factoryResetPending} onClick={() => onRebuildBusyChange(true)}>
         begin-rebuild
       </button>
       <button type="button" onClick={() => onRebuildBusyChange(false)}>
         end-rebuild
       </button>
+      <button type="button" disabled={repairBusy || mutationBusy || factoryResetBusy || factoryResetPending} onClick={() => onSavingChange?.(true)}>
+        begin-save
+      </button>
+      <button type="button" onClick={() => onSavingChange?.(false)}>end-save</button>
     </div>
   ),
 }));
@@ -159,6 +171,11 @@ beforeEach(() => {
   });
   api.resumeMemoryClear.mockResolvedValue({ status: 'completed', operation_id: 'clear-42' });
   api.abortMemoryClear.mockResolvedValue({ status: 'aborted', operation_id: 'clear-42' });
+  api.repairMemoryIndex.mockResolvedValue({
+    ok: true,
+    result: 'completed',
+    health: memoryCascadeHealth(),
+  });
 });
 
 afterEach(() => {
@@ -206,12 +223,14 @@ describe('SettingsMemoryPage Processing Record', () => {
     api.getMemorySettings.mockResolvedValue({
       status: 'ok',
       enabled: false,
+      repair_available: true,
       processing: { llm: endpoint, embedding: endpoint },
     });
     renderPage();
 
     expect(await screen.findByTestId('processing-log')).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'memory.status.restartEngine' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'memory.processingRecord.repair.action' })).toBeNull();
   });
 
   it('renders source-local anomaly failure without hiding maintenance recovery', async () => {
@@ -489,5 +508,219 @@ describe('SettingsMemoryPage restart action', () => {
 
     expect(await screen.findByRole('button', { name: 'open-factory' })).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'retry-factory' })).toBeNull();
+  });
+});
+
+describe('SettingsMemoryPage Repair action', () => {
+  it('keeps the capability action visible when the health summary fails', async () => {
+    api.getMemorySettings.mockResolvedValue({
+      status: 'ok',
+      enabled: true,
+      repair_available: true,
+      processing: { llm: endpoint, embedding: endpoint },
+    });
+    api.getMemoryProcessingRecord.mockResolvedValue({ status: 'failed', error: 'memory_status_failed' });
+    renderPage();
+
+    expect(await screen.findByRole('button', { name: 'memory.processingRecord.repair.action' })).toBeTruthy();
+  });
+
+  it('locks restart and settings clear for the full Repair request lifetime', async () => {
+    let finishRepair: ((value: unknown) => void) | undefined;
+    const summary = readyProcessingRecord();
+    summary.maintenance.clear_recovery = {
+      operation_id: 'clear-during-repair',
+      state: 'recovery_needed',
+      can_resume: true,
+      can_abort: true,
+    };
+    api.getMemorySettings.mockResolvedValue({
+      status: 'ok',
+      enabled: true,
+      repair_available: true,
+      processing: { llm: endpoint, embedding: endpoint },
+    });
+    api.getMemoryProcessingRecord.mockResolvedValue(summary);
+    api.repairMemoryIndex.mockReturnValue(new Promise((resolve) => { finishRepair = resolve; }));
+    const user = userEvent.setup();
+    renderPage();
+
+    const repair = await screen.findByRole('button', { name: 'memory.processingRecord.repair.action' });
+    await user.click(repair);
+    await user.click(screen.getByRole('button', { name: 'confirm-clear' }));
+
+    await waitFor(() => expect(api.repairMemoryIndex).toHaveBeenCalledTimes(1));
+    expect((repair as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: 'memory.processingRecord.clearRecovery.resume' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: 'memory.processingRecord.clearRecovery.abort' }) as HTMLButtonElement).disabled).toBe(true);
+    await waitFor(() => expect((screen.getByRole('button', { name: 'memory.status.restartEngine' }) as HTMLButtonElement).disabled).toBe(true));
+    expect(api.restartMemoryRuntime).not.toHaveBeenCalled();
+    await user.click(await screen.findByRole('radio', { name: 'memory.tabs.settings' }));
+    expect((screen.getByRole('button', { name: 'open-clear' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: 'begin-rebuild' }) as HTMLButtonElement).disabled).toBe(true);
+
+    finishRepair?.({
+      ok: true,
+      result: 'completed',
+      health: memoryCascadeHealth(),
+    });
+    await waitFor(() => expect((screen.getByRole('button', { name: 'memory.status.restartEngine' }) as HTMLButtonElement).disabled).toBe(false));
+  });
+
+  it('renders an unhealthy Repair completion as warnings', async () => {
+    const warningHealth = memoryCascadeHealth({
+      healthy: false,
+      reasons: ['drain_failures'],
+      pending: 1,
+      failed_retryable: 1,
+      drain_consecutive_failures: 2,
+      prune_stale_seconds: 60,
+    });
+    api.getMemorySettings.mockResolvedValue({
+      status: 'ok',
+      enabled: true,
+      repair_available: true,
+      processing: { llm: endpoint, embedding: endpoint },
+    });
+    api.repairMemoryIndex.mockResolvedValue({
+      ok: true,
+      result: 'completed_with_warnings',
+      health: warningHealth,
+    });
+    const user = userEvent.setup();
+    renderPage();
+
+    await user.click(await screen.findByRole('button', { name: 'memory.processingRecord.repair.action' }));
+    await user.click(screen.getByRole('button', { name: 'confirm-clear' }));
+
+    await waitFor(() => expect(api.repairMemoryIndex).toHaveBeenCalledTimes(1));
+    expect(showToast).toHaveBeenCalledWith(
+      'memory.processingRecord.repair.completedWithWarnings',
+      'warning',
+    );
+    expect(await screen.findByText('memory.processingRecord.repair.completedWithWarnings')).toBeTruthy();
+  });
+
+  it('prevents a second Repair request while the first is pending', async () => {
+    let finishRepair: ((value: unknown) => void) | undefined;
+    api.getMemorySettings.mockResolvedValue({
+      status: 'ok',
+      enabled: true,
+      repair_available: true,
+      processing: { llm: endpoint, embedding: endpoint },
+    });
+    api.repairMemoryIndex.mockReturnValue(new Promise((resolve) => { finishRepair = resolve; }));
+    const user = userEvent.setup();
+    renderPage();
+
+    const repair = await screen.findByRole('button', { name: 'memory.processingRecord.repair.action' });
+    await user.click(repair);
+    await user.click(screen.getByRole('button', { name: 'confirm-clear' }));
+    await waitFor(() => expect(api.repairMemoryIndex).toHaveBeenCalledTimes(1));
+
+    const runningRepair = screen.getByRole('button', { name: 'memory.processingRecord.repair.running' });
+    expect((runningRepair as HTMLButtonElement).disabled).toBe(true);
+    await user.click(runningRepair);
+    expect(api.repairMemoryIndex).toHaveBeenCalledTimes(1);
+
+    finishRepair?.({ ok: true, result: 'completed', health: memoryCascadeHealth() });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'memory.processingRecord.repair.action' })).toBeTruthy());
+  });
+
+  it('blocks Repair during restart, rebuild, and clear confirmation', async () => {
+    let finishRestart: ((value: { ok: true; state: string }) => void) | undefined;
+    api.getMemorySettings.mockResolvedValue({
+      status: 'ok',
+      enabled: true,
+      repair_available: true,
+      processing: { llm: endpoint, embedding: endpoint },
+    });
+    api.restartMemoryRuntime.mockReturnValue(new Promise((resolve) => { finishRestart = resolve; }));
+    const user = userEvent.setup();
+    renderPage();
+
+    await user.click(await screen.findByRole('button', { name: 'memory.status.restartEngine' }));
+    expect((screen.getByRole('button', { name: 'memory.processingRecord.repair.action' }) as HTMLButtonElement).disabled).toBe(true);
+    finishRestart?.({ ok: true, state: 'ready' });
+    await waitFor(() => expect((screen.getByRole('button', { name: 'memory.processingRecord.repair.action' }) as HTMLButtonElement).disabled).toBe(false));
+
+    await user.click(screen.getByRole('radio', { name: 'memory.tabs.settings' }));
+    await user.click(screen.getByRole('button', { name: 'begin-rebuild' }));
+    await user.click(screen.getByRole('radio', { name: 'memory.tabs.processingRecord' }));
+    expect((screen.getByRole('button', { name: 'memory.processingRecord.repair.action' }) as HTMLButtonElement).disabled).toBe(true);
+
+    await user.click(screen.getByRole('radio', { name: 'memory.tabs.settings' }));
+    await user.click(screen.getByRole('button', { name: 'end-rebuild' }));
+    await user.click(screen.getByRole('button', { name: 'open-clear' }));
+    await user.click(screen.getByRole('radio', { name: 'memory.tabs.processingRecord' }));
+    expect((screen.getByRole('button', { name: 'memory.processingRecord.repair.action' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('blocks Repair and settings mutations for the full Clear recovery lifetime', async () => {
+    let finishRecovery: ((value: { status: 'completed'; operation_id: string }) => void) | undefined;
+    const summary = readyProcessingRecord();
+    summary.maintenance.clear_recovery = {
+      operation_id: 'clear-recovery',
+      state: 'recovery_needed',
+      can_resume: true,
+      can_abort: true,
+    };
+    api.getMemorySettings.mockResolvedValue({
+      status: 'ok',
+      enabled: true,
+      repair_available: true,
+      processing: { llm: endpoint, embedding: endpoint },
+    });
+    api.getMemoryProcessingRecord.mockResolvedValue(summary);
+    api.resumeMemoryClear.mockReturnValue(new Promise((resolve) => { finishRecovery = resolve; }));
+    const user = userEvent.setup();
+    renderPage();
+
+    await user.click(await screen.findByRole('button', { name: 'memory.processingRecord.clearRecovery.resume' }));
+    await waitFor(() => expect(api.resumeMemoryClear).toHaveBeenCalledWith('clear-recovery'));
+    expect((screen.getByRole('button', { name: 'memory.processingRecord.repair.action' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: 'memory.status.restartEngine' }) as HTMLButtonElement).disabled).toBe(true);
+
+    await user.click(screen.getByRole('radio', { name: 'memory.tabs.settings' }));
+    expect((screen.getByRole('button', { name: 'open-clear' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: 'begin-rebuild' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: 'begin-save' }) as HTMLButtonElement).disabled).toBe(true);
+
+    finishRecovery?.({ status: 'completed', operation_id: 'clear-recovery' });
+    await user.click(screen.getByRole('radio', { name: 'memory.tabs.processingRecord' }));
+    await waitFor(() => expect((screen.getByRole('button', { name: 'memory.processingRecord.repair.action' }) as HTMLButtonElement).disabled).toBe(false));
+  });
+
+  it('blocks Repair and Clear recovery while settings are saving', async () => {
+    const summary = readyProcessingRecord();
+    summary.maintenance.clear_recovery = {
+      operation_id: 'clear-during-save',
+      state: 'recovery_needed',
+      can_resume: true,
+      can_abort: true,
+    };
+    api.getMemorySettings.mockResolvedValue({
+      status: 'ok',
+      enabled: true,
+      repair_available: true,
+      processing: { llm: endpoint, embedding: endpoint },
+    });
+    api.getMemoryProcessingRecord.mockResolvedValue(summary);
+    const user = userEvent.setup();
+    renderPage();
+
+    await user.click(await screen.findByRole('radio', { name: 'memory.tabs.settings' }));
+    await user.click(screen.getByRole('button', { name: 'begin-save' }));
+    await user.click(screen.getByRole('radio', { name: 'memory.tabs.processingRecord' }));
+
+    expect((screen.getByRole('button', { name: 'memory.processingRecord.repair.action' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: 'memory.processingRecord.clearRecovery.resume' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: 'memory.processingRecord.clearRecovery.abort' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: 'memory.status.restartEngine' }) as HTMLButtonElement).disabled).toBe(true);
+
+    await user.click(screen.getByRole('radio', { name: 'memory.tabs.settings' }));
+    await user.click(screen.getByRole('button', { name: 'end-save' }));
+    await user.click(screen.getByRole('radio', { name: 'memory.tabs.processingRecord' }));
+    expect((screen.getByRole('button', { name: 'memory.processingRecord.repair.action' }) as HTMLButtonElement).disabled).toBe(false);
   });
 });

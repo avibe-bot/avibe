@@ -227,6 +227,7 @@ def test_memory_settings_are_direct_loopback_only_and_write_only(monkeypatch, tm
     assert response.get_json()["processing"]["llm"]["api_key"] is None
     assert response.get_json()["processing"]["llm"]["has_api_key"] is False
     assert response.get_json()["rebuild_required"] is False
+    assert response.get_json()["repair_available"] is False
     assert "recovery_intent" not in response.get_json()
     assert "embedding_change_pending" not in response.get_json()
     assert "diagnostics" not in response.get_json()
@@ -325,6 +326,97 @@ def test_memory_factory_reset_marker_still_blocks_lifecycle_patch(monkeypatch, t
         "error": "memory_operation_in_progress",
     }
     assert V2Config.load().memory.recovery_intent == "factory_reset"
+
+
+def test_memory_settings_projects_only_admitted_repair_capability(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+
+    class Artifact:
+        def sync_capability(self) -> bool:
+            return True
+
+    monkeypatch.setattr(
+        "core.memory.artifact.get_memory_artifact_manager",
+        lambda: Artifact(),
+    )
+    response = app.test_client().get(
+        "/api/memory/settings",
+        headers=_local_headers(),
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+    assert response.status_code == 200
+    assert response.get_json()["repair_available"] is True
+
+
+def test_memory_settings_hides_repair_capability_during_pending_rebuild(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _save_memory(MemoryConfig(recovery_intent="rebuild"))
+
+    class Artifact:
+        def sync_capability(self) -> bool:
+            return True
+
+    monkeypatch.setattr(
+        "core.memory.artifact.get_memory_artifact_manager",
+        lambda: Artifact(),
+    )
+    response = app.test_client().get(
+        "/api/memory/settings",
+        headers=_local_headers(),
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["rebuild_required"] is True
+    assert response.get_json()["repair_available"] is False
+
+
+def test_memory_settings_patch_projects_repair_capability_off_event_loop(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    observed_running_loops: list[bool] = []
+
+    class Artifact:
+        def sync_capability(self) -> bool:
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                observed_running_loops.append(False)
+            else:
+                observed_running_loops.append(True)
+            return True
+
+    async def reconcile():
+        return {"status_code": 200, "body": {"ok": True, "state": "disabled"}}
+
+    monkeypatch.setattr(
+        "core.memory.artifact.get_memory_artifact_manager",
+        lambda: Artifact(),
+    )
+    monkeypatch.setattr(internal_client, "reconcile_memory", reconcile)
+    client = app.test_client()
+    response = client.patch(
+        "/api/memory/settings",
+        json={"enabled": False},
+        headers=csrf_headers(client, "http://127.0.0.1:15131"),
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["repair_available"] is True
+    assert response.get_json()["runtime"] == {"ok": True, "state": "disabled"}
+    assert observed_running_loops == [False]
 
 
 def test_memory_settings_get_accepts_same_origin_referer_without_origin(monkeypatch, tmp_path) -> None:
@@ -1625,6 +1717,223 @@ def test_memory_runtime_rebuild_exposes_only_final_closed_results(
     assert response.get_json() == expected_body
 
 
+def _repair_health(*, healthy: bool = True) -> dict[str, object]:
+    return {
+        "healthy": healthy,
+        "reasons": [] if healthy else ["drain_failures"],
+        "pending": 0,
+        "failed_permanent": 0 if healthy else 1,
+        "failed_retryable": 0,
+        "drain_consecutive_failures": 0,
+        "unrecoverable_total": 0 if healthy else 1,
+        "optimize_failure_streak": 0,
+        "prune_stale_seconds": 0.0,
+    }
+
+
+@pytest.mark.parametrize(
+    ("internal_status", "internal_body", "expected_status", "expected_body"),
+    [
+        (
+            200,
+            {"ok": True, "result": "completed", "health": _repair_health()},
+            200,
+            {"ok": True, "result": "completed", "health": _repair_health()},
+        ),
+        (
+            200,
+            {
+                "ok": True,
+                "result": "completed_with_warnings",
+                "health": _repair_health(healthy=False),
+            },
+            200,
+            {
+                "ok": True,
+                "result": "completed_with_warnings",
+                "health": _repair_health(healthy=False),
+            },
+        ),
+        (
+            409,
+            {
+                "ok": False,
+                "error": "memory_runtime_unsupported",
+                "result": "failed",
+            },
+            409,
+            {
+                "ok": False,
+                "error": "memory_runtime_unsupported",
+                "result": "failed",
+            },
+        ),
+        (
+            503,
+            {
+                "ok": False,
+                "error": "memory_repair_failed",
+                "result": "timed_out",
+            },
+            503,
+            {
+                "ok": False,
+                "error": "memory_repair_failed",
+                "result": "timed_out",
+            },
+        ),
+        (
+            202,
+            {"ok": True, "result": "completed", "health": _repair_health()},
+            503,
+            {"ok": False, "error": "memory_repair_failed", "result": "failed"},
+        ),
+        (
+            200,
+            {
+                "ok": True,
+                "result": "completed",
+                "health": _repair_health(),
+                "api_key": "must-not-leak",
+            },
+            503,
+            {"ok": False, "error": "memory_repair_failed", "result": "failed"},
+        ),
+    ],
+)
+def test_memory_runtime_repair_exposes_only_final_closed_results(
+    monkeypatch,
+    tmp_path,
+    internal_status: int,
+    internal_body: dict,
+    expected_status: int,
+    expected_body: dict,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+
+    async def repair(*, user_key: str):
+        assert user_key == "avibe:local"
+        return {"status_code": internal_status, "body": internal_body}
+
+    monkeypatch.setattr(internal_client, "memory_repair", repair)
+    client = app.test_client()
+    response = client.post(
+        "/api/memory/runtime/repair",
+        json={"confirm": True},
+        headers=csrf_headers(client, "http://127.0.0.1:15131"),
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == expected_status
+    assert response.status_code != 202
+    assert response.get_json() == expected_body
+
+
+def test_memory_runtime_repair_requires_exact_confirmation(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    calls: list[str] = []
+
+    async def repair(*, user_key: str):
+        calls.append(user_key)
+        return {"status_code": 200, "body": {}}
+
+    monkeypatch.setattr(internal_client, "memory_repair", repair)
+    client = app.test_client()
+    response = client.post(
+        "/api/memory/runtime/repair",
+        json={"confirm": False},
+        headers=csrf_headers(client, "http://127.0.0.1:15131"),
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 400
+    assert response.get_json() == {
+        "status": "failed",
+        "error": "memory_invalid_input",
+    }
+    assert calls == []
+
+
+def test_memory_repair_request_joins_and_survives_caller_cancellation(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    started = asyncio.Event()
+    finish = asyncio.Event()
+    second_request_entered = asyncio.Event()
+    calls = 0
+    user_key_calls = 0
+
+    def user_key() -> str:
+        nonlocal user_key_calls
+        user_key_calls += 1
+        if user_key_calls == 2:
+            second_request_entered.set()
+        return "avibe:local"
+
+    async def repair(*, user_key: str):
+        nonlocal calls
+        assert user_key == "avibe:local"
+        calls += 1
+        started.set()
+        await finish.wait()
+        return {
+            "status_code": 200,
+            "body": {
+                "ok": True,
+                "result": "completed",
+                "health": _repair_health(),
+            },
+        }
+
+    monkeypatch.setattr(internal_client, "memory_repair", repair)
+    monkeypatch.setattr(ui_memory_routes, "_memory_ui_user_key", user_key)
+
+    async def scenario() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app, client=("127.0.0.1", 12345))
+        headers = {
+            "Origin": "http://127.0.0.1:15131",
+            "X-Vibe-CSRF-Token": "repair-csrf",
+        }
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://127.0.0.1:15131",
+            cookies={"vibe_csrf_token": "repair-csrf"},
+        ) as client:
+            first = asyncio.create_task(
+                client.post(
+                    "/api/memory/runtime/repair",
+                    json={"confirm": True},
+                    headers=headers,
+                )
+            )
+            await started.wait()
+            second = asyncio.create_task(
+                client.post(
+                    "/api/memory/runtime/repair",
+                    json={"confirm": True},
+                    headers=headers,
+                )
+            )
+            await second_request_entered.wait()
+            first.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await first
+            finish.set()
+            return await second
+
+    response = asyncio.run(scenario())
+    assert response.status_code == 200
+    assert response.json()["result"] == "completed"
+    assert calls == 1
+
+
 def test_memory_runtime_rebuild_joins_duplicate_and_survives_caller_cancellation(
     monkeypatch,
     tmp_path,
@@ -1883,8 +2192,8 @@ def test_memory_settings_controller_lease_returns_busy_without_writing(
     _save_memory(baseline)
     config_path = tmp_path / "config" / "config.json"
     before = config_path.read_bytes()
-    monkeypatch.setattr(ui_memory_routes, "_rebuild_request_task", None)
-    monkeypatch.setattr(ui_memory_routes, "_rebuild_request_task_loop", None)
+    monkeypatch.setattr(ui_memory_routes._rebuild_request_owner, "_task", None)
+    monkeypatch.setattr(ui_memory_routes._rebuild_request_owner, "_loop", None)
     monkeypatch.setattr(
         internal_client,
         "reconcile_memory",
@@ -2194,6 +2503,34 @@ def test_memory_restart_route_shares_retained_request_and_blocks_settings_after_
         assert reconcile_calls == [True]
 
     asyncio.run(_go())
+
+
+def test_memory_retained_request_owner_clears_only_current_completed_task() -> None:
+    owner = ui_memory_routes._MemoryRetainedRequestOwner[str]()
+
+    async def scenario() -> None:
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+
+        async def first_request() -> str:
+            first_started.set()
+            await release_first.wait()
+            return "first"
+
+        first = owner.create_or_join(first_request)
+        await first_started.wait()
+        assert owner.current_task() is first
+        release_first.set()
+        assert await first == "first"
+        await asyncio.sleep(0)
+        assert owner.current_task() is None
+
+        second = owner.create_or_join(lambda: asyncio.sleep(0, result="second"))
+        owner._clear_finished(first)
+        assert owner.current_task() is second
+        assert await second == "second"
+
+    asyncio.run(scenario())
 
 
 def test_memory_restart_route_isolates_remote_session_cookie_renewal(

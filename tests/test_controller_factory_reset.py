@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from config.v2_config import MemoryConfig
 from core.controller import Controller
 from core.memory.operation_lock import MemoryOperationLease
 
@@ -51,6 +52,12 @@ def _create_roots(home: Path) -> None:
     (home / "memory").mkdir(mode=0o700)
     (home / "state" / "memory").mkdir(mode=0o700, parents=True)
     (home / "state").chmod(0o700)
+
+
+def _assert_operation_lease_available(home: Path) -> None:
+    lease = MemoryOperationLease(home)
+    lease.acquire()
+    lease.release()
 
 
 def test_delete_memory_roots_reports_lstat_failure_per_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -190,6 +197,60 @@ async def test_factory_reset_reaps_recorded_sidecar_before_marker_or_delete(
 
 
 @pytest.mark.asyncio
+async def test_factory_reset_reaps_recorded_sync_before_sidecar_and_marker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reset lease fences a proven cascade orphan before any root mutation."""
+
+    from core.memory import factory_reset
+
+    _create_roots(tmp_path)
+    events: list[str] = []
+
+    class _ClosableRuntime(_Runtime):
+        closed = False
+
+        async def _reap_recorded_sync_if_unowned(self, *, fail_closed: bool = False) -> bool:
+            assert fail_closed is True
+            events.append("sync")
+            return True
+
+        async def _reap_recorded_sidecar_if_unowned(self, *, fail_closed: bool = False) -> bool:
+            assert fail_closed is True
+            events.append("sidecar")
+            return True
+
+        async def close(self) -> None:
+            events.append("close")
+            self.closed = True
+
+    runtime = _ClosableRuntime(tmp_path)
+    controller = _controller(runtime)
+    controller._mark_factory_reset_intent = lambda: (
+        events.append("mark") or MemoryConfig(recovery_intent="factory_reset")
+    )
+
+    class _Deletion:
+        data_remaining = True
+
+        def payload(self) -> dict[str, object]:
+            events.append("delete")
+            return {"data_deleted": True, "data_remaining": True, "roots": []}
+
+    monkeypatch.setattr(factory_reset, "delete_memory_roots", lambda _home: _Deletion())
+    monkeypatch.setattr(
+        "core.memory.runtime.create_memory_runtime",
+        lambda *args, **kwargs: _ClosableRuntime(tmp_path),
+    )
+
+    result = await controller._factory_reset_memory_once()
+
+    assert result["result"] == "partial"
+    assert events[:4] == ["sync", "sidecar", "mark", "close"]
+
+
+@pytest.mark.asyncio
 async def test_factory_reset_keeps_roots_when_recorded_sidecar_reap_fails(tmp_path: Path) -> None:
     _create_roots(tmp_path)
     runtime = _Runtime(tmp_path)
@@ -202,6 +263,46 @@ async def test_factory_reset_keeps_roots_when_recorded_sidecar_reap_fails(tmp_pa
     assert result["data_deleted"] is False
     assert result["data_remaining"] is True
     assert runtime.retired is False
+
+
+@pytest.mark.asyncio
+async def test_factory_reset_keeps_roots_when_recorded_sync_reap_is_unprovable(tmp_path: Path) -> None:
+    _create_roots(tmp_path)
+
+    class _RuntimeWithSyncFailure(_Runtime):
+        async def _reap_recorded_sync_if_unowned(self, *, fail_closed: bool = False) -> bool:
+            assert fail_closed is True
+            raise RuntimeError("sync orphan still owns the root")
+
+    runtime = _RuntimeWithSyncFailure(tmp_path)
+    result = await Controller._factory_reset_memory_once(_controller(runtime))
+
+    assert result["result"] == "failed"
+    assert result["reason"] == "sync_recovery_failed"
+    assert result["data_deleted"] is False
+    assert result["data_remaining"] is True
+    assert runtime.retired is False
+    _assert_operation_lease_available(tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_factory_reset_releases_operation_lease_when_repair_is_running(tmp_path: Path) -> None:
+    _create_roots(tmp_path)
+
+    class _RuntimeWithRepair(_Runtime):
+        def _repair_running(self) -> bool:
+            return True
+
+    result = await Controller._factory_reset_memory_once(
+        _controller(_RuntimeWithRepair(tmp_path))
+    )
+
+    assert result == {
+        "ok": False,
+        "error": "memory_operation_in_progress",
+        "result": "failed",
+    }
+    _assert_operation_lease_available(tmp_path)
 
 
 @pytest.mark.asyncio

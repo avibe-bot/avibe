@@ -30,6 +30,17 @@ capabilities:
     unit_or_contract_tests:
       - ui/src/components/settings/SettingsMemoryPage.test.tsx
       - ui/src/components/settings/memory/MemorySettingsPanel.test.tsx
+  - id: memory_repair
+    name: Live Memory index repair via admitted artifact sync
+    status: active
+    catalog: tests/scenarios/memory_repair/catalog.yaml
+    observations: tests/scenarios/memory_repair/observations.yaml
+    scenario_tests:
+      - tests/scenarios/memory_repair/test_memory_repair_scenarios.py
+    harness:
+      - tests/scenario_harness/memory_repair.py
+    unit_or_contract_tests:
+      - ui/src/components/settings/memory/MemoryStatusPanel.test.tsx
   - id: model_hub
     name: Model Hub source resolution and supply configuration
     status: active
