@@ -1,20 +1,24 @@
 /**
  * Orders asynchronous Workbench reads against accepted session mutations.
  *
- * A response is only allowed to commit when it belongs to the current
- * mutation epoch and is the newest read issued by this data owner. This keeps
- * HTTP completion order from deciding whether a stale snapshot wins over a
- * realtime event or a newer read.
+ * A response is only allowed to commit when it belongs to the current mutation
+ * epoch and has not been superseded for any resource it owns. The shared epoch
+ * orders realtime mutations, while resource generations keep independent reads
+ * from invalidating one another merely because they completed in another order.
  */
 export type WorkbenchSessionReadStamp = {
   epoch: number;
   generation: number;
+  resources: string[];
 };
 
 export type WorkbenchSessionReadOwnership = {
-  beginRead: () => WorkbenchSessionReadStamp;
+  beginRead: (resources?: string | readonly string[]) => WorkbenchSessionReadStamp;
   acceptMutation: () => number;
-  isCurrent: (stamp: WorkbenchSessionReadStamp) => boolean;
+  isCurrent: (
+    stamp: WorkbenchSessionReadStamp,
+    resources?: string | readonly string[],
+  ) => boolean;
   isLatestRead: (stamp: WorkbenchSessionReadStamp) => boolean;
   epoch: () => number;
 };
@@ -22,19 +26,32 @@ export type WorkbenchSessionReadOwnership = {
 export function createWorkbenchSessionReadOwnership(): WorkbenchSessionReadOwnership {
   let mutationEpoch = 0;
   let latestGeneration = 0;
+  const latestByResource = new Map<string, number>();
 
   return {
-    beginRead: () => {
+    beginRead: (resources = 'default') => {
+      const resourceList = typeof resources === 'string' ? [resources] : [...resources];
+      if (resourceList.length === 0) throw new Error('A session read must own at least one resource');
       latestGeneration += 1;
-      return { epoch: mutationEpoch, generation: latestGeneration };
+      for (const resource of resourceList) latestByResource.set(resource, latestGeneration);
+      return { epoch: mutationEpoch, generation: latestGeneration, resources: resourceList };
     },
     acceptMutation: () => {
       mutationEpoch += 1;
       return mutationEpoch;
     },
-    isCurrent: (stamp) =>
-      stamp.epoch === mutationEpoch && stamp.generation === latestGeneration,
-    isLatestRead: (stamp) => stamp.generation === latestGeneration,
+    isCurrent: (stamp, resources = stamp.resources) => {
+      const resourceList = typeof resources === 'string' ? [resources] : resources;
+      return (
+        stamp.epoch === mutationEpoch &&
+        resourceList.every((resource) => {
+          const latest = latestByResource.get(resource);
+          return latest === undefined || latest <= stamp.generation;
+        })
+      );
+    },
+    isLatestRead: (stamp) =>
+      stamp.resources.every((resource) => latestByResource.get(resource) === stamp.generation),
     epoch: () => mutationEpoch,
   };
 }

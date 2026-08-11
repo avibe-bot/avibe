@@ -76,6 +76,11 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   // Every Inbox read shares one ordering fence. This covers page-one refresh,
   // cursor reads, resume reconcile, and the targeted foreground-restore read.
   const readOwnershipRef = useRef(createWorkbenchSessionReadOwnership());
+  // A stale cold-start snapshot cannot be replaced by an event patch alone: the
+  // event may have dropped a card that was never loaded in this provider. Retry
+  // one authoritative feed read after that response settles.
+  const authoritativeFeedLoadedRef = useRef(false);
+  const coldRefreshRetryPendingRef = useRef(false);
 
   const acceptSessionMutation = useCallback(() => {
     readOwnershipRef.current.acceptMutation();
@@ -91,14 +96,24 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   }, []);
 
   const refresh = useCallback(async () => {
-    const read = readOwnershipRef.current.beginRead();
+    const read = readOwnershipRef.current.beginRead('inbox-feed');
     setLoading(true);
     try {
       const result = await api.listInbox({ platform: 'avibe', limit: PAGE_SIZE });
-      if (!readOwnershipRef.current.isCurrent(read)) return;
+      if (!readOwnershipRef.current.isCurrent(read)) {
+        if (!authoritativeFeedLoadedRef.current && !coldRefreshRetryPendingRef.current) {
+          coldRefreshRetryPendingRef.current = true;
+          queueMicrotask(() => {
+            coldRefreshRetryPendingRef.current = false;
+            if (!authoritativeFeedLoadedRef.current) void refresh();
+          });
+        }
+        return;
+      }
       setInboxSessions(result.sessions);
       setNextCursor(result.next_cursor);
       applyUnreadMap(result.unread_by_session ?? {});
+      authoritativeFeedLoadedRef.current = true;
     } catch (err) {
       console.error('[inbox] refresh failed', err);
     } finally {
@@ -109,7 +124,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   const loadMore = useCallback(async () => {
     const cursor = cursorRef.current;
     if (!cursor) return;
-    const read = readOwnershipRef.current.beginRead();
+    const read = readOwnershipRef.current.beginRead('inbox-feed');
     setLoadingMore(true);
     try {
       const result = await api.listInbox({ platform: 'avibe', limit: PAGE_SIZE, before: cursor });
@@ -143,7 +158,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   // that arrived during the gap surface at top. No loading flag — the user
   // already has content; this is a silent catch-up.
   const reconcile = useCallback(async () => {
-    const read = readOwnershipRef.current.beginRead();
+    const read = readOwnershipRef.current.beginRead('inbox-feed');
     // Snapshot loaded ids up front: sizes the re-read window, and lets us tell
     // afterward whether the read overlapped what we already had (cursor note).
     const loadedIds = new Set(inboxSessionsRef.current.map((s) => s.session_id));
@@ -166,6 +181,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
       });
       // Whole-account unread map (not paginated) — always authoritative.
       applyUnreadMap(result.unread_by_session ?? {});
+      authoritativeFeedLoadedRef.current = true;
       // Cursor: the loaded feed is always a contiguous run from the top, and
       // this reads the newest `limit` rows. If the read shares ANY row with what
       // we had (overlap), the two runs are contiguous — no gap below the read —
@@ -189,7 +205,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   // whole-account unread map, so refresh that too. Never touches the cursor.
   const reconcileSession = useCallback(
     async (sessionId: string) => {
-      const read = readOwnershipRef.current.beginRead();
+      const read = readOwnershipRef.current.beginRead(`inbox-session:${sessionId}`);
       try {
         const result = await api.listInbox({
           platform: 'avibe',
@@ -199,7 +215,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
           handleError: false,
         });
         const row = result.sessions.find((s) => s.session_id === sessionId);
-        if (!readOwnershipRef.current.isCurrent(read)) return;
+        if (!readOwnershipRef.current.isCurrent(read, ['inbox-feed', `inbox-session:${sessionId}`])) return;
         if (row) setInboxSessions((prev) => upsertSession(prev, row));
         applyUnreadMap(result.unread_by_session ?? {});
       } catch (err) {
@@ -241,7 +257,6 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
         }
       },
       onSessionActivity: (data) => {
-        acceptSessionMutation();
         // Contract A6: react to visibility/scope changes carried on the event.
         // background ⇒ drop the card (like an archive); foreground ⇒ fetch that
         // exact session and upsert its card so it reappears even if it sorts past
@@ -249,10 +264,12 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
         // See lib/inboxActivity.
         const action = sessionActivityInboxAction(data);
         if (action === 'reconcile') {
+          acceptSessionMutation();
           void reconcileSession(data.session_id);
           return;
         }
         if (action === 'ignore') return;
+        acceptSessionMutation();
         // action === 'drop': remove the card + its unread live, instead of
         // waiting for the next reconnect/refresh to filter it.
         setInboxSessions((prev) => prev.filter((s) => s.session_id !== data.session_id));
