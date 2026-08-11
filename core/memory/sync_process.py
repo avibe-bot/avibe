@@ -9,10 +9,12 @@ durable recovery scheduler.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import secrets
 import signal
+import stat
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -46,6 +48,7 @@ _MAX_RECORD_BYTES = 16 * 1024
 _STOP_TIMEOUT_SECONDS = 10.0
 _SYNC_TIMEOUT_SECONDS = 30 * 60.0
 _HANDSHAKE_TIMEOUT_SECONDS = 30.0
+_SYNC_LOCK_FILENAME = "everos.sync.lock"
 
 
 class SyncProcessResult(str, Enum):
@@ -58,6 +61,10 @@ class SyncProcessResult(str, Enum):
 
 class SyncOwnershipError(RuntimeError):
     """A sync ownership record could not be proven safe to reconcile."""
+
+
+class _SyncOwnershipBusy(SyncOwnershipError):
+    """Another launcher won the record claim."""
 
 
 def sync_record_path(memory_dir: Path | str) -> Path:
@@ -87,6 +94,33 @@ class SyncOwnership:
         self.provider_root = Path(provider_root)
         self.host = host
 
+    @contextlib.contextmanager
+    def _locked(self):
+        """Serialize record mutations across independent launcher processes."""
+        _ensure_owner_directory(self.path.parent)
+        lock_path = self.path.parent / _SYNC_LOCK_FILENAME
+        flags = os.O_RDWR | os.O_CREAT | int(getattr(os, "O_CLOEXEC", 0))
+        no_follow = int(getattr(os, "O_NOFOLLOW", 0))
+        descriptor = os.open(lock_path, flags | no_follow, 0o600)
+        try:
+            info = os.fstat(descriptor)
+            getter = getattr(os, "getuid", None)
+            if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600:
+                raise SyncOwnershipError("sync ownership lock is unsafe")
+            if callable(getter) and info.st_uid != int(getter()):
+                raise SyncOwnershipError("sync ownership lock has unexpected owner")
+            import fcntl
+
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            yield
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        except SyncOwnershipError:
+            raise
+        except OSError as exc:
+            raise SyncOwnershipError("sync ownership lock is unsafe") from exc
+        finally:
+            os.close(descriptor)
+
     def read(self) -> dict[str, Any] | None:
         _ensure_owner_directory(self.path.parent)
         try:
@@ -106,6 +140,14 @@ class SyncOwnership:
         return payload
 
     def write(self, payload: Mapping[str, Any]) -> None:
+        """Test/maintenance writer that refuses to clobber another nonce."""
+        with self._locked():
+            current = self.read()
+            if current is not None and current.get("nonce") != payload.get("nonce"):
+                raise _SyncOwnershipBusy("sync ownership record is already claimed")
+            self._write_unlocked(payload)
+
+    def _write_unlocked(self, payload: Mapping[str, Any]) -> None:
         _ensure_owner_directory(self.path.parent)
         encoded = (json.dumps(dict(payload), sort_keys=True, separators=(",", ":")) + "\n").encode()
         if len(encoded) > _MAX_RECORD_BYTES:
@@ -136,16 +178,56 @@ class SyncOwnership:
             except FileNotFoundError:
                 pass
 
+    def claim(self, payload: Mapping[str, Any]) -> None:
+        """Atomically claim the absent record; never replace another nonce."""
+        with self._locked():
+            if self.path.exists() or self.path.is_symlink():
+                raise _SyncOwnershipBusy("sync ownership record is already claimed")
+            _ensure_owner_directory(self.path.parent)
+            encoded = (json.dumps(dict(payload), sort_keys=True, separators=(",", ":")) + "\n").encode()
+            if len(encoded) > _MAX_RECORD_BYTES:
+                raise SyncOwnershipError("sync ownership record is too large")
+            try:
+                descriptor = os.open(
+                    self.path,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | int(getattr(os, "O_CLOEXEC", 0)),
+                    0o600,
+                )
+                with os.fdopen(descriptor, "wb") as stream:
+                    stream.write(encoded)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                directory = os.open(self.path.parent, os.O_RDONLY)
+                try:
+                    os.fsync(directory)
+                finally:
+                    os.close(directory)
+            except FileExistsError as exc:
+                raise _SyncOwnershipBusy("sync ownership record is already claimed") from exc
+            except (OSError, TypeError, ValueError) as exc:
+                raise SyncOwnershipError("sync ownership record could not be claimed") from exc
+
+    def finalize(self, payload: Mapping[str, Any], *, nonce: str) -> None:
+        """Transition pending -> finalized only for this exact nonce."""
+        with self._locked():
+            current = self.read()
+            if current is None or current.get("nonce") != nonce:
+                raise SyncOwnershipError("sync ownership record changed during finalization")
+            if current.get("state") != "pending":
+                raise SyncOwnershipError("sync ownership record is no longer pending")
+            self._write_unlocked(payload)
+
     def remove(self, *, nonce: str) -> None:
-        current = self.read()
-        if current is None:
-            return
-        if current.get("nonce") != nonce:
-            raise SyncOwnershipError("sync ownership record changed during cleanup")
-        try:
-            self.path.unlink()
-        except FileNotFoundError:
-            return
+        with self._locked():
+            current = self.read()
+            if current is None:
+                return
+            if current.get("nonce") != nonce:
+                raise SyncOwnershipError("sync ownership record changed during cleanup")
+            try:
+                self.path.unlink()
+            except FileNotFoundError:
+                return
 
     async def reconcile(self) -> None:
         """Fail closed unless a recorded process is gone and exactly identified."""
@@ -197,34 +279,50 @@ class SyncOwnership:
                 "process_group": group,
             }
             _validate_child_identity(identity, record, provider_root=self.provider_root)
-            self.write(record)
+            self.finalize(record, nonce=str(record["nonce"]))
         if not isinstance(pid, int) or pid <= 1:
             raise SyncOwnershipError("finalized sync ownership record has no pid")
         identity = self.host.inspect_identity(pid)
-        if identity is None:
-            self.remove(nonce=str(record["nonce"]))
-            return
-        _validate_child_identity(identity, record, provider_root=self.provider_root)
+        if identity is not None:
+            _validate_child_identity(identity, record, provider_root=self.provider_root)
         group = record.get("process_group")
         if not isinstance(group, int) or group <= 1:
             raise SyncOwnershipError("finalized sync ownership record has no process group")
-        identities = {pid: float(record["create_time"])}
+        # The leader may have exited while a helper remains. Enumerate and
+        # authenticate the complete recorded group before retiring anything.
+        claimed, foreign = self.host.recorded_group_members(
+            group,
+            socket_path=Path(record["socket_path"]),
+            provider_root=self.provider_root,
+            role=_MemoryChildRole.CASCADE_SYNC,
+        )
+        if foreign:
+            raise SyncOwnershipError("sync process group contains unverifiable members")
+        identities: dict[int, float] = {}
+        if identity is not None and record.get("create_time") is not None:
+            identities[pid] = float(record["create_time"])
+        for member_pid, created_at in claimed.items():
+            member = self.host.inspect_identity(member_pid)
+            if member is None:
+                continue
+            member_record = {**record, "pid": member_pid, "create_time": created_at}
+            _validate_child_identity(member, member_record, provider_root=self.provider_root)
+            identities[member_pid] = float(created_at)
         if self.host.live(identities):
-            claimed, foreign = self.host.recorded_group_members(
-                group,
-                socket_path=Path(record["socket_path"]),
-                provider_root=self.provider_root,
-                role=_MemoryChildRole.CASCADE_SYNC,
-            )
-            identities.update(claimed)
-            if foreign:
-                raise SyncOwnershipError("sync process group contains unverifiable members")
             for signum, timeout in ((signal.SIGTERM, _STOP_TIMEOUT_SECONDS), (getattr(signal, "SIGKILL", signal.SIGTERM), 3.0)):
                 self.host.signal(identities, signum, process_group=group)
                 if await self.host.wait_for_exit(identities, timeout):
                     break
             else:
                 raise SyncOwnershipError("sync process group did not exit")
+            remaining, remaining_foreign = self.host.recorded_group_members(
+                group,
+                socket_path=Path(record["socket_path"]),
+                provider_root=self.provider_root,
+                role=_MemoryChildRole.CASCADE_SYNC,
+            )
+            if remaining_foreign or self.host.live(remaining):
+                raise SyncOwnershipError("sync process group death is unproven")
         self.remove(nonce=str(record["nonce"]))
 
 
@@ -289,7 +387,7 @@ class EverOSSyncProcess:
         group: int | None = None
         identities: dict[int, float] = {}
         try:
-            self._ownership.write(pending)
+            self._ownership.claim(pending)
             env = _sync_environment(
                 self.python,
                 self.memory_dir,
@@ -318,7 +416,7 @@ class EverOSSyncProcess:
             if identity.create_time is None:
                 raise SyncOwnershipError("sync child creation time is unavailable")
             finalized = {**pending, "state": "finalized", "pid": process.pid, "create_time": identity.create_time, "process_group": group}
-            self._ownership.write(finalized)
+            self._ownership.finalize(finalized, nonce=nonce)
             process.send_signal(signal.SIGCONT)
             try:
                 await asyncio.wait_for(process.wait(), timeout=self.timeout_seconds)
@@ -340,6 +438,8 @@ class EverOSSyncProcess:
         except asyncio.CancelledError:
             await self._cleanup_failed_launch(process, group, identities, nonce)
             return SyncProcessResult.INTERRUPTED
+        except _SyncOwnershipBusy:
+            return SyncProcessResult.ALREADY_RUNNING
         except (OSError, SyncOwnershipError, asyncio.TimeoutError):
             await self._cleanup_failed_launch(process, group, identities, nonce)
             return SyncProcessResult.FAILED
@@ -352,6 +452,24 @@ class EverOSSyncProcess:
         nonce: str,
     ) -> None:
         if process is None:
+            # A spawn exception may happen before asyncio returns a Process.
+            # Retire only our still-pending nonce after exact child discovery;
+            # an unknown finder keeps the evidence for boot reconciliation.
+            finder = getattr(self._ownership.host, "find_syncs", None)
+            if callable(finder):
+                try:
+                    current = self._ownership.read()
+                    if current is not None and current.get("nonce") == nonce and current.get("state") == "pending":
+                        candidates = finder(
+                            provider_root=self.provider_root,
+                            python=Path(current["argv"][0]),
+                            nonce=nonce,
+                        )
+                        if not candidates:
+                            self._ownership.remove(nonce=nonce)
+                except Exception:
+                    # Preserve the record when discovery is uncertain.
+                    pass
             return
         try:
             await _terminate_owned_process_tree(
@@ -440,7 +558,7 @@ def _validate_child_identity(identity: _ProcessIdentity, record: Mapping[str, An
         raise SyncOwnershipError("sync child creation time does not match")
     uid = record.get("parent_uid")
     getter = getattr(os, "getuid", None)
-    if callable(getter) and identity.uid != int(getter()):
+    if uid is not None and identity.uid != int(uid):
         raise SyncOwnershipError("sync child uid does not match")
     argv = record.get("argv")
     if identity.cmdline is None or tuple(identity.cmdline) != tuple(argv):

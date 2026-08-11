@@ -31,7 +31,7 @@ EXPECTED_PLATFORMS = {
 SYNC_BOOTSTRAP_REVISION = 1
 SYNC_ARGV = ("-I", "-m", "everos.entrypoints.cli.main", "cascade", "sync")
 SYNC_BOOTSTRAP_SOURCE = Path(__file__).with_name("memory_runtime_sitecustomize.py")
-SYNC_SCRUBBERS_SOURCE = Path(__file__).with_name("memory_runtime_sync_scrubbers.py")
+SYNC_SCRUBBERS_SOURCE = Path(__file__).parents[1] / "core" / "memory" / "secret_scrubber.py"
 SMOKE_SCRIPT = (
     "from importlib.metadata import version\n"
     "import platform\n"

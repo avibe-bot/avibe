@@ -91,6 +91,33 @@ async def test_pending_sync_record_fails_closed_without_touching_sidecar(tmp_pat
     assert sidecar.read_text(encoding="ascii") == "sidecar-owned"
 
 
+def test_two_launchers_have_one_atomic_nonce_winner(tmp_path: Path) -> None:
+    memory_dir = tmp_path / "memory"
+    root = memory_dir / "everos-root"
+    ownership = SyncOwnership(sync_record_path(memory_dir), provider_root=root, host=_Host())
+    first = _record(root, state="pending")
+    second = {**first, "nonce": "b" * 64}
+
+    ownership.claim(first)
+    with pytest.raises(SyncOwnershipError, match="claimed"):
+        ownership.claim(second)
+    assert ownership.read()["nonce"] == first["nonce"]
+
+
+def test_nonce_clobber_is_rejected_for_update_and_remove(tmp_path: Path) -> None:
+    memory_dir = tmp_path / "memory"
+    root = memory_dir / "everos-root"
+    ownership = SyncOwnership(sync_record_path(memory_dir), provider_root=root, host=_Host())
+    first = _record(root, state="pending")
+    ownership.claim(first)
+
+    with pytest.raises(SyncOwnershipError, match="claimed"):
+        ownership.write({**first, "nonce": "b" * 64})
+    with pytest.raises(SyncOwnershipError, match="changed"):
+        ownership.remove(nonce="b" * 64)
+    assert ownership.read()["nonce"] == first["nonce"]
+
+
 async def test_pending_record_is_retired_only_after_exact_discovery_finds_no_child(
     tmp_path: Path,
 ) -> None:
@@ -182,6 +209,82 @@ async def test_finalized_sync_reconciliation_cleans_exact_recorded_group(tmp_pat
     assert not ownership.path.exists()
     assert host.signals[0][0] == {451: 10.5}
     assert host.signals[0][2] == 451
+
+
+async def test_gone_leader_with_live_helper_is_swept_before_retirement(tmp_path: Path) -> None:
+    memory_dir = tmp_path / "memory"
+    root = memory_dir / "everos-root"
+    record = _record(root, state="finalized", pid=451)
+    uid = os.getuid() if hasattr(os, "getuid") else None
+    helper_env = {
+        "EVEROS_ROOT": str(root),
+        "AVIBE_MEMORY_CHILD_ROLE": SYNC_ROLE,
+        SYNC_NONCE_ENV: record["nonce"],
+        SYNC_PARENT_PID_ENV: str(record["parent_pid"]),
+        SYNC_PARENT_CREATE_TIME_ENV: float(record["parent_create_time"]).hex(),
+        SYNC_PARENT_UID_ENV: "" if uid is None else str(uid),
+    }
+    helper = _ProcessIdentity(
+        create_time=11.5,
+        cmdline=tuple(record["argv"]),
+        uid=uid,
+        environment=helper_env,
+    )
+    host = _Host({777: helper})
+    ownership = SyncOwnership(sync_record_path(memory_dir), provider_root=root, host=host)
+    ownership.write(record)
+
+    await ownership.reconcile()
+
+    assert not ownership.path.exists()
+    assert host.signals[0][0] == {777: 11.5}
+
+
+async def test_uncertain_group_member_preserves_record(tmp_path: Path) -> None:
+    memory_dir = tmp_path / "memory"
+    root = memory_dir / "everos-root"
+    record = _record(root, state="finalized", pid=451)
+
+    class UncertainHost(_Host):
+        def recorded_group_members(self, process_group, **kwargs):
+            del process_group, kwargs
+            return {}, [777]
+
+    host = UncertainHost()
+    ownership = SyncOwnership(sync_record_path(memory_dir), provider_root=root, host=host)
+    ownership.write(record)
+
+    with pytest.raises(SyncOwnershipError, match="unverifiable"):
+        await ownership.reconcile()
+    assert ownership.path.exists()
+    assert host.signals == []
+
+
+async def test_spawn_failure_without_process_retires_exact_pending_nonce(tmp_path: Path) -> None:
+    python = tmp_path / "runtime" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_bytes(b"python")
+
+    class SpawnFailureHost(_Host):
+        async def spawn(self, *_args, **_kwargs):
+            raise OSError("spawn failed")
+
+        def find_syncs(self, *, provider_root, python, nonce):
+            del provider_root, python, nonce
+            return {}
+
+    process = EverOSSyncProcess(
+        python,
+        effective_home=tmp_path / "home",
+        _host=SpawnFailureHost(),
+    )
+    assert await process.run() is SyncProcessResult.FAILED
+    assert not sync_record_path(tmp_path / "home" / "memory").exists()
+
+    # A retry can claim a fresh nonce immediately; the failed caller did not
+    # leave a tombstone that blocks admission.
+    assert await process.run() is SyncProcessResult.FAILED
+    assert not sync_record_path(tmp_path / "home" / "memory").exists()
 
 
 async def test_system_host_uses_exact_direct_sync_argv(monkeypatch, tmp_path: Path) -> None:

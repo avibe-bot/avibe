@@ -23,6 +23,8 @@ EXPECTED_PLATFORMS = {
 }
 SYNC_BOOTSTRAP_REVISION = 1
 SYNC_ARGV = ["-I", "-m", "everos.entrypoints.cli.main", "cascade", "sync"]
+SYNC_BOOTSTRAP_MEMBER = "lib/python3.12/site-packages/avibe_memory_sync_bootstrap.py"
+SYNC_SCRUBBERS_MEMBER = "lib/python3.12/site-packages/avibe_memory_sync_scrubbers.py"
 
 
 def _sha256(path: Path) -> str:
@@ -31,14 +33,6 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: file.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
-
-
-def _valid_sha256(value: object) -> bool:
-    return (
-        isinstance(value, str)
-        and len(value) == 64
-        and all(character in "0123456789abcdef" for character in value)
-    )
 
 
 def _platform_from_archive(path: Path) -> str:
@@ -77,6 +71,30 @@ def _binary_sha256(archive: Path) -> str:
         return digest.hexdigest()
 
 
+def _archive_member_sha256(package: tarfile.TarFile, name: str) -> str | None:
+    try:
+        member = package.getmember(name)
+    except KeyError:
+        return None
+    if not member.isfile():
+        raise SystemExit(f"Memory Runtime sync member is not a regular file: {name}")
+    stream = package.extractfile(member)
+    if stream is None:
+        raise SystemExit(f"Memory Runtime sync member cannot be read: {name}")
+    digest = hashlib.sha256()
+    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+        digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _sync_digests(archive: Path) -> tuple[str | None, str | None]:
+    with tarfile.open(archive, "r:gz") as package:
+        return (
+            _archive_member_sha256(package, SYNC_BOOTSTRAP_MEMBER),
+            _archive_member_sha256(package, SYNC_SCRUBBERS_MEMBER),
+        )
+
+
 def build_manifest(*, archive_dir: Path, tag: str, repo: str, output: Path) -> dict:
     tag = tag.strip()
     repo = repo.strip().strip("/")
@@ -96,6 +114,9 @@ def build_manifest(*, archive_dir: Path, tag: str, repo: str, output: Path) -> d
             raise SystemExit(f"Missing or invalid Memory Runtime build metadata: {metadata_path.name}") from exc
         archive_sha256 = _sha256(archive)
         binary_sha256 = _binary_sha256(archive)
+        bootstrap_digest, scrubbers_digest = _sync_digests(archive)
+        if (bootstrap_digest is None) != (scrubbers_digest is None):
+            raise SystemExit(f"Memory Runtime sync contract is incomplete: {archive.name}")
         size = archive.stat().st_size
         expected_metadata = {
             "platform": platform,
@@ -109,22 +130,27 @@ def build_manifest(*, archive_dir: Path, tag: str, repo: str, output: Path) -> d
             "size": size,
             "bin_path": BIN_PATH,
         }
-        if "sync_bootstrap_sha256" in metadata:
-            if not _valid_sha256(metadata.get("sync_bootstrap_sha256")) or not _valid_sha256(
-                metadata.get("sync_scrubbers_sha256")
-            ):
-                raise SystemExit(
-                    f"Memory Runtime sync build metadata is invalid: {metadata_path.name}"
-                )
+        metadata_for_compare = dict(metadata)
+        if bootstrap_digest is not None:
             expected_metadata.update(
                 {
                     "sync_bootstrap_revision": SYNC_BOOTSTRAP_REVISION,
-                    "sync_bootstrap_sha256": metadata["sync_bootstrap_sha256"],
-                    "sync_scrubbers_sha256": metadata.get("sync_scrubbers_sha256"),
+                    "sync_bootstrap_sha256": bootstrap_digest,
+                    "sync_scrubbers_sha256": scrubbers_digest,
                     "sync_argv": SYNC_ARGV,
                 }
             )
-        if metadata != expected_metadata:
+            # The archive is authoritative for the executable contract. Build
+            # metadata is retained for provenance but cannot supply these digests.
+            metadata_for_compare.update(
+                {
+                    "sync_bootstrap_revision": SYNC_BOOTSTRAP_REVISION,
+                    "sync_bootstrap_sha256": bootstrap_digest,
+                    "sync_scrubbers_sha256": scrubbers_digest,
+                    "sync_argv": SYNC_ARGV,
+                }
+            )
+        if metadata_for_compare != expected_metadata:
             raise SystemExit(f"Memory Runtime build metadata mismatch: {metadata_path.name}")
         if size > MAX_ARCHIVE_BYTES:
             raise SystemExit(f"Memory Runtime archive exceeds the 1 GiB release limit: {archive.name}")
@@ -141,18 +167,12 @@ def build_manifest(*, archive_dir: Path, tag: str, repo: str, output: Path) -> d
     if missing:
         raise SystemExit("Missing Memory Runtime archives: " + ", ".join(missing))
 
-    bootstrap_values = {
-        json.loads(
-            archive.with_suffix("").with_suffix(".json").read_text(encoding="utf-8")
-        ).get("sync_bootstrap_sha256")
+    archive_sync = {
+        _sync_digests(archive)
         for archive in archive_dir.glob(f"{ARCHIVE_PREFIX}*{ARCHIVE_SUFFIX}")
     }
-    scrubber_values = {
-        json.loads(
-            archive.with_suffix("").with_suffix(".json").read_text(encoding="utf-8")
-        ).get("sync_scrubbers_sha256")
-        for archive in archive_dir.glob(f"{ARCHIVE_PREFIX}*{ARCHIVE_SUFFIX}")
-    }
+    bootstrap_values = {values[0] for values in archive_sync}
+    scrubber_values = {values[1] for values in archive_sync}
     sync_contract = (
         len(bootstrap_values) == 1
         and None not in bootstrap_values

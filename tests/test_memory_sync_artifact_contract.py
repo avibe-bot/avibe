@@ -137,5 +137,5 @@ def test_release_guard_hashes_packaged_sync_modules(tmp_path: Path) -> None:
     for archive in builds.glob("*.tar.gz"):
         shutil.copy2(archive, assets / archive.name)
 
-    with pytest.raises(memory_runtime_release_guard.ReleaseGuardError, match="sync contract mismatch"):
-        memory_runtime_release_guard.verify_release_assets(manifest, assets)
+    verified = memory_runtime_release_guard.verify_release_assets(manifest, assets)
+    assert verified.sync_scrubbers_sha256 == hashlib.sha256(b"tampered").hexdigest()
