@@ -2058,8 +2058,11 @@ def retire_for_run_cancellation(
     if (
         successor is None
         or successor["session_id"] != session_id
-        or successor["state"] != "waiting"
+        or successor["state"] != "terminal"
         or successor["initial_delivery_id"] != delivery_id
+        or successor["terminal_outcome"] != "not_written"
+        or successor["settled_by"] != "agent_run_canceled"
+        or successor["terminal_evidence_kind"] != "replacement_run_canceled"
     ):
         return False
     predecessor = _one(
@@ -2070,13 +2073,6 @@ def retire_for_run_cancellation(
         .where(session_turns.c.control_successor_turn_id == successor_turn_id)
         .order_by(session_turns.c.created_at.desc(), session_turns.c.id.desc())
         .limit(1),
-    )
-    terminalized = terminalize_turn(
-        conn,
-        successor_turn_id,
-        outcome="not_written",
-        settled_by="agent_run_canceled",
-        evidence_kind="replacement_run_canceled",
     )
     retired = cas_delivery(
         conn,
@@ -2095,7 +2091,7 @@ def retire_for_run_cancellation(
             "reason": "replacement_agent_run_canceled",
         },
     )
-    if not terminalized["changed"] or retired is None:
+    if retired is None:
         raise RuntimeError("replacement Run cancellation lost its waiting successor")
     if predecessor is not None:
         predecessor_values: dict[str, Any] = {

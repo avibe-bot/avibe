@@ -1848,6 +1848,71 @@ class SessionTurnManager:
         return delivery
 
     @classmethod
+    def _terminalize_detached_run_replacement(
+        cls,
+        conn: Connection,
+        *,
+        run_id: str,
+        session_id: str,
+        current: dict[str, Any],
+    ) -> bool:
+        """Give the Turn owner sole authority to terminalize a canceled successor."""
+
+        if current.get("control_mode") != "replace" or current.get(
+            "control_state"
+        ) not in {
+            "pending",
+            "interrupting",
+            "waiting_terminal",
+            "reconciling",
+        }:
+            return False
+        run = conn.execute(
+            select(agent_runs.c.status, agent_runs.c.delivery_id)
+            .where(agent_runs.c.id == run_id)
+            .where(agent_runs.c.session_id == session_id)
+            .limit(1)
+        ).mappings().first()
+        successor_delivery_id = str(
+            current.get("control_successor_delivery_id") or ""
+        )
+        successor_turn_id = str(current.get("control_successor_turn_id") or "")
+        if (
+            run is None
+            or normalize_run_status(run["status"]) not in {"queued", "running"}
+            or str(run["delivery_id"] or "") != successor_delivery_id
+            or not successor_turn_id
+        ):
+            return False
+        successor = delivery_store.get_turn(conn, successor_turn_id)
+        successor_delivery = delivery_store.get_delivery(
+            conn,
+            successor_delivery_id,
+        )
+        if (
+            successor is None
+            or successor["session_id"] != session_id
+            or successor["state"] != "waiting"
+            or successor["initial_delivery_id"] != successor_delivery_id
+            or successor_delivery is None
+            or successor_delivery["session_id"] != session_id
+            or successor_delivery["state"] != "interrupt_waiting"
+            or successor_delivery["turn_id"] != successor_turn_id
+            or successor_delivery["turn_role"] != "initial"
+        ):
+            return False
+        terminalized = cls._write_terminal_snapshot(
+            conn,
+            successor_turn_id,
+            outcome="not_written",
+            settled_by="agent_run_canceled",
+            evidence_kind="replacement_run_canceled",
+        )
+        if not terminalized.get("changed"):
+            raise RuntimeError("replacement Run cancellation lost Turn authority")
+        return True
+
+    @classmethod
     def _retire_delivery_not_written(
         cls,
         conn: Connection,
@@ -3085,12 +3150,26 @@ class SessionTurnManager:
                         run_id=expected_exclusive_run_id,
                         turn_id=str(current_id or ""),
                     )
+                    replacement_terminalized = False
+                    if not exclusive:
+                        replacement_terminalized = (
+                            self._terminalize_detached_run_replacement(
+                                conn,
+                                run_id=expected_exclusive_run_id,
+                                session_id=request.session_id,
+                                current=current,
+                            )
+                        )
                     cancellation = apply_live_agent_run_cancellation_in_connection(
                         conn,
                         expected_exclusive_run_id,
                         session_id=request.session_id,
                         detach=not exclusive,
                     )
+                    if replacement_terminalized and cancellation != "run_detached":
+                        raise RuntimeError(
+                            "replacement Run terminalized without cancellation ownership"
+                        )
                     if not exclusive:
                         return DeliveryResult(
                             None,
