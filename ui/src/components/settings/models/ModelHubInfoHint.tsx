@@ -35,4 +35,3 @@ export const ModelHubInfoHint: React.FC<{
     </Popover>
   );
 };
-
