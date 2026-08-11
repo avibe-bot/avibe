@@ -1593,6 +1593,118 @@ def test_mh_cfg_mig_001_pre_v5_unreadable_source_is_dropped_without_logging_its_
     assert not any("sk-live" in record.getMessage() for record in caplog.records)
 
 
+def test_mh_cfg_mig_001_pre_v5_duplicate_native_sources_collapse_to_the_first(tmp_path, caplog):
+    """v5 allows one native source per backend; the pre-v5 shape allowed several.
+
+    The old OAuth creation path could append a second native source, so this is
+    a shape a running install can hold. Neither source is invalid on its own —
+    only the aggregate is — so the duplicate is collapsed here instead of
+    failing the load.
+    """
+
+    legacy = _legacy_model_hub_payload(api.config_to_payload(default_config()))
+    kept = copy.deepcopy(_schema("source.schema.json")["examples"][0])
+    supplied_id = kept["models"][0]["id"]
+    duplicate = copy.deepcopy(kept) | {"id": "src_claudepro2", "account_label": "other@gmail.com"}
+    legacy["model_hub"]["sources"] = [kept, duplicate]
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING, logger="config.v2_config"):
+        loaded = V2Config.load(config_path=config_path)
+
+    assert [source.id for source in loaded.model_hub.sources] == [kept["id"]]
+    assert list(loaded.model_hub.agents["claude"].sources.order) == [kept["id"]]
+    assert [
+        (hop.source_id, hop.model_id)
+        for hop in loaded.model_hub.agents["claude"].routes[supplied_id].hops
+    ] == [(kept["id"], supplied_id)]
+    assert [
+        record.getMessage() for record in caplog.records if duplicate["id"] in record.getMessage()
+    ] == [
+        f"Model Hub migration dropped source '{duplicate['id']}': "
+        "'claude' already has a native source"
+    ]
+
+
+def test_mh_cfg_mig_001_pre_v5_falsy_agent_entry_loads_the_default_agent(tmp_path):
+    """The pre-v5 parser read ``agents_payload.get(backend) or <default>``.
+
+    A persisted ``null`` therefore meant the default direct agent, and carrying
+    it through would now fail the load over a value that used to mean nothing.
+    """
+
+    legacy = _legacy_model_hub_payload(api.config_to_payload(default_config()))
+    legacy["model_hub"]["agents"]["claude"] = None
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert loaded.model_hub.agents["claude"].to_payload() == (
+        ModelHubAgentSupplyConfig.default("claude", mode="direct").to_payload()
+    )
+
+
+def test_mh_cfg_mig_001_pre_v5_retired_mapping_id_is_never_logged_verbatim(tmp_path, caplog):
+    """A retired ``builtin_id`` is unvalidated config text, like a rejected source id.
+
+    The legacy mapping parser accepted any non-empty string, so an upgrade must
+    not move a hand-edited or corrupted credential-shaped value out of the
+    config and into the more broadly collected application log.
+    """
+
+    legacy = _legacy_model_hub_payload(api.config_to_payload(default_config()))
+    secret_id = "api_key=sk-live-should-never-be-logged"
+    legacy["model_hub"]["agents"]["claude"]["mappings"] = [
+        {"builtin_id": secret_id, "target_model_id": "target-model", "enabled": True}
+    ]
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING, logger="config.v2_config"):
+        V2Config.load(config_path=config_path)
+
+    assert [record.getMessage() for record in caplog.records if "no longer offered" in record.getMessage()] == [
+        "Model Hub migration dropped a 'claude' mapping for '<unreadable id>': "
+        "the model is no longer offered"
+    ]
+    assert not any("sk-live" in record.getMessage() for record in caplog.records)
+
+
+def test_mh_cfg_mig_001_pre_v5_noncanonical_opencode_menu_entry_is_dropped(tmp_path, caplog):
+    """A bare OpenCode selection was unavailable before v5 and is refused after it.
+
+    The pre-v5 menu parser accepted any string, so an entry such as ``gpt-4o``
+    could sit in a config that still started. v5 validates every checked id and
+    route key as a canonical ``provider/model`` identity, so the entry has to
+    leave the menu and the routes together.
+    """
+
+    legacy = _legacy_model_hub_payload(api.config_to_payload(default_config()))
+    source = copy.deepcopy(_schema("source.schema.json")["examples"][1])
+    checked_id = opencode_model_id(source["vendor"], source["models"][0]["id"])
+    legacy["model_hub"]["sources"] = [source]
+    opencode = legacy["model_hub"]["agents"]["opencode"]
+    opencode["sources"]["order"] = [source["id"]]
+    opencode["menu"] = {"view": "featured", "checked": ["gpt-4o", checked_id]}
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING, logger="config.v2_config"):
+        loaded = V2Config.load(config_path=config_path)
+
+    agent = loaded.model_hub.agents["opencode"]
+    assert list(agent.menu.checked) == [checked_id]
+    assert set(agent.routes) == {checked_id}
+    assert [
+        record.getMessage() for record in caplog.records if "menu selection" in record.getMessage()
+    ] == ["Model Hub migration dropped an unusable 'opencode' menu selection"]
+    # The rejected entry is never repeated, since the same validator rejects
+    # credential material in exactly this position.
+    assert not any("gpt-4o" in record.getMessage() for record in caplog.records)
+
+
 def test_current_model_hub_config_survives_load_unchanged(tmp_path):
     current = api.config_to_payload(default_config())
     config_path = tmp_path / "config.json"

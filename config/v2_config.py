@@ -167,6 +167,18 @@ def model_hub_fixed_menu_ids(backend: str) -> tuple[str, ...]:
     )
 
 
+def _loggable_model_hub_menu_id(identifier: str) -> str:
+    """Return a menu id only when it is safe to copy into the application log."""
+
+    if (
+        len(identifier) > 64
+        or identifier != identifier.strip()
+        or _contains_model_hub_credential_material(identifier)
+    ):
+        return "<unreadable id>"
+    return identifier
+
+
 def _legacy_model_hub_sources(
     sources_payload: object,
 ) -> tuple[list, list["ModelHubSourceConfig"]]:
@@ -182,12 +194,18 @@ def _legacy_model_hub_sources(
     service starts, and the user re-adds it. Keeping it would fail the very load
     this function is here to rescue, and re-implementing the invariants here
     would rot the moment another one is added.
+
+    A second native source for one backend is the same kind of shape: legal
+    before v5 — the old OAuth path could append one — and rejected now by an
+    aggregate rule no single source can satisfy on its own, so the duplicates
+    are collapsed onto the first one persisted.
     """
 
     if not isinstance(sources_payload, list):
         return [], []
     payloads: list = []
     parsed: list[ModelHubSourceConfig] = []
+    native_backends: set[str] = set()
     for raw_source in sources_payload:
         source_payload = (
             {key: value for key, value in raw_source.items() if key != "experimental_consent_at"}
@@ -207,6 +225,30 @@ def _legacy_model_hub_sources(
                 source_id,
             )
             continue
+        # A native source serves exactly one backend, and v5 allows one of them
+        # per backend. The first one persisted wins, matching the first-wins
+        # rule the rest of this migration reads legacy state by.
+        native_backend = (
+            next(
+                (
+                    candidate
+                    for candidate in MODEL_HUB_BACKENDS
+                    if ModelHubConfig.source_eligible_for_backend(source, candidate)
+                ),
+                None,
+            )
+            if source.supply_channel == "native_cli"
+            else None
+        )
+        if native_backend is not None:
+            if native_backend in native_backends:
+                logger.warning(
+                    "Model Hub migration dropped source '%s': '%s' already has a native source",
+                    source.id,
+                    native_backend,
+                )
+                continue
+            native_backends.add(native_backend)
         payloads.append(source_payload)
         parsed.append(source)
     return payloads, parsed
@@ -252,10 +294,45 @@ def _legacy_model_hub_ordered_sources(
     )
 
 
+def _legacy_model_hub_menu_ids(raw_agent: dict, backend: str) -> tuple[str, ...]:
+    """Return the menu ids a legacy agent can still offer, in menu order.
+
+    A fixed menu is the bundled catalog and never varied by config. An open
+    (OpenCode) menu was persisted by a parser that accepted any string, while v5
+    requires every checked id to be a canonical ``provider/model`` identity free
+    of credential material. A bare or stale entry made the model unavailable
+    before the upgrade and refuses the whole config after it, so it is dropped
+    here — from the menu and from the routes built off it alike.
+    """
+
+    if backend in {"claude", "codex"}:
+        return model_hub_fixed_menu_ids(backend)
+    menu = raw_agent.get("menu")
+    checked = menu.get("checked") if isinstance(menu, dict) else None
+    if not isinstance(checked, list):
+        return ()
+    kept: list[str] = []
+    for identifier in checked:
+        try:
+            canonical_opencode_menu_identity(identifier)
+        except ValueError:
+            # The entry itself is never logged: the legacy menu accepted any
+            # string, so it can carry the credential material this validator
+            # is part of rejecting.
+            logger.warning(
+                "Model Hub migration dropped an unusable '%s' menu selection",
+                backend,
+            )
+            continue
+        kept.append(identifier)
+    return tuple(kept)
+
+
 def _legacy_model_hub_routes(
     raw_agent: dict,
     backend: str,
     ordered_sources: list["ModelHubSourceConfig"],
+    menu_ids: tuple[str, ...],
 ) -> dict:
     """Build v5 routes for a pre-v5 agent that only persisted ``mappings``.
 
@@ -269,13 +346,6 @@ def _legacy_model_hub_routes(
     current menu no longer offers is dropped with the menu id it named; both are
     logged so an upgrade never loses a supply path silently.
     """
-
-    if backend in {"claude", "codex"}:
-        menu_ids: tuple[str, ...] = model_hub_fixed_menu_ids(backend)
-    else:
-        menu = raw_agent.get("menu")
-        checked = menu.get("checked") if isinstance(menu, dict) else None
-        menu_ids = tuple(item for item in checked if isinstance(item, str)) if isinstance(checked, list) else ()
 
     from core.handlers.model_hub.resolver import legacy_supplied_model_id
 
@@ -345,10 +415,14 @@ def _legacy_model_hub_routes(
                 )
         routes[model_id] = {"hops": hops}
     for model_id in sorted(retired):
+        # A retired id is by definition not in the menu, so there is no
+        # catalog to check it against; the live credential-material rule the
+        # persisted identifiers are validated by decides whether it can be
+        # repeated into the log, since a legacy mapping accepted any string.
         logger.warning(
             "Model Hub migration dropped a '%s' mapping for '%s': the model is no longer offered",
             backend,
-            model_id,
+            _loggable_model_hub_menu_id(model_id),
         )
     return routes
 
@@ -422,8 +496,16 @@ def _migrate_legacy_model_hub_on_load(payload: dict) -> dict:
     # An agent for a backend this build no longer has is dropped rather than
     # copied: the pre-v5 parser only ever constructed the supported three and
     # ignored the rest, while v5 rejects the whole config over the extra key.
+    # A falsy entry is dropped for the mirror-image reason — the pre-v5 parser
+    # read `agents_payload.get(backend) or <default>`, so `"claude": null` meant
+    # the default direct agent, and leaving it in place would now fail the load
+    # over a value that used to mean nothing at all. A truthy non-object is left
+    # alone: it was rejected before the upgrade too, and discarding it would
+    # throw away content instead of reporting it.
     supported_agents = {
-        backend: agent for backend, agent in agents.items() if backend in MODEL_HUB_BACKENDS
+        backend: agent
+        for backend, agent in agents.items()
+        if backend in MODEL_HUB_BACKENDS and agent
     }
     migrated_agents = dict(supported_agents)
     for backend, raw_agent in supported_agents.items():
@@ -438,8 +520,19 @@ def _migrate_legacy_model_hub_on_load(payload: dict) -> dict:
         migrated_agent["sources"] = migrated_sources
 
         if "routes" not in migrated_agent:
+            menu_ids = _legacy_model_hub_menu_ids(raw_agent, backend)
             ordered_sources = _legacy_model_hub_ordered_sources(raw_agent, backend, sources)
-            migrated_agent["routes"] = _legacy_model_hub_routes(raw_agent, backend, ordered_sources)
+            migrated_agent["routes"] = _legacy_model_hub_routes(
+                raw_agent,
+                backend,
+                ordered_sources,
+                menu_ids,
+            )
+            # The menu is narrowed to the same ids the routes were built for:
+            # v5 requires a route for every checked entry and rejects any that
+            # is not a canonical identity, so the two must be filtered together.
+            if backend == "opencode" and isinstance(migrated_agent.get("menu"), dict):
+                migrated_agent["menu"] = {**migrated_agent["menu"], "checked": list(menu_ids)}
             # The walk the routes were built from is also the order v5 reads
             # back. A legacy `follow` order was recomputed on every load, so
             # persisting the stored list instead would leave settings showing
