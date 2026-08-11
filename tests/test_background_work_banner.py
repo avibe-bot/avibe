@@ -24,7 +24,7 @@ from storage.agent_session_rows import create_agent_session_row
 from storage.background import SQLiteBackgroundTaskStore, task_resume_block
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
-from storage.models import agent_runs, run_definitions
+from storage.models import agent_runs, agent_sessions, run_definitions
 from storage.session_reclaim import RECLAIM_DELETE, RECLAIM_PAUSE, reclaim_bound_definitions
 from storage.workbench_sessions_service import (
     count_bound_resources,
@@ -87,15 +87,21 @@ def _insert_run(engine, **overrides) -> str:
 
 def _insert_queued_delivery(engine, *, delivery_id: str, session_id: str, now: str) -> None:
     with engine.begin() as conn:
-        create_agent_session_row(
-            conn,
-            scope_id=None,
-            session_id=session_id,
-            session_anchor=session_id,
-            agent_backend="codex",
-            workdir="/tmp",
-            now=now,
-        )
+        if (
+            conn.execute(
+                select(agent_sessions.c.id).where(agent_sessions.c.id == session_id)
+            ).scalar_one_or_none()
+            is None
+        ):
+            create_agent_session_row(
+                conn,
+                scope_id=None,
+                session_id=session_id,
+                session_anchor=session_id,
+                agent_backend="codex",
+                workdir="/tmp",
+                now=now,
+            )
         delivery_store.insert_delivery(
             conn,
             delivery_id=delivery_id,
@@ -112,6 +118,62 @@ def _insert_queued_delivery(engine, *, delivery_id: str, session_id: str, now: s
             ),
             dispatch_text="audit the contract",
             now=now,
+        )
+
+
+def _accept_delivery_turn(
+    engine,
+    *,
+    session_id: str,
+    turn_id: str,
+    delivery_ids: list[str],
+) -> None:
+    with engine.begin() as conn:
+        deliveries = [
+            delivery_store.get_delivery(conn, delivery_id)
+            for delivery_id in delivery_ids
+        ]
+        assert all(deliveries)
+        claimed = delivery_store.claim_start_batch(
+            conn,
+            turn_id=turn_id,
+            session_id=session_id,
+            backend="codex",
+            deliveries=[deliveries[0]],
+            dispatch_text=str(deliveries[0]["dispatch_text"]),
+            attempt_id=f"attempt:start:{turn_id}",
+        )
+        turn = claimed["turn"]
+        native_turn_id = f"native:{turn_id}"
+        assert delivery_store.bind_native_start(
+            conn,
+            turn_id,
+            expected_version=int(turn["version"]),
+            runtime_key=f"runtime:{turn_id}",
+            runtime_turn_id=f"runtime-turn:{turn_id}",
+            native_turn_id=native_turn_id,
+        ) is not None
+        assert delivery_store.materialize_start_acceptance(
+            conn,
+            turn_id=turn_id,
+            evidence={"kind": "test_native_acceptance"},
+        )
+        if len(deliveries) == 1:
+            return
+        steer_attempt_id = f"attempt:steer:{turn_id}"
+        steered = delivery_store.open_steer_attempt_batch(
+            conn,
+            deliveries=deliveries[1:],
+            turn_id=turn_id,
+            attempt_id=steer_attempt_id,
+            expected_native_turn_id=native_turn_id,
+        )
+        assert delivery_store.materialize_steer_acceptance(
+            conn,
+            leader_delivery_id=str(steered[0]["id"]),
+            expected_attempt_id=steer_attempt_id,
+            turn_id=turn_id,
+            evidence={"kind": "test_native_acceptance"},
         )
 
 
@@ -188,6 +250,86 @@ def test_queued_delivery_projects_delegated_run_as_queued(tmp_path: Path):
     assert len(items) == 1
     assert items[0]["status"] == "queued"
     assert items[0]["since"] == queued_at
+
+
+def test_agent_run_banner_collapses_accepted_turn_and_keeps_queued_deliveries(
+    tmp_path: Path,
+):
+    """MESSAGE-DELIVERY-315: one active row per Turn, but one queued row per Delivery."""
+    engine, _ = _make_engine(tmp_path)
+    accepted_b = ["delivery-b-1", "delivery-b-2", "delivery-b-3"]
+    accepted_c = ["delivery-c-1"]
+    queued_b = ["delivery-b-queued-1", "delivery-b-queued-2"]
+
+    delivery_ids = [*accepted_b, *accepted_c, *queued_b]
+    for offset, delivery_id in enumerate(delivery_ids, start=1):
+        session_id = (
+            "ses-target-c"
+            if delivery_id.startswith("delivery-c")
+            else "ses-target-b"
+        )
+        _insert_queued_delivery(
+            engine,
+            delivery_id=delivery_id,
+            session_id=session_id,
+            now=f"2026-07-16T00:00:{offset:02d}Z",
+        )
+
+    _accept_delivery_turn(
+        engine,
+        session_id="ses-target-b",
+        turn_id="turn-b",
+        delivery_ids=accepted_b,
+    )
+    _accept_delivery_turn(
+        engine,
+        session_id="ses-target-c",
+        turn_id="turn-c",
+        delivery_ids=accepted_c,
+    )
+
+    run_specs = (
+        ("run-b-1", accepted_b[0], "first accepted", "2026-07-16T00:10:05Z"),
+        ("run-b-2", accepted_b[1], "second accepted", "2026-07-16T00:10:04Z"),
+        # The latest Turn position is deliberately not the newest Run timestamp.
+        ("run-b-3", accepted_b[2], "last accepted", "2026-07-16T00:10:01Z"),
+        ("run-c-1", accepted_c[0], "other target", "2026-07-16T00:10:02Z"),
+        ("run-b-queued-1", queued_b[0], "queued first", "2026-07-16T00:10:03Z"),
+        ("run-b-queued-2", queued_b[1], "queued second", "2026-07-16T00:10:06Z"),
+    )
+    for run_id, delivery_id, message, created_at in run_specs:
+        session_id = (
+            "ses-target-c"
+            if delivery_id.startswith("delivery-c")
+            else "ses-target-b"
+        )
+        _insert_run(
+            engine,
+            id=run_id,
+            agent_name="worker",
+            message=message,
+            session_id=session_id,
+            callback_session_id="ses-caller",
+            delivery_id=delivery_id,
+            created_at=created_at,
+            started_at=created_at,
+            updated_at=created_at,
+        )
+
+    with engine.connect() as conn:
+        items = derive_session_harness_activities(conn, "ses-caller")
+
+    assert {item["id"] for item in items} == {
+        "agent_run:run-b-3",
+        "agent_run:run-c-1",
+        "agent_run:run-b-queued-1",
+        "agent_run:run-b-queued-2",
+    }
+    by_id = {item["id"]: item for item in items}
+    assert by_id["agent_run:run-b-3"]["label"] == "worker: last accepted"
+    assert by_id["agent_run:run-c-1"]["status"] == "running"
+    assert by_id["agent_run:run-b-queued-1"]["status"] == "queued"
+    assert by_id["agent_run:run-b-queued-2"]["status"] == "queued"
 
 
 def test_task_schedule_type_comes_from_the_durable_definition(tmp_path: Path):
