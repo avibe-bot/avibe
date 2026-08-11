@@ -254,7 +254,10 @@ export const MemorySettingsPanel: React.FC<{
       showToast(t('memory.settings.saved'), 'success');
       return;
     }
-    if (identityChanged(embeddingDraft, settings.processing.embedding)) {
+    if (
+      identityChanged(embeddingDraft, settings.processing.embedding)
+      && !factoryResetRequired
+    ) {
       // Retain the draft and open confirmation; the same patch is replayed with
       // confirm_rebuild: true after the user accepts the cost/duration disclosure.
       setPendingPatch(patch);
@@ -331,7 +334,7 @@ export const MemorySettingsPanel: React.FC<{
         draft={llmDraft}
         original={settings.processing.llm}
         onChange={setLlmDraft}
-        disabled={busy || factoryResetRequired}
+        disabled={busy}
         canClearKey={canClearKeys}
       />
 
@@ -340,7 +343,7 @@ export const MemorySettingsPanel: React.FC<{
         draft={embeddingDraft}
         original={settings.processing.embedding}
         onChange={setEmbeddingDraft}
-        disabled={busy || factoryResetRequired}
+        disabled={busy}
         identityHint={t('memory.settings.embeddingIdentityHint')}
         canClearKey={canClearKeys}
       />
@@ -355,7 +358,7 @@ export const MemorySettingsPanel: React.FC<{
 
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-2">
-          <Button onClick={() => void save()} disabled={busy || factoryResetRequired}>
+          <Button onClick={() => void save()} disabled={busy}>
             {saving ? <Loader2 className="size-3.5 animate-spin" /> : null}
             {saving ? t('memory.settings.saving') : t('memory.settings.save')}
           </Button>
@@ -419,7 +422,11 @@ export const MemorySettingsPanel: React.FC<{
               {factoryResetResult.roots.map((root) => (
                 <li key={root.path}>{t('memory.factoryReset.rootOutcome', {
                   path: root.path ?? t('memory.factoryReset.unknownRoot'),
-                  deleted: root.deleted === true ? t('memory.factoryReset.deleted') : t('memory.factoryReset.retained'),
+                  deleted: root.deleted === true
+                    ? t('memory.factoryReset.deleted')
+                    : root.existed === false
+                      ? t('memory.factoryReset.absent')
+                      : t('memory.factoryReset.retained'),
                 })}</li>
               ))}
             </ul>

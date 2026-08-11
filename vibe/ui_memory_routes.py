@@ -213,6 +213,31 @@ def _memory_api_key_only_patch(patch_payload: object) -> bool:
     )
 
 
+def _memory_factory_reset_repair_patch(patch_payload: object) -> bool:
+    """Return whether a patch only repairs processing endpoint settings.
+
+    A factory-reset marker fences activation until the roots are gone.  Once
+    activation itself fails, the operator must still be able to correct the
+    endpoint URL, model, or credential before retrying that fenced operation.
+    Keep this escape hatch narrow: enabled state and rebuild confirmation are
+    separate lifecycle controls and must never be smuggled through it.
+    """
+
+    if not isinstance(patch_payload, dict) or set(patch_payload) != {"processing"}:
+        return False
+    processing = patch_payload.get("processing")
+    if not isinstance(processing, dict) or not processing:
+        return False
+    if not set(processing).issubset({"llm", "embedding"}):
+        return False
+    return all(
+        isinstance(endpoint, dict)
+        and bool(endpoint)
+        and set(endpoint).issubset({"base_url", "model", "api_key"})
+        for endpoint in processing.values()
+    )
+
+
 def _memory_closed_error(payload: dict, *, fallback: str) -> str:
     from core.memory.types import is_memory_error_code
 
@@ -551,9 +576,16 @@ async def _apply_memory_settings_patch(
         except (TypeError, ValueError):
             return _memory_response({"status": "failed", "error": "memory_invalid_input"}, status_code=400)
 
+        factory_reset_repair = (
+            pending_factory_reset and _memory_factory_reset_repair_patch(patch_payload)
+        )
+
         # Unconfirmed identity change never writes — including on empty roots —
         # so a check-then-save race cannot quietly accept a new vector space.
-        if identity_changed and not confirm_rebuild:
+        # A factory-reset repair is the one deliberate exception: the reset
+        # marker guarantees the next retry will wipe any remaining old root
+        # before activating the corrected endpoint.
+        if identity_changed and not confirm_rebuild and not factory_reset_repair:
             return _memory_response(
                 {
                     "status": "failed",
@@ -562,11 +594,38 @@ async def _apply_memory_settings_patch(
                 status_code=409,
             )
 
-        if pending_factory_reset:
+        if pending_factory_reset and not factory_reset_repair:
             return _memory_response(
                 {"status": "failed", "error": "memory_operation_in_progress"},
                 status_code=409,
             )
+
+        if factory_reset_repair:
+            try:
+                saved = await asyncio.to_thread(
+                    api.save_memory_config,
+                    target_payload,
+                    recovery_intent="factory_reset",
+                    expected=current.memory,
+                )
+            except (api.MemoryConfigStaleWrite, api.MemoryOperationBusy):
+                return _memory_response(
+                    {"status": "failed", "error": "memory_operation_in_progress"},
+                    status_code=409,
+                )
+            except ValueError:
+                return _memory_response(
+                    {"status": "failed", "error": "memory_invalid_input"},
+                    status_code=400,
+                )
+            except Exception:
+                return _memory_response(
+                    {"status": "failed", "error": "memory_store_unavailable"},
+                    status_code=503,
+                )
+            # Do not reconcile here: the durable reset marker remains the
+            # authority and Retry must perform the fenced deletion/activation.
+            return _memory_response(_settings_ok_payload(saved.memory))
 
         # An exact credential-only update under an existing marker updates the
         # candidate without touching the fenced runtime. Every broader patch

@@ -16,9 +16,19 @@ class _Runtime:
         self.effective_home = effective_home
         self._artifact_admitted = artifact_admitted
         self.retired = False
+        self.reap_calls = 0
+        self.reap_error: Exception | None = None
 
     def artifact_admitted(self) -> bool:
         return self._artifact_admitted
+
+    async def _reap_recorded_sidecar_if_unowned(self, *, fail_closed: bool = False) -> bool:
+        self.reap_calls += 1
+        if self.reap_error is not None:
+            if fail_closed:
+                raise self.reap_error
+            return False
+        return True
 
     def adopt_recovery_intent(self, _candidate: object) -> None:
         return None
@@ -73,6 +83,90 @@ def test_delete_memory_roots_reports_absent_roots_as_not_deleted(tmp_path: Path)
     assert [(root.existed, root.deleted) for root in result.roots] == [(False, False), (False, False)]
     assert result.data_deleted is False
     assert result.data_remaining is False
+
+
+def test_delete_memory_roots_hardens_default_application_directory_modes(tmp_path: Path) -> None:
+    """The reset must accept owner-owned 0755 dirs created under umask 0022."""
+
+    from core.memory import factory_reset
+
+    _create_roots(tmp_path)
+    tmp_path.chmod(0o755)
+    (tmp_path / "state").chmod(0o755)
+
+    result = factory_reset.delete_memory_roots(tmp_path)
+
+    assert result.data_remaining is False
+    assert result.data_deleted is True
+    assert stat.S_IMODE(tmp_path.stat().st_mode) == 0o700
+    assert stat.S_IMODE((tmp_path / "state").stat().st_mode) == 0o700
+
+
+@pytest.mark.asyncio
+async def test_factory_reset_reaps_recorded_sidecar_before_marker_or_delete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A durable sidecar record is consumed while the reset lease still fences roots."""
+
+    from core.memory import factory_reset
+
+    _create_roots(tmp_path)
+    events: list[str] = []
+
+    class _ClosableRuntime(_Runtime):
+        closed = False
+
+        async def _reap_recorded_sidecar_if_unowned(self, *, fail_closed: bool = False) -> bool:
+            assert fail_closed is True
+            events.append("reap")
+            return True
+
+        async def close(self) -> None:
+            events.append("close")
+            self.closed = True
+
+    runtime = _ClosableRuntime(tmp_path)
+    controller = _controller(runtime)
+
+    def mark() -> SimpleNamespace:
+        events.append("mark")
+        return SimpleNamespace(recovery_intent="factory_reset")
+
+    controller._mark_factory_reset_intent = mark
+
+    class _PartialDeletion:
+        data_remaining = True
+
+        def payload(self) -> dict[str, object]:
+            events.append("delete")
+            return {
+                "data_deleted": True,
+                "data_remaining": True,
+                "roots": [],
+            }
+
+    monkeypatch.setattr(factory_reset, "delete_memory_roots", lambda _home: _PartialDeletion())
+
+    result = await controller._factory_reset_memory_once()
+
+    assert result["result"] == "partial"
+    assert events == ["reap", "mark", "close", "delete"]
+
+
+@pytest.mark.asyncio
+async def test_factory_reset_keeps_roots_when_recorded_sidecar_reap_fails(tmp_path: Path) -> None:
+    _create_roots(tmp_path)
+    runtime = _Runtime(tmp_path)
+    runtime.reap_error = RuntimeError("orphan still owns the root")
+
+    result = await Controller._factory_reset_memory_once(_controller(runtime))
+
+    assert result["result"] == "failed"
+    assert result["reason"] == "sidecar_recovery_failed"
+    assert result["data_deleted"] is False
+    assert result["data_remaining"] is True
+    assert runtime.retired is False
 
 
 @pytest.mark.asyncio

@@ -758,7 +758,11 @@ def remove_confined_path(
     try:
         current = os.open(home, strict_directory_open_flags())
         anchored.append(current)
-        _require_exact_private_directory(os.fstat(current), "confinement root")
+        # ``paths.ensure_data_dirs`` historically created the home with the
+        # process umask (commonly 0755). We own the descriptor and pin it with
+        # O_NOFOLLOW, so harden that app-created mode in place before traversing
+        # instead of leaving a durable reset marker that can never be retried.
+        _harden_private_directory_fd(current, "confinement root", sync=False)
         for component in relative.parts[:-1]:
             try:
                 next_descriptor = os.open(
@@ -771,7 +775,7 @@ def remove_confined_path(
                 return
             current = next_descriptor
             anchored.append(current)
-            _require_private_directory(os.fstat(current), "confined directory")
+            _harden_private_directory_fd(current, "confined directory", sync=False)
         remove_anchored_entry(current, relative.parts[-1])
         _fsync_anchored_deletion(anchored)
     finally:
@@ -993,11 +997,17 @@ def _require_exact_private_directory(info: os.stat_result, label: str) -> None:
         raise ConfinedFilesystemError(f"{label} mode mismatch")
 
 
-def _harden_private_directory_fd(descriptor: int, label: str) -> None:
+def _harden_private_directory_fd(
+    descriptor: int,
+    label: str,
+    *,
+    sync: bool = True,
+) -> None:
     _require_directory(os.fstat(descriptor), label)
     try:
         os.fchmod(descriptor, 0o700)
-        os.fsync(descriptor)
+        if sync:
+            os.fsync(descriptor)
     except OSError as error:
         raise ConfinedFilesystemError(f"{label} cannot be hardened safely") from error
     _require_exact_private_directory(os.fstat(descriptor), label)

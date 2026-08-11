@@ -232,13 +232,33 @@ def test_memory_settings_are_direct_loopback_only_and_write_only(monkeypatch, tm
     assert "diagnostics" not in response.get_json()
 
 
-def test_memory_factory_reset_marker_projects_retry_state_and_blocks_non_key_patch(
+def test_memory_factory_reset_marker_allows_endpoint_repair_without_reconcile(
     monkeypatch,
     tmp_path,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
-    _save_memory(MemoryConfig(recovery_intent="factory_reset"))
+    _save_memory(
+        MemoryConfig(
+            enabled=True,
+            recovery_intent="factory_reset",
+            processing=MemoryProcessingConfig(
+                llm=MemoryEndpointConfig("https://old-llm.example.test/v1", "old-chat", "old-llm-key"),
+                embedding=MemoryEndpointConfig(
+                    "https://old-embed.example.test/v1",
+                    "old-embed",
+                    "old-embed-key",
+                ),
+            ),
+        )
+    )
+    reconcile_calls: list[None] = []
+
+    async def reconcile_must_not_run(*_args, **_kwargs):
+        reconcile_calls.append(None)
+        raise AssertionError("endpoint repair must leave the factory-reset marker fenced")
+
+    monkeypatch.setattr(internal_client, "reconcile_memory", reconcile_must_not_run)
     client = app.test_client()
     settings = client.get(
         "/api/memory/settings",
@@ -253,11 +273,52 @@ def test_memory_factory_reset_marker_projects_retry_state_and_blocks_non_key_pat
 
     response = client.patch(
         "/api/memory/settings",
-        json={"processing": {"llm": {"model": "new-model"}}},
+        json={
+            "processing": {
+                "llm": {
+                    "base_url": "https://new-llm.example.test/v1",
+                    "model": "new-chat",
+                    "api_key": "new-llm-key",
+                },
+                "embedding": {
+                    "base_url": "https://new-embed.example.test/v1",
+                    "model": "new-embed",
+                    "api_key": "new-embed-key",
+                },
+            }
+        },
         headers=csrf_headers(client, "http://127.0.0.1:15131"),
         base_url="http://127.0.0.1:15131",
         environ_base={"REMOTE_ADDR": "127.0.0.1"},
     )
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["status"] == "ok"
+    assert body["factory_reset_required"] is True
+    assert body["processing"]["llm"]["has_api_key"] is True
+    assert body["processing"]["embedding"]["has_api_key"] is True
+    assert reconcile_calls == []
+
+    persisted = V2Config.load().memory
+    assert persisted.recovery_intent == "factory_reset"
+    assert persisted.processing.llm.model == "new-chat"
+    assert persisted.processing.embedding.base_url == "https://new-embed.example.test/v1"
+
+
+def test_memory_factory_reset_marker_still_blocks_lifecycle_patch(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _save_memory(MemoryConfig(recovery_intent="factory_reset"))
+
+    client = app.test_client()
+    response = client.patch(
+        "/api/memory/settings",
+        json={"enabled": False},
+        headers=csrf_headers(client, "http://127.0.0.1:15131"),
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
     assert response.status_code == 409
     assert response.get_json() == {
         "status": "failed",

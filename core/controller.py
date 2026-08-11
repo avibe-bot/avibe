@@ -722,6 +722,21 @@ class Controller:
                 )
 
             try:
+                try:
+                    # A restart can construct a Runtime with no in-memory
+                    # supervisor even while its recorded sidecar survives.
+                    # Reap that ownership under the operation/root fence before
+                    # any reset path is allowed to delete the provider root.
+                    await runtime._reap_recorded_sidecar_if_unowned(
+                        fail_closed=True,
+                    )
+                except Exception:
+                    logger.exception("Memory factory reset could not reap a recorded sidecar")
+                    return unchanged_memory_reset_result(
+                        runtime.effective_home,
+                        reason="sidecar_recovery_failed",
+                    )
+
                 # Keep a defensive admission check for runtimes that expose the
                 # in-flight installer flag before they acquire the shared lease.
                 if getattr(runtime, "_artifact_installing", False):

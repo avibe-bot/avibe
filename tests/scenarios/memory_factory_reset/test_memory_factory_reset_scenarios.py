@@ -25,6 +25,7 @@ class _Runtime:
         self.closed = False
         self.worker_running = True
         self.process_running = True
+        self.reap_calls = 0
         self.module = SimpleNamespace(
             claims_paused=False,
             claims_resumed=False,
@@ -36,6 +37,11 @@ class _Runtime:
 
     def artifact_admitted(self) -> bool:
         return self._artifact_admitted
+
+    async def _reap_recorded_sidecar_if_unowned(self, *, fail_closed: bool = False) -> bool:
+        assert fail_closed is True
+        self.reap_calls += 1
+        return True
 
     def adopt_recovery_intent(self, _config: object) -> None:
         if getattr(_config, "recovery_intent", None) is not None:

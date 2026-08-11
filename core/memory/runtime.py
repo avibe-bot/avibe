@@ -684,7 +684,7 @@ class MemoryRuntime:
             exact_redaction_values=exact_redaction_values,
         )
 
-    async def _reap_recorded_sidecar_if_unowned(self) -> bool:
+    async def _reap_recorded_sidecar_if_unowned(self, *, fail_closed: bool = False) -> bool:
         """Reap a previous run's sidecar when this runtime supervises none.
 
         ``EverOSProcess`` reaps a recorded orphan on its way to spawning a
@@ -719,7 +719,9 @@ class MemoryRuntime:
         would report a failure they cannot act on. On the enabled path the launch
         runs the same reap again moments later and fails closed there, so the
         guarantee is kept where it means something. Either way the record is
-        retained, so the recovery stays available to the next attempt.
+        retained, so the recovery stays available to the next attempt. A caller
+        that is about to delete the provider root may pass ``fail_closed=True``
+        to stop on that recovery failure instead.
         """
 
         async with self._reconcile_lock:
@@ -735,6 +737,8 @@ class MemoryRuntime:
                 await recovery.reconcile_orphan()
             except Exception as exc:
                 logger.warning("Recorded EverOS sidecar recovery did not finish: %s", exc)
+                if fail_closed:
+                    raise
                 return False
             return True
 
