@@ -328,14 +328,17 @@ def _legacy_source_order_setting_is_valid(value: object, *, required: bool = Fal
 def _legacy_mapping_is_valid(value: object) -> bool:
     """Match the pre-v5 mapping parser's required fields and types."""
 
-    return (
-        isinstance(value, dict)
-        and isinstance(value.get("builtin_id"), str)
-        and bool(value["builtin_id"])
-        and isinstance(value.get("target_model_id"), str)
-        and bool(value["target_model_id"])
-        and isinstance(value.get("enabled"), bool)
-    )
+    if (
+        not isinstance(value, dict)
+        or not isinstance(value.get("builtin_id"), str)
+        or not value["builtin_id"]
+        or not isinstance(value.get("enabled"), bool)
+    ):
+        return False
+    target_model_id = value.get("target_model_id")
+    if value["enabled"]:
+        return isinstance(target_model_id, str) and bool(target_model_id)
+    return target_model_id is None or isinstance(target_model_id, str)
 
 
 def _legacy_claude_matching_model_id(source: dict, requested_model: str) -> str | None:
@@ -632,6 +635,7 @@ def _recovery_section_for_error(error: BaseException) -> Optional[str]:
             "api-key source",
             "manual model",
             "subscription source",
+            "opencode model identifier",
         )
     ):
         return "model_hub"

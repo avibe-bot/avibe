@@ -403,6 +403,21 @@ def test_delete_provider_auth_removes_opencode_json_options_key(fake_save_env) -
     assert read_opencode_provider_base_url("poe", home=home) == "https://poe-relay.example/v1"
 
 
+def test_delete_provider_auth_blocks_recovery_before_external_mutation(fake_save_env, monkeypatch) -> None:
+    server, _home = fake_save_env
+    monkeypatch.setattr(
+        api,
+        "load_config",
+        lambda: type("Config", (), {"load_warnings": ("recovery required",)})(),
+    )
+
+    result = asyncio.run(api.delete_opencode_provider_auth_async("poe"))
+
+    assert result["ok"] is False
+    assert result["error"] == "config_recovery"
+    assert server.remove_calls == []
+
+
 def test_delete_provider_auth_clears_options_cache(fake_save_env) -> None:
     from vibe.opencode_config import upsert_opencode_provider_api_key
 

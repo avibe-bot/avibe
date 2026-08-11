@@ -10884,6 +10884,9 @@ async def save_opencode_provider_auth_async(provider_id: str, payload: dict) -> 
         return {"ok": False, "message": "provider_id is required"}
     if not isinstance(payload, dict):
         return {"ok": False, "message": "Payload must be an object"}
+    recovery_message = _config_recovery_message()
+    if recovery_message:
+        return {"ok": False, "error": "config_recovery", "message": recovery_message}
     raw_key = payload.get("api_key")
     # ``api_key`` is optional when the provider is already configured: the
     # UI's "Replace" flow hides the plaintext and only sends ``base_url``
@@ -11035,6 +11038,9 @@ async def delete_opencode_provider_auth_async(provider_id: str) -> dict:
     """
     if not isinstance(provider_id, str) or not provider_id.strip():
         return {"ok": False, "message": "provider_id is required"}
+    recovery_message = _config_recovery_message()
+    if recovery_message:
+        return {"ok": False, "error": "config_recovery", "message": recovery_message}
     pid = provider_id.strip()
     try:
         from vibe.opencode_config import (

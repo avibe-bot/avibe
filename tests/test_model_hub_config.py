@@ -1135,7 +1135,13 @@ def test_config_reload_uses_first_enabled_duplicate_legacy_mapping(monkeypatch, 
 
 @pytest.mark.parametrize(
     "invalid_invariant",
-    ["healthy-detail", "hub-credential", "manual-discovered-at", "subscription-api-key"],
+    [
+        "healthy-detail",
+        "hub-credential",
+        "manual-discovered-at",
+        "subscription-api-key",
+        "opencode-identity",
+    ],
 )
 def test_config_reload_recovers_inner_model_hub_invariant_only(
     monkeypatch,
@@ -1153,9 +1159,15 @@ def test_config_reload_recovers_inner_model_hub_invariant_only(
         source["credential_ref"] = None
     elif invalid_invariant == "manual-discovered-at":
         source["models"][0]["origin"] = "manual"
-    else:
+    elif invalid_invariant == "subscription-api-key":
         source["base_url"] = "https://api.anthropic.com"
-    payload["model_hub"]["sources"] = [source]
+    else:
+        payload["model_hub"]["agents"]["opencode"]["menu"] = {
+            "view": "featured",
+            "checked": ["invalid-opencode-identity"],
+        }
+    if invalid_invariant != "opencode-identity":
+        payload["model_hub"]["sources"] = [source]
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps(payload), encoding="utf-8")
 
@@ -1164,7 +1176,30 @@ def test_config_reload_recovers_inner_model_hub_invariant_only(
     assert loaded.show_duration is True
     assert loaded.model_hub.to_payload() == V2Config.default().model_hub.to_payload()
     assert loaded.load_warnings and "model_hub" in loaded.load_warnings[0]
-    assert json.loads(config_path.read_text(encoding="utf-8"))["model_hub"]["sources"] == [source]
+    persisted = json.loads(config_path.read_text(encoding="utf-8"))["model_hub"]
+    if invalid_invariant == "opencode-identity":
+        assert persisted["agents"]["opencode"]["menu"]["checked"] == [
+            "invalid-opencode-identity"
+        ]
+    else:
+        assert persisted["sources"] == [source]
+
+
+def test_config_reload_allows_empty_target_on_disabled_legacy_mapping(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    payload = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    legacy = _legacy_model_hub_payload(payload["model_hub"])
+    legacy["agents"]["claude"]["mappings"] = [
+        {"builtin_id": "opus", "target_model_id": "", "enabled": False}
+    ]
+    payload["model_hub"] = legacy
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert loaded.load_warnings == ()
+    assert loaded.model_hub.agents["claude"].routes["opus"].hops == ()
 
 
 def test_invalid_json_recovery_backs_up_the_original_snapshot(monkeypatch, tmp_path):
