@@ -639,27 +639,31 @@ sixth treatment is a change to this section, not a local invention in a frame.
 | F1 | Retry in place | The surface stays open. The message is replaced in the slot the result would have used, the primary becomes 重试, and every value typed is kept. A refusal that came back persisted nothing. A request that never came back leaves that unknown, and 重试 establishes it before it re-sends. |
 | F2 | Keep the last good result | A failed read leaves the last successful result rendered, and the status line carries the cause. The action that failed stays enabled. |
 | F3 | Guard refusal | The request came back refused because it would break a configured chain. The shared confirm (`Qp6FI`, §1.6) states the consequence; the same request is re-sent with `force`, or abandoned. |
-| F4 | Issue and do not await | A cleanup call for something the user has already left behind, issued as they move on. There is no error surface and no retry, because the surface it would appear on is either gone or already showing the thing the user asked for instead; the truth is read from the list on the next load (D-15). |
+| F4 | Issue and do not await | A cleanup call for something the user has already left behind is owned in the background while the visible surface moves on. The departing surface does not wait and renders no cleanup error. The cleanup owner may still serialize its own work — for OAuth it settles the cancel attempt first and then re-reads the affected Source projection — because a read made before that call settles cannot account for a write the cleanup itself may materialize (D-15). |
 | F5 | No request | The state issues nothing, so it cannot fail. A local draft it holds is discarded by 取消. |
 
 **Frame-group conservation checklist** `[derived]`. Registration is additive: an exported
 frame may contribute controls and states, but it may not erase behaviour already owned by
-the surface around it. Every new frame column MUST check all five rows below. `[x] N/A` is
+the surface around it. Every new frame column MUST check all seven rows below. `[x] N/A` is
 valid only with the reason in the cell; an empty cell or a missing row is an incomplete
 registration, not something a reviewer is expected to infer from prose.
 
 | Check | Required accounting | §1.10 / frame 11 | §1.11 / frame 12 | §1.12 / frame 13 |
 | --- | --- | --- | --- | --- |
 | C1 — existing capability-gated actions | Preserve every action the containing surface already offers; add the frame delta beside it | [x] Edit / Remove sit beside the existing capability-gated Reauthorize / Replace key producers | [x] The cause-specific card action is additive; the card target and healthy-source overflow producers remain | [x] The existing Add subscription trigger remains the owner; the menu adds only vendor selection |
-| C2 — valid local draft | Preserve the exact valid draft across no-op exits and F1/F3; prevent a predictably invalid submit | [x] The normalized display name and Base URL rules below define the valid draft and F1/F3 retain it | [x] The acknowledgement, typed key, flow intent and any paste value remain with their owning state | [x] N/A — a row activation passes one closed vendor value and holds no editable draft |
+| C2 — valid local draft | Preserve the exact valid draft across no-op exits and F1/F3; prevent a predictably invalid submit | [x] V1/V2 define the normalized display name and Base URL draft; F1/F3 retain it | [x] The acknowledgement, typed key, flow intent and any paste value remain with their owning state | [x] N/A — a row activation passes one closed vendor value and holds no editable draft |
 | C3 — focus return target | Name the mounted control that receives focus when a transient surface closes | [x] A no-op close returns to the source overflow trigger; a committed exit hands focus to its named receiving surface | [x] A no-op repair exit returns to the invoking card/menu control; a committed exit hands focus to the returned source projection | [x] Escape, outside dismissal and a no-op return from 04 restore Add subscription; a committed 04 exit hands focus to its named receiving surface |
 | C4 — in-flight response owner | A busy state with no cancellation route cannot be dismissed; if cancellation is contracted, name the state that owns its late response | [x] Saving source and Removing source disable Cancel, close, Escape and outside dismissal until the request settles | [x] Pre-flow reauth and credential replacement are locked while busy; after a flow is acquired §1.4 Dismissing owns cancellation and any late answer | [x] N/A — the menu sends no request; selection transfers ownership synchronously to §1.4 |
 | C5 — existing visual state | Hold the exact rendered origin; a no-op exit must not manufacture another state | [x] Edit/remove dialogs hold the exact §1.6 origin | [x] Card, source-detail and key-entry origins are held exactly | [x] Closed is the same footer/trigger state that existed before Open |
+| C6 — committed-report exit | Once a mutation has committed, every dismissal path is the report's Done-equivalent exit and may neither restore a pre-write origin nor discard held response evidence | [x] Save/remove impact reports use their registered committed exit; a failed post-delete list refresh keeps the report and does not question the delete | [x] Repair impact uses its Done-equivalent exit to render the held returned Source; no path restores the invoking card/menu origin | [x] N/A — the menu commits nothing and owns no response report |
+| C7 — authoritative field validation | Register every editable field against the authority that normalizes or rejects it; no field may rely on a generic request failure as its validator | [x] V1/V2 register every frame-11 field, including the complete Base URL normalizer | [x] V3/V4 register the replacement key and paste-back value; the native acknowledgement is the contracted literal `true`, not a free-form draft | [x] N/A — vendor rows emit closed enum values and expose no editable field |
 
-The C5 rule is the former held-state conservation rule in checklist form. 取消, close,
-Escape, an outside press, or abandoning an F3 refusal restores the held origin whenever
-the relevant state is not busy; none manufactures `Ready`. Only a successful mutation or
-a later authoritative read may select a different state.
+The C5 rule is the former held-state conservation rule in checklist form. In a DP-1
+reversible phase, 取消, close, Escape, an outside press, or abandoning an F3 refusal
+restores the held origin; none manufactures `Ready`. C5 does not apply merely because a
+state is idle: after commit, C6/DP-4 owns every exit and the pre-write origin is no longer
+a legal destination. Only a successful mutation or a later authoritative read may select
+a different projection.
 
 **Mutation-producer response totality** `[contract]`. A mutation state is incomplete unless
 every member of its contracted success envelope has one registered disposition: render it,
@@ -672,8 +676,51 @@ this one matrix rather than restating the rule in each state row:
 | --- | --- | --- | --- |
 | R1 | §1.10 source metadata `PATCH` | `source`, `removed_hops`, `interrupted` | Hold `source` as the updated projection. Any non-empty impact array enters Source save impact reported before that projection replaces the dialog; empty arrays have no rows to render. |
 | R2 | §1.10 source `DELETE` | `removed_hops`, `interrupted` | Hold every non-empty array in Source removal impact reported before the list is re-read. Empty arrays enter Source gone directly. Deletion has no `source` member to project. |
-| R3 | §1.11 reauth acquisition and OAuth terminal | acquisition `flow`; terminal `flow`, `source`, `recovered`, `interrupted_pairs` | §1.4 consumes `flow` at both stages: first as presentation/poll ownership, then as terminal state and intent. The terminal `source` is held as the updated projection; non-empty `interrupted_pairs` render in Repair impact reported. `recovered` is not separate copy: it only says whether the prior state was a blocker, while returned `source.state` is the authoritative user-visible result. |
+| R3 | §1.11 reauth acquisition and OAuth terminal | acquisition `flow`; terminal `flow`, `source`, `recovered`, `interrupted_pairs` | RR-1/RR-2 consume acquisition: only a non-terminal flow becomes presentation/poll ownership; a terminal flow is status-read first. §1.4 consumes the materialized terminal `flow`; the returned `source` is held as the updated projection and non-empty `interrupted_pairs` render in Repair impact reported. `recovered` is not separate copy: it only says whether the prior state was a blocker, while returned `source.state` is the authoritative user-visible result. |
 | R4 | §1.11 credential replacement | `source`, `recovered`, `interrupted_pairs` | The same repair-tail disposition as R3: hold `source`, render non-empty pairs, and do not duplicate `recovered` into a second status vocabulary. |
+
+**Repair-reconciliation totality** `[contract]` `[derived]`. This is the one machine for
+create OAuth, reauth and credential replacement. A Source snapshot and a mutation result
+are different evidence: the former may prove that a held blocker cleared, but a Source
+that was already healthy cannot prove that an elective mutation committed. Each row is a
+fixture/checklist cell; a consuming implementation is incomplete if any applicable row
+has no transition.
+
+| Fixture | Producer / evidence now held | Held origin | Intent | Required disposition |
+| --- | --- | --- | --- | --- |
+| RR-1 | OAuth acquisition returns `flow.state` `starting`, `awaiting_action` or `verifying` | none for create; exact Source projection for reauth | create / reauth | Open the non-null `auth_url` once, select the server-declared presentation form, and enter the 2s status-read machine. The acquired flow owns cancellation. |
+| RR-2 | OAuth acquisition returns any terminal flow | same as RR-1 | create / reauth | Do **not** open or reconstruct a presentation form. Immediately read `GET /api/models/oauth/status/<flow_id>`; only that route materializes and returns the terminal tail. Transport/no answer remains inconclusive under the §1.4 status-read matrix. |
+| RR-3 | Status or submit returns terminal success with the create tail | no Source origin | create | §1.4 consumes every member, closes into 06 for the returned `source`, and carries its placement arrays. |
+| RR-4 | Status or submit returns terminal success with the repair tail | exact Source projection | reauth | R3 consumes every member: hold returned `source`, render non-empty `interrupted_pairs`, and use `recovered` only as response evidence rather than a second visible status. |
+| RR-5 | Status/submit returns `failed` / `cancelled`, or a server-named materialization failure | none / exact Source projection | create / reauth | Stop polling and use the intent-specific §1.4 failure row. A named materialization failure re-reads the list for create or the held Source id for reauth; Source absence takes §1.6 precedence. |
+| RR-6 | A pre-flow reauth or key-replacement request fails or has no answer; the reconciliation read cannot find the held Source | exact Source projection | reauth / replace key | Enter §1.6 Source gone. No retry may recreate or select a lookalike Source. |
+| RR-7 | The same pre-flow failure; the held origin was `needs_action` or `error`, and the reread Source is no longer blocked | blocked Source projection | reauth / replace key | The cleared blocker is sufficient outcome evidence: render the reread Source as the repaired projection. No response-only impact rows are invented, because no success envelope arrived. |
+| RR-8 | The same pre-flow failure; the held origin was blocked and the reread Source remains blocked | blocked Source projection | reauth / replace key | Stay in Repair failed with the reread projection behind it; Retry repeats the held producer and preserves acknowledgement/key. |
+| RR-9 | The same pre-flow failure; the held origin was not blocked, whatever present Source the reread returns | `active`, `standby`, `cooldown` or another non-blocked projection | reauth / replace key | A healthy snapshot is **not** mutation evidence. Stay in Repair failed and repeat only on Retry. The current wire exposes no mutation-specific read marker, so the success shortcut is deliberately unavailable for elective repair. |
+| RR-10 | A flow-owning dialog is dismissed, or a bounded retry releases its current flow | none / exact Source projection | create / reauth | Dismissal closes visually under F4; retry may start its fresh acquisition without waiting. In either case the cleanup owner first settles its authorized cancel attempt, then always re-reads the list for create or the held Source id for reauth. The reread runs even when cancel fails or ownership has moved, and no late arrival restores a departed dialog. |
+
+**Dialog phase × exit matrix** `[derived]` `[contract]`. Reversibility, not whether a
+request happens to be pending at this instant, decides dismissal semantics. Every dialog
+state in frames 11/12 and the shared §1.4 machine names one of these three phases.
+
+| Phase fixture | Registered states | Primary / Done | Cancel | Close / Escape / outside | Evidence and focus disposition |
+| --- | --- | --- | --- | --- | --- |
+| DP-1 — reversible draft | §1.4 Default and no-flow failures; Edit open, Remove confirmation, Reauth confirmation, Key entry, guarded refusals and pre-success F1 states | Starts/retries the named producer or its mandatory reconciliation | Restore the exact held origin, or close a create dialog that has no Source origin | Same as Cancel where the frame affords that dismissal | No successful response is held. Preserve valid draft through F1/F3; a no-op return restores the invoking control's focus |
+| DP-2 — in-flight, no cancellation route | Saving source, Removing source, pre-flow Reauthorizing, Replacing key | Disabled while owned | Disabled | Disabled | The state remains mounted until its response is classified; the response totality matrix owns every success member |
+| DP-3 — in-flight OAuth with contracted cancellation | Awaiting sign-in/paste-back/completion, Submitting paste-back and their retryable flow states | Submit/retry follows §1.4 | Close visually into Dismissing | Same as Cancel | RR-10 owns the late cancel and reread sequence; any late submit/poll also re-reads after it settles, and the departed surface never reopens |
+| DP-4 — committed report | Source save impact reported, Source removal impact reported, Repair impact reported | Run the report's registered Done exit | Not rendered | Exactly the same operation as Done | Never restore the pre-write origin. Preserve the authoritative arrays until the Done-equivalent exit succeeds; a projection-read failure keeps them rendered and cannot negate the held write response |
+
+**Editable-field authority register** `[contract]` `[derived]`. C2 owns preservation;
+C7 owns validity. Save/submit is disabled for an invalid row, so F1 is never used as a
+predictable field validator. The register is exhaustive for editable values added or
+consumed by frames 11/12 and their shared OAuth form.
+
+| Fixture | Field / owner | Authority consumed | Normalization and valid value | Invalid disposition |
+| --- | --- | --- | --- | --- |
+| V1 | frame 11 `display_name` | source metadata handler: string, non-empty, at most 64 characters, no credential material | Cap the input at 64 characters, trim, then compare and send the 1–64-character value | Disable Save; keep the draft local |
+| V2 | frame 11 `base_url` | `normalize_model_hub_base_url`, used by the source metadata handler | Empty draft → `null`. Otherwise trim, require a parseable HTTP(S) URL with a hostname, no username/password or fragment, no credential-bearing query key and no credential-shaped material; compare/send the normalizer output, including its lowercase scheme and trailing-path-slash removal | Disable Save; keep the draft local. The field is editable only for an `api_key` / Hub Source with a stored credential |
+| V3 | frame 12 replacement `key` | credential-replacement handler: required non-empty string; `force` remains a separate boolean | Trim; a non-empty result enables submit and is held through F1/F3 | Disable submit; never send an empty key |
+| V4 | §1.4 paste-back `value` consumed by frame 12 reauth | OAuth submit shape plus the selected `presentation.expects` | Trim; a non-empty code or callback URL enables submit, and the same normalized value is retained through reconciliation | Disable submit; never infer a second format beyond the server-declared enum |
 
 **F1's last clause used to read 「nothing is persisted」, and a lost answer is not a
 refusal** `[derived]`. Several states this treatment lands on are creates that are not
@@ -734,15 +781,15 @@ as everywhere else in this document.
 | §1.3 | Empty order, held-out sources remaining | The ordered section is empty and the held-out section is not | F5 | `order.empty.ordered` | 排进来 → Dirty. 保存顺序 stays enabled — an empty order is a real configuration |
 | §1.3 | Dirty (uncommitted moves) | 排进来, 移出, a drag, or a keyboard move | F5 — nothing has been sent, so nothing can fail | `order.action.include`, `order.action.exclude` | 保存顺序 → Saving; 取消 → discard, close |
 | §1.3 | Saving | 保存顺序 pressed — the whole order in one `PUT /api/models/agents/<backend>/sources` with `{order: string[]}` `[contract]`, which stores and re-echoes it and touches no chain | F1 | `order.save`, `order.fail.save`, `order.retry` | Success → close; 重试 → Saving again, with every move still held |
-| §1.4 | Default | A frame 13 vendor row has supplied the vendor | F5 | `addSub.title` … `addSub.hint.chatgpt` | The recommended option is pre-selected; selecting the other replaces it; 去登录 sends `POST /api/models/oauth/start` and its answer decides: an accepted flow opens its non-null `presentation.auth_url` exactly once, then `presentation.expects: none` → Awaiting sign-in, `paste_code` or `paste_callback_url` → Awaiting paste-back; refused because that backend already holds its one `native_cli` Source `[contract]` → Already bound, and any other answer that is not a flow → Start failed. Polling, re-render and reconciliation never open that URL again `[derived]` |
+| §1.4 | Default | A frame 13 vendor row has supplied the vendor | F5 | `addSub.title` … `addSub.hint.chatgpt` | The recommended option is pre-selected; selecting the other replaces it; 去登录 sends `POST /api/models/oauth/start` and RR-1/RR-2 classify any accepted flow **before** presentation: non-terminal opens its non-null `presentation.auth_url` exactly once, then `presentation.expects: none` → Awaiting sign-in, `paste_code` or `paste_callback_url` → Awaiting paste-back; terminal → immediate status read with no form reopened. Refused because that backend already holds its one `native_cli` Source `[contract]` → Already bound, and any other answer that is not a flow → Start failed. Polling, re-render and reconciliation never open that URL again `[derived]` |
 | §1.4 | Second pass `[derived]` | Re-opened while this backend already holds its one `native_cli` source `[contract]` | F5 | `addSub.opt.added` | The native row is inert whichever account that source holds; the hub row stays choosable and is selected on open, whatever the recommendation says |
 | §1.4 | Awaiting sign-in | An acquired flow carries `presentation.expects: none` and no `device_code`; Form B remains G-33. `GET /api/models/oauth/status/<flow_id>` is polled every 2s until the §1.4 status-read matrix selects an exit `[contract]` | → OAuth failed / OAuth materialization failed. A transport failure or no answer remains inconclusive and the next 2s tick retries under the same bound (D-16); `flow_not_found` / `flow_expired` stops at OAuth failed; any other server-named safe failure stops at OAuth materialization failed | `addSub.signIn`; non-null `presentation.instructions_key` renders directly | `state` reads `success` → `intent: create` closes **into 06 for the source that terminal names** with `added_to` and `adopted_by` in hand; `intent: reauth` → §1.11's R3 repair terminal `[contract]`; `failed` / `cancelled` → OAuth failed; the polling bound passes with no terminal reading → OAuth failed — the bound is `OAuthFlow.expires_at` when the flow carries one `[contract]` and 15 minutes from acquisition when it does not `[derived]`; dismissed any of the three ways → Dismissing |
-| §1.4 | Awaiting paste-back | The acquired flow carries `presentation.expects: paste_code` or `paste_callback_url` `[contract]`; the 04 paste-back exhibit replaces the option body and keeps the `flow_id` | F5 until submit | `addSub.paste.title.code`, `addSub.paste.title.callbackUrl`, `addSub.paste.subtitle`, `addSub.paste.label.code`, `addSub.paste.label.callbackUrl`, `addSub.paste.placeholder.code`, `addSub.paste.placeholder.callbackUrl`; non-null `presentation.instructions_key` renders directly, otherwise `addSub.paste.hint.code` / `addSub.paste.hint.callbackUrl`; `addSub.paste.submit`, `addSub.cancel` | A non-empty value enables 提交 → Submitting paste-back; 取消 / close / outside press → Dismissing |
+| §1.4 | Awaiting paste-back | The acquired flow carries `presentation.expects: paste_code` or `paste_callback_url` `[contract]`; the 04 paste-back exhibit replaces the option body and keeps the `flow_id` | F5 until submit | `addSub.paste.title.code`, `addSub.paste.title.callbackUrl`, `addSub.paste.subtitle`, `addSub.paste.label.code`, `addSub.paste.label.callbackUrl`, `addSub.paste.placeholder.code`, `addSub.paste.placeholder.callbackUrl`; non-null `presentation.instructions_key` renders directly, otherwise `addSub.paste.hint.code` / `addSub.paste.hint.callbackUrl`; `addSub.paste.submit`, `addSub.cancel` | V4 gates 提交 → Submitting paste-back; 取消 / close / outside press → Dismissing (C7/DP-3) |
 | §1.4 | Submitting paste-back | 提交 pressed — `POST /api/models/oauth/submit` with the held `{flow_id, value}` `[contract]` | F1 → Paste-back failed; a server-named safe failure → OAuth materialization failed | `addSub.paste.submitting` | A successful terminal dispatches by its held intent: `create` closes into 06; `reauth` → §1.11's R3 repair terminal. An unsuccessful terminal → OAuth failed; an allowed non-terminal `{flow}` → Awaiting paste-back completion; transport/no answer → Paste-back failed |
 | §1.4 | Awaiting paste-back completion `[contract]` | Submit, or the reconciliation read below, answered with `OAuthFlow.state` `starting`, `awaiting_action` or `verifying` | The same §1.4 status-read matrix and expiry/15-minute bound as Awaiting sign-in: transport/no answer continues; a server-named safe failure stops immediately | `addSub.paste.submitting`, `addSub.cancel` | `success` dispatches by held intent: `create` closes into 06; `reauth` → §1.11's R3 repair terminal. `failed` / `cancelled` → OAuth failed; another non-terminal reading stays here; a server-named safe failure → OAuth materialization failed. 取消 / close / outside press → Dismissing |
 | §1.4 | Paste-back failed `[derived]` | The submit request failed or never answered without a server-named safe error | F1, in place; the input, `flow_id` and intent are kept | `addSub.paste.fail`, `addSub.retry`, `addSub.cancel` | 重试 first re-reads `GET /api/models/oauth/status/<flow_id>` (D-36): `success` dispatches by held intent to 06 or §1.11's R3 repair terminal; `failed` / `cancelled` → OAuth failed; a server-named safe failure → OAuth materialization failed; a non-terminal reading → Awaiting paste-back completion, **without submitting the held value again**; transport/no answer leaves this state unchanged. 取消 → Dismissing |
-| §1.4 | Dismissing | 取消, the close icon, or a press outside, while a flow is in flight | F4 — `POST /api/models/oauth/cancel` is issued as the dialog closes and its result is not awaited (D-15) | — | The dialog is gone either way. A cancel that never lands leaves a flow that may still complete, and the source list is then the surface of truth (D-16) |
-| §1.4 | OAuth failed | The flow reached an unsuccessful terminal — `OAuthFlow.state` reads `failed` or `cancelled` `[contract]` — or the status read was refused with `flow_not_found` / `flow_expired` `[contract]`, or the polling bound above passed with no terminal reading. Read off the flow, never off a source; its intent remains held | F1 for the retry itself; **F4 for the cleanup below**, which is a call this dialog issues and does not await | `addSub.error.oauthFailed`, `addSub.retry` | **Fresh acquisition preserves intent** `[contract]`: `create` sends `POST /api/models/oauth/start`; `reauth` repeats §1.11's held producer — `{}` for Hub or `{acknowledge_irreversible: true}` for `native_cli` — and never calls the create route. 重试 after a terminal reading or `flow_not_found` / `flow_expired` goes straight to that producer. 重试 after the polling bound first re-reads `GET /api/models/oauth/status/<flow_id>` once (D-32): `success` dispatches by intent to 06 or §1.11's R3 repair terminal; a server-named safe failure → OAuth materialization failed; `failed` / `cancelled` → fresh acquisition; still non-terminal or transport/no answer → issue `POST /api/models/oauth/cancel` as F4, then fresh acquisition. 取消 → Dismissing, which cancels whichever flow is current |
+| §1.4 | Dismissing | 取消, the close icon, or a press outside, while a flow is in flight | F4 — the dialog closes immediately; RR-10 owns cleanup in the background (D-15) | — | The cleanup owner first settles the authorized `POST /api/models/oauth/cancel` attempt and then always re-reads the affected projection: source list for create, held Source id for reauth. Cancel failure, an ownership handoff, or a terminal flow does not suppress that later read; no late answer restores the dialog (D-16) |
+| §1.4 | OAuth failed | The flow reached an unsuccessful terminal — `OAuthFlow.state` reads `failed` or `cancelled` `[contract]` — or the status read was refused with `flow_not_found` / `flow_expired` `[contract]`, or the polling bound above passed with no terminal reading. Read off the flow, never off a source; its intent remains held | F1 for the retry itself; **F4 for the cleanup below**, whose background owner sequences cancel then reread | `addSub.error.oauthFailed`, `addSub.retry` | **Fresh acquisition preserves intent** `[contract]`: `create` sends `POST /api/models/oauth/start`; `reauth` repeats §1.11's held producer — `{}` for Hub or `{acknowledge_irreversible: true}` for `native_cli` — and never calls the create route. RR-1/RR-2 classify its answer, so an already-terminal retry response is status-read and never presented. 重试 after a terminal reading or `flow_not_found` / `flow_expired` goes straight to that producer. 重试 after the polling bound first re-reads `GET /api/models/oauth/status/<flow_id>` once (D-32): `success` dispatches by intent to 06 or §1.11's R3 repair terminal; a server-named safe failure → OAuth materialization failed; `failed` / `cancelled` → fresh acquisition; still non-terminal or transport/no answer → launch fresh acquisition and F4 cleanup together, while that cleanup settles `POST /api/models/oauth/cancel` before its RR-10 reread. 取消 → Dismissing, which releases whichever flow is current |
 | §1.4 | OAuth materialization failed `[derived]` `[contract]` | Status or submit returned a server-named safe failure after this dialog acquired the flow, excluding the two absence readings owned by OAuth failed. Authorization may already have succeeded and the affected source projection may already have changed | F1 in place; polling stops immediately | `addSub.error.finalize` for `intent: create`, `addSub.error.finalizeReauth` for `intent: reauth`, `addSub.retry` | Refresh the affected projection immediately: `create` re-reads the source list; `reauth` re-reads the held source id and applies §1.6 Source gone precedence. The failure surface remains in front of that refreshed projection. 重试 performs fresh acquisition with the held intent and channel body, exactly as OAuth failed does; 取消 → Dismissing |
 | §1.4 | Engine unavailable | The gateway is not running and gateway-upstream was chosen | F1 | `addSub.error.engineDown`, `addSub.retry` | 重试 re-sends, and that press **is** the recovery observation — nothing here watches for one — so its answer decides: whichever of *Awaiting sign-in* / *Already bound* / *Start failed* the start call then names, or still down → back here; 取消 → dismiss, nothing bound `[derived]` |
 | §1.4 | Already bound | 去登录 was refused by the start call because that backend already holds its one `native_cli` Source — 「the API rejects duplicate creation with the existing Source id」 `[spec §4.1]`. **This is the race the dialog cannot see**: it disables the native row from the sources it read on open, and the singleton can appear after that | F1, in place — nothing was sent to the provider, so there is no flow to cancel | `addSub.error.alreadyBound`, `addSub.retry` | 重试 → Second pass: the dialog re-reads the sources, the native row is now the inert one, and the hub row is what 去登录 sends; 取消 → dismiss, nothing bound `[derived]` |
@@ -791,24 +838,24 @@ as everywhere else in this document.
 | §1.9 | Committing | The confirm's primary was pressed — `PATCH /api/models/agents/<backend>/mode` | F1 → Failed | — | Success → the dialog closes and the page becomes 01 with this backend in 网关 mode |
 | §1.9 | Failed | A step this confirm promised did not go through | F1 lands here | `adopt.fail.title`, `adopt.fail.detail`, `adopt.fail.reason.transport`, `adopt.fail.reason.refused`, `adopt.fail.reason.notReady`, `adopt.fail.reason.unknown`, `install.fail.detail` | The dialog stays open, states the failure, keeps 取消 enabled and the primary retryable. **The title holds for every step; the detail is selected by which step failed.** A step that was a request renders `adopt.fail.detail` — `{{request}}` is the request that failed. The install step is no request `[contract-gap]` G-10, so it renders `install.fail.detail`, the sentence 01 already shows for the same operation (D-26). **`adopt.fail.detail`'s `{{reason}}` is one of four words and never an upstream string**: `fail.reason.transport` when no answer came back, `fail.reason.refused` when one did and it was a refusal, `fail.reason.notReady` when the start step answered and the runtime still reads `not_started` or `down`, and `fail.reason.unknown` for everything else — the residue that keeps the set total, because §0.9 has the slot always present. **重试 re-reads before it resumes, and the reading decides where it re-enters** `[derived]`: every step this confirm promises has a read that proves it, and the subject of all of them is the backend the dialog was opened on, which the client has held since the first press (D-36). `GET /api/models/runtime/status` proves the first two — `health` no longer `not_installed` means the component is there, `health` reading `ok` **or `degraded`** means it started — both are a runtime answering about itself, and only the second half of that pair is a quality judgement — and `GET /api/models/agents` proves the third, `mode` reading `hub` `[contract]`. So the press is not a replay: the runtime read answers first and the sequence resumes at the first step it cannot already see done — still `not_installed` → install, `not_started` or `down` → start, `ok` or `degraded` → the mode `PATCH`. **`degraded` is on the switching side of that split, and §1.0 is what puts it there**: it maps `degraded` to Impaired with an afforded action of `none`, so it is the one health this dialog can read that offers no control at all — re-sending the start route for it would press the thing the product declines to offer, once per retry, against a component that is already answering. Reading it as 「present but not `ok`」 did exactly that. Nothing here waits for `ok` either, because no contract conditions the mode `PATCH` on health: what the sequence owes is that the component exists and is running, and an impaired runtime meets both. A backend that already reads `hub` is a `PATCH` that committed unseen, so nothing is re-sent and the dialog closes into the success it turns out to have been, the same shape §1.6's *Refetch failed* has and §1.5's ⑦ cannot get |
 | §1.9 | Dependency missing `[derived]` D-26 `[contract-gap]` G-10 | Runtime `health` is `not_installed` (§1.0) | F1 → Failed | `adopt.effects.install`, `adopt.confirm.install` | The confirm gains one line naming the component and roughly how long it takes, and the primary becomes 安装并切换 — one press, three steps, reported as one outcome. **Only the last two steps have routes** (`POST /api/models/runtime/start`, then the mode `PATCH`), so this row inherits G-10 the way 01's pill does: the install's progress is client-side only, and a reload while it runs reads back `not_installed` with this backend still in 直连, because the mode `PATCH` is the third step and has not been sent. A step that fails lands in this dialog's own Failed row above, which is why the promise is safe to make as one outcome — the dialog reports no switch it did not make. **Which step failed decides the detail there**: the two route steps have a `METHOD path` to name and render `adopt.fail.detail`; the install step has none — that is what G-10 *is* — so it renders `install.fail.detail`, and no string is asked to interpolate evidence this dialog cannot produce. 取消 is unchanged |
-| §1.10 | Edit open | 编辑来源 chosen from 06's source overflow; that menu's capability-gated credential actions remain beside Edit / Remove (C1) | F5 | `sourceDetail.edit.title`, `sourceDetail.edit.name`, `sourceDetail.edit.baseUrl`, `sourceDetail.edit.hint`, `sourceDetail.edit.cancel`, `sourceDetail.edit.save` | 保存 is enabled only for a valid changed draft: `display_name` is trimmed, non-empty and at most 64 characters; an emptied custom Base URL normalizes to null. 保存 → Saving source; 取消 / close / outside press → dismiss unchanged and return focus to the overflow trigger (C2/C3) |
+| §1.10 | Edit open | 编辑来源 chosen from 06's source overflow; that menu's capability-gated credential actions remain beside Edit / Remove (C1) | F5 | `sourceDetail.edit.title`, `sourceDetail.edit.name`, `sourceDetail.edit.baseUrl`, `sourceDetail.edit.hint`, `sourceDetail.edit.cancel`, `sourceDetail.edit.save` | V1/V2 are the exhaustive field gates. 保存 is enabled only when every changed normalized value is valid and at least one differs from the held Source; 保存 → Saving source. 取消 / close / outside press → dismiss unchanged and return focus to the overflow trigger (C2/C3/C7) |
 | §1.10 | Saving source | 保存 pressed — `PATCH /api/models/sources/<id>` with the normalized changed `display_name` and/or `base_url` `[contract]` | F3 when a Base URL change is refused; F1 otherwise → Source save failed. The request owns the dialog: Cancel, close, Escape and outside dismissal are disabled until it settles (C4) | `sourceDetail.edit.saving` | R1 owns the complete success envelope: non-empty impact → Source save impact reported; empty impact → close onto the held returned `source`. A guard refusal → Source save refused; `source_not_found` → §1.6 Source gone |
 | §1.10 | Source save refused | The guarded `PATCH` names the hops or supply gaps the Base URL change would remove `[contract]` | F3 — shared `Qp6FI` | `guard.title.editSource`, `guard.subtitle.editSource`, `guard.confirm.editSource`, `guard.label`, `guard.count`, `guard.hop.position`, `guard.hint.safe`, `guard.hint.interrupt`, `guard.gap.label`, `guard.gap.subject`, `guard.gap.agents`, `gateway.modelCount`, `guard.cancel` | 仍要保存 re-sends the same `PATCH` with `force: true` → Saving source; 取消 → Edit open with both values kept |
 | §1.10 | Source save failed `[derived]` | The `PATCH` failed or never answered | F1, in the edit dialog | `sourceDetail.edit.fail`, `sourceDetail.retry` | 重试 first re-reads `GET /api/models/sources` by the held source id (D-36): the requested fields already present → close as success; source absent → §1.6 Source gone; otherwise re-send → Saving source |
-| §1.10 | Source save impact reported `[derived]` `[contract]` | R1 holds a successful metadata response with non-empty `removed_hops` and/or `interrupted` | F5 — the write already succeeded and the authoritative response is held | `sourceDetail.edit.impact.title`, `sourceDetail.edit.impact.detail`, `sourceDetail.edit.impact.done`, `sourceDetail.impact.removedHops`, `sourceDetail.impact.interruptedModels`, `guard.hop.position`, `guard.gap.subject`, `guard.gap.agents`, `gateway.modelCount` | Render each non-empty array once: the existing hop block for `removed_hops`, the §1.11 SupplyGap block for `interrupted`. 完成 closes onto the held returned `source`; no reread replaces response evidence |
+| §1.10 | Source save impact reported `[derived]` `[contract]` | R1 holds a successful metadata response with non-empty `removed_hops` and/or `interrupted` | F5 — the write already succeeded and the authoritative response is held; DP-4 owns every exit | `sourceDetail.edit.impact.title`, `sourceDetail.edit.impact.detail`, `sourceDetail.edit.impact.done`, `sourceDetail.impact.removedHops`, `sourceDetail.impact.interruptedModels`, `guard.hop.position`, `guard.gap.subject`, `guard.gap.agents`, `gateway.modelCount` | Render each non-empty array once: the existing hop block for `removed_hops`, the §1.11 SupplyGap block for `interrupted`. 完成, close, Escape or outside press all close onto the held returned `source`; none restores the pre-write origin, and no reread replaces response evidence |
 | §1.10 | Remove confirmation `[derived]` | 移除来源 chosen from 06's source overflow; the exact §1.6 source-detail state behind it is held | F5 — no request has been sent | `guard.title.removeSource`, `guard.hint.removeSource`, `guard.confirm.removeSource`, `guard.cancel` | 移除来源 → Removing source with the initial non-forced delete; 取消 / close / outside press restores the held §1.6 origin by C5 |
 | §1.10 | Removing source | The destructive primary was activated in Remove confirmation or Source remove refused — `DELETE /api/models/sources/<id>` is non-forced on the first path and carries `?force=true` only on the second `[contract]` | F3 on refusal; F1 otherwise → Source remove failed. The request owns the dialog and all dismissal paths are disabled until it settles (C4) | `sourceDetail.remove.checking` | R2 owns the complete success envelope: either array non-empty → Source removal impact reported; both empty → §1.6 Source gone. An initial guard refusal → Source remove refused; `source_not_found` → §1.6 Source gone |
 | §1.10 | Source remove refused | The non-forced delete returned the guarded envelope; frame 11 renders its source-removal variant while retaining the held §1.6 origin | F3 — shared refusal semantics and the frame 11 dialog | `guard.title.removeSource`, `guard.confirm.removeSource`, `guard.label.removeSource`, `guard.count`, `guard.hop.position.removeSource`, `guard.hint.removeSource`, `guard.gap.label`, `guard.gap.subject`, `guard.gap.agents`, `gateway.modelCount`, `guard.cancel` | 移除来源 re-sends the same `DELETE` with `force` → Removing source; 取消 / close / outside press restores the held origin by C5 |
 | §1.10 | Source remove failed `[derived]` | Either delete request failed or never answered | F1, in place | `sourceDetail.remove.fail`, `sourceDetail.retry` | 重试 re-reads `GET /api/models/sources` by the held id (D-36): absent → §1.6 Source gone; present → re-send the same stage, non-forced before refusal and forced after one |
-| §1.10 | Source removal impact reported `[derived]` `[contract]` | R2 holds a successful delete response with non-empty `removed_hops` and/or `interrupted`; the source is already gone | F2 for the list reread after 完成; until then no request is pending | `sourceDetail.remove.impact.title`, `sourceDetail.remove.impact.detail`, `sourceDetail.remove.impact.done`, `sourceDetail.impact.removedHops`, `sourceDetail.impact.interruptedModels`, `guard.hop.position.removeSource`, `guard.gap.subject`, `guard.gap.agents`, `gateway.modelCount`, `sourceDetail.remove.fail`, `sourceDetail.retry` | Render the authoritative success arrays before any reread, even when they differ from the earlier refusal preview. 完成 re-reads `GET /api/models/sources`; success drops the detail into 01 with the current list, failure keeps the report, renders the existing remove-failure line and changes 完成 to 重试 |
+| §1.10 | Source removal impact reported `[derived]` `[contract]` | R2 holds a successful delete response with non-empty `removed_hops` and/or `interrupted`; the source is already gone | F2 for the list reread after a DP-4 exit; the read cannot negate the held delete response | `sourceDetail.remove.impact.title`, `sourceDetail.remove.impact.detail`, `sourceDetail.remove.impact.done`, `sourceDetail.remove.impact.refreshFail`, `sourceDetail.impact.removedHops`, `sourceDetail.impact.interruptedModels`, `guard.hop.position.removeSource`, `guard.gap.subject`, `guard.gap.agents`, `gateway.modelCount`, `sourceDetail.retry` | Render the authoritative success arrays before any reread, even when they differ from the earlier refusal preview. 完成, close, Escape or outside press are the same exit: re-read `GET /api/models/sources`; success drops the detail into 01 with the current list, failure keeps the report, states only that the list refresh failed, and changes the exit to 重试. It never says the committed deletion is unconfirmed |
 | §1.11 | Needs-action card | Frame 12's card delta is rendered for a source whose status is `needs_action` | F5 | the selected `sourceDetail.status.needsAction.*` key plus `upstream.state.supplyStopped`; one of `upstream.repair.reauthorize`, `upstream.repair.replaceKey`, `upstream.repair.topUp`, `upstream.repair.contactVendor`, or the non-linked `upstream.repair.contactProvider` fallback | 重新授权 on a `native_cli` source → Reauth confirmation; on a Hub source → Reauthorizing; 更换 Key → Key entry. A subscription's 补充额度 or 联系厂商 opens the matching §1.4 static destination in a new browser context and keeps this card in place; a later source payload decides whether its state changed. An `api_key` Source renders 联系你的服务商 with no link for either vendor-directed cause, because a compatibility vendor id does not identify the account operator |
 | §1.11 | Reauth confirmation `[derived]` `[contract]` | 重新授权 pressed for a `native_cli` source from either the needs-action card or the capability-gated source overflow | F5 — no request has been sent | `upstream.repair.reauthConfirm.title`, `upstream.repair.reauthConfirm.detail`, `upstream.repair.reauthConfirm.confirm`, `upstream.repair.reauthConfirm.cancel` | 继续登录 sends `POST /api/models/sources/<id>/reauth` with `{acknowledge_irreversible: true}` → Reauthorizing; 取消 / close / Escape restores the exact invoking card/menu origin and its focus target (C2/C3/C5) |
-| §1.11 | Reauthorizing | The Hub repair action was pressed, or the native acknowledgement was confirmed — `POST /api/models/sources/<id>/reauth` sends `{}` for Hub and the acknowledged body above for `native_cli` `[contract]` | F1 before a flow is held → Repair failed, with every dismissal path locked while that request is pending (C4); after acquisition, §1.4 owns cancellation, 2s polling and F1–F5 | `upstream.repair.reauthorizing` | R3 owns both response stages. The acquired `flow` enters §1.4 with held `intent: reauth`; a terminal with non-empty `interrupted_pairs` → Repair impact reported, and an empty array renders the held returned `source`. Server-named materialization failure stops polling and refreshes this source through §1.4. Create-only arrays are absent by contract |
-| §1.11 | Key entry `[derived]` | 更换 Key pressed from either the needs-action card or the capability-gated source overflow, or a guarded refusal is abandoned | F5 — the secret remains local and no request is sent until submit | `upstream.repair.replaceKey` | Submit holds the typed key and sends `PUT /api/models/sources/<id>/credential` with `{key}` → Replacing key; cancel restores the exact invoking origin and focus target (C2/C3/C5) |
+| §1.11 | Reauthorizing | The Hub repair action was pressed, or the native acknowledgement was confirmed — `POST /api/models/sources/<id>/reauth` sends `{}` for Hub and the acknowledged body above for `native_cli` `[contract]` | F1 before a flow is held → Repair failed, with every dismissal path locked while that request is pending (C4); after acquisition, §1.4 owns cancellation, 2s polling and F1–F5 | `upstream.repair.reauthorizing` | R3 and RR-1/RR-2 own acquisition: a non-terminal `flow` enters the §1.4 presentation/poll machine with held `intent: reauth`; an already-terminal `flow` is status-read immediately and never presented. The materialized terminal then renders non-empty `interrupted_pairs` in Repair impact reported or the held returned `source` when empty. Server-named materialization failure stops polling and refreshes this source through §1.4. Create-only arrays are absent by contract |
+| §1.11 | Key entry `[derived]` | 更换 Key pressed from either the needs-action card or the capability-gated source overflow, or a guarded refusal is abandoned | F5 — the secret remains local and no request is sent until submit | `upstream.repair.replaceKey` | V3 gates submit. A valid submit holds the normalized key and sends `PUT /api/models/sources/<id>/credential` with `{key}` → Replacing key; cancel restores the exact invoking origin and focus target (C2/C3/C5/C7) |
 | §1.11 | Replacing key | Key entry submitted, or the guarded confirm below was accepted — the latter reuses the held key and adds `force: true` `[contract]` | F3 on guard refusal; F1 otherwise → Repair failed, with the key kept under F1. All dismissal paths are locked until the request settles (C4) | `upstream.repair.replacingKey` | R4 owns the complete success tail: non-empty `interrupted_pairs` → Repair impact reported; empty pairs → render the held returned `source`; refusal → Key replacement refused; failure → Repair failed |
 | §1.11 | Key replacement refused `[derived]` `[contract]` | The non-forced credential replacement returned the shared guarded `409`; the typed key and exact Key entry origin are held | F3 — shared `Qp6FI`, with only the operation strings below changed | `guard.title.replaceKey`, `guard.subtitle.replaceKey`, `guard.confirm.replaceKey`, `guard.label`, `guard.count`, `guard.hop.position`, `guard.hint.safe`, `guard.hint.interrupt`, `guard.gap.label`, `guard.gap.subject`, `guard.gap.agents`, `gateway.modelCount`, `guard.cancel` | 仍要更换 re-sends the held `{key, force: true}` → Replacing key; 取消 / close / Escape → Key entry with the typed key kept, by C2/C5 |
-| §1.11 | Repair impact reported `[derived]` `[contract]` | R3 or R4 holds a successful repair terminal with non-empty `interrupted_pairs: SupplyGap[]` and its complete returned `source` | F5 — the successful terminal is already in hand and this one-response report is held | `upstream.repair.impact.title`, `upstream.repair.impact.detail`, `guard.gap.subject`, `guard.gap.agents`, `upstream.repair.impact.done` | 完成 renders the held returned `source` without replacing response evidence with a reread. Each pair renders its backend and menu model; the Agent line renders only when `agents` is non-empty |
-| §1.11 | Repair failed `[derived]` | The pre-flow reauth request or credential replacement failed before its terminal could be confirmed; the repair intent, channel acknowledgement and any typed key remain held | F1, on the repair surface | `upstream.repair.fail`, `upstream.retry` | 重试 re-reads `GET /api/models/sources` by source id first (D-36); a cleared state closes as success, otherwise it repeats the held producer — reauth with the same channel body, or credential replacement with the same key. After a flow is held, terminal/absence failures use §1.4 OAuth failed and server-named materialization failures use §1.4 OAuth materialization failed; both preserve `intent: reauth` |
+| §1.11 | Repair impact reported `[derived]` `[contract]` | R3 or R4 holds a successful repair terminal with non-empty `interrupted_pairs: SupplyGap[]` and its complete returned `source` | F5 — the successful terminal is already in hand and this one-response report is held; DP-4 owns every exit | `upstream.repair.impact.title`, `upstream.repair.impact.detail`, `guard.gap.subject`, `guard.gap.agents`, `upstream.repair.impact.done` | 完成, close, Escape or outside press all render the held returned `source` without replacing response evidence with a reread or restoring the invoking origin. Each pair renders its backend and menu model; the Agent line renders only when `agents` is non-empty |
+| §1.11 | Repair failed `[derived]` | The pre-flow reauth request or credential replacement failed before its terminal could be confirmed; the repair intent, channel acknowledgement, exact origin status and any typed key remain held | F1, on the repair surface | `upstream.repair.fail`, `upstream.retry` | RR-6–RR-9 own the reconciliation read by held source id (D-36): absent → Source gone; a held `needs_action`/`error` origin that is now clear → render the reread Source as repaired; a still-blocked origin → remain here; any origin that was already non-blocked → remain here regardless of the present snapshot, because health is not mutation evidence. 重试 repeats the held producer — reauth with the same channel body, or credential replacement with the same key. After a flow is held, terminal/absence failures use §1.4 OAuth failed and server-named materialization failures use §1.4 OAuth materialization failed; both preserve `intent: reauth` |
 | §1.12 | Closed | 添加订阅 is rendered in 01's upstream footer | F5 | `upstream.addSubscription` | Activate → Open |
 | §1.12 | Open | The frame 13 vendor menu is visible and focus is on its first row; the Add subscription trigger remains held as the focus owner | F5 | `addSubMenu.vendor.claude`, `addSubMenu.vendor.chatgpt`, `addSubMenu.recommendation.native`, `addSubMenu.recommendation.gateway` | Claude 订阅 → §1.4 with `vendor: anthropic`; ChatGPT 订阅 → §1.4 with `vendor: openai`. Selection closes the menu; if 04 later dismisses back to 01, focus returns explicitly to Add subscription, while a committed exit gives focus to 06. Escape / outside press → Closed with the same trigger focus (C3) |
 
@@ -2268,8 +2315,9 @@ value accepted by the one contracted submit route and does not define a second f
 | 提交 | Send the held value | yes when non-empty | `POST /api/models/oauth/submit` with `{flow_id, value}` |
 
 The provider handoff belongs to the start transition, not to a second control invented
-inside this exhibit `[contract]` `[derived]`. Every accepted start flow opens its non-null
-`presentation.auth_url` once before the dialog enters either awaiting state. That is how
+inside this exhibit `[contract]` `[derived]`. RR-1 opens a **non-terminal** accepted
+flow's non-null `presentation.auth_url` once before the dialog enters either awaiting state. RR-2
+routes an already-terminal acquisition straight to status and opens nothing. That is how
 the user obtains the code or callback URL the frame asks for. The URL is server-declared;
 the client keeps no vendor-to-**OAuth**-URL table, and the static top-up/support register
 above is never consulted for this transition. Polling, re-rendering or reconciling a submit
@@ -2408,8 +2456,9 @@ a button the user already pressed.
 paste-back completion, Paste-back failed reconciliation and §1.11 reauth. No caller may
 collapse its last two rows into a generic failed read:
 
-| Status / submit outcome | What it proves | Poll ownership | Intent-specific projection |
+| Acquisition / status / submit outcome | What it proves | Poll ownership | Intent-specific projection |
 | --- | --- | --- | --- |
+| Acquisition returns a terminal `flow` without a terminal tail | The producer found a finished flow, but has not materialized or reported its create/repair result | Status-read immediately under RR-2; do not select a form or open `auth_url` | None until the status route returns the complete terminal envelope |
 | Transport failure or no answer | Nothing about the flow (D-16) | Keep the held state; the next 2s tick retries under the same bound | None; neither source list nor source card is changed by a non-reading |
 | Non-terminal `{flow}` | The flow still exists and is not done | Continue the same poll without re-opening `auth_url` or re-submitting a held paste value | None |
 | Terminal `failed` / `cancelled`, or `flow_not_found` / `flow_expired` | This flow cannot produce a later success terminal | Stop → OAuth failed | Retry preserves the held `create` / `reauth` intent |
@@ -2450,31 +2499,21 @@ started. An unsuccessful terminal reads like the other two entries and leaves no
 cancel. Only a still-non-terminal reading, or a read that fails, puts the dialog back
 where the bound left it, and that is the branch the cleanup below belongs to.
 
-**The cleanup goes out and the new flow does not wait for it** `[derived]`. The browser
-tab on the other side of the bound is untouched: a user who signs in twenty minutes later
-completes a flow this dialog gave up on, and if 重试 has meanwhile started a second one,
-the provider can complete both. So the retry issues
-`POST /api/models/oauth/cancel` — 「Cancels and forgets the flow」 `[contract]` — for the
-`flow_id` it is abandoning, and starts the new one without awaiting it. Serializing the
-start behind the cancel is the tempting change and it buys nothing: the cancel is F4, so
-holding the start would mean holding the user behind a call whose failure this dialog has
-already decided not to surface, and the outcome it would be protecting against survives
-anyway. That outcome is a second Source — this backend's `native_cli` singleton is what
-refuses a duplicate, and the `hub` channel these flows also use has no such rule —
-landing in the list. Frame 11 now gives that list a source-removal affordance; it does
-not make cleanup synchronous or make an unseen duplicate something this dialog can name.
-The list remains the surface where the result can be seen and removed.
+**The new flow does not wait for cleanup, but cleanup's own read does wait for cancel**
+`[derived]`. A retry launches the fresh acquisition the user asked for and gives the old
+flow to an F4 background owner. Within that owner the order is fixed: settle the
+authorized `POST /api/models/oauth/cancel` attempt, then re-read the affected projection.
+Starting the new flow need not block on that work; reading before the cancel settles is
+forbidden because cancel can itself materialize the old flow. If the fresh journey has
+already adopted a reusable reauth flow, the ownership check withholds the stale cancel
+and still performs the read.
 
-The cleanup is issued and not awaited, which is F4, and this is the treatment's second
-caller rather than a new one: a cancel that fails here has no repair the user could
-perform, because the surface that would have to state it is already showing the retry
-they asked for. Blocking the retry on it would be worse than not sending it — the user
-pressed 重试 to sign in, and a dialog that answers 清理失败 has replaced their action with
-somebody else's bookkeeping. D-16 already says where the truth is when a cancel does not
-land: the source list on the next load, which is exactly where the duplicate would show
-up. Conditioning first on how the state was entered and then on what the re-read says
-keeps the request off the wire in every case that has nothing to cancel; it costs no
-second state and no second sentence, because the user sees one dialog throughout.
+A cleanup failure has no error surface and does not replace 重试 with bookkeeping. The
+post-cleanup read still runs, which narrows D-16 from 「the next load eventually tells」 to
+「the cleanup owner refreshes after its last possible write」. Create refreshes the list;
+reauth refreshes the held Source. A failed cancel may still leave a later completion, but
+the spec neither calls that cleanup success nor suppresses the read that can observe the
+latest projection.
 
 **This state is read off the flow, and there is no source to read it off** `[contract]`.
 It said 「classified `needs_action`」 until this round, which named a real status and put
@@ -2510,36 +2549,22 @@ flow, its 重试 branches on a `flow_id`, and neither exists when the start call
 failed — so a fourth row is cheaper than a state that has to check whether its own
 subject is there.
 
-**Dismissing while a sign-in is in flight cancels the flow, and that is what makes
-re-entry trivial** `[derived]` `[contract]`. 取消, the close icon and a press outside the
-dialog are one action, not three: each ends the dialog, and when the dialog is in
-*Awaiting sign-in* each also calls `POST /api/models/oauth/cancel` with the `flow_id`
-returned when the flow started — the route exists for exactly this and its own
-description is 「Cancels and forgets the flow」 (`api.md`, `[contract]`). The browser tab
-the user was sent to is not ours to close; what we owe is that finishing in that tab
-after dismissal binds nothing, which is the forgetting the route does. §1.0's rule asks
-every state for entry, exit **and** re-entry, and this is the section that takes the
-cheaper of the two answers it allows: **no flow outlives its dialog**, so re-entry needs
-no rule of its own — reopening 添加订阅 is always a fresh Default or a fresh Second pass,
-never a resumption. The expensive answer would have been a resume path, and it would have
-had to survive a restart, a second dialog for the same vendor, and an OAuth code that
-completes minutes later; none of that is worth buying when the flow can simply be
-allowed not to exist.
+**Dismissing while a sign-in is in flight is visually immediate and evidentially
+ordered** `[derived]` `[contract]`. 取消, the close icon and a press outside are the one
+DP-3 exit: the dialog leaves at once, while RR-10's background owner decides whether it
+still owns `POST /api/models/oauth/cancel`. That owner always waits for its cancel attempt
+to settle before it re-reads the affected projection. This order is load-bearing: cancel
+may itself materialize a terminal create/repair, and a read issued beside or before it
+can return the state that existed before that write.
 
-**The cancel call's own failure does not hold the user** `[derived]`. It is issued as the
-dialog closes and its result is not awaited: a non-2xx or a dropped connection changes
-nothing on screen, renders no error, and offers no retry. Two reasons, and the second is
-the load-bearing one. Keeping someone inside a dialog to finish cleaning up an operation
-they just abandoned is the opposite of what 取消 means, and D-15 already says a failure
-never makes a mutation the only way out — a *forward* control on a dismissal would be
-exactly that. And the residual risk is **visible and recoverable from frame 11**: a
-cancel that never lands leaves a flow that may still complete, in which case a source the
-user did not keep appears in the list — where D-16's rule applies unchanged, since the
-list reports what exists rather than what was intended. `api.md` contracts
-`DELETE /api/models/sources/<id>`, and §1.10 registers its source-level producer separately
-from 06's manual-model 移除. What this section will **not** do is claim the guarantee is
-stronger than the call: 「no flow outlives its dialog」 holds when the route answers, and
-the source list plus frame 11's action are the recovery surface when it does not.
+**The cancel call's own failure still does not hold the user** `[derived]`. A non-2xx or
+dropped connection renders no cleanup error and offers no retry on a surface that is gone,
+but it also does not suppress the later read. Create rereads the Source list; reauth
+rereads the held Source id. An ownership handoff skips an unauthorized cancel and performs
+the same read. The result is the only re-entry rule required: a later open starts from the
+projection the list now reports, while no late cleanup response reopens the departed
+dialog. This does not promise that no flow can outlive a failed call; it promises that the
+latest available authority is read after cleanup has had its chance to write.
 
 **There is no partial-completion state here, and that is a property of the rebuild, not
 an omission.** An earlier draft of this section carried a `[contract-gap]` (G-5) for the
@@ -4335,17 +4360,11 @@ the supply impact and may remove affected hops on force. `sourceDetail.edit.hint
 string of record, preserving the frame's fixed-protocol point while naming the guard
 instead of promising no consequence. This is a copy correction, not a geometry change.
 
-An empty Base URL draft is the one normalization this editor performs `[contract]`:
-when the held source had a custom endpoint, clearing the field is a real change, keeps 保存
-enabled and sends `base_url: null`. It never sends an empty string and never treats the
-cleared draft as unchanged; null is how the Source contract names the vendor's official
-endpoint.
-
-The display-name draft is normalized before the request too `[derived]` `[contract]`.
-The input is capped at 64 characters, Save reads the trimmed value, and a blank or
-whitespace-only value is invalid. Save is disabled when the normalized name and Base URL
-are both unchanged, or while either changed field is invalid; F1 and F3 retain the same
-normalized draft instead of repeatedly sending a predictable rejection (C2).
+V1/V2 are the sole metadata-draft validator register `[derived]` `[contract]`. This
+section does not keep a second field list: clearing a custom Base URL reaches the official
+endpoint because V2 normalizes it to `null`, and every other Base URL or display-name
+predicate comes from the same table. Save compares normalized values, while F1/F3 retain
+them (C2/C7).
 
 **Removal keeps confirmation before the first destructive request, then escalates in the
 same shell** `[frame]` `[contract]`. Choosing the overflow action opens frame 11's 520-wide
@@ -4371,12 +4390,14 @@ positions. It also inherits G-23 for a non-empty `would_interrupt`, because the 
 dialog has the hop block and summary sentence but no second body block that names protected
 menu models and Agents. Neither open gap is filled from inference here.
 
-**States** — §0.8, rows marked §1.10. The dialogs trap focus; Tab stays inside. When idle,
-Escape and the head close take the same path as 取消 and restore focus to the source overflow
-trigger. While Saving source or Removing source owns an outstanding request, 取消, close,
-Escape and outside dismissal are disabled (C3/C4). Enter submits Edit only when its draft
-is valid and focus is in a single-line field; both destructive stages require activating
-the focused button and are not default Enter actions `[derived]`.
+**States** — §0.8, rows marked §1.10. The dialogs trap focus; Tab stays inside. DP-1
+reversible states make Escape and the head close equivalent to 取消 and restore focus to
+the source overflow trigger. DP-2 disables every dismissal path while Saving source or
+Removing source owns a request. DP-4 committed reports instead make close, Escape and an
+outside press equivalent to 完成; they never take Cancel semantics or restore the held
+pre-write origin (C3/C4/C6). Enter submits Edit only when V1/V2 are valid and focus is in
+a single-line field; both destructive stages require activating the focused button and
+are not default Enter actions `[derived]`.
 
 **Copy** is registered in the existing owners: source-menu and edit strings under
 `models.hub.sourceDetail.*`, and refusal strings under `models.hub.guard.*`. Dynamic head
@@ -4390,6 +4411,7 @@ operation-specific shell strings and reuse the existing hop / `SupplyGap` row co
 | `edit.impact.done` `[derived]` | 完成 | Done |
 | `remove.impact.title` `[derived]` `[contract]` | 来源已移除,部分供给受到影响 | The source was removed, and some supply was affected |
 | `remove.impact.detail` `[derived]` `[contract]` | 以下是这次移除实际影响的路由和型号。 | These are the routes and models actually affected by this removal. |
+| `remove.impact.refreshFail` `[derived]` | 来源已移除,但来源列表暂时无法刷新。 | The source was removed, but the source list could not be refreshed. |
 | `remove.impact.done` `[derived]` | 完成 | Done |
 | `impact.removedHops` `[derived]` `[contract]` | 已移除的跳 | Removed hops |
 | `impact.interruptedModels` `[derived]` `[contract]` | 已中断的型号 | Interrupted models |
@@ -4470,16 +4492,20 @@ transition that sends `{acknowledge_irreversible: true}` `[contract]`. A Hub sou
 
 - acquisition and every fresh retry preserve `intent: reauth`: they repeat
   `POST /api/models/sources/<id>/reauth` with the held channel body, never the create-only
-  `POST /api/models/oauth/start`;
-- Forms A, B and C are selected from the returned `presentation`, never a vendor table. A
-  non-null `auth_url` opens once, `expects` selects the branch, and a non-null
+  `POST /api/models/oauth/start`. RR-1/RR-2 classify the returned flow before any form: a
+  terminal acquisition is status-read immediately and is never presented;
+- Forms A, B and C are selected from a **non-terminal** returned `presentation`, never a
+  vendor table. A non-null `auth_url` opens once, `expects` selects the branch, and a non-null
   `instructions_key` renders directly; G-33 remains only the missing Form B `device_code`
   output. Submit, the status-read matrix, 2s polling, timeout, cancel and the F1–F5
   treatments are otherwise §1.4 verbatim. In particular, transport silence keeps polling,
   while a server-named materialization failure stops immediately and refreshes this held
   source projection;
 - a successful terminal carries `source`, `recovered` and `interrupted_pairs`; it never
-  consumes create-only `added_to` or `adopted_by`.
+  consumes create-only `added_to` or `adopted_by`;
+- RR-10 owns every dismissed flow: the dialog leaves immediately, then background cleanup
+  settles its authorized cancel attempt before it re-reads this Source. A cancel failure or
+  ownership handoff does not suppress the read.
 
 The 更换 Key card action is the producer, not the secret field. It opens the key-entry
 step owned by credential repair; plaintext remains local until submit, and only submit
@@ -4489,8 +4515,8 @@ confirm by re-sending `{key, force: true}`. Cancel returns to the held key-entry
 the key intact. Frame 12 fixes the missing card affordance without claiming unexported
 modal geometry.
 
-R3/R4 preserve a non-empty `interrupted_pairs` report and the returned `source` until the
-user dismisses it `[contract]`. Each item is the contract's `SupplyGap`: backend + protected
+R3/R4 preserve a non-empty `interrupted_pairs` report and the returned `source` until its
+DP-4 Done-equivalent exit `[contract]`. Each item is the contract's `SupplyGap`: backend + protected
 menu model, followed by the named-Agent line only when `agents` is non-empty. A source-list
 re-read cannot reconstruct which pairs this write interrupted, so 完成 renders the held
 returned `source` rather than replacing response evidence with another request. An empty
@@ -4502,14 +4528,17 @@ is the same noun, rather than creating a second spelling for it.
 The native acknowledgement, key-replacement refusal and frame 11 removal all cite §0.8's
 C2/C3/C5 checks: a no-op exit restores the exact state and valid draft under the modal,
 returns focus to its invoking control and never promotes the source to `Ready` `[derived]`.
+Committed repair reports instead cite C6, and the replacement key / paste-back fields cite
+C7; neither rule can be inferred from the reversible no-op rule.
 
 **States** — §0.8, rows marked §1.11. Within a card, Tab reaches the card target and then
 the repair button; Enter or Space activates the focused target. Activating the nested
 repair button does not bubble into the card's open-detail action. Idle confirmations trap
 focus; Escape is cancel; Enter activates only the focused control. Pre-flow Reauthorizing
 and Replacing key disable dismissal while their mutation owns the response; once a flow is
-held, §1.4's explicit cancel path owns its late answer (C4). Every impact report keeps focus
-inside until 完成 `[derived]`.
+held, §1.4's explicit cancel path owns its late answer and RR-10 reread (C4). Every impact
+report keeps focus inside; close, Escape and outside press invoke the same committed exit as
+完成 and never restore the invoking origin (C6/DP-4) `[derived]`.
 
 **Copy** — the causes reuse `models.hub.sourceDetail.status.needsAction.*`; the drawn supply
 suffix is `models.hub.upstream.state.supplyStopped`; credential actions, vendor exits,
