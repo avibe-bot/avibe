@@ -5,7 +5,7 @@ import os
 import re
 import tempfile
 import threading
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from datetime import datetime
 from pathlib import Path
 from typing import List, Literal, Mapping, Optional, Union
@@ -179,21 +179,106 @@ def _loggable_model_hub_menu_id(identifier: str) -> str:
     return identifier
 
 
+# The payload keys the pre-v5 parsers actually read. They are frozen here
+# rather than derived from the live dataclasses because they describe configs
+# already written to disk: that shape can never change again. Every other key a
+# legacy object carries was metadata the old parser silently ignored — the
+# retired `experimental_consent_at`, or a field from a build even older — while
+# the v5 parser rejects unknown fields at every level. Narrowing to these sets
+# is what keeps such a source loadable instead of dropped.
+_LEGACY_MODEL_HUB_SOURCE_FIELDS = frozenset(
+    {
+        "id",
+        "created_at",
+        "last_discovered_at",
+        "kind",
+        "vendor",
+        "display_name",
+        "protocol",
+        "base_url",
+        "supply_channel",
+        "billing",
+        "state",
+        "usage",
+        "models",
+        "credential_ref",
+        "account_label",
+        "masked_credential",
+    }
+)
+_LEGACY_MODEL_HUB_MODEL_FIELDS = frozenset(
+    {"id", "display_name", "origin", "reasoning_efforts", "discovered_at"}
+)
+_LEGACY_MODEL_HUB_STATE_FIELDS = frozenset({"status", "retry_at", "detail_key"})
+_LEGACY_MODEL_HUB_USAGE_FIELDS = frozenset(
+    {"cycle_used_pct", "month_spend_cents", "currency", "projected_exhaust_at"}
+)
+_LEGACY_MODEL_HUB_MENU_FIELDS = frozenset({"view", "checked"})
+
+
+def _narrowed_legacy_payload(value: object, fields: frozenset[str]) -> object:
+    """Return a legacy object holding only the keys its own parser read."""
+
+    if not isinstance(value, dict):
+        return value
+    return {key: item for key, item in value.items() if key in fields}
+
+
+def _legacy_model_hub_source_payload(raw_source: object) -> object:
+    """Return one legacy source narrowed, at every level, to the old contract.
+
+    The nested objects are narrowed too because the v5 parser rejects unknown
+    fields inside `state`, `usage` and each model as strictly as it does at the
+    top. A single stale key in any of them would otherwise cost the whole
+    source, and with it every route the migration builds through it.
+    """
+
+    if not isinstance(raw_source, dict):
+        return raw_source
+    payload = _narrowed_legacy_payload(raw_source, _LEGACY_MODEL_HUB_SOURCE_FIELDS)
+    if "state" in payload:
+        payload["state"] = _narrowed_legacy_payload(payload["state"], _LEGACY_MODEL_HUB_STATE_FIELDS)
+    if "usage" in payload:
+        payload["usage"] = _narrowed_legacy_payload(payload["usage"], _LEGACY_MODEL_HUB_USAGE_FIELDS)
+    models = payload.get("models")
+    if isinstance(models, list):
+        payload["models"] = [_legacy_model_hub_model_payload(model) for model in models]
+    return payload
+
+
+def _legacy_model_hub_model_payload(raw_model: object) -> object:
+    """Return one legacy model narrowed, and with the default the old parser applied."""
+
+    if not isinstance(raw_model, dict):
+        return raw_model
+    model = _narrowed_legacy_payload(raw_model, _LEGACY_MODEL_HUB_MODEL_FIELDS)
+    # `reasoning_efforts` was optional before v5 and defaulted to none at all;
+    # v5 requires the key. Writing that same default back is the read the old
+    # parser performed, and it costs a model — and the source holding it —
+    # nothing.
+    model.setdefault("reasoning_efforts", [])
+    return model
+
+
 def _legacy_model_hub_sources(
     sources_payload: object,
 ) -> tuple[list, list["ModelHubSourceConfig"]]:
     """Return the legacy sources v5 can still hold, as payloads and parsed pairs.
 
-    Retired consent metadata is stripped first, then every source is put through
-    the live parser rather than a copy of its rules. v5 added cross-field
-    invariants the pre-v5 parser never had — a hub source now requires an engine
-    credential ref, a native one must not carry it, an API-key source must use
-    the hub channel — so a source that was legal then can be impossible to
-    represent now. Dropping such a source is the graceful degradation this
-    migration exists for: the models it supplied migrate to empty routes, the
-    service starts, and the user re-adds it. Keeping it would fail the very load
-    this function is here to rescue, and re-implementing the invariants here
-    would rot the moment another one is added.
+    Each source is narrowed to the old contract first, then put through the live
+    parser rather than a copy of its rules. v5 added cross-field invariants the
+    pre-v5 parser never had — a hub source now requires an engine credential
+    ref, a native one must not carry it, an API-key source must use the hub
+    channel — so a source that was legal then can be impossible to represent
+    now. Dropping such a source is the graceful degradation this migration
+    exists for: the models it supplied migrate to empty routes, the service
+    starts, and the user re-adds it. Keeping it would fail the very load this
+    function is here to rescue, and re-implementing the invariants here would
+    rot the moment another one is added.
+
+    The parsed source keeps the vendor id exactly as it was persisted, not the
+    canonical one the live parser derives: everything downstream reads these to
+    reconstruct the pre-v5 walk, and that walk compared the raw string.
     """
 
     if not isinstance(sources_payload, list):
@@ -201,11 +286,7 @@ def _legacy_model_hub_sources(
     payloads: list = []
     parsed: list[ModelHubSourceConfig] = []
     for raw_source in sources_payload:
-        source_payload = (
-            {key: value for key, value in raw_source.items() if key != "experimental_consent_at"}
-            if isinstance(raw_source, dict)
-            else raw_source
-        )
+        source_payload = _legacy_model_hub_source_payload(raw_source)
         try:
             source = ModelHubSourceConfig.from_payload(source_payload)
         except (ValueError, TypeError):
@@ -220,7 +301,7 @@ def _legacy_model_hub_sources(
             )
             continue
         payloads.append(source_payload)
-        parsed.append(source)
+        parsed.append(replace(source, vendor=source_payload["vendor"]))
     return payloads, parsed
 
 
@@ -237,6 +318,11 @@ def _legacy_source_eligible_for_backend(source: "ModelHubSourceConfig", backend:
     The frozen rule is strictly narrower than the live one, which is what keeps
     a migrated ``sources.order`` valid — v5 validates every entry against its
     own eligibility rule on the way back in.
+
+    ``source.vendor`` is read as persisted, not as v5 canonicalizes it: the old
+    parser kept the string it was given, so a source recorded as ``Anthropic``
+    matched nothing and supplied nothing. Comparing the canonical form here
+    would hand an install a supply path it never had before the upgrade.
     """
 
     if backend not in MODEL_HUB_BACKENDS:
@@ -473,6 +559,34 @@ def _legacy_model_hub_routes(
     return routes
 
 
+def _legacy_model_hub_agent_fields(agent: dict) -> bool:
+    """Report whether an agent carries a field only the pre-v5 contract defined."""
+
+    if "mappings" in agent:
+        return True
+    raw_sources = agent.get("sources")
+    return isinstance(raw_sources, dict) and "policy" in raw_sources
+
+
+def _v5_model_hub_routes_payload(routes: object, backend: str) -> bool:
+    """Report whether a ``routes`` payload is one the v5 parser would accept."""
+
+    if not isinstance(routes, dict):
+        return False
+    try:
+        for model_id, route in routes.items():
+            if not isinstance(model_id, str) or not model_id:
+                return False
+            if _contains_model_hub_credential_material(model_id):
+                return False
+            if backend == "opencode":
+                canonical_opencode_menu_identity(model_id)
+            ModelHubRouteConfig.from_payload(route)
+    except (ValueError, TypeError):
+        return False
+    return True
+
+
 def _legacy_model_hub_payload(model_hub: dict, agents: dict) -> bool:
     """Report whether ``model_hub`` was written before the v5 supply contract.
 
@@ -492,9 +606,7 @@ def _legacy_model_hub_payload(model_hub: dict, agents: dict) -> bool:
     ):
         return True
     return any(
-        "mappings" in agent
-        or "routes" not in agent
-        or (isinstance(agent.get("sources"), dict) and "policy" in agent["sources"])
+        _legacy_model_hub_agent_fields(agent) or "routes" not in agent
         for agent in agents.values()
         if isinstance(agent, dict)
     )
@@ -582,8 +694,27 @@ def _migrate_legacy_model_hub_on_load(payload: dict) -> dict:
         # explicit `{}`.
         if "sources" in migrated_agent:
             migrated_agent["sources"] = migrated_sources
+        # The menu is narrowed for the same reason as the agent around it: the
+        # legacy menu parser read `view` and `checked` and ignored the rest.
+        if isinstance(migrated_agent.get("menu"), dict):
+            migrated_agent["menu"] = _narrowed_legacy_payload(
+                migrated_agent["menu"],
+                _LEGACY_MODEL_HUB_MENU_FIELDS,
+            )
 
-        if "routes" not in migrated_agent:
+        # Whether the routes must be rebuilt is decided by the agent, not by the
+        # presence of the key: the pre-v5 contract had no `routes` field at all,
+        # so a legacy agent that carries one carries something no old build
+        # wrote and no old parser read. A field only the old contract defined
+        # means the `mappings` beside it are the real supply and must win over
+        # any route object — an empty one included. Failing that, the routes
+        # themselves decide: one the live parser would reject (`null`, a
+        # malformed hop) has to be rebuilt or it fails the very load this
+        # migration exists to rescue.
+        if _legacy_model_hub_agent_fields(raw_agent) or not _v5_model_hub_routes_payload(
+            migrated_agent.get("routes"),
+            backend,
+        ):
             menu_ids = _legacy_model_hub_menu_ids(raw_agent, backend)
             ordered_sources = _legacy_model_hub_ordered_sources(raw_agent, backend, sources)
             migrated_agent["routes"] = _legacy_model_hub_routes(

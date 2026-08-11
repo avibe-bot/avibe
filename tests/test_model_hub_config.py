@@ -1760,7 +1760,10 @@ def test_legacy_source_eligibility_is_narrower_than_the_live_rule():
         for index, (kind, vendor, channel) in enumerate(
             product(
                 ("subscription", "api_key"),
-                ("anthropic", "openai", "custom"),
+                # The non-canonical spellings are swept too: the frozen rule
+                # reads the vendor exactly as it was persisted, so they are
+                # part of its domain.
+                ("anthropic", "openai", "custom", "Anthropic", " openai "),
                 ("native_cli", "hub"),
             )
         )
@@ -1851,6 +1854,163 @@ def test_mh_cfg_mig_001_pre_v5_noncanonical_opencode_menu_entry_is_dropped(tmp_p
     # The rejected entry is never repeated, since the same validator rejects
     # credential material in exactly this position.
     assert not any("gpt-4o" in record.getMessage() for record in caplog.records)
+
+
+def test_mh_cfg_mig_001_pre_v5_source_fields_the_v5_contract_dropped_never_block_startup(tmp_path):
+    """The pre-v5 source parsers read the fields they knew and ignored the rest.
+
+    v5 rejects unknown fields at every level of a source, so a single stale key
+    in the source, its state, its usage or one of its models would cost the
+    whole source — and with it every route the migration builds through it,
+    which is the outage this migration exists to prevent. An ignored field is
+    representable simply by dropping it, unlike a credential or channel shape
+    v5 has no way to hold.
+    """
+
+    legacy = _legacy_model_hub_payload(api.config_to_payload(default_config()))
+    source = copy.deepcopy(_schema("source.schema.json")["examples"][0])
+    supplied_id = source["models"][0]["id"]
+    source["a_field_this_build_never_heard_of"] = "anything"
+    source["state"]["a_stale_state_field"] = "anything"
+    source["usage"]["a_stale_usage_field"] = "anything"
+    source["models"][0]["a_stale_model_field"] = "anything"
+    legacy["model_hub"]["sources"] = [source]
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert [source.id for source in loaded.model_hub.sources] == [source["id"]]
+    assert [
+        (hop.source_id, hop.model_id)
+        for hop in loaded.model_hub.agents["claude"].routes[supplied_id].hops
+    ] == [(source["id"], supplied_id)]
+
+
+def test_mh_cfg_mig_001_pre_v5_model_without_reasoning_efforts_keeps_its_source(tmp_path):
+    """``reasoning_efforts`` was optional before v5 and required after it.
+
+    The old parser defaulted an absent key to no efforts at all, so writing
+    that same default back is the read it performed. Dropping the source over
+    it would take every model it supplies, not just the one field.
+    """
+
+    legacy = _legacy_model_hub_payload(api.config_to_payload(default_config()))
+    source = copy.deepcopy(_schema("source.schema.json")["examples"][0])
+    supplied_id = source["models"][0]["id"]
+    source["models"][0].pop("reasoning_efforts")
+    legacy["model_hub"]["sources"] = [source]
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert [model.reasoning_efforts for model in loaded.model_hub.sources[0].models] == [[]]
+    assert [
+        (hop.source_id, hop.model_id)
+        for hop in loaded.model_hub.agents["claude"].routes[supplied_id].hops
+    ] == [(source["id"], supplied_id)]
+
+
+def test_mh_cfg_mig_001_pre_v5_menu_fields_the_v5_contract_dropped_never_block_startup(tmp_path):
+    """The pre-v5 menu parser read ``view`` and ``checked`` and ignored the rest."""
+
+    legacy = _legacy_model_hub_payload(api.config_to_payload(default_config()))
+    menu = legacy["model_hub"]["agents"]["opencode"]["menu"]
+    menu["a_key_this_build_never_heard_of"] = ["anything"]
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert loaded.model_hub.agents["opencode"].menu.to_payload() == {
+        "view": menu["view"],
+        "checked": [],
+    }
+
+
+def test_mh_cfg_mig_001_pre_v5_agent_routes_key_never_outranks_its_mappings(tmp_path):
+    """A pre-v5 agent that carries ``routes`` carries something no old build wrote.
+
+    The old contract had no such field: the parser never read one, so its value
+    is metadata of unknown origin. A ``null`` would fail the load this
+    migration exists to rescue, and an empty object would look valid while
+    silently discarding the ``mappings`` that were the real supply.
+    """
+
+    current = api.config_to_payload(default_config())
+    legacy = _legacy_model_hub_payload(current)
+    source = copy.deepcopy(_schema("source.schema.json")["examples"][0])
+    source["models"].append({**source["models"][0], "id": "target-model"})
+    legacy["model_hub"]["sources"] = [source]
+    mapped_id, *_ = tuple(current["model_hub"]["agents"]["claude"]["routes"])
+    legacy["model_hub"]["agents"]["claude"]["mappings"] = [
+        {"builtin_id": mapped_id, "target_model_id": "target-model", "enabled": True}
+    ]
+    legacy["model_hub"]["agents"]["claude"]["routes"] = None
+    legacy["model_hub"]["agents"]["codex"]["routes"] = {}
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert [
+        (hop.source_id, hop.model_id)
+        for hop in loaded.model_hub.agents["claude"].routes[mapped_id].hops
+    ] == [(source["id"], "target-model")]
+    assert set(loaded.model_hub.agents["codex"].routes) == set(
+        current["model_hub"]["agents"]["codex"]["routes"]
+    )
+
+
+def test_mh_cfg_mig_001_pre_v5_unreadable_routes_are_rebuilt_without_a_legacy_agent_field(tmp_path):
+    """A legacy payload can hold an agent whose own fields say nothing.
+
+    The file is pre-v5 by its root, so the agent's ``routes`` are foreign
+    whatever they say; when they are also unreadable, keeping them would block
+    startup on exactly the config this migration is for.
+    """
+
+    current = api.config_to_payload(default_config())
+    legacy = _legacy_model_hub_payload(current)
+    claude = legacy["model_hub"]["agents"]["claude"]
+    claude.pop("mappings")
+    claude["sources"].pop("policy")
+    menu_id, *_ = tuple(current["model_hub"]["agents"]["claude"]["routes"])
+    claude["routes"] = {menu_id: {"hops": "not-an-array"}}
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert set(loaded.model_hub.agents["claude"].routes) == set(
+        current["model_hub"]["agents"]["claude"]["routes"]
+    )
+
+
+def test_mh_cfg_mig_001_pre_v5_noncanonical_vendor_supplied_nothing_and_still_does(tmp_path):
+    """The pre-v5 parser kept the vendor string it was given; v5 canonicalizes it.
+
+    A source recorded as ``Anthropic`` matched no vendor before the upgrade, so
+    it was eligible for nothing and supplied nothing. Reading it through the
+    canonical form would hand the install a supply path it never had.
+    """
+
+    legacy = _legacy_model_hub_payload(api.config_to_payload(default_config()))
+    source = copy.deepcopy(_schema("source.schema.json")["examples"][0]) | {"vendor": "Anthropic"}
+    supplied_id = source["models"][0]["id"]
+    legacy["model_hub"]["sources"] = [source]
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    # The source itself survives — it is representable, and the user can order
+    # it by hand — but no agent is given a walk through it.
+    assert [source.id for source in loaded.model_hub.sources] == [source["id"]]
+    for agent in loaded.model_hub.agents.values():
+        assert list(agent.sources.order) == []
+        assert agent.routes.get(supplied_id, ModelHubRouteConfig()).hops == ()
 
 
 def test_current_model_hub_config_survives_load_unchanged(tmp_path):
