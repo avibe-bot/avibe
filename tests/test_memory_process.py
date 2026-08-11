@@ -4104,6 +4104,25 @@ def test_sync_discovery_ignores_foreign_uid_candidates(
         )
 
 
+def test_sync_discovery_ignores_non_sync_candidate_with_inaccessible_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    own_uid = os.getuid() if hasattr(os, "getuid") else 0
+    unrelated = _RebuildDiscoveryCandidate(
+        cmdline=(sys.executable, "-m", "http.server"),
+        uid=own_uid,
+        environment=None,
+    )
+    monkeypatch.setattr(memory_process.psutil, "process_iter", lambda: [unrelated])
+
+    assert _processes_syncing_owned_root(
+        provider_root=tmp_path,
+        python=Path(sys.executable),
+        nonce="a" * 64,
+    ) == {}
+
+
 def test_sidecar_root_discovery_requires_exact_uid_argv_root_and_role(
     monkeypatch,
     tmp_path: Path,

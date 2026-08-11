@@ -3048,8 +3048,6 @@ def _processes_syncing_owned_root(
             if own_uid is not None and uid is not None and uid != own_uid:
                 continue
             cmdline = _disclosed_identity_field(candidate.cmdline)
-            created_at = _disclosed_identity_field(candidate.create_time)
-            environment = _disclosed_process_environment(candidate)
         except psutil.NoSuchProcess:
             continue
         except psutil.Error as exc:
@@ -3068,6 +3066,15 @@ def _processes_syncing_owned_root(
             python=python,
         ):
             continue
+        try:
+            created_at = _disclosed_identity_field(candidate.create_time)
+            environment = _disclosed_process_environment(candidate)
+        except psutil.NoSuchProcess:
+            continue
+        except psutil.Error as exc:
+            raise RuntimeError(
+                f"sync child identity could not be verified (pid {candidate.pid})"
+            ) from exc
         if own_uid is not None and uid is None:
             raise RuntimeError(f"sync child uid could not be verified (pid {candidate.pid})")
         if created_at is None or environment is None:

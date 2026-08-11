@@ -360,14 +360,14 @@ class SyncOwnership:
                     break
             else:
                 raise SyncOwnershipError("sync process group did not exit")
-            remaining, remaining_foreign = self.host.recorded_group_members(
-                group,
-                socket_path=Path(record["socket_path"]),
-                provider_root=self.provider_root,
-                role=_MemoryChildRole.CASCADE_SYNC,
-            )
-            if remaining_foreign or self.host.live(remaining):
-                raise SyncOwnershipError("sync process group death is unproven")
+        remaining, remaining_foreign = self.host.recorded_group_members(
+            group,
+            socket_path=Path(record["socket_path"]),
+            provider_root=self.provider_root,
+            role=_MemoryChildRole.CASCADE_SYNC,
+        )
+        if remaining_foreign or self.host.live(remaining):
+            raise SyncOwnershipError("sync process group death is unproven")
         self.remove(nonce=str(record["nonce"]))
 
 

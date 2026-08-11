@@ -488,6 +488,50 @@ async def test_gone_leader_with_live_helper_is_swept_before_retirement(tmp_path:
     assert host.signals[0][0] == {777: 11.5}
 
 
+async def test_orphan_reconciliation_rescans_group_before_retiring_record(
+    tmp_path: Path,
+) -> None:
+    memory_dir = tmp_path / "memory"
+    root = memory_dir / "everos-root"
+    record = _record(root, state="finalized", pid=451)
+    uid = os.getuid() if hasattr(os, "getuid") else None
+    helper_env = {
+        "EVEROS_ROOT": str(root),
+        "AVIBE_MEMORY_CHILD_ROLE": SYNC_ROLE,
+        SYNC_NONCE_ENV: record["nonce"],
+        SYNC_PARENT_PID_ENV: str(record["parent_pid"]),
+        SYNC_PARENT_CREATE_TIME_ENV: float(record["parent_create_time"]).hex(),
+        SYNC_PARENT_UID_ENV: "" if uid is None else str(uid),
+    }
+
+    class ReplacingHelperHost(_Host):
+        scans = 0
+
+        def recorded_group_members(self, process_group, **kwargs):
+            del process_group, kwargs
+            self.scans += 1
+            if self.scans == 1:
+                return {777: 11.5}, []
+            self.identities[778] = _ProcessIdentity(
+                create_time=12.5,
+                cmdline=("/runtime/bin/python", "-c", "replacement-helper"),
+                uid=uid,
+                environment=helper_env,
+            )
+            return {778: 12.5}, []
+
+    host = ReplacingHelperHost()
+    ownership = SyncOwnership(sync_record_path(memory_dir), provider_root=root, host=host)
+    ownership.write(record)
+
+    with pytest.raises(SyncOwnershipError, match="group death is unproven"):
+        await ownership.reconcile()
+
+    assert host.scans == 2
+    assert ownership.path.exists()
+    assert host.signals == []
+
+
 async def test_uncertain_group_member_preserves_record(tmp_path: Path) -> None:
     memory_dir = tmp_path / "memory"
     root = memory_dir / "everos-root"
