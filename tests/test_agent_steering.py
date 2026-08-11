@@ -110,9 +110,13 @@ class _OpenCodeSessionManager:
     def __init__(self, base_session_id: str, native_session_id: str, cwd: str) -> None:
         self.base_session_id = base_session_id
         self.request_session = (native_session_id, cwd, "session-key")
+        self.session_lock = asyncio.Lock()
 
     def get_request_session(self, base_session_id: str):
         return self.request_session if base_session_id == self.base_session_id else None
+
+    def get_session_lock(self, _base_session_id: str):
+        return self.session_lock
 
 
 class _OpenCodeServer:
@@ -602,6 +606,7 @@ def _opencode_agent(primary: AgentRequest, task: asyncio.Task, server: _OpenCode
         primary.working_path,
     )
     agent._client_manager = SimpleNamespace(_server_manager=server)
+    agent._user_stopped_sessions = set()
     agent._steering_states = {
         primary.base_session_id: _OpenCodeSteerState(
             task=task,

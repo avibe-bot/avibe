@@ -12,6 +12,7 @@ from unittest.mock import ANY, AsyncMock, Mock, call, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from core.processing_indicator import STOPPED_REACTION_EMOJI
 from core.runtime_activation import RuntimeActivationRegistry
 
 _AGENT_PATH = Path(__file__).resolve().parents[1] / "modules/agents/codex/agent.py"
@@ -602,6 +603,7 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         agent._session_mgr = SimpleNamespace(get_thread_id=lambda base_session_id: "thread-1")
         agent._turn_registry = _StubTurnRegistry()
         agent._turn_registry._active_turns["session-1"] = "turn-1"
+        agent._user_stopped_turn_ids = set()
         transport = SimpleNamespace(is_alive=True, send_request=AsyncMock(side_effect=RuntimeError("boom")))
         agent._transports = {"/tmp": transport}
         agent._event_handler = SimpleNamespace(clear_pending=Mock(return_value=SimpleNamespace()))
@@ -615,12 +617,15 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result)
         agent._event_handler.clear_pending.assert_not_called()
         agent._remove_ack_reaction.assert_not_awaited()
+        # Nothing was stopped, so no later ending may inherit a stopped receipt.
+        self.assertEqual(agent._user_stopped_turn_ids, set())
 
     async def test_handle_stop_hides_turn_after_interrupt_succeeds(self):
         agent = object.__new__(CodexAgent)
         agent._session_mgr = SimpleNamespace(get_thread_id=lambda base_session_id: "thread-1")
         agent._turn_registry = _StubTurnRegistry()
         agent._turn_registry._active_turns["session-1"] = "turn-1"
+        agent._user_stopped_turn_ids = set()
 
         events = []
 
@@ -634,7 +639,9 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
 
         agent._transports = {"/tmp": SimpleNamespace(is_alive=True, send_request=send_request)}
         agent._event_handler = SimpleNamespace(clear_pending=clear_pending)
-        agent._remove_ack_reaction = AsyncMock(side_effect=lambda request: events.append(("ack", None)))
+        agent._remove_ack_reaction = AsyncMock(
+            side_effect=lambda request, *, terminal_emoji=None: events.append(("ack", terminal_emoji))
+        )
         agent.controller = SimpleNamespace(emit_agent_message=AsyncMock())
 
         request = SimpleNamespace(base_session_id="session-1", working_path="/tmp", context=object())
@@ -644,6 +651,32 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result)
         self.assertEqual(events[0][0], "send")
         self.assertEqual(events[1][0], "clear")
+        # The stop is silent, so the ⏹️ receipt replacing the running 👀 is the
+        # only thing that tells the user the turn ended on their command.
+        self.assertEqual(events[2], ("ack", STOPPED_REACTION_EMOJI))
+        self.assertEqual(agent._user_stopped_turn_ids, set())
+
+    async def test_handle_stop_does_not_cancel_a_turn_that_completed_during_rpc(self):
+        agent = object.__new__(CodexAgent)
+        agent._session_mgr = SimpleNamespace(get_thread_id=lambda base_session_id: "thread-1")
+        agent._turn_registry = _StubTurnRegistry()
+        agent._turn_registry._active_turns["session-1"] = "turn-1"
+        agent._user_stopped_turn_ids = set()
+        agent._transports = {"/tmp": SimpleNamespace(is_alive=True, send_request=AsyncMock(return_value={}))}
+        # None with the intent still present means a normal/failed completion
+        # popped the turn; an interrupted completion would consume the intent.
+        agent._event_handler = SimpleNamespace(clear_pending=Mock(return_value=None))
+        agent._remove_ack_reaction = AsyncMock()
+        agent.controller = SimpleNamespace(emit_agent_message=AsyncMock())
+
+        request = SimpleNamespace(base_session_id="session-1", working_path="/tmp", context=object())
+
+        result = await agent.handle_stop(request)
+
+        self.assertTrue(result)
+        agent._remove_ack_reaction.assert_not_awaited()
+        agent.controller.emit_agent_message.assert_not_awaited()
+        self.assertEqual(agent._user_stopped_turn_ids, set())
 
     async def test_refresh_auth_state_stops_transports_and_invalidates_threads(self):
         agent = object.__new__(CodexAgent)

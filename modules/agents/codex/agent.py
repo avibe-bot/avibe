@@ -20,6 +20,7 @@ from core.backend_failure import emit_backend_failure
 from core.caller_context import caller_env_for_platform_payload
 from core.message_output import stop_output_for, terminal_output_for
 from core.native_dispatch_phase import mark_backend_dispatch_attempted
+from core.processing_indicator import STOPPED_REACTION_EMOJI
 from core.services.agent_steering import (
     ActiveSteerTarget,
     SteerOutcome,
@@ -151,6 +152,11 @@ class CodexAgent(BaseAgent):
         self._thread_caller_env_configs: Dict[str, tuple[str, dict[str, str]]] = {}
         # base_session_id → (thread_id, effective Git PATH, PATH override persisted)
         self._thread_git_path_configs: Dict[str, tuple[str, str, bool]] = {}
+        # Turn ids the USER stopped. ``turn/interrupt`` and the ``turn/completed``
+        # notification it provokes race each other, and whichever arrives first
+        # clears the 👀 — so the stop intent has to outlive both and be consumed
+        # by the winner. See ``consume_user_stop_intent``.
+        self._user_stopped_turn_ids: set[str] = set()
         self._fork_correction_pending_base_sessions: set[str] = set()
         self._connection_probes: Dict[str, _CodexConnectionProbeState] = {}
         self._connection_probe_turns: Dict[str, str] = {}
@@ -628,19 +634,36 @@ class CodexAgent(BaseAgent):
             request.stop_failure_reason = "runtime_unavailable"
             return False
 
+        # Recorded BEFORE the RPC. Codex answers an interrupt with a
+        # ``turn/completed`` notification the event worker may process while this
+        # call is still awaiting its response; that handler pops the turn and
+        # clears its reaction, after which ``clear_pending`` here returns None.
+        # Whichever side gets there first consumes the intent and owes the
+        # receipt, so the race can no longer swallow it.
+        self._user_stopped_turn_ids.add(turn_id)
         try:
             await transport.send_request(
                 "turn/interrupt",
                 {"threadId": thread_id, "turnId": turn_id},
             )
             interrupted_request = self._event_handler.clear_pending(turn_id)
-            if interrupted_request:
-                await self._remove_ack_reaction(interrupted_request)
+            stopped_by_user = self.consume_user_stop_intent(turn_id)
+            if interrupted_request and stopped_by_user:
+                await self._remove_ack_reaction(
+                    interrupted_request,
+                    terminal_emoji=STOPPED_REACTION_EMOJI,
+                )
+            elif interrupted_request is None and stopped_by_user:
+                # A normal/failed completion won the race and popped the turn
+                # without consuming the stop intent. Its own terminal output is
+                # authoritative, so do not overwrite it with a silent cancel.
+                logger.info("Codex turn %s completed before /stop claimed it", turn_id)
+                return True
             # A user-initiated stop is terminal but intentional, so it carries NO
             # user-facing message: a single SILENT result settles the dot to idle +
             # releases the SSE waiter through the outbound chokepoint without a
             # bubble. The user already knows they stopped it (avibe shows the dot go
-            # idle; IM shows the ack reaction removed above). ``level="silent"`` is
+            # idle; IM shows the ⏹️ receipt stamped above). ``level="silent"`` is
             # the explicit visibility grade rather than faking it via empty text.
             # ``stop_output_for`` (not the terminal-turn default) keeps this empty body
             # out of the run's terminal state so the stop settles it ``canceled``
@@ -658,6 +681,24 @@ class CodexAgent(BaseAgent):
             request.stop_failure_reason = "interrupt_failed"
             logger.error("Failed to interrupt Codex turn: %s", e)
             return False
+        finally:
+            # A normal/failed completion does not consume stop intent, and the
+            # caller itself may be cancelled while the RPC is in flight. Never
+            # let either path leave a stale turn id in this long-lived agent.
+            self._user_stopped_turn_ids.discard(turn_id)
+
+    def consume_user_stop_intent(self, turn_id: str) -> bool:
+        """Claim the /stop intent for ``turn_id``; True for the first claimer only.
+
+        Both the interrupt RPC and the ``turn/completed`` notification it causes
+        want to retire the same reaction, and either may run first. Claiming the
+        intent makes the receipt exactly-once instead of dependent on that order.
+        """
+
+        if not turn_id or turn_id not in self._user_stopped_turn_ids:
+            return False
+        self._user_stopped_turn_ids.discard(turn_id)
+        return True
 
     async def clear_sessions(self, session_key: str) -> int:
         """Clear sessions scoped to a specific session_key."""
