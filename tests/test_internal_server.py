@@ -712,6 +712,41 @@ def test_memory_factory_reset_posts_exact_confirmation_and_returns_final_result(
     controller.factory_reset_memory.assert_awaited_once_with()
 
 
+def test_memory_factory_reset_validates_confirmation_before_runtime_lookup() -> None:
+    from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+    from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+
+    secret = "test-memory-ui-secret"
+    path = "/internal/memory/factory-reset"
+    controller = _build_controller_double()
+    controller.memory_runtime = None
+    controller.factory_reset_memory = AsyncMock()
+    app = internal_server.create_app(controller, memory_ui_secret=secret)
+    headers = {
+        MEMORY_USER_KEY_HEADER: "avibe:local",
+        MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
+            secret,
+            method="POST",
+            path=path,
+            user_key="avibe:local",
+        ),
+    }
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post(path, json={"confirm": False}, headers=headers)
+
+    response = asyncio.run(_exercise())
+    assert response.status_code == 400
+    assert response.json() == {
+        "ok": False,
+        "error": "memory_invalid_input",
+        "result": "failed",
+    }
+    controller.factory_reset_memory.assert_not_awaited()
+
+
 @pytest.mark.parametrize(
     "payload",
     [

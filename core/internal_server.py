@@ -969,17 +969,17 @@ def create_app(
                 status_code=403,
                 content={"ok": False, "error": "memory_access_denied", "result": "failed"},
             )
-        runtime = _memory_runtime()
-        if runtime is None:
-            return JSONResponse(
-                status_code=503,
-                content={"ok": False, "error": "memory_runtime_missing", "result": "failed"},
-            )
         payload = await _safe_json(request)
         if payload != {"confirm": True}:
             return JSONResponse(
                 status_code=400,
                 content={"ok": False, "error": "memory_invalid_input", "result": "failed"},
+            )
+        runtime = _memory_runtime()
+        if runtime is None:
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": "memory_runtime_missing", "result": "failed"},
             )
         rebuild_running = getattr(runtime, "_rebuild_running", None)
         repair_running = getattr(runtime, "_repair_running", None)

@@ -54,6 +54,12 @@ def _create_roots(home: Path) -> None:
     (home / "state").chmod(0o700)
 
 
+def _assert_operation_lease_available(home: Path) -> None:
+    lease = MemoryOperationLease(home)
+    lease.acquire()
+    lease.release()
+
+
 def test_delete_memory_roots_reports_lstat_failure_per_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from core.memory import factory_reset
 
@@ -276,6 +282,27 @@ async def test_factory_reset_keeps_roots_when_recorded_sync_reap_is_unprovable(t
     assert result["data_deleted"] is False
     assert result["data_remaining"] is True
     assert runtime.retired is False
+    _assert_operation_lease_available(tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_factory_reset_releases_operation_lease_when_repair_is_running(tmp_path: Path) -> None:
+    _create_roots(tmp_path)
+
+    class _RuntimeWithRepair(_Runtime):
+        def _repair_running(self) -> bool:
+            return True
+
+    result = await Controller._factory_reset_memory_once(
+        _controller(_RuntimeWithRepair(tmp_path))
+    )
+
+    assert result == {
+        "ok": False,
+        "error": "memory_operation_in_progress",
+        "result": "failed",
+    }
+    _assert_operation_lease_available(tmp_path)
 
 
 @pytest.mark.asyncio
