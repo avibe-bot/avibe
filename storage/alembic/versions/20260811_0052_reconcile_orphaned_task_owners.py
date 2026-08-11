@@ -18,10 +18,12 @@ branch_labels = None
 depends_on = None
 
 
+_SQLITE_WHITESPACE_EXPR = "' ' || char(9) || char(10) || char(11) || char(12) || char(13)"
 _OWNER_SESSION_EXPR = (
     "CASE WHEN json_valid(run_definitions.metadata_json) = 1 THEN "
     "CASE WHEN json_type(run_definitions.metadata_json, '$.created_by.caller.session_id') = 'text' "
-    "THEN nullif(trim(json_extract(run_definitions.metadata_json, '$.created_by.caller.session_id')), '') "
+    "THEN nullif(trim(json_extract(run_definitions.metadata_json, "
+    "'$.created_by.caller.session_id'), " + _SQLITE_WHITESPACE_EXPR + "), '') "
     "END END"
 )
 
@@ -29,11 +31,11 @@ _OWNER_SESSION_EXPR = (
 def upgrade() -> None:
     """Stop pre-owner-teardown Tasks that have no surviving execution target.
 
-    Pure command and create-per-run Tasks deliberately leave ``session_id`` NULL.
-    If their creating Session was removed before owner-aware teardown shipped, the
-    definitions otherwise remain enabled and continue firing without belonging to
-    any Session that can show them in the banner. Pausing them preserves the
-    definition in the unfiltered Task list while preventing invisible execution.
+    Pure command and create-per-run Tasks deliberately leave ``session_id`` blank.
+    If their creating Session was removed before owner-aware teardown shipped, an
+    enabled definition would continue firing invisibly and an already-paused one
+    could later be resumed into that state. Mark both; only enabled rows need their
+    enabled state changed.
     """
 
     bind = op.get_bind()
@@ -42,15 +44,14 @@ def upgrade() -> None:
     bind.execute(
         sa.text(
             "UPDATE run_definitions "
-            "SET enabled = 0, "
+            "SET enabled = CASE WHEN enabled <> 0 THEN 0 ELSE enabled END, "
             "metadata_json = json_set(metadata_json, '$.orphaned_task_owner', "
             "json_object('reason_code', 'task_owner_session_unavailable', "
             "'owner_session_id', (" + owner_expr + "))), "
             "updated_at = :updated_at "
             "WHERE definition_type = 'scheduled' "
-            "AND enabled <> 0 "
             "AND deleted_at IS NULL "
-            "AND nullif(trim(session_id), '') IS NULL "
+            "AND nullif(trim(session_id, " + _SQLITE_WHITESPACE_EXPR + "), '') IS NULL "
             "AND (" + owner_expr + ") IS NOT NULL "
             "AND NOT EXISTS ("
             "SELECT 1 FROM agent_sessions "

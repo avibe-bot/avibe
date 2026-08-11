@@ -1967,8 +1967,8 @@ def test_retirement_marker_migration_is_forward_only(tmp_path: Path) -> None:
     assert version == (HEAD_REVISION,)
 
 
-def test_orphaned_owner_task_migration_pauses_unbound_definitions(tmp_path: Path) -> None:
-    """0052 stops enabled pure-command/create-per-run Tasks with no live owner."""
+def test_orphaned_owner_task_migration_marks_unbound_definitions(tmp_path: Path) -> None:
+    """0052 blocks every resumable orphan and stops the ones still enabled."""
     db_path = tmp_path / "vibe.sqlite"
     run_migrations(db_path, revision="20260811_0051")
 
@@ -2030,6 +2030,7 @@ def test_orphaned_owner_task_migration_pauses_unbound_definitions(tmp_path: Path
         insert_task("missing-owner", "ses-removed-owner")
         insert_task("pure-command", "ses-removed-owner", session_policy=None)
         insert_task("blank-target", "ses-removed-owner", session_id="   ")
+        insert_task("whitespace-target", "ses-removed-owner", session_id="\t\n\r")
         insert_task("archived-owner", "ses-archived-owner")
         insert_task("live-owner", "ses-live-owner")
         insert_task("target-fallback", "ses-removed-owner", session_id="ses-target")
@@ -2060,6 +2061,7 @@ def test_orphaned_owner_task_migration_pauses_unbound_definitions(tmp_path: Path
         "missing-owner": (None, "ses-removed-owner"),
         "pure-command": (None, "ses-removed-owner"),
         "blank-target": ("   ", "ses-removed-owner"),
+        "whitespace-target": ("\t\n\r", "ses-removed-owner"),
         "archived-owner": (None, "ses-archived-owner"),
     }
     for task_id, (session_id, owner_session_id) in expected_paused.items():
@@ -2073,7 +2075,11 @@ def test_orphaned_owner_task_migration_pauses_unbound_definitions(tmp_path: Path
     assert rows["target-fallback"][:3] == (1, "ses-target", None)
     assert rows["legacy-unowned"][:3] == (1, None, None)
     assert rows["already-paused"][:3] == (0, None, "manual pause")
-    for task_id in ("live-owner", "target-fallback", "legacy-unowned", "already-paused"):
+    assert owner_marker("already-paused") == {
+        "reason_code": "task_owner_session_unavailable",
+        "owner_session_id": "ses-removed-owner",
+    }
+    for task_id in ("live-owner", "target-fallback", "legacy-unowned"):
         assert owner_marker(task_id) is None
 
 

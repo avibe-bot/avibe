@@ -2296,7 +2296,9 @@ def _delete_agent_session_rows(
         # whole guard exists to survive. Measured, not assumed. Leaving the reclaim in
         # place is also the recoverable half: the definitions were owned by the session
         # the user asked to clear, ``pause`` keeps them re-enablable, and the kept row is
-        # a superseded one the thread has already moved off.
+        # a superseded one the thread has already moved off. Owner-only Tasks briefly
+        # receive the same orphan marker as a successful teardown; the refused-claim
+        # branch removes it again once it proves the owner row is still live.
         reclaim_bound_definitions(conn, session_id, mode=reclaim_mode, reason=reclaim_reason)
         claimed = bool(
             conn.execute(
@@ -2307,6 +2309,10 @@ def _delete_agent_session_rows(
             ).rowcount
         )
         if not claimed:
+            if reclaim_mode == RECLAIM_PAUSE:
+                from storage.background import clear_task_resume_blocks_for_available_owner
+
+                clear_task_resume_blocks_for_available_owner(conn, session_id)
             logger.warning(
                 "Skipped hard-deleting session %s: it stopped matching the teardown "
                 "query concurrently (superseded, re-anchored or already gone)",

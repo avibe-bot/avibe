@@ -336,6 +336,7 @@ _BLANK_DEFINITION_SUMMARY: dict[str, Any] = {
 _DEFINITION_SESSION_KEY_FIELDS = ("session_key", "deliver_key")
 ORPHANED_TASK_OWNER_METADATA_KEY = "orphaned_task_owner"
 TASK_OWNER_UNAVAILABLE_REASON_CODE = "task_owner_session_unavailable"
+_SQLITE_TRIM_WHITESPACE = " \t\n\r\f\v"
 
 
 def definition_owner_session_id(metadata: Any) -> Optional[str]:
@@ -399,7 +400,7 @@ def definition_owner_session_id_expression() -> Any:
                 (
                     func.json_type(metadata_json, "$.created_by.caller.session_id")
                     == "text",
-                    func.nullif(func.trim(raw_owner), ""),
+                    func.nullif(func.trim(raw_owner, _SQLITE_TRIM_WHITESPACE), ""),
                 ),
                 else_=None,
             ),
@@ -562,6 +563,59 @@ def require_task_resumable(
     blocked = task_resume_block(metadata, session_id)
     if blocked is not None:
         raise TaskResumeBlocked(definition_id, blocked["owner_session_id"])
+
+
+def clear_task_resume_blocks_for_available_owner(
+    conn: Any,
+    owner_session_id: str,
+) -> int:
+    """Clear stale orphan markers when a refused teardown leaves the owner live."""
+
+    sid = str(owner_session_id or "").strip()
+    if not sid:
+        return 0
+    owner_is_live = conn.execute(
+        select(literal(1))
+        .select_from(agent_sessions)
+        .where(agent_sessions.c.id == sid, agent_sessions.c.status != "archived")
+        .limit(1)
+    ).first()
+    if owner_is_live is None:
+        return 0
+
+    rows = (
+        conn.execute(
+            select(
+                run_definitions.c.id,
+                run_definitions.c.session_id,
+                run_definitions.c.metadata_json,
+            )
+            .where(run_definitions.c.definition_type == "scheduled")
+            .where(run_definitions.c.deleted_at.is_(None))
+        )
+        .mappings()
+        .all()
+    )
+    cleared = 0
+    now = _utc_now_iso()
+    for row in rows:
+        metadata = _json_loads(row["metadata_json"], {})
+        if definition_owner_session_id(metadata) != sid:
+            continue
+        blocked = task_resume_block(metadata, row["session_id"])
+        if blocked is None or blocked["owner_session_id"] != sid:
+            continue
+        metadata = dict(metadata)
+        metadata.pop(ORPHANED_TASK_OWNER_METADATA_KEY, None)
+        result = conn.execute(
+            update(run_definitions)
+            .where(run_definitions.c.id == row["id"])
+            .where(run_definitions.c.deleted_at.is_(None))
+            .where(run_definitions.c.metadata_json == row["metadata_json"])
+            .values(metadata_json=_json_dumps(metadata), updated_at=now)
+        )
+        cleared += int(result.rowcount or 0)
+    return cleared
 
 
 @dataclass(frozen=True)
@@ -3040,6 +3094,11 @@ class SQLiteBackgroundTaskStore:
         definition_type: Optional[str] = None,
     ) -> bool:
         with self.engine.begin() as conn:
+            if enabled:
+                # The resumability decision and enabling UPDATE are one atomic
+                # transition. Without the writer reservation, /new can stamp an
+                # orphan-owner block after the SELECT and before this UPDATE.
+                reserve_write_lock(conn)
             values: dict[str, Any] = {"enabled": 1 if enabled else 0, "updated_at": _utc_now_iso()}
             if enabled:
                 # Resuming may start a new lifecycle, and the old one must stop

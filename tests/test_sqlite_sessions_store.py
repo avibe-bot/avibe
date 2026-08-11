@@ -5895,8 +5895,9 @@ def _bind_definition(
     conn,  # noqa: ANN001
     *,
     definition_id: str,
-    session_id: str,
+    session_id: str | None,
     metadata: dict | None = None,
+    enabled: int = 1,
 ) -> None:
     """A scheduled task pinned to ``session_id``, in the shape reclaim reads."""
     conn.execute(
@@ -5912,7 +5913,7 @@ def _bind_definition(
             prompt="run the nightly check",
             schedule_type="cron",
             cron="0 3 * * *",
-            enabled=1,
+            enabled=enabled,
             created_at="2026-07-28T00:00:00Z",
             updated_at="2026-07-28T00:00:00Z",
             metadata_json=json.dumps(metadata or {"origin": "cli"}),
@@ -5926,11 +5927,11 @@ def _bind_definition(
 #: teardown ledger -- is decided from this one row set.
 _RECLAIM_DECISION_SELECT = (
     "SELECT run_definitions.id, run_definitions.definition_type, run_definitions.enabled, "
-    "run_definitions.metadata_json FROM run_definitions WHERE ("
+    "run_definitions.session_id, run_definitions.metadata_json FROM run_definitions WHERE ("
     "run_definitions.definition_type = ? AND run_definitions.session_id = ? OR "
     "run_definitions.definition_type = ? AND (CASE WHEN (json_valid(run_definitions.metadata_json) = ?) "
     "THEN CASE WHEN (json_type(run_definitions.metadata_json, ?) = ?) THEN "
-    "nullif(trim(json_extract(run_definitions.metadata_json, ?)), ?) END END = ? OR "
+    "nullif(trim(json_extract(run_definitions.metadata_json, ?), ?), ?) END END = ? OR "
     "run_definitions.session_id = ?)) AND run_definitions.deleted_at IS NULL"
 )
 
@@ -6547,6 +6548,16 @@ def test_new_teardown_keeps_a_session_superseded_inside_its_window(tmp_path: Pat
                 workdir=str(tmp_path),
             )
             _bind_definition(conn, definition_id="def-pinned", session_id=superseded_id)
+            _bind_definition(
+                conn,
+                definition_id="def-owner-only",
+                session_id=None,
+                enabled=0,
+                metadata={
+                    "created_by": {"caller": {"session_id": superseded_id}},
+                    "origin": "cli",
+                },
+            )
 
         def _winner_supersedes(other_conn) -> None:  # noqa: ANN001
             other_conn.execute(
@@ -6587,6 +6598,24 @@ def test_new_teardown_keeps_a_session_superseded_inside_its_window(tmp_path: Pat
                 .mappings()
                 .first()
             )
+            owner_only = (
+                conn.execute(select(run_definitions).where(run_definitions.c.id == "def-owner-only"))
+                .mappings()
+                .one()
+            )
+        from storage.background import SQLiteBackgroundTaskStore, task_resume_block
+
+        metadata = json.loads(owner_only["metadata_json"])
+        assert task_resume_block(metadata, owner_only["session_id"]) is None
+        task_store = SQLiteBackgroundTaskStore(db_path)
+        try:
+            assert task_store.set_definition_enabled(
+                "def-owner-only",
+                True,
+                definition_type="scheduled",
+            )
+        finally:
+            task_store.close()
     finally:
         service.close()
 
@@ -6613,6 +6642,13 @@ def test_new_teardown_keeps_a_session_superseded_inside_its_window(tmp_path: Pat
     assert [entry["definition_id"] for entry in ledger_entries] == ["def-pinned"], (
         f"the /new reply counts {ledger_entries!r}, which is not what the teardown did"
     )
+
+
+_DEFINITION_RESUME_SELECT = (
+    "SELECT run_definitions.definition_type, run_definitions.mode, run_definitions.enabled, "
+    "run_definitions.session_id, run_definitions.metadata_json FROM run_definitions "
+    "WHERE run_definitions.id = ? AND run_definitions.deleted_at IS NULL"
+)
 
 
 # --- Meta-guard: every writer of the session ROUTE must stay marker-aware ---
@@ -6977,6 +7013,72 @@ def _refuse_a_competing_writer_at(engine, db_path: Path, *, read: str, write) ->
             other.dispose()
 
     return state
+
+
+def test_direct_task_resume_reserves_write_lock_before_resumability_read(tmp_path: Path) -> None:
+    """A Harness resume cannot overtake an orphan marker from Session teardown."""
+
+    from storage.background import SQLiteBackgroundTaskStore
+
+    db_path = tmp_path / "vibe.sqlite"
+    service = SQLiteSessionsService(db_path)
+    try:
+        with service.engine.begin() as conn:
+            _bind_definition(
+                conn,
+                definition_id="def-resume-race",
+                session_id=None,
+                enabled=0,
+                metadata={
+                    "created_by": {"caller": {"session_id": "ses-owner"}},
+                    "origin": "cli",
+                },
+            )
+    finally:
+        service.close()
+
+    store = SQLiteBackgroundTaskStore(db_path)
+    try:
+        def _stamp_orphan_marker(other_conn) -> None:  # noqa: ANN001
+            other_conn.execute(
+                run_definitions.update()
+                .where(run_definitions.c.id == "def-resume-race")
+                .values(
+                    enabled=0,
+                    metadata_json=json.dumps(
+                        {
+                            "created_by": {"caller": {"session_id": "ses-owner"}},
+                            "origin": "cli",
+                            "orphaned_task_owner": {
+                                "reason_code": "task_owner_session_unavailable",
+                                "owner_session_id": "ses-owner",
+                            },
+                        }
+                    ),
+                    updated_at="2026-08-11T00:00:01Z",
+                )
+            )
+
+        race = _refuse_a_competing_writer_at(
+            store.engine,
+            db_path,
+            read=_DEFINITION_RESUME_SELECT,
+            write=_stamp_orphan_marker,
+        )
+
+        assert store.set_definition_enabled(
+            "def-resume-race",
+            True,
+            definition_type="scheduled",
+        )
+        saved = store.get_scheduled_task("def-resume-race")
+    finally:
+        store.close()
+
+    assert race["fired"] == 1, "the test did not observe the resumability decision read"
+    assert race["committed"] == 0, "Session teardown wrote inside the resume window"
+    assert race["refused"], "the resume path did not hold SQLite's writer slot"
+    assert saved is not None and saved["enabled"] is True
 
 
 def _record_statements(engine) -> list[str]:
