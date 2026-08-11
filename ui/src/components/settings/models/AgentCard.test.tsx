@@ -39,9 +39,13 @@ describe('AgentCard', () => {
     expect(screen.queryByText(/takeover/i)).toBeNull();
   });
 
-  it('offers gateway enablement, but no Source-order control, in direct mode', () => {
-    render(<I18nextProvider i18n={i18n}><AgentCard agents={[{ ...hubAgent, mode: 'direct', sources: null, routes: null, supply_status: null, model_supply: null }]} sources={[]} chains={{}} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
+  it('offers only gateway enablement and ignores stale chain data in direct mode', () => {
+    const key = modelChainKey('claude', 'claude-opus-4-6');
+    render(<I18nextProvider i18n={i18n}><AgentCard agents={[{ ...hubAgent, mode: 'direct', sources: null, routes: null, supply_status: null, model_supply: null }]} sources={[source('src_a', 'Primary'), source('src_b', 'Backup')]} chains={{ [key]: { kind: 'ready', data: { contract_version: 5, backend: 'claude', model_id: 'claude-opus-4-6', current: { source_id: 'src_b', model_id: 'claude-opus-4-6' }, chain: [{ source_id: 'src_a', model_id: 'claude-opus-4-6', channel: 'hub', health: 'cooldown', runnable: false, reason: null, retry_at: '2099-01-01T00:00:00Z' }, { source_id: 'src_b', model_id: 'claude-opus-4-6', channel: 'hub', health: 'healthy', runnable: true, reason: null, retry_at: null }], supply_state: 'ok' } } }} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
     expect(screen.queryByText(/Source order/i)).toBeNull();
+    expect(screen.queryByRole('button', { name: /route chain/i })).toBeNull();
+    expect(screen.queryByText(/Backup/)).toBeNull();
+    expect(screen.queryByText(/takeover/i)).toBeNull();
   });
 
   it('renders the AgentSupply collapse projection and rereads chains on expand and collapse', async () => {

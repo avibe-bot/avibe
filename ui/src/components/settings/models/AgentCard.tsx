@@ -71,7 +71,8 @@ const AgentModelCard: React.FC<{
   const collapsedAtRest = collapsedModelRows(agent);
   const models = collapsed.visible;
   const canCollapse = collapsedAtRest.hidden.length > 0;
-  const hasTakeover = allModels.some((modelId) => isTakeoverRead(chains[modelChainKey(agent.backend, modelId)]));
+  const hasTakeover = agent.mode === 'hub'
+    && allModels.some((modelId) => isTakeoverRead(chains[modelChainKey(agent.backend, modelId)]));
   const modeWord = t(`settings.models.gateway.group.mode.${agent.mode === 'hub' ? 'gateway' : 'direct'}`) as string;
   const health = agent.supply_status ?? 'noSelection';
   const subtitle = agent.mode === 'direct'
@@ -117,7 +118,7 @@ const AgentModelCard: React.FC<{
           <ModelHubInfoHint label={switchFailed ? t('settings.models.gateway.fail.switchToDirect') : subtitle} content={switchFailed ? t('settings.models.gateway.fail.switchToDirect') : subtitle} className="model-hub-overview-info size-[13px]" />
         </span>
       </div>
-      {models.length === 0 ? <div className="px-4 py-10 text-center sm:px-5"><p className="text-[12.5px] text-muted">{t('settings.models.gateway.group.emptyModels')}</p></div> : <div className="space-y-2 p-2">{noUsableSource && <p className="px-3 py-1 text-[11px] font-semibold text-muted">{t('settings.models.gateway.supply.none')}</p>}{models.map((modelId) => <ModelRow key={modelId} agent={agent} modelId={modelId} sources={sources} read={chains[modelChainKey(agent.backend, modelId)]} onOpenRoute={onOpenRoute} />)}{canCollapse && <button type="button" onClick={toggleCollapsed} className="model-hub-model-collapse flex h-6 w-full items-center gap-1.5 hover:text-foreground">{expanded ? <ChevronUp /> : <ChevronDown />}{expanded ? t('settings.models.gateway.collapse', { count: collapsedAtRest.hidden.length }) : t('settings.models.gateway.collapse', { count: collapsed.hidden.length })}</button>}</div>}
+      {agent.mode === 'hub' && (models.length === 0 ? <div className="px-4 py-10 text-center sm:px-5"><p className="text-[12.5px] text-muted">{t('settings.models.gateway.group.emptyModels')}</p></div> : <div className="space-y-2 p-2">{noUsableSource && <p className="px-3 py-1 text-[11px] font-semibold text-muted">{t('settings.models.gateway.supply.none')}</p>}{models.map((modelId) => <ModelRow key={modelId} agent={agent} modelId={modelId} sources={sources} read={chains[modelChainKey(agent.backend, modelId)]} onOpenRoute={onOpenRoute} />)}{canCollapse && <button type="button" onClick={toggleCollapsed} className="model-hub-model-collapse flex h-6 w-full items-center gap-1.5 hover:text-foreground">{expanded ? <ChevronUp /> : <ChevronDown />}{expanded ? t('settings.models.gateway.collapse', { count: collapsedAtRest.hidden.length }) : t('settings.models.gateway.collapse', { count: collapsed.hidden.length })}</button>}</div>)}
     </section>
   );
 };

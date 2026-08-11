@@ -313,11 +313,16 @@ export const SettingsModelsPage: React.FC = () => {
   const refreshAllAgentChains = React.useCallback((agentRows: AgentSupply[]) => {
     const hubAgents = agentRows.filter((agent) => agent.mode === 'hub');
     const activeBackends = new Set(hubAgents.map((agent) => agent.backend));
+    chainReadAuthority.invalidateExcept(activeBackends);
     setChainsRead((previous) => readyRegion(Object.fromEntries(
       Object.entries(regionData(previous) ?? {}).filter(([key]) => activeBackends.has(key.split('\u0000')[0] as AgentBackend)),
     )));
     for (const agent of hubAgents) void refreshAgentChains(agent);
-  }, [refreshAgentChains]);
+  }, [chainReadAuthority, refreshAgentChains]);
+
+  React.useEffect(() => {
+    if (supplyRead.kind === 'ready') refreshAllAgentChains(supplyRead.data);
+  }, [refreshAllAgentChains, supplyRead]);
 
   const [refreshAuthority] = React.useState(() => createLatestAsyncAuthority<SurfaceLanding>((landing) => {
     if (!aliveRef.current) return;
@@ -328,8 +333,7 @@ export const SettingsModelsPage: React.FC = () => {
       if (next.kind === 'ready') setRuntimeRecoveryPending(false);
       return next;
     });
-    if (landing.supply.kind === 'ready') refreshAllAgentChains(landing.supply.data);
-    else setChainsRead(failRegionRead);
+    if (landing.supply.kind !== 'ready') setChainsRead(failRegionRead);
     setEventsRead((previous) => {
       if (landing.events.kind !== 'ready') return failRegionRead(previous);
       const previousFeed = regionData(previous);
@@ -467,7 +471,7 @@ export const SettingsModelsPage: React.FC = () => {
   }, [sourceIntentAuthority]);
   const selectedSource = sources.find((source) => source.id === selectedSourceId) ?? null;
   const orderAgent = agents.find((agent) => agent.backend === orderBackend && agent.mode === 'hub') ?? null;
-  const routeAgent = agents.find((agent) => agent.backend === routeTarget?.backend) ?? null;
+  const routeAgent = agents.find((agent) => agent.backend === routeTarget?.backend && agent.mode === 'hub') ?? null;
   const routeSelection = routeTarget && routeAgent ? {
     agent: routeAgent,
     modelId: routeTarget.modelId,

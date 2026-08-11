@@ -164,6 +164,23 @@ describe('latest async authority', () => {
     expect(await olderRun).toBe('stale');
     expect(landed).toEqual(['claude:new', 'codex:independent']);
   });
+
+  it('invalidates pending generations whose keys lose active ownership', async () => {
+    const claude = deferred<string>();
+    const codex = deferred<string>();
+    const landed: string[] = [];
+    const authority = createLatestAsyncAuthorityByKey<string, string>((key, value) => landed.push(`${key}:${value}`));
+
+    const claudeRun = authority.run('claude', () => claude.promise);
+    const codexRun = authority.run('codex', () => codex.promise);
+    authority.invalidateExcept(new Set(['codex']));
+    claude.resolve('no longer owned');
+    codex.resolve('still active');
+
+    expect(await claudeRun).toBe('stale');
+    expect(await codexRun).toBe('landed');
+    expect(landed).toEqual(['codex:still active']);
+  });
 });
 
 describe('bounded async map', () => {

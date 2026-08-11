@@ -33,8 +33,17 @@ export const createLatestAsyncAuthorityByKey = <K, T>(
   land: (key: K, value: T) => void,
 ) => {
   const latestRequest = new Map<K, number>();
+  const advance = (key: K) => {
+    latestRequest.set(key, (latestRequest.get(key) ?? 0) + 1);
+  };
 
   return {
+    /** Advances retired keys so their pending requests cannot regain ownership. */
+    invalidateExcept: (activeKeys: ReadonlySet<K>): void => {
+      for (const key of latestRequest.keys()) {
+        if (!activeKeys.has(key)) advance(key);
+      }
+    },
     run: async (key: K, read: () => Promise<T>): Promise<'landed' | 'stale'> => {
       const request = (latestRequest.get(key) ?? 0) + 1;
       latestRequest.set(key, request);

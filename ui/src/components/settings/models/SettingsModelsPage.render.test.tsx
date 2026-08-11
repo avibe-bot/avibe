@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { I18nextProvider } from 'react-i18next';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -62,6 +62,14 @@ const takeoverChain: AgentChain = {
     { source_id: 'src_relay', model_id: 'gpt-5.6-sol', channel: 'hub', health: 'healthy', runnable: true, reason: null, retry_at: null },
   ],
   supply_state: 'ok',
+};
+
+const deferred = <T,>() => {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
 };
 
 const renderPage = (sources: Source[]) => {
@@ -214,6 +222,45 @@ describe('SettingsModelsPage surface branches', () => {
     expect(await screen.findByText('Retained source')).toBeTruthy();
     expect(screen.getByText(/^Claude Code$/i)).toBeTruthy();
     expect(screen.getAllByText('—').length).toBeGreaterThan(0);
+  });
+
+  it('cannot restore chains after the authoritative supply leaves hub mode', async () => {
+    const head = { ...retainedSource, id: 'src_head', display_name: 'Paused source', state: { status: 'cooldown' as const, retry_at: '2099-01-01T00:00:00Z', detail_key: null } };
+    const relay = { ...retainedSource, id: 'src_relay', display_name: 'Replacement source', state: { status: 'active' as const, retry_at: null, detail_key: null } };
+    const direct = { ...takeoverAgent, mode: 'direct' as const, sources: null, routes: null, supply_status: null, model_supply: null };
+    const pendingChain = deferred<AgentChain>();
+    vi.spyOn(modelsApi, 'listSources').mockResolvedValue([head, relay]);
+    const agentRead = vi.spyOn(modelsApi, 'listAgents')
+      .mockResolvedValueOnce([takeoverAgent])
+      .mockResolvedValueOnce([direct]);
+    vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
+    vi.spyOn(modelsApi, 'listEvents')
+      .mockRejectedValueOnce(new TypeError('events unread'))
+      .mockResolvedValueOnce([]);
+    const chainRead = vi.spyOn(modelsApi, 'getAgentChain').mockImplementation(() => pendingChain.promise);
+
+    render(
+      <ToastProvider>
+        <I18nextProvider i18n={i18n}>
+          <SettingsModelsPage />
+        </I18nextProvider>
+      </ToastProvider>,
+    );
+
+    await waitFor(() => expect(chainRead).toHaveBeenCalledOnce());
+    const history = screen.getByText(/^Recent switches$|^最近切换$/i).closest('section');
+    await userEvent.click(within(history as HTMLElement).getByRole('button', { name: /^Retry$|^重试$/i }));
+    await waitFor(() => expect(agentRead).toHaveBeenCalledTimes(2));
+    expect(await screen.findByRole('button', { name: /^Switch to Gateway$|^切换到网关$/i })).toBeTruthy();
+
+    await act(async () => {
+      pendingChain.resolve(takeoverChain);
+      await pendingChain.promise;
+    });
+
+    expect(screen.queryByRole('button', { name: /route chain|路由链/i })).toBeNull();
+    expect(screen.queryByText(/^Taken over$|^接管中$/i)).toBeNull();
+    expect(screen.queryByText(/Now: Replacement source \(takeover\)|当前 Replacement source（接管）/i)).toBeNull();
   });
 
   it('keeps retained chain projections when a later supply read fails', async () => {

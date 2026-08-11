@@ -83,5 +83,6 @@ describe('RegionRead', () => {
     expect(unownedCalls).toEqual([]);
     expect(landing).not.toMatch(/readAgentChains|getAgentChain/);
     expect(page).not.toMatch(/\breadChains\b/);
+    expect(page).toMatch(/chainReadAuthority\.invalidateExcept\(activeBackends\)/);
   });
 });
