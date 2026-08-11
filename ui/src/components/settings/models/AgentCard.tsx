@@ -57,10 +57,9 @@ const ModelRow: React.FC<{
       aria-label={t('settings.models.routeDialog.open', { model: modelId }) as string}
       className="model-hub-model-row flex h-9 w-full min-w-0 items-center gap-2.5 overflow-hidden rounded-lg border border-border px-3 text-left"
     >
-      <span className="min-w-0 flex-1 truncate font-mono text-[12px] font-medium text-foreground" title={modelId}>{modelId}</span>
-      <span className="model-hub-model-mode-chip shrink-0 rounded-full border border-border px-2 py-[3px] text-[10.5px] font-semibold text-muted">{mode}</span>
-      <span className={cn('model-hub-model-current w-[190px] min-w-0 truncate text-[10.5px]', takeover && 'model-hub-model-current--takeover')} title={currentCopy}>{currentCopy}</span>
-      <ChevronRight className="size-[15px] shrink-0 text-muted/40" aria-hidden="true" />
+      <span className="flex min-w-0 flex-1 items-center gap-2.5"><span className="min-w-0 flex-1 truncate font-mono text-[12px] font-medium text-foreground" title={modelId}>{modelId}</span><span className="model-hub-model-mode-chip shrink-0 rounded-full border border-border px-2 py-[3px] text-[10.5px] font-semibold text-muted">{mode}</span></span>
+      <span className={cn('model-hub-model-current min-w-0 flex-1 truncate text-[10.5px]', takeover && 'model-hub-model-current--takeover')} title={currentCopy}>{currentCopy}</span>
+      <ChevronRight className="model-hub-overview-chevron size-[15px] shrink-0" aria-hidden="true" />
     </button>
   );
 };
@@ -102,7 +101,7 @@ const AgentModelCard: React.FC<{
   const statusClass = switchFailed || health === 'interrupted'
     ? 'text-destructive'
     : hasTakeover || health === 'degraded' || health === 'waiting'
-      ? 'text-gold'
+      ? 'model-hub-ink-gold'
       : 'text-muted';
   const statusDot = switchFailed || health === 'interrupted'
     ? 'bg-destructive'
@@ -115,11 +114,11 @@ const AgentModelCard: React.FC<{
     <section className="overflow-hidden rounded-xl border border-border bg-background" data-agent-backend={agent.backend}>
       <div className="flex min-h-[66px] flex-col justify-center gap-[7px] border-b border-border px-3.5 py-3 sm:h-[66px] sm:py-0">
         <div className="flex min-w-0 flex-col items-stretch gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
-          <div className="flex min-w-0 items-center gap-3">
-            <span className={cn('flex size-[30px] shrink-0 items-center justify-center rounded-[9px]', ACCENT_TILE[accent])}><Icon className={cn('size-4', ACCENT_ICON[accent])} /></span>
-            <span className="flex min-w-0 items-center gap-2">
+          <div className="flex min-w-0 items-center gap-[9px]">
+            <span className={cn('flex size-[30px] shrink-0 items-center justify-center rounded-[9px]', ACCENT_TILE[accent])}><Icon className={cn('size-[15px]', ACCENT_ICON[accent])} /></span>
+            <span className="flex min-w-0 items-center gap-[7px]">
               <h2 className="truncate text-[14px] font-bold text-foreground">{t(`settings.models.backends.${agent.backend}`, { defaultValue: agent.backend })}</h2>
-              <Badge variant="secondary" className={cn('px-2 py-[3px] text-[10px] font-semibold', hasTakeover && 'border-violet/30 bg-violet/10 text-violet')}>
+              <Badge variant="secondary" className={cn('px-2 py-[3px] text-[10.5px] font-semibold', hasTakeover && 'model-hub-takeover-chip')}>
                 {hasTakeover ? t('settings.models.takeover.chip') : t('settings.models.gateway.modelCount', { count: allModels.length })}
               </Badge>
             </span>
@@ -129,7 +128,7 @@ const AgentModelCard: React.FC<{
         <span className={cn('flex items-center gap-1.5 text-[11px] font-semibold sm:ml-[42px]', statusClass)}>
           <span className={cn('size-[5px] shrink-0 rounded-full', statusDot)} />
           {switchFailed ? t('settings.models.gateway.fail.switchToDirect') : subtitle}
-          <ModelHubInfoHint label={switchFailed ? t('settings.models.gateway.fail.switchToDirect') : subtitle} content={switchFailed ? t('settings.models.gateway.fail.switchToDirect') : subtitle} className="size-[13px] text-foreground/25" />
+          <ModelHubInfoHint label={switchFailed ? t('settings.models.gateway.fail.switchToDirect') : subtitle} content={switchFailed ? t('settings.models.gateway.fail.switchToDirect') : subtitle} className="model-hub-overview-info size-[13px]" />
         </span>
       </div>
       {models.length === 0 ? <div className="px-4 py-10 text-center sm:px-5"><p className="text-[12.5px] text-muted">{t('settings.models.gateway.group.emptyModels')}</p></div> : <div className="space-y-2 p-2">{noUsableSource && <p className="px-3 py-1 text-[11px] font-semibold text-muted">{t('settings.models.gateway.supply.none')}</p>}{models.map((modelId) => <ModelRow key={modelId} agent={agent} modelId={modelId} sources={sources} read={chains[modelChainKey(agent.backend, modelId)]} onOpenRoute={onOpenRoute} />)}{canCollapse && <button type="button" onClick={toggleCollapsed} className="model-hub-model-collapse flex h-6 w-full items-center gap-1.5 hover:text-foreground">{expanded ? <ChevronUp /> : <ChevronDown />}{expanded ? t('settings.models.gateway.collapse', { count: collapsedAtRest.hidden.length }) : t('settings.models.gateway.collapse', { count: collapsed.hidden.length })}</button>}</div>}

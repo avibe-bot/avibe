@@ -9,6 +9,7 @@ import { ResponsiveMenu } from '@/components/ui/responsive-menu';
 import { cn } from '@/lib/utils';
 import { formatRelativeTime } from '@/lib/relativeTime';
 import { apiFailure, modelsApi } from './modelsApi';
+import { reconcileUnknownWrite } from './reconcileUnknownWrite';
 import { sourceStatePresentation } from './sourceStatePresentation';
 import { useDeadlineClock } from './useDeadlineClock';
 import { ACCENT_ICON, ACCENT_TILE, isCustomEndpoint, sourceVisual } from './vendorMeta';
@@ -121,7 +122,7 @@ const TierEditor: React.FC<{
         {tiers.length > 0 ? tiers.map((tier) => (
           <span key={tier} className="model-hub-source-tier model-hub-source-tier-chip inline-flex rounded-full border border-border text-foreground">{tier}</span>
         )) : <span className="model-hub-source-tier text-muted">{t('settings.models.sourceDetail.tiers.empty')}</span>}
-        <span className="model-hub-source-tier font-semibold text-mint">{t(tiers.length > 0 ? 'settings.models.sourceDetail.tiers.add' : 'settings.models.sourceDetail.tiers.addFirst')}</span>
+        <span className="model-hub-source-tier model-hub-ink-mint font-semibold">{t(tiers.length > 0 ? 'settings.models.sourceDetail.tiers.add' : 'settings.models.sourceDetail.tiers.addFirst')}</span>
       </button>
     );
   }
@@ -198,11 +199,11 @@ export const SourceDetailPanel: React.FC<{
   const now = useDeadlineClock(source.state.status === 'cooldown' ? source.state.retry_at : null);
   const { Icon, accent } = sourceVisual(source);
   const [busy, setBusy] = React.useState(false);
-  const [manualDraft, setManualDraft] = React.useState<{ modelId: string; tiers: string[]; failed: boolean } | null>(null);
+  const [manualDraft, setManualDraft] = React.useState<{ modelId: string; tiers: string[]; failed: boolean; retryRead: boolean } | null>(null);
   const [guard, setGuard] = React.useState<GuardedAction | null>(null);
   const [result, setResult] = React.useState<{ added: string[]; removed: string[] } | null>(null);
   const [refetchFailed, setRefetchFailed] = React.useState(false);
-  const [removeFailure, setRemoveFailure] = React.useState<string | null>(null);
+  const [removeFailure, setRemoveFailure] = React.useState<{ modelId: string; retryRead: boolean } | null>(null);
   const models = source.models;
 
   const guardedFailure = (error: unknown): { hops: RouteHopRef[]; gaps: SupplyGap[] } | null => {
@@ -234,6 +235,10 @@ export const SourceDetailPanel: React.FC<{
       setBusy(false);
     }
   };
+  const reconcileManualCreate = async (modelId: string) => reconcileUnknownWrite(
+    () => modelsApi.listSources(),
+    (sources) => sources.find((item) => item.id === source.id)?.models.find((model) => model.id === modelId),
+  );
   const addManualModel = async () => {
     if (!manualDraft || busy) return;
     const modelId = manualDraft.modelId.trim();
@@ -241,6 +246,21 @@ export const SourceDetailPanel: React.FC<{
     setResult(null);
     setRefetchFailed(false);
     setBusy(true);
+    if (manualDraft.retryRead) {
+      const reconciliation = await reconcileManualCreate(modelId);
+      if (reconciliation.kind === 'committed') {
+        setManualDraft(null);
+        await onChanged();
+      } else {
+        setManualDraft((current) => current ? {
+          ...current,
+          failed: true,
+          retryRead: reconciliation.kind === 'unread',
+        } : current);
+      }
+      setBusy(false);
+      return;
+    }
     try {
       await modelsApi.addCustomModel(source.id, {
         model_id: modelId,
@@ -251,11 +271,40 @@ export const SourceDetailPanel: React.FC<{
       setResult(null);
       await onChanged();
     } catch (error) {
-      if (apiFailure(error)?.code === 'source_not_found') await onChanged();
-      setManualDraft((current) => current ? { ...current, failed: true } : current);
+      if (apiFailure(error)?.code === 'source_not_found') {
+        await onChanged();
+      } else {
+        const reconciliation = await reconcileManualCreate(modelId);
+        if (reconciliation.kind === 'committed') {
+          setManualDraft(null);
+          await onChanged();
+        } else {
+          setManualDraft((current) => current ? {
+            ...current,
+            failed: true,
+            retryRead: reconciliation.kind === 'unread',
+          } : current);
+        }
+      }
     } finally {
       setBusy(false);
     }
+  };
+  const reconcileRemoval = async (model: SuppliedModel) => {
+    const reconciliation = await reconcileUnknownWrite(
+      () => modelsApi.listSources(),
+      (sources) => {
+        const current = sources.find((item) => item.id === source.id);
+        return !current || !current.models.some((entry) => entry.id === model.id) ? true : undefined;
+      },
+    );
+    if (reconciliation.kind === 'committed') {
+      setGuard(null);
+      setRemoveFailure(null);
+      await onChanged();
+      return;
+    }
+    setRemoveFailure({ modelId: model.id, retryRead: reconciliation.kind === 'unread' });
   };
   const remove = async (model: SuppliedModel, force = false) => {
     setResult(null);
@@ -270,10 +319,7 @@ export const SourceDetailPanel: React.FC<{
       const refusal = guardedFailure(error);
       if (refusal && !force) setGuard({ kind: 'remove', model, ...refusal });
       else {
-        // A lost DELETE response is an unknown outcome. Re-read before another
-        // non-idempotent attempt so an already-committed removal disappears.
-        await onChanged();
-        setRemoveFailure(model.id);
+        await reconcileRemoval(model);
       }
     } finally {
       setBusy(false);
@@ -305,11 +351,11 @@ export const SourceDetailPanel: React.FC<{
         </div>
         <div className="flex shrink-0 gap-2">
           <Button variant="outline" size="sm" className="model-hub-source-action" disabled={busy} onClick={() => void refetch()}>{busy ? <Loader2 className="animate-spin" /> : <RefreshCw />}{t('settings.models.sourceDetail.action.refetch')}</Button>
-          {source.kind === 'api_key' && <Button variant="secondary" size="sm" className="model-hub-source-action text-mint" disabled={busy || manualDraft !== null} onClick={() => setManualDraft({ modelId: '', tiers: [], failed: false })}><Plus />{t('settings.models.sourceDetail.action.addModel')}</Button>}
+          {source.kind === 'api_key' && <Button variant="secondary" size="sm" className="model-hub-source-action model-hub-ink-mint" disabled={busy || manualDraft !== null} onClick={() => setManualDraft({ modelId: '', tiers: [], failed: false, retryRead: false })}><Plus />{t('settings.models.sourceDetail.action.addModel')}</Button>}
         </div>
       </section>
-      {result && result.removed.length > 0 && <p className="rounded-lg border border-gold/25 bg-gold/10 px-3 py-2 text-[11.5px] text-gold">{t('settings.models.sourceDetail.refetch.removed', { count: result.removed.length, models: result.removed.join(', ') })}</p>}
-      {result && result.added.length === 0 && result.removed.length === 0 && <p className="rounded-lg border border-mint/25 bg-mint-soft/40 px-3 py-2 text-[11.5px] text-mint">{t('settings.models.sourceDetail.refetch.unchangedOnly')}</p>}
+      {result && result.removed.length > 0 && <p className="model-hub-status-gold rounded-lg border px-3 py-2 text-[11.5px]">{t('settings.models.sourceDetail.refetch.removed', { count: result.removed.length, models: result.removed.join(', ') })}</p>}
+      {result && result.added.length === 0 && result.removed.length === 0 && <p className="model-hub-status-mint rounded-lg border px-3 py-2 text-[11.5px]">{t('settings.models.sourceDetail.refetch.unchangedOnly')}</p>}
       {refetchFailed && <p className="rounded-lg border border-destructive/25 bg-destructive/[0.08] px-3 py-2 text-[11.5px] text-destructive">{t('settings.models.sourceDetail.fail.refetch')}</p>}
       <section className="model-hub-source-table overflow-hidden border border-border bg-surface">
         <div className="model-hub-source-table-head hidden border-b border-border font-semibold md:grid">
@@ -317,11 +363,15 @@ export const SourceDetailPanel: React.FC<{
         </div>
         {models.length === 0 && !manualDraft ? <p className="px-5 py-12 text-center text-[12px] text-muted">{t(source.last_discovered_at ? 'settings.models.sourceDetail.empty' : 'settings.models.sourceDetail.emptyNeverFetched')}</p> : models.map((model) => (
           <div key={model.id} className="model-hub-source-table-row grid gap-3 border-b border-border last:border-b-0 md:items-center md:gap-y-0">
-            <span className="flex min-w-0 items-center gap-2"><span className="model-hub-source-model truncate font-mono text-foreground" title={model.id}>{model.id}</span>{result?.added.includes(model.id) && <span className="model-hub-source-pill rounded-full border border-mint/30 bg-mint-soft px-2 py-0.5 font-semibold text-mint">{t('settings.models.sourceDetail.refetch.added')}</span>}</span>
+            <span className="flex min-w-0 items-center gap-2"><span className="model-hub-source-model truncate font-mono text-foreground" title={model.id}>{model.id}</span>{result?.added.includes(model.id) && <span className="model-hub-accent-pill--mint model-hub-source-pill rounded-full border px-2 py-0.5 font-semibold">{t('settings.models.sourceDetail.refetch.added')}</span>}</span>
             <span className="model-hub-source-pill model-hub-source-entry-pill w-fit rounded-full border border-border font-semibold text-muted">{t(`settings.models.sourceDetail.entry.${model.provenance === 'discovered' ? 'auto' : 'manual'}`)}</span>
             <TierEditor source={source} model={model} onMutating={() => { setResult(null); setRefetchFailed(false); }} onChanged={onChanged} />
             <div className="flex items-center justify-end gap-2">
-              {removeFailure === model.id && <span className="model-hub-source-tier text-right text-destructive">{t('settings.models.sourceDetail.fail.removeModel')} <button type="button" disabled={busy} onClick={() => void remove(model)} className="font-semibold underline underline-offset-2">{t('settings.models.sourceDetail.retry')}</button></span>}
+              {removeFailure?.modelId === model.id && <span className="model-hub-source-tier text-right text-destructive">{t('settings.models.sourceDetail.fail.removeModel')} <button type="button" disabled={busy} onClick={() => void (async () => {
+                if (!removeFailure.retryRead) return remove(model);
+                setBusy(true);
+                try { await reconcileRemoval(model); } finally { setBusy(false); }
+              })()} className="font-semibold underline underline-offset-2">{t('settings.models.sourceDetail.retry')}</button></span>}
               {model.provenance === 'manual' && <ManualModelMenu model={model} busy={busy} onRemove={() => void remove(model)} />}
             </div>
           </div>
@@ -331,12 +381,12 @@ export const SourceDetailPanel: React.FC<{
             <Input
               autoFocus
               value={manualDraft.modelId}
-              onChange={(event) => setManualDraft((current) => current ? { ...current, modelId: event.target.value, failed: false } : current)}
+              onChange={(event) => setManualDraft((current) => current ? { ...current, modelId: event.target.value, failed: false, retryRead: false } : current)}
               placeholder={t('settings.models.sourceDetail.col.id') as string}
               className="model-hub-source-manual-id model-hub-source-model h-8 font-mono"
             />
             <span className="model-hub-source-pill model-hub-source-entry-pill w-fit rounded-full border border-border font-semibold text-muted">{t('settings.models.sourceDetail.entry.manual')}</span>
-            <DraftTiers tiers={manualDraft.tiers} onChange={(tiers) => setManualDraft((current) => current ? { ...current, tiers, failed: false } : current)} />
+            <DraftTiers tiers={manualDraft.tiers} onChange={(tiers) => setManualDraft((current) => current ? { ...current, tiers, failed: false, retryRead: false } : current)} />
             <div className="flex justify-end gap-2">
               <Button variant="ghost" size="xs" disabled={busy} onClick={() => setManualDraft(null)}>{t('common.cancel')}</Button>
               <Button size="xs" disabled={busy || !manualDraft.modelId.trim() || source.models.some((model) => model.id === manualDraft.modelId.trim())} onClick={() => void addManualModel()}>{manualDraft.failed ? t('settings.models.sourceDetail.retry') : t('settings.models.sourceDetail.action.addModel')}</Button>
@@ -345,7 +395,7 @@ export const SourceDetailPanel: React.FC<{
           </div>
         )}
         {source.kind === 'api_key' && !manualDraft && (
-          <button type="button" className="model-hub-source-table-add model-hub-source-model flex w-full items-center gap-2 border-b border-border text-left font-semibold text-mint" onClick={() => setManualDraft({ modelId: '', tiers: [], failed: false })}>
+          <button type="button" className="model-hub-source-table-add model-hub-source-model model-hub-ink-mint flex w-full items-center gap-2 border-b border-border text-left font-semibold" onClick={() => setManualDraft({ modelId: '', tiers: [], failed: false, retryRead: false })}>
             <Plus className="size-3.5" />
             {t('settings.models.sourceDetail.action.addModel')}
             <span className="text-[10.5px] font-normal text-muted">{t('settings.models.sourceDetail.addRow.hint')}</span>

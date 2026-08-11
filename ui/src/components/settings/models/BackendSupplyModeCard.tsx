@@ -179,7 +179,7 @@ export const BackendSupplyModeCard: React.FC<{ backend: AgentBackend }> = ({ bac
             <Link
               to="/admin/settings/models"
               onClick={(e) => e.stopPropagation()}
-              className="inline-flex shrink-0 items-center gap-1 text-[13px] font-medium text-mint transition-colors hover:text-mint/80"
+              className="model-hub-action-mint inline-flex shrink-0 items-center gap-1 text-[13px] font-medium transition-colors"
             >
               {t('settings.models.supplyMode.hub.openModels')}
               <ArrowRight className="size-3.5" />
@@ -194,7 +194,7 @@ export const BackendSupplyModeCard: React.FC<{ backend: AgentBackend }> = ({ bac
               no instructions. */}
           {mode === 'hub' && isSupplyWarning(hubOutcome) && (
             <div className="flex items-start gap-2 rounded-lg border border-gold/40 bg-gold/[0.08] px-3.5 py-2.5 text-[12px] leading-relaxed text-foreground">
-              <Info className="mt-0.5 size-3.5 shrink-0 text-gold" />
+              <Info className="model-hub-ink-gold mt-0.5 size-3.5 shrink-0" />
               <span>
                 {t(`settings.models.supply.${hubOutcome}`)}
                 {(hubOutcome === 'noSources' || hubOutcome === 'interrupted') &&
@@ -216,7 +216,7 @@ export const BackendSupplyModeCard: React.FC<{ backend: AgentBackend }> = ({ bac
           {mode === 'direct' && detectItem && (
             <div className="flex items-center justify-between gap-3 rounded-lg border border-gold/40 bg-gold/[0.08] px-3.5 py-2.5">
               <span className="flex min-w-0 items-center gap-2 text-[12px] leading-relaxed text-foreground">
-                <Info className="size-3.5 shrink-0 text-gold" />
+                <Info className="model-hub-ink-gold size-3.5 shrink-0" />
                 <span className="truncate">
                   {t('settings.models.supplyMode.direct.detected', { detail: detectItem.masked_detail })}
                 </span>

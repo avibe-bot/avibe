@@ -87,6 +87,8 @@ export const RuntimePill: React.FC<{
   const canInstall = health === 'not_installed' && Boolean(runtime?.manifest.assets.length);
   const key = starting
     ? 'starting'
+    : health === 'installing'
+      ? 'starting'
     : health === 'ok'
       ? 'running'
       : health === 'degraded'
@@ -98,7 +100,7 @@ export const RuntimePill: React.FC<{
             : canInstall
               ? 'notInstalled'
               : 'unsupported';
-  const action = !starting && (health === 'down' || health === 'not_started')
+  const action = !starting && health !== 'installing' && (health === 'down' || health === 'not_started')
     ? onStart
     : !starting && canInstall
       ? onInstall
@@ -107,7 +109,7 @@ export const RuntimePill: React.FC<{
     'model-hub-runtime-pill',
     (health === 'down' || health === 'degraded') && 'model-hub-runtime-pill--error',
   );
-  const content = <><span className="model-hub-runtime-dot" />{starting && <LoaderCircle className="animate-spin" />}{t(`settings.models.shell.${key}`)}</>;
+  const content = <><span className="model-hub-runtime-dot" />{(starting || health === 'installing') && <LoaderCircle className="animate-spin" />}{t(`settings.models.shell.${key}`)}</>;
   return action
     ? <button type="button" className={className} onClick={action}>{content}</button>
     : <span className={className}>{content}</span>;
@@ -160,7 +162,7 @@ const DirectHome: React.FC<{ agents: AgentSupply[]; onSwitch: (agent: AgentSuppl
         <section className="model-hub-direct-card overflow-hidden border border-border bg-surface">
           <div className="model-hub-direct-head flex items-center justify-between gap-3 border-b border-border px-5 py-3">
             <div><h2 className="text-[16px] font-bold text-foreground">{t('settings.models.direct.card.current')}</h2><p className="mt-1 text-[11.5px] text-muted">{t('settings.models.direct.card.current.sub')}</p></div>
-            <span className="rounded-full border border-border bg-foreground/[0.05] px-2.5 py-1 text-[10px] font-semibold text-muted">{t('settings.models.direct.pill.direct')}</span>
+            <span className="model-hub-direct-kind-pill rounded-full border px-2.5 py-1 text-[10px] font-semibold">{t('settings.models.direct.pill.direct')}</span>
           </div>
           <div className="model-hub-direct-content flex flex-col">
             {agents.map((agent) => {
@@ -168,7 +170,7 @@ const DirectHome: React.FC<{ agents: AgentSupply[]; onSwitch: (agent: AgentSuppl
               return (
                 <div key={agent.backend} className="model-hub-direct-row flex flex-col gap-2.5 bg-background px-3 py-3 sm:h-16 sm:flex-row sm:items-center sm:justify-between sm:py-0">
                   <div className="flex min-w-0 items-center gap-2.5">
-                    <span className="flex size-[34px] shrink-0 items-center justify-center rounded-[9px] bg-foreground/[0.04]"><Icon className="size-[17px] text-muted" /></span>
+                    <span className="model-hub-direct-tile flex size-[34px] shrink-0 items-center justify-center rounded-[9px]"><Icon className="size-[17px]" /></span>
                     <span><span className="block text-[13.5px] font-semibold text-foreground">{t(`settings.models.backends.${agent.backend}`, { defaultValue: agent.backend })}</span><span className="mt-0.5 block truncate text-[11px] text-muted" title={t(`settings.models.direct.backend.${agent.backend}.detail`) as string}>{t(`settings.models.direct.backend.${agent.backend}.detail`)}</span></span>
                   </div>
                   <Button variant="secondary" size="sm" className="h-auto rounded-lg px-3 py-[9px] text-[11.5px] font-bold" onClick={() => onSwitch(agent)}>{t('settings.models.direct.action.switchToGateway')}</Button>
@@ -179,10 +181,10 @@ const DirectHome: React.FC<{ agents: AgentSupply[]; onSwitch: (agent: AgentSuppl
         </section>
         <section className="model-hub-direct-card overflow-hidden border border-border bg-surface">
           <div className="model-hub-direct-head flex items-center border-b border-border px-5 py-3"><h2 className="text-[16px] font-bold text-foreground">{t('settings.models.direct.benefits.title')}</h2></div>
-          <div className="model-hub-direct-content flex flex-col">{(['1', '2', '3'] as const).map((key) => <div key={key} className="model-hub-direct-row flex gap-2.5 bg-background px-3 py-[11px]"><span className="grid size-5 shrink-0 place-items-center rounded-full bg-mint-soft text-[10.5px] font-bold text-mint">{key}</span><span><span className="block text-[12.5px] font-semibold text-foreground">{t(`settings.models.direct.benefits.${key}`)}</span><span className="mt-1 block text-[11px] leading-relaxed text-muted">{t(`settings.models.direct.benefits.${key}.detail`)}</span></span></div>)}</div>
+          <div className="model-hub-direct-content flex flex-col">{(['1', '2', '3'] as const).map((key) => <div key={key} className="model-hub-direct-row flex gap-2.5 bg-background px-3 py-[11px]"><span className="model-hub-ink-mint grid size-5 shrink-0 place-items-center rounded-full bg-mint-soft text-[10.5px] font-bold">{key}</span><span><span className="block text-[12.5px] font-semibold text-foreground">{t(`settings.models.direct.benefits.${key}`)}</span><span className="mt-1 block text-[11px] leading-relaxed text-muted">{t(`settings.models.direct.benefits.${key}.detail`)}</span></span></div>)}</div>
         </section>
       </div>
-      <p className="model-hub-direct-note flex items-center justify-center border border-border/70 bg-foreground/[0.025] text-center text-[11.5px] text-muted">{t('settings.models.direct.note.perBackend')}</p>
+      <p className="model-hub-direct-note flex items-center justify-center border text-center text-[11.5px]">{t('settings.models.direct.note.perBackend')}</p>
     </div>
   );
 };
@@ -190,7 +192,7 @@ const DirectHome: React.FC<{ agents: AgentSupply[]; onSwitch: (agent: AgentSuppl
 const DirectPill: React.FC<{ count: number }> = ({ count }) => {
   const { t } = useTranslation();
   if (count === 0) return null;
-  return <span className="model-hub-runtime-pill"><span className="model-hub-runtime-dot" />{t('settings.models.shell.allDirect', { count })}</span>;
+  return <span className="model-hub-runtime-pill model-hub-runtime-pill--direct"><span className="model-hub-runtime-dot" />{t('settings.models.shell.allDirect', { count })}</span>;
 };
 
 const TakeoverPill: React.FC<{ count: number }> = ({ count }) => {
@@ -239,6 +241,7 @@ export const SettingsModelsPage: React.FC = () => {
     const runtimeCanRecover = runtimeRecoveryPending
       || runtimeHealth === 'not_started'
       || runtimeHealth === 'not_installed'
+      || runtimeHealth === 'installing'
       || runtimeHealth === 'down'
       || runtimeHealth === 'degraded';
     if (!runtimeCanRecover || startingRuntime) return undefined;

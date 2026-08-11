@@ -93,7 +93,7 @@ export const RecentSwitchesCard: React.FC<{
           <button
             type="button"
             onClick={() => (expanded ? setExpanded(false) : expand())}
-            className="inline-flex min-h-10 items-center text-[13px] font-medium text-mint transition-colors hover:text-mint/80 sm:min-h-0"
+            className="model-hub-action-mint inline-flex min-h-10 items-center text-[13px] font-medium transition-colors sm:min-h-0"
           >
             {expanded ? t('settings.models.recent.collapse') : t('settings.models.recent.viewAll')}
           </button>
@@ -102,7 +102,7 @@ export const RecentSwitchesCard: React.FC<{
       {readState === 'error' && (
         <div className="flex items-center justify-between gap-3 border-b border-border px-4 py-3 text-[12px] text-destructive sm:px-5">
           <span>{t('settings.models.toast.refreshFailed')}</span>
-          <button type="button" onClick={() => void onRetry?.()} className="shrink-0 font-semibold text-mint">{t('settings.models.upstream.retry')}</button>
+          <button type="button" onClick={() => void onRetry?.()} className="model-hub-action-mint shrink-0 font-semibold">{t('settings.models.upstream.retry')}</button>
         </div>
       )}
       {readState === 'error' && shown.length === 0 ? null : shown.length === 0 ? (
@@ -112,7 +112,7 @@ export const RecentSwitchesCard: React.FC<{
             <button
               type="button"
               onClick={() => void onLoadMore?.()}
-              className="min-h-8 font-medium text-mint transition-colors hover:text-mint/80"
+              className="model-hub-action-mint min-h-8 font-medium transition-colors"
             >
               {t('settings.models.recent.loadMore')}
             </button>
@@ -139,7 +139,7 @@ export const RecentSwitchesCard: React.FC<{
                 {namesDeletedSource(event) && (
                   <Badge
                     variant="secondary"
-                    className="ml-1.5 translate-y-[-1px] bg-foreground/[0.03] px-2 py-0 text-[10px] font-medium"
+                    className="model-hub-fill-white-08 ml-1.5 translate-y-[-1px] px-2 py-0 text-[10px] font-medium"
                   >
                     {t('settings.models.recent.deletedSource')}
                   </Badge>
@@ -152,7 +152,7 @@ export const RecentSwitchesCard: React.FC<{
               type="button"
               onClick={() => void onLoadMore?.()}
               disabled={loadingMore}
-              className="min-h-11 border-t border-border px-4 py-3 text-[12.5px] font-medium text-mint transition-colors hover:text-mint/80 disabled:text-muted sm:px-5 sm:text-[13px]"
+              className="model-hub-action-mint min-h-11 border-t border-border px-4 py-3 text-[12.5px] font-medium transition-colors disabled:text-muted sm:px-5 sm:text-[13px]"
             >
               {loadingMore ? t('settings.models.recent.loadingMore') : t('settings.models.recent.loadMore')}
             </button>

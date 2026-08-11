@@ -170,7 +170,7 @@ export const MigrationDialog: React.FC<{
         <DialogHeader>
           <DialogTitle className="flex items-center gap-3 text-[18px] font-bold">
             <span className="flex size-10 shrink-0 items-center justify-center rounded-[12px] bg-mint-soft">
-              <ArrowDownToLine className="size-5 text-mint" />
+              <ArrowDownToLine className="model-hub-ink-mint size-5" />
             </span>
             {t('settings.models.migration.title')}
           </DialogTitle>
@@ -196,7 +196,7 @@ export const MigrationDialog: React.FC<{
           </div>
         )}
 
-        <p className="flex items-start gap-2 text-[12px] leading-relaxed text-mint">
+        <p className="model-hub-ink-mint flex items-start gap-2 text-[12px] leading-relaxed">
           <ShieldCheck className="mt-0.5 size-4 shrink-0" />
           {t('settings.models.migration.nonDestructive')}
         </p>

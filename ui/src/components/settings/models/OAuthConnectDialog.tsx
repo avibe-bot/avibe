@@ -691,7 +691,7 @@ export const OAuthConnectDialog: React.FC<{
                       <span
                         className={cn(
                           'mt-0.5 grid size-4 shrink-0 place-items-center rounded-full border',
-                          selected ? 'border-mint' : 'border-foreground/20',
+                          selected ? 'border-mint' : 'model-hub-border-white-33',
                         )}
                         aria-hidden
                       >
@@ -703,7 +703,7 @@ export const OAuthConnectDialog: React.FC<{
                         <span className="model-hub-add-sub-option-label font-semibold text-foreground">
                           {t(`settings.models.addSub.opt.${optionKey}.label`)}
                         </span>
-                        <span className="model-hub-add-sub-badge rounded-full border border-mint/30 bg-mint/10 font-semibold text-mint">
+                        <span className="model-hub-accent-pill--mint model-hub-add-sub-badge rounded-full border font-semibold">
                           {t(`settings.models.addSub.${disabled ? 'opt' : 'badge'}.${badgeKey}`)}
                         </span>
                       </span>
@@ -711,7 +711,7 @@ export const OAuthConnectDialog: React.FC<{
                         {t(`settings.models.addSub.opt.${optionKey}.desc.${vendorCopy}`)}
                       </span>
                       {vendorCopy === 'claude' && candidate === 'hub' && (
-                        <span className="model-hub-add-sub-risk flex items-start gap-2 border border-gold/30 bg-gold/10 text-gold">
+                        <span className="model-hub-add-sub-risk flex items-start gap-2 border border-gold/30 bg-gold/10">
                           <TriangleAlert className="mt-0.5 size-3 shrink-0" />
                           <span>{t('settings.models.addSub.tos.claude')}</span>
                         </span>
@@ -727,7 +727,7 @@ export const OAuthConnectDialog: React.FC<{
             </p>
           </div>
 
-          <div className="model-hub-add-sub-foot flex items-center justify-end gap-2 border-t border-border bg-foreground/[0.02]">
+          <div className="model-hub-add-sub-foot model-hub-fill-white-05 flex items-center justify-end gap-2 border-t border-border">
             <Button variant="ghost" size="sm" className="model-hub-dialog-action" onClick={onClose}>
               {t('settings.models.addSub.cancel')}
             </Button>
@@ -782,7 +782,7 @@ export const OAuthConnectDialog: React.FC<{
             // something is still without a source. Only the last stays on screen.
             repair?.kind === 'gaps' ? (
               <div className="flex flex-col gap-2 rounded-lg border border-gold/40 bg-gold/[0.08] px-3.5 py-3">
-                <span className="text-[12.5px] font-semibold leading-relaxed text-gold">
+                <span className="model-hub-ink-gold text-[12.5px] font-semibold leading-relaxed">
                   {t('settings.models.repair.gapsDone')}
                 </span>
                 <SupplyGapNote gaps={repair.gaps} />
@@ -793,12 +793,12 @@ export const OAuthConnectDialog: React.FC<{
               // that reports itself signed out lands here). A 「已恢复可用」 over
               // that is the dead end §4.5 forbids; the row keeps its remedy and
               // this line is why it is still there.
-              <div className="flex items-center gap-2 rounded-lg border border-gold/40 bg-gold/[0.08] px-4 py-3 text-[13px] font-medium text-gold">
+              <div className="model-hub-ink-gold flex items-center gap-2 rounded-lg border border-gold/40 bg-gold/[0.08] px-4 py-3 text-[13px] font-medium">
                 <TriangleAlert className="size-4 shrink-0" />
                 {t('settings.models.repair.unresolved')}
               </div>
             ) : (
-              <div className="flex items-center gap-2 rounded-lg border border-mint/30 bg-mint-soft/50 px-4 py-3 text-[13px] font-medium text-mint">
+              <div className="model-hub-ink-mint flex items-center gap-2 rounded-lg border border-mint/30 bg-mint-soft/50 px-4 py-3 text-[13px] font-medium">
                 <CheckCircle2 className="size-4 shrink-0" />
                 {repair
                   ? t(REPAIR_LINE_KEY[repair.kind])
@@ -807,7 +807,7 @@ export const OAuthConnectDialog: React.FC<{
             )
           ) : success ? (
             <div className="flex flex-col gap-2">
-              <div className="flex items-center gap-2 rounded-lg border border-mint/30 bg-mint-soft/50 px-4 py-3 text-[13px] font-medium text-mint">
+              <div className="model-hub-ink-mint flex items-center gap-2 rounded-lg border border-mint/30 bg-mint-soft/50 px-4 py-3 text-[13px] font-medium">
                 <CheckCircle2 className="size-4 shrink-0" />
                 {t('settings.models.oauth.connected')}
               </div>

@@ -44,7 +44,7 @@ describe('AgentCard', () => {
     expect(screen.queryByText(/Source order/i)).toBeNull();
   });
 
-  it('renders the AgentSupply collapse projection and rereads chains when expanded', async () => {
+  it('renders the AgentSupply collapse projection and rereads chains on expand and collapse', async () => {
     const onProbeSettled = vi.fn();
     const models = Array.from({ length: NOMINAL_MODEL_BASELINE + 2 }, (_, index) => `model-${index + 1}`);
     render(<I18nextProvider i18n={i18n}><AgentCard agents={[{
@@ -58,6 +58,11 @@ describe('AgentCard', () => {
     await userEvent.click(screen.getByRole('button', { name: /more model/i }));
     expect(screen.getByText(models.at(-1) as string)).toBeTruthy();
     expect(onProbeSettled).toHaveBeenCalledOnce();
+    await userEvent.click(screen.getByRole('button', { name: /more model/i }));
+    expect(screen.queryByText(models.at(-1) as string)).toBeNull();
+    expect(onProbeSettled).toHaveBeenCalledTimes(2);
+    expect(onProbeSettled).toHaveBeenNthCalledWith(1, expect.objectContaining({ backend: 'claude' }));
+    expect(onProbeSettled).toHaveBeenNthCalledWith(2, expect.objectContaining({ backend: 'claude' }));
   });
 
   it('opens Frame 02 with the exact backend and model context', async () => {

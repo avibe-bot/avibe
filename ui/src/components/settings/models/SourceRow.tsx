@@ -6,7 +6,7 @@ import { cn } from '@/lib/utils';
 import { sourceDetail } from './sourcePresentation';
 import { sourceStatePresentation } from './sourceStatePresentation';
 import { useDeadlineClock } from './useDeadlineClock';
-import { ACCENT_ICON, ACCENT_TILE, sourceVisual } from './vendorMeta';
+import { ACCENT_ICON, ACCENT_PILL, ACCENT_TILE, sourceVisual } from './vendorMeta';
 import type { AdoptedBy, Source } from './types';
 
 export const SourceRow: React.FC<{ source: Source; adoptedBy?: readonly AdoptedBy[]; onOpen: (source: Source) => void }> = ({ source, adoptedBy = [], onOpen }) => {
@@ -41,19 +41,19 @@ export const SourceRow: React.FC<{ source: Source; adoptedBy?: readonly AdoptedB
         <Icon className={cn('size-[17px]', ACCENT_ICON[accent])} />
       </span>
       <span className="min-w-0 flex-1">
-        <span className="flex min-w-0 items-center gap-2">
+        <span className="flex min-w-0 items-center gap-1.5">
           <span className="truncate text-[12.5px] font-bold text-foreground" title={source.display_name}>{source.display_name}</span>
-          <span className="shrink-0 rounded-full border border-border bg-foreground/[0.04] px-2 py-[3px] text-[10.5px] font-semibold text-muted">
+          <span className={cn('shrink-0 rounded-full border px-2 py-[3px] text-[10.5px] font-semibold', ACCENT_PILL[accent])}>
             {t(`settings.models.upstream.kind.${kindKey}`)}
           </span>
         </span>
         {detail && <span className="model-hub-upstream-detail mt-1 block truncate font-mono text-[10.5px]" title={detail}>{detail}</span>}
-        {state.key && <span className={cn('mt-1 flex items-center gap-1.5 text-[10.5px] font-semibold', state.textClass)}>
+        {state.key && <span className={cn('mt-1 flex items-center gap-[5px] text-[10.5px] font-semibold', state.textClass)}>
           <span className={cn('size-[5px] rounded-full', state.dotClass)} />
           {t(state.key, state.values)}
         </span>}
       </span>
-      <ChevronRight className="size-[15px] shrink-0 text-muted/50" />
+      <ChevronRight className="model-hub-overview-chevron size-[15px] shrink-0" />
     </button>
   );
 };

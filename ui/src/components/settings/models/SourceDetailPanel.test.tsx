@@ -109,27 +109,32 @@ describe('SourceDetailPanel', () => {
   });
 
   it('re-reads after an unconfirmed manual deletion before offering another DELETE', async () => {
-    vi.spyOn(modelsApi, 'deleteCustomModel').mockRejectedValueOnce(new TypeError('response lost'));
+    const remove = vi.spyOn(modelsApi, 'deleteCustomModel').mockRejectedValueOnce(new TypeError('response lost'));
+    const list = vi.spyOn(modelsApi, 'listSources').mockResolvedValueOnce([{ ...source, models: [] }]);
     const onChanged = vi.fn();
-    const Fixture = () => {
-      const [current, setCurrent] = React.useState(source);
-      return (
-        <SourceDetailPanel
-          source={current}
-          onChanged={() => {
-            onChanged();
-            setCurrent((value) => ({ ...value, models: [] }));
-          }}
-        />
-      );
-    };
-    render(<I18nextProvider i18n={i18n}><Fixture /></I18nextProvider>);
+    render(<I18nextProvider i18n={i18n}><SourceDetailPanel source={source} onChanged={onChanged} /></I18nextProvider>);
 
     await userEvent.click(screen.getByRole('button', { name: /Remove model-a|移除 model-a/i }));
     await userEvent.click(screen.getByRole('menuitem', { name: /^Remove$|^移除$/i }));
 
     await waitFor(() => expect(onChanged).toHaveBeenCalledOnce());
-    await waitFor(() => expect(screen.queryByText('model-a')).toBeNull());
+    expect(list).toHaveBeenCalledOnce();
+    expect(remove).toHaveBeenCalledOnce();
     expect(screen.queryByRole('button', { name: /^Try again$|^重试$/i })).toBeNull();
+  });
+
+  it('offers a second DELETE only after the authoritative list proves the model remains', async () => {
+    const remove = vi.spyOn(modelsApi, 'deleteCustomModel')
+      .mockRejectedValueOnce(new TypeError('response lost'))
+      .mockResolvedValueOnce({ ...source, models: [] });
+    const list = vi.spyOn(modelsApi, 'listSources').mockResolvedValueOnce([source]);
+    renderPanel();
+
+    await userEvent.click(screen.getByRole('button', { name: /Remove model-a|移除 model-a/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Remove$|^移除$/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /^Try again$|^重试$/i }));
+
+    await waitFor(() => expect(remove).toHaveBeenCalledTimes(2));
+    expect(list).toHaveBeenCalledOnce();
   });
 });

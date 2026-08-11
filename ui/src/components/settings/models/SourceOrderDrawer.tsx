@@ -13,6 +13,7 @@ import { modelsApi } from './modelsApi';
 import { movedOrder, sameIds } from './reorder';
 import { sourceDetail } from './sourcePresentation';
 import type { AgentSupply, Source } from './types';
+import { ACCENT_PILL, sourceAccent } from './vendorMeta';
 
 type OrderAnnouncement =
   | { key: 'grabbed' | 'moved' | 'dropped'; source: string; position: number; count: number }
@@ -30,7 +31,7 @@ const SourceIdentity: React.FC<{ source: Source }> = ({ source }) => {
         <span className="model-hub-order-name block truncate" title={source.display_name}>{source.display_name}</span>
         {detail && <span className="model-hub-order-meta block truncate" title={detail}>{detail}</span>}
       </span>
-      <span className={cn('model-hub-order-tag', source.kind === 'subscription' && 'model-hub-order-tag--subscription')}>
+      <span className={cn('model-hub-order-tag', ACCENT_PILL[sourceAccent(source)])}>
         {t(`settings.models.sourceKind.${source.kind}`)}
       </span>
     </>
@@ -254,19 +255,19 @@ export const SourceOrderDrawer: React.FC<{
                 />
               </div>
               <DialogPrimitive.Close asChild>
-                <Button type="button" variant="ghost" size="icon" className="size-[27px] text-foreground/35" aria-label={t('settings.models.order.cancel')} disabled={saving}>
+                <Button type="button" variant="ghost" size="icon" className="model-hub-order-close size-[27px]" aria-label={t('settings.models.order.cancel')} disabled={saving}>
                   <X className="size-[15px]" />
                 </Button>
               </DialogPrimitive.Close>
             </div>
-            <DialogPrimitive.Description className="model-hub-order-subtitle text-foreground/45">
+            <DialogPrimitive.Description className="model-hub-order-subtitle">
               {t('settings.models.order.subtitle')}
             </DialogPrimitive.Description>
           </header>
 
           <div className="model-hub-order-body flex min-h-0 flex-1 flex-col overflow-y-auto">
             {readState === 'loading' && (
-              <div className="model-hub-order-state"><LoaderCircle className="size-4 animate-spin text-mint" />{t('common.loading')}</div>
+              <div className="model-hub-order-state"><LoaderCircle className="model-hub-ink-mint size-4 animate-spin" />{t('common.loading')}</div>
             )}
             {readState === 'error' && (
               <div className="model-hub-order-state model-hub-order-state--error">{t('settings.models.order.fail.read')}</div>

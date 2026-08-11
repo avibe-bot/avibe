@@ -169,4 +169,45 @@ describe('AddApiKeyDialog', () => {
     expect(onClose).not.toHaveBeenCalled();
     expect(screen.getByRole('button', { name: /Fetch models|拉取型号/i })).toBeTruthy();
   });
+
+  it('reconciles a lost source-create response by nonce without posting twice', async () => {
+    let nonce: string | undefined;
+    vi.spyOn(modelsApi, 'observeApiKeySource').mockResolvedValueOnce(observed());
+    const create = vi.spyOn(modelsApi, 'createApiKeySource').mockImplementationOnce(async (draft) => {
+      nonce = draft.client_nonce;
+      throw new TypeError('response lost');
+    });
+    const list = vi.spyOn(modelsApi, 'listSources').mockImplementation(async () => [{
+      ...source,
+      client_nonce: nonce,
+      adopted_by: [],
+    }]);
+    const { onAdded } = renderDialog();
+    const user = await fillCredentials();
+
+    await user.click(screen.getByRole('button', { name: /^Add$|^添加$/i }));
+    await user.click(await screen.findByRole('button', { name: /^Retry$|^重试$/i }));
+
+    await waitFor(() => expect(onAdded).toHaveBeenCalledOnce());
+    expect(list).toHaveBeenCalledOnce();
+    expect(create).toHaveBeenCalledOnce();
+    expect(nonce).toMatch(/^scn_[a-z0-9]{16,64}$/);
+  });
+
+  it('retries source creation only after the nonce is confirmed absent', async () => {
+    vi.spyOn(modelsApi, 'observeApiKeySource').mockResolvedValueOnce(observed());
+    const create = vi.spyOn(modelsApi, 'createApiKeySource')
+      .mockRejectedValueOnce(new TypeError('response lost'))
+      .mockResolvedValueOnce({ source, added_to: [], adopted_by: [] });
+    const list = vi.spyOn(modelsApi, 'listSources').mockResolvedValueOnce([]);
+    renderDialog();
+    const user = await fillCredentials();
+
+    await user.click(screen.getByRole('button', { name: /^Add$|^添加$/i }));
+    await user.click(await screen.findByRole('button', { name: /^Retry$|^重试$/i }));
+
+    await waitFor(() => expect(create).toHaveBeenCalledTimes(2));
+    expect(list).toHaveBeenCalledOnce();
+    expect(create.mock.calls[1][0].client_nonce).toBe(create.mock.calls[0][0].client_nonce);
+  });
 });

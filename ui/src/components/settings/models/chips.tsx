@@ -37,7 +37,7 @@ export const BillingChip: React.FC<{
   const { t } = useTranslation();
   if (billing === 'monthly') {
     return (
-      <Badge variant="secondary" className={cn(BILLING_CHIP, 'bg-foreground/[0.03]', className)}>
+      <Badge variant="secondary" className={cn(BILLING_CHIP, 'model-hub-fill-white-08', className)}>
         {t('settings.models.billing.monthly')}
       </Badge>
     );
@@ -106,7 +106,7 @@ export const ModeChip: React.FC<{ mode: AgentMode }> = ({ mode }) => {
       {t('settings.models.mode.hub')}
     </Badge>
   ) : (
-    <Badge variant="secondary" className={cn(base, 'bg-foreground/[0.03]')}>
+    <Badge variant="secondary" className={cn(base, 'model-hub-fill-white-08')}>
       <Unplug className="size-3 sm:hidden" />
       {t('settings.models.mode.direct')}
     </Badge>

@@ -103,9 +103,9 @@ export const SupplyLegend: React.FC<{ relations: SupplyRelation[] }> = ({ relati
           </span>
         ))}
       </div>
-      <span className="flex items-center gap-1.5 text-muted/55">
+      <span className="model-hub-ink-white-59 flex items-center gap-1.5">
         <span className="hidden sm:inline">{t('settings.models.legend.note')}</span>
-        <ModelHubInfoHint label={t('settings.models.legend.note')} content={t('settings.models.legend.note')} className="size-[20px] text-muted/55" align="end" />
+        <ModelHubInfoHint label={t('settings.models.legend.note')} content={t('settings.models.legend.note')} className="model-hub-ink-white-59 size-[20px]" align="end" />
       </span>
     </div>
   );

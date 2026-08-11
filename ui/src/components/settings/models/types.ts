@@ -84,6 +84,8 @@ export type SuppliedModel = {
 
 export type Source = {
   id: string;
+  /** Exact optional create correlation used only for lost-response recovery. */
+  client_nonce?: string | null;
   /** Source creation time; ordinary audit/display metadata only. */
   created_at?: string | null;
   /** Latest successful full model discovery for this source. null means the
@@ -110,6 +112,8 @@ export type Source = {
   models: SuppliedModel[];
   /** Opaque handle. Secret material NEVER appears here. */
   credential_ref?: string | null;
+  /** Server-derived persisted Route-reference projection. */
+  adopted_by?: AdoptedBy[];
 };
 
 // `priority.schema.json` does not exist in v3: there is no global source order,
@@ -444,10 +448,12 @@ export type OAuthFlow = {
 };
 
 // ── runtime-dependency.schema.json ──────────────────────────────────────
-export type RuntimeHealth = 'ok' | 'degraded' | 'down' | 'not_started' | 'not_installed';
+export type RuntimeHealth = 'ok' | 'degraded' | 'down' | 'not_started' | 'not_installed' | 'installing';
 
 export type RuntimeDependency = {
   contract_version: typeof CONTRACT_VERSION;
+  /** Server host platform, never the browser platform. */
+  host_platform?: string;
   manifest: {
     name: 'cliproxyapi';
     version: string;
@@ -465,6 +471,7 @@ export type RuntimeDependency = {
     listening?: { host: '127.0.0.1'; port: number } | null;
     health: RuntimeHealth;
     last_check?: string | null;
+    error_key?: 'settings.models.install.fail.detail' | null;
   };
 };
 
@@ -527,6 +534,8 @@ export type ApiKeySourceCreate = {
   display_name?: string;
   base_url?: string | null;
   key: string;
+  /** Stable across a create retry; persisted only when the Source commits. */
+  client_nonce?: string;
   /** Probe order only; the client never sends a protocol conclusion. */
   protocol_order?: SourceProtocol[];
 };

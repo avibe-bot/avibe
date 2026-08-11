@@ -25,6 +25,7 @@ import {
   type AddApiKeyOrigin,
 } from './addApiKeyState';
 import { apiFailure, modelsApi, type SourceCreated } from './modelsApi';
+import { reconcileUnknownWrite } from './reconcileUnknownWrite';
 import {
   SOURCE_PROTOCOLS,
   type ApiKeySourceCreate,
@@ -41,6 +42,13 @@ type Phase =
   | { kind: 'save_unconfirmed'; protocolOrder: SourceProtocol[] | undefined };
 
 const INITIAL_PHASE: Phase = { kind: 'form', report: null };
+
+const sourceClientNonce = (): string => {
+  const uuid = globalThis.crypto.randomUUID?.();
+  if (uuid) return `scn_${uuid.replaceAll('-', '').toLowerCase()}`;
+  const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16));
+  return `scn_${Array.from(bytes, (value) => value.toString(16).padStart(2, '0')).join('')}`;
+};
 
 const failureCopy = (cause: AddApiKeyFailure): string => {
   switch (cause) {
@@ -63,6 +71,7 @@ export const AddApiKeyDialog: React.FC<{
   const [revealed, setRevealed] = React.useState(false);
   const [phase, setPhase] = React.useState<Phase>(INITIAL_PHASE);
   const attempt = React.useRef(0);
+  const clientNonce = React.useRef(sourceClientNonce());
   const observationAbort = React.useRef<AbortController | null>(null);
   const onAddedRef = React.useRef(onAdded);
   const onCloseRef = React.useRef(onClose);
@@ -77,6 +86,7 @@ export const AddApiKeyDialog: React.FC<{
     observationAbort.current?.abort();
     observationAbort.current = null;
     if (open) {
+      clientNonce.current = sourceClientNonce();
       setDisplayName('');
       setBaseUrl('');
       setApiKey('');
@@ -91,6 +101,7 @@ export const AddApiKeyDialog: React.FC<{
     ...(displayName.trim() ? { display_name: displayName.trim() } : {}),
     base_url: baseUrl.trim(),
     key: apiKey.trim(),
+    client_nonce: clientNonce.current,
     ...(protocolOrder ? { protocol_order: protocolOrder } : {}),
   }), [apiKey, baseUrl, displayName]);
 
@@ -174,12 +185,22 @@ export const AddApiKeyDialog: React.FC<{
       return;
     }
     if (phase.kind === 'save_unconfirmed') {
-      try {
-        await modelsApi.listSources();
-      } catch {
+      const reconciliation = await reconcileUnknownWrite(
+        () => modelsApi.listSources(),
+        (sources) => sources.find((source) => source.client_nonce === clientNonce.current),
+      );
+      if (reconciliation.kind === 'committed') {
+        onAddedRef.current({
+          source: reconciliation.value,
+          added_to: [],
+          adopted_by: reconciliation.value.adopted_by ?? [],
+        });
+        onCloseRef.current();
         return;
       }
-      await observe('add', phase.protocolOrder);
+      if (reconciliation.kind === 'absent') {
+        await persist(++attempt.current, phase.protocolOrder);
+      }
       return;
     }
     if (phase.kind === 'failure') await observe(phase.origin);
@@ -201,8 +222,9 @@ export const AddApiKeyDialog: React.FC<{
   };
 
   const isWorking = phase.kind === 'working';
+  const formLocked = isWorking || phase.kind === 'save_unconfirmed';
   const canCancel = !(phase.kind === 'working' && phase.stage === 'persist');
-  const canSubmit = Boolean(baseUrl.trim() && apiKey.trim()) && !isWorking;
+  const canSubmit = Boolean(baseUrl.trim() && apiKey.trim()) && !formLocked;
   const showForm = phase.kind !== 'undetermined' && phase.kind !== 'inventory';
   return (
     <DialogPrimitive.Root open={open} onOpenChange={(next) => !next && canCancel && cancel()}>
@@ -222,7 +244,7 @@ export const AddApiKeyDialog: React.FC<{
               type="button"
               variant="ghost"
               size="icon"
-              className="size-[27px] text-foreground/35"
+              className="model-hub-ink-white-59 size-[27px]"
               aria-label={t('settings.models.addKey.cancel')}
               disabled={!canCancel}
               onClick={cancel}
@@ -230,7 +252,7 @@ export const AddApiKeyDialog: React.FC<{
               <X className="size-[15px]" />
             </Button>
           </div>
-          <DialogPrimitive.Description className="model-hub-add-key-subtitle font-mono text-muted/70">
+          <DialogPrimitive.Description className="model-hub-add-key-subtitle model-hub-ink-muted-b3 font-mono">
             {t('settings.models.addKey.subtitle')}
           </DialogPrimitive.Description>
         </header>
@@ -238,13 +260,13 @@ export const AddApiKeyDialog: React.FC<{
         {showForm && (
           <div className="model-hub-add-key-body flex flex-col">
             <Field className="model-hub-add-key-field" labelClassName="model-hub-add-key-label" label={t('settings.models.addKey.field.name')}>
-              {(id) => <Input id={id} value={displayName} disabled={isWorking} onChange={(event) => setDisplayName(event.target.value)} className="model-hub-add-key-input" />}
+              {(id) => <Input id={id} value={displayName} disabled={formLocked} onChange={(event) => setDisplayName(event.target.value)} className="model-hub-add-key-input" />}
             </Field>
             <Field className="model-hub-add-key-field" labelClassName="model-hub-add-key-label" hintClassName="model-hub-add-key-hint" label={t('settings.models.addKey.field.baseUrl')} hint={t('settings.models.addKey.field.baseUrl.hint')}>
-              {(id) => <Input id={id} value={baseUrl} disabled={isWorking} autoComplete="url" spellCheck={false} onChange={(event) => editEndpoint(event.target.value)} className="model-hub-add-key-input font-mono" />}
+              {(id) => <Input id={id} value={baseUrl} disabled={formLocked} autoComplete="url" spellCheck={false} onChange={(event) => editEndpoint(event.target.value)} className="model-hub-add-key-input font-mono" />}
             </Field>
             <Field className="model-hub-add-key-field" labelClassName="model-hub-add-key-label" label={t('settings.models.addKey.field.apiKey')}>
-              {(id) => <span className="model-hub-add-key-secret relative flex items-center"><Input id={id} value={apiKey} type={revealed ? 'text' : 'password'} disabled={isWorking} autoComplete="off" spellCheck={false} onChange={(event) => editKey(event.target.value)} className="model-hub-add-key-input w-full pr-10 font-mono" /><Button type="button" variant="ghost" size="icon" className="absolute right-1 size-7 text-foreground/35" aria-label={t(`settings.models.addKey.field.apiKey.${revealed ? 'conceal' : 'reveal'}`)} disabled={isWorking} onClick={() => setRevealed((value) => !value)}>{revealed ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}</Button></span>}
+              {(id) => <span className="model-hub-add-key-secret relative flex items-center"><Input id={id} value={apiKey} type={revealed ? 'text' : 'password'} disabled={formLocked} autoComplete="off" spellCheck={false} onChange={(event) => editKey(event.target.value)} className="model-hub-add-key-input w-full pr-10 font-mono" /><Button type="button" variant="ghost" size="icon" className="model-hub-ink-white-59 absolute right-1 size-7" aria-label={t(`settings.models.addKey.field.apiKey.${revealed ? 'conceal' : 'reveal'}`)} disabled={formLocked} onClick={() => setRevealed((value) => !value)}>{revealed ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}</Button></span>}
             </Field>
 
             {!isWorking && (
@@ -265,7 +287,7 @@ export const AddApiKeyDialog: React.FC<{
 
             {phase.kind === 'form' && phase.report && (
               <div className="model-hub-add-key-strip model-hub-add-key-strip--success">
-                <CheckCircle2 className="size-3.5 shrink-0 text-mint" />
+                <CheckCircle2 className="model-hub-ink-mint size-3.5 shrink-0" />
                 <span>{phase.report.models.length === 0
                   ? t('settings.models.addKey.pull.empty')
                   : t('settings.models.addKey.pull.result', { count: phase.report.models.length })}</span>
@@ -273,7 +295,7 @@ export const AddApiKeyDialog: React.FC<{
             )}
             {phase.kind === 'working' && (
               <div className="model-hub-add-key-strip model-hub-add-key-strip--working">
-                <LoaderCircle className="size-3.5 shrink-0 animate-spin text-mint" />
+                <LoaderCircle className="model-hub-ink-mint size-3.5 shrink-0 animate-spin" />
                 <div className="flex min-w-0 flex-col gap-[3px]">
                   <span className="model-hub-add-key-strip-title text-foreground">{t('settings.models.addKey.adding')}</span>
                   <span className="model-hub-add-key-strip-detail">{t('settings.models.addKey.adding.detail')}</span>
@@ -303,9 +325,9 @@ export const AddApiKeyDialog: React.FC<{
           <div className="model-hub-add-key-outcome flex flex-col">
             <div className="model-hub-add-key-outcome-wrap">
               <div className="model-hub-add-key-strip model-hub-add-key-strip--advisory">
-                <Info className="size-3.5 shrink-0 text-gold" />
+                <Info className="model-hub-ink-gold size-3.5 shrink-0" />
                 <div className="flex min-w-0 flex-col gap-[3px]">
-                  <span className="model-hub-add-key-strip-title text-gold">{t('settings.models.addKey.undetermined.title')}</span>
+                  <span className="model-hub-add-key-strip-title model-hub-ink-gold">{t('settings.models.addKey.undetermined.title')}</span>
                   <span className="model-hub-add-key-strip-detail">{t('settings.models.addKey.undetermined.detail')}</span>
                 </div>
               </div>
@@ -313,7 +335,7 @@ export const AddApiKeyDialog: React.FC<{
             <div className="model-hub-add-key-protocol-field flex flex-col">
               <div className="flex items-center gap-1.5">
                 <span className="model-hub-add-key-label">{t('settings.models.addKey.undetermined.label')}</span>
-                <Info className="size-[13px] text-foreground/35" aria-hidden />
+                <Info className="model-hub-ink-white-59 size-[13px]" aria-hidden />
               </div>
               <div className="model-hub-add-key-segments flex max-w-full flex-wrap">
                 {SOURCE_PROTOCOLS.map((protocol) => (
@@ -336,13 +358,13 @@ export const AddApiKeyDialog: React.FC<{
         {phase.kind === 'inventory' && (
           <div className="model-hub-add-key-outcome-wrap">
             <div className="model-hub-add-key-strip model-hub-add-key-strip--advisory model-hub-add-key-strip--inventory">
-              <TriangleAlert className="size-3.5 shrink-0 text-gold" />
-              <span className="model-hub-add-key-strip-title text-gold">{t('settings.models.addKey.inventory.title')}</span>
+              <TriangleAlert className="model-hub-ink-gold size-3.5 shrink-0" />
+              <span className="model-hub-add-key-strip-title model-hub-ink-gold">{t('settings.models.addKey.inventory.title')}</span>
             </div>
           </div>
         )}
 
-        <footer className="model-hub-add-key-foot flex flex-row items-center justify-end border-t border-border bg-foreground/[0.02]">
+        <footer className="model-hub-add-key-foot model-hub-fill-white-05 flex flex-row items-center justify-end border-t border-border">
           <Button
             type="button"
             variant="outline"

@@ -123,6 +123,8 @@ export type ModelsApi = {
   /** `before` is an event id cursor (「查看全部」 pagination). */
   listEvents(limit?: number, before?: string): Promise<ResolutionEvent[]>;
   getRuntimeStatus(): Promise<RuntimeDependency>;
+  /** Start the contract-owned client installation transaction. */
+  installRuntime(): Promise<RuntimeDependency>;
   startRuntime(): Promise<RuntimeDependency>;
   startOAuth(vendor: string, channel: SupplyChannel): Promise<OAuthFlow>;
   getOAuthStatus(flowId: string): Promise<OAuthResult>;
@@ -396,6 +398,7 @@ const liveApi: ModelsApi = {
       `/api/models/events?limit=${limit}${before ? `&before=${encodeURIComponent(before)}` : ''}`,
     ).then((r) => r.events),
   getRuntimeStatus: () => call<{ runtime?: RuntimeDependency } & RuntimeDependency>('/api/models/runtime/status').then((r) => (r.runtime ?? r) as RuntimeDependency),
+  installRuntime: () => call<{ runtime?: RuntimeDependency } & RuntimeDependency>('/api/models/runtime/install', jsonInit('POST')).then((r) => (r.runtime ?? r) as RuntimeDependency),
   startRuntime: () => call<{ runtime?: RuntimeDependency } & RuntimeDependency>('/api/models/runtime/start', jsonInit('POST')).then((r) => (r.runtime ?? r) as RuntimeDependency),
   startOAuth: (vendor, channel) =>
     call<{ flow?: OAuthFlow } & OAuthFlow>(
@@ -542,9 +545,20 @@ class MockStore {
   }
 
   createApiKeySource(draft: ApiKeySourceCreate) {
+    const existing = draft.client_nonce
+      ? this.sources.find((source) => source.client_nonce === draft.client_nonce)
+      : undefined;
+    if (existing) {
+      return delay({
+        source: structuredClone(existing),
+        added_to: [],
+        adopted_by: structuredClone(existing.adopted_by ?? []),
+      });
+    }
     const count = mockDiscoveredCount(draft.vendor);
     const source: Source = {
       id: rid('src'),
+      client_nonce: draft.client_nonce ?? null,
       created_at: new Date().toISOString(),
       last_discovered_at: new Date().toISOString(),
       kind: 'api_key',
@@ -569,6 +583,7 @@ class MockStore {
     };
     this.sources.push(source);
     const placement = this.placeNewSource(source);
+    source.adopted_by = placement.adopted_by;
     // simulate probe latency
     return delay({ source: structuredClone(source), ...placement }, 900);
   }
@@ -993,6 +1008,17 @@ class MockStore {
     return delay(structuredClone(this.runtime));
   }
 
+  installRuntime() {
+    this.runtime.status.health = 'installing';
+    this.runtime.status.error_key = null;
+    setTimeout(() => {
+      this.runtime.status.installed_version = this.runtime.manifest.version;
+      this.runtime.status.verified = true;
+      this.runtime.status.health = 'not_started';
+    }, 1200);
+    return delay(structuredClone(this.runtime));
+  }
+
   startRuntime() {
     this.runtime.status.health = 'ok';
     this.runtime.status.listening = { host: '127.0.0.1', port: 15220 };
@@ -1242,6 +1268,7 @@ const mockApi: ModelsApi = {
   applyMigration: (itemIds) => mockStore.applyMigration(itemIds),
   listEvents: (limit, before) => mockStore.listEvents(limit, before),
   getRuntimeStatus: () => mockStore.getRuntimeStatus(),
+  installRuntime: () => mockStore.installRuntime(),
   startRuntime: () => mockStore.startRuntime(),
   startOAuth: (vendor, channel) => mockStore.startOAuth(vendor, channel),
   getOAuthStatus: (flowId) => mockStore.getOAuthStatus(flowId),

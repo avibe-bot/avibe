@@ -46,21 +46,21 @@ export const RouteChainDialog: React.FC<{
               {chain ? chain.chain.map((hop, index) => {
                 const current = chain.current?.source_id === hop.source_id && chain.current.model_id === hop.model_id;
                 return (
-                  <div key={`${hop.source_id}:${hop.model_id}:${index}`} data-current={current || undefined} className="model-hub-route-hop flex items-center border border-border bg-foreground/[0.03]">
-                    <GripVertical className="size-3.5 shrink-0 text-muted/50" aria-hidden />
-                    <span className={cn('model-hub-route-ordinal grid shrink-0 place-items-center font-mono font-medium', current ? 'bg-mint-soft text-mint' : 'bg-foreground/[0.04] text-muted')}>{index + 1}</span>
-                    <span className="model-hub-route-hop-copy flex min-w-0 flex-1 flex-col"><span className="model-hub-route-hop-name truncate font-semibold text-foreground">{sourceName(sources, hop.source_id)}</span><span className="model-hub-route-hop-model truncate font-mono text-muted/70">{hop.model_id}</span></span>
-                    <button type="button" disabled aria-label={t('settings.models.routeDialog.removeHop') as string} className="model-hub-route-remove grid shrink-0 place-items-center border border-border bg-foreground/[0.04] text-muted disabled:opacity-60"><X className="size-3.5" /></button>
+                  <div key={`${hop.source_id}:${hop.model_id}:${index}`} data-current={current || undefined} className="model-hub-route-hop model-hub-fill-white-08 flex items-center border border-border">
+                    <GripVertical className="model-hub-ink-white-59 size-3.5 shrink-0" aria-hidden />
+                    <span className={cn('model-hub-route-ordinal grid shrink-0 place-items-center font-mono font-medium', current ? 'model-hub-accent-pill--mint' : 'model-hub-fill-white-0a text-muted')}>{index + 1}</span>
+                    <span className="model-hub-route-hop-copy flex min-w-0 flex-1 flex-col"><span className="model-hub-route-hop-name truncate font-semibold text-foreground">{sourceName(sources, hop.source_id)}</span><span className="model-hub-route-hop-model model-hub-ink-muted-b3 truncate font-mono">{hop.model_id}</span></span>
+                    <button type="button" disabled aria-label={t('settings.models.routeDialog.removeHop') as string} className="model-hub-route-remove model-hub-fill-white-0a grid shrink-0 place-items-center border border-border text-muted disabled:opacity-60"><X className="size-3.5" /></button>
                   </div>
                 );
-              }) : <div className="model-hub-route-hop grid place-items-center border border-border bg-foreground/[0.03] font-mono text-xs text-muted">—</div>}
-              <button type="button" disabled className="model-hub-route-add flex w-full items-center justify-center gap-1.5 border border-border bg-foreground/[0.02] font-semibold text-muted disabled:opacity-60"><Plus className="size-3.5" />{t('settings.models.routeDialog.addHop')}</button>
+              }) : <div className="model-hub-route-hop model-hub-fill-white-08 grid place-items-center border border-border font-mono text-xs text-muted">—</div>}
+              <button type="button" disabled className="model-hub-route-add model-hub-fill-white-05 flex w-full items-center justify-center gap-1.5 border border-border font-semibold text-muted disabled:opacity-60"><Plus className="size-3.5" />{t('settings.models.routeDialog.addHop')}</button>
             </div>
             <button type="button" disabled className="model-hub-route-reseed flex items-center gap-1.5 self-start font-semibold text-cyan disabled:opacity-60"><ListRestart className="size-3" />{t('settings.models.routeDialog.reseed')}</button>
             <p className="model-hub-route-hint flex items-start gap-2 text-muted"><Info className="mt-0.5 size-3.5 shrink-0" />{t('settings.models.routeDialog.hint')}</p>
           </div>
 
-          <footer className="model-hub-route-foot flex items-center justify-end gap-2 border-t border-border bg-foreground/[0.02]">
+          <footer className="model-hub-route-foot model-hub-fill-white-05 flex items-center justify-end gap-2 border-t border-border">
             <Button variant="outline" className="model-hub-dialog-action" onClick={onClose}>{t('common.cancel')}</Button>
             <Button className="model-hub-dialog-action" disabled>{t('common.save')}</Button>
           </footer>

@@ -1,9 +1,5 @@
-// Visual + vendor metadata for the Model Hub surfaces. Colors follow the V4
-// design (design.pen `产品改造 V4 01r/06r/07`): subscriptions carry the brand
-// sparkle accent (Claude→mint, ChatGPT→gold); API keys carry a per-vendor key
-// accent (Anthropic→violet, 智谱→cyan, custom/relay→gold). Only the icon
-// component is reused from `lib/agentBackends`; the V4 accents differ from the
-// older backends page on purpose, so they live here as data.
+// Model Hub identity colors are semantic, not vendor branding: channel/kind
+// owns source color, while backend identity owns Agent color.
 import type React from 'react';
 import { Bot, KeyRound, Sparkles, Terminal } from 'lucide-react';
 
@@ -14,19 +10,19 @@ export type Accent = 'mint' | 'gold' | 'cyan' | 'violet' | 'muted';
 // Soft-tinted tile + matching icon/dot color per accent. Uses the theme tokens
 // (mint/gold/cyan/violet + *-soft) so it tracks Light/Dark automatically.
 export const ACCENT_TILE: Record<Accent, string> = {
-  mint: 'bg-mint-soft',
-  gold: 'bg-gold/15',
-  cyan: 'bg-cyan-soft',
-  violet: 'bg-violet-soft',
-  muted: 'bg-surface-2',
+  mint: 'model-hub-accent-tile--mint',
+  gold: 'model-hub-accent-tile--gold',
+  cyan: 'model-hub-accent-tile--cyan',
+  violet: 'model-hub-accent-tile--violet',
+  muted: 'model-hub-accent-tile--neutral',
 };
 
 export const ACCENT_ICON: Record<Accent, string> = {
-  mint: 'text-mint',
-  gold: 'text-gold',
-  cyan: 'text-cyan',
-  violet: 'text-violet',
-  muted: 'text-muted',
+  mint: 'model-hub-accent-ink--mint',
+  gold: 'model-hub-accent-ink--gold',
+  cyan: 'model-hub-accent-ink--cyan',
+  violet: 'model-hub-accent-ink--violet',
+  muted: 'model-hub-accent-ink--neutral',
 };
 
 // Status dot fill (composite pill · recent-switch list). Gold reserved for the
@@ -39,30 +35,31 @@ export const ACCENT_DOT: Record<Accent, string> = {
   muted: 'bg-muted',
 };
 
-type IconType = React.ComponentType<{ size?: number; className?: string }>;
-
-// api_key accent by vendor id. Unknown vendors fall back to violet (the generic
-// "key" accent used by the add-source menu).
-const API_KEY_ACCENT: Record<string, Accent> = {
-  anthropic: 'violet',
-  openai: 'gold',
-  zhipuai: 'cyan',
-  kimi: 'cyan',
-  xai: 'muted',
-  custom: 'gold',
+export const ACCENT_PILL: Record<Accent, string> = {
+  mint: 'model-hub-accent-pill--mint',
+  gold: 'model-hub-accent-pill--gold',
+  cyan: 'model-hub-accent-pill--cyan',
+  violet: 'model-hub-accent-pill--violet',
+  muted: 'model-hub-accent-pill--neutral',
 };
 
-export function sourceAccent(source: Pick<Source, 'kind' | 'vendor'>): Accent {
-  if (source.kind === 'subscription') {
-    if (source.vendor === 'openai') return 'gold';
-    return 'mint'; // anthropic + any other subscription
-  }
-  return API_KEY_ACCENT[source.vendor] ?? 'violet';
+type IconType = React.ComponentType<{ size?: number; className?: string }>;
+
+export const SOURCE_IDENTITY_ACCENT = {
+  native_cli: 'cyan',
+  subscription: 'mint',
+  api_key: 'muted',
+} as const satisfies Record<'native_cli' | Source['kind'], Accent>;
+
+export function sourceAccent(source: Pick<Source, 'kind' | 'supply_channel'>): Accent {
+  return source.supply_channel === 'native_cli'
+    ? SOURCE_IDENTITY_ACCENT.native_cli
+    : SOURCE_IDENTITY_ACCENT[source.kind];
 }
 
 export type SourceVisual = { Icon: IconType; accent: Accent };
 
-export function sourceVisual(source: Pick<Source, 'kind' | 'vendor'>): SourceVisual {
+export function sourceVisual(source: Pick<Source, 'kind' | 'supply_channel'>): SourceVisual {
   return {
     Icon: source.kind === 'subscription' ? Sparkles : KeyRound,
     accent: sourceAccent(source),
@@ -72,10 +69,22 @@ export function sourceVisual(source: Pick<Source, 'kind' | 'vendor'>): SourceVis
 // ── Agent backends (Agent card rows) ────────────────────────────────────
 export type BackendVisual = { Icon: IconType; accent: Accent };
 
+export const BACKEND_IDENTITY_ACCENT = {
+  claude: 'cyan',
+  codex: 'mint',
+  opencode: 'violet',
+} as const satisfies Record<AgentBackend, Accent>;
+
+const BACKEND_ICON: Record<AgentBackend, IconType> = {
+  claude: Sparkles,
+  codex: Bot,
+  opencode: Terminal,
+};
+
 const BACKEND_VISUAL: Record<AgentBackend, BackendVisual> = {
-  claude: { Icon: Sparkles, accent: 'mint' },
-  codex: { Icon: Bot, accent: 'gold' },
-  opencode: { Icon: Terminal, accent: 'violet' },
+  claude: { Icon: BACKEND_ICON.claude, accent: BACKEND_IDENTITY_ACCENT.claude },
+  codex: { Icon: BACKEND_ICON.codex, accent: BACKEND_IDENTITY_ACCENT.codex },
+  opencode: { Icon: BACKEND_ICON.opencode, accent: BACKEND_IDENTITY_ACCENT.opencode },
 };
 
 export function backendVisual(backend: AgentBackend): BackendVisual {

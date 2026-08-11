@@ -31,6 +31,24 @@ afterEach(() => {
 });
 
 describe('apiFailure — whether the route named the failure', () => {
+  it('posts installation to the dedicated runtime route', async () => {
+    const runtime = {
+      contract_version: 5,
+      manifest: { name: 'cliproxyapi', version: '1', source_sha: 'sha', assets: [] },
+      status: { installed_version: null, verified: false, listening: null, health: 'installing', last_check: null },
+    } as const;
+    let installInit: RequestInit | undefined;
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (input === '/api/csrf-token') return Response.json({ csrf_token: 'csrf' });
+      if (input === '/api/models/runtime/install') installInit = init;
+      return Response.json({ runtime });
+    });
+    vi.stubGlobal('fetch', fetch);
+
+    await expect(modelsApi.installRuntime()).resolves.toEqual(runtime);
+    expect(installInit?.method).toBe('POST');
+  });
+
   it('reads a route-declared code as named', async () => {
     const failure = await failureFor(() => Response.json({ error: 'discovery_failed' }, { status: 409 }));
     expect(failure).toMatchObject({ code: 'discovery_failed', serverNamed: true, responseStatus: 409 });

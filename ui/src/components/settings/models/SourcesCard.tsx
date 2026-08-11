@@ -31,7 +31,7 @@ export const SourcesCard: React.FC<{
             className="model-hub-upstream-info"
           />
         </span>
-        {readState === 'ready' && <span className="rounded-full border border-border bg-foreground/[0.04] px-2 py-[3px] text-[10.5px] font-semibold text-muted">{t('settings.models.upstream.count', { count: sources.length })}</span>}
+        {readState === 'ready' && <span className="model-hub-upstream-count rounded-full border px-2 py-[3px] text-[10.5px] font-semibold">{t('settings.models.upstream.count', { count: sources.length })}</span>}
       </div>
       <div className="min-h-0 flex-1 space-y-2.5 overflow-y-auto p-3">
         {readState === 'loading'

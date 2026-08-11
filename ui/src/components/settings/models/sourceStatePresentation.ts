@@ -37,7 +37,7 @@ const STATUS_RULES: Readonly<Record<SourceStatus, Rule>> = {
     if (!Number.isFinite(retryAt) || remainingMinutes <= 0) {
       return {
         key: 'settings.models.upstream.state.unavailableDue',
-        textClass: 'text-gold',
+        textClass: 'model-hub-ink-gold',
         dotClass: 'bg-gold',
       };
     }
@@ -46,7 +46,7 @@ const STATUS_RULES: Readonly<Record<SourceStatus, Rule>> = {
       values: {
         delay: new Intl.NumberFormat(locale, { style: 'unit', unit: 'minute', unitDisplay: 'long' }).format(remainingMinutes),
       },
-      textClass: 'text-gold',
+      textClass: 'model-hub-ink-gold',
       dotClass: 'bg-gold',
     };
   },
@@ -75,7 +75,7 @@ export const sourceStatePresentation = (
     if (surface === 'detail') {
       return {
         key: 'settings.models.sourceDetail.status.inUse',
-        textClass: 'text-mint',
+        textClass: 'model-hub-ink-mint',
         dotClass: 'bg-mint',
       };
     }
@@ -86,7 +86,7 @@ export const sourceStatePresentation = (
       values: adoption.native
         ? { backend: adoption.backends[0] }
         : { backends: adoption.backends.join(locale.startsWith('zh') ? '、' : ', ') },
-      textClass: adoption.native ? 'text-cyan' : 'text-mint',
+      textClass: adoption.native ? 'text-cyan' : 'model-hub-ink-mint',
       dotClass: adoption.native ? 'bg-cyan' : 'bg-mint',
     };
   }

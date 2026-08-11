@@ -5,7 +5,6 @@ import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
 import { modelsApi } from './modelsApi';
-import { startRuntimeWithStatusRefresh } from './runtimeLifecycle';
 import type { RuntimeDependency } from './types';
 
 const Bullet: React.FC<{ children: React.ReactNode }> = ({ children }) => (
@@ -18,30 +17,49 @@ export const InstallGatewayDialog: React.FC<{
   onRuntime: (runtime: RuntimeDependency | null) => void;
 }> = ({ runtime, onClose, onRuntime }) => {
   const { t } = useTranslation();
-  const [busy, setBusy] = React.useState(false);
+  const [requesting, setRequesting] = React.useState(false);
   const [failed, setFailed] = React.useState(false);
+  const initiated = React.useRef(false);
+  const installing = requesting || runtime.status.health === 'installing';
+
+  React.useEffect(() => {
+    if (initiated.current && runtime.status.health !== 'installing' && runtime.status.health !== 'not_installed') {
+      onClose();
+    }
+  }, [onClose, runtime.status.health]);
 
   const install = () => {
-    if (busy) return;
-    setBusy(true);
+    if (installing) return;
+    initiated.current = true;
+    setRequesting(true);
     setFailed(false);
-    void startRuntimeWithStatusRefresh(modelsApi)
-      .then((result) => {
-        onRuntime(result.runtime);
-        if (result.failed) setFailed(true);
-        else onClose();
+    void modelsApi.installRuntime()
+      .then((next) => {
+        onRuntime(next);
+        if (next.status.health === 'not_installed') setFailed(true);
+        else if (next.status.health !== 'installing') onClose();
       })
-      .finally(() => setBusy(false));
+      .catch(async () => {
+        try {
+          const next = await modelsApi.getRuntimeStatus();
+          onRuntime(next);
+          if (next.status.health === 'not_installed') setFailed(true);
+          else if (next.status.health !== 'installing') onClose();
+        } catch {
+          setFailed(true);
+        }
+      })
+      .finally(() => setRequesting(false));
   };
 
   return (
-    <DialogPrimitive.Root open onOpenChange={(open) => !open && !busy && onClose()}>
+    <DialogPrimitive.Root open onOpenChange={(open) => !open && !installing && onClose()}>
       <DialogPrimitive.Portal>
         <DialogPrimitive.Overlay className="model-hub-adopt-overlay fixed inset-0 z-50" />
         <DialogPrimitive.Content
           className="model-hub-adopt-dialog fixed left-1/2 top-1/2 z-50 flex -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden bg-surface outline-none"
-          onEscapeKeyDown={(event) => { if (busy) event.preventDefault(); }}
-          onPointerDownOutside={(event) => { if (busy) event.preventDefault(); }}
+          onEscapeKeyDown={(event) => { if (installing) event.preventDefault(); }}
+          onPointerDownOutside={(event) => { if (installing) event.preventDefault(); }}
         >
           <header className="model-hub-adopt-head">
             <div className="flex items-center justify-between gap-3">
@@ -49,7 +67,7 @@ export const InstallGatewayDialog: React.FC<{
                 {t('settings.models.install.title')}
               </DialogPrimitive.Title>
               <DialogPrimitive.Close asChild>
-                <Button type="button" variant="ghost" size="icon" className="model-hub-adopt-close" disabled={busy} aria-label={t('settings.models.install.cancel')}>
+                <Button type="button" variant="ghost" size="icon" className="model-hub-adopt-close" disabled={installing} aria-label={t('settings.models.install.cancel')}>
                   <X />
                 </Button>
               </DialogPrimitive.Close>
@@ -79,12 +97,12 @@ export const InstallGatewayDialog: React.FC<{
             </section>
           </div>
           <footer className="model-hub-adopt-foot">
-            <Button type="button" variant="outline" className="model-hub-adopt-action" onClick={onClose} disabled={busy}>
+            <Button type="button" variant="outline" className="model-hub-adopt-action" onClick={onClose} disabled={installing}>
               {t('settings.models.install.cancel')}
             </Button>
-            <Button type="button" variant="brand" className="model-hub-adopt-action" onClick={install} disabled={busy}>
-              {busy && <LoaderCircle className="animate-spin" />}
-              {busy
+            <Button type="button" variant="brand" className="model-hub-adopt-action" onClick={install} disabled={installing}>
+              {installing && <LoaderCircle className="animate-spin" />}
+              {installing
                 ? t('settings.models.install.progress')
                 : failed
                   ? t('settings.models.install.retry')
