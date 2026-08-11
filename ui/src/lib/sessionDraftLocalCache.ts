@@ -13,6 +13,7 @@ type CreateId = () => string;
 type Now = () => number;
 
 export const SESSION_DRAFT_STORAGE_PREFIX = 'avibe.session-draft.v1.';
+export const SESSION_DRAFT_INVALIDATION_PREFIX = 'avibe.session-draft-invalidation.v1.';
 
 function browserStorage(storage?: DraftStorage): DraftStorage | undefined {
   try {
@@ -53,6 +54,7 @@ export class SessionDraftLocalCache {
   private readonly storage?: DraftStorage;
   private readonly createId: CreateId;
   private readonly now: Now;
+  private readonly memoryInvalidations = new Map<string, string>();
 
   constructor(
     storage?: DraftStorage,
@@ -76,6 +78,29 @@ export class SessionDraftLocalCache {
     } catch {
       return null;
     }
+  }
+
+  readInvalidation(sessionId: string): string | null {
+    const memory = this.memoryInvalidations.get(sessionId) ?? null;
+    const target = browserStorage(this.storage);
+    if (!target) return memory;
+    try {
+      const stored = target.getItem(this.invalidationKey(sessionId));
+      return stored || memory;
+    } catch {
+      return memory;
+    }
+  }
+
+  invalidate(sessionId: string): string {
+    const token = this.createId();
+    this.memoryInvalidations.set(sessionId, token);
+    try {
+      browserStorage(this.storage)?.setItem(this.invalidationKey(sessionId), token);
+    } catch {
+      // The in-memory token still invalidates reads in this tab.
+    }
+    return token;
   }
 
   dirtySessionIds(): string[] {
@@ -180,5 +205,9 @@ export class SessionDraftLocalCache {
 
   private key(sessionId: string): string {
     return `${SESSION_DRAFT_STORAGE_PREFIX}${encodeURIComponent(sessionId)}`;
+  }
+
+  private invalidationKey(sessionId: string): string {
+    return `${SESSION_DRAFT_INVALIDATION_PREFIX}${encodeURIComponent(sessionId)}`;
   }
 }

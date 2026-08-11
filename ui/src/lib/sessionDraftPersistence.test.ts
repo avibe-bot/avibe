@@ -118,7 +118,7 @@ describe('SessionDraftPersistence', () => {
     });
   });
 
-  it('retries the newest local mutation instead of a stale in-memory tab copy', async () => {
+  it('keeps each live tab dirty mutation authoritative until it is acknowledged', async () => {
     const storage = new MemoryStorage();
     const firstCache = new SessionDraftLocalCache(storage, () => 'tab-a', () => 1);
     const secondCache = new SessionDraftLocalCache(storage, () => 'tab-b', () => 2);
@@ -132,10 +132,10 @@ describe('SessionDraftPersistence', () => {
       return { ok: true, server: { text: draft.text, updatedAt: 'rev-1' } };
     });
 
-    expect(writes).toEqual([{ text: 'from tab B', expectedUpdatedAt: null }]);
+    expect(writes).toEqual([{ text: 'from tab A', expectedUpdatedAt: null }]);
     expect(secondCache.read('session-a')).toMatchObject({
       text: 'from tab B',
-      dirty: false,
+      dirty: true,
       mutationId: 'tab-b',
     });
   });
@@ -242,7 +242,7 @@ describe('SessionDraftPersistence', () => {
     expect(restored.peek('session-a')).toBe('other device');
   });
 
-  it('preserves a dirty local draft and stops automatic writes on a version conflict', async () => {
+  it('preserves a conflicted draft and resumes syncing after the user edits it', async () => {
     const persistence = new SessionDraftPersistence(localCache());
     const firstRead = persistence.beginRead('session-a');
     persistence.reconcileRead('session-a', firstRead, { text: 'cloud', updatedAt: 'rev-1' });
@@ -262,6 +262,42 @@ describe('SessionDraftPersistence', () => {
     });
     expect(write).not.toHaveBeenCalled();
     expect(persistence.peek('session-a')).toBe('local edit');
+
+    persistence.cache('session-a', 'local edit resolved');
+    await expect(persistence.save('session-a', 'local edit resolved', write)).resolves.toMatchObject({
+      ok: true,
+    });
+    expect(write).toHaveBeenCalledWith({
+      text: 'local edit resolved',
+      expectedUpdatedAt: 'rev-2',
+    });
+  });
+
+  it('rebases the next edit onto the server revision returned by a write conflict', async () => {
+    const persistence = new SessionDraftPersistence(localCache());
+    const conflict = vi.fn(async (): Promise<SessionDraftSaveResult> => ({
+      ok: false,
+      conflict: true,
+      server: { text: 'other device', updatedAt: 'rev-2' },
+    }));
+
+    await expect(persistence.save('session-a', 'local edit', conflict)).resolves.toMatchObject({
+      ok: false,
+      conflict: true,
+    });
+    await persistence.save('session-a', 'local edit', conflict);
+    expect(conflict).toHaveBeenCalledTimes(1);
+
+    const resolved = vi.fn(async (draft: SessionDraftWrite): Promise<SessionDraftSaveResult> => ({
+      ok: true,
+      server: { text: draft.text, updatedAt: 'rev-3' },
+    }));
+    persistence.cache('session-a', 'local edit resolved');
+    await persistence.save('session-a', 'local edit resolved', resolved);
+    expect(resolved).toHaveBeenCalledWith({
+      text: 'local edit resolved',
+      expectedUpdatedAt: 'rev-2',
+    });
   });
 
   it('treats a same-text conflict as convergence and cleans the local record', async () => {
@@ -303,5 +339,28 @@ describe('SessionDraftPersistence', () => {
       { text: 'stale pre-archive draft', updatedAt: 'old-revision' },
     )).toBe('');
     expect(cache.read('session-a')).toBeNull();
+  });
+
+  it('discards a pre-archive read when another tab invalidates the session', () => {
+    const storage = new MemoryStorage();
+    const first = new SessionDraftPersistence(new SessionDraftLocalCache(
+      storage,
+      () => 'tab-a',
+      () => 1,
+    ));
+    const second = new SessionDraftPersistence(new SessionDraftLocalCache(
+      storage,
+      () => 'tab-b-archive',
+      () => 2,
+    ));
+    const read = first.beginRead('session-a');
+
+    second.clearSession('session-a');
+    expect(first.reconcileRead(
+      'session-a',
+      read,
+      { text: 'stale pre-archive draft', updatedAt: 'old-revision' },
+    )).toBe('');
+    expect(first.peek('session-a')).toBeNull();
   });
 });

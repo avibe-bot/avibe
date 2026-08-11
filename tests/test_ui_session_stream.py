@@ -1248,6 +1248,39 @@ def test_session_draft_compare_and_set_protects_newer_writes_and_clears(
     assert resurrect.get_json()["draft"] == cleared_draft
 
 
+def test_session_draft_reserves_writer_before_cas_reads(isolated_state, tmp_path):
+    from core.services import sessions as sessions_service
+    from storage.agent_session_rows import reserve_write_lock as real_reserve_write_lock
+    from vibe.ui_server import app
+
+    real_get_session = sessions_service.get_session
+    _, session_id = _make_session(tmp_path)
+    client = app.test_client()
+    headers = csrf_headers(client)
+    calls = []
+
+    def reserve_write_lock(conn):
+        calls.append("write_lock")
+        return real_reserve_write_lock(conn)
+
+    def get_session(conn, target_session_id):
+        calls.append("session_read")
+        return real_get_session(conn, target_session_id)
+
+    with (
+        patch("storage.agent_session_rows.reserve_write_lock", reserve_write_lock),
+        patch("core.services.sessions.get_session", get_session),
+    ):
+        response = client.put(
+            f"/api/sessions/{session_id}/draft",
+            json={"text": "serialized", "expected_updated_at": None},
+            headers=headers,
+        )
+
+    assert response.status_code == 200
+    assert calls[:2] == ["write_lock", "session_read"]
+
+
 def test_queue_row_send_now_passes_the_exact_delivery_id(isolated_state, tmp_path):
     from vibe.ui_server import app
 

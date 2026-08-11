@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  SESSION_DRAFT_INVALIDATION_PREFIX,
   SESSION_DRAFT_STORAGE_PREFIX,
   SessionDraftLocalCache,
 } from './sessionDraftLocalCache';
@@ -95,6 +96,19 @@ describe('SessionDraftLocalCache', () => {
     expect(storage.getItem(`${SESSION_DRAFT_STORAGE_PREFIX}broken`)).toBeNull();
   });
 
+  it('persists archive invalidation across cache instances', () => {
+    const storage = new MemoryStorage();
+    const first = new SessionDraftLocalCache(storage, () => 'archive-1', () => 1);
+    const second = new SessionDraftLocalCache(storage, () => 'unused', () => 2);
+
+    expect(first.readInvalidation('session/a')).toBeNull();
+    expect(first.invalidate('session/a')).toBe('archive-1');
+    expect(second.readInvalidation('session/a')).toBe('archive-1');
+    expect(storage.getItem(
+      `${SESSION_DRAFT_INVALIDATION_PREFIX}session%2Fa`,
+    )).toBe('archive-1');
+  });
+
   it('discards malformed data and tolerates blocked storage', () => {
     const storage = new MemoryStorage();
     storage.setItem(`${SESSION_DRAFT_STORAGE_PREFIX}broken`, '{not-json');
@@ -112,5 +126,7 @@ describe('SessionDraftLocalCache', () => {
     expect(() => fallback.writeDirty('session-a', 'text', null)).not.toThrow();
     expect(fallback.read('session-a')).toBeNull();
     expect(() => fallback.clear('session-a')).not.toThrow();
+    expect(fallback.invalidate('session-a')).toBe('id');
+    expect(fallback.readInvalidation('session-a')).toBe('id');
   });
 });

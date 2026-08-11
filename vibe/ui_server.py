@@ -8922,6 +8922,7 @@ def sessions_draft_set(session_id: str):
     """Upsert the session's draft (debounced from the composer). Blank clears it."""
     from core.services import sessions as workbench_sessions_service
     from storage import message_deliveries
+    from storage.agent_session_rows import reserve_write_lock
 
     payload = request.json or {}
     text = payload.get("text")
@@ -8932,6 +8933,10 @@ def sessions_draft_set(session_id: str):
     engine = _projects_engine()
     try:
         with engine.begin() as conn:
+            # The version read and its update are one CAS decision. Reserving
+            # SQLite's writer slot before either read prevents a concurrent
+            # commit from turning this transaction's snapshot into BUSY_SNAPSHOT.
+            reserve_write_lock(conn)
             session = workbench_sessions_service.get_session(conn, session_id)
             # Archive is terminal: drop a late/debounced draft save (e.g. the
             # composer flushing as it unmounts right after archive) so it can't

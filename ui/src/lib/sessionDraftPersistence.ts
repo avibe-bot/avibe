@@ -19,7 +19,7 @@ export type SessionDraftSaveResult = {
 export type SessionDraftRead = {
   revision: number;
   pending: boolean;
-  generation: number;
+  generation: string | null;
 };
 
 type DraftEntry = {
@@ -49,7 +49,7 @@ export class SessionDraftPersistence {
   private readonly entries = new Map<string, DraftEntry>();
   private readonly activeReads = new Map<string, Set<SessionDraftRead>>();
   private readonly serverVersions = new Map<string, string | null>();
-  private readonly generations = new Map<string, number>();
+  private readonly invalidations = new Map<string, string | null>();
   private readonly localCache: SessionDraftLocalCache;
 
   constructor(localCache = new SessionDraftLocalCache()) {
@@ -57,12 +57,16 @@ export class SessionDraftPersistence {
   }
 
   cache(sessionId: string, text: string): void {
+    this.observeInvalidation(sessionId);
     const current = this.entries.get(sessionId);
     const cached = this.localCache.read(sessionId);
-    const baseUpdatedAt = current?.baseUpdatedAt
-      ?? cached?.serverUpdatedAt
-      ?? this.serverVersions.get(sessionId)
-      ?? null;
+    const resolvesConflict = Boolean(current?.conflict && current.text !== text);
+    const baseUpdatedAt = resolvesConflict && this.serverVersions.has(sessionId)
+      ? this.serverVersions.get(sessionId)!
+      : current?.baseUpdatedAt
+        ?? cached?.serverUpdatedAt
+        ?? this.serverVersions.get(sessionId)
+        ?? null;
     const local = this.localCache.writeDirty(sessionId, text, baseUpdatedAt);
     this.entries.set(sessionId, {
       revision: (current?.revision ?? 0) + 1,
@@ -72,17 +76,21 @@ export class SessionDraftPersistence {
       pending: current?.pending ?? null,
       pendingRevision: current?.pendingRevision ?? null,
       dirty: true,
-      // Editing cannot resolve an already-observed version fork. Keep the
-      // automatic cloud writer stopped until an authoritative read converges.
-      conflict: current?.conflict ?? false,
+      // A new keystroke after a conflict is explicit user intent. Rebase that
+      // edit onto the revision returned by the conflict and resume CAS writes.
+      conflict: resolvesConflict ? false : current?.conflict ?? false,
     });
   }
 
   peek(sessionId: string): string | null {
+    this.observeInvalidation(sessionId);
+    const current = this.entries.get(sessionId);
+    if (current?.dirty) return current.text;
     return this.localCache.read(sessionId)?.text ?? null;
   }
 
   save(sessionId: string, text: string, write: DraftSave): Promise<SessionDraftSaveResult> {
+    this.observeInvalidation(sessionId);
     let current = this.entries.get(sessionId);
     if (!current || current.text !== text || !current.dirty) {
       this.cache(sessionId, text);
@@ -115,7 +123,7 @@ export class SessionDraftPersistence {
     const read: SessionDraftRead = {
       revision: current?.revision ?? 0,
       pending: Boolean(current?.pending),
-      generation: this.generations.get(sessionId) ?? 0,
+      generation: this.localCache.readInvalidation(sessionId),
     };
     const reads = this.activeReads.get(sessionId) ?? new Set<SessionDraftRead>();
     reads.add(read);
@@ -137,11 +145,14 @@ export class SessionDraftPersistence {
     read: SessionDraftRead,
     server: SessionDraftServerState,
   ): string {
-    const current = this.entries.get(sessionId);
     this.finishRead(sessionId, read);
-    if (read.generation !== (this.generations.get(sessionId) ?? 0)) {
+    const invalidation = this.localCache.readInvalidation(sessionId);
+    if (read.generation !== invalidation) {
+      this.discardInvalidatedSession(sessionId, invalidation);
       return '';
     }
+    this.invalidations.set(sessionId, invalidation);
+    const current = this.entries.get(sessionId);
 
     // A write that finished after this read started is newer than the read's
     // response even though both have server revisions. Preserve that result
@@ -172,7 +183,8 @@ export class SessionDraftPersistence {
   }
 
   clearSession(sessionId: string): void {
-    this.generations.set(sessionId, (this.generations.get(sessionId) ?? 0) + 1);
+    const invalidation = this.localCache.invalidate(sessionId);
+    this.invalidations.set(sessionId, invalidation);
     this.entries.delete(sessionId);
     this.activeReads.delete(sessionId);
     this.serverVersions.delete(sessionId);
@@ -272,8 +284,13 @@ export class SessionDraftPersistence {
   }
 
   private hydrateDirty(sessionId: string): DraftEntry | null {
+    this.observeInvalidation(sessionId);
     const current = this.entries.get(sessionId);
     const cached = this.localCache.read(sessionId);
+    // A live tab owns its unsynced mutation. Shared localStorage is recovery
+    // state for reloads and inactive tabs, not permission for one tab to replace
+    // another tab's composer while navigating.
+    if (current?.dirty) return current;
     if (current && (!cached || cached.mutationId === current.localId)) return current;
     if (current && cached && !cached.dirty) {
       if (current.pending) return current;
@@ -299,6 +316,24 @@ export class SessionDraftPersistence {
     this.serverVersions.set(sessionId, server.updatedAt);
     this.entries.delete(sessionId);
     this.localCache.writeClean(sessionId, server.text, server.updatedAt);
+  }
+
+  private observeInvalidation(sessionId: string): void {
+    const invalidation = this.localCache.readInvalidation(sessionId);
+    if (!this.invalidations.has(sessionId)) {
+      this.invalidations.set(sessionId, invalidation);
+      return;
+    }
+    if (this.invalidations.get(sessionId) === invalidation) return;
+    this.discardInvalidatedSession(sessionId, invalidation);
+  }
+
+  private discardInvalidatedSession(sessionId: string, invalidation: string | null): void {
+    this.invalidations.set(sessionId, invalidation);
+    this.entries.delete(sessionId);
+    this.activeReads.delete(sessionId);
+    this.serverVersions.delete(sessionId);
+    this.localCache.clear(sessionId);
   }
 
   private finishRead(sessionId: string, read: SessionDraftRead): void {
