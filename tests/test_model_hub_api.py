@@ -74,12 +74,17 @@ class MemoryStore:
             }
         )
         self.requested_models = {}
+        self.recovery = False
 
     def load(self):
         return self.config
 
     def save(self, config):
         self.config = config
+
+    def ensure_writable(self):
+        if self.recovery:
+            raise ModelHubError("config_recovery", status=409)
 
     def requested_model(self, backend):
         return self.requested_models.get(backend, "")
@@ -984,6 +989,26 @@ def test_oauth_start_normalizes_vendor_before_singleton_and_adapter(tmp_path):
 
     assert flow["vendor"] == "anthropic"
     assert adapter.oauth_start_calls == [(flow["source_id"], "anthropic")]
+
+
+def test_model_hub_oauth_blocks_recovery_before_external_auth(tmp_path):
+    service, store, adapter = _service(tmp_path)
+    flow = asyncio.run(
+        service.oauth_start({"vendor": "anthropic", "channel": "native_cli"})
+    )["flow"]
+    store.recovery = True
+
+    with pytest.raises(ModelHubError) as start_error:
+        asyncio.run(service.oauth_start({"vendor": "anthropic", "channel": "native_cli"}))
+    assert start_error.value.code == "config_recovery"
+    assert len(adapter.oauth_start_calls) == 1
+
+    with pytest.raises(ModelHubError) as submit_error:
+        asyncio.run(
+            service.oauth_submit({"flow_id": flow["flow_id"], "value": "auth-code"})
+        )
+    assert submit_error.value.code == "config_recovery"
+    assert adapter.secret_lengths == []
 
 
 def test_chain_route_reorders_exact_persisted_hops(monkeypatch, tmp_path):

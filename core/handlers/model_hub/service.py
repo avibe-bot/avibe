@@ -143,6 +143,14 @@ class V2ModelHubConfigStore:
         except FileNotFoundError:
             return default_config().model_hub
 
+    def ensure_writable(self) -> None:
+        try:
+            config = V2Config.load()
+        except FileNotFoundError:
+            return
+        if config.load_warnings:
+            raise ModelHubError("config_recovery", status=409)
+
     def save(self, model_hub: ModelHubConfig) -> None:
         model_hub = ModelHubConfig.from_payload(model_hub.to_payload())
         with CONFIG_LOCK:
@@ -615,6 +623,11 @@ class ModelHubService:
         canonical = ModelHubConfig.from_payload(config.to_payload())
         self.store.save(canonical)
         return canonical
+
+    def _ensure_config_writable(self) -> None:
+        ensure_writable = getattr(self.store, "ensure_writable", None)
+        if callable(ensure_writable):
+            ensure_writable()
 
     async def _sync_sources(self, config: ModelHubConfig, *, force_empty: bool = False) -> None:
         bindings = self._bindings(config)
@@ -1234,6 +1247,7 @@ class ModelHubService:
         # Claim and consume a completed flow under the aggregate lock. This
         # prevents a duplicate browser retry from revoking the winning source's
         # credential while still retaining rollback ownership before discovery.
+        self._ensure_config_writable()
         async with self._mutation_lock:
             rollback_credential_ref: Optional[str] = None
             source_id = ""
@@ -3582,6 +3596,7 @@ class ModelHubService:
         except ValueError:
             raise ModelHubError("flow_not_found", status=400) from None
         oauth_channel = cast(OAuthChannel, channel)
+        self._ensure_config_writable()
         if oauth_channel == "native_cli":
             backend = _NATIVE_VENDOR_BACKENDS.get(vendor)
             if backend is not None:
@@ -3679,6 +3694,7 @@ class ModelHubService:
         value = payload.get("value") if isinstance(payload, dict) else None
         if not isinstance(flow_id, str) or not isinstance(value, str):
             raise ModelHubError("flow_not_found", status=404)
+        self._ensure_config_writable()
         binding = self._oauth_binding(flow_id)
         completed = self._completed_oauth_flow(flow_id, binding)
         if completed is not None:

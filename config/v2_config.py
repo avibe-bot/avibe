@@ -330,6 +330,7 @@ def _legacy_mapping_is_valid(value: object) -> bool:
 
     if (
         not isinstance(value, dict)
+        or set(value) - {"builtin_id", "target_model_id", "enabled"}
         or not isinstance(value.get("builtin_id"), str)
         or not value["builtin_id"]
         or not isinstance(value.get("enabled"), bool)
@@ -506,6 +507,8 @@ def _migrate_legacy_model_hub_payload(payload: dict) -> tuple[dict, bool, tuple[
                 for mapping in mappings or []
             ):
                 return payload, False, ()
+        if "routes" in agent and not isinstance(agent["routes"], dict):
+            return payload, False, ()
         menu = agent.get("menu")
         if isinstance(menu, dict) and "checked" in menu and not isinstance(menu["checked"], list):
             return payload, False, ()
@@ -837,6 +840,43 @@ def _write_config_payload(path: Path, payload: dict) -> None:
         os.replace(temp_name, path)
 
 
+def _write_config_payload_if_unchanged(
+    path: Path,
+    payload: dict,
+    expected_raw: str,
+) -> bool:
+    """Replace a config only if the final pre-replace snapshot still matches."""
+
+    content = json.dumps(payload, indent=2)
+    temp_name: str | None = None
+    with CONFIG_LOCK:
+        try:
+            with tempfile.NamedTemporaryFile(
+                "w",
+                encoding="utf-8",
+                dir=path.parent,
+                delete=False,
+            ) as tmp:
+                tmp.write(content)
+                tmp.flush()
+                os.fsync(tmp.fileno())
+                temp_name = tmp.name
+            current_raw = path.read_text(encoding="utf-8")
+            if current_raw != expected_raw:
+                return False
+            os.replace(temp_name, path)
+            temp_name = None
+            return True
+        except (OSError, UnicodeDecodeError):
+            return False
+        finally:
+            if temp_name is not None:
+                try:
+                    Path(temp_name).unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+
 def _persist_migrated_config_payload(
     path: Path,
     expected_raw: str,
@@ -851,10 +891,15 @@ def _persist_migrated_config_payload(
             return None, f"Could not verify config before migration persistence: {exc}"
         if current_raw != expected_raw:
             return None, "Skipped config migration because the file changed during load"
-        backup = _backup_config_file(path, "model-hub-migration")
+        backup = _backup_config_file(
+            path,
+            "model-hub-migration",
+            content=expected_raw.encode("utf-8"),
+        )
         if backup is None:
             return None, "Skipped config migration because the original file could not be backed up"
-        _write_config_payload(path, payload)
+        if not _write_config_payload_if_unchanged(path, payload, expected_raw):
+            return backup, "Skipped config migration because the file changed before replacement"
         return backup, None
 
 

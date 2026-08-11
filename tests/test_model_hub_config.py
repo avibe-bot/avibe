@@ -1261,6 +1261,39 @@ def test_config_reload_does_not_overwrite_config_changed_during_migration(
     assert loaded.load_warnings and "changed during load" in loaded.load_warnings[0]
 
 
+def test_config_reload_does_not_overwrite_config_changed_before_replace(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    payload = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    payload["model_hub"] = _legacy_model_hub_payload(payload["model_hub"])
+    config_path = tmp_path / "config.json"
+    original = json.dumps(payload)
+    config_path.write_text(original, encoding="utf-8")
+    concurrent_payload = {**payload, "show_duration": True}
+    original_write = v2_config._write_config_payload_if_unchanged
+
+    def write_after_concurrent_save(path, migrated_payload, expected_raw):
+        path.write_text(json.dumps(concurrent_payload), encoding="utf-8")
+        return original_write(path, migrated_payload, expected_raw)
+
+    monkeypatch.setattr(
+        v2_config,
+        "_write_config_payload_if_unchanged",
+        write_after_concurrent_save,
+    )
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert json.loads(config_path.read_text(encoding="utf-8")) == json.loads(
+        json.dumps(concurrent_payload)
+    )
+    assert loaded.load_warnings and "before replacement" in " ".join(loaded.load_warnings)
+    backups = list(config_path.parent.glob("config.json.bak-model-hub-migration-*"))
+    assert backups and backups[0].read_text(encoding="utf-8") == original
+
+
 def test_config_reload_recovers_invalid_optional_section_without_overwriting_file(
     monkeypatch,
     tmp_path,
@@ -1275,10 +1308,10 @@ def test_config_reload_recovers_invalid_optional_section_without_overwriting_fil
 
     assert loaded.model_hub.to_payload() == V2Config.default().model_hub.to_payload()
     assert loaded.load_warnings and "model_hub" in loaded.load_warnings[0]
-    assert api.client_config_payload(loaded)["config_recovery"] == {
-        "required": True,
-        "warnings": list(loaded.load_warnings),
-    }
+    recovery = api.client_config_payload(loaded)["config_recovery"]
+    assert recovery["required"] is True
+    assert recovery["warnings"]
+    assert recovery["warnings"] != list(loaded.load_warnings)
     assert json.loads(config_path.read_text(encoding="utf-8"))["model_hub"]["sources"] == "invalid"
     assert list(config_path.parent.glob("config.json.bak-recovery-*"))
     V2Config.load(config_path=config_path)
@@ -1289,6 +1322,22 @@ def test_config_reload_recovers_invalid_optional_section_without_overwriting_fil
         api.save_config({"show_duration": True})
     with pytest.raises(ValueError, match="recovery warnings"):
         loaded.save(config_path)
+
+
+def test_client_config_recovery_projection_redacts_validator_details(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    payload = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    payload["platforms"] = {"enabled": ["sk-leaked-platform-token"], "primary": "avibe"}
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+    raw_warnings = json.dumps(loaded.load_warnings)
+    projected = api.client_config_payload(loaded)
+
+    assert "sk-leaked-platform-token" in raw_warnings
+    assert "sk-leaked-platform-token" not in json.dumps(projected)
+    assert projected["config_recovery"]["warnings"]
 
 
 def test_config_reload_recovers_runtime_with_the_canonical_default(
@@ -1338,6 +1387,19 @@ def test_config_reload_recovers_runtime_with_the_canonical_default(
         lambda hub: hub["agents"]["claude"].update({"menu_kind": "open"}),
         lambda hub: hub["agents"]["claude"].pop("menu_kind"),
         lambda hub: hub["agents"]["claude"].update(
+            {
+                "mappings": [
+                    {
+                        "builtin_id": "opus",
+                        "target_model_id": "claude-opus-4-5",
+                        "enabled": True,
+                        "future_field": True,
+                    }
+                ]
+            }
+        ),
+        lambda hub: hub["agents"]["claude"].update({"routes": "invalid"}),
+        lambda hub: hub["agents"]["claude"].update(
             {"mappings": [{"builtin_id": "opus", "enabled": True}]}
         ),
         lambda hub: hub["agents"]["claude"].update(
@@ -1376,6 +1438,8 @@ def test_config_reload_recovers_runtime_with_the_canonical_default(
         "agent-backend-missing",
         "agent-menu-kind-mismatch",
         "agent-menu-kind-missing",
+        "mapping-unknown-field",
+        "routes-not-object",
         "mapping-missing-target",
         "mapping-retired-menu",
         "mapping-enabled-not-boolean",

@@ -1249,9 +1249,17 @@ def client_config_payload(config: V2Config) -> dict:
 
     payload = config_to_payload(config)
     payload.pop("memory", None)
+    recovery_warnings = []
+    if config.load_warnings:
+        recovery_warnings.append(
+            backend_t(
+                "error.configRecovery.beforeAuth",
+                getattr(config, "language", "en") or "en",
+            )
+        )
     payload["config_recovery"] = {
         "required": bool(config.load_warnings),
-        "warnings": list(config.load_warnings),
+        "warnings": recovery_warnings,
     }
     return payload
 
