@@ -759,6 +759,7 @@
     "launch": {
       "retry": "The next turn has already switched routes. Retry directly.",
       "waiting": "Model {model} is temporarily unavailable. Waiting for {source} to recover at {retry_at}.",
+      "waiting_without_retry": "The route for model {model} has recovered. Retry directly.",
       "interrupted": "Model {model} is unavailable: {blockers}. Open Models to resolve it.",
       "route_unconfigured": "Model {model} has no configured route. Open Models to configure one.",
       "request_incompatible": "This request is incompatible; switching Sources will not help."

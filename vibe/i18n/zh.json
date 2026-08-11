@@ -759,6 +759,7 @@
     "launch": {
       "retry": "下一回合已自动换线，直接重试即可",
       "waiting": "模型 {model} 暂时不可用，等待 {source} 于 {retry_at} 自动恢复。",
+      "waiting_without_retry": "模型 {model} 的路线已恢复，直接重试即可。",
       "interrupted": "模型 {model} 当前不可用：{blockers}。请前往 Models 处理。",
       "route_unconfigured": "模型 {model} 尚未配置路由。请前往 Models 配置。",
       "request_incompatible": "此请求不兼容；切换模型来源也无法解决。"

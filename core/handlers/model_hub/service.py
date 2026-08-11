@@ -237,11 +237,21 @@ class UnavailableEngineAdapter:
 
 @dataclass(frozen=True)
 class ResolvedInvocation:
+    backend: BackendName
+    requested_model_id: str
     source_id: str
     model_id: str
     handle: Optional[InvokeHandle]
     outcome: Optional[RawCallOutcome]
     supply_channel: Literal["native_cli", "hub"] = "hub"
+    requested_supply_channel: Literal["hub"] | None = None
+
+
+@dataclass(frozen=True)
+class HandleSettlement:
+    outcome: RawCallOutcome
+    decision: ResolutionDecision
+    turn_outcome: TurnOutcomeProjectionInput
 
 
 AttemptObserver = Callable[
@@ -3951,6 +3961,50 @@ class ModelHubService:
             attempted_hop=(source_id, source_model_id),
         )
 
+    async def settle_handle_outcome(
+        self,
+        resolved: ResolvedInvocation,
+        outcome: RawCallOutcome,
+    ) -> HandleSettlement:
+        """Settle every consumed hub handle before its terminal facts are exposed."""
+
+        if resolved.supply_channel != "hub":
+            raise AssertionError("post-handle settlement requires a hub stream")
+        # A consumed non-null handle is first-byte evidence even if an adapter
+        # omitted the redundant flag from its terminal report.
+        outcome = replace(outcome, stream_started=True)
+        config = self.store.load()
+        source = self._source(config, resolved.source_id)
+        decision = await self._classify_source_outcome(source, outcome)
+        if decision.action == "return":
+            return HandleSettlement(
+                outcome=outcome,
+                decision=decision,
+                turn_outcome=produce_turn_outcome("turn.served"),
+            )
+        if decision.action != "surface":
+            raise AssertionError("consumed streams cannot retry or fall through")
+        if decision.reason is not None:
+            await self._settle_fallback_source(
+                source,
+                decision,
+                backend=resolved.backend,
+                model_id=resolved.requested_model_id,
+            )
+        return HandleSettlement(
+            outcome=outcome,
+            decision=decision,
+            turn_outcome=self._produce_attempt_terminal_outcome(
+                backend=resolved.backend,
+                model_id=resolved.requested_model_id,
+                supply_channel=resolved.requested_supply_channel,
+                source_id=resolved.source_id,
+                source_model_id=resolved.model_id,
+                outcome=outcome,
+                decision=decision,
+            ),
+        )
+
     def _emit_switch(
         self,
         *,
@@ -4158,11 +4212,14 @@ class ModelHubService:
                     source=source,
                 )
                 return ResolvedInvocation(
-                    source.id,
-                    target_model,
-                    None,
-                    None,
+                    backend=cast(BackendName, backend),
+                    requested_model_id=model_id,
+                    source_id=source.id,
+                    model_id=target_model,
+                    handle=None,
+                    outcome=None,
                     supply_channel="native_cli",
+                    requested_supply_channel=supply_channel,
                 )
             await self._prepare_engine_for_demand(already_synced=engine_prepared)
             engine_prepared = True
@@ -4190,7 +4247,15 @@ class ModelHubService:
                     failed_reason=failed_reason,
                     source=source,
                 )
-                return ResolvedInvocation(source.id, target_model, handle, None)
+                return ResolvedInvocation(
+                    backend=cast(BackendName, backend),
+                    requested_model_id=model_id,
+                    source_id=source.id,
+                    model_id=target_model,
+                    handle=handle,
+                    outcome=None,
+                    requested_supply_channel=supply_channel,
+                )
             decision = await self._classify_source_outcome(source, outcome)
             if decision.action == "refresh":
                 # The engine refreshes its credential internally; L2 retries the
@@ -4210,7 +4275,15 @@ class ModelHubService:
                         failed_reason=failed_reason,
                         source=source,
                     )
-                    return ResolvedInvocation(source.id, target_model, handle, None)
+                    return ResolvedInvocation(
+                        backend=cast(BackendName, backend),
+                        requested_model_id=model_id,
+                        source_id=source.id,
+                        model_id=target_model,
+                        handle=handle,
+                        outcome=None,
+                        requested_supply_channel=supply_channel,
+                    )
                 decision = classify_outcome(outcome, refresh_attempted=True)
             if attempt_observer is not None:
                 attempt_observer(
@@ -4229,7 +4302,15 @@ class ModelHubService:
                     failed_reason=failed_reason,
                     source=source,
                 )
-                return ResolvedInvocation(source.id, target_model, handle, outcome)
+                return ResolvedInvocation(
+                    backend=cast(BackendName, backend),
+                    requested_model_id=model_id,
+                    source_id=source.id,
+                    model_id=target_model,
+                    handle=handle,
+                    outcome=outcome,
+                    requested_supply_channel=supply_channel,
+                )
             if decision.action == "surface":
                 if outcome.stream_started and decision.reason is not None:
                     await self._settle_fallback_source(

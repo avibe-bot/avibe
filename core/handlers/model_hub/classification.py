@@ -34,9 +34,9 @@ _MODEL_SURFACE_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 _MODEL_NOT_FOUND_ERROR_CODES = frozenset({"not_found_error"})
-_REQUEST_SURFACE_ERROR_CODES = frozenset({"request_too_large"})
-_REQUEST_TERMINAL_ERROR_CODES = {
-    "permission_error": "request_incompatible",
+_MACHINE_ERROR_CODE_DECISIONS: dict[str, tuple[ResolutionAction, str]] = {
+    "permission_error": ("surface", "request_incompatible"),
+    "request_too_large": ("surface", "upstream_request_invalid"),
 }
 _QUOTA_PATTERNS = re.compile(
     r"(?:quota[_ -]?(?:exhausted|exceeded)|insufficient[_ -]?(?:quota|credits)|"
@@ -72,6 +72,14 @@ def _classify_unstreamed(
     if outcome.kind == RawOutcomeKind.PROTOCOL_ERROR:
         return ResolutionDecision("surface", error_code="upstream_protocol_error")
 
+    # Signed machine-code rows precede every status heuristic. HTTP status is
+    # only fallback evidence when no canonical machine-code row matches.
+    normalized_error_code = str(outcome.error_code or "").strip().lower()
+    machine_row = _MACHINE_ERROR_CODE_DECISIONS.get(normalized_error_code)
+    if machine_row is not None:
+        action, error_code = machine_row
+        return ResolutionDecision(action, error_code=error_code)
+
     if outcome.http_status == 401:
         if refresh_attempted:
             return ResolutionDecision(
@@ -86,20 +94,15 @@ def _classify_unstreamed(
             "fallback",
             reason="balance_exhausted",
         )
-    normalized_error_code = str(outcome.error_code or "").strip().lower()
     model_not_found = _MODEL_SURFACE_PATTERNS.search(error_text) or (
         outcome.http_status == 404
         and normalized_error_code in _MODEL_NOT_FOUND_ERROR_CODES
     )
     if (
-        normalized_error_code in _REQUEST_SURFACE_ERROR_CODES
-        or _SURFACE_PATTERNS.search(error_text)
+        _SURFACE_PATTERNS.search(error_text)
         or model_not_found
     ):
         return ResolutionDecision("surface", error_code="upstream_request_invalid")
-    terminal_error_code = _REQUEST_TERMINAL_ERROR_CODES.get(normalized_error_code)
-    if terminal_error_code is not None:
-        return ResolutionDecision("surface", error_code=terminal_error_code)
 
     if _QUOTA_PATTERNS.search(error_text):
         return ResolutionDecision(

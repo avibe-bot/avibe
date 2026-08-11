@@ -216,6 +216,45 @@ def test_turn_outcome_copy_projection_has_one_runtime_owner() -> None:
     assert constructor_calls == {owner: producer_calls}
 
 
+def test_gateway_handle_termination_has_one_settlement_owner() -> None:
+    path = Path(__file__).parents[1] / "core/handlers/model_hub/turn_gateway.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    owner = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef)
+        and node.name == "_settle_consumed_handle"
+    )
+
+    def is_call(node: ast.AST, name: str) -> bool:
+        return (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == name
+        )
+
+    all_outcome_calls = {
+        node.lineno for node in ast.walk(tree) if is_call(node, "outcome")
+    }
+    owner_outcome_calls = {
+        node.lineno for node in ast.walk(owner) if is_call(node, "outcome")
+    }
+    all_settlement_calls = {
+        node.lineno
+        for node in ast.walk(tree)
+        if is_call(node, "settle_handle_outcome")
+    }
+    owner_settlement_calls = {
+        node.lineno
+        for node in ast.walk(owner)
+        if is_call(node, "settle_handle_outcome")
+    }
+    assert owner_outcome_calls
+    assert owner_settlement_calls
+    assert all_outcome_calls == owner_outcome_calls
+    assert all_settlement_calls == owner_settlement_calls
+
+
 def _terminal_resolution_facts(
     config: ModelHubConfig,
     *,
@@ -312,6 +351,15 @@ def test_every_turn_outcome_matrix_variant_projects_or_stays_silent(
                 "src_attempted01",
                 "shared-model",
             )
+    elif variant == "waiting_without_retry":
+        source = _source("src_matrix_ready", "Recovered source")
+        config = _config([source])
+        resolution = _terminal_resolution_facts(
+            config,
+            supply_status="degraded",
+            next_hop=(source.id, "shared-model"),
+        )
+        producer_kwargs = {"config": config, "resolution": resolution}
     elif variant == "next_current":
         source = _source("src_matrix002", "Next source")
         config = _config([source])
@@ -341,6 +389,30 @@ def test_every_turn_outcome_matrix_variant_projects_or_stays_silent(
 def test_turn_outcome_producer_rejects_missing_streamed_fallback_facts() -> None:
     with pytest.raises(TurnOutcomeProductionError, match="missing"):
         produce_turn_outcome("turn.streamed_fallback")
+
+
+def test_recovered_exhaustion_projects_waiting_without_a_past_retry_time() -> None:
+    source = _source("src_recovered01", "Recovered source")
+    config = _config([source])
+    resolution = _terminal_resolution_facts(
+        config,
+        supply_status="degraded",
+        next_hop=(source.id, "shared-model"),
+    )
+
+    projection = produce_turn_outcome(
+        "turn.exhausted",
+        config=config,
+        resolution=resolution,
+    )
+    copy = project_turn_outcome_copy(projection)
+
+    assert projection.outcome == "exhausted"
+    assert projection.supply_facts is not None
+    assert projection.supply_facts.supply_state == "waiting"
+    assert projection.supply_facts.retry_at == ""
+    assert copy is not None
+    assert copy.key == "modelHub.launch.waiting_without_retry"
 
 
 def test_route_unconfigured_launch_copy_exists_in_each_backend_locale() -> None:
@@ -438,9 +510,32 @@ class InvokeHandle:
         return self._outcome
 
 
+class LiveInvokeHandle:
+    def __init__(self, outcome: RawCallOutcome, chunks: tuple[bytes, ...]):
+        self._outcome = outcome
+        self._stream = self._iterate(chunks)
+
+    @staticmethod
+    async def _iterate(chunks: tuple[bytes, ...]):
+        for chunk in chunks:
+            yield chunk
+
+    @property
+    def stream(self):
+        return self._stream
+
+    async def outcome(self) -> RawCallOutcome:
+        return self._outcome
+
+
 class ProbeAdapter:
-    def __init__(self, outcomes: list[RawCallOutcome]):
+    def __init__(
+        self,
+        outcomes: list[RawCallOutcome],
+        live_handles: list[LiveInvokeHandle] | None = None,
+    ):
         self.outcomes = deque(outcomes)
+        self.live_handles = deque(live_handles or [])
         self.invocations: list[tuple[str, str, str]] = []
         self.requests: list[ModelHubRequest] = []
         self.refreshable_credential_refs: set[str] = set()
@@ -459,6 +554,8 @@ class ProbeAdapter:
     async def invoke(self, source_id, model_id, request, _stream, origin):
         self.invocations.append((source_id, model_id, origin))
         self.requests.append(request)
+        if self.live_handles:
+            return self.live_handles.popleft()
         return InvokeHandle(self.outcomes.popleft())
 
     async def status(self) -> EngineStatus:
@@ -554,11 +651,12 @@ def _service(
     *,
     sources: list[ModelHubSourceConfig],
     outcomes: list[RawCallOutcome] | None = None,
+    live_handles: list[LiveInvokeHandle] | None = None,
 ) -> ModelHubService:
     store = MemoryStore(_config(sources))
     return ModelHubService(
         store=store,
-        adapter=ProbeAdapter(outcomes or []),
+        adapter=ProbeAdapter(outcomes or [], live_handles),
         events=BoundedEventLog(tmp_path / "events.json"),
         provenance=BoundedProvenanceStore(tmp_path / "provenance.json"),
         revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
@@ -1150,6 +1248,82 @@ def test_gateway_preserves_exhausted_provenance_after_all_hops_fallback(
     asyncio.run(exercise())
 
 
+def test_gateway_exhaustion_uses_no_time_copy_when_an_earlier_hop_recovers(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        first = _source("src_recovery01", "Recovered while waiting")
+        second = _source("src_recovery02", "Still cooling")
+        service = _service(
+            tmp_path,
+            sources=[first, second],
+            outcomes=[
+                _outcome(
+                    RawOutcomeKind.HTTP_ERROR,
+                    status=429,
+                    source_id=first.id,
+                ),
+                _outcome(
+                    RawOutcomeKind.HTTP_ERROR,
+                    status=503,
+                    source_id=second.id,
+                ),
+            ],
+        )
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        service.store.config.agents["codex"].routes[requested_model] = (
+            ModelHubRouteConfig(
+                hops=(
+                    ModelHubRouteHopConfig(first.id, "shared-model"),
+                    ModelHubRouteHopConfig(second.id, "shared-model"),
+                )
+            )
+        )
+        clock = {"now": NOW}
+        service.now = lambda: clock["now"]
+        invoke = service.adapter.invoke
+
+        async def advance_during_later_attempt(
+            source_id,
+            model_id,
+            request,
+            stream,
+            origin,
+        ):
+            if source_id == second.id:
+                clock["now"] = NOW + timedelta(minutes=10)
+            return await invoke(source_id, model_id, request, stream, origin)
+
+        service.adapter.invoke = advance_during_later_attempt
+        gateway = ModelHubTurnGateway(service)
+        base_url, token = await gateway.endpoint(
+            "codex",
+            process_scope="/repo",
+            turn_id="turn_exhausted_after_recovery",
+            requested_model_id=requested_model,
+            resolved_model_id="shared-model",
+            source_id=first.id,
+        )
+        try:
+            async with aiohttp.ClientSession(trust_env=False) as client:
+                response = await client.post(
+                    f"{base_url}/v1/responses",
+                    json={"model": "shared-model", "input": "ping", "stream": False},
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                assert response.status == 503
+                payload = await response.json()
+                assert payload["error"]["message"] == i18n_t(
+                    "modelHub.launch.waiting_without_retry",
+                    "en",
+                    model=requested_model,
+                )
+        finally:
+            await gateway.close()
+
+    asyncio.run(exercise())
+
+
 def test_gateway_streamed_fallback_settles_source_before_rendering_next_current(
     tmp_path: Path,
 ) -> None:
@@ -1229,6 +1403,97 @@ def test_gateway_streamed_fallback_settles_source_before_rendering_next_current(
             "reason": "stream_interrupted",
             "stream_started": True,
         }
+        _assert_valid("turn-provenance.schema.json", record)
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize(
+    ("kind", "status", "code", "expected_outcome", "expected_source_status"),
+    [
+        (RawOutcomeKind.SUCCESS, 200, None, "served", "standby"),
+        (
+            RawOutcomeKind.PROTOCOL_ERROR,
+            502,
+            "upstream_protocol_error",
+            "failed_terminal",
+            "standby",
+        ),
+        (RawOutcomeKind.TIMEOUT, 200, None, "failed_terminal", "cooldown"),
+    ],
+)
+def test_gateway_handle_terminal_matrix_always_uses_service_settlement(
+    tmp_path: Path,
+    stream: bool,
+    kind: RawOutcomeKind,
+    status: int,
+    code: str | None,
+    expected_outcome: str,
+    expected_source_status: str,
+) -> None:
+    async def exercise() -> None:
+        source = _source("src_livehandle", "Live handle")
+        outcome = _outcome(
+            kind,
+            status=status,
+            code=code,
+            source_id=source.id,
+            stream_started=True,
+        )
+        chunks = (
+            (b"data: {}\n\n",)
+            if stream
+            else (b'{"id":"response-live-handle"}',)
+        )
+        service = _service(
+            tmp_path,
+            sources=[source],
+            live_handles=[LiveInvokeHandle(outcome, chunks)],
+        )
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        service.settle_handle_outcome = AsyncMock(
+            wraps=service.settle_handle_outcome
+        )
+        turn_id = f"turn_live_{kind.value}_{stream}"
+        gateway = ModelHubTurnGateway(service)
+        base_url, token = await gateway.endpoint(
+            "codex",
+            process_scope="/repo",
+            turn_id=turn_id,
+            requested_model_id=requested_model,
+            resolved_model_id="shared-model",
+            source_id=source.id,
+        )
+        try:
+            async with aiohttp.ClientSession(trust_env=False) as client:
+                response = await client.post(
+                    f"{base_url}/v1/responses",
+                    json={
+                        "model": "shared-model",
+                        "input": "ping",
+                        "stream": stream,
+                    },
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                await response.read()
+                if stream or kind is RawOutcomeKind.SUCCESS:
+                    assert response.status == 200
+                else:
+                    assert response.status == 502
+        finally:
+            await gateway.close()
+
+        service.settle_handle_outcome.assert_awaited_once()
+        assert service.store.load().sources[0].state.status == expected_source_status
+        gateway.correlation.settle(
+            turn_id,
+            settled_by=SETTLED_BY_TERMINAL_RESULT,
+            ts=NOW.isoformat(),
+        )
+        record = service.provenance.get(turn_id)
+        assert record is not None
+        assert record["outcome"] == expected_outcome
         _assert_valid("turn-provenance.schema.json", record)
 
     asyncio.run(exercise())

@@ -420,7 +420,11 @@ def test_streamed_nonfallback_preserves_the_terminal_interruption_code():
     assert decision.error_code == "stream_interrupted"
 
 
-def test_permission_denial_is_terminal_without_switch_or_source_mutation(tmp_path):
+@pytest.mark.parametrize("status", [401, 402, 403, 429, 500])
+def test_machine_permission_denial_precedes_every_status_heuristic(
+    tmp_path,
+    status,
+):
     source = _source("src_route006", ("upstream-first", "upstream-second"))
     config = _config([source])
     config.agents["claude"].routes["claude-opus-4-6"] = ModelHubRouteConfig(
@@ -434,7 +438,7 @@ def test_permission_denial_is_terminal_without_switch_or_source_mutation(tmp_pat
         (
             RawCallOutcome(
                 kind=RawOutcomeKind.HTTP_ERROR,
-                http_status=403,
+                http_status=status,
                 error_code="permission_error",
                 redacted_message=None,
                 stream_started=False,
@@ -466,9 +470,10 @@ def test_permission_denial_is_terminal_without_switch_or_source_mutation(tmp_pat
         )
 
     assert exc.value.code == "request_incompatible"
-    assert exc.value.status == 403
+    assert exc.value.status == status
     assert decisions[-1].action == "surface"
     assert adapter.invocations == [(source.id, "upstream-first")]
+    assert adapter.capability_queries == []
     assert store.load().sources[0].state.status == "standby"
     assert BoundedEventLog(tmp_path / "events.json").list() == []
 

@@ -13,8 +13,7 @@ from aiohttp import web
 from config import paths
 from vibe.i18n import t as i18n_t
 
-from .adapter import RawCallOutcome, RawOutcomeKind
-from .classification import classify_outcome
+from .adapter import InvokeHandle, RawCallOutcome, RawOutcomeKind
 from .provenance import (
     BoundedProvenanceStore,
     ENGINE_DOWN_TURN_OUTCOME,
@@ -25,7 +24,12 @@ from .provenance import (
     render_turn_outcome_copy,
 )
 from .request import ModelHubRequest
-from .service import ModelHubError, ModelHubService, ResolvedInvocation
+from .service import (
+    HandleSettlement,
+    ModelHubError,
+    ModelHubService,
+    ResolvedInvocation,
+)
 
 
 _MAX_REQUEST_BYTES: Final = 16 * 1024 * 1024
@@ -283,17 +287,16 @@ class ModelHubTurnGateway:
             payload = bytearray()
             async for chunk in handle.stream:
                 payload.extend(chunk)
-            outcome = await handle.outcome()
-            decision = classify_outcome(outcome)
-            terminalizer.finish_attempt(
-                outcome=outcome,
-                decision=decision,
+            outcome, settlement = await self._settle_consumed_handle(
+                resolved,
+                handle,
+                terminalizer,
             )
-            if decision.action != "return":
+            if settlement.decision.action != "return":
                 return self._outcome_response(
                     outcome,
-                    error_code=decision.error_code,
-                    turn_outcome=REQUEST_NONFALLBACK_TURN_OUTCOME,
+                    error_code=settlement.decision.error_code,
+                    turn_outcome=settlement.turn_outcome,
                 )
             return web.Response(
                 status=200,
@@ -317,13 +320,29 @@ class ModelHubTurnGateway:
                 terminalizer.mark_stream_started()
                 await response.write(chunk)
         finally:
-            outcome = await handle.outcome()
-            terminalizer.finish_attempt(
-                outcome=outcome,
-                decision=classify_outcome(outcome),
+            await self._settle_consumed_handle(
+                resolved,
+                handle,
+                terminalizer,
             )
         await response.write_eof()
         return response
+
+    async def _settle_consumed_handle(
+        self,
+        resolved: ResolvedInvocation,
+        handle: InvokeHandle,
+        terminalizer: GatewayTurnTerminalizer,
+    ) -> tuple[RawCallOutcome, HandleSettlement]:
+        """Route every handle terminal through the service settlement owner."""
+
+        outcome = await handle.outcome()
+        settlement = await self.service.settle_handle_outcome(resolved, outcome)
+        terminalizer.finish_attempt(
+            outcome=settlement.outcome,
+            decision=settlement.decision,
+        )
+        return settlement.outcome, settlement
 
     def _outcome_response(
         self,

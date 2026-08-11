@@ -455,7 +455,7 @@ def test_mh_res_live_003_started_stream_never_retries(tmp_path: Path) -> None:
             assert status == 200
             assert body == b"data: partial\n\n"
             assert [call[0] for call in adapter.invocations] == ["src_primary1"]
-            assert store.load().sources[0].state.status == "standby"
+            assert store.load().sources[0].state.status == "cooldown"
         finally:
             await gateway.close()
 

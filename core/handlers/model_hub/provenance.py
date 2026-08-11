@@ -138,6 +138,7 @@ TURN_OUTCOME_RENDERING_AUTHORITY: dict[str, TurnOutcomeRenderingRule] = {
         discriminator="final_supply_state",
         copy_keys=(
             ("waiting", "modelHub.launch.waiting"),
+            ("waiting_without_retry", "modelHub.launch.waiting_without_retry"),
             ("interrupted", "modelHub.launch.interrupted"),
         ),
     ),
@@ -224,6 +225,13 @@ def _turn_outcome_variant(
         return "stream_started"
     if (
         projection.supply_facts is not None
+        and projection.supply_facts.supply_state == "waiting"
+        and not projection.supply_facts.retry_at
+        and "waiting_without_retry" in copy_keys
+    ):
+        return "waiting_without_retry"
+    if (
+        projection.supply_facts is not None
         and projection.supply_facts.supply_state in copy_keys
     ):
         return projection.supply_facts.supply_state
@@ -274,11 +282,23 @@ def produce_turn_outcome(
                     )
                 next_current_changed = True
         if not next_current_changed:
-            if resolution.supply_status not in {"waiting", "interrupted"}:
+            recovered_after_exhaustion = (
+                decision == "turn.exhausted"
+                and resolution.supply_status in {"ok", "degraded"}
+                and bool(resolution.candidate_hops)
+            )
+            if recovered_after_exhaustion:
+                supply_facts = TurnSupplyFacts(
+                    backend=resolution.backend,
+                    model=resolution.requested_model or resolution.target_model,
+                    supply_state="waiting",
+                )
+            elif resolution.supply_status not in {"waiting", "interrupted"}:
                 raise TurnOutcomeProductionError(
                     "Turn outcome production requires a terminal supply state"
                 )
-            supply_facts = turn_supply_facts(config, resolution)
+            else:
+                supply_facts = turn_supply_facts(config, resolution)
 
     projection = TurnOutcomeProjectionInput(
         outcome=rule.outcome,
