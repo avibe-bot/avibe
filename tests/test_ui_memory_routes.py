@@ -2123,8 +2123,8 @@ def test_memory_settings_controller_lease_returns_busy_without_writing(
     _save_memory(baseline)
     config_path = tmp_path / "config" / "config.json"
     before = config_path.read_bytes()
-    monkeypatch.setattr(ui_memory_routes, "_rebuild_request_task", None)
-    monkeypatch.setattr(ui_memory_routes, "_rebuild_request_task_loop", None)
+    monkeypatch.setattr(ui_memory_routes._rebuild_request_owner, "_task", None)
+    monkeypatch.setattr(ui_memory_routes._rebuild_request_owner, "_loop", None)
     monkeypatch.setattr(
         internal_client,
         "reconcile_memory",
@@ -2434,6 +2434,34 @@ def test_memory_restart_route_shares_retained_request_and_blocks_settings_after_
         assert reconcile_calls == [True]
 
     asyncio.run(_go())
+
+
+def test_memory_retained_request_owner_clears_only_current_completed_task() -> None:
+    owner = ui_memory_routes._MemoryRetainedRequestOwner[str]()
+
+    async def scenario() -> None:
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+
+        async def first_request() -> str:
+            first_started.set()
+            await release_first.wait()
+            return "first"
+
+        first = owner.create_or_join(first_request)
+        await first_started.wait()
+        assert owner.current_task() is first
+        release_first.set()
+        assert await first == "first"
+        await asyncio.sleep(0)
+        assert owner.current_task() is None
+
+        second = owner.create_or_join(lambda: asyncio.sleep(0, result="second"))
+        owner._clear_finished(first)
+        assert owner.current_task() is second
+        assert await second == "second"
+
+    asyncio.run(scenario())
 
 
 def test_memory_restart_route_isolates_remote_session_cookie_renewal(

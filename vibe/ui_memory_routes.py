@@ -18,7 +18,7 @@ import asyncio
 import json
 import math
 import re
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable, Generic, TypeVar
 
 from fastapi import Request as FastAPIRequest
 
@@ -491,14 +491,48 @@ def _memory_repair_result(payload: dict, status_code: int) -> tuple[dict, int]:
 
 _settings_write_lock: asyncio.Lock | None = None
 _settings_write_lock_loop: asyncio.AbstractEventLoop | None = None
-_restart_request_task: asyncio.Task[tuple[dict, int]] | None = None
-_restart_request_task_loop: asyncio.AbstractEventLoop | None = None
-_rebuild_request_task: asyncio.Task[tuple[dict, int]] | None = None
-_rebuild_request_task_loop: asyncio.AbstractEventLoop | None = None
-_factory_reset_request_task: asyncio.Task[tuple[dict, int]] | None = None
-_factory_reset_request_task_loop: asyncio.AbstractEventLoop | None = None
-_repair_request_task: asyncio.Task[tuple[dict, int]] | None = None
-_repair_request_task_loop: asyncio.AbstractEventLoop | None = None
+_RetainedResult = TypeVar("_RetainedResult")
+
+
+class _MemoryRetainedRequestOwner(Generic[_RetainedResult]):
+    """Own one loop-affine request task that duplicate callers can join."""
+
+    def __init__(self) -> None:
+        self._task: asyncio.Task[_RetainedResult] | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+
+    def current_task(self) -> asyncio.Task[_RetainedResult] | None:
+        loop = asyncio.get_running_loop()
+        if self._loop is not loop:
+            self._task = None
+            self._loop = loop
+        return self._task
+
+    def running(self) -> bool:
+        task = self.current_task()
+        return task is not None and not task.done()
+
+    def create_or_join(
+        self,
+        factory: Callable[[], Awaitable[_RetainedResult]],
+    ) -> asyncio.Task[_RetainedResult]:
+        loop = asyncio.get_running_loop()
+        task = self.current_task()
+        if task is None:
+            task = loop.create_task(factory())
+            self._task = task
+            task.add_done_callback(self._clear_finished)
+        return task
+
+    def _clear_finished(self, finished: asyncio.Task[_RetainedResult]) -> None:
+        if self._task is finished:
+            self._task = None
+
+
+_restart_request_owner = _MemoryRetainedRequestOwner[tuple[dict, int]]()
+_rebuild_request_owner = _MemoryRetainedRequestOwner[tuple[dict, int]]()
+_repair_request_owner = _MemoryRetainedRequestOwner[tuple[dict, int]]()
+_factory_reset_request_owner = _MemoryRetainedRequestOwner[tuple[dict, int]]()
 
 
 def _memory_settings_write_lock() -> asyncio.Lock:
@@ -520,41 +554,11 @@ def _memory_settings_write_lock() -> asyncio.Lock:
 
 
 def _memory_rebuild_request_running() -> bool:
-    loop = asyncio.get_running_loop()
-    return bool(
-        _rebuild_request_task_loop is loop
-        and _rebuild_request_task is not None
-        and not _rebuild_request_task.done()
-    )
+    return _rebuild_request_owner.running()
 
 
 def _memory_factory_reset_request_running() -> bool:
-    loop = asyncio.get_running_loop()
-    return bool(
-        _factory_reset_request_task_loop is loop
-        and _factory_reset_request_task is not None
-        and not _factory_reset_request_task.done()
-    )
-
-
-async def _run_memory_restart_request() -> tuple[dict, int]:
-    from vibe import internal_client
-
-    if _memory_rebuild_request_running() or _memory_factory_reset_request_running():
-        return {"status": "failed", "error": "memory_operation_in_progress"}, 409
-    async with _memory_settings_write_lock():
-        if _memory_rebuild_request_running() or _memory_factory_reset_request_running():
-def _memory_repair_request_running() -> bool:
-    loop = asyncio.get_running_loop()
-    return bool(
-        _repair_request_task_loop is loop
-        and _repair_request_task is not None
-        and not _repair_request_task.done()
-    )
-
-
-def _memory_mutation_request_running() -> bool:
-    return _memory_rebuild_request_running() or _memory_repair_request_running()
+    return _factory_reset_request_owner.running()
 
 
 async def _run_memory_restart_request() -> tuple[dict, int]:
@@ -563,32 +567,21 @@ async def _run_memory_restart_request() -> tuple[dict, int]:
     if _memory_mutation_request_running():
         return {"status": "failed", "error": "memory_operation_in_progress"}, 409
     async with _memory_settings_write_lock():
-        if _memory_mutation_request_running():
+        if _memory_mutation_request_running() or _memory_factory_reset_request_running():
             return {"status": "failed", "error": "memory_operation_in_progress"}, 409
         return await _memory_internal_result(internal_client.memory_restart)
 
 
+def _memory_repair_request_running() -> bool:
+    return _repair_request_owner.running()
+
+
+def _memory_mutation_request_running() -> bool:
+    return _memory_rebuild_request_running() or _memory_repair_request_running()
+
+
 def _memory_restart_request_task() -> asyncio.Task[tuple[dict, int]]:
-    """Create or join the UI process' loop-scoped restart request owner."""
-
-    global _restart_request_task, _restart_request_task_loop
-
-    loop = asyncio.get_running_loop()
-    if _restart_request_task_loop is not loop:
-        _restart_request_task = None
-        _restart_request_task_loop = loop
-    if _restart_request_task is None:
-        task = loop.create_task(_run_memory_restart_request())
-        _restart_request_task = task
-
-        def clear_finished(finished: asyncio.Task[tuple[dict, int]]) -> None:
-            global _restart_request_task
-
-            if _restart_request_task is finished:
-                _restart_request_task = None
-
-        task.add_done_callback(clear_finished)
-    return _restart_request_task
+    return _restart_request_owner.create_or_join(_run_memory_restart_request)
 
 
 async def _run_memory_rebuild_request(user_key: str) -> tuple[dict, int]:
@@ -604,26 +597,9 @@ async def _run_memory_rebuild_request(user_key: str) -> tuple[dict, int]:
 
 
 def _memory_rebuild_request_task(*, user_key: str) -> asyncio.Task[tuple[dict, int]]:
-    """Create or join the UI process' loop-scoped rebuild request owner."""
-
-    global _rebuild_request_task, _rebuild_request_task_loop
-
-    loop = asyncio.get_running_loop()
-    if _rebuild_request_task_loop is not loop:
-        _rebuild_request_task = None
-        _rebuild_request_task_loop = loop
-    if _rebuild_request_task is None:
-        task = loop.create_task(_run_memory_rebuild_request(user_key))
-        _rebuild_request_task = task
-
-        def clear_finished(finished: asyncio.Task[tuple[dict, int]]) -> None:
-            global _rebuild_request_task
-
-            if _rebuild_request_task is finished:
-                _rebuild_request_task = None
-
-        task.add_done_callback(clear_finished)
-    return _rebuild_request_task
+    return _rebuild_request_owner.create_or_join(
+        lambda: _run_memory_rebuild_request(user_key)
+    )
 
 
 async def _run_memory_factory_reset_request(user_key: str) -> tuple[dict, int]:
@@ -636,24 +612,11 @@ async def _run_memory_factory_reset_request(user_key: str) -> tuple[dict, int]:
 
 
 def _memory_factory_reset_request_task(*, user_key: str) -> asyncio.Task[tuple[dict, int]]:
-    global _factory_reset_request_task, _factory_reset_request_task_loop
+    return _factory_reset_request_owner.create_or_join(
+        lambda: _run_memory_factory_reset_request(user_key)
+    )
 
-    loop = asyncio.get_running_loop()
-    if _factory_reset_request_task_loop is not loop:
-        _factory_reset_request_task = None
-        _factory_reset_request_task_loop = loop
-    if _factory_reset_request_task is None:
-        task = loop.create_task(_run_memory_factory_reset_request(user_key))
-        _factory_reset_request_task = task
 
-        def clear_finished(finished: asyncio.Task[tuple[dict, int]]) -> None:
-            global _factory_reset_request_task
-
-            if _factory_reset_request_task is finished:
-                _factory_reset_request_task = None
-
-        task.add_done_callback(clear_finished)
-    return _factory_reset_request_task
 async def _run_memory_repair_request(user_key: str) -> tuple[dict, int]:
     from vibe import internal_client
 
@@ -664,26 +627,9 @@ async def _run_memory_repair_request(user_key: str) -> tuple[dict, int]:
 
 
 def _memory_repair_request_task(*, user_key: str) -> asyncio.Task[tuple[dict, int]]:
-    """Create or join the UI process' loop-scoped Repair request owner."""
-
-    global _repair_request_task, _repair_request_task_loop
-
-    loop = asyncio.get_running_loop()
-    if _repair_request_task_loop is not loop:
-        _repair_request_task = None
-        _repair_request_task_loop = loop
-    if _repair_request_task is None:
-        task = loop.create_task(_run_memory_repair_request(user_key))
-        _repair_request_task = task
-
-        def clear_finished(finished: asyncio.Task[tuple[dict, int]]) -> None:
-            global _repair_request_task
-
-            if _repair_request_task is finished:
-                _repair_request_task = None
-
-        task.add_done_callback(clear_finished)
-    return _repair_request_task
+    return _repair_request_owner.create_or_join(
+        lambda: _run_memory_repair_request(user_key)
+    )
 
 
 def _settings_ok_payload(memory, runtime_payload: dict | None = None) -> dict:
@@ -1122,11 +1068,7 @@ def register_memory_routes(app) -> None:
                     {"status": "failed", "error": "memory_operation_in_progress"},
                     status_code=409,
                 )
-            task = (
-                _rebuild_request_task
-                if _rebuild_request_task_loop is asyncio.get_running_loop()
-                else None
-            )
+            task = _rebuild_request_owner.current_task()
             if task is None:
                 async with _memory_settings_write_lock():
                     if _memory_factory_reset_request_running() or _memory_repair_request_running():
@@ -1137,11 +1079,7 @@ def register_memory_routes(app) -> None:
                             },
                             status_code=409,
                         )
-                    task = (
-                        _rebuild_request_task
-                        if _rebuild_request_task_loop is asyncio.get_running_loop()
-                        else None
-                    )
+                    task = _rebuild_request_owner.current_task()
                     if task is None:
                         task = _memory_rebuild_request_task(user_key=user_key)
             body, status_code = await asyncio.shield(task)
@@ -1171,11 +1109,7 @@ def register_memory_routes(app) -> None:
                     {"status": "failed", "error": "memory_operation_in_progress"},
                     status_code=409,
                 )
-            task = (
-                _factory_reset_request_task
-                if _factory_reset_request_task_loop is asyncio.get_running_loop()
-                else None
-            )
+            task = _factory_reset_request_owner.current_task()
             if task is None:
                 async with _memory_settings_write_lock():
                     if _memory_rebuild_request_running() or _memory_repair_request_running():
@@ -1183,11 +1117,7 @@ def register_memory_routes(app) -> None:
                             {"status": "failed", "error": "memory_operation_in_progress"},
                             status_code=409,
                         )
-                    task = (
-                        _factory_reset_request_task
-                        if _factory_reset_request_task_loop is asyncio.get_running_loop()
-                        else None
-                    )
+                    task = _factory_reset_request_owner.current_task()
                     if task is None:
                         task = _memory_factory_reset_request_task(user_key=user_key)
             body, status_code = await asyncio.shield(task)
@@ -1216,7 +1146,7 @@ def register_memory_routes(app) -> None:
                     {"ok": False, "error": "memory_operation_in_progress", "result": "failed"},
                     status_code=409,
                 )
-            task = _repair_request_task if _repair_request_task_loop is asyncio.get_running_loop() else None
+            task = _repair_request_owner.current_task()
             if task is None:
                 async with _memory_settings_write_lock():
                     if _memory_rebuild_request_running() or _memory_factory_reset_request_running():
@@ -1224,7 +1154,7 @@ def register_memory_routes(app) -> None:
                             {"ok": False, "error": "memory_operation_in_progress", "result": "failed"},
                             status_code=409,
                         )
-                    task = _repair_request_task if _repair_request_task_loop is asyncio.get_running_loop() else None
+                    task = _repair_request_owner.current_task()
                     if task is None:
                         task = _memory_repair_request_task(user_key=user_key)
             body, status_code = await asyncio.shield(task)
