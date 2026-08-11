@@ -183,13 +183,18 @@ async def test_memory_factory_101_disabled_reset_fails_closed_without_deletion(t
 
 
 @pytest.mark.asyncio
-async def test_memory_factory_201_worker_and_process_death_are_quiesced_before_delete(tmp_path: Path) -> None:
+async def test_memory_factory_201_worker_and_process_death_are_quiesced_before_delete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Retirement closes the old aggregate before either mutable root is removed."""
     _create_roots(tmp_path)
     old = _Runtime(tmp_path)
     controller = _controller(old)
+    monkeypatch.setattr("core.memory.runtime.create_memory_runtime", lambda *args, **kwargs: _FreshRuntime(tmp_path))
     result = await controller._factory_reset_memory_once()
-    assert result["ok"] is False or result["ok"] is True
+    assert result["ok"] is True
+    assert result["data_remaining"] is False
     assert old.closed is True
     assert old.retired is True
 
