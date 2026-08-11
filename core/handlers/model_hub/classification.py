@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal, Optional
 
 from .adapter import RawCallOutcome, RawOutcomeKind
@@ -62,21 +62,11 @@ def _error_text(outcome: RawCallOutcome) -> str:
     return " ".join(value for value in (outcome.error_code, outcome.redacted_message) if isinstance(value, str))
 
 
-def classify_outcome(
+def _classify_unstreamed(
     outcome: RawCallOutcome,
     *,
     refresh_attempted: bool = False,
 ) -> ResolutionDecision:
-    """Apply the signed taxonomy without persisting or exposing raw errors."""
-
-    if outcome.kind == RawOutcomeKind.SUCCESS:
-        return ResolutionDecision("return")
-
-    # A partial stream is already externally observable. Any transparent retry
-    # could duplicate tokens or tool calls, regardless of the failure category.
-    if outcome.stream_started:
-        return ResolutionDecision("surface", error_code="stream_interrupted")
-
     if outcome.kind in {RawOutcomeKind.NETWORK_ERROR, RawOutcomeKind.TIMEOUT}:
         return ResolutionDecision("fallback", reason="network", cooldown_seconds=30)
     if outcome.kind == RawOutcomeKind.PROTOCOL_ERROR:
@@ -139,3 +129,34 @@ def classify_outcome(
             cooldown_seconds=30,
         )
     return ResolutionDecision("fallback", reason="unclassified_error")
+
+
+def classify_outcome(
+    outcome: RawCallOutcome,
+    *,
+    refresh_attempted: bool = False,
+) -> ResolutionDecision:
+    """Apply the signed taxonomy without persisting or exposing raw errors."""
+
+    if outcome.kind == RawOutcomeKind.SUCCESS:
+        return ResolutionDecision("return")
+
+    decision = _classify_unstreamed(
+        outcome,
+        refresh_attempted=refresh_attempted,
+    )
+    if not outcome.stream_started:
+        return decision
+    # Output already reached the caller, so replay is terminal. Retain a
+    # fallback-class Source reason for settlement before the terminal response.
+    if decision.action == "fallback":
+        return replace(
+            decision,
+            action="surface",
+            error_code="stream_interrupted",
+        )
+    return replace(
+        decision,
+        action="surface",
+        error_code="stream_interrupted",
+    )

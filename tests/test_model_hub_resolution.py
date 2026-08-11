@@ -28,13 +28,13 @@ from core.handlers.model_hub.adapter import (
     RawOutcomeKind,
     SourceObservation,
 )
+from core.handlers.model_hub.classification import classify_outcome
 from core.handlers.model_hub.events import BoundedEventLog
 from core.handlers.model_hub.errors import ModelDiscoveryError
 from core.handlers.model_hub.provenance import (
-    TurnOutcomeProjectionInput,
     TurnSupplyBlocker,
+    produce_turn_outcome,
     project_turn_outcome_copy,
-    turn_supply_facts,
 )
 from core.handlers.model_hub.request import ModelHubRequest
 from core.handlers.model_hub.resolver import allowed_origins, resolve_model_hub_turn
@@ -402,6 +402,24 @@ def test_supply_is_degraded_when_a_later_exact_hop_is_blocked():
     assert resolution.supply_status == "degraded"
 
 
+def test_streamed_nonfallback_preserves_the_terminal_interruption_code():
+    decision = classify_outcome(
+        RawCallOutcome(
+            kind=RawOutcomeKind.PROTOCOL_ERROR,
+            http_status=502,
+            error_code="upstream_protocol_error",
+            redacted_message=None,
+            stream_started=True,
+            model_id="upstream-first",
+            source_id="src_route006",
+        )
+    )
+
+    assert decision.action == "surface"
+    assert decision.reason is None
+    assert decision.error_code == "stream_interrupted"
+
+
 def test_permission_denial_is_terminal_without_switch_or_source_mutation(tmp_path):
     source = _source("src_route006", ("upstream-first", "upstream-second"))
     config = _config([source])
@@ -691,14 +709,14 @@ def test_launch_failure_reports_unsupported_exact_hop():
     config = _config([source], model="stale-model")
     resolution = resolve_model_hub_turn(config, "claude", "stale-model")
 
-    facts = turn_supply_facts(config, resolution)
-    copy = project_turn_outcome_copy(
-        TurnOutcomeProjectionInput(
-            outcome="no_candidate",
-            discriminator="blocked_supply_state",
-            supply_facts=facts,
-        )
+    projection = produce_turn_outcome(
+        "turn.no_candidate.blocked",
+        config=config,
+        resolution=resolution,
     )
+    facts = projection.supply_facts
+    assert facts is not None
+    copy = project_turn_outcome_copy(projection)
 
     assert copy is not None
     assert copy.key == "modelHub.launch.interrupted"

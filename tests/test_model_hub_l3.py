@@ -46,12 +46,10 @@ from core.handlers.model_hub.events import (
 from core.handlers.model_hub.provenance import (
     BoundedProvenanceStore,
     ExactHopBlocker,
-    SupplyState,
     TURN_OUTCOME_RENDERING_AUTHORITY,
-    TurnOutcomeProjectionInput,
-    TurnSupplyBlocker,
-    TurnSupplyFacts,
+    TurnOutcomeProductionError,
     TurnCorrelationRegistry,
+    produce_turn_outcome,
     project_turn_outcome_copy,
     render_turn_outcome_copy,
 )
@@ -179,6 +177,89 @@ def test_turn_outcome_copy_projection_has_one_runtime_owner() -> None:
         assert "modelHub.launch." not in source
         assert '"copy_key"' not in source
 
+    excluded = {".git", ".venv", "node_modules"}
+
+    def is_projection_constructor(node: ast.Call) -> bool:
+        return (
+            isinstance(node.func, ast.Name)
+            and node.func.id == "TurnOutcomeProjectionInput"
+        ) or (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr == "TurnOutcomeProjectionInput"
+        )
+
+    constructor_calls: dict[Path, set[int]] = {}
+    for path in root.rglob("*.py"):
+        if any(part in excluded for part in path.parts):
+            continue
+        calls = [
+            node.lineno
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+            if isinstance(node, ast.Call)
+            and is_projection_constructor(node)
+        ]
+        if calls:
+            constructor_calls[path] = set(calls)
+    owner_tree = ast.parse(owner.read_text(encoding="utf-8"))
+    producer = next(
+        node
+        for node in owner_tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "produce_turn_outcome"
+    )
+    producer_calls = {
+        node.lineno
+        for node in ast.walk(producer)
+        if isinstance(node, ast.Call)
+        and is_projection_constructor(node)
+    }
+    assert producer_calls
+    assert constructor_calls == {owner: producer_calls}
+
+
+def _terminal_resolution_facts(
+    config: ModelHubConfig,
+    *,
+    model: str = "shared-model",
+    supply_status: str,
+    structural_reason: str | None = None,
+    blocker_reason: str | None = None,
+    next_hop: tuple[str, str] | None = None,
+) -> SimpleNamespace:
+    source = config.sources[0] if config.sources else None
+    inspections = (
+        (
+            SimpleNamespace(
+                runnable=False,
+                source=source,
+                source_id=(source.id if source is not None else None),
+                model_id=model,
+                reason=blocker_reason,
+            ),
+        )
+        if blocker_reason is not None
+        else ()
+    )
+    candidates = (
+        (
+            SimpleNamespace(
+                source_id=next_hop[0],
+                model_id=next_hop[1],
+            ),
+        )
+        if next_hop is not None
+        else ()
+    )
+    return SimpleNamespace(
+        backend="claude",
+        requested_model=model,
+        target_model=model,
+        matching_sources=tuple(config.sources),
+        inspected_hops=inspections,
+        candidate_hops=candidates,
+        supply_status=supply_status,
+        structural_blocker_reason=structural_reason,
+    )
+
 
 @pytest.mark.parametrize(
     ("decision", "variant", "expected_key"),
@@ -193,21 +274,61 @@ def test_every_turn_outcome_matrix_variant_projects_or_stays_silent(
     variant: str,
     expected_key: str | None,
 ) -> None:
-    rule = TURN_OUTCOME_RENDERING_AUTHORITY[decision]
-    supply_state = variant if variant in {"waiting", "interrupted"} else "waiting"
-    projection = TurnOutcomeProjectionInput(
-        outcome=rule.outcome,
-        discriminator=rule.discriminator,
-        supply_facts=TurnSupplyFacts(
-            backend="claude",
-            model="menu-model",
-            supply_state=cast(SupplyState, supply_state),
-            source="Exact source",
-            retry_at=NOW.isoformat(),
-            blockers=(TurnSupplyBlocker("Exact source", "model_unsupported"),),
-        ),
+    producer_kwargs = {}
+    if variant in {"waiting", "interrupted"}:
+        if decision == "turn.no_candidate.unconfigured":
+            config = _config([])
+        else:
+            source = _source(
+                "src_matrix001",
+                "Matrix source",
+                status=("cooldown" if variant == "waiting" else "needs_action"),
+                retry_at=(
+                    (NOW + timedelta(minutes=5)).isoformat()
+                    if variant == "waiting"
+                    else None
+                ),
+            )
+            if variant == "interrupted":
+                source.state.detail_key = (
+                    "models.source.needs_action.credential_revoked"
+                )
+            config = _config([source])
+        resolution = _terminal_resolution_facts(
+            config,
+            supply_status=variant,
+            structural_reason=(
+                "route_unconfigured"
+                if decision == "turn.no_candidate.unconfigured"
+                else None
+            ),
+            blocker_reason=(
+                "credential_revoked" if variant == "interrupted" else None
+            ),
+        )
+        producer_kwargs = {"config": config, "resolution": resolution}
+        if decision == "turn.streamed_fallback":
+            producer_kwargs["attempted_hop"] = (
+                "src_attempted01",
+                "shared-model",
+            )
+    elif variant == "next_current":
+        source = _source("src_matrix002", "Next source")
+        config = _config([source])
+        resolution = _terminal_resolution_facts(
+            config,
+            supply_status="degraded",
+            next_hop=(source.id, "shared-model"),
+        )
+        producer_kwargs = {
+            "config": config,
+            "resolution": resolution,
+            "attempted_hop": ("src_attempted02", "shared-model"),
+        }
+    projection = produce_turn_outcome(
+        decision,
         stream_started=variant == "stream_started",
-        next_current_changed=variant == "next_current",
+        **producer_kwargs,
     )
 
     copy = project_turn_outcome_copy(projection)
@@ -217,18 +338,25 @@ def test_every_turn_outcome_matrix_variant_projects_or_stays_silent(
     assert (rendered is None) == (expected_key is None)
 
 
+def test_turn_outcome_producer_rejects_missing_streamed_fallback_facts() -> None:
+    with pytest.raises(TurnOutcomeProductionError, match="missing"):
+        produce_turn_outcome("turn.streamed_fallback")
+
+
 def test_route_unconfigured_launch_copy_exists_in_each_backend_locale() -> None:
-    facts = TurnSupplyFacts(
-        backend="claude",
+    config = _config([])
+    resolution = _terminal_resolution_facts(
+        config,
         model="menu-model",
-        supply_state="interrupted",
+        supply_status="interrupted",
+        structural_reason="route_unconfigured",
     )
     failure = ModelHubError(
         "no_candidate",
-        turn_outcome=TurnOutcomeProjectionInput(
-            outcome="no_candidate",
-            discriminator="route_unconfigured",
-            supply_facts=facts,
+        turn_outcome=produce_turn_outcome(
+            "turn.no_candidate.unconfigured",
+            config=config,
+            resolution=resolution,
         ),
     )
     for locale in ("en", "zh"):
@@ -246,19 +374,25 @@ def test_route_unconfigured_launch_copy_exists_in_each_backend_locale() -> None:
 
 
 def test_structural_blocker_copy_uses_its_reason_instead_of_source_status() -> None:
+    source = _source(
+        "src_blocker01",
+        "Exact source",
+    )
+    config = _config([source])
+    config.agents["claude"].routes["shared-model"] = ModelHubRouteConfig(
+        hops=(ModelHubRouteHopConfig(source.id, "removed-model"),)
+    )
+    resolution = _terminal_resolution_facts(
+        config,
+        supply_status="interrupted",
+        blocker_reason="model_unsupported",
+    )
     failure = ModelHubError(
         "no_candidate",
-        turn_outcome=TurnOutcomeProjectionInput(
-            outcome="no_candidate",
-            discriminator="blocked_supply_state",
-            supply_facts=TurnSupplyFacts(
-                backend="claude",
-                model="menu-model",
-                supply_state="interrupted",
-                blockers=(
-                    TurnSupplyBlocker("Exact source", "model_unsupported"),
-                ),
-            ),
+        turn_outcome=produce_turn_outcome(
+            "turn.no_candidate.blocked",
+            config=config,
+            resolution=resolution,
         ),
     )
 
@@ -402,13 +536,14 @@ def _outcome(
     code: str | None = None,
     message: str | None = None,
     source_id: str = "src_primary01",
+    stream_started: bool = False,
 ) -> RawCallOutcome:
     return RawCallOutcome(
         kind=kind,
         http_status=status,
         error_code=code,
         redacted_message=message,
-        stream_started=False,
+        stream_started=stream_started,
         model_id="shared-model",
         source_id=source_id,
     )
@@ -1010,6 +1145,90 @@ def test_gateway_preserves_exhausted_provenance_after_all_hops_fallback(
             first.id,
             second.id,
         ]
+        _assert_valid("turn-provenance.schema.json", record)
+
+    asyncio.run(exercise())
+
+
+def test_gateway_streamed_fallback_settles_source_before_rendering_next_current(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        first = _source("src_primary01", "Primary")
+        second = _source("src_backup001", "Backup")
+        service = _service(
+            tmp_path,
+            sources=[first, second],
+            outcomes=[
+                _outcome(
+                    RawOutcomeKind.TIMEOUT,
+                    status=200,
+                    source_id=first.id,
+                    stream_started=True,
+                ),
+            ],
+        )
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        service.store.config.agents["codex"].routes[requested_model] = (
+            ModelHubRouteConfig(
+                hops=(
+                    ModelHubRouteHopConfig(first.id, "shared-model"),
+                    ModelHubRouteHopConfig(second.id, "shared-model"),
+                )
+            )
+        )
+        gateway = ModelHubTurnGateway(service)
+        base_url, token = await gateway.endpoint(
+            "codex",
+            process_scope="/repo",
+            turn_id="turn_gateway_streamed_fallback",
+            requested_model_id=requested_model,
+            resolved_model_id="shared-model",
+            source_id=first.id,
+        )
+        try:
+            async with aiohttp.ClientSession(trust_env=False) as client:
+                response = await client.post(
+                    f"{base_url}/v1/responses",
+                    json={"model": "shared-model", "input": "ping", "stream": False},
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                assert response.status == 502
+                payload = await response.json()
+                assert payload["error"] == {
+                    "type": "stream_interrupted",
+                    "code": "stream_interrupted",
+                    "message": i18n_t("modelHub.launch.retry", "en"),
+                }
+        finally:
+            await gateway.close()
+
+        assert service.adapter.invocations == [
+            (first.id, "shared-model", "codex")
+        ]
+        persisted = {source.id: source for source in service.store.load().sources}
+        assert persisted[first.id].state.status == "cooldown"
+        assert persisted[second.id].state.status == "standby"
+        assert service.agent_chain("codex", requested_model)["current"] == {
+            "source_id": second.id,
+            "model_id": "shared-model",
+        }
+
+        gateway.correlation.settle(
+            "turn_gateway_streamed_fallback",
+            settled_by=SETTLED_BY_TERMINAL_RESULT,
+            ts=NOW.isoformat(),
+        )
+        record = service.provenance.get("turn_gateway_streamed_fallback")
+        assert record is not None
+        assert record["outcome"] == "failed_terminal"
+        assert record["terminal_error"] == {
+            "source_id": first.id,
+            "configured_model_id": "shared-model",
+            "channel": "hub",
+            "reason": "stream_interrupted",
+            "stream_started": True,
+        }
         _assert_valid("turn-provenance.schema.json", record)
 
     asyncio.run(exercise())

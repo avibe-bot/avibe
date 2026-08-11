@@ -82,7 +82,7 @@ from .provenance import (
     ExactHopBlocker,
     TurnOutcomeProjectionInput,
     exact_hop_blockers,
-    turn_supply_facts,
+    produce_turn_outcome,
 )
 from .request import ModelHubRequest
 from .resolver import (
@@ -3874,6 +3874,83 @@ class ModelHubService:
                     now=self.now(),
                 )
 
+    async def _settle_fallback_source(
+        self,
+        source: ModelHubSourceConfig,
+        decision: ResolutionDecision,
+        *,
+        backend: BackendName,
+        model_id: str,
+    ) -> EventReason:
+        """Persist one fallback-class Source result before the turn settles."""
+
+        if decision.reason is None:
+            raise AssertionError("fallback-class outcome must retain its Source reason")
+        event_reason = cast(EventReason, decision.reason)
+        if event_reason in {
+            "quota_exhausted",
+            "rate_limited",
+            "server_error",
+            "network",
+        }:
+            await self._cooldown(
+                source,
+                decision,
+                agent=cast(EventAgent, backend),
+                model_id=model_id,
+            )
+        else:
+            detail_key = {
+                "credential_expired": "models.source.needs_action.oauth_expired",
+                "credential_revoked": "models.source.needs_action.credential_revoked",
+                "balance_exhausted": "models.source.needs_action.balance_exhausted",
+                "account_banned": "models.source.needs_action.account_banned",
+                "unclassified_error": "models.source.error.unclassified",
+            }[event_reason]
+            await self._set_source_blocker(
+                source.id,
+                backend=backend,
+                model_id=model_id,
+                detail_key=detail_key,
+                reason=event_reason,
+            )
+        return event_reason
+
+    def _produce_attempt_terminal_outcome(
+        self,
+        *,
+        backend: BackendName,
+        model_id: str,
+        supply_channel: Literal["hub"] | None,
+        source_id: str,
+        source_model_id: str,
+        outcome: RawCallOutcome,
+        decision: ResolutionDecision,
+    ) -> TurnOutcomeProjectionInput:
+        """Produce the sole complete terminal projection after attempt settlement."""
+
+        if not outcome.stream_started or decision.reason is None:
+            return produce_turn_outcome("turn.request_nonfallback")
+
+        config = self.store.load()
+        resolution = resolve_model_hub_turn(
+            config,
+            backend,
+            model_id,
+            now=self.now(),
+            unavailable_source_ids=self._unavailable_native_sources(
+                config,
+                backend,
+            ),
+            supply_channel=supply_channel,
+        )
+        return produce_turn_outcome(
+            "turn.streamed_fallback",
+            config=config,
+            resolution=resolution,
+            attempted_hop=(source_id, source_model_id),
+        )
+
     def _emit_switch(
         self,
         *,
@@ -4037,21 +4114,24 @@ class ModelHubService:
         event_agent = cast(EventAgent, backend)
         candidate_hops = list(resolution.candidate_hops)
         if not candidate_hops:
-            facts = turn_supply_facts(config, resolution)
+            turn_outcome = produce_turn_outcome(
+                (
+                    "turn.no_candidate.unconfigured"
+                    if resolution.route_unconfigured
+                    else "turn.no_candidate.blocked"
+                ),
+                config=config,
+                resolution=resolution,
+            )
+            facts = turn_outcome.supply_facts
+            if facts is None:
+                raise AssertionError("no-candidate outcome must carry supply facts")
             raise ModelHubError(
                 "mapping_target_unavailable",
                 status=409,
                 supply_state=facts.supply_state,
                 blockers=exact_hop_blockers(resolution),
-                turn_outcome=TurnOutcomeProjectionInput(
-                    outcome="no_candidate",
-                    discriminator=(
-                        "route_unconfigured"
-                        if resolution.route_unconfigured
-                        else "blocked_supply_state"
-                    ),
-                    supply_facts=facts,
-                ),
+                turn_outcome=turn_outcome,
             )
 
         failed_source: Optional[ModelHubSourceConfig] = None
@@ -4151,6 +4231,13 @@ class ModelHubService:
                 )
                 return ResolvedInvocation(source.id, target_model, handle, outcome)
             if decision.action == "surface":
+                if outcome.stream_started and decision.reason is not None:
+                    await self._settle_fallback_source(
+                        source,
+                        decision,
+                        backend=cast(BackendName, backend),
+                        model_id=model_id,
+                    )
                 raise ModelHubError(
                     decision.error_code or outcome.error_code or "engine_down",
                     status=(
@@ -4158,45 +4245,23 @@ class ModelHubService:
                         if outcome.http_status is not None and 400 <= outcome.http_status <= 599
                         else 502
                     ),
-                    turn_outcome=TurnOutcomeProjectionInput(
-                        outcome="failed_terminal",
-                        discriminator=(
-                            "streamed_fallback"
-                            if outcome.stream_started
-                            else "request_nonfallback"
-                        ),
-                        stream_started=outcome.stream_started,
+                    turn_outcome=self._produce_attempt_terminal_outcome(
+                        backend=cast(BackendName, backend),
+                        model_id=model_id,
+                        supply_channel=supply_channel,
+                        source_id=source.id,
+                        source_model_id=target_model,
+                        outcome=outcome,
+                        decision=decision,
                     ),
                 )
             if decision.action == "fallback":
-                event_reason = cast(EventReason, decision.reason)
-                if event_reason in {
-                    "quota_exhausted",
-                    "rate_limited",
-                    "server_error",
-                    "network",
-                }:
-                    await self._cooldown(
-                        source,
-                        decision,
-                        agent=event_agent,
-                        model_id=model_id,
-                    )
-                else:
-                    detail_key = {
-                        "credential_expired": "models.source.needs_action.oauth_expired",
-                        "credential_revoked": "models.source.needs_action.credential_revoked",
-                        "balance_exhausted": "models.source.needs_action.balance_exhausted",
-                        "account_banned": "models.source.needs_action.account_banned",
-                        "unclassified_error": "models.source.error.unclassified",
-                    }[event_reason]
-                    await self._set_source_blocker(
-                        source.id,
-                        backend=cast(BackendName, backend),
-                        model_id=model_id,
-                        detail_key=detail_key,
-                        reason=event_reason,
-                    )
+                event_reason = await self._settle_fallback_source(
+                    source,
+                    decision,
+                    backend=cast(BackendName, backend),
+                    model_id=model_id,
+                )
                 globally_blocked_source_ids.add(source.id)
                 failed_source = source
                 failed_reason = event_reason
@@ -4204,10 +4269,7 @@ class ModelHubService:
             raise ModelHubError(
                 decision.error_code or "engine_down",
                 status=502,
-                turn_outcome=TurnOutcomeProjectionInput(
-                    outcome="failed_terminal",
-                    discriminator="engine_down",
-                ),
+                turn_outcome=produce_turn_outcome("turn.engine_down"),
             )
         final_config = self.store.load()
         final_resolution = resolve_model_hub_turn(
@@ -4221,17 +4283,20 @@ class ModelHubService:
             ),
             supply_channel=supply_channel,
         )
-        final_facts = turn_supply_facts(final_config, final_resolution)
+        turn_outcome = produce_turn_outcome(
+            "turn.exhausted",
+            config=final_config,
+            resolution=final_resolution,
+        )
+        final_facts = turn_outcome.supply_facts
+        if final_facts is None:
+            raise AssertionError("exhausted outcome must carry supply facts")
         raise ModelHubError(
             "mapping_target_unavailable",
             status=503,
             supply_state=final_facts.supply_state,
             blockers=exact_hop_blockers(final_resolution),
-            turn_outcome=TurnOutcomeProjectionInput(
-                outcome="exhausted",
-                discriminator="final_supply_state",
-                supply_facts=final_facts,
-            ),
+            turn_outcome=turn_outcome,
         )
 
 

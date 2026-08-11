@@ -24,9 +24,9 @@ from core.handlers.model_hub.provenance import (
     ENGINE_DOWN_TURN_OUTCOME,
     TurnOutcomeProjectionInput,
     exact_hop_blockers,
+    produce_turn_outcome,
     render_turn_outcome_copy,
     supply_interruption_reason,
-    turn_supply_facts,
 )
 from core.handlers.model_hub.resolver import (
     BackendName,
@@ -661,7 +661,18 @@ class ModelHubRuntimeRouter:
         process_scope: Optional[str],
         turn_id: Optional[str],
     ) -> ModelHubError:
-        facts = turn_supply_facts(config, resolution)
+        turn_outcome = produce_turn_outcome(
+            (
+                "turn.no_candidate.unconfigured"
+                if resolution.route_unconfigured
+                else "turn.no_candidate.blocked"
+            ),
+            config=config,
+            resolution=resolution,
+        )
+        facts = turn_outcome.supply_facts
+        if facts is None:
+            raise AssertionError("no-candidate outcome must carry supply facts")
         supply_state = facts.supply_state
         normalized_scope = (
             str(process_scope or "").strip()
@@ -697,15 +708,7 @@ class ModelHubRuntimeRouter:
             status=409,
             supply_state=supply_state,
             blockers=exact_hop_blockers(resolution),
-            turn_outcome=TurnOutcomeProjectionInput(
-                outcome="no_candidate",
-                discriminator=(
-                    "route_unconfigured"
-                    if resolution.route_unconfigured
-                    else "blocked_supply_state"
-                ),
-                supply_facts=facts,
-            ),
+            turn_outcome=turn_outcome,
         )
 
     def settle_turn(

@@ -166,7 +166,7 @@ TURN_OUTCOME_RENDERING_AUTHORITY: dict[str, TurnOutcomeRenderingRule] = {
     "turn.no_candidate.unconfigured": TurnOutcomeRenderingRule(
         outcome="no_candidate",
         discriminator="route_unconfigured",
-        copy_keys=(("default", "modelHub.launch.route_unconfigured"),),
+        copy_keys=(("interrupted", "modelHub.launch.route_unconfigured"),),
     ),
     "turn.no_candidate.blocked": TurnOutcomeRenderingRule(
         outcome="no_candidate",
@@ -193,14 +193,111 @@ class TurnOutcomeProjectionInput:
     next_current_changed: bool = False
 
 
-REQUEST_NONFALLBACK_TURN_OUTCOME = TurnOutcomeProjectionInput(
-    outcome="failed_terminal",
-    discriminator="request_nonfallback",
+class TurnOutcomeProductionError(ValueError):
+    """A terminal outcome is missing a fact required by the copy matrix."""
+
+
+def _turn_outcome_rule(
+    projection: TurnOutcomeProjectionInput,
+) -> TurnOutcomeRenderingRule:
+    matches = tuple(
+        rule
+        for rule in TURN_OUTCOME_RENDERING_AUTHORITY.values()
+        if rule.outcome == projection.outcome
+        and rule.discriminator == projection.discriminator
+    )
+    if len(matches) != 1:
+        raise TurnOutcomeProductionError(
+            "Turn outcome does not match its rendering discriminator"
+        )
+    return matches[0]
+
+
+def _turn_outcome_variant(
+    projection: TurnOutcomeProjectionInput,
+    rule: TurnOutcomeRenderingRule,
+) -> str:
+    copy_keys = dict(rule.copy_keys)
+    if projection.next_current_changed and "next_current" in copy_keys:
+        return "next_current"
+    if projection.stream_started and "stream_started" in copy_keys:
+        return "stream_started"
+    if (
+        projection.supply_facts is not None
+        and projection.supply_facts.supply_state in copy_keys
+    ):
+        return projection.supply_facts.supply_state
+    return "default"
+
+
+def produce_turn_outcome(
+    decision: str,
+    *,
+    config: ModelHubConfig | None = None,
+    resolution: ModelHubTurnResolution | None = None,
+    attempted_hop: tuple[str, str] | None = None,
+    stream_started: bool = False,
+) -> TurnOutcomeProjectionInput:
+    """Produce complete terminal facts from one authoritative matrix row."""
+
+    rule = TURN_OUTCOME_RENDERING_AUTHORITY.get(decision)
+    if rule is None:
+        raise TurnOutcomeProductionError("Unknown turn-outcome matrix decision")
+    variants = {variant for variant, _key in rule.copy_keys}
+    requires_exact_supply = bool(
+        variants & {"next_current", "waiting", "interrupted"}
+    )
+    if requires_exact_supply and (config is None or resolution is None):
+        raise TurnOutcomeProductionError(
+            "Turn outcome production is missing its exact-chain inspection"
+        )
+
+    next_current_changed = False
+    supply_facts = None
+    if requires_exact_supply:
+        assert config is not None and resolution is not None
+        if "next_current" in variants:
+            if attempted_hop is None:
+                raise TurnOutcomeProductionError(
+                    "Turn outcome production is missing its attempted hop"
+                )
+            next_hop = (
+                resolution.candidate_hops[0]
+                if resolution.candidate_hops
+                else None
+            )
+            if next_hop is not None:
+                next_identity = (next_hop.source_id, next_hop.model_id)
+                if next_identity == attempted_hop:
+                    raise TurnOutcomeProductionError(
+                        "Settled streamed fallback left the attempted hop current"
+                    )
+                next_current_changed = True
+        if not next_current_changed:
+            if resolution.supply_status not in {"waiting", "interrupted"}:
+                raise TurnOutcomeProductionError(
+                    "Turn outcome production requires a terminal supply state"
+                )
+            supply_facts = turn_supply_facts(config, resolution)
+
+    projection = TurnOutcomeProjectionInput(
+        outcome=rule.outcome,
+        discriminator=rule.discriminator,
+        supply_facts=supply_facts,
+        stream_started=stream_started,
+        next_current_changed=next_current_changed,
+    )
+    if _turn_outcome_variant(projection, rule) not in dict(rule.copy_keys):
+        raise TurnOutcomeProductionError(
+            "Turn outcome production is missing its required rendering fact"
+        )
+    return projection
+
+
+REQUEST_NONFALLBACK_TURN_OUTCOME = produce_turn_outcome(
+    "turn.request_nonfallback"
 )
-ENGINE_DOWN_TURN_OUTCOME = TurnOutcomeProjectionInput(
-    outcome="failed_terminal",
-    discriminator="engine_down",
-)
+ENGINE_DOWN_TURN_OUTCOME = produce_turn_outcome("turn.engine_down")
 
 
 @dataclass(frozen=True)
@@ -308,28 +405,13 @@ def project_turn_outcome_copy(
 ) -> TurnOutcomeCopy | None:
     """Project copy from the recorded outcome and its sole matrix discriminator."""
 
-    matches = tuple(
-        rule
-        for rule in TURN_OUTCOME_RENDERING_AUTHORITY.values()
-        if rule.outcome == projection.outcome
-        and rule.discriminator == projection.discriminator
-    )
-    if len(matches) != 1:
-        raise ValueError("Turn outcome does not match its rendering discriminator")
-    rule = matches[0]
+    rule = _turn_outcome_rule(projection)
     copy_keys = dict(rule.copy_keys)
-    variant = "default"
-    if projection.next_current_changed and "next_current" in copy_keys:
-        variant = "next_current"
-    elif projection.stream_started and "stream_started" in copy_keys:
-        variant = "stream_started"
-    elif (
-        projection.supply_facts is not None
-        and projection.supply_facts.supply_state in copy_keys
-    ):
-        variant = projection.supply_facts.supply_state
+    variant = _turn_outcome_variant(projection, rule)
     if variant not in copy_keys:
-        raise ValueError("Turn outcome is missing its required rendering fact")
+        raise TurnOutcomeProductionError(
+            "Turn outcome bypassed production without its required rendering fact"
+        )
     key = copy_keys[variant]
     if key is None:
         return None
