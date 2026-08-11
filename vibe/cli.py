@@ -76,6 +76,7 @@ from storage.db import create_sqlite_engine
 from storage.background import (
     DefinitionWriteConflict,
     SQLiteBackgroundTaskStore,
+    TaskResumeBlocked,
     compute_next_run_at,
     normalize_run_status,
 )
@@ -1981,6 +1982,7 @@ _DEFINITION_FAILURE_FIELDS = (
     "processing_recent_failures",
     # The one field that says WHY, dropped from the brief list payload before.
     "last_error",
+    "resume_blocked",
 )
 
 
@@ -3685,6 +3687,21 @@ def cmd_task_set_enabled(task_id: str, enabled: bool):
         return 1
     try:
         updated = store.set_enabled(task_id, enabled)
+    except TaskResumeBlocked as exc:
+        lang = _memory_cli_language()
+        _print_task_error(
+            TaskCliError(
+                i18n_t("error.taskOwnerUnavailable.message", lang),
+                code=exc.code,
+                hint=i18n_t("error.taskOwnerUnavailable.hint", lang, id=task_id),
+                help_command=f"vibe task remove {task_id}",
+                details={
+                    "task_id": task_id,
+                    "owner_session_id": exc.owner_session_id,
+                },
+            )
+        )
+        return 1
     except DefinitionWriteConflict as exc:
         # Pause/resume is also a full-row write, so it is refused when a teardown
         # changed the definition first. Reporting the switch as flipped would be a lie

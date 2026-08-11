@@ -102,6 +102,58 @@ def test_disabled_agent_cannot_run(tmp_path: Path) -> None:
     assert payload["error"] == "agent 'worker' is disabled"
 
 
+def test_task_resume_rejects_orphaned_owner_without_execution_target(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """A migrated orphan cannot resume into an invisible firing state."""
+
+    from storage.importer import ensure_sqlite_state
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    store = cli.ScheduledTaskStore()
+    task = store.add_task(
+        name="Orphaned command",
+        session_key="",
+        prompt="",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        shell_command="true",
+        metadata={
+            "orphaned_task_owner": {
+                "reason_code": "task_owner_session_unavailable",
+                "owner_session_id": "ses-removed",
+            }
+        },
+    )
+    task.enabled = False
+    store.upsert_task(task)
+
+    with (
+        patch("vibe.cli._task_store", return_value=store),
+        patch("vibe.cli._memory_cli_language", return_value="zh"),
+    ):
+        result, payload = _capture_stderr_json(
+            cli.cmd_task_set_enabled,
+            task.id,
+            True,
+        )
+
+    assert result == 1
+    assert payload["code"] == "task_owner_session_unavailable"
+    assert payload["error"] == "这个 Task 的管理 Session 已不可用。"
+    assert payload["hint"] == (
+        "请从可用的 Agent Session 创建替代 Task，再用 "
+        f"`vibe task remove {task.id}` 删除这条失去管理者的定义。"
+    )
+    assert payload["details"] == {
+        "task_id": task.id,
+        "owner_session_id": "ses-removed",
+    }
+    assert cli.ScheduledTaskStore().get_task(task.id).enabled is False
+
+
 def test_task_update_preserves_archived_agent_reference(capsys) -> None:
     db_path = cli.paths.get_sqlite_state_path()
     agent_store = cli.VibeAgentStore(db_path)

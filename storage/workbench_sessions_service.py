@@ -848,14 +848,29 @@ def is_session_archived(conn: Connection, session_id: str) -> bool:
 
 
 def count_bound_resources(conn: Connection, session_id: str) -> dict[str, int]:
-    """Count what archiving ``session_id`` will permanently reclaim: bound
-    scheduled tasks + watches (live, not-yet-deleted definitions) and
-    not-yet-terminal runs. Shared by the archive teardown and the confirm-dialog
-    preview so both agree on the numbers shown vs. acted on."""
+    """Count what archiving ``session_id`` will permanently reclaim.
+
+    Scheduled Tasks are counted when either their creation owner or execution
+    target is this Session; Watches remain callback-targeted. This is deliberately
+    broader than the owner-first banner projection so the archive preview matches
+    teardown and no Task survives with a dead execution target.
+    """
+    from storage.background import scheduled_definition_reclaimable_by_session_expression
+
+    definition_binding = or_(
+        and_(
+            run_definitions.c.definition_type == "watch",
+            run_definitions.c.session_id == session_id,
+        ),
+        and_(
+            run_definitions.c.definition_type == "scheduled",
+            scheduled_definition_reclaimable_by_session_expression(session_id),
+        ),
+    )
     types = (
         conn.execute(
             select(run_definitions.c.definition_type)
-            .where(run_definitions.c.session_id == session_id)
+            .where(definition_binding)
             .where(run_definitions.c.deleted_at.is_(None))
         )
         .scalars()
@@ -956,8 +971,11 @@ def derive_session_harness_activities(conn: Connection, session_id: str) -> list
     construction across restarts (a watch survives a restart; the registry does
     not). Three sources, all scoped to ``session_id``:
 
-    - enabled, live (not soft-deleted) watches bound to this session;
-    - enabled, live scheduled tasks bound to this session;
+    - enabled, live (not soft-deleted) watches whose callback targets this
+      session;
+    - enabled, live scheduled tasks managed by this session; creation provenance
+      is authoritative, with the bound session as a legacy fallback for
+      definitions that predate provenance capture;
     - queued/running delegated agent runs whose callback returns here (work this
       session dispatched and is waiting on).
 
@@ -971,7 +989,11 @@ def derive_session_harness_activities(conn: Connection, session_id: str) -> list
 
     # Watches + scheduled tasks live in ``run_definitions``, discriminated by
     # ``definition_type`` (see storage/background.py). Both must be enabled and
-    # not soft-deleted to count as ongoing background work for the session.
+    # not soft-deleted to count as ongoing background work for the session. The
+    # Task owner expression is shared with the Harness session filter so a
+    # row remains discoverable after the banner navigates to that filtered page.
+    from storage.background import scheduled_definition_owned_by_session_expression
+
     definition_rows = (
         conn.execute(
             select(
@@ -984,7 +1006,18 @@ def derive_session_harness_activities(conn: Connection, session_id: str) -> list
                 run_definitions.c.created_at,
                 run_definitions.c.updated_at,
             )
-            .where(run_definitions.c.session_id == session_id)
+            .where(
+                or_(
+                    and_(
+                        run_definitions.c.definition_type == "watch",
+                        run_definitions.c.session_id == session_id,
+                    ),
+                    and_(
+                        run_definitions.c.definition_type == "scheduled",
+                        scheduled_definition_owned_by_session_expression(session_id),
+                    ),
+                )
+            )
             .where(run_definitions.c.deleted_at.is_(None))
             .where(run_definitions.c.enabled == 1)
             .order_by(run_definitions.c.created_at, run_definitions.c.id)
@@ -1107,8 +1140,8 @@ def archive_session(conn: Connection, session_id: str) -> dict[str, Any]:
 
     Archive is terminal (there is no un-archive) — so we don't just flip a flag,
     we tear down the resources that would otherwise keep firing into a hidden
-    session: bound scheduled tasks + watches are soft-deleted, queued/running
-    runs are cancelled, and the Show Page is taken offline. All of it rides the
+    session: affected scheduled tasks + callback-targeted watches are soft-deleted,
+    queued/running runs are cancelled, and the Show Page is taken offline. All of it rides the
     caller's transaction so the teardown is atomic with the status flip.
 
     The one piece that can't live here is cancelling an in-flight chat turn: it
@@ -1165,7 +1198,8 @@ def archive_session(conn: Connection, session_id: str) -> dict[str, Any]:
     # Tally before teardown so the response reports what was reclaimed.
     reclaimed = count_bound_resources(conn, session_id)
 
-    # 2) Soft-delete bound scheduled tasks + watches (same table, distinguished by
+    # 2) Soft-delete scheduled tasks affected by this Session (creation owner or
+    #    execution target) + callback-targeted watches (same table, distinguished by
     #    ``definition_type``). Deleting — not pausing — is deliberate: a paused
     #    definition could be re-enabled later and would then target a dead session.
     #    Shared with the hard-delete teardown path, which passes ``pause`` instead

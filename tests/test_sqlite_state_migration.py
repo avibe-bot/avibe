@@ -31,7 +31,7 @@ from vibe.message_types import build_partial_index_predicate
 pytestmark = pytest.mark.no_sqlite_template
 
 
-HEAD_REVISION = "20260811_0051"
+HEAD_REVISION = "20260811_0052"
 MESSAGE_PARTIAL_INDEX_PREDICATES = {
     "ix_messages_inbox_activity": (
         "session_id is not null and type in "
@@ -1965,6 +1965,122 @@ def test_retirement_marker_migration_is_forward_only(tmp_path: Path) -> None:
     assert "retired_at" in columns
     assert row == ("2026-07-26T00:00:00+00:00", None)
     assert version == (HEAD_REVISION,)
+
+
+def test_orphaned_owner_task_migration_marks_unbound_definitions(tmp_path: Path) -> None:
+    """0052 blocks every resumable orphan and stops the ones still enabled."""
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision="20260811_0051")
+
+    with sqlite3.connect(db_path) as conn:
+        _insert_scope(conn, "sc1")
+        for session_id, anchor in (
+            ("ses-live-owner", "live-owner"),
+            ("ses-target", "target"),
+            ("ses-archived-owner", "archived-owner"),
+        ):
+            _insert_agent_session(
+                conn,
+                row_id=session_id,
+                scope_id="sc1",
+                anchor=anchor,
+                workdir="/tmp",
+                backend="codex",
+                native=f"native-{session_id}",
+                last_active="2026-08-11T00:00:00+00:00",
+            )
+        conn.execute(
+            "update agent_sessions set status = 'archived' where id = 'ses-archived-owner'"
+        )
+
+        def insert_task(
+            task_id: str,
+            owner_session_id: str | None,
+            *,
+            session_id: str | None = None,
+            session_policy: str | None = "create_per_run",
+            enabled: int = 1,
+            last_error: str | None = None,
+        ) -> None:
+            metadata = (
+                json.dumps({"created_by": {"caller": {"session_id": owner_session_id}}})
+                if owner_session_id is not None
+                else "{}"
+            )
+            conn.execute(
+                """
+                insert into run_definitions (
+                    id, definition_type, name, session_policy, session_id, enabled,
+                    last_error, created_at, updated_at, metadata_json
+                ) values (?, 'scheduled', ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    task_id,
+                    task_id,
+                    session_policy,
+                    session_id,
+                    enabled,
+                    last_error,
+                    "2026-08-11T00:00:00+00:00",
+                    "2026-08-11T00:00:00+00:00",
+                    metadata,
+                ),
+            )
+
+        insert_task("missing-owner", "ses-removed-owner")
+        insert_task("pure-command", "ses-removed-owner", session_policy=None)
+        insert_task("blank-target", "ses-removed-owner", session_id="   ")
+        insert_task("whitespace-target", "ses-removed-owner", session_id="\t\n\r")
+        insert_task("archived-owner", "ses-archived-owner")
+        insert_task("live-owner", "ses-live-owner")
+        insert_task("target-fallback", "ses-removed-owner", session_id="ses-target")
+        insert_task("legacy-unowned", None)
+        insert_task(
+            "already-paused",
+            "ses-removed-owner",
+            enabled=0,
+            last_error="manual pause",
+        )
+        conn.commit()
+
+    run_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        rows = {
+            row[0]: row[1:]
+            for row in conn.execute(
+                "select id, enabled, session_id, last_error, metadata_json from run_definitions"
+            )
+        }
+
+    def owner_marker(task_id: str) -> dict | None:
+        metadata = json.loads(rows[task_id][3])
+        return metadata.get("orphaned_task_owner")
+
+    expected_paused = {
+        "missing-owner": (None, "ses-removed-owner"),
+        "pure-command": (None, "ses-removed-owner"),
+        "blank-target": ("   ", "ses-removed-owner"),
+        "whitespace-target": ("\t\n\r", "ses-removed-owner"),
+        "archived-owner": (None, "ses-archived-owner"),
+    }
+    for task_id, (session_id, owner_session_id) in expected_paused.items():
+        assert rows[task_id][:3] == (0, session_id, None)
+        assert owner_marker(task_id) == {
+            "reason_code": "task_owner_session_unavailable",
+            "owner_session_id": owner_session_id,
+        }
+
+    assert rows["live-owner"][:3] == (1, None, None)
+    assert rows["target-fallback"][:3] == (1, "ses-target", None)
+    assert rows["legacy-unowned"][:3] == (1, None, None)
+    assert rows["already-paused"][:3] == (0, None, "manual pause")
+    assert owner_marker("already-paused") == {
+        "reason_code": "task_owner_session_unavailable",
+        "owner_session_id": "ses-removed-owner",
+    }
+    for task_id in ("live-owner", "target-fallback", "legacy-unowned"):
+        assert owner_marker(task_id) is None
 
 
 def test_show_annotation_migration_changes_only_the_user_send_index(

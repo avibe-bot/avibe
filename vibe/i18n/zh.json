@@ -226,6 +226,10 @@
       "message": "Agent `{agent}` 无法用于此项目。",
       "hint": "请选择一个已启用的 Agent 后重新保存项目设置。"
     },
+    "taskOwnerUnavailable": {
+      "message": "这个 Task 的管理 Session 已不可用。",
+      "hint": "请从可用的 Agent Session 创建替代 Task，再用 `vibe task remove {id}` 删除这条失去管理者的定义。"
+    },
     "sessionFork": {
       "agentUnavailable": {
         "message": "源会话的 Agent 已无法用于创建新的复刻会话。",
