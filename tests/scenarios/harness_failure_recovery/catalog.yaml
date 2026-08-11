@@ -4255,6 +4255,26 @@ scenarios:
     # A definitive process death makes the old local Turn fence non-authoritative;
     # only unknown ownership or an active Activity can still veto replacement.
     test: tests/test_codex_agent.py::CodexTransportCwdStalenessTests::test_hfr_473_dead_transport_restarts_past_stale_turn_ownership
+  - id: HFR-474
+    name: upgrade recovery collapses legacy restart notices by durable Turn ownership
+    status: covered
+    kind: failure_recovery
+    layer: scenario
+    backend: shared
+    # Before the notice lane starts, accepted Delivery ownership repairs legacy
+    # per-Run restart notices into one Turn fallback. A notice already sent remains
+    # authoritative and suppresses every pending sibling.
+    test: tests/test_session_delivery_fsm.py::test_hfr_474_startup_collapses_legacy_restart_notices_by_durable_turn
+  - id: HFR-475
+    name: restart notices stay concise and hide opaque internal identities
+    status: covered
+    kind: failure_recovery
+    layer: contract
+    backend: shared
+    # A service restart renders one calm recovery action. Readable definition names
+    # remain visible, while deleted definitions never leak their opaque id or append
+    # internal error, origin, lifecycle, and inspection lines.
+    test: tests/test_harness_failure_visibility.py::test_hfr_475_restart_notice_is_one_calm_action_without_internal_details
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor

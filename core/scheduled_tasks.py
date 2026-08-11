@@ -6692,9 +6692,11 @@ class ScheduledTaskService:
             else None
         )
         is_watch = watch is not None or str(run.get("run_type") or "").strip().startswith("watch")
+        explicit_name = (task.name if task else None) or (
+            str((watch or {}).get("name") or "").strip() or None
+        )
         name = (
-            (task.name if task else None)
-            or (str((watch or {}).get("name") or "").strip() or None)
+            explicit_name
             or definition_id
             or str(run["id"])
         )
@@ -6709,6 +6711,14 @@ class ScheduledTaskService:
             )
         reason = str(notice.get("interrupt_reason") or "").strip()
         error = str(run.get("error") or "").strip() or self._t("harness.notice.unknownError")
+        if reason == SETTLED_BY_RESTARTED:
+            # A service restart is a lifecycle event, not a diagnosis. Keep its
+            # notification to one calm action and leave internal Run/definition
+            # details on the inspection surfaces. A deleted definition has no
+            # trustworthy display name, so never substitute its opaque id.
+            if explicit_name:
+                return self._t("harness.notice.restartStopped", name=explicit_name)
+            return self._t("harness.notice.restartStoppedUnnamed")
         if failure_notices.is_interruption(notice):
             # The reason is rendered INSIDE a translated sentence, so it is copy: the
             # wire value went through a closed label map, never interpolated raw. An
@@ -8762,10 +8772,77 @@ class ScheduledTaskService:
         """Settle late accepted Runs from their immutable Turn snapshot."""
 
         if settled_by in SETTLEMENTS_WITHOUT_RESULT:
-            self.settle_agent_runs_without_result(
-                execution_ids,
-                settled_by=str(settled_by),
+            normalized_settlement = str(settled_by)
+            store = self.request_store.sqlite_backend
+            if store is None:
+                self.settle_agent_runs_without_result(
+                    execution_ids,
+                    settled_by=normalized_settlement,
+                )
+                return
+            normalized_execution_ids = list(
+                dict.fromkeys(
+                    execution_id
+                    for value in execution_ids
+                    if (execution_id := str(value or "").strip())
+                )
             )
+            terminal_status = SETTLEMENT_TERMINAL_STATUS.get(
+                normalized_settlement,
+                "failed",
+            )
+            error_text = self._t(
+                SETTLEMENT_I18N_KEYS.get(
+                    normalized_settlement,
+                    SETTLEMENT_I18N_KEYS[SETTLED_BY_NO_TERMINAL_RESULT],
+                )
+            )
+            provenance: dict[str, Any] = {
+                "turn_id": turn_id,
+                "evidence_kind": evidence_kind,
+                "settled_by": normalized_settlement,
+                "interrupt_reason": normalized_settlement,
+            }
+            if terminal_status == "failed":
+                provenance["turn_failure_notification"] = {
+                    "failure_id": f"turn:{turn_id}",
+                    "delivered": False,
+                }
+            results = store.record_turn_run_outputs(
+                normalized_execution_ids,
+                output_id=f"resultless:{normalized_settlement}",
+                text="",
+                provenance=provenance,
+                terminal_status=terminal_status,
+                error=error_text,
+            )
+            repaired_ids = (
+                store.reconcile_resultless_turn_failure_notices(
+                    normalized_execution_ids,
+                    turn_id=turn_id,
+                    settled_by=normalized_settlement,
+                )
+                if terminal_status == "failed"
+                else []
+            )
+            transitioned = False
+            for execution_id, result in results.items():
+                if not result.get("terminal_transition"):
+                    continue
+                transitioned = True
+                run = result.get("run")
+                expected_status = str((run or {}).get("status") or terminal_status)
+                self._project_terminal_definition_result(
+                    run,
+                    execution_id=execution_id,
+                    expected_status=expected_status,
+                )
+            if transitioned or repaired_ids:
+                self._wake_runtime_work(
+                    RuntimeWorkLane.REQUESTS,
+                    RuntimeWorkLane.RUN_CALLBACKS,
+                    RuntimeWorkLane.FAILURE_NOTICES,
+                )
             return
         if evidence.get("settles_run") is not True:
             return

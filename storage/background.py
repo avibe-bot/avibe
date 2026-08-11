@@ -4881,6 +4881,7 @@ class SQLiteBackgroundTaskStore:
                                 "turn_id",
                                 "turn_failure_notification",
                                 TURN_PARTICIPANT_RUN_IDS_METADATA_KEY,
+                                "interrupt_reason",
                             )
                             if provenance and (value := provenance.get(key)) is not None
                         }
@@ -5128,6 +5129,7 @@ class SQLiteBackgroundTaskStore:
                     "turn_id",
                     "turn_failure_notification",
                     TURN_PARTICIPANT_RUN_IDS_METADATA_KEY,
+                    "interrupt_reason",
                 )
                 if (value := terminal_provenance.get(key)) is not None
             }
@@ -5162,6 +5164,184 @@ class SQLiteBackgroundTaskStore:
                     _conn=conn,
                 )
         return results
+
+    def reconcile_resultless_turn_failure_notices(
+        self,
+        run_ids: Sequence[str],
+        *,
+        turn_id: str,
+        settled_by: str,
+        updated_at: Optional[str] = None,
+    ) -> list[str]:
+        """Attach one exact Turn owner to legacy per-Run interruption notices.
+
+        Releases before HFR-474 lost the notification contract from Run metadata,
+        but accepted Delivery ownership still retained the exact Turn. Startup calls
+        this before the notice lane activates. A sent notice is authoritative;
+        otherwise one pending participant is elected deterministically. Notice state,
+        attempts, errors, and retry timing remain unchanged.
+        """
+
+        from core import failure_notices
+
+        normalized_turn_id = str(turn_id or "").strip()
+        normalized_reason = str(settled_by or "").strip()
+        normalized_run_ids = list(
+            dict.fromkeys(
+                run_id
+                for value in run_ids
+                if (run_id := str(value or "").strip())
+            )
+        )
+        if not normalized_turn_id or not normalized_reason or not normalized_run_ids:
+            return []
+
+        now = updated_at or _utc_now_iso()
+        changed_ids: list[str] = []
+        with run_update_event_transaction(self.engine) as conn:
+            reserve_write_lock(conn)
+            rows: dict[str, Any] = {}
+            for batch in _id_batches(normalized_run_ids):
+                rows.update(
+                    {
+                        str(row["id"]): row
+                        for row in conn.execute(
+                            select(agent_runs).where(agent_runs.c.id.in_(batch))
+                        ).mappings()
+                    }
+                )
+            participant_ids = [
+                run_id for run_id in normalized_run_ids if run_id in rows
+            ]
+            notice_rows: dict[str, tuple[Any, dict[str, Any], dict[str, Any]]] = {}
+            for run_id in participant_ids:
+                row = rows[run_id]
+                if normalize_run_status(row["status"]) != "failed":
+                    continue
+                metadata = _decoded_failure_notice_metadata(row["metadata_json"])
+                if metadata is None:
+                    continue
+                notice = metadata.get(OWED_FAILURE_NOTICE_KEY)
+                if not isinstance(notice, dict) or notice.get("state") not in {
+                    NOTICE_PENDING,
+                    NOTICE_SENT,
+                }:
+                    continue
+                notice_turn_id = failure_notices.notice_turn_id(notice)
+                if notice_turn_id and notice_turn_id != normalized_turn_id:
+                    continue
+                reason = str(
+                    notice.get("interrupt_reason")
+                    or metadata.get("interrupt_reason")
+                    or ""
+                ).strip()
+                if reason != normalized_reason:
+                    continue
+                notice_rows[run_id] = (row, metadata, dict(notice))
+            if not notice_rows:
+                return []
+
+            ordered_ids = sorted(
+                notice_rows,
+                key=lambda run_id: (
+                    str(notice_rows[run_id][0]["created_at"] or ""),
+                    run_id,
+                ),
+            )
+            sent_ids = [
+                run_id
+                for run_id in ordered_ids
+                if notice_rows[run_id][2].get("state") == NOTICE_SENT
+            ]
+            pending_ids = [
+                run_id
+                for run_id in ordered_ids
+                if notice_rows[run_id][2].get("state") == NOTICE_PENDING
+            ]
+            existing_owner = ""
+            for run_id in ordered_ids:
+                _row, metadata, notice = notice_rows[run_id]
+                notification = metadata.get("turn_failure_notification")
+                notification = notification if isinstance(notification, dict) else {}
+                candidate = str(
+                    notification.get("fallback_run_id")
+                    or notice.get("turn_fallback_run_id")
+                    or ""
+                ).strip()
+                if candidate in notice_rows:
+                    existing_owner = candidate
+                    break
+
+            if sent_ids:
+                owner_id = sent_ids[0]
+            elif existing_owner in pending_ids:
+                owner_id = existing_owner
+            else:
+                owner_id = next(
+                    (
+                        run_id
+                        for run_id in pending_ids
+                        if not _callback_parent_owns_failure_notice(
+                            conn,
+                            source_kind=notice_rows[run_id][0]["source_kind"],
+                            parent_run_id=notice_rows[run_id][0]["parent_run_id"],
+                        )
+                    ),
+                    pending_ids[0] if pending_ids else "",
+                )
+            if not owner_id:
+                return []
+
+            delivered = bool(sent_ids)
+            ack_evidence = None
+            if sent_ids:
+                evidence_values = [
+                    str(notice_rows[run_id][2].get("ack_evidence") or "")
+                    for run_id in sent_ids
+                ]
+                ack_evidence = max(
+                    evidence_values,
+                    key=lambda value: _ACK_EVIDENCE_PRIORITY.get(value, 0),
+                ) or None
+            failure_id = f"turn:{normalized_turn_id}"
+            notification: dict[str, Any] = {
+                "failure_id": failure_id,
+                "delivered": delivered,
+                "fallback_run_id": owner_id,
+            }
+            if ack_evidence:
+                notification["ack_evidence"] = ack_evidence
+
+            for run_id in ordered_ids:
+                _row, metadata, notice = notice_rows[run_id]
+                updated_metadata = dict(metadata)
+                updated_notice = dict(notice)
+                updated_metadata["turn_id"] = normalized_turn_id
+                updated_metadata["turn_failure_notification"] = dict(notification)
+                updated_notice.update(
+                    {
+                        "failure_id": failure_id,
+                        "turn_id": normalized_turn_id,
+                        "turn_notification_delivered": delivered,
+                        "turn_notification_ack_evidence": ack_evidence,
+                        "turn_fallback_run_id": owner_id,
+                        TURN_PARTICIPANT_RUN_IDS_METADATA_KEY: participant_ids,
+                    }
+                )
+                updated_metadata[OWED_FAILURE_NOTICE_KEY] = updated_notice
+                if updated_metadata == metadata:
+                    continue
+                conn.execute(
+                    update(agent_runs)
+                    .where(agent_runs.c.id == run_id)
+                    .values(
+                        metadata_json=_json_dumps(updated_metadata),
+                        updated_at=now,
+                    )
+                )
+                changed_ids.append(run_id)
+            _defer_run_ids_updated_from_connection(conn, changed_ids)
+        return changed_ids
 
     def settle_run_terminal(
         self,
