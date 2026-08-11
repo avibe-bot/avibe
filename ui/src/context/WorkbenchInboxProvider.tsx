@@ -6,6 +6,7 @@ import type { InboxSession } from './ApiContext';
 import { WorkbenchInboxContext, type InboxState } from './WorkbenchInboxContext';
 import { sessionActivityInboxAction } from '../lib/inboxActivity';
 import { syncFaviconBadge } from '../lib/faviconBadge';
+import { createWorkbenchSessionReadOwnership } from '../lib/workbenchSessionReadOwnership';
 
 const PAGE_SIZE = 30;
 
@@ -72,6 +73,13 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   // — reconciles the loaded window instead, so a non-resume
   // rerun never collapses a multi-page feed back to page one.
   const initialFetched = useRef(false);
+  // Every Inbox read shares one ordering fence. This covers page-one refresh,
+  // cursor reads, resume reconcile, and the targeted foreground-restore read.
+  const readOwnershipRef = useRef(createWorkbenchSessionReadOwnership());
+
+  const acceptSessionMutation = useCallback(() => {
+    readOwnershipRef.current.acceptMutation();
+  }, []);
 
   // One home for "an authoritative unread map arrived": set the map and flip
   // ``unreadLoaded`` together so the two can never drift apart. Every whole-account
@@ -83,43 +91,48 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   }, []);
 
   const refresh = useCallback(async () => {
+    const read = readOwnershipRef.current.beginRead();
     setLoading(true);
     try {
       const result = await api.listInbox({ platform: 'avibe', limit: PAGE_SIZE });
+      if (!readOwnershipRef.current.isCurrent(read)) return;
       setInboxSessions(result.sessions);
       setNextCursor(result.next_cursor);
       applyUnreadMap(result.unread_by_session ?? {});
     } catch (err) {
       console.error('[inbox] refresh failed', err);
     } finally {
-      setLoading(false);
+      if (readOwnershipRef.current.isLatestRead(read)) setLoading(false);
     }
   }, [api, applyUnreadMap]);
 
   const loadMore = useCallback(async () => {
     const cursor = cursorRef.current;
     if (!cursor) return;
+    const read = readOwnershipRef.current.beginRead();
     setLoadingMore(true);
     try {
       const result = await api.listInbox({ platform: 'avibe', limit: PAGE_SIZE, before: cursor });
+      if (!readOwnershipRef.current.isCurrent(read)) return;
       setInboxSessions((prev) => appendPage(prev, result.sessions));
       setNextCursor(result.next_cursor);
     } catch (err) {
       console.error('[inbox] load more failed', err);
     } finally {
-      setLoadingMore(false);
+      if (readOwnershipRef.current.isLatestRead(read)) setLoadingMore(false);
     }
   }, [api]);
 
   const markRead = useCallback(
     async (sessionId: string, untilMessageId?: string) => {
       const result = await api.markSessionRead(sessionId, untilMessageId);
+      acceptSessionMutation();
       // The unread map is authoritative for badges; the card's unread styling
       // derives from it, so clearing here clears the dot without touching the
       // feed order (a read doesn't change last activity).
       applyUnreadMap(result.unread_by_session ?? {});
     },
-    [api, applyUnreadMap],
+    [acceptSessionMutation, api, applyUnreadMap],
   );
 
   // Resume reconcile: re-read the feed WITHOUT collapsing pagination. A
@@ -130,6 +143,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   // that arrived during the gap surface at top. No loading flag — the user
   // already has content; this is a silent catch-up.
   const reconcile = useCallback(async () => {
+    const read = readOwnershipRef.current.beginRead();
     // Snapshot loaded ids up front: sizes the re-read window, and lets us tell
     // afterward whether the read overlapped what we already had (cursor note).
     const loadedIds = new Set(inboxSessionsRef.current.map((s) => s.session_id));
@@ -141,6 +155,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
         cache: false,
         handleError: false,
       });
+      if (!readOwnershipRef.current.isCurrent(read)) return;
       setInboxSessions((prev) => {
         const incoming = new Map(result.sessions.map((s) => [s.session_id, s]));
         const merged = prev.map((s) => incoming.get(s.session_id) ?? s);
@@ -174,6 +189,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   // whole-account unread map, so refresh that too. Never touches the cursor.
   const reconcileSession = useCallback(
     async (sessionId: string) => {
+      const read = readOwnershipRef.current.beginRead();
       try {
         const result = await api.listInbox({
           platform: 'avibe',
@@ -183,6 +199,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
           handleError: false,
         });
         const row = result.sessions.find((s) => s.session_id === sessionId);
+        if (!readOwnershipRef.current.isCurrent(read)) return;
         if (row) setInboxSessions((prev) => upsertSession(prev, row));
         applyUnreadMap(result.unread_by_session ?? {});
       } catch (err) {
@@ -207,6 +224,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
     }
     const disconnect = api.connectWorkbenchEvents({
       onInboxSessionUpdated: (row) => {
+        acceptSessionMutation();
         setInboxSessions((prev) => upsertSession(prev, row));
         setUnreadBySession((prev) => {
           if ((prev[row.session_id] ?? 0) === row.unread_count) return prev;
@@ -217,11 +235,13 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
         });
       },
       onInboxUnreadChanged: (data) => {
+        acceptSessionMutation();
         if (data?.unread_by_session) {
           applyUnreadMap(data.unread_by_session);
         }
       },
       onSessionActivity: (data) => {
+        acceptSessionMutation();
         // Contract A6: react to visibility/scope changes carried on the event.
         // background ⇒ drop the card (like an archive); foreground ⇒ fetch that
         // exact session and upsert its card so it reappears even if it sorts past
@@ -250,7 +270,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
       },
     });
     return disconnect;
-  }, [api, refresh, reconcile, reconcileSession, applyUnreadMap]);
+  }, [acceptSessionMutation, api, refresh, reconcile, reconcileSession, applyUnreadMap]);
 
   // Recover after the OS suspended us. A backgrounded mobile PWA has its page
   // frozen and its SSE socket dropped, and the broker never replays the gap;

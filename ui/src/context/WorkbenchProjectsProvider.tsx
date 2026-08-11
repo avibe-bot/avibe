@@ -11,6 +11,7 @@ import {
 import { createdReconcileMinCount } from '../lib/sessionVisibilityEvents';
 import { orderProjectSessions } from '../lib/sessionPinning';
 import { errorMessage } from '@/lib/errorMessage';
+import { createWorkbenchSessionReadOwnership } from '../lib/workbenchSessionReadOwnership';
 
 // How many sessions to load per page under a project. The server clamps the
 // /api/sessions limit (to 200) and returns a cursor (next_before_id); both the
@@ -118,6 +119,14 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
   // reconcile per project so they can't race or truncate an append.
   const inFlightRef = useRef<Set<string>>(new Set());
   const pendingReconcileRef = useRef<Map<string, number>>(new Map());
+  // All reads owned by this provider share one ordering fence. A bootstrap,
+  // paginated read, or targeted row read that started before a newer mutation
+  // must not commit its snapshot after that mutation is accepted.
+  const readOwnershipRef = useRef(createWorkbenchSessionReadOwnership());
+
+  const acceptSessionMutation = useCallback(() => {
+    readOwnershipRef.current.acceptMutation();
+  }, []);
 
   const queueReconcile = useCallback((projectId: string, minCount = 0) => {
     const pending = pendingReconcileRef.current.get(projectId) ?? 0;
@@ -151,15 +160,19 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
   }, []);
 
   const fetchProjects = useCallback(async (options?: { cache?: boolean }) => {
+    const read = readOwnershipRef.current.beginRead();
     try {
       const result = await api.getWorkbenchProjectsBootstrap({ cache: options?.cache });
+      if (!readOwnershipRef.current.isCurrent(read)) return;
       setProjects(result.projects);
       applyBootstrapSessions(result.sessions ?? {});
       setProjectsError(null);
     } catch (err) {
       // Don't strand consumers on an empty-state for a transient failure — keep
       // any list we had and surface the error (mobile shows a retry).
-      setProjectsError(errorMessage(err) ?? String(err));
+      if (readOwnershipRef.current.isCurrent(read)) {
+        setProjectsError(errorMessage(err) ?? String(err));
+      }
     }
   }, [api, applyBootstrapSessions]);
 
@@ -183,6 +196,8 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
         const targetCount = Math.max(sessionsRef.current[projectId]?.sessions?.length ?? 0, minCount);
         if (targetCount === 0) return; // nothing loaded to reconcile
         inFlightRef.current.add(projectId);
+        const read = readOwnershipRef.current.beginRead();
+        let stale = false;
         try {
           const acc: WorkbenchSession[] = [];
           const seen = new Set<string>();
@@ -196,6 +211,10 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
               beforeId: before,
               cache: false,
             });
+            if (!readOwnershipRef.current.isCurrent(read)) {
+              stale = true;
+              break;
+            }
             for (const s of res.sessions) {
               if (!seen.has(s.id)) {
                 seen.add(s.id);
@@ -205,10 +224,12 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
             nextBeforeId = res.next_before_id;
             before = res.next_before_id ?? undefined;
           } while (before && acc.length < targetCount);
-          setSessions((prev) => ({
-            ...prev,
-            [projectId]: { sessions: acc, cursor: nextBeforeId, loading: false, loadingMore: false, error: false },
-          }));
+          if (!stale && readOwnershipRef.current.isCurrent(read)) {
+            setSessions((prev) => ({
+              ...prev,
+              [projectId]: { sessions: acc, cursor: nextBeforeId, loading: false, loadingMore: false, error: false },
+            }));
+          }
         } catch {
           /* keep the current window on a failed reconcile */
         } finally {
@@ -223,6 +244,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
   );
 
   const reconcileProjectTree = useCallback(async () => {
+    const read = readOwnershipRef.current.beginRead();
     const bootstrapGroups = new Map<number, string[]>();
     const largeProjectIds: string[] = [];
     for (const [projectId, state] of Object.entries(sessionsRef.current)) {
@@ -245,6 +267,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       const groups = Array.from(bootstrapGroups.entries());
       if (groups.length === 0) {
         const result = await api.getWorkbenchProjectsBootstrap({ cache: false });
+        if (!readOwnershipRef.current.isCurrent(read)) return;
         setProjects(result.projects);
       } else {
         let nextProjects: WorkbenchProject[] | null = null;
@@ -256,6 +279,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
             limit,
             cache: false,
           });
+          if (!readOwnershipRef.current.isCurrent(read)) return;
           nextProjects = result.projects;
           for (const [projectId, page] of Object.entries(result.sessions ?? {})) {
             const currentCount = sessionsRef.current[projectId]?.sessions?.length ?? 0;
@@ -266,14 +290,17 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
             }
           }
         }
+        if (!readOwnershipRef.current.isCurrent(read)) return;
         if (nextProjects) setProjects(nextProjects);
         applyBootstrapSessions(pages);
       }
+      if (!readOwnershipRef.current.isCurrent(read)) return;
       setProjectsError(null);
       for (const projectId of largeProjectIds) {
         void reconcileSessions(projectId);
       }
     } catch (err) {
+      if (!readOwnershipRef.current.isCurrent(read)) return;
       setProjectsError(errorMessage(err) ?? String(err));
       const projectIds = [...bootstrapGroups.values()].flat();
       for (const projectId of [...projectIds, ...largeProjectIds]) {
@@ -287,9 +314,12 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       state.sessions?.some((session) => session.id === sessionId && !session.native_session_id),
     );
     if (!needsRefresh) return;
+    const read = readOwnershipRef.current.beginRead();
     try {
       const updated = await api.getSession(sessionId, { cache: false });
-      setSessions((prev) => patchSessionRow(prev, sessionId, () => updated));
+      if (readOwnershipRef.current.isCurrent(read)) {
+        setSessions((prev) => patchSessionRow(prev, sessionId, () => updated));
+      }
     } catch {
       /* best-effort: reconnect reconcile will refresh the row later */
     }
@@ -310,11 +340,18 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
           [projectId]: append ? { ...cur, loadingMore: true } : { ...cur, loading: true, error: false },
         };
       });
+      const beforeId = append ? sessionsRef.current[projectId]?.cursor ?? undefined : undefined;
+      const read = readOwnershipRef.current.beginRead();
       try {
-        const beforeId = append ? sessionsRef.current[projectId]?.cursor ?? undefined : undefined;
         const res = await api.listSessions({ projectId, status: 'active', limit: SESSIONS_PAGE_SIZE, beforeId });
         setSessions((prev) => {
           const cur = prev[projectId] ?? EMPTY_SESSIONS;
+          if (!readOwnershipRef.current.isCurrent(read)) {
+            return {
+              ...prev,
+              [projectId]: append ? { ...cur, loadingMore: false } : { ...cur, loading: false },
+            };
+          }
           const existing = append ? cur.sessions ?? [] : [];
           // Cursor pages can overlap if a row's last_active_at shifts between
           // fetches (the cursor is just a row id resolved against current
@@ -329,6 +366,12 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       } catch {
         setSessions((prev) => {
           const cur = prev[projectId] ?? EMPTY_SESSIONS;
+          if (!readOwnershipRef.current.isLatestRead(read)) return prev;
+          if (!readOwnershipRef.current.isCurrent(read)) {
+            return append
+              ? { ...prev, [projectId]: { ...cur, loadingMore: false } }
+              : { ...prev, [projectId]: { ...cur, loading: false } };
+          }
           // Load-more failure: keep the list + cursor so the button stays usable.
           // First-page failure: flag error (mobile retry; re-expand refetches) and
           // keep `sessions` non-null so the desktop still renders its empty state.
@@ -357,6 +400,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
         void reconcileProjectTree();
       },
       onSessionActivity: (data) => {
+        acceptSessionMutation();
         if (data.event === 'archived') {
           // Terminal archive (here or in another tab) — drop the row live.
           setSessions((prev) => removeSessionRow(prev, data.session_id));
@@ -409,12 +453,14 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
         void reconcileSessions(projectId, { minCount });
       },
       onSessionStatus: ({ session_id, agent_status }) => {
+        acceptSessionMutation();
         setSessions((prev) =>
           patchSessionRow(prev, session_id, (s) => (s.agent_status === agent_status ? s : { ...s, agent_status })),
         );
         if (agent_status !== 'running') void refreshCachedSessionRow(session_id);
       },
       onTurnEnd: ({ session_id }) => {
+        acceptSessionMutation();
         // The first turn can bind the native_session_id server-side, but the
         // status event only carries the dot state. Refresh the cached row so
         // actions gated on native binding, such as Fork session, unlock without
@@ -423,7 +469,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       },
     });
     return disconnect;
-  }, [api, reconcileProjectTree, reconcileSessions, refreshCachedSessionRow]);
+  }, [acceptSessionMutation, api, reconcileProjectTree, reconcileSessions, refreshCachedSessionRow]);
 
   const toggleExpanded = useCallback(
     (projectId: string) => {
@@ -454,6 +500,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       try {
         // No overrides → omit agent fields so the server defers to the default Agent.
         const session = await api.createSession({ project_id: projectId, ...overrides });
+        acceptSessionMutation();
         if (alreadyLoaded) {
           setSessions((prev) => {
             const cur = prev[projectId] ?? EMPTY_SESSIONS;
@@ -486,19 +533,20 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
         });
       }
     },
-    [api, fetchSessions],
+    [acceptSessionMutation, api, fetchSessions],
   );
 
   const renameProject = useCallback(
     async (projectId: string, name: string) => {
       try {
         const updated = await api.updateProject(projectId, { display_name: name });
+        acceptSessionMutation();
         setProjects((prev) => (prev ? prev.map((p) => (p.id === projectId ? updated : p)) : prev));
       } catch (err) {
         console.error('[workbench] rename project failed', err);
       }
     },
-    [api],
+    [acceptSessionMutation, api],
   );
 
   const forkSession = useCallback(
@@ -510,6 +558,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       const alreadyLoaded = projectId != null && sessionsRef.current[projectId]?.sessions != null;
       try {
         const session = await api.forkSession(sessionId);
+        acceptSessionMutation();
         if (projectId == null) return session;
         if (alreadyLoaded) {
           setSessions((prev) => {
@@ -537,7 +586,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
         return null;
       }
     },
-    [api, fetchSessions],
+    [acceptSessionMutation, api, fetchSessions],
   );
 
   const setProjectDefaultAgent = useCallback(
@@ -562,6 +611,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
     async (projectId: string) => {
       try {
         await api.archiveProject(projectId);
+        acceptSessionMutation();
         setProjects((prev) => (prev ? prev.filter((p) => p.id !== projectId) : prev));
         setExpanded((prev) => {
           if (!prev.has(projectId)) return prev;
@@ -573,7 +623,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
         console.error('[workbench] archive project failed', err);
       }
     },
-    [api],
+    [acceptSessionMutation, api],
   );
 
   const renameSession = useCallback(
@@ -583,6 +633,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       // broadcast then reconciles the same value. Throws on failure (caller's
       // inline editor catches it) so a failed rename leaves the old title.
       const updated = await api.updateSession(sessionId, { title });
+      acceptSessionMutation();
       setSessions((prev) => {
         const state = prev[projectId];
         if (!state?.sessions) return prev;
@@ -595,12 +646,13 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
         };
       });
     },
-    [api],
+    [acceptSessionMutation, api],
   );
 
   const setSessionPinned = useCallback(
     async (projectId: string | null, sessionId: string, pinned: boolean) => {
       const updated = await api.updateSession(sessionId, { pinned });
+      acceptSessionMutation();
       // Session-keyed: patches whatever project holds the row (none, for a
       // standalone session). Only the pinned-first re-order needs a project.
       setSessions((prev) => patchSessionRow(prev, sessionId, () => updated, true));
@@ -608,7 +660,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       const loaded = sessionsRef.current[projectId]?.sessions?.length ?? 0;
       void reconcileSessions(projectId, { minCount: loaded });
     },
-    [api, reconcileSessions],
+    [acceptSessionMutation, api, reconcileSessions],
   );
 
   const archiveSession = useCallback(
@@ -616,6 +668,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       // Archive is terminal — the API reclaims bound tasks/watches/runs server-side.
       // Drop the row from the tree on success; throw so the caller's dialog can react.
       await api.archiveSession(sessionId);
+      acceptSessionMutation();
       if (projectId == null) return; // standalone session: no tree row to drop
       setSessions((prev) => {
         const state = prev[projectId];
@@ -626,7 +679,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
         };
       });
     },
-    [api],
+    [acceptSessionMutation, api],
   );
 
   const upsertProjectToTop = useCallback(
