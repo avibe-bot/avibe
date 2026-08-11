@@ -204,6 +204,7 @@ export const ChatPage: React.FC = () => {
   // re-render / visibility gap-recovery can't re-trigger the jump.
   const [searchParams, setSearchParams] = useSearchParams();
   const deepLinkMessageId = searchParams.get('msg');
+  const vaultAnchorRequestId = searchParams.get('vault_request');
   const deepLinkMessageIdRef = useLatestRef(deepLinkMessageId);
   // A "show me the chat" navigation carries ?view=chat (see sessionChatPath({ showChat:
   // true })) — a general signal that this navigation must leave Show Page mode.
@@ -526,6 +527,7 @@ export const ChatPage: React.FC = () => {
   const jumpTargetRef = useLatestRef(jumpTarget);
   const [highlightedId, setHighlightedId] = useState<string | null>(null);
   const handledJumpRef = useRef<string | null>(null);
+  const handledVaultAnchorRef = useRef<string | null>(null);
   const highlightTimerRef = useRef<number | null>(null);
   const [messageFontSize, setMessageFontSize] = useState(() => normalizeChatMessageFontSize(undefined));
   const [loading, setLoading] = useState(true);
@@ -747,10 +749,11 @@ export const ChatPage: React.FC = () => {
   sessionIdRef.current = sessionId;
 
   // Legacy provision rows may be created after their Agent reply and therefore
-  // cannot be placed from `created_at` alone. When the originating user message
-  // is outside the retained tail, fetch a small around-window once so the card
-  // can join its real turn instead of falling back to a fixed-looking footer.
+  // cannot be placed from `created_at` alone. Only an explicit Vaults-page link
+  // may request an around-window fetch; opening a chat normally must stay at the
+  // live tail instead of jumping to an older pending request.
   useEffect(() => {
+    const targetRequestId = vaultAnchorRequestId?.trim() || null;
     if (
       !sessionId ||
       loading ||
@@ -759,10 +762,33 @@ export const ChatPage: React.FC = () => {
       jumpTarget ||
       showPageActive ||
       deepLinkWindowHandledRef.current ||
-      provisionPlacement.unanchored.length === 0
+      !targetRequestId
     ) return;
+    if (handledVaultAnchorRef.current === targetRequestId) return;
+
+    // Clear only the Vault anchor parameter so unrelated navigation state (for
+    // example a Show Page signal) remains intact.
+    const clearVaultAnchorParam = () => {
+      const next = new URLSearchParams(window.location.search);
+      next.delete('vault_request');
+      setSearchParams(next, { replace: true });
+    };
+
+    // If the request is already attached to the retained transcript, jump to
+    // that row directly without replacing the current window.
+    const loadedAnchorMessageId = [...provisionPlacement.byMessageId.entries()].find(([, candidates]) =>
+      candidates.some((candidate) => candidate.id === targetRequestId),
+    )?.[0];
+    if (loadedAnchorMessageId) {
+      handledVaultAnchorRef.current = targetRequestId;
+      setJumpTarget(loadedAnchorMessageId);
+      clearVaultAnchorParam();
+      return;
+    }
+
     if (vaultAnchorInFlightRef.current) return;
     const request = provisionPlacement.unanchored.find((candidate) => {
+      if (candidate.id !== targetRequestId) return false;
       const sourceMessageId = vaultRequestSourceMessageId(candidate);
       const requestMessageId = typeof candidate.message_id === 'string' && candidate.message_id.trim()
         ? candidate.message_id
@@ -806,7 +832,6 @@ export const ChatPage: React.FC = () => {
     vaultAnchorFetchesRef.current.add(fetchKey);
     vaultAnchorInFlightRef.current = true;
     let retryDelayMs: number | null = null;
-    let deferredByVisibleAnchor = false;
     let deferredByMissingReply = false;
     let deferredByHiddenSurface = false;
     const loadedSource = messageAnchorId
@@ -872,6 +897,8 @@ export const ChatPage: React.FC = () => {
           !requestStillUnanchored ||
           hiddenVaultRequestIdsRef.current.has(request.id)
         ) {
+          handledVaultAnchorRef.current = targetRequestId;
+          clearVaultAnchorParam();
           vaultAnchorFetchesRef.current.delete(fetchKey);
           return;
         }
@@ -898,21 +925,6 @@ export const ChatPage: React.FC = () => {
         }
         const existing = messagesRef.current;
         const disjoint = existing.length > 0 && !transcriptWindowsOverlap(existing, incoming);
-        const preservesVisibleAnchor = [...provisionPlacementRef.current.byMessageId.values()].some(
-          (candidates) => candidates.some(
-            (candidate) => candidate.id !== request.id &&
-              candidate.status === 'pending' &&
-              !hiddenVaultRequestIdsRef.current.has(candidate.id),
-          ),
-        );
-        if (disjoint && preservesVisibleAnchor) {
-          // Another request currently owns the visible historical window. Let
-          // the next placement cycle retry this request once that anchor is
-          // fulfilled or dismissed.
-          deferredByVisibleAnchor = true;
-          vaultAnchorFetchesRef.current.delete(fetchKey);
-          return;
-        }
         // An around-fetch can land wholly outside the retained live tail. Do
         // not union those ranges: the missing rows would be rendered as if
         // they were adjacent. Replace the tail with a historical window,
@@ -959,6 +971,8 @@ export const ChatPage: React.FC = () => {
             return result.messages;
           });
         }
+        handledVaultAnchorRef.current = targetRequestId;
+        clearVaultAnchorParam();
         // A completed anchor is gated by placement itself. Release the fetch key
         // so a later retained-window trim can re-arm the request and recover it.
         vaultAnchorFetchesRef.current.delete(fetchKey);
@@ -986,11 +1000,23 @@ export const ChatPage: React.FC = () => {
             vaultAnchorRetryWaitingRef.current.delete(fetchKey);
             if (sessionId === sessionIdRef.current) setVaultAnchorCycle((cycle) => cycle + 1);
           }, retryDelayMs);
-        } else if (!deferredByVisibleAnchor && !deferredByMissingReply && !deferredByHiddenSurface) {
+        } else if (!deferredByMissingReply && !deferredByHiddenSurface) {
           setVaultAnchorCycle((cycle) => cycle + 1);
         }
       });
-  }, [api, deepLinkMessageId, jumpTarget, loading, provisionPlacement.unanchored, session?.id, sessionId, showPageActive, vaultAnchorCycle]);
+  }, [
+    api,
+    deepLinkMessageId,
+    jumpTarget,
+    loading,
+    provisionPlacement,
+    session?.id,
+    sessionId,
+    setSearchParams,
+    showPageActive,
+    vaultAnchorCycle,
+    vaultAnchorRequestId,
+  ]);
 
   const appendMessage = useCallback((msg: WorkbenchMessage) => {
     setMessages((prev) => {
@@ -1480,6 +1506,7 @@ export const ChatPage: React.FC = () => {
     setJumpTarget(null);
     setHighlightedId(null);
     handledJumpRef.current = null;
+    handledVaultAnchorRef.current = null;
     if (highlightTimerRef.current !== null) {
       window.clearTimeout(highlightTimerRef.current);
       highlightTimerRef.current = null;
@@ -2237,6 +2264,12 @@ export const ChatPage: React.FC = () => {
   useEffect(() => {
     if (!deepLinkMessageId) handledJumpRef.current = null;
   }, [deepLinkMessageId]);
+
+  // Re-arm the explicit Vault anchor after its URL parameter is consumed, so
+  // selecting the same request from Vaults again remains a fresh navigation.
+  useEffect(() => {
+    if (!vaultAnchorRequestId) handledVaultAnchorRef.current = null;
+  }, [vaultAnchorRequestId]);
 
   // Clear a pending highlight timer on unmount so it can't fire after teardown.
   useEffect(() => {

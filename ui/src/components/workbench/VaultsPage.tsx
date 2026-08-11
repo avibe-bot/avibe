@@ -301,7 +301,7 @@ const RequestRow: React.FC<{ request: VaultRequest; onReview: (request: VaultReq
           {session ? (
             <>
               <span aria-hidden>·</span>
-              <VaultRequestSessionLink session={session} />
+              <VaultRequestSessionLink session={session} requestId={isProvision ? r.id : undefined} />
             </>
           ) : null}
         </span>
