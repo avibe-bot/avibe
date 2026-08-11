@@ -16,7 +16,7 @@ import { RouteChainDialog } from './RouteChainDialog';
 import { SourceDetailPanel } from './SourceDetailPanel';
 import { SourceOrderDrawer } from './SourceOrderDrawer';
 import { SourcesCard } from './SourcesCard';
-import { modelsSurfaceKind } from './modelHubSurfaceState';
+import { modelsSurfaceKindFromReads } from './modelHubSurfaceState';
 import { buildSupplyRelations } from './supplyRelations';
 import { SupplyGraph, SupplyLegend } from './SupplyGraph';
 import './modelHubSurface.css';
@@ -29,15 +29,16 @@ import { modelChainKey, modelChainRequests, type ModelChainIndex } from './model
 import {
   beginRegionRead,
   failRegionRead,
+  foldRegionRead,
+  freshRegionData,
   loadingRegion,
   readyRegion,
-  regionData,
   regionFailed,
   settleRegionRead,
   unreadRegion,
   type RegionRead,
 } from './regionRead';
-import { agentHasLiveChainProjection, pollRuntimeStatus, runtimeHasInstallAsset, startRuntimeWithStatusRefresh } from './runtimeLifecycle';
+import { agentHasLiveChainProjection, freshRuntimeProjection, pollRuntimeStatus, runtimeHasInstallAsset, startRuntimeWithStatusRefresh } from './runtimeLifecycle';
 import { backendVisual } from './vendorMeta';
 import type { AgentBackend, AgentSupply, ResolutionEvent, RuntimeDependency, Source } from './types';
 
@@ -107,16 +108,22 @@ export const RuntimePill: React.FC<{
   directCount?: number;
 }> = ({ read, starting, onStart, onInstall, directCount }) => {
   const { t } = useTranslation();
-  const runtime = regionData(read);
-  if (!runtime) {
+  const projection = foldRegionRead<RuntimeDependency, { runtime: RuntimeDependency; authoritative: boolean } | null>(read, {
+    loading: () => null,
+    ready: (runtime) => ({ runtime, authoritative: true }),
+    unread: () => null,
+    degraded: (runtime) => ({ runtime, authoritative: false }),
+  });
+  if (!projection) {
     const key = read.kind === 'loading' ? 'starting' : 'unread';
     return <span className={cn('model-hub-runtime-pill', read.kind !== 'loading' && 'model-hub-runtime-pill--error')}><span className="model-hub-runtime-dot" />{read.kind === 'loading' && <LoaderCircle className="animate-spin" />}{t(`settings.models.shell.${key}`)}</span>;
   }
+  const { runtime, authoritative } = projection;
   const health = runtime.status.health;
-  const authoritative = read.kind === 'ready';
+  const unread = read.kind === 'degraded' && read.cause === 'read_failed';
   const canInstall = health === 'not_installed' && runtimeHasInstallAsset(runtime);
   const allDirect = authoritative && !starting && health === 'ok' && directCount !== undefined && directCount > 0;
-  const key = read.kind === 'error'
+  const key = unread
     ? 'unread'
     : starting
     ? 'starting'
@@ -140,7 +147,7 @@ export const RuntimePill: React.FC<{
       : null;
   const className = cn(
     'model-hub-runtime-pill',
-    (health === 'down' || health === 'degraded' || read.kind === 'error') && 'model-hub-runtime-pill--error',
+    (health === 'down' || health === 'degraded' || unread) && 'model-hub-runtime-pill--error',
     allDirect && 'model-hub-runtime-pill--direct',
   );
   const content = <><span className="model-hub-runtime-dot" />{(starting || health === 'installing') && <LoaderCircle className="animate-spin" />}{t(`settings.models.shell.${key}`, allDirect ? { count: directCount } : undefined)}</>;
@@ -286,15 +293,36 @@ export const SettingsModelsPage: React.FC = () => {
     return result;
   }, [sourceEntityAuthority, sourceWriteRegistry]);
 
-  const sources = regionData(sourcesRead) ?? [];
-  const agents = regionData(supplyRead) ?? [];
-  const chains = regionData(chainsRead) ?? {};
-  const runtime = regionData(runtimeRead) ?? null;
-  const feed = regionData(eventsRead) ?? emptyFeed;
-  const runtimeHealth = runtime?.status.health ?? null;
+  const sources = foldRegionRead<Source[], Source[]>(sourcesRead, {
+    loading: () => [],
+    ready: (data) => data,
+    unread: () => [],
+    degraded: (staleData) => staleData,
+  });
+  const agents = foldRegionRead<AgentSupply[], AgentSupply[]>(supplyRead, {
+    loading: () => [],
+    ready: (data) => data,
+    unread: () => [],
+    degraded: (staleData) => staleData,
+  });
+  const chains = freshRegionData(chainsRead) ?? {};
+  const runtime = freshRuntimeProjection(runtimeRead);
+  const retainedRuntime = foldRegionRead<RuntimeDependency, RuntimeDependency | null>(runtimeRead, {
+    loading: () => null,
+    ready: (data) => data,
+    unread: () => null,
+    degraded: (staleData) => staleData,
+  });
+  const feed = foldRegionRead<EventFeed, EventFeed>(eventsRead, {
+    loading: () => emptyFeed,
+    ready: (data) => data,
+    unread: () => emptyFeed,
+    degraded: (staleData) => staleData,
+  });
+  const runtimeHealth = retainedRuntime?.status.health ?? null;
   React.useEffect(() => {
     const runtimeCanRecover = runtimeRead.kind === 'unread'
-      || runtimeRead.kind === 'error'
+      || (runtimeRead.kind === 'degraded' && runtimeRead.cause === 'read_failed')
       || runtimeRecoveryPending
       || runtimeHealth === 'not_started'
       || runtimeHealth === 'not_installed'
@@ -311,11 +339,21 @@ export const SettingsModelsPage: React.FC = () => {
 
   const [chainReadAuthority] = React.useState(() => createLatestAsyncAuthorityByKey<AgentBackend, { agent: AgentSupply; chains: ModelChainIndex }>((_backend, incoming) => {
     if (!aliveRef.current) return;
-    setChainsRead((previous) => readyRegion(settleAgentChainIndex(regionData(previous) ?? {}, incoming.agent, incoming.chains)));
+    setChainsRead((previous) => readyRegion(settleAgentChainIndex(foldRegionRead<ModelChainIndex, ModelChainIndex>(previous, {
+      loading: () => ({}),
+      ready: (data) => data,
+      unread: () => ({}),
+      degraded: (staleData) => staleData,
+    }), incoming.agent, incoming.chains)));
   }));
 
   const refreshAgentChains = React.useCallback(async (agent: AgentSupply) => {
-    setChainsRead((previous) => readyRegion(beginAgentChainIndex(regionData(previous) ?? {}, agent)));
+    setChainsRead((previous) => readyRegion(beginAgentChainIndex(foldRegionRead<ModelChainIndex, ModelChainIndex>(previous, {
+      loading: () => ({}),
+      ready: (data) => data,
+      unread: () => ({}),
+      degraded: (staleData) => staleData,
+    }), agent)));
     await chainReadAuthority.run(agent.backend, async () => ({
       agent,
       chains: await readAgentChains(agent),
@@ -327,23 +365,36 @@ export const SettingsModelsPage: React.FC = () => {
     const activeBackends = new Set(hubAgents.map((agent) => agent.backend));
     chainReadAuthority.invalidateExcept(activeBackends);
     setChainsRead((previous) => readyRegion(Object.fromEntries(
-      Object.entries(regionData(previous) ?? {}).filter(([key]) => activeBackends.has(key.split('\u0000')[0] as AgentBackend)),
+      Object.entries(foldRegionRead<ModelChainIndex, ModelChainIndex>(previous, {
+        loading: () => ({}),
+        ready: (data) => data,
+        unread: () => ({}),
+        degraded: (staleData) => staleData,
+      })).filter(([key]) => activeBackends.has(key.split('\u0000')[0] as AgentBackend)),
     )));
     for (const agent of hubAgents) void refreshAgentChains(agent);
   }, [chainReadAuthority, refreshAgentChains]);
 
   React.useEffect(() => {
-    if (supplyRead.kind === 'ready') refreshAllAgentChains(supplyRead.data);
+    const freshSupply = freshRegionData(supplyRead);
+    if (freshSupply) refreshAllAgentChains(freshSupply);
   }, [refreshAllAgentChains, supplyRead]);
 
   const [eventReadAuthority] = React.useState(() => createLatestAsyncAuthority<RegionRead<ResolutionEvent[]>>((incoming) => {
     if (!aliveRef.current) return;
     setEventsRead((previous) => {
       if (incoming.kind !== 'ready') return failRegionRead(previous);
-      const previousFeed = regionData(previous);
+      const previousFeed = foldRegionRead<EventFeed, EventFeed | undefined>(previous, {
+        loading: () => undefined,
+        ready: (data) => data,
+        unread: () => undefined,
+        degraded: (staleData) => staleData,
+      });
+      const freshEvents = freshRegionData(incoming);
+      if (!freshEvents) return failRegionRead(previous);
       return readyRegion(previousFeed
-        ? feedAfterHeadRead(previousFeed, incoming.data)
-        : feedAfterTailRead(emptyFeed, incoming.data, EVENT_PAGE, null));
+        ? feedAfterHeadRead(previousFeed, freshEvents)
+        : feedAfterTailRead(emptyFeed, freshEvents, EVENT_PAGE, null));
     });
   }));
 
@@ -360,7 +411,8 @@ export const SettingsModelsPage: React.FC = () => {
 
   const [refreshAuthority] = React.useState(() => createLatestAsyncAuthority<AuthorizedSurfaceLanding>(({ landing, sourceSnapshot }) => {
     if (!aliveRef.current) return;
-    if (landing.sources.kind === 'ready') sourceEntityAuthority.settleSnapshot(sourceSnapshot, landing.sources.data);
+    const freshSources = freshRegionData(landing.sources);
+    if (freshSources) sourceEntityAuthority.settleSnapshot(sourceSnapshot, freshSources);
     else setSourcesRead((previous) => settleRegionRead(previous, landing.sources));
     setSupplyRead((previous) => settleRegionRead(previous, landing.supply));
     setRuntimeRead((previous) => {
@@ -402,7 +454,12 @@ export const SettingsModelsPage: React.FC = () => {
   }, [refreshEventHead]);
 
   const applyAgentEcho = React.useCallback((echoed: AgentSupply) => {
-    setSupplyRead((previous) => readyRegion(agentsWithEcho(regionData(previous) ?? [], echoed)));
+    setSupplyRead((previous) => readyRegion(agentsWithEcho(foldRegionRead(previous, {
+      loading: () => [],
+      ready: (data) => data,
+      unread: () => [],
+      degraded: (staleData) => staleData,
+    }), echoed)));
   }, []);
   const agentSaved = React.useCallback(async (echoed: AgentSupply) => {
     await convergeMutation({
@@ -469,7 +526,12 @@ export const SettingsModelsPage: React.FC = () => {
     try {
       const events = await modelsApi.listEvents(EVENT_PAGE, cursor);
       if (aliveRef.current) {
-        setEventsRead((previous) => readyRegion(feedAfterTailRead(regionData(previous) ?? emptyFeed, events, EVENT_PAGE, cursor)));
+        setEventsRead((previous) => readyRegion(feedAfterTailRead(foldRegionRead(previous, {
+          loading: () => emptyFeed,
+          ready: (data) => data,
+          unread: () => emptyFeed,
+          degraded: (staleData) => staleData,
+        }), events, EVENT_PAGE, cursor)));
       }
     } catch {
       if (aliveRef.current) showToast(t('settings.models.toast.refreshFailed') as string, 'error');
@@ -491,12 +553,10 @@ export const SettingsModelsPage: React.FC = () => {
       setStartingRuntime(false);
     }
   };
-  const landingLoading = sourcesRead.kind === 'loading' && regionData(sourcesRead) === undefined
-    && supplyRead.kind === 'loading' && regionData(supplyRead) === undefined
-    && runtimeRead.kind === 'loading' && regionData(runtimeRead) === undefined;
-  const directEmpty = regionData(sourcesRead) !== undefined
-    && regionData(supplyRead) !== undefined
-    && modelsSurfaceKind(agents, sources) === 'direct_empty';
+  const landingLoading = sourcesRead.kind === 'loading'
+    && supplyRead.kind === 'loading'
+    && runtimeRead.kind === 'loading';
+  const directEmpty = modelsSurfaceKindFromReads(supplyRead, sourcesRead) === 'direct_empty';
   const selectSource = React.useCallback((sourceId: string | null) => {
     sourceIntentAuthority.commit(() => setSelectedSourceId(sourceId));
   }, [sourceIntentAuthority]);
@@ -560,7 +620,7 @@ export const SettingsModelsPage: React.FC = () => {
                       <div ref={overviewRef} className="model-hub-overview-grid relative flex flex-col gap-4">
                         <SourcesCard read={sourcesRead} onRetry={() => void retrySources()} onOpenSource={(source) => selectSource(source.id)} onAddApiKey={() => setApiKeyOpen(true)} />
                         <div className="hidden lg:block" aria-hidden="true" />
-                        <GatewayModule supply={supplyRead} sources={sources} chains={chains} runtime={runtime} onRetry={() => void retrySupply()} pendingBackends={agentWrites} switchFailures={switchFailures} connectingBackend={adoptAgent?.backend ?? null} onConnectHub={setAdoptAgent} onSwitchDirect={switchToDirect} onOpenOrder={(agent) => setOrderBackend(agent.backend)} onOpenRoute={(agent, modelId) => setRouteTarget({ backend: agent.backend, modelId })} onProbeSettled={(agent) => void refreshAgentChains(agent)} />
+                        <GatewayModule supply={supplyRead} sources={sources} chains={chains} runtime={runtime} runtimeSnapshot={retainedRuntime} onRetry={() => void retrySupply()} pendingBackends={agentWrites} switchFailures={switchFailures} connectingBackend={adoptAgent?.backend ?? null} onConnectHub={setAdoptAgent} onSwitchDirect={switchToDirect} onOpenOrder={(agent) => setOrderBackend(agent.backend)} onOpenRoute={(agent, modelId) => setRouteTarget({ backend: agent.backend, modelId })} onProbeSettled={(agent) => void refreshAgentChains(agent)} />
                         <SupplyGraph containerRef={overviewRef} relations={supplyRelations} />
                       </div>
                       <SupplyLegend relations={supplyRelations} />
@@ -576,7 +636,7 @@ export const SettingsModelsPage: React.FC = () => {
         <EnableGatewayDialog
           key={adoptAgent.backend}
           agent={adoptAgent}
-          runtime={runtime}
+          runtime={retainedRuntime}
           onClose={() => setAdoptAgent(null)}
           onAdopted={agentSaved}
           onRuntime={(next) => {
@@ -585,9 +645,9 @@ export const SettingsModelsPage: React.FC = () => {
           trackWrite={(work) => agentWriteRegistry.track(adoptAgent.backend, work)}
         />
       )}
-      {installOpen && runtime && (
+      {installOpen && retainedRuntime && (
         <InstallGatewayDialog
-          runtime={runtime}
+          runtime={retainedRuntime}
           onClose={() => setInstallOpen(false)}
           onRuntime={(next) => {
             setRuntimeRead((previous) => next === null ? failRegionRead(previous) : readyRegion(next));

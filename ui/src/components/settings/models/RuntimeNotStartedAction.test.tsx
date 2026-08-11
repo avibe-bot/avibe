@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import zh from '../../../i18n/zh.json';
 import { failRegionRead, readyRegion, unreadRegion } from './regionRead';
-import { agentHasLiveChainProjection, pollRuntimeStatus, startRuntimeWithStatusRefresh } from './runtimeLifecycle';
+import { agentHasLiveChainProjection, freshRuntimeProjection, pollRuntimeStatus, resumeInstallAndStartRuntime, startRuntimeWithStatusRefresh } from './runtimeLifecycle';
 import { RuntimePill } from './SettingsModelsPage';
 import type { AgentSupply, RuntimeDependency } from './types';
 
@@ -58,13 +58,19 @@ describe('Model Hub runtime pill', () => {
   it('exposes chain projections only for running Hub backends', () => {
     const agent = { backend: 'claude', mode: 'hub' } as AgentSupply;
     for (const health of ['ok', 'degraded'] as const) {
-      expect(agentHasLiveChainProjection(runtime(health), agent)).toBe(true);
+      expect(agentHasLiveChainProjection(freshRuntimeProjection(readyRegion(runtime(health))), agent)).toBe(true);
     }
     for (const health of ['down', 'not_started', 'not_installed', 'installing'] as const) {
-      expect(agentHasLiveChainProjection(runtime(health), agent)).toBe(false);
+      expect(agentHasLiveChainProjection(freshRuntimeProjection(readyRegion(runtime(health))), agent)).toBe(false);
     }
-    expect(agentHasLiveChainProjection(runtime('ok'), { ...agent, mode: 'direct' })).toBe(false);
+    expect(agentHasLiveChainProjection(freshRuntimeProjection(readyRegion(runtime('ok'))), { ...agent, mode: 'direct' })).toBe(false);
     expect(agentHasLiveChainProjection(null, agent)).toBe(false);
+  });
+
+  it('does not promote a retained runtime snapshot into a fresh projection', () => {
+    const retained = failRegionRead(readyRegion(runtime('ok')));
+
+    expect(freshRuntimeProjection(retained)).toBeNull();
   });
 
   it('maps every runtime health to its registered shell copy and activation', () => {
@@ -113,7 +119,7 @@ describe('Model Hub runtime pill', () => {
       getRuntimeStatus: vi.fn().mockResolvedValue(runtime('down')),
     };
 
-    await expect(startRuntimeWithStatusRefresh(api)).resolves.toEqual({ runtime: runtime('down'), failed: true });
+    await expect(startRuntimeWithStatusRefresh(api)).resolves.toMatchObject({ runtime: runtime('down'), failed: true });
     expect(api.startRuntime).toHaveBeenCalledOnce();
     expect(api.getRuntimeStatus).toHaveBeenCalledOnce();
   });
@@ -124,7 +130,7 @@ describe('Model Hub runtime pill', () => {
       getRuntimeStatus: vi.fn().mockRejectedValue(new Error('status failed')),
     };
 
-    await expect(startRuntimeWithStatusRefresh(api)).resolves.toEqual({ runtime: null, failed: true });
+    await expect(startRuntimeWithStatusRefresh(api)).resolves.toMatchObject({ runtime: null, failed: true });
   });
 
   it('accepts healthy and degraded authoritative results', async () => {
@@ -145,8 +151,32 @@ describe('Model Hub runtime pill', () => {
       getRuntimeStatus: vi.fn().mockResolvedValue(runtime('ok')),
     };
 
-    await expect(startRuntimeWithStatusRefresh(api)).resolves.toEqual({ runtime: runtime('ok'), failed: false });
+    await expect(startRuntimeWithStatusRefresh(api)).resolves.toMatchObject({ runtime: runtime('ok'), failed: false });
   });
+
+  it.each([
+    ['not_installed', 1, 1, 'ok'],
+    ['not_started', 0, 1, 'ok'],
+    ['down', 0, 1, 'ok'],
+    ['ok', 0, 0, 'ok'],
+    ['degraded', 0, 0, 'degraded'],
+  ] as const)(
+    'resumes install-and-start from %s at the first unproven step',
+    async (initialHealth, installCalls, startCalls, finalHealth) => {
+      const api = {
+        installRuntime: vi.fn().mockResolvedValue(runtime('not_started')),
+        startRuntime: vi.fn().mockResolvedValue(runtime('ok')),
+        getRuntimeStatus: vi.fn(),
+      };
+
+      const result = await resumeInstallAndStartRuntime(api, runtime(initialHealth), vi.fn(), 0);
+
+      expect(api.installRuntime).toHaveBeenCalledTimes(installCalls);
+      expect(api.startRuntime).toHaveBeenCalledTimes(startCalls);
+      expect(result.failedStep).toBeNull();
+      expect(result.runtime?.status.health).toBe(finalHealth);
+    },
+  );
 
   it('polls read-only health while idle and cancels stale async writes', async () => {
     vi.useFakeTimers();

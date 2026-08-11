@@ -333,7 +333,7 @@ describe('SettingsModelsPage surface branches', () => {
     expect(screen.queryByText(/Now: Replacement source \(takeover\)|当前 Replacement source（接管）/i)).toBeNull();
   });
 
-  it('keeps retained chain projections when a later supply read fails', async () => {
+  it('keeps retained supply rows but clears derived chain claims when a later supply read fails', async () => {
     const head = { ...retainedSource, id: 'src_head', display_name: 'Paused source', state: { status: 'cooldown' as const, retry_at: '2099-01-01T00:00:00Z', detail_key: null } };
     const relay = { ...retainedSource, id: 'src_relay', display_name: 'Replacement source', state: { status: 'active' as const, retry_at: null, detail_key: null } };
     vi.spyOn(modelsApi, 'listSources').mockResolvedValue([head, relay]);
@@ -360,6 +360,39 @@ describe('SettingsModelsPage surface branches', () => {
     await waitFor(() => expect(agentRead).toHaveBeenCalledTimes(2));
     await userEvent.click(screen.getByRole('button', { name: /^Back to sources$|^返回来源$/i }));
     expect(await screen.findByText(/Could not read this backend's supply|没有读到后端列表/i)).toBeTruthy();
-    expect(screen.getByText(/Now: Replacement source \(takeover\)|当前 Replacement source（接管）/i)).toBeTruthy();
+    expect(screen.queryByText(/Now: Replacement source \(takeover\)|当前 Replacement source（接管）/i)).toBeNull();
+    expect(screen.getAllByText('—').length).toBeGreaterThan(0);
+  });
+
+  it('keeps retained regions but clears live chain claims when a later runtime read fails', async () => {
+    const head = { ...retainedSource, id: 'src_head', display_name: 'Paused source', state: { status: 'cooldown' as const, retry_at: '2099-01-01T00:00:00Z', detail_key: null } };
+    const relay = { ...retainedSource, id: 'src_relay', display_name: 'Replacement source', state: { status: 'active' as const, retry_at: null, detail_key: null } };
+    vi.spyOn(modelsApi, 'listSources').mockResolvedValue([head, relay]);
+    vi.spyOn(modelsApi, 'listAgents').mockResolvedValue([takeoverAgent]);
+    const runtimeRead = vi.spyOn(modelsApi, 'getRuntimeStatus')
+      .mockResolvedValueOnce(runtime)
+      .mockRejectedValueOnce(new TypeError('runtime unread'));
+    vi.spyOn(modelsApi, 'refreshSource').mockResolvedValueOnce({ source: head, discovered: head.models.length });
+    vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
+    vi.spyOn(modelsApi, 'getAgentChain').mockResolvedValue(takeoverChain);
+
+    render(
+      <ToastProvider>
+        <I18nextProvider i18n={i18n}>
+          <SettingsModelsPage />
+        </I18nextProvider>
+      </ToastProvider>,
+    );
+
+    expect(await screen.findByText(/Now: Replacement source \(takeover\)|当前 Replacement source（接管）/i)).toBeTruthy();
+    await userEvent.click(screen.getByText('Paused source').closest('button') as HTMLButtonElement);
+    await userEvent.click(await screen.findByRole('button', { name: /^Refetch$|^重新拉取$/i }));
+
+    await waitFor(() => expect(runtimeRead).toHaveBeenCalledTimes(2));
+    await userEvent.click(screen.getByRole('button', { name: /^Back to sources$|^返回来源$/i }));
+    expect(await screen.findByText(/^Gateway status unavailable$|^网关状态未读到$/i)).toBeTruthy();
+    expect(screen.queryByText(/Now: Replacement source \(takeover\)|当前 Replacement source（接管）/i)).toBeNull();
+    expect(screen.queryByText(/^Taken over$|^接管中$/i)).toBeNull();
+    expect(screen.getAllByText('—').length).toBeGreaterThan(0);
   });
 });

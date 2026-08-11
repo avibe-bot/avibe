@@ -4,12 +4,14 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
   beginRegionRead,
+  foldRegionRead,
   failRegionRead,
+  freshRegionData,
   loadingRegion,
   readRegion,
   readyRegion,
-  regionData,
   settleRegionRead,
+  type RegionRead,
 } from './regionRead';
 import { FIRST_PAINT_REGION_WHITELIST, readFirstPaintRegions, type FirstPaintRegionReaders } from './firstPaintRegions';
 
@@ -31,16 +33,30 @@ describe('RegionRead', () => {
     expect(first).toEqual(readyRegion({ rows: ['first'] }));
 
     const pending = beginRegionRead(first);
-    expect(pending).toEqual({ kind: 'loading', data: { rows: ['first'] } });
+    expect(pending).toMatchObject({ kind: 'degraded', cause: 'refreshing', retryable: false });
 
     const failed = settleRegionRead(pending, await readRegion(read));
-    expect(failed).toEqual({ kind: 'error', data: { rows: ['first'] }, retryable: true });
-    expect(regionData(failed)).toEqual({ rows: ['first'] });
+    expect(failed).toMatchObject({ kind: 'degraded', cause: 'read_failed', retryable: true });
+    expect(foldRegionRead(failed, {
+      loading: () => null,
+      ready: (data) => data,
+      unread: () => null,
+      degraded: (staleData) => staleData,
+    })).toEqual({ rows: ['first'] });
   });
 
   it('marks a first failure unread instead of inventing a domain value', () => {
     expect(failRegionRead(loadingRegion<number>())).toEqual({ kind: 'unread', retryable: true });
-    expect(regionData(failRegionRead(loadingRegion<number>()))).toBeUndefined();
+    expect(freshRegionData(failRegionRead(loadingRegion<number>()))).toBeUndefined();
+  });
+
+  it('makes unclassified data access impossible on the public union', () => {
+    type ReadyRead = Extract<RegionRead<unknown>, { kind: 'ready' }>;
+    type DegradedRead = Extract<RegionRead<unknown>, { kind: 'degraded' }>;
+    type HasReadyPublicData = 'data' extends keyof ReadyRead ? true : false;
+    type HasDegradedPublicData = 'data' extends keyof DegradedRead ? true : false;
+    const hasPublicData: [HasReadyPublicData, HasDegradedPublicData] = [false, false];
+    expect(hasPublicData).toEqual([false, false]);
   });
 
   it('keeps every landing region tagged instead of pairing nullable data with flags', () => {
@@ -68,14 +84,13 @@ describe('RegionRead', () => {
     expect(barrier).not.toMatch(/listEvents|events/);
   });
 
-  it('requires every product file that projects RegionRead data to name its read-state branch', () => {
+  it('allows RegionRead projection only through its fresh accessor or exhaustive fold', () => {
     const violations = productFiles(__dirname).flatMap((path) => {
       if (path.endsWith('/regionRead.ts')) return [];
       const source = readFileSync(path, 'utf8');
       const importsRegionRead = /from ['"]\.\/(?:regionRead|modelRows)['"]/.test(source);
-      const projectsData = /\bregionData\s*\(|\b\w+\.data\b/.test(source);
-      const namesReadState = /\.kind\s*(?:===|!==)\s*['"](?:ready|error|unread)['"]/.test(source);
-      return importsRegionRead && projectsData && !namesReadState ? [path] : [];
+      const bypassesProjection = /\bregionData\s*\(|\b\w+\.data\b/.test(source);
+      return importsRegionRead && bypassesProjection ? [path] : [];
     });
 
     expect(violations).toEqual([]);

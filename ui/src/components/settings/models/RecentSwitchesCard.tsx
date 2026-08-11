@@ -18,7 +18,7 @@ import { Badge } from '@/components/ui/badge';
 import { Dot } from './chips';
 import { emptyFeed, eventAccent, type EventFeed } from './eventFeed';
 import { localCalendarRelation } from './localCalendar';
-import { regionData, type RegionRead } from './regionRead';
+import { foldRegionRead, type RegionRead } from './regionRead';
 import type { ResolutionEvent, Source } from './types';
 
 const COLLAPSED = 3;
@@ -55,9 +55,19 @@ export const RecentSwitchesCard: React.FC<{
   const [expanded, setExpanded] = React.useState(false);
   const formatTime = useEventTime();
   const zh = i18n.language.startsWith('zh');
-  const feed = regionData(eventsRead) ?? emptyFeed;
+  const feed = foldRegionRead(eventsRead, {
+    loading: () => emptyFeed,
+    ready: (data) => data,
+    unread: () => emptyFeed,
+    degraded: (staleData) => staleData,
+  });
   const events = feed.events;
-  const sources = regionData(sourcesRead) ?? [];
+  const sources = foldRegionRead<Source[], Source[]>(sourcesRead, {
+    loading: () => [],
+    ready: (data) => data,
+    unread: () => [],
+    degraded: (staleData) => staleData,
+  });
   const sourceInventoryCurrent = sourcesRead.kind === 'ready';
   const hasOlder = hasMore ?? !feed.exhausted;
   const liveIds = React.useMemo(() => new Set(sources.map((s) => s.id)), [sources]);
@@ -102,13 +112,13 @@ export const RecentSwitchesCard: React.FC<{
           </button>
         )}
       </div>
-      {(eventsRead.kind === 'error' || eventsRead.kind === 'unread') && (
+      {((eventsRead.kind === 'degraded' && eventsRead.cause === 'read_failed') || eventsRead.kind === 'unread') && (
         <div className="flex items-center justify-between gap-3 border-b border-border px-4 py-3 text-[12px] text-destructive sm:px-5">
           <span>{t('settings.models.toast.refreshFailed')}</span>
           <button type="button" onClick={() => void onRetry?.()} className="model-hub-action-mint shrink-0 font-semibold">{t('settings.models.upstream.retry')}</button>
         </div>
       )}
-      {(eventsRead.kind === 'error' || eventsRead.kind === 'unread') && shown.length === 0 ? null : shown.length === 0 ? (
+      {((eventsRead.kind === 'degraded' && eventsRead.cause === 'read_failed') || eventsRead.kind === 'unread') && shown.length === 0 ? null : shown.length === 0 ? (
         <div className="flex flex-col items-center gap-2 px-4 py-8 text-center text-[13px] text-muted sm:px-5">
           <span>{eventsRead.kind === 'loading' || hasOlder ? t('settings.models.recent.loadingMore') : t('settings.models.recent.empty')}</span>
           {eventsRead.kind === 'ready' && hasOlder && !loadingMore && (

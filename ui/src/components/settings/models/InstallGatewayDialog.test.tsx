@@ -26,22 +26,27 @@ afterEach(() => {
 });
 
 describe('InstallGatewayDialog', () => {
-  it('confirms through the dedicated install route and keeps start separate', async () => {
+  it('holds install-and-start through both proven steps before closing', async () => {
     const installed = runtime('not_started');
+    const running = runtime('ok');
     const install = vi.spyOn(modelsApi, 'installRuntime').mockResolvedValueOnce(installed);
-    const start = vi.spyOn(modelsApi, 'startRuntime');
+    const start = vi.spyOn(modelsApi, 'startRuntime').mockResolvedValueOnce(running);
     const onRuntime = vi.fn();
+    const onClose = vi.fn();
     render(
       <I18nextProvider i18n={i18n}>
-        <InstallGatewayDialog runtime={runtime('not_installed')} onClose={vi.fn()} onRuntime={onRuntime} />
+        <InstallGatewayDialog runtime={runtime('not_installed')} onClose={onClose} onRuntime={onRuntime} />
       </I18nextProvider>,
     );
 
     await userEvent.click(screen.getByRole('button', { name: /Install and start|安装并启动/i }));
 
-    await waitFor(() => expect(install).toHaveBeenCalledOnce());
-    expect(start).not.toHaveBeenCalled();
-    expect(onRuntime).toHaveBeenCalledWith(installed);
+    await waitFor(() => expect(onClose).toHaveBeenCalledOnce());
+    expect(install).toHaveBeenCalledOnce();
+    expect(start).toHaveBeenCalledOnce();
+    expect(install.mock.invocationCallOrder[0]).toBeLessThan(start.mock.invocationCallOrder[0]);
+    expect(onRuntime).toHaveBeenNthCalledWith(1, installed);
+    expect(onRuntime).toHaveBeenNthCalledWith(2, running);
   });
 
   it('keeps the dialog open and offers retry when a background install fails', async () => {

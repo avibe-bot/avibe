@@ -1,5 +1,5 @@
 import { apiFailure, type ModelsApi } from './modelsApi';
-import { installRuntimeUntilSettled, runtimeIsRunning } from './runtimeLifecycle';
+import { resumeInstallAndStartRuntime } from './runtimeLifecycle';
 import type { AgentBackend, AgentSupply, RuntimeDependency } from './types';
 
 export type GatewayAdoptionFailure = {
@@ -74,44 +74,21 @@ export async function resumeGatewayAdoption(
     return readFailure(error, 'GET /api/models/runtime/status');
   }
 
-  if (runtime.status.health === 'not_installed' || runtime.status.health === 'installing') {
-    const installed = await installRuntimeUntilSettled(
-      api,
-      () => {},
-      installPollIntervalMs,
-      runtime.status.health === 'installing' ? runtime : undefined,
-    );
-    if (installed.runtime) runtime = installed.runtime;
-    if (installed.failed) {
-      return {
-        ok: false,
-        failure: { step: 'install', reason: 'unknown' },
-        runtime: installed.runtime ?? runtime,
-      };
-    }
-  }
-
-  if (!runtimeIsRunning(runtime)) {
-    try {
-      runtime = await api.startRuntime();
-    } catch (error) {
-      const observed = await api.getRuntimeStatus().catch(() => null);
-      if (observed && runtimeIsRunning(observed)) {
-        runtime = observed;
-      } else {
-        return {
-          ok: false,
-          failure: classifiedFailure(error, 'start', 'POST /api/models/runtime/start'),
-          runtime: observed ?? runtime,
-        };
-      }
-    }
-  }
-
-  if (!runtimeIsRunning(runtime)) {
+  const runtimeSequence = await resumeInstallAndStartRuntime(api, runtime, () => {}, installPollIntervalMs);
+  if (runtimeSequence.runtime) runtime = runtimeSequence.runtime;
+  if (runtimeSequence.failedStep === 'install') {
     return {
       ok: false,
-      failure: { step: 'start', request: 'POST /api/models/runtime/start', reason: 'notReady' },
+      failure: { step: 'install', reason: 'unknown' },
+      runtime,
+    };
+  }
+  if (runtimeSequence.failedStep === 'start') {
+    return {
+      ok: false,
+      failure: runtimeSequence.error
+        ? classifiedFailure(runtimeSequence.error, 'start', 'POST /api/models/runtime/start')
+        : { step: 'start', request: 'POST /api/models/runtime/start', reason: 'notReady' },
       runtime,
     };
   }

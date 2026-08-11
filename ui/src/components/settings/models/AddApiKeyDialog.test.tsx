@@ -231,7 +231,7 @@ describe('AddApiKeyDialog', () => {
   it('keeps a server-named create validation failure editable and out of save reconciliation', async () => {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
       if (String(input) === '/api/csrf-token') return Response.json({ csrf_token: 'csrf' });
-      return Response.json({ ok: false, error: 'invalid_source', detail: 'display_name is invalid' }, { status: 422 });
+      return Response.json({ ok: false, error: 'invalid_source', detail: 'modelHub.errors.discovery_failed' }, { status: 422 });
     }));
     let validationError: unknown;
     try {
@@ -249,7 +249,8 @@ describe('AddApiKeyDialog', () => {
 
     await user.click(screen.getByRole('button', { name: /^Add$|^添加$/i }));
 
-    expect(await screen.findByText('display_name is invalid')).toBeTruthy();
+    expect(await screen.findByText(i18n.t('settings.models.addKey.fail.unclassified'))).toBeTruthy();
+    expect(screen.queryByText('modelHub.errors.discovery_failed')).toBeNull();
     expect((name as HTMLInputElement).disabled).toBe(false);
     expect(screen.queryByText(/not confirmed saved|确认.*保存/i)).toBeNull();
     expect(list).not.toHaveBeenCalled();

@@ -6,6 +6,7 @@ import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import type { ModelChainRead } from './modelRows';
+import { freshRegionData } from './regionRead';
 import type { AgentSupply, Source } from './types';
 
 const sourceName = (sources: Source[], sourceId: string): string =>
@@ -25,7 +26,7 @@ export const RouteChainDialog: React.FC<{
   const { t } = useTranslation();
   if (!selection) return null;
   const { agent, modelId, read } = selection;
-  const chain = read?.kind === 'ready' ? read.data : null;
+  const chain = read ? freshRegionData(read) ?? null : null;
   const backend = t(`settings.models.backends.${agent.backend}`, { defaultValue: agent.backend }) as string;
   return (
     <DialogPrimitive.Root open onOpenChange={(open) => !open && onClose()}>

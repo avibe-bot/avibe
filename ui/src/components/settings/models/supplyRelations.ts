@@ -1,7 +1,8 @@
 import { modelChainKey, type ModelChainIndex } from './modelRows';
-import { agentHasLiveChainProjection } from './runtimeLifecycle';
+import { freshRegionData } from './regionRead';
+import { agentHasLiveChainProjection, type FreshRuntimeProjection } from './runtimeLifecycle';
 import { isTakeoverChain } from './takeover';
-import type { AgentBackend, AgentSupply, RuntimeDependency, Source } from './types';
+import type { AgentBackend, AgentSupply, Source } from './types';
 
 export type SupplyRelationKind = 'native' | 'gateway' | 'connected_unused' | 'takeover' | 'unavailable';
 
@@ -20,11 +21,12 @@ const relationKind = (
   let isTakeover = false;
   for (const modelId of Object.keys(agent.routes ?? {})) {
     const read = chains[modelChainKey(agent.backend, modelId)];
-    if (read?.kind !== 'ready' || !read.data.current) continue;
-    const current = read.data.current;
+    const chain = read ? freshRegionData(read) : undefined;
+    if (!chain?.current) continue;
+    const current = chain.current;
     if (current.source_id !== source.id) continue;
     isCurrent = true;
-    isTakeover ||= isTakeoverChain(read.data);
+    isTakeover ||= isTakeoverChain(chain);
   }
   if (isTakeover) return 'takeover';
   if (isCurrent) return source.supply_channel === 'native_cli' ? 'native' : 'gateway';
@@ -36,7 +38,7 @@ export function buildSupplyRelations(
   agents: AgentSupply[],
   sources: Source[],
   chains: ModelChainIndex,
-  runtime: RuntimeDependency | null,
+  runtime: FreshRuntimeProjection | null,
 ): SupplyRelation[] {
   const sourceById = new Map(sources.map((source) => [source.id, source]));
   const relations: SupplyRelation[] = [];

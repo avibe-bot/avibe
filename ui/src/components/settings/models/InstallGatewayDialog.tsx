@@ -5,7 +5,7 @@ import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
 import { modelsApi } from './modelsApi';
-import { installRuntimeUntilSettled } from './runtimeLifecycle';
+import { resumeInstallAndStartRuntime, runtimeIsRunning } from './runtimeLifecycle';
 import type { RuntimeDependency } from './types';
 
 const Bullet: React.FC<{ children: React.ReactNode }> = ({ children }) => (
@@ -32,7 +32,7 @@ export const InstallGatewayDialog: React.FC<{
     if (wasInstalling && runtime.status.health === 'not_installed' && installErrorKey) {
       setRequesting(false);
       setFailed(true);
-    } else if (runtime.status.health !== 'installing' && runtime.status.health !== 'not_installed') {
+    } else if (runtimeIsRunning(runtime)) {
       onClose();
     }
   }, [installErrorKey, onClose, runtime.status.health]);
@@ -42,9 +42,9 @@ export const InstallGatewayDialog: React.FC<{
     initiated.current = true;
     setRequesting(true);
     setFailed(false);
-    void installRuntimeUntilSettled(modelsApi, onRuntime)
+    void resumeInstallAndStartRuntime(modelsApi, runtime, onRuntime)
       .then((result) => {
-        if (result.failed) setFailed(true);
+        if (result.failedStep) setFailed(true);
         else onClose();
       })
       .finally(() => setRequesting(false));

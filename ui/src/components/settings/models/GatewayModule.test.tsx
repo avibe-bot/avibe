@@ -31,6 +31,7 @@ describe('GatewayModule region failure treatment', () => {
         <GatewayModule
           supply={failRegionRead(readyRegion([agent]))}
           runtime={null}
+          runtimeSnapshot={null}
           onRetry={onRetry}
           sources={[]}
           chains={{}}

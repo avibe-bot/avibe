@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
-import { modelsSurfaceKind } from './modelHubSurfaceState';
+import { modelsSurfaceKind, modelsSurfaceKindFromReads } from './modelHubSurfaceState';
+import { failRegionRead, readyRegion } from './regionRead';
 import type { AgentSupply, Source } from './types';
 
 const directAgent = (backend: AgentSupply['backend']): AgentSupply => ({
@@ -32,5 +33,17 @@ describe('modelsSurfaceKind', () => {
     expect(modelsSurfaceKind(agents, [])).toBe('direct_empty');
     expect(modelsSurfaceKind(hubState, [])).toBe('gateway');
     expect(modelsSurfaceKind(agents, [])).toBe('direct_empty');
+  });
+
+  it.each(['sources', 'agents'] as const)('keeps Frame 09 unreachable while retained %s are degraded', (region) => {
+    const agents = [directAgent('claude')];
+    const agentsRead = region === 'agents'
+      ? failRegionRead(readyRegion(agents))
+      : readyRegion(agents);
+    const sourcesRead = region === 'sources'
+      ? failRegionRead(readyRegion<Source[]>([]))
+      : readyRegion<Source[]>([]);
+
+    expect(modelsSurfaceKindFromReads(agentsRead, sourcesRead)).toBe('gateway');
   });
 });

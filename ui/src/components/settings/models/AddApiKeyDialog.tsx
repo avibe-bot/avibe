@@ -27,6 +27,7 @@ import {
 } from './addApiKeyState';
 import { apiFailure, modelsApi, type SourceCreated } from './modelsApi';
 import { reconcileUnknownWrite } from './reconcileUnknownWrite';
+import { serverText } from './serverCopy';
 import {
   SOURCE_DISPLAY_NAME_MAX_LENGTH,
   SOURCE_PROTOCOLS,
@@ -41,7 +42,7 @@ type Phase =
   | { kind: 'failure'; origin: AddApiKeyOrigin; cause: AddApiKeyFailure }
   | { kind: 'undetermined'; origin: AddApiKeyOrigin; observation: SourceObservation; hint: SourceProtocol | null }
   | { kind: 'inventory'; origin: AddApiKeyOrigin; observation: SourceObservation }
-  | { kind: 'persist_failure'; message: string; protocolOrder: SourceProtocol[] | undefined }
+  | { kind: 'persist_failure'; messageKey: string | null; protocolOrder: SourceProtocol[] | undefined }
   | { kind: 'save_unconfirmed'; protocolOrder: SourceProtocol[] | undefined };
 
 const INITIAL_PHASE: Phase = { kind: 'form', report: null };
@@ -124,7 +125,7 @@ export const AddApiKeyDialog: React.FC<{
         && failure.responseStatus < 500
         && failure.responseStatus !== 409;
       setPhase(definitiveClientFailure
-        ? { kind: 'persist_failure', message: failure.detail ?? failure.code, protocolOrder }
+        ? { kind: 'persist_failure', messageKey: failure.detail ?? failure.code ?? null, protocolOrder }
         : { kind: 'save_unconfirmed', protocolOrder });
     }
   }, [draft]);
@@ -345,7 +346,10 @@ export const AddApiKeyDialog: React.FC<{
             {phase.kind === 'persist_failure' && (
               <div className="model-hub-add-key-strip model-hub-add-key-strip--error">
                 <CircleX className="model-hub-add-key-error-ink size-3.5 shrink-0" />
-                <span className="model-hub-add-key-error-ink model-hub-add-key-strip-title">{phase.message}</span>
+                <span className="model-hub-add-key-error-ink model-hub-add-key-strip-title">
+                  {serverText(t, phase.messageKey, 'settings.models.addKey.fail.unclassified')
+                    ?? t('settings.models.addKey.fail.unclassified')}
+                </span>
               </div>
             )}
           </div>

@@ -293,7 +293,7 @@ describe('agentsWithEcho — what speaks for a row when no read does', () => {
   it('is how every Agent write on the page reports itself', () => {
     const page = readFileSync(join(__dirname, 'SettingsModelsPage.tsx'), 'utf8');
 
-    expect(page).toMatch(/setSupplyRead\(\(previous\) => readyRegion\(agentsWithEcho\(regionData\(previous\) \?\? \[\], echoed\)\)\)/);
+    expect(page).toMatch(/setSupplyRead\(\(previous\) => readyRegion\(agentsWithEcho\(foldRegionRead\(previous,[\s\S]*?echoed\)\)\)/);
     expect(page).toMatch(/const agentSaved[\s\S]*?convergeMutation\(\{/);
     // The mode PATCH echoes the same row the drawers' writes do.
     expect(page).toMatch(/await agentSaved\(echoed\)/);

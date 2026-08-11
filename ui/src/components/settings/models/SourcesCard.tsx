@@ -4,7 +4,7 @@ import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
 import { ModelHubInfoHint } from './ModelHubInfoHint';
-import { regionData, type RegionRead } from './regionRead';
+import { foldRegionRead, type RegionRead } from './regionRead';
 import { SourceRow } from './SourceRow';
 import type { Source } from './types';
 
@@ -15,7 +15,12 @@ export const SourcesCard: React.FC<{
   onAddApiKey: () => void;
 }> = ({ read, onRetry, onOpenSource, onAddApiKey }) => {
   const { t } = useTranslation();
-  const sources = regionData(read);
+  const sources = foldRegionRead<Source[], Source[] | undefined>(read, {
+    loading: () => undefined,
+    ready: (data) => data,
+    unread: () => undefined,
+    degraded: (staleData) => staleData,
+  });
   const groups = [
     { id: 'native', sources: (sources ?? []).filter((source) => source.supply_channel === 'native_cli') },
     { id: 'hub', sources: (sources ?? []).filter((source) => source.supply_channel === 'hub') },
@@ -39,7 +44,7 @@ export const SourcesCard: React.FC<{
           : read.kind === 'unread'
             ? <div className="flex h-full min-h-36 flex-col items-center justify-center gap-3 px-4 text-center"><p className="text-[12px] text-muted">{t('settings.models.upstream.unread')}</p><Button variant="outline" size="xs" onClick={onRetry}>{t('settings.models.upstream.retry')}</Button></div>
             : <>
-                {read.kind === 'error' && <div className="mb-2 flex items-center justify-between gap-3 rounded-lg border border-destructive/25 bg-destructive/[0.08] px-3 py-2"><p className="text-[11px] text-destructive">{t('settings.models.upstream.unread')}</p><Button variant="outline" size="xs" onClick={onRetry}>{t('settings.models.upstream.retry')}</Button></div>}
+                {read.kind === 'degraded' && read.cause === 'read_failed' && <div className="mb-2 flex items-center justify-between gap-3 rounded-lg border border-destructive/25 bg-destructive/[0.08] px-3 py-2"><p className="text-[11px] text-destructive">{t('settings.models.upstream.unread')}</p><Button variant="outline" size="xs" onClick={onRetry}>{t('settings.models.upstream.retry')}</Button></div>}
                 {groups.length > 0
                   ? groups.map((group) => <div key={group.id} className="space-y-2"><h3 className="model-hub-upstream-group-label flex h-[18px] items-center uppercase">{t(`settings.models.upstream.group.${group.id}`)}</h3>{group.sources.map((source) => <SourceRow key={source.id} source={source} onOpen={onOpenSource} />)}</div>)
                   : <p className="px-3 py-10 text-center text-[12px] text-muted">{t('settings.models.upstream.empty')}</p>}

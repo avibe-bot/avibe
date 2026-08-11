@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
 import { modelChainKey } from './modelRows';
+import { readyRegion } from './regionRead';
+import { freshRuntimeProjection } from './runtimeLifecycle';
 import { buildSupplyRelations as buildRelations } from './supplyRelations';
 import type { AgentChain, AgentSupply, RuntimeDependency, Source } from './types';
 
@@ -13,7 +15,7 @@ const buildSupplyRelations = (
   agents: AgentSupply[],
   sources: Source[],
   chains: Parameters<typeof buildRelations>[2],
-) => buildRelations(agents, sources, chains, runtime);
+) => buildRelations(agents, sources, chains, freshRuntimeProjection(readyRegion(runtime)));
 
 const source = (id: string, channel: Source['supply_channel'], status: Source['state']['status'] = 'active'): Source => ({
   id,
@@ -60,27 +62,27 @@ describe('buildSupplyRelations', () => {
   it('derives relation ink from configured routes and the exact current hop', () => {
     const sources = [source('native', 'native_cli'), source('relay', 'hub'), source('unused', 'hub')];
     const key = modelChainKey('claude', 'model-a');
-    expect(buildSupplyRelations([agent], sources, { [key]: { kind: 'ready', data: chain('native') } })).toEqual([
+    expect(buildSupplyRelations([agent], sources, { [key]: readyRegion(chain('native')) })).toEqual([
       { sourceId: 'native', backend: 'claude', kind: 'native' },
       { sourceId: 'relay', backend: 'claude', kind: 'connected_unused' },
       { sourceId: 'unused', backend: 'claude', kind: 'connected_unused' },
     ]);
-    expect(buildSupplyRelations([agent], sources, { [key]: { kind: 'ready', data: chain('relay', 'cooldown', false) } })[1]).toEqual(
+    expect(buildSupplyRelations([agent], sources, { [key]: readyRegion(chain('relay', 'cooldown', false)) })[1]).toEqual(
       { sourceId: 'relay', backend: 'claude', kind: 'takeover' },
     );
-    expect(buildSupplyRelations([agent], sources, { [key]: { kind: 'ready', data: chain('relay', 'cooldown', false, 'native_cli_unavailable') } })[1]).toEqual(
+    expect(buildSupplyRelations([agent], sources, { [key]: readyRegion(chain('relay', 'cooldown', false, 'native_cli_unavailable')) })[1]).toEqual(
       { sourceId: 'relay', backend: 'claude', kind: 'gateway' },
     );
     for (const health of ['needs_action', 'error'] as const) {
-      expect(buildSupplyRelations([agent], sources, { [key]: { kind: 'ready', data: chain('relay', health, false) } })[1]).toEqual(
+      expect(buildSupplyRelations([agent], sources, { [key]: readyRegion(chain('relay', health, false)) })[1]).toEqual(
         { sourceId: 'relay', backend: 'claude', kind: 'gateway' },
       );
     }
-    expect(buildSupplyRelations([agent], sources, { [key]: { kind: 'ready', data: chain('relay') } })[0]).toEqual(
+    expect(buildSupplyRelations([agent], sources, { [key]: readyRegion(chain('relay')) })[0]).toEqual(
       { sourceId: 'native', backend: 'claude', kind: 'connected_unused' },
     );
     const staleCooldown = [source('native', 'native_cli'), source('relay', 'hub', 'cooldown'), source('unused', 'hub')];
-    expect(buildSupplyRelations([agent], staleCooldown, { [key]: { kind: 'ready', data: chain('relay') } })[1]).toEqual(
+    expect(buildSupplyRelations([agent], staleCooldown, { [key]: readyRegion(chain('relay')) })[1]).toEqual(
       { sourceId: 'relay', backend: 'claude', kind: 'gateway' },
     );
   });
@@ -90,6 +92,6 @@ describe('buildSupplyRelations', () => {
     expect(buildSupplyRelations([agent], sources, {} )[0]?.kind).toBe('unavailable');
     expect(buildSupplyRelations([{ ...agent, mode: 'direct', routes: null, sources: null }], sources, {})).toEqual([]);
     const stopped = { ...runtime, status: { ...runtime.status, health: 'not_started' as const } };
-    expect(buildRelations([agent], sources, {}, stopped)).toEqual([]);
+    expect(buildRelations([agent], sources, {}, freshRuntimeProjection(readyRegion(stopped)))).toEqual([]);
   });
 });

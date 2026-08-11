@@ -7,14 +7,21 @@ import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { ModelHubInfoHint } from './ModelHubInfoHint';
 import { collapsedModelRows, listedModelIds, modelChainKey, type ModelChainIndex, type ModelChainRead } from './modelRows';
-import { agentHasLiveChainProjection } from './runtimeLifecycle';
+import { freshRegionData } from './regionRead';
+import { agentHasLiveChainProjection, type FreshRuntimeProjection } from './runtimeLifecycle';
 import { currentChainLink, isTakeoverChain } from './takeover';
 import { ACCENT_ICON, ACCENT_TILE, backendVisual } from './vendorMeta';
-import type { AgentSupply, RuntimeDependency, Source } from './types';
+import type { AgentSupply, Source } from './types';
 
 const sourceName = (sources: Source[], id: string): string => sources.find((source) => source.id === id)?.display_name ?? id;
-const currentLink = (read: ModelChainRead | undefined) => read?.kind === 'ready' ? currentChainLink(read.data) : null;
-const isTakeoverRead = (read: ModelChainRead | undefined): boolean => read?.kind === 'ready' && isTakeoverChain(read.data);
+const currentLink = (read: ModelChainRead | undefined) => {
+  const chain = read ? freshRegionData(read) : undefined;
+  return chain ? currentChainLink(chain) : null;
+};
+const isTakeoverRead = (read: ModelChainRead | undefined): boolean => {
+  const chain = read ? freshRegionData(read) : undefined;
+  return chain ? isTakeoverChain(chain) : false;
+};
 
 const ModelRow: React.FC<{
   agent: AgentSupply;
@@ -53,7 +60,7 @@ const ModelRow: React.FC<{
 
 const AgentModelCard: React.FC<{
   agent: AgentSupply;
-  runtime: RuntimeDependency | null;
+  runtime: FreshRuntimeProjection | null;
   sources: Source[];
   chains: ModelChainIndex;
   pending: boolean;
@@ -77,7 +84,7 @@ const AgentModelCard: React.FC<{
   const needsChainRepair = chainProjectionLive
     && allModels.some((modelId) => {
       const read = chains[modelChainKey(agent.backend, modelId)];
-      return read?.kind === 'unread' || read?.kind === 'error';
+      return read?.kind === 'unread' || (read?.kind === 'degraded' && read.cause === 'read_failed');
     });
   const hasTakeover = chainProjectionLive
     && allModels.some((modelId) => isTakeoverRead(chains[modelChainKey(agent.backend, modelId)]));
@@ -134,7 +141,7 @@ const AgentModelCard: React.FC<{
 
 export const AgentCard: React.FC<{
   agents: AgentSupply[];
-  runtime: RuntimeDependency | null;
+  runtime: FreshRuntimeProjection | null;
   sources: Source[];
   chains: ModelChainIndex;
   pendingBackends: ReadonlySet<string>;
