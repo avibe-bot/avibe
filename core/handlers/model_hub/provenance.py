@@ -175,6 +175,7 @@ TURN_OUTCOME_RENDERING_AUTHORITY: dict[str, TurnOutcomeRenderingRule] = {
         discriminator="blocked_supply_state",
         copy_keys=(
             ("waiting", "modelHub.launch.waiting"),
+            ("waiting_without_retry", "modelHub.launch.waiting_without_retry"),
             ("interrupted", "modelHub.launch.interrupted"),
         ),
     ),

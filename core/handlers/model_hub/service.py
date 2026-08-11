@@ -57,6 +57,8 @@ from .classification import (
     ResolutionDecision,
     classify_outcome,
     machine_error_codes,
+    source_settlement_allowed,
+    source_settlement_rule,
     terminal_outcome_category,
 )
 from .events import (
@@ -3206,6 +3208,8 @@ class ModelHubService:
                 source = self._source(config, source_id)
             except ModelHubError:
                 return
+            if not source_settlement_allowed(source.state.status, reason):
+                return
             status: Literal["error", "needs_action"] = (
                 "error"
                 if reason == "unclassified_error"
@@ -3876,6 +3880,11 @@ class ModelHubService:
                 current = self._source(config, source.id)
             except ModelHubError:
                 return
+            if decision.reason is not None and not source_settlement_allowed(
+                current.state.status,
+                decision.reason,
+            ):
+                return
             already_cooling = current.state.status == "cooldown"
             current.state = ModelHubSourceStateConfig(
                 status="cooldown",
@@ -3908,12 +3917,8 @@ class ModelHubService:
         if decision.reason is None:
             raise AssertionError("fallback-class outcome must retain its Source reason")
         event_reason = cast(EventReason, decision.reason)
-        if event_reason in {
-            "quota_exhausted",
-            "rate_limited",
-            "server_error",
-            "network",
-        }:
+        settlement_rule = source_settlement_rule(event_reason)
+        if settlement_rule.status == "cooldown":
             await self._cooldown(
                 source,
                 decision,

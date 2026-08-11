@@ -186,12 +186,23 @@ def test_terminal_event_renderer_uses_native_protocol_shape(
             "type": "error",
             "error": {"type": "api_error", "message": "Retry directly."},
         }
+        assert isinstance(event["type"], str)
+        assert isinstance(event["error"], dict)
+        assert isinstance(event["error"]["type"], str)
+        assert isinstance(event["error"]["message"], str)
     elif expected_shape == "responses":
         assert event == {
             "type": "error",
             "code": "modelHub.launch.retry",
             "message": "Retry directly.",
+            "param": None,
+            "sequence_number": 0,
         }
+        assert isinstance(event["type"], str)
+        assert isinstance(event["code"], str)
+        assert isinstance(event["message"], str)
+        assert event["param"] is None or isinstance(event["param"], str)
+        assert isinstance(event["sequence_number"], int)
     else:
         assert event == {
             "object": "chat.completion.chunk",
@@ -203,6 +214,13 @@ def test_terminal_event_renderer_uses_native_protocol_shape(
             },
             "choices": [],
         }
+        assert isinstance(event["object"], str)
+        assert isinstance(event["type"], str)
+        assert isinstance(event["error"], dict)
+        assert isinstance(event["error"]["type"], str)
+        assert isinstance(event["error"]["code"], str)
+        assert isinstance(event["error"]["message"], str)
+        assert isinstance(event["choices"], list)
 
 
 def test_turn_outcome_copy_projection_has_one_runtime_owner() -> None:
@@ -529,6 +547,29 @@ def test_recovered_exhaustion_projects_waiting_without_a_past_retry_time() -> No
     copy = project_turn_outcome_copy(projection)
 
     assert projection.outcome == "exhausted"
+    assert projection.supply_facts is not None
+    assert projection.supply_facts.supply_state == "waiting"
+    assert projection.supply_facts.retry_at == ""
+    assert copy is not None
+    assert copy.key == "modelHub.launch.waiting_without_retry"
+
+
+def test_recovered_no_candidate_projects_waiting_without_retry_time() -> None:
+    source = _source("src_recovered02", "Recovered source")
+    config = _config([source])
+    resolution = _terminal_resolution_facts(
+        config,
+        supply_status="degraded",
+        next_hop=(source.id, "shared-model"),
+    )
+
+    projection = produce_turn_outcome(
+        "turn.no_candidate.blocked",
+        config=config,
+        resolution=resolution,
+    )
+    copy = project_turn_outcome_copy(projection)
+
     assert projection.supply_facts is not None
     assert projection.supply_facts.supply_state == "waiting"
     assert projection.supply_facts.retry_at == ""
@@ -4743,6 +4784,42 @@ def test_shared_source_cooldown_emits_only_on_state_transition(
     assert len(events) == 1
     assert events[0]["kind"] == "cooldown"
     assert events[0]["agent"] == "claude"
+
+
+def test_late_transient_settlement_preserves_needs_action_state(
+    tmp_path: Path,
+) -> None:
+    source = _source("src_needsaction01", "Credential source")
+    service = _service(tmp_path, sources=[source])
+    menu_models = _canonicalize_fixed_test_routes(service)
+    transient = classify_outcome(
+        _outcome(
+            RawOutcomeKind.HTTP_ERROR,
+            status=503,
+            code="api_error",
+        )
+    )
+
+    async def settle_in_order() -> None:
+        await service._set_source_blocker(
+            source.id,
+            backend="claude",
+            model_id=menu_models["claude"],
+            detail_key="models.source.needs_action.credential_revoked",
+            reason="credential_revoked",
+        )
+        await service._cooldown(
+            source,
+            transient,
+            agent="codex",
+            model_id=menu_models["codex"],
+        )
+
+    asyncio.run(settle_in_order())
+
+    persisted = service.store.load().sources[0]
+    assert persisted.state.status == "needs_action"
+    assert persisted.state.detail_key == "models.source.needs_action.credential_revoked"
 
 
 def test_event_emission_rejects_unknown_source_ids(tmp_path: Path) -> None:

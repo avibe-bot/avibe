@@ -28,6 +28,49 @@ ResolutionReason = Literal[
     "unclassified_error",
 ]
 
+
+@dataclass(frozen=True)
+class SourceSettlementRule:
+    """Authoritative source-state policy for one settled fallback reason."""
+
+    status: Literal["cooldown", "needs_action", "error"]
+    priority: int
+
+
+# A needs_action state is credential-owned and outranks transient failures.
+SOURCE_SETTLEMENT_AUTHORITY: Mapping[str, SourceSettlementRule] = {
+    "quota_exhausted": SourceSettlementRule("cooldown", 10),
+    "rate_limited": SourceSettlementRule("cooldown", 10),
+    "server_error": SourceSettlementRule("cooldown", 10),
+    "network": SourceSettlementRule("cooldown", 10),
+    "credential_expired": SourceSettlementRule("needs_action", 20),
+    "credential_revoked": SourceSettlementRule("needs_action", 20),
+    "balance_exhausted": SourceSettlementRule("needs_action", 20),
+    "account_banned": SourceSettlementRule("needs_action", 20),
+    "unclassified_error": SourceSettlementRule("error", 10),
+}
+_SOURCE_STATE_PRIORITY: Mapping[str, int] = {
+    "active": 0,
+    "standby": 0,
+    "cooldown": 10,
+    "error": 10,
+    "needs_action": 20,
+}
+
+
+def source_settlement_rule(reason: str) -> SourceSettlementRule:
+    try:
+        return SOURCE_SETTLEMENT_AUTHORITY[reason]
+    except KeyError as exc:
+        raise ValueError(f"unknown source settlement reason: {reason}") from exc
+
+
+def source_settlement_allowed(existing_status: str, reason: str) -> bool:
+    """Return whether a settled reason may replace the persisted source state."""
+
+    incoming = source_settlement_rule(reason)
+    return incoming.priority >= _SOURCE_STATE_PRIORITY.get(existing_status, 0)
+
 _SURFACE_PATTERNS = re.compile(
     r"(?:invalid[_ -]?(?:request|parameter)|validation[_ -]?error|context[_ -]?length|"
     r"unsupported[_ -]?(?:protocol|tool)|protocol[_ -]?(?:error|mismatch)|"

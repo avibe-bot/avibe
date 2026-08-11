@@ -56,7 +56,13 @@ def _anthropic_terminal_event(_key: str, message: str) -> dict[str, object]:
 
 
 def _responses_terminal_event(key: str, message: str) -> dict[str, object]:
-    return {"type": "error", "code": key, "message": message}
+    return {
+        "type": "error",
+        "code": key,
+        "message": message,
+        "param": None,
+        "sequence_number": 0,
+    }
 
 
 def _chat_terminal_event(key: str, message: str) -> dict[str, object]:
