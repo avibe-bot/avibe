@@ -1,0 +1,179 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "model-hub/observation-result.schema.json",
+  "title": "SourceObservation",
+  "description": "Response-backed result of the unsaved Source observation. It never contains a credential reference or persisted Source state. Any upstream response proves reachability, but a bare HTTP status proves neither protocol nor authentication. Authentication is accepted only for a shaped success or a shaped request error that occurs after authentication; shaped authentication errors are rejected, while shaped server and rate-limit errors leave authentication unknown and settle as adapter_error rather than observed or ambiguous.",
+  "type": "object",
+  "required": [
+    "contract_version",
+    "outcome",
+    "reachable",
+    "authenticated",
+    "protocol",
+    "discovery",
+    "models"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "contract_version": { "const": 5 },
+    "outcome": {
+      "enum": [
+        "observed",
+        "ambiguous",
+        "unreachable",
+        "authentication_failed",
+        "adapter_error",
+        "timeout"
+      ]
+    },
+    "reachable": { "type": ["boolean", "null"] },
+    "authenticated": { "enum": ["authenticated", "rejected", "unknown"] },
+    "protocol": {
+      "type": ["string", "null"],
+      "enum": [null, "anthropic", "openai_responses", "openai_chat"]
+    },
+    "discovery": { "enum": ["succeeded", "failed", "not_attempted"] },
+    "models": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "outcome": { "const": "observed" } }, "required": ["outcome"] },
+      "then": {
+        "properties": {
+          "reachable": { "const": true },
+          "authenticated": { "const": "authenticated" },
+          "protocol": { "type": "string" },
+          "discovery": { "enum": ["succeeded", "failed"] }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "outcome": { "const": "ambiguous" } }, "required": ["outcome"] },
+      "then": {
+        "properties": {
+          "reachable": { "const": true },
+          "authenticated": { "enum": ["authenticated", "unknown"] },
+          "protocol": { "const": null },
+          "discovery": { "const": "not_attempted" },
+          "models": { "maxItems": 0 }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "outcome": { "const": "unreachable" } }, "required": ["outcome"] },
+      "then": {
+        "properties": {
+          "reachable": { "const": false },
+          "authenticated": { "const": "unknown" },
+          "protocol": { "const": null },
+          "discovery": { "const": "not_attempted" },
+          "models": { "maxItems": 0 }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "outcome": { "const": "authentication_failed" } }, "required": ["outcome"] },
+      "then": {
+        "properties": {
+          "reachable": { "const": true },
+          "authenticated": { "const": "rejected" },
+          "protocol": { "const": null },
+          "discovery": { "const": "not_attempted" },
+          "models": { "maxItems": 0 }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "outcome": { "const": "adapter_error" } }, "required": ["outcome"] },
+      "then": {
+        "properties": {
+          "reachable": { "enum": [true, null] },
+          "authenticated": { "const": "unknown" },
+          "protocol": { "const": null },
+          "discovery": { "const": "not_attempted" },
+          "models": { "maxItems": 0 }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "outcome": { "const": "timeout" } }, "required": ["outcome"] },
+      "then": {
+        "properties": {
+          "reachable": { "const": null },
+          "authenticated": { "const": "unknown" },
+          "protocol": { "const": null },
+          "discovery": { "const": "not_attempted" },
+          "models": { "maxItems": 0 }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "discovery": { "const": "failed" } }, "required": ["discovery"] },
+      "then": { "properties": { "models": { "maxItems": 0 } } }
+    },
+    {
+      "if": { "properties": { "protocol": { "const": null } }, "required": ["protocol"] },
+      "then": { "properties": { "outcome": { "enum": ["ambiguous", "unreachable", "authentication_failed", "adapter_error", "timeout"] } } }
+    }
+  ],
+  "examples": [
+    {
+      "contract_version": 5,
+      "outcome": "observed",
+      "reachable": true,
+      "authenticated": "authenticated",
+      "protocol": "openai_chat",
+      "discovery": "succeeded",
+      "models": ["gpt-5.6"]
+    },
+    {
+      "contract_version": 5,
+      "outcome": "authentication_failed",
+      "reachable": true,
+      "authenticated": "rejected",
+      "protocol": null,
+      "discovery": "not_attempted",
+      "models": []
+    },
+    {
+      "contract_version": 5,
+      "outcome": "ambiguous",
+      "reachable": true,
+      "authenticated": "unknown",
+      "protocol": null,
+      "discovery": "not_attempted",
+      "models": []
+    },
+    {
+      "contract_version": 5,
+      "outcome": "unreachable",
+      "reachable": false,
+      "authenticated": "unknown",
+      "protocol": null,
+      "discovery": "not_attempted",
+      "models": []
+    },
+    {
+      "contract_version": 5,
+      "outcome": "adapter_error",
+      "reachable": null,
+      "authenticated": "unknown",
+      "protocol": null,
+      "discovery": "not_attempted",
+      "models": []
+    },
+    {
+      "contract_version": 5,
+      "outcome": "timeout",
+      "reachable": null,
+      "authenticated": "unknown",
+      "protocol": null,
+      "discovery": "not_attempted",
+      "models": []
+    }
+  ]
+}

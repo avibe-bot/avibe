@@ -154,6 +154,23 @@ class RuntimeTargetOwnershipSnapshot:
         )
 
     @property
+    def blocks_dead_transport_replacement(self) -> bool:
+        """Whether native effects can outlive a definitively dead transport.
+
+        Delivery, Turn, and Run ownership may remain active until shared
+        terminal convergence finishes, but none of those rows can keep a dead
+        backend process executing. Activities can own child effects beyond the
+        transport lifetime, and an unknown snapshot must still fail closed.
+        """
+
+        if self.disposition is SessionRuntimeDisposition.UNKNOWN:
+            return True
+        return bool(
+            self.sessionless_active_activity_ids
+            or any(session.active_activity_ids for session in self.sessions)
+        )
+
+    @property
     def has_runnable_deliveries(self) -> bool:
         return any(
             any(reason == "delivery:queued" for reason in session.reasons)

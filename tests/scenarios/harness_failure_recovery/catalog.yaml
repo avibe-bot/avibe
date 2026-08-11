@@ -4246,6 +4246,15 @@ scenarios:
     # shown primary at its resolved delivery target, and atomic settlement elects
     # one owner only when Runs exist.
     test: tests/test_message_dispatcher_result_fallback.py::MessageDispatcherResultFallbackTests::test_hfr_472_empty_failed_turn_creates_one_shared_fallback_contract
+  - id: HFR-473
+    name: dead Codex transport releases its stale Turn fence for the next request
+    status: covered
+    kind: failure_recovery
+    layer: scenario
+    backend: codex
+    # A definitive process death makes the old local Turn fence non-authoritative;
+    # only unknown ownership or an active Activity can still veto replacement.
+    test: tests/test_codex_agent.py::CodexTransportCwdStalenessTests::test_hfr_473_dead_transport_restarts_past_stale_turn_ownership
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor

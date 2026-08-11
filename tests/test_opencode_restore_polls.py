@@ -113,9 +113,11 @@ def _build_agent(active_polls: dict[str, ActivePollInfo], *, language: str = "en
 
     class _Controller:
         def __init__(self):
+            from core.processing_indicator import ProcessingIndicatorService
             from core.session_turns import SessionTurnManager
 
             self.config = SimpleNamespace(language=language)
+            self.processing_indicator = ProcessingIndicatorService(self)
             # The restore path re-marks running via the turn owner, which delegates
             # to set_agent_status — wire a real manager so the full path is exercised.
             self.session_turns = SessionTurnManager(self)
@@ -129,6 +131,7 @@ def _build_agent(active_polls: dict[str, ActivePollInfo], *, language: str = "en
     agent._poll_loop = _PollLoop()
     agent._session_manager = _SessionManager()
     agent._active_requests = {}
+    agent._user_stopped_sessions = set()
     agent._steering_states = {}
     agent._restored_poll_servers = {}
 

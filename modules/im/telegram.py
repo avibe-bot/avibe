@@ -1411,6 +1411,20 @@ class TelegramBot(BaseIMClient):
             "writing_hand": "✍",
             "thinking_face": "🤔",
             "shrug": "🤷",
+            # Terminal receipts. ``setMessageReaction`` accepts ONLY emoji from
+            # Telegram's fixed list, and neither ⏹️ nor ⚠️ is on it — sent raw,
+            # the whole call is rejected and the turn ends with no trace at all.
+            # These two stand-ins are on the list and carry the same reading:
+            # 🙊 for "stopped talking on your command" (the stop result is
+            # deliberately silent) and 😱 for the alarm of a runtime that died
+            # mid-turn. Both spellings of each source emoji are listed because
+            # the constants carry U+FE0F and callers may strip it.
+            "⏹️": "🙊",
+            "⏹": "🙊",
+            "stop_button": "🙊",
+            "⚠️": "😱",
+            "⚠": "😱",
+            "warning": "😱",
         }
         return aliases.get(normalized, normalized)
 

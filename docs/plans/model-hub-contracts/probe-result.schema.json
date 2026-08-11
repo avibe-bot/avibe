@@ -2,36 +2,18 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "model-hub/probe-result.schema.json",
   "title": "ProbeResult",
-  "description": "v5 (2026-07-29 targeted amendment): outcome of walking an agent's current chain in spec §4.3 order and selecting the first runnable source. An unavailable chain item is never probed. For channel=hub the selected source is probed upstream exactly as in v3. For channel=native_cli readiness is re-verified after selection, so an item that was available during resolution may honestly return not-ready if that process-local fact went stale. Readiness is not completion evidence: a native result never claims an upstream request ran or completed. Classified outcomes only, never raw diagnostics. `reachable` remains distinct from the envelope's `ok`.",
+  "description": "Outcome of probing the first runnable exact configured hop. Runtime never performs model matching or substitution.",
   "type": "object",
-  "required": ["contract_version", "backend", "channel", "reachable", "source_id", "model_id", "latency_ms", "via_mapping", "error"],
+  "required": ["contract_version", "backend", "channel", "reachable", "source_id", "model_id", "latency_ms", "error"],
   "additionalProperties": false,
   "properties": {
     "contract_version": { "const": 5 },
     "backend": { "enum": ["claude", "codex", "opencode"] },
-    "channel": {
-      "enum": ["hub", "native_cli"],
-      "description": "The channel whose truth this result reports. Mirrors source.schema.json → supply_channel and agent-chain.schema.json → chain[].channel."
-    },
-    "reachable": {
-      "type": "boolean",
-      "description": "Channel-scoped usability RIGHT NOW. For hub, true means the upstream request succeeded and false means the attempted source was not usable; latency says whether that attempt completed. For native_cli, this is readiness only: true means this process can launch the CLI under its own login now, false means it cannot. Native readiness is never completion evidence. Never conflate this field with the envelope's `ok`."
-    },
-    "source_id": {
-      "type": "string",
-      "pattern": "^src_[a-z0-9]{8,}$",
-      "description": "The first runnable chain source selected for checking. For hub it is attempted upstream. For native_cli its process readiness is re-verified without an upstream attempt and may have gone stale since selection; a source already marked unavailable in the chain is never selected. NON-NULLABLE; the no-candidate case remains the separate `probe_no_candidate` envelope."
-    },
-    "model_id": {
-      "type": "string",
-      "minLength": 1,
-      "description": "The resolved model, mapping applied. Hub sends it upstream; native_cli would pass it to the CLI if readiness permits. Non-nullable for the same reason as `source_id`."
-    },
-    "latency_ms": {
-      "type": ["integer", "null"],
-      "minimum": 0,
-      "description": "Hub round trip of the minimal upstream request. For hub, null means the attempt never completed and the existing error-key partition is total. For native_cli this is ALWAYS null in both readiness outcomes because no upstream request is timed; rendering a measured local check such as 12 ms would impersonate completion evidence."
-    },
+    "channel": { "enum": ["hub", "native_cli"] },
+    "reachable": { "type": "boolean" },
+    "source_id": { "type": "string", "pattern": "^src_[a-z0-9]{8,}$" },
+    "model_id": { "type": "string", "minLength": 1, "description": "The exact upstream model id stored in the selected hop." },
+    "latency_ms": { "type": ["integer", "null"], "minimum": 0 },
     "error": {
       "type": ["string", "null"],
       "enum": [
@@ -47,201 +29,39 @@
         "models.source.needs_action.account_banned",
         "models.source.error.unclassified",
         "models.probe.native_cli_unavailable"
-      ],
-      "description": "Closed i18n-key outcome, never raw text. For channel=hub the ten source-state keys mirror source.schema.json → state.detail_key. For channel=native_cli the only non-null value is `models.probe.native_cli_unavailable`, the i18n spelling of agent-chain.schema.json → reason `native_cli_unavailable`; that mapping is registered and mutation-tested in mirror-registry.json. Explicitly null on every reachable result."
-    },
-    "via_mapping": {
-      "type": "boolean",
-      "description": "true when a per-agent mapping rewrote the requested model id for this probe. Non-nullable (07-29, review round 4): it is known the moment a candidate resolves, so it is answerable on every object that gets returned."
+      ]
     }
   },
   "allOf": [
     {
-      "$comment": "v2 (07-29, review round 3): the nullability above was per-field and therefore too loose in combination — `reachable: true` with a null `source_id` and a non-null `error` validated, i.e. 'it answered, we don't know who, and here is why it didn't'. ROUND 4 moved the identity half UP to the type level: `source_id` / `model_id` / `via_mapping` are now plainly non-nullable, which is strictly stronger than pinning them in each branch and removes the branch bookkeeping entirely — a returned ProbeResult always identifies what was tested, in BOTH directions, and no future branch can reintroduce the hole. What is left here is genuinely conditional: `latency_ms` null means 'the attempt never completed', which a reachable probe contradicts by definition, so 未完成 belongs to the false branch alone.",
-      "if": {
-        "properties": {
-          "channel": { "const": "hub" },
-          "reachable": { "const": true }
-        },
-        "required": ["channel", "reachable"]
-      },
-      "then": {
-        "properties": {
-          "latency_ms": { "type": "integer" },
-          "error": { "type": "null" }
-        }
-      }
+      "if": { "properties": { "channel": { "const": "hub" }, "reachable": { "const": true } }, "required": ["channel", "reachable"] },
+      "then": { "properties": { "latency_ms": { "type": "integer" }, "error": { "type": "null" } } }
     },
     {
-      "$comment": "v2 (07-29, review round 3): the converse half. `error` is the field the UI renders instead of a latency, so an unreachable probe that carries no key leaves the drawer with nothing to say — the same 'required but nullable' gap, at the other end. `latency_ms` stays nullable on this branch on purpose: an attempted failure may or may not have completed.",
-      "if": {
-        "properties": {
-          "channel": { "const": "hub" },
-          "reachable": { "const": false }
-        },
-        "required": ["channel", "reachable"]
-      },
+      "if": { "properties": { "channel": { "const": "hub" }, "reachable": { "const": false } }, "required": ["channel", "reachable"] },
       "then": { "properties": { "error": { "type": "string" } } }
     },
     {
-      "$comment": "v2 (07-29, review round 4; made TOTAL in round 5): which failures completed is decided by the error key, not by the emitter. Round 4 pinned the needs_action family alone — every one of those is learned FROM a completed upstream response (402/401/403 telling us the balance is out, the key is revoked, the account is banned), so `latency_ms: null` there would render a completed billing answer as 未完成. But the cooldown family is MIXED, and round 4 treated it as if it were uniformly transport: `rate_limited` (429), `quota_exhausted` and `server_error` (5xx) are all completed responses too, so they were left free to report null and reproduce the exact defect one family over. The partition is by key, and only `network` / `.timeout` are transport. Listing the completed keys explicitly rather than negating the transport pair is deliberate: with a closed enum both forms are equivalent today, but an added key would silently inherit 'completed' from a negation, whereas this list forces the contract change to say which side it is on — and round 7 is that mechanism working as designed: `models.source.error.unclassified` joined the enum and had to declare a side here. It is COMPLETED. An unclassified failure is one the adapter could not map, which means something came back to be unmappable; a request that never finished is not unclassified at all, it is `network` or `timeout` by definition.",
-      "if": {
-        "properties": {
-          "channel": { "const": "hub" },
-          "error": {
-            "enum": [
-              "models.source.cooldown.rate_limited",
-              "models.source.cooldown.quota_exhausted",
-              "models.source.cooldown.server_error",
-              "models.source.needs_action.oauth_expired",
-              "models.source.needs_action.balance_exhausted",
-              "models.source.needs_action.credential_revoked",
-              "models.source.needs_action.account_banned",
-              "models.source.error.unclassified"
-            ]
-          }
-        },
-        "required": ["channel", "error"]
-      },
-      "then": { "properties": { "latency_ms": { "type": "integer" } } }
+      "if": { "properties": { "channel": { "const": "hub" }, "latency_ms": { "type": "null" } }, "required": ["channel", "latency_ms"] },
+      "then": { "properties": { "error": { "enum": ["models.source.cooldown.network", "models.source.cooldown.timeout"] } } }
     },
     {
-      "$comment": "v2 (07-29, review round 5): the converse, which is what makes the partition total instead of one-directional. Round 4's shape said 'these keys require a latency' and stopped, so 未完成 remained writable for anything not named — the open half is how the 429 case survived a round whose whole purpose was closing this class. Stated from the null side there is nothing left over: a probe that never completed MUST be one of the two transport failures, because those are the only two ways an attempt can fail to finish. Any other key with a null latency is now unrepresentable rather than merely discouraged. Round 5 also claimed this left 「no undefined combination in either direction」; that claim was false, and the branch below is the direction it missed.",
-      "if": {
-        "properties": {
-          "channel": { "const": "hub" },
-          "latency_ms": { "type": "null" }
-        },
-        "required": ["channel", "latency_ms"]
-      },
-      "then": {
-        "properties": {
-          "channel": { "const": "hub" },
-          "error": {
-            "enum": ["models.source.cooldown.network", "models.source.cooldown.timeout"]
-          }
-        }
-      }
-    },
-    {
-      "$comment": "v2 (07-29, review round 9): transport failures require a NULL latency — the half round 5 thought it had closed. Both prior branches read from one side only: 'these eight completed keys need an integer' and 'a null latency must be transport'. Neither forbids `error: models.source.cooldown.timeout` with `latency_ms: 287`, so a request that never finished could validate carrying a measured round trip, and the drawer would render 超时 next to 287ms — a completed-looking answer for the one class of failure that by definition did not complete. Stated in both directions the pair is finally a partition: transport ⇔ null, the other eight keys ⇔ integer, `reachable: true` ⇔ integer with no error. No example changes; the transport example already carries null.",
-      "if": {
-        "properties": {
-          "channel": { "const": "hub" },
-          "error": {
-            "enum": ["models.source.cooldown.network", "models.source.cooldown.timeout"]
-          }
-        },
-        "required": ["channel", "error"]
-      },
+      "if": { "properties": { "channel": { "const": "native_cli" } }, "required": ["channel"] },
       "then": { "properties": { "latency_ms": { "type": "null" } } }
     },
     {
-      "$comment": "v5 (07-29, escalations #2+#3): probe selection walks §4.3 order and touches the first runnable item; a source already present in unavailable_source_ids is excluded by core/handlers/model_hub/resolver.py:83-87,267-273 at master 807d1eee and is never probed. For a selected native_cli item, modules/agents/model_hub.py:323-348 re-verifies process-local readiness, which may have gone stale. reachable=true is readiness only — this process can launch the sanctioned CLI under its own login now. No upstream request ran, so readiness is not completion evidence and latency is null rather than a measured local check.",
-      "if": {
-        "properties": {
-          "channel": { "const": "native_cli" },
-          "reachable": { "const": true }
-        },
-        "required": ["channel", "reachable"]
-      },
-      "then": {
-        "properties": {
-          "latency_ms": { "type": "null" },
-          "error": { "type": "null" }
-        }
-      }
+      "if": { "properties": { "channel": { "const": "native_cli" }, "reachable": { "const": false } }, "required": ["channel", "reachable"] },
+      "then": { "properties": { "error": { "type": "string" } } }
     },
     {
-      "$comment": "native_cli reachable=false uses the same process-availability concept as AgentChain reason=native_cli_unavailable, spelled as a closed i18n key here. It is a readiness failure rather than a completed CLI call, so latency is null.",
-      "if": {
-        "properties": {
-          "channel": { "const": "native_cli" },
-          "reachable": { "const": false }
-        },
-        "required": ["channel", "reachable"]
-      },
-      "then": {
-        "required": ["error"],
-        "properties": {
-          "latency_ms": { "type": "null" },
-          "error": { "enum": ["models.probe.native_cli_unavailable"] }
-        }
-      }
-    },
-    {
-      "$comment": "The native CLI readiness key cannot appear on a hub probe or a reachable result. Together with the channel branches, this closes channel, reachability, latency, and error in both directions.",
-      "if": {
-        "properties": {
-          "error": { "const": "models.probe.native_cli_unavailable" }
-        },
-        "required": ["error"]
-      },
-      "then": {
-        "required": ["channel", "reachable", "latency_ms"],
-        "properties": {
-          "channel": { "const": "native_cli" },
-          "reachable": { "const": false },
-          "latency_ms": { "type": "null" }
-        }
-      }
+      "if": { "properties": { "error": { "const": "models.probe.native_cli_unavailable" } }, "required": ["error"] },
+      "then": { "properties": { "channel": { "const": "native_cli" }, "reachable": { "const": false }, "latency_ms": { "type": "null" } } }
     }
   ],
   "examples": [
-    {
-      "contract_version": 5,
-      "backend": "codex",
-      "channel": "hub",
-      "reachable": true,
-      "source_id": "src_chatgptplus",
-      "model_id": "gpt-5.6",
-      "latency_ms": 412,
-      "error": null,
-      "via_mapping": false
-    },
-    {
-      "contract_version": 5,
-      "backend": "claude",
-      "channel": "hub",
-      "reachable": false,
-      "source_id": "src_relay9c1x",
-      "model_id": "glm-5.2",
-      "latency_ms": 287,
-      "error": "models.source.needs_action.balance_exhausted",
-      "via_mapping": true
-    },
-    {
-      "contract_version": 5,
-      "backend": "claude",
-      "channel": "hub",
-      "reachable": false,
-      "source_id": "src_relay9c1x",
-      "model_id": "glm-5.2",
-      "latency_ms": null,
-      "error": "models.source.cooldown.timeout",
-      "via_mapping": true
-    },
-    {
-      "contract_version": 5,
-      "backend": "codex",
-      "channel": "native_cli",
-      "reachable": true,
-      "source_id": "src_chatgptplus",
-      "model_id": "gpt-5.6",
-      "latency_ms": null,
-      "error": null,
-      "via_mapping": false
-    },
-    {
-      "contract_version": 5,
-      "backend": "codex",
-      "channel": "native_cli",
-      "reachable": false,
-      "source_id": "src_chatgptplus",
-      "model_id": "gpt-5.6",
-      "latency_ms": null,
-      "error": "models.probe.native_cli_unavailable",
-      "via_mapping": false
-    }
+    { "contract_version": 5, "backend": "codex", "channel": "hub", "reachable": true, "source_id": "src_chatgptplus", "model_id": "gpt-5.6", "latency_ms": 412, "error": null },
+    { "contract_version": 5, "backend": "claude", "channel": "hub", "reachable": false, "source_id": "src_relay9c1x", "model_id": "glm-5.2", "latency_ms": 287, "error": "models.source.needs_action.balance_exhausted" },
+    { "contract_version": 5, "backend": "codex", "channel": "native_cli", "reachable": true, "source_id": "src_chatgptplus", "model_id": "gpt-5.6", "latency_ms": null, "error": null },
+    { "contract_version": 5, "backend": "codex", "channel": "native_cli", "reachable": false, "source_id": "src_chatgptplus", "model_id": "gpt-5.6", "latency_ms": null, "error": "models.probe.native_cli_unavailable" }
   ]
 }

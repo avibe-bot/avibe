@@ -97,6 +97,29 @@
         }
       }
     },
+    "routes": {
+      "type": ["object", "null"],
+      "description": "The persisted exact Route for every menu model. Keys are caller-facing menu ids; each value is an ordered hops array and may be empty. Runtime reads this projection verbatim.",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["hops"],
+        "additionalProperties": false,
+        "properties": {
+          "hops": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["source_id", "model_id"],
+              "additionalProperties": false,
+              "properties": {
+                "source_id": { "type": "string", "pattern": "^src_[a-z0-9]{8,}$" },
+                "model_id": { "type": "string", "minLength": 1 }
+              }
+            }
+          }
+        }
+      }
+    },
     "supply_status": {
       "type": ["string", "null"],
       "enum": ["ok", "degraded", "waiting", "interrupted", null],
@@ -183,6 +206,7 @@
           "selected_model_id": { "type": "null" },
           "selected_by_agent": { "type": "null" },
           "sources": { "type": "null" },
+          "routes": { "type": "null" },
           "supply_status": { "type": "null" },
           "model_supply": { "type": "null" },
           "named_agents": {
@@ -200,6 +224,7 @@
       "then": {
         "properties": {
           "sources": { "type": "object" },
+          "routes": { "type": "object" },
           "model_supply": { "type": "array" },
           "named_agents": {
             "type": "array",

@@ -48,6 +48,7 @@
     },
     "vendor": {
       "type": "string",
+      "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
       "description": "Standard vendor id (anthropic|openai|zhipuai|kimi|xai|...) or 'custom'. Also the OpenCode provider prefix (see opencode-overlay.md)."
     },
     "display_name": {
