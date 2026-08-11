@@ -12,6 +12,7 @@ import pytest
 from jsonschema import Draft7Validator, FormatChecker, ValidationError
 
 from config.v2_config import (
+    MODEL_HUB_BACKENDS,
     MODEL_HUB_ENABLED_ENV,
     MODEL_HUB_LEGACY_CREATED_AT,
     ModelHubAgentSourcesConfig,
@@ -1505,6 +1506,90 @@ def test_mh_cfg_mig_001_pre_v5_mapping_without_eligible_source_degrades_to_empty
 
     assert loaded.model_hub.to_payload() == current["model_hub"]
     assert any(mapped_id in record.getMessage() for record in caplog.records)
+    assert not any("sk-live" in record.getMessage() for record in caplog.records)
+
+
+def test_mh_cfg_mig_001_pre_v5_agent_for_a_removed_backend_never_blocks_startup(tmp_path):
+    """A legacy agents map can name a backend this build no longer supports.
+
+    The pre-v5 parser built only the backends it knew and ignored the rest,
+    while v5 rejects the whole config over the extra key, so a leftover entry
+    would turn an upgrade into a service that refuses to start.
+    """
+
+    legacy = _legacy_model_hub_payload(api.config_to_payload(default_config()))
+    agents = legacy["model_hub"]["agents"]
+    agents["a_backend_this_build_removed"] = copy.deepcopy(agents["claude"])
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert set(loaded.model_hub.agents) == set(MODEL_HUB_BACKENDS)
+
+
+def test_mh_cfg_mig_001_pre_v5_source_the_v5_contract_cannot_hold_is_dropped(tmp_path, caplog):
+    """v5 added cross-field source invariants the pre-v5 parser never enforced.
+
+    A hub source persisted without an engine credential ref was legal then and
+    is unrepresentable now. It is dropped so the rest of the config still loads,
+    and it must also leave the agent order it appeared in — a persisted order
+    naming a source that no longer exists fails the same load it was rescued
+    for.
+    """
+
+    current = api.config_to_payload(default_config())
+    legacy = _legacy_model_hub_payload(current)
+    kept = copy.deepcopy(_schema("source.schema.json")["examples"][0])
+    supplied_id = kept["models"][0]["id"]
+    dropped = copy.deepcopy(_schema("source.schema.json")["examples"][1])
+    dropped["credential_ref"] = None
+    legacy["model_hub"]["sources"] = [dropped, kept]
+    claude = legacy["model_hub"]["agents"]["claude"]
+    claude["sources"] = {"policy": "custom", "order": [dropped["id"], kept["id"]]}
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING, logger="config.v2_config"):
+        loaded = V2Config.load(config_path=config_path)
+
+    assert [source.id for source in loaded.model_hub.sources] == [kept["id"]]
+    assert list(loaded.model_hub.agents["claude"].sources.order) == [kept["id"]]
+    assert [
+        (hop.source_id, hop.model_id)
+        for hop in loaded.model_hub.agents["claude"].routes[supplied_id].hops
+    ] == [(kept["id"], supplied_id)]
+    assert [
+        record.getMessage() for record in caplog.records if dropped["id"] in record.getMessage()
+    ] == [
+        f"Model Hub migration dropped source '{dropped['id']}': "
+        "the current contract cannot represent it"
+    ]
+
+
+def test_mh_cfg_mig_001_pre_v5_unreadable_source_is_dropped_without_logging_its_body(
+    tmp_path,
+    caplog,
+):
+    """A source too broken to name is still dropped, and nothing of it is logged.
+
+    Everything in a rejected source is unvalidated config text that can carry
+    credential material, so only an id that matches the persisted id shape is
+    ever repeated into the application log.
+    """
+
+    legacy = _legacy_model_hub_payload(api.config_to_payload(default_config()))
+    broken = copy.deepcopy(_schema("source.schema.json")["examples"][1])
+    broken["id"] = "sk-live-should-never-be-logged"
+    legacy["model_hub"]["sources"] = [broken]
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING, logger="config.v2_config"):
+        loaded = V2Config.load(config_path=config_path)
+
+    assert loaded.model_hub.sources == []
+    assert any("<unreadable id>" in record.getMessage() for record in caplog.records)
     assert not any("sk-live" in record.getMessage() for record in caplog.records)
 
 
