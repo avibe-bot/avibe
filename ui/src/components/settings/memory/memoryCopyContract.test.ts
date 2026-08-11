@@ -37,6 +37,19 @@ describe('Memory UI copy contracts', () => {
     }
   });
 
+  it.each(['en', 'zh'] as const)('discloses proactive non-plain-content capture in %s', (language) => {
+    const disclosure = BUNDLES[language].memory.settings.disclosure.join('\n');
+
+    if (language === 'en') {
+      expect(disclosure).toContain('proactively save durable notes without being asked');
+      expect(disclosure).toMatch(/files.*non-plain content/i);
+    } else {
+      expect(disclosure).toContain('未明确要求');
+      expect(disclosure).toContain('主动保存');
+      expect(disclosure).toMatch(/文件.*非纯文本/);
+    }
+  });
+
   it.each(['en', 'zh'] as const)('keeps rebuild cost guidance conditional in %s', (language) => {
     const text = BUNDLES[language].memory.settings.rebuildConfirmDescription;
     expect(text).toMatch(language === 'en' ? /may use/ : /可能消耗/);
@@ -51,14 +64,20 @@ describe('Memory UI copy contracts', () => {
     expect(zh.memory.log.callStage.cascade).not.toContain('队列');
   });
 
-  it.each(['en', 'zh'] as const)('limits Search and processing-log descriptions to returned data in %s', (language) => {
+  it.each(['en', 'zh'] as const)('keeps Search, source timestamps, and processing-log scope accurate in %s', (language) => {
     if (language === 'en') {
       expect(en.memory.search.description).toBe('Search your profile, episodes, and facts.');
-      expect(en.memory.log.description).toBe('See the processing history for created Memory entries.');
+      expect(en.memory.processingRecord.sources.help).toContain('last checked');
+      expect(en.memory.processingRecord.sources.help).not.toContain('last updated');
+      expect(en.memory.log.description).toBe(
+        'See the processing history for created Memory entries across every user and project on this installation.',
+      );
       expect(en.memory.clear.confirmDescription).toContain('Avibe-managed Memory data');
     } else {
       expect(zh.memory.search.description).toBe('搜索你的画像、事件和事实。');
-      expect(zh.memory.log.description).toBe('查看已创建记忆条目的处理记录。');
+      expect(zh.memory.processingRecord.sources.help).toContain('最近一次检查');
+      expect(zh.memory.processingRecord.sources.help).not.toContain('上次更新');
+      expect(zh.memory.log.description).toBe('查看本安装中所有用户和项目的已创建记忆条目的处理记录。');
       expect(zh.memory.clear.confirmDescription).toContain('Avibe 在本机上管理的记忆数据');
     }
   });

@@ -3743,7 +3743,7 @@
       "sourceNotObserved": "Not observed",
       "sources": {
         "title": "Data sources",
-        "help": "Each part of this page gets its data from a different source. This shows when each source last updated.",
+        "help": "Each part of this page gets its data from a different source. This shows when each source was last checked.",
         "helpLabel": "About data sources",
         "description": "One source being temporarily unavailable doesn't mean Memory is broken."
       },
@@ -3827,7 +3827,7 @@
       "sourceNote": "Distilled from your conversation history, plus any notes your Agent recorded."
     },
     "log": {
-      "description": "See the processing history for created Memory entries.",
+      "description": "See the processing history for created Memory entries across every user and project on this installation.",
       "loading": "Loading processing log…",
       "loadFailed": "Couldn't load the processing log.",
       "detailLoading": "Loading processing details…",
@@ -3952,7 +3952,7 @@
       "saved": "Memory settings saved.",
       "disclosureTitle": "About Memory",
       "disclosure": [
-        "When on, your Workbench messages and authorized users' private messages are distilled into memories; long-term notes your Agent takes while working (like your preferences and decisions) are included too.",
+        "When on, your Workbench messages and authorized users' private messages are distilled into memories. Your Agent can also proactively save durable notes without being asked, including preferences, corrections, decisions, and lasting facts about your machine or accounts found in files, forwarded or shared content, or other non-plain content.",
         "To build memories, message content is sent to the model endpoints configured above, and Search sends queries there too. These endpoints are separate from your Agent's models, and their providers handle the data under their own policies.",
         "Avibe's local Memory store stays on this machine and includes scrubbed model-call diagnostics for every user and project on this installation. Diagnostics can contain sensitive conversation text and are kept for up to 14 days or 5,000 calls. Copies sent to model endpoints are outside this local store. Turning Memory off pauses it — it doesn't delete anything.",
         "Clear all deletes Avibe-managed Memory data on this machine, including your profile, memories, and messages waiting to process. It can't take back content already sent to model endpoints or touch your original chat history.",
