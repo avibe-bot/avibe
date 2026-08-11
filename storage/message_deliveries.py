@@ -1830,6 +1830,12 @@ def agent_run_exclusively_owns_turn(
         "processing",
     }:
         return False, "run_not_running"
+    if (
+        turn.get("control_mode") == "replace"
+        or turn.get("control_successor_delivery_id")
+        or turn.get("control_successor_turn_id")
+    ):
+        return False, "turn_has_replacement_successor"
     participant_delivery_ids = [
         str(value)
         for value in conn.execute(

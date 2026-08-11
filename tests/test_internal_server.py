@@ -4929,6 +4929,122 @@ def test_run_cancel_guard_counts_an_unresolved_steer_as_a_participant(
     assert steer["state"] == "steering"
 
 
+def test_run_cancel_guard_preserves_an_in_flight_replacement(monkeypatch, tmp_path):
+    """Canceling the owner Run cannot supersede another input's P0 replacement."""
+
+    from core.scheduled_tasks import TaskExecutionStore
+    from storage.background import attach_agent_run_delivery_in_connection
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session, turn_id = _create_active_test_turn(
+        tmp_path,
+        native_id="proj_replacement_run_cancel",
+    )
+    session_id = session["id"]
+    request_store = TaskExecutionStore()
+    owner_run = request_store.enqueue_agent_run(
+        session_id=session_id,
+        message="initial owner",
+        agent_name="worker",
+        callback_session_id="ses_callback",
+    )
+    assert request_store.claim(owner_run.id) is not None
+
+    with engine.begin() as conn:
+        turn = message_deliveries.get_turn(conn, turn_id)
+        initial = message_deliveries.delivery_for_turn(conn, turn_id)
+        assert turn is not None
+        assert initial is not None
+        assert attach_agent_run_delivery_in_connection(
+            conn,
+            owner_run.id,
+            session_id=session_id,
+            delivery_id=initial["id"],
+        )
+        replacement = _reserve_submission(
+            conn,
+            scope_id=session["scope_id"],
+            session_id=session_id,
+            text="replacement from another user",
+        )
+        successor_turn_id = message_deliveries.new_turn_id()
+        message_deliveries.insert_turn(
+            conn,
+            turn_id=successor_turn_id,
+            session_id=session_id,
+            initial_delivery_id=str(replacement["id"]),
+            state="waiting",
+            backend="claude",
+        )
+        replacement = message_deliveries.cas_delivery(
+            conn,
+            str(replacement["id"]),
+            expected_version=int(replacement["version"]),
+            expected_states=("reserved",),
+            values={
+                "priority": "p0",
+                "state": "interrupt_waiting",
+                "turn_id": successor_turn_id,
+                "turn_role": "initial",
+                "turn_position": 0,
+            },
+        )
+        assert replacement is not None
+        controlled = message_deliveries.cas_turn(
+            conn,
+            turn_id,
+            expected_version=int(turn["version"]),
+            expected_states=("active",),
+            values={
+                "control_state": "interrupting",
+                "control_mode": "replace",
+                "control_attempt_id": message_deliveries.new_attempt_id(),
+                "control_expected_native_turn_id": turn["native_turn_id"],
+                "control_successor_delivery_id": replacement["id"],
+                "control_successor_turn_id": successor_turn_id,
+            },
+        )
+        assert controlled is not None
+
+    controller = _build_controller_double()
+    app = internal_server.create_app(controller)
+    transport = httpx.ASGITransport(app=app)
+
+    async def _go():
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            return await client.post(
+                f"/internal/cancel/{session_id}",
+                params={"run_id": owner_run.id},
+            )
+
+    response = asyncio.run(_go())
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": True,
+        "session_id": session_id,
+        "status": "run_detached",
+        "reason": "turn_has_replacement_successor",
+    }
+    controller.command_handler.handle_stop.assert_not_awaited()
+    saved = request_store.get_run(owner_run.id)
+    assert saved is not None
+    assert saved["status"] == "canceled"
+    assert saved["callback_status"] == "skipped"
+    with engine.connect() as conn:
+        turn = message_deliveries.get_turn(conn, turn_id)
+        successor = message_deliveries.get_turn(conn, successor_turn_id)
+        replacement = message_deliveries.get_delivery(conn, str(replacement["id"]))
+    assert turn is not None
+    assert turn["control_mode"] == "replace"
+    assert turn["control_successor_turn_id"] == successor_turn_id
+    assert successor is not None and successor["state"] == "waiting"
+    assert replacement is not None and replacement["state"] == "interrupt_waiting"
+
+
 def test_run_cancel_without_an_active_turn_settles_atomically(monkeypatch, tmp_path):
     """An orphaned live projection is canceled without inventing a Session Stop."""
 
