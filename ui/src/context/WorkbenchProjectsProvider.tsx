@@ -123,6 +123,8 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
   const inFlightRef = useRef<Set<string>>(new Set());
   const pendingReconcileRef = useRef<Map<string, number>>(new Map());
   const sessionProjectRef = useRef<Map<string, string>>(new Map());
+  const cachedRowRefreshInFlightRef = useRef<Set<string>>(new Set());
+  const pendingCachedRowRefreshRef = useRef<Set<string>>(new Set());
   // All reads owned by this provider share one ordering fence. A bootstrap,
   // paginated read, or targeted row read that started before a newer mutation
   // must not commit its snapshot after that mutation is accepted.
@@ -407,28 +409,41 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
   }, [api, applyBootstrapSessions, queueReconcile, reconcileSessions]);
 
   const refreshCachedSessionRow = useCallback(async function refreshCachedSessionRow(sessionId: string) {
-    const projectId = Object.entries(sessionsRef.current).find(([, state]) =>
-      state.sessions?.some((session) => session.id === sessionId && !session.native_session_id),
-    )?.[0];
-    if (!projectId) return;
-    const resource = `project-session:${sessionId}`;
-    const read = readOwnershipRef.current.beginRead(resource);
+    if (cachedRowRefreshInFlightRef.current.has(sessionId)) {
+      pendingCachedRowRefreshRef.current.add(sessionId);
+      return;
+    }
+    cachedRowRefreshInFlightRef.current.add(sessionId);
     try {
-      const updated = await api.getSession(sessionId, { cache: false });
-      if (readOwnershipRef.current.isCurrent(read, resource)) {
-        sessionProjectRef.current.set(updated.id, projectId);
-        setSessions((prev) => patchSessionRow(prev, sessionId, () => updated));
-      } else if (readOwnershipRef.current.isLatestRead(read)) {
+      while (true) {
+        pendingCachedRowRefreshRef.current.delete(sessionId);
+        const projectId = Object.entries(sessionsRef.current).find(([, state]) =>
+          state.sessions?.some((session) => session.id === sessionId && !session.native_session_id),
+        )?.[0];
+        if (!projectId) return;
+        const resource = `project-session:${sessionId}`;
+        const read = readOwnershipRef.current.beginRead(resource);
+        let stale = false;
+        try {
+          const updated = await api.getSession(sessionId, { cache: false });
+          stale = !readOwnershipRef.current.isCurrent(read, resource);
+          if (!stale) {
+            sessionProjectRef.current.set(updated.id, projectId);
+            setSessions((prev) => patchSessionRow(prev, sessionId, () => updated));
+            return;
+          }
+        } catch {
+          stale = !readOwnershipRef.current.isCurrent(read, resource);
+          if (!stale && !pendingCachedRowRefreshRef.current.has(sessionId)) return;
+          /* current best-effort failures are recovered by reconnect reconcile */
+        }
+        if (!stale && !pendingCachedRowRefreshRef.current.has(sessionId)) return;
+      }
+    } finally {
+      cachedRowRefreshInFlightRef.current.delete(sessionId);
+      if (pendingCachedRowRefreshRef.current.delete(sessionId)) {
         queueMicrotask(() => void refreshCachedSessionRow(sessionId));
       }
-    } catch {
-      if (
-        !readOwnershipRef.current.isCurrent(read, resource) &&
-        readOwnershipRef.current.isLatestRead(read)
-      ) {
-        queueMicrotask(() => void refreshCachedSessionRow(sessionId));
-      }
-      /* best-effort current failures are recovered by reconnect reconcile */
     }
   }, [api]);
 

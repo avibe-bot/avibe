@@ -83,11 +83,9 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   // Every Inbox read shares one ordering fence. This covers page-one refresh,
   // cursor reads, resume reconcile, and the targeted foreground-restore read.
   const readOwnershipRef = useRef(createWorkbenchSessionReadOwnership());
-  // A stale cold-start snapshot cannot be replaced by an event patch alone: the
-  // event may have dropped a card that was never loaded in this provider. Retry
-  // one authoritative feed read after that response settles.
-  const authoritativeFeedLoadedRef = useRef(false);
-  const coldRefreshRetryPendingRef = useRef(false);
+  // A stale refresh cannot be replaced by an event patch or cursor page alone:
+  // neither operation owns the full top-of-feed snapshot requested by refresh.
+  const refreshRetryPendingRef = useRef(false);
   const reconcileRetryPendingRef = useRef(false);
   const refreshLoadingGenerationRef = useRef(0);
   const loadMoreLoadingGenerationRef = useRef(0);
@@ -119,6 +117,16 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
     setUnreadLoaded(true);
   }, []);
 
+  const applySessionUnread = useCallback((sessionId: string, count: number) => {
+    setUnreadBySession((prev) => {
+      const next = { ...prev };
+      if (count > 0) next[sessionId] = count;
+      else delete next[sessionId];
+      return next;
+    });
+    setUnreadLoaded(true);
+  }, []);
+
   const mergeTargetedSnapshots = useCallback((rows: InboxSession[]): InboxSession[] => {
     let next = rows;
     for (const [sessionId, snapshot] of targetedSnapshotsRef.current) {
@@ -139,32 +147,48 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
     }
   }, []);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async function refresh() {
     const read = readOwnershipRef.current.beginRead(['inbox-feed', 'inbox-unread', 'inbox-feed-refresh']);
     const loadingGeneration = ++refreshLoadingGenerationRef.current;
+    const retryAfterInvalidation = () => {
+      const invalidatedByMutation = !readOwnershipRef.current.isMutationCurrent(read, 'inbox-feed');
+      const supersededByCursorRead =
+        (readOwnershipRef.current.latestGeneration('inbox-feed-cursor') ?? 0) > read.generation;
+      const supersededByRefresh =
+        (readOwnershipRef.current.latestGeneration('inbox-feed-refresh') ?? 0) > read.generation;
+      const supersededByReconcile =
+        (readOwnershipRef.current.latestGeneration('inbox-feed-reconcile') ?? 0) > read.generation;
+      if (
+        (!invalidatedByMutation && !supersededByCursorRead) ||
+        supersededByRefresh ||
+        supersededByReconcile ||
+        refreshRetryPendingRef.current
+      ) {
+        return false;
+      }
+      refreshRetryPendingRef.current = true;
+      queueMicrotask(() => {
+        refreshRetryPendingRef.current = false;
+        void refresh();
+      });
+      return true;
+    };
     setLoading(true);
     try {
       const result = await api.listInbox({ platform: 'avibe', limit: PAGE_SIZE });
       const feedCurrent = readOwnershipRef.current.isCurrent(read, 'inbox-feed');
       if (!feedCurrent) {
-        if (!authoritativeFeedLoadedRef.current && !coldRefreshRetryPendingRef.current) {
-          coldRefreshRetryPendingRef.current = true;
-          queueMicrotask(() => {
-            coldRefreshRetryPendingRef.current = false;
-            if (!authoritativeFeedLoadedRef.current) void refresh();
-          });
-        }
+        retryAfterInvalidation();
       } else {
         acceptFeedRows(read, result.sessions);
         setInboxSessions(() => mergeTargetedSnapshots(result.sessions));
         setNextCursor(result.next_cursor);
-        authoritativeFeedLoadedRef.current = true;
       }
       if (readOwnershipRef.current.isCurrent(read, 'inbox-unread')) {
         applyUnreadMap(result.unread_by_session ?? {});
       }
     } catch (err) {
-      console.error('[inbox] refresh failed', err);
+      if (!retryAfterInvalidation()) console.error('[inbox] refresh failed', err);
     } finally {
       if (refreshLoadingGenerationRef.current === loadingGeneration) setLoading(false);
     }
@@ -198,15 +222,30 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
 
   const markRead = useCallback(
     async (sessionId: string, untilMessageId?: string) => {
-      const read = readOwnershipRef.current.beginRead('inbox-unread');
+      const operation = readOwnershipRef.current.beginRead(`inbox-mark-read:${sessionId}`);
       const result = await api.markSessionRead(sessionId, untilMessageId);
-      if (!readOwnershipRef.current.isCurrent(read, 'inbox-unread')) return;
+      if (
+        !readOwnershipRef.current.isMutationCurrent(operation, [
+          `inbox-session:${sessionId}`,
+          'inbox-unread-all',
+        ])
+      ) {
+        return;
+      }
+      // A successful write commits after every read that was already in flight,
+      // even when one of those reads started later and returns last. The endpoint
+      // mutates only this session, so merge only that count; concurrent mark-read
+      // writes for other sessions remain independent.
+      readOwnershipRef.current.acceptMutation([
+        'inbox-unread',
+        `inbox-unread-session:${sessionId}`,
+      ]);
       // The unread map is authoritative for badges; the card's unread styling
       // derives from it, so clearing here clears the dot without touching the
       // feed order (a read doesn't change last activity).
-      applyUnreadMap(result.unread_by_session ?? {});
+      applySessionUnread(sessionId, result.unread_by_session?.[sessionId] ?? 0);
     },
-    [api, applyUnreadMap],
+    [api, applySessionUnread],
   );
 
   // Resume reconcile: re-read the feed WITHOUT collapsing pagination. A
@@ -218,6 +257,29 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   // already has content; this is a silent catch-up.
   const reconcile = useCallback(async () => {
     const read = readOwnershipRef.current.beginRead(['inbox-feed', 'inbox-unread', 'inbox-feed-reconcile']);
+    const retryAfterInvalidation = () => {
+      const invalidatedByMutation = !readOwnershipRef.current.isMutationCurrent(read, 'inbox-feed');
+      const supersededByCursorRead =
+        (readOwnershipRef.current.latestGeneration('inbox-feed-cursor') ?? 0) > read.generation;
+      const supersededByReconcileRead =
+        (readOwnershipRef.current.latestGeneration('inbox-feed-reconcile') ?? 0) > read.generation;
+      const supersededByRefresh =
+        (readOwnershipRef.current.latestGeneration('inbox-feed-refresh') ?? 0) > read.generation;
+      if (
+        (!invalidatedByMutation && !supersededByCursorRead) ||
+        supersededByRefresh ||
+        supersededByReconcileRead ||
+        reconcileRetryPendingRef.current
+      ) {
+        return false;
+      }
+      reconcileRetryPendingRef.current = true;
+      queueMicrotask(() => {
+        reconcileRetryPendingRef.current = false;
+        void reconcile();
+      });
+      return true;
+    };
     // Snapshot loaded ids up front: sizes the re-read window, and lets us tell
     // afterward whether the read overlapped what we already had (cursor note).
     const loadedIds = new Set(inboxSessionsRef.current.map((s) => s.session_id));
@@ -230,26 +292,12 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
         handleError: false,
       });
       const feedCurrent = readOwnershipRef.current.isCurrent(read, 'inbox-feed');
-      const invalidatedByMutation = !readOwnershipRef.current.isMutationCurrent(read, 'inbox-feed');
       const supersededByCursorRead =
         (readOwnershipRef.current.latestGeneration('inbox-feed-cursor') ?? 0) > read.generation;
       const supersededByReconcileRead =
         (readOwnershipRef.current.latestGeneration('inbox-feed-reconcile') ?? 0) > read.generation;
-      const supersededByRefresh =
-        (readOwnershipRef.current.latestGeneration('inbox-feed-refresh') ?? 0) > read.generation;
       if (!feedCurrent || supersededByCursorRead || supersededByReconcileRead) {
-        if (
-          (invalidatedByMutation || supersededByCursorRead) &&
-          !supersededByRefresh &&
-          !supersededByReconcileRead &&
-          !reconcileRetryPendingRef.current
-        ) {
-          reconcileRetryPendingRef.current = true;
-          queueMicrotask(() => {
-            reconcileRetryPendingRef.current = false;
-            void reconcile();
-          });
-        }
+        retryAfterInvalidation();
       } else {
         acceptFeedRows(read, result.sessions);
         setInboxSessions((prev) => {
@@ -260,7 +308,6 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
           merged.sort(byActivityDesc);
           return mergeTargetedSnapshots(merged);
         });
-        authoritativeFeedLoadedRef.current = true;
         // Cursor: the loaded feed is always a contiguous run from the top, and
         // this reads the newest `limit` rows. If the read shares ANY row with what
         // we had (overlap), the two runs are contiguous — no gap below the read —
@@ -277,7 +324,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
         applyUnreadMap(result.unread_by_session ?? {});
       }
     } catch (err) {
-      console.error('[inbox] reconcile failed', err);
+      if (!retryAfterInvalidation()) console.error('[inbox] reconcile failed', err);
     }
   }, [acceptFeedRows, api, applyUnreadMap, mergeTargetedSnapshots]);
 
