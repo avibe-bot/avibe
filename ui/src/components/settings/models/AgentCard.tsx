@@ -7,29 +7,13 @@ import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { ModelHubInfoHint } from './ModelHubInfoHint';
 import { collapsedModelRows, listedModelIds, modelChainKey, type ModelChainIndex, type ModelChainRead } from './modelRows';
+import { currentChainLink, isTakeoverChain } from './takeover';
 import { ACCENT_ICON, ACCENT_TILE, backendVisual } from './vendorMeta';
-import type { AgentChainLink, AgentSupply, Source } from './types';
+import type { AgentSupply, Source } from './types';
 
 const sourceName = (sources: Source[], id: string): string => sources.find((source) => source.id === id)?.display_name ?? id;
-const currentLink = (read: ModelChainRead | undefined): AgentChainLink | null => {
-  if (read?.kind !== 'ready' || !read.chain.current) return null;
-  return read.chain.chain.find((link) => (
-    link.source_id === read.chain.current?.source_id
-    && link.model_id === read.chain.current.model_id
-  )) ?? null;
-};
-
-const isTakeoverRead = (read: ModelChainRead | undefined): boolean => {
-  const current = currentLink(read);
-  const head = read?.kind === 'ready' ? read.chain.chain[0] : undefined;
-  return Boolean(
-    current
-    && head
-    && (current.source_id !== head.source_id || current.model_id !== head.model_id)
-    && head.health === 'cooldown'
-    && !head.runnable,
-  );
-};
+const currentLink = (read: ModelChainRead | undefined) => read?.kind === 'ready' ? currentChainLink(read.chain) : null;
+const isTakeoverRead = (read: ModelChainRead | undefined): boolean => read?.kind === 'ready' && isTakeoverChain(read.chain);
 
 const ModelRow: React.FC<{
   agent: AgentSupply;
@@ -57,8 +41,10 @@ const ModelRow: React.FC<{
       aria-label={t('settings.models.routeDialog.open', { model: modelId }) as string}
       className="model-hub-model-row flex h-9 w-full min-w-0 items-center gap-2.5 overflow-hidden rounded-lg border border-border px-3 text-left"
     >
-      <span className="flex min-w-0 flex-1 items-center gap-2.5"><span className="min-w-0 flex-1 truncate font-mono text-[12px] font-medium text-foreground" title={modelId}>{modelId}</span><span className="model-hub-model-mode-chip shrink-0 rounded-full border border-border px-2 py-[3px] text-[10.5px] font-semibold text-muted">{mode}</span></span>
-      <span className={cn('model-hub-model-current min-w-0 flex-1 truncate text-[10.5px]', takeover && 'model-hub-model-current--takeover')} title={currentCopy}>{currentCopy}</span>
+      <span className="flex min-w-0 flex-1 items-center justify-between gap-2.5">
+        <span className="flex min-w-0 flex-1 items-center gap-[7px]"><span className="min-w-0 flex-1 truncate font-mono text-[12px] font-medium text-foreground" title={modelId}>{modelId}</span><span className="model-hub-model-mode-chip shrink-0 rounded-full border border-border px-2 py-[3px] text-[10.5px] font-semibold text-muted">{mode}</span></span>
+        <span className={cn('model-hub-model-current min-w-0 flex-1 truncate text-[10.5px]', takeover && 'model-hub-model-current--takeover')} title={currentCopy}>{currentCopy}</span>
+      </span>
       <ChevronRight className="model-hub-overview-chevron size-[15px] shrink-0" aria-hidden="true" />
     </button>
   );

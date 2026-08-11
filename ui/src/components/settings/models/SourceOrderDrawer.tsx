@@ -27,9 +27,9 @@ const SourceIdentity: React.FC<{ source: Source }> = ({ source }) => {
   const detail = sourceDetail(source);
   return (
     <>
-      <span className="min-w-0 flex-1">
-        <span className="model-hub-order-name block truncate" title={source.display_name}>{source.display_name}</span>
-        {detail && <span className="model-hub-order-meta block truncate" title={detail}>{detail}</span>}
+      <span className="model-hub-order-identity">
+        <span className="model-hub-order-name truncate" title={source.display_name}>{source.display_name}</span>
+        {detail && <span className="model-hub-order-meta truncate" title={detail}>{detail}</span>}
       </span>
       <span className={cn('model-hub-order-tag', ACCENT_PILL[sourceAccent(source)])}>
         {t(`settings.models.sourceKind.${source.kind}`)}

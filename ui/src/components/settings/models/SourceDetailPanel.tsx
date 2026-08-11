@@ -194,7 +194,7 @@ export const SourceDetailPanel: React.FC<{
   source: Source;
   adoptedBy?: readonly AdoptedBy[];
   onChanged: () => Promise<void> | void;
-}> = ({ source, adoptedBy = [], onChanged }) => {
+}> = ({ source, adoptedBy, onChanged }) => {
   const { t, i18n } = useTranslation();
   const now = useDeadlineClock(source.state.status === 'cooldown' ? source.state.retry_at : null);
   const { Icon, accent } = sourceVisual(source);
@@ -330,8 +330,10 @@ export const SourceDetailPanel: React.FC<{
     if (guard.kind === 'refetch') void refetch(true);
     else void remove(guard.model, guard.hops.length > 0 || guard.gaps.length > 0);
   };
-  const adoptedBackends = [...new Set(adoptedBy.map(({ backend }) => t(`settings.models.backends.${backend}`, { defaultValue: backend }) as string))];
+  const effectiveAdoption = adoptedBy ?? source.adopted_by;
+  const adoptedBackends = [...new Set((effectiveAdoption ?? []).map(({ backend }) => t(`settings.models.backends.${backend}`, { defaultValue: backend }) as string))];
   const state = sourceStatePresentation(source.state, 'detail', i18n.language, now, {
+    known: effectiveAdoption !== undefined,
     backends: adoptedBackends,
     native: source.supply_channel === 'native_cli',
   });
@@ -343,14 +345,14 @@ export const SourceDetailPanel: React.FC<{
         <span className={cn('model-hub-source-tile flex shrink-0 items-center justify-center', ACCENT_TILE[accent])}><Icon className={cn('size-[18px]', ACCENT_ICON[accent])} /></span>
         <div className="min-w-0 flex-1">
           <h2 className="model-hub-source-title truncate font-bold text-foreground">{source.display_name}</h2>
-          <p className={cn('mt-1 flex flex-wrap items-center gap-x-2 gap-y-1', state.textClass)}>
-            <span className="model-hub-source-state flex items-center gap-1.5"><span className={cn('size-[5px] rounded-full', state.dotClass)} />{state.key && t(state.key, state.values)}</span>
+          {(state.key || source.last_discovered_at) && <p className={cn('mt-1 flex flex-wrap items-center gap-x-2 gap-y-1', state.textClass)}>
+            {state.key && <span className="model-hub-source-state flex items-center gap-1.5"><span className={cn('size-[5px] rounded-full', state.dotClass)} />{t(state.key, state.values)}</span>}
             {source.last_discovered_at && <span className="model-hub-source-age text-muted">{t('settings.models.sourceDetail.status.listUpdated', { time: formatRelativeTime(source.last_discovered_at, t) })}</span>}
-          </p>
+          </p>}
           <p className="model-hub-source-summary mt-1 truncate font-mono">{t(host ? 'settings.models.sourceDetail.summary' : 'settings.models.gateway.modelCount', { host, count: source.models.length })}</p>
         </div>
         <div className="flex shrink-0 gap-2">
-          <Button variant="outline" size="sm" className="model-hub-source-action" disabled={busy} onClick={() => void refetch()}>{busy ? <Loader2 className="animate-spin" /> : <RefreshCw />}{t('settings.models.sourceDetail.action.refetch')}</Button>
+          {source.supply_channel === 'hub' && <Button variant="outline" size="sm" className="model-hub-source-action" disabled={busy} onClick={() => void refetch()}>{busy ? <Loader2 className="animate-spin" /> : <RefreshCw />}{t('settings.models.sourceDetail.action.refetch')}</Button>}
           {source.kind === 'api_key' && <Button variant="secondary" size="sm" className="model-hub-source-action model-hub-ink-mint" disabled={busy || manualDraft !== null} onClick={() => setManualDraft({ modelId: '', tiers: [], failed: false, retryRead: false })}><Plus />{t('settings.models.sourceDetail.action.addModel')}</Button>}
         </div>
       </section>

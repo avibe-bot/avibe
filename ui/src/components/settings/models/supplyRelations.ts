@@ -1,4 +1,5 @@
 import { modelChainKey, type ModelChainIndex } from './modelRows';
+import { isTakeoverChain } from './takeover';
 import type { AgentBackend, AgentSupply, Source } from './types';
 
 export type SupplyRelationKind = 'native' | 'gateway' | 'connected_unused' | 'takeover' | 'unavailable';
@@ -23,13 +24,7 @@ const relationKind = (
     const current = read.chain.current;
     if (current.source_id !== source.id) continue;
     isCurrent = true;
-    const head = read.chain.chain[0];
-    isTakeover ||= Boolean(
-      head
-      && (current.source_id !== head.source_id || current.model_id !== head.model_id)
-      && head.health === 'cooldown'
-      && !head.runnable,
-    );
+    isTakeover ||= isTakeoverChain(read.chain);
   }
   if (isTakeover) return 'takeover';
   if (!isCurrent) return 'connected_unused';

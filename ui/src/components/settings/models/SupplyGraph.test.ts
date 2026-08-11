@@ -32,13 +32,13 @@ const agent: AgentSupply = {
   menu: null,
 };
 
-const chain = (current: string, headHealth: AgentChain['chain'][number]['health'] = 'healthy', headRunnable = true): AgentChain => ({
+const chain = (current: string, headHealth: AgentChain['chain'][number]['health'] = 'healthy', headRunnable = true, reason: AgentChain['chain'][number]['reason'] = null): AgentChain => ({
   contract_version: 5,
   backend: 'claude',
   model_id: 'model-a',
   current: { source_id: current, model_id: 'model-a' },
   chain: [
-    { source_id: 'native', model_id: 'model-a', channel: 'native_cli', health: headHealth, runnable: headRunnable, reason: null, retry_at: headHealth === 'cooldown' ? '2099-01-01T00:00:00Z' : null },
+    { source_id: 'native', model_id: 'model-a', channel: 'native_cli', health: headHealth, runnable: headRunnable, reason, retry_at: headHealth === 'cooldown' ? '2099-01-01T00:00:00Z' : null },
     { source_id: 'relay', model_id: 'model-a', channel: 'hub', health: 'healthy', runnable: true, reason: null, retry_at: null },
     { source_id: 'unused', model_id: 'model-a', channel: 'hub', health: 'healthy', runnable: true, reason: null, retry_at: null },
   ],
@@ -57,6 +57,14 @@ describe('buildSupplyRelations', () => {
     expect(buildSupplyRelations([agent], sources, { [key]: { kind: 'ready', chain: chain('relay', 'cooldown', false) } })[1]).toEqual(
       { sourceId: 'relay', backend: 'claude', kind: 'takeover' },
     );
+    expect(buildSupplyRelations([agent], sources, { [key]: { kind: 'ready', chain: chain('relay', 'cooldown', false, 'native_cli_unavailable') } })[1]).toEqual(
+      { sourceId: 'relay', backend: 'claude', kind: 'gateway' },
+    );
+    for (const health of ['needs_action', 'error'] as const) {
+      expect(buildSupplyRelations([agent], sources, { [key]: { kind: 'ready', chain: chain('relay', health, false) } })[1]).toEqual(
+        { sourceId: 'relay', backend: 'claude', kind: 'gateway' },
+      );
+    }
     expect(buildSupplyRelations([agent], sources, { [key]: { kind: 'ready', chain: chain('relay') } })[0]).toEqual(
       { sourceId: 'native', backend: 'claude', kind: 'connected_unused' },
     );

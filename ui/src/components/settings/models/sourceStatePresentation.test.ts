@@ -11,17 +11,19 @@ const state = (status: SourceStatus, over: Partial<SourceState> = {}): SourceSta
 });
 
 describe('sourceStatePresentation', () => {
-  it('does not invent adoption attribution on either persisted-source surface', () => {
-    expect(sourceStatePresentation(state('active'), 'card', 'en', 0).key).toBe(
-      'settings.models.upstream.state.standby',
-    );
-    expect(sourceStatePresentation(state('active'), 'detail', 'en', 0).key).toBe(
-      'settings.models.upstream.state.standby',
-    );
+  it('omits attribution when the source projection does not carry it', () => {
+    expect(sourceStatePresentation(state('active'), 'card', 'en', 0).key).toBeNull();
+    expect(sourceStatePresentation(state('active'), 'detail', 'en', 0).key).toBeNull();
+    expect(sourceStatePresentation(state('active'), 'card', 'en', 0, {
+      known: true,
+      backends: [],
+      native: false,
+    }).key).toBe('settings.models.upstream.state.standby');
   });
 
   it('uses a creation response adoption without reconstructing it from chains', () => {
     expect(sourceStatePresentation(state('active'), 'card', 'en', 0, {
+      known: true,
       backends: ['Claude Code', 'Codex'],
       native: false,
     })).toMatchObject({
@@ -30,6 +32,7 @@ describe('sourceStatePresentation', () => {
       dotClass: 'bg-mint',
     });
     expect(sourceStatePresentation(state('active'), 'detail', 'en', 0, {
+      known: true,
       backends: ['Claude Code'],
       native: true,
     })).toMatchObject({ key: 'settings.models.sourceDetail.status.inUse', dotClass: 'bg-mint' });

@@ -18,8 +18,10 @@ void i18n.use(initReactI18next).init({
 const runtime = (
   health: RuntimeDependency['status']['health'],
   withAsset = false,
+  hostPlatform?: string,
 ): RuntimeDependency => ({
   contract_version: 5,
+  host_platform: hostPlatform,
   manifest: {
     name: 'cliproxyapi',
     version: '1',
@@ -36,11 +38,11 @@ const runtime = (
 
 const renderPill = (
   health: RuntimeDependency['status']['health'],
-  options: { withAsset?: boolean; statusUnread?: boolean; starting?: boolean } = {},
+  options: { withAsset?: boolean; hostPlatform?: string; statusUnread?: boolean; starting?: boolean } = {},
 ): string => renderToStaticMarkup(
   <I18nextProvider i18n={i18n}>
     <RuntimePill
-      runtime={runtime(health, options.withAsset)}
+      runtime={runtime(health, options.withAsset, options.hostPlatform)}
       statusUnread={options.statusUnread ?? false}
       starting={options.starting ?? false}
       onStart={vi.fn()}
@@ -66,6 +68,8 @@ describe('Model Hub runtime pill', () => {
     expect(renderPill('not_installed', { withAsset: true })).toContain('<button');
     expect(renderPill('not_installed')).toContain(zh.settings.models.shell.unsupported);
     expect(renderPill('not_installed')).not.toContain('<button');
+    expect(renderPill('not_installed', { withAsset: true, hostPlatform: 'linux-amd64' })).toContain(zh.settings.models.shell.unsupported);
+    expect(renderPill('not_installed', { withAsset: true, hostPlatform: 'linux-amd64' })).not.toContain('<button');
   });
 
   it('renders the pending and unread projections without claiming healthy state', () => {

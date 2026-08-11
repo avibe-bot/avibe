@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
 import { modelsApi } from './modelsApi';
+import { installRuntimeUntilSettled } from './runtimeLifecycle';
 import type { RuntimeDependency } from './types';
 
 const Bullet: React.FC<{ children: React.ReactNode }> = ({ children }) => (
@@ -20,34 +21,30 @@ export const InstallGatewayDialog: React.FC<{
   const [requesting, setRequesting] = React.useState(false);
   const [failed, setFailed] = React.useState(false);
   const initiated = React.useRef(false);
+  const previousHealth = React.useRef(runtime.status.health);
   const installing = requesting || runtime.status.health === 'installing';
 
   React.useEffect(() => {
-    if (initiated.current && runtime.status.health !== 'installing' && runtime.status.health !== 'not_installed') {
+    const wasInstalling = previousHealth.current === 'installing';
+    previousHealth.current = runtime.status.health;
+    if (!initiated.current) return;
+    if (wasInstalling && runtime.status.health === 'not_installed' && runtime.status.error_key) {
+      setRequesting(false);
+      setFailed(true);
+    } else if (runtime.status.health !== 'installing' && runtime.status.health !== 'not_installed') {
       onClose();
     }
-  }, [onClose, runtime.status.health]);
+  }, [onClose, runtime.status.error_key, runtime.status.health]);
 
   const install = () => {
     if (installing) return;
     initiated.current = true;
     setRequesting(true);
     setFailed(false);
-    void modelsApi.installRuntime()
-      .then((next) => {
-        onRuntime(next);
-        if (next.status.health === 'not_installed') setFailed(true);
-        else if (next.status.health !== 'installing') onClose();
-      })
-      .catch(async () => {
-        try {
-          const next = await modelsApi.getRuntimeStatus();
-          onRuntime(next);
-          if (next.status.health === 'not_installed') setFailed(true);
-          else if (next.status.health !== 'installing') onClose();
-        } catch {
-          setFailed(true);
-        }
+    void installRuntimeUntilSettled(modelsApi, onRuntime)
+      .then((result) => {
+        if (result.failed) setFailed(true);
+        else onClose();
       })
       .finally(() => setRequesting(false));
   };

@@ -25,7 +25,7 @@ const source: Source = {
   models: [{ id: 'model-a', display_name: null, provenance: 'manual', reasoning_efforts: ['high'] }],
 };
 
-const renderPanel = (adoptedBy: React.ComponentProps<typeof SourceDetailPanel>['adoptedBy'] = []) => render(
+const renderPanel = (adoptedBy: React.ComponentProps<typeof SourceDetailPanel>['adoptedBy'] = undefined) => render(
   <ToastProvider>
     <I18nextProvider i18n={i18n}>
       <SourceDetailPanel source={source} adoptedBy={adoptedBy} onChanged={vi.fn()} />
@@ -42,6 +42,7 @@ describe('SourceDetailPanel', () => {
   it('keeps the detail surface to inventory, entry kind, tiers, and refetch', () => {
     renderPanel();
     expect(screen.queryByText(/latency|延迟|enrollment|protocol|协议/i)).toBeNull();
+    expect(screen.queryByText(/^Standby$|^待命$/i)).toBeNull();
     expect(screen.getByText('model-a')).toBeTruthy();
     expect(screen.getByText(/relay\.example/)).toBeTruthy();
   });
@@ -49,6 +50,11 @@ describe('SourceDetailPanel', () => {
   it('shows in-use only when the response carries adoption for this source', () => {
     renderPanel([{ backend: 'claude', menu_model: 'claude-opus-4-6' }]);
     expect(screen.getByText(/^In use$|^使用中$/i)).toBeTruthy();
+  });
+
+  it('omits native refetch because that channel has no stored discovery credential', () => {
+    render(<I18nextProvider i18n={i18n}><SourceDetailPanel source={{ ...source, kind: 'subscription', supply_channel: 'native_cli' }} onChanged={vi.fn()} /></I18nextProvider>);
+    expect(screen.queryByRole('button', { name: /^Refetch$|^重新拉取$/i })).toBeNull();
   });
 
   it('discards an uncommitted tier on Escape', async () => {

@@ -2,6 +2,7 @@ import * as React from 'react';
 import * as DialogPrimitive from '@radix-ui/react-dialog';
 import {
   CheckCircle2,
+  CircleX,
   Eye,
   EyeOff,
   Info,
@@ -304,9 +305,9 @@ export const AddApiKeyDialog: React.FC<{
             )}
             {phase.kind === 'failure' && (
               <div className="model-hub-add-key-strip model-hub-add-key-strip--error">
-                <TriangleAlert className="size-3.5 shrink-0 text-destructive" />
+                <CircleX className="model-hub-add-key-error-ink size-3.5 shrink-0" />
                 <div className="flex min-w-0 flex-col gap-[3px]">
-                  <span className="model-hub-add-key-strip-title text-destructive">{t(failureCopy(phase.cause))}</span>
+                  <span className="model-hub-add-key-error-ink model-hub-add-key-strip-title">{t(failureCopy(phase.cause))}</span>
                   {phase.cause === 'auth' && <span className="model-hub-add-key-strip-detail">{t('settings.models.addKey.fail.auth.detail')}</span>}
                   {phase.cause !== 'engineDown' && <span className="model-hub-add-key-strip-detail">{t('settings.models.addKey.fail.subtitle')}</span>}
                 </div>
@@ -314,8 +315,8 @@ export const AddApiKeyDialog: React.FC<{
             )}
             {phase.kind === 'save_unconfirmed' && (
               <div className="model-hub-add-key-strip model-hub-add-key-strip--error">
-                <TriangleAlert className="size-3.5 shrink-0 text-destructive" />
-                <span className="model-hub-add-key-strip-title text-destructive">{t('settings.models.addKey.fail.save')}</span>
+                <CircleX className="model-hub-add-key-error-ink size-3.5 shrink-0" />
+                <span className="model-hub-add-key-error-ink model-hub-add-key-strip-title">{t('settings.models.addKey.fail.save')}</span>
               </div>
             )}
           </div>

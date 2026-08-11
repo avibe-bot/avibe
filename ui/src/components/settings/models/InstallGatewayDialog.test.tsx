@@ -27,8 +27,8 @@ afterEach(() => {
 
 describe('InstallGatewayDialog', () => {
   it('confirms through the dedicated install route and keeps start separate', async () => {
-    const installing = runtime('installing');
-    const install = vi.spyOn(modelsApi, 'installRuntime').mockResolvedValueOnce(installing);
+    const installed = runtime('not_started');
+    const install = vi.spyOn(modelsApi, 'installRuntime').mockResolvedValueOnce(installed);
     const start = vi.spyOn(modelsApi, 'startRuntime');
     const onRuntime = vi.fn();
     render(
@@ -41,6 +41,25 @@ describe('InstallGatewayDialog', () => {
 
     await waitFor(() => expect(install).toHaveBeenCalledOnce());
     expect(start).not.toHaveBeenCalled();
-    expect(onRuntime).toHaveBeenCalledWith(installing);
+    expect(onRuntime).toHaveBeenCalledWith(installed);
+  });
+
+  it('keeps the dialog open and offers retry when a background install fails', async () => {
+    let settleInstall: ((value: RuntimeDependency) => void) | undefined;
+    vi.spyOn(modelsApi, 'installRuntime').mockImplementation(() => new Promise((resolve) => { settleInstall = resolve; }));
+    const onClose = vi.fn();
+    const view = render(
+      <I18nextProvider i18n={i18n}>
+        <InstallGatewayDialog runtime={runtime('not_installed')} onClose={onClose} onRuntime={vi.fn()} />
+      </I18nextProvider>,
+    );
+    await userEvent.click(screen.getByRole('button', { name: /Install and start|安装并启动/i }));
+    view.rerender(<I18nextProvider i18n={i18n}><InstallGatewayDialog runtime={runtime('installing')} onClose={onClose} onRuntime={vi.fn()} /></I18nextProvider>);
+    view.rerender(<I18nextProvider i18n={i18n}><InstallGatewayDialog runtime={{ ...runtime('not_installed'), status: { ...runtime('not_installed').status, error_key: 'settings.models.install.fail.detail' } }} onClose={onClose} onRuntime={vi.fn()} /></I18nextProvider>);
+
+    expect(await screen.findByRole('alert')).toBeTruthy();
+    expect(screen.getByRole('button', { name: /Try again|重试/i })).toBeTruthy();
+    expect(onClose).not.toHaveBeenCalled();
+    settleInstall?.(runtime('not_installed'));
   });
 });

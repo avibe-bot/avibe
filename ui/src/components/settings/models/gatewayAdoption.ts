@@ -1,4 +1,5 @@
 import { apiFailure, type ModelsApi } from './modelsApi';
+import { installRuntimeUntilSettled, runtimeIsRunning } from './runtimeLifecycle';
 import type { AgentBackend, AgentSupply, RuntimeDependency } from './types';
 
 export type GatewayAdoptionFailure = {
@@ -11,9 +12,6 @@ export type GatewayAdoptionFailure = {
 export type GatewayAdoptionResult =
   | { ok: true; agent: AgentSupply; runtime: RuntimeDependency | null }
   | { ok: false; failure: GatewayAdoptionFailure; runtime: RuntimeDependency | null };
-
-const running = (runtime: RuntimeDependency): boolean =>
-  runtime.status.health === 'ok' || runtime.status.health === 'degraded';
 
 const classifiedFailure = (
   error: unknown,
@@ -44,12 +42,13 @@ const backendRow = (agents: AgentSupply[], backend: AgentBackend): AgentSupply |
 
 /**
  * Reconciles before every attempt, so retry resumes at the first unproven step.
- * The contracted start route is the only runtime mutation: no install endpoint
- * is invented for G-10's client-side installing state.
+ * Installation, startup, and mode adoption are separate proven steps. A retry
+ * resumes at the first step the server state has not already confirmed.
  */
 export async function resumeGatewayAdoption(
-  api: Pick<ModelsApi, 'listAgents' | 'getRuntimeStatus' | 'startRuntime' | 'setAgentMode'>,
+  api: Pick<ModelsApi, 'listAgents' | 'getRuntimeStatus' | 'installRuntime' | 'startRuntime' | 'setAgentMode'>,
   backend: AgentBackend,
+  installPollIntervalMs = 2_000,
 ): Promise<GatewayAdoptionResult> {
   let agents: AgentSupply[];
   try {
@@ -75,33 +74,44 @@ export async function resumeGatewayAdoption(
     return readFailure(error, 'GET /api/models/runtime/status');
   }
 
-  if (!running(runtime)) {
-    const startedMissing = runtime.status.health === 'not_installed';
+  if (runtime.status.health === 'not_installed' || runtime.status.health === 'installing') {
+    const installed = await installRuntimeUntilSettled(
+      api,
+      () => {},
+      installPollIntervalMs,
+      runtime.status.health === 'installing' ? runtime : undefined,
+    );
+    if (installed.runtime) runtime = installed.runtime;
+    if (installed.failed) {
+      return {
+        ok: false,
+        failure: { step: 'install', reason: 'unknown' },
+        runtime: installed.runtime ?? runtime,
+      };
+    }
+  }
+
+  if (!runtimeIsRunning(runtime)) {
     try {
       runtime = await api.startRuntime();
     } catch (error) {
       const observed = await api.getRuntimeStatus().catch(() => null);
-      if (observed && running(observed)) {
+      if (observed && runtimeIsRunning(observed)) {
         runtime = observed;
       } else {
-        const stillMissing = observed?.status.health === 'not_installed' || (!observed && startedMissing);
         return {
           ok: false,
-          failure: stillMissing
-            ? { step: 'install', reason: classifiedFailure(error, 'install').reason }
-            : classifiedFailure(error, 'start', 'POST /api/models/runtime/start'),
+          failure: classifiedFailure(error, 'start', 'POST /api/models/runtime/start'),
           runtime: observed ?? runtime,
         };
       }
     }
   }
 
-  if (!running(runtime)) {
+  if (!runtimeIsRunning(runtime)) {
     return {
       ok: false,
-      failure: runtime.status.health === 'not_installed'
-        ? { step: 'install', reason: 'unknown' }
-        : { step: 'start', request: 'POST /api/models/runtime/start', reason: 'notReady' },
+      failure: { step: 'start', request: 'POST /api/models/runtime/start', reason: 'notReady' },
       runtime,
     };
   }

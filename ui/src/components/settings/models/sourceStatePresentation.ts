@@ -20,8 +20,6 @@ type Rule = (state: SourceState, surface: SourceStateSurface, locale: string, no
 
 const STATUS_RULES: Readonly<Record<SourceStatus, Rule>> = {
   active: () => ({
-    // The persisted Source projection does not carry adopted_by (G-20), so an
-    // active credential proves health but not that a configured Route uses it.
     key: 'settings.models.upstream.state.standby',
     textClass: 'text-muted',
     dotClass: 'bg-muted',
@@ -69,8 +67,11 @@ export const sourceStatePresentation = (
   surface: SourceStateSurface,
   locale: string,
   now: number = Date.now(),
-  adoption: { backends: string[]; native: boolean } = { backends: [], native: false },
+  adoption: { known: boolean; backends: string[]; native: boolean } = { known: false, backends: [], native: false },
 ): SourceStatePresentation => {
+  if (state.status === 'active' && !adoption.known) {
+    return { key: null, textClass: 'text-muted', dotClass: 'bg-muted' };
+  }
   if (state.status === 'active' && adoption.backends.length > 0) {
     if (surface === 'detail') {
       return {

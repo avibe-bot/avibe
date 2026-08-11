@@ -19,6 +19,7 @@ const runtime = (health: RuntimeDependency['status']['health']): RuntimeDependen
 const api = (overrides: Partial<Parameters<typeof resumeGatewayAdoption>[0]> = {}) => ({
   listAgents: vi.fn().mockResolvedValue([agent('direct')]),
   getRuntimeStatus: vi.fn().mockResolvedValue(runtime('ok')),
+  installRuntime: vi.fn().mockResolvedValue(runtime('not_started')),
   startRuntime: vi.fn().mockResolvedValue(runtime('ok')),
   setAgentMode: vi.fn().mockResolvedValue(agent('hub')),
   ...overrides,
@@ -53,19 +54,33 @@ describe('resumeGatewayAdoption', () => {
     expect(client.setAgentMode).toHaveBeenCalledWith('claude', 'hub');
   });
 
-  it('keeps an uninstalled failure in the install step and never sends the mode PATCH', async () => {
+  it('installs, starts, and switches in the order of the first unproven step', async () => {
+    const calls: string[] = [];
     const client = api({
       getRuntimeStatus: vi.fn().mockResolvedValue(runtime('not_installed')),
-      startRuntime: vi.fn().mockRejectedValue(new TypeError('network')),
+      installRuntime: vi.fn().mockImplementation(async () => { calls.push('install'); return runtime('not_started'); }),
+      startRuntime: vi.fn().mockImplementation(async () => { calls.push('start'); return runtime('ok'); }),
+      setAgentMode: vi.fn().mockImplementation(async () => { calls.push('mode'); return agent('hub'); }),
+    });
+
+    await expect(resumeGatewayAdoption(client, 'claude', 0)).resolves.toMatchObject({ ok: true });
+
+    expect(calls).toEqual(['install', 'start', 'mode']);
+  });
+
+  it('keeps a terminal install failure in the install step and never sends the mode PATCH', async () => {
+    const client = api({
+      getRuntimeStatus: vi.fn().mockResolvedValue(runtime('not_installed')),
+      installRuntime: vi.fn().mockResolvedValue(runtime('not_installed')),
     });
 
     await expect(resumeGatewayAdoption(client, 'claude')).resolves.toEqual({
       ok: false,
-      failure: { step: 'install', reason: 'transport' },
+      failure: { step: 'install', reason: 'unknown' },
       runtime: runtime('not_installed'),
     });
 
-    expect(client.getRuntimeStatus).toHaveBeenCalledTimes(2);
+    expect(client.startRuntime).not.toHaveBeenCalled();
     expect(client.setAgentMode).not.toHaveBeenCalled();
   });
 

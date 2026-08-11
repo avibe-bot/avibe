@@ -24,7 +24,7 @@ import { agentsWithEcho, createLatestAsyncAuthority, createPendingWrites, mapWit
 import { emptyFeed, feedAfterHeadRead, feedAfterTailRead, feedTailCursor, type EventFeed } from './eventFeed';
 import { modelsApi, type SourceCreated } from './modelsApi';
 import { modelChainKey, modelChainRequests, type ModelChainIndex } from './modelRows';
-import { pollRuntimeStatus, startRuntimeWithStatusRefresh } from './runtimeLifecycle';
+import { pollRuntimeStatus, runtimeHasInstallAsset, startRuntimeWithStatusRefresh } from './runtimeLifecycle';
 import { backendVisual } from './vendorMeta';
 import type { AdoptedBy, AgentBackend, AgentSupply, ResolutionEvent, RuntimeDependency, Source } from './types';
 
@@ -84,7 +84,7 @@ export const RuntimePill: React.FC<{
 }> = ({ runtime, statusUnread, starting, onStart, onInstall }) => {
   const { t } = useTranslation();
   const health = statusUnread ? 'down' : runtime?.status.health ?? 'down';
-  const canInstall = health === 'not_installed' && Boolean(runtime?.manifest.assets.length);
+  const canInstall = health === 'not_installed' && Boolean(runtime && runtimeHasInstallAsset(runtime));
   const key = starting
     ? 'starting'
     : health === 'installing'
@@ -160,20 +160,23 @@ const DirectHome: React.FC<{ agents: AgentSupply[]; onSwitch: (agent: AgentSuppl
     <div className="model-hub-direct">
       <div className="model-hub-direct-grid grid">
         <section className="model-hub-direct-card overflow-hidden border border-border bg-surface">
-          <div className="model-hub-direct-head flex items-center justify-between gap-3 border-b border-border px-5 py-3">
+          <div className="model-hub-direct-head flex items-center gap-3 border-b border-border px-5 py-3">
             <div><h2 className="text-[16px] font-bold text-foreground">{t('settings.models.direct.card.current')}</h2><p className="mt-1 text-[11.5px] text-muted">{t('settings.models.direct.card.current.sub')}</p></div>
-            <span className="model-hub-direct-kind-pill rounded-full border px-2.5 py-1 text-[10px] font-semibold">{t('settings.models.direct.pill.direct')}</span>
           </div>
           <div className="model-hub-direct-content flex flex-col">
             {agents.map((agent) => {
               const { Icon } = backendVisual(agent.backend);
               return (
-                <div key={agent.backend} className="model-hub-direct-row flex flex-col gap-2.5 bg-background px-3 py-3 sm:h-16 sm:flex-row sm:items-center sm:justify-between sm:py-0">
-                  <div className="flex min-w-0 items-center gap-2.5">
-                    <span className="model-hub-direct-tile flex size-[34px] shrink-0 items-center justify-center rounded-[9px]"><Icon className="size-[17px]" /></span>
-                    <span><span className="block text-[13.5px] font-semibold text-foreground">{t(`settings.models.backends.${agent.backend}`, { defaultValue: agent.backend })}</span><span className="mt-0.5 block truncate text-[11px] text-muted" title={t(`settings.models.direct.backend.${agent.backend}.detail`) as string}>{t(`settings.models.direct.backend.${agent.backend}.detail`)}</span></span>
-                  </div>
-                  <Button variant="secondary" size="sm" className="h-auto rounded-lg px-3 py-[9px] text-[11.5px] font-bold" onClick={() => onSwitch(agent)}>{t('settings.models.direct.action.switchToGateway')}</Button>
+                <div key={agent.backend} className="model-hub-direct-row model-hub-direct-row--backend flex flex-wrap items-center gap-2.5 bg-background px-3 sm:flex-nowrap">
+                  <span className="model-hub-direct-tile flex size-[34px] shrink-0 items-center justify-center rounded-[9px]"><Icon className="size-[17px]" /></span>
+                  <span className="model-hub-direct-backend-copy">
+                    <span className="flex min-w-0 items-center gap-1.5">
+                      <span className="model-hub-direct-backend-name truncate text-foreground">{t(`settings.models.backends.${agent.backend}`, { defaultValue: agent.backend })}</span>
+                      <span className="model-hub-direct-kind-pill shrink-0 rounded-full border px-2 py-[3px] text-[10.5px] font-semibold">{t('settings.models.direct.pill.direct')}</span>
+                    </span>
+                    <span className="model-hub-direct-backend-detail truncate" title={t(`settings.models.direct.backend.${agent.backend}.detail`) as string}>{t(`settings.models.direct.backend.${agent.backend}.detail`)}</span>
+                  </span>
+                  <Button variant="secondary" size="sm" className="model-hub-direct-switch h-auto rounded-lg px-3 py-[9px] text-[11.5px] font-bold" onClick={() => onSwitch(agent)}>{t('settings.models.direct.action.switchToGateway')}</Button>
                 </div>
               );
             })}
@@ -181,7 +184,7 @@ const DirectHome: React.FC<{ agents: AgentSupply[]; onSwitch: (agent: AgentSuppl
         </section>
         <section className="model-hub-direct-card overflow-hidden border border-border bg-surface">
           <div className="model-hub-direct-head flex items-center border-b border-border px-5 py-3"><h2 className="text-[16px] font-bold text-foreground">{t('settings.models.direct.benefits.title')}</h2></div>
-          <div className="model-hub-direct-content flex flex-col">{(['1', '2', '3'] as const).map((key) => <div key={key} className="model-hub-direct-row flex gap-2.5 bg-background px-3 py-[11px]"><span className="model-hub-ink-mint grid size-5 shrink-0 place-items-center rounded-full bg-mint-soft text-[10.5px] font-bold">{key}</span><span><span className="block text-[12.5px] font-semibold text-foreground">{t(`settings.models.direct.benefits.${key}`)}</span><span className="mt-1 block text-[11px] leading-relaxed text-muted">{t(`settings.models.direct.benefits.${key}.detail`)}</span></span></div>)}</div>
+          <div className="model-hub-direct-content flex flex-col">{(['1', '2', '3'] as const).map((key) => <div key={key} className="model-hub-direct-row flex items-start gap-2.5 bg-background px-3 py-[11px]"><span className="model-hub-ink-mint grid size-5 shrink-0 place-items-center rounded-full bg-mint-soft text-[10.5px] font-bold">{key}</span><span className="model-hub-direct-benefit-copy"><span className="model-hub-direct-benefit-title-row flex items-center gap-1.5"><span className="text-[12.5px] font-semibold text-foreground">{t(`settings.models.direct.benefits.${key}`)}</span></span><span className="model-hub-direct-benefit-detail">{t(`settings.models.direct.benefits.${key}.detail`)}</span></span></div>)}</div>
         </section>
       </div>
       <p className="model-hub-direct-note flex items-center justify-center border text-center text-[11.5px]">{t('settings.models.direct.note.perBackend')}</p>

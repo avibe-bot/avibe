@@ -6,6 +6,49 @@
 import type { ModelsApi } from './modelsApi';
 import type { RuntimeDependency } from './types';
 
+const runtimeIsInstalled = (runtime: RuntimeDependency): boolean =>
+  runtime.status.health !== 'not_installed' && runtime.status.health !== 'installing';
+
+export const runtimeIsRunning = (runtime: RuntimeDependency): boolean =>
+  runtime.status.health === 'ok' || runtime.status.health === 'degraded';
+
+export const runtimeHasInstallAsset = (runtime: RuntimeDependency): boolean => {
+  const host = runtime.host_platform;
+  return runtime.manifest.assets.some((asset) => host == null || asset.platform === host);
+};
+
+const waitForPoll = (intervalMs: number): Promise<void> => new Promise((resolve) => {
+  globalThis.setTimeout(resolve, intervalMs);
+});
+
+export async function installRuntimeUntilSettled(
+  api: Pick<ModelsApi, 'installRuntime' | 'getRuntimeStatus'>,
+  onRuntime: (runtime: RuntimeDependency) => void = () => {},
+  intervalMs = 2_000,
+  initialRuntime?: RuntimeDependency,
+): Promise<{ runtime: RuntimeDependency | null; failed: boolean }> {
+  let runtime: RuntimeDependency | null = initialRuntime ?? null;
+  if (!runtime) {
+    try {
+      runtime = await api.installRuntime();
+    } catch {
+      // The install request is not safe to repeat until supervisor state proves
+      // it did not start. Reconcile the authoritative state first.
+      runtime = await api.getRuntimeStatus().catch(() => null);
+    }
+  }
+
+  if (!runtime) return { runtime: null, failed: true };
+  onRuntime(runtime);
+  while (runtime.status.health === 'installing') {
+    await waitForPoll(intervalMs);
+    runtime = await api.getRuntimeStatus().catch(() => null);
+    if (!runtime) return { runtime: null, failed: true };
+    onRuntime(runtime);
+  }
+  return { runtime, failed: !runtimeIsInstalled(runtime) };
+}
+
 export async function startRuntimeWithStatusRefresh(
   api: Pick<ModelsApi, 'startRuntime' | 'getRuntimeStatus'>,
 ): Promise<{ runtime: RuntimeDependency | null; failed: boolean }> {
