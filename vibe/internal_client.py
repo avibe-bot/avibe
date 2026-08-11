@@ -733,7 +733,7 @@ async def cancel_dispatch(
         ) as client:
             resp = await client.post(
                 f"/internal/cancel/{session_id}",
-                params={"run_id": run_id} if run_id else None,
+                params={"run_id": run_id} if run_id is not None else None,
             )
     except _SOCKET_ERRORS as exc:
         raise InternalServerUnavailable(str(exc)) from exc

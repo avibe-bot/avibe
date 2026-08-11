@@ -5293,8 +5293,8 @@ def test_run_cancel_keeps_a_sole_starting_owner_attached(monkeypatch, tmp_path):
     assert delivery is not None and delivery["state"] == "claimed"
 
 
-def test_run_cancel_does_not_own_a_shared_starting_batch(monkeypatch, tmp_path):
-    """Other claimed inputs keep a starting batch shared."""
+def test_run_cancel_preserves_shared_starting_batch_siblings(monkeypatch, tmp_path):
+    """Detaching one claimed Run replays every surviving batch participant."""
 
     from core.scheduled_tasks import TaskExecutionStore
     from storage.background import attach_agent_run_delivery_in_connection
@@ -5305,12 +5305,15 @@ def test_run_cancel_does_not_own_a_shared_starting_batch(monkeypatch, tmp_path):
         native_id="proj_shared_starting_run_cancel",
     )
     request_store = TaskExecutionStore()
-    owner_run = request_store.enqueue_agent_run(
-        session_id=session["id"],
-        message="one batch participant",
-        agent_name="worker",
-    )
-    assert request_store.claim(owner_run.id) is not None
+    runs = [
+        request_store.enqueue_agent_run(
+            session_id=session["id"],
+            message=message,
+            agent_name="worker",
+        )
+        for message in ("canceled batch participant", "surviving batch participant")
+    ]
+    assert all(request_store.claim(run.id) is not None for run in runs)
 
     with engine.begin() as conn:
         deliveries = [
@@ -5320,7 +5323,7 @@ def test_run_cancel_does_not_own_a_shared_starting_batch(monkeypatch, tmp_path):
                 session_id=session["id"],
                 text=text,
             )
-            for text in ("one batch participant", "another batch participant")
+            for text in ("canceled batch participant", "surviving batch participant")
         ]
         turn_id = message_deliveries.new_turn_id()
         claimed = message_deliveries.claim_start_batch(
@@ -5329,19 +5332,74 @@ def test_run_cancel_does_not_own_a_shared_starting_batch(monkeypatch, tmp_path):
             session_id=session["id"],
             backend="claude",
             deliveries=deliveries,
-            dispatch_text="one batch participant\n\nanother batch participant",
+            dispatch_text="canceled batch participant\n\nsurviving batch participant",
         )
-        assert attach_agent_run_delivery_in_connection(
-            conn,
-            owner_run.id,
-            session_id=session["id"],
-            delivery_id=str(claimed["deliveries"][0]["id"]),
-        )
+        for run, delivery in zip(runs, claimed["deliveries"], strict=True):
+            assert attach_agent_run_delivery_in_connection(
+                conn,
+                run.id,
+                session_id=session["id"],
+                delivery_id=str(delivery["id"]),
+            )
         assert message_deliveries.agent_run_exclusively_owns_turn(
             conn,
-            run_id=owner_run.id,
+            run_id=runs[0].id,
             turn_id=turn_id,
         ) == (False, "turn_has_other_participants")
+
+    controller = _build_controller_double()
+    app = internal_server.create_app(controller)
+    manager = controller.session_turns
+    transport = httpx.ASGITransport(app=app)
+    dispatched: list[str] = []
+
+    async def _record_start(_session_id, _context, text, **_kwargs):
+        dispatched.append(text)
+
+    monkeypatch.setattr(manager, "_run", _record_start)
+
+    async def _go():
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            response = await client.post(
+                f"/internal/cancel/{session['id']}",
+                params={"run_id": runs[0].id},
+            )
+        started_original = await manager._start_persisted_turn(
+            turn_id,
+            context=MessageContext(
+                user_id="workbench",
+                channel_id=session["id"],
+                platform="avibe",
+                platform_specific={"workbench_session_id": session["id"]},
+            ),
+        )
+        return response, started_original
+
+    response, started_original = asyncio.run(_go())
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "run_detached"
+    assert started_original is False
+    assert dispatched == ["surviving batch participant"]
+    assert request_store.get_run(runs[0].id)["status"] == "canceled"
+    assert request_store.get_run(runs[1].id)["status"] == "running"
+    with engine.connect() as conn:
+        original = message_deliveries.get_turn(conn, turn_id)
+        canceled = message_deliveries.get_delivery(
+            conn,
+            str(claimed["deliveries"][0]["id"]),
+        )
+        surviving = message_deliveries.get_delivery(
+            conn,
+            str(claimed["deliveries"][1]["id"]),
+        )
+    assert original is not None and original["terminal_outcome"] == "not_written"
+    assert canceled is not None and canceled["state"] == "retired"
+    assert surviving is not None and surviving["state"] == "claimed"
+    assert surviving["turn_id"] != turn_id
 
 
 def test_run_cancel_rechecks_a_changed_current_turn(monkeypatch, tmp_path):
