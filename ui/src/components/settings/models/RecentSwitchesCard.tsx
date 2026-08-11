@@ -17,6 +17,7 @@ import { useTranslation } from 'react-i18next';
 import { Badge } from '@/components/ui/badge';
 import { Dot } from './chips';
 import { emptyFeed, eventAccent, type EventFeed } from './eventFeed';
+import { localCalendarRelation } from './localCalendar';
 import { regionData, type RegionRead } from './regionRead';
 import type { ResolutionEvent, Source } from './types';
 
@@ -30,12 +31,10 @@ function useEventTime() {
     const now = new Date();
     const hh = String(d.getHours()).padStart(2, '0');
     const mm = String(d.getMinutes()).padStart(2, '0');
-    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-    const dayMs = 86_400_000;
-    const dayDiff = Math.floor((startOfToday - new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()) / dayMs);
+    const relation = localCalendarRelation(d, now);
     let day: string;
-    if (dayDiff === 0) day = t('settings.models.recent.today') as string;
-    else if (dayDiff === 1) day = t('settings.models.recent.yesterday') as string;
+    if (relation === 'today') day = t('settings.models.recent.today') as string;
+    else if (relation === 'yesterday') day = t('settings.models.recent.yesterday') as string;
     else day = `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
     return `${day} ${hh}:${mm}`;
   };

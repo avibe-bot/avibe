@@ -215,7 +215,9 @@ describe('the page reads the feed through this owner', () => {
     // the same Promise.all, one failing leg left repaired sources and the ● 当前
     // the user just moved on screen as they were before the mutation.
     expect(page).toMatch(/Promise\.all\([\s\S]*?readRegion\(\(\) => modelsApi\.listEvents\(EVENT_PAGE\)\)/);
-    expect(page).toMatch(/createLatestAsyncAuthority<SurfaceLanding>/);
+    expect(page).toMatch(/createLatestAsyncAuthority<AuthorizedSurfaceLanding>/);
+    expect(page).toMatch(/sourceEntityAuthority\.beginSnapshot\(\)/);
+    expect(page).toMatch(/sourceEntityAuthority\.settleSnapshot\(sourceSnapshot, landing\.sources\.data\)/);
     // Region reads also settle independently: a failed source list cannot erase
     // a successful backend projection, and vice versa.
     expect(page).toMatch(/sources: RegionRead<Source\[\]>/);

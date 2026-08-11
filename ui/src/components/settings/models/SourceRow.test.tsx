@@ -28,12 +28,11 @@ describe('SourceRow', () => {
     expect(screen.queryByText(/latency/i)).toBeNull();
   });
 
-  it('uses response-scoped adoption to name an active supplying source', () => {
+  it('uses the authoritative Source adoption to name an active supplying source', () => {
     render(
       <I18nextProvider i18n={i18n}>
         <SourceRow
-          source={{ ...source, supply_channel: 'native_cli', state: { ...source.state, status: 'active' } }}
-          adoptedBy={[{ backend: 'claude', menu_model: 'claude-opus-4-6' }]}
+          source={{ ...source, supply_channel: 'native_cli', state: { ...source.state, status: 'active' }, adopted_by: [{ backend: 'claude', menu_model: 'claude-opus-4-6' }] }}
           onOpen={vi.fn()}
         />
       </I18nextProvider>,

@@ -1,6 +1,7 @@
 import { modelChainKey, type ModelChainIndex } from './modelRows';
+import { agentHasLiveChainProjection } from './runtimeLifecycle';
 import { isTakeoverChain } from './takeover';
-import type { AgentBackend, AgentSupply, Source } from './types';
+import type { AgentBackend, AgentSupply, RuntimeDependency, Source } from './types';
 
 export type SupplyRelationKind = 'native' | 'gateway' | 'connected_unused' | 'takeover' | 'unavailable';
 
@@ -35,11 +36,12 @@ export function buildSupplyRelations(
   agents: AgentSupply[],
   sources: Source[],
   chains: ModelChainIndex,
+  runtime: RuntimeDependency | null,
 ): SupplyRelation[] {
   const sourceById = new Map(sources.map((source) => [source.id, source]));
   const relations: SupplyRelation[] = [];
   for (const agent of agents) {
-    if (agent.mode !== 'hub') continue;
+    if (!agentHasLiveChainProjection(runtime, agent)) continue;
     const sourceIds = new Set(
       Object.values(agent.routes ?? {}).flatMap((route) => route.hops.map((hop) => hop.source_id)),
     );

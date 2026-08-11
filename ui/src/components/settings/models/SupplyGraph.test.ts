@@ -1,8 +1,19 @@
 import { describe, expect, it } from 'vitest';
 
 import { modelChainKey } from './modelRows';
-import { buildSupplyRelations } from './supplyRelations';
-import type { AgentChain, AgentSupply, Source } from './types';
+import { buildSupplyRelations as buildRelations } from './supplyRelations';
+import type { AgentChain, AgentSupply, RuntimeDependency, Source } from './types';
+
+const runtime: RuntimeDependency = {
+  contract_version: 5,
+  manifest: { name: 'cliproxyapi', version: '1.0.0', source_sha: 'fixture', assets: [] },
+  status: { installed_version: '1.0.0', verified: true, listening: null, health: 'ok', last_check: null },
+};
+const buildSupplyRelations = (
+  agents: AgentSupply[],
+  sources: Source[],
+  chains: Parameters<typeof buildRelations>[2],
+) => buildRelations(agents, sources, chains, runtime);
 
 const source = (id: string, channel: Source['supply_channel'], status: Source['state']['status'] = 'active'): Source => ({
   id,
@@ -78,5 +89,7 @@ describe('buildSupplyRelations', () => {
     const sources = [source('native', 'native_cli', 'cooldown'), source('relay', 'hub'), source('unused', 'hub')];
     expect(buildSupplyRelations([agent], sources, {} )[0]?.kind).toBe('unavailable');
     expect(buildSupplyRelations([{ ...agent, mode: 'direct', routes: null, sources: null }], sources, {})).toEqual([]);
+    const stopped = { ...runtime, status: { ...runtime.status, health: 'not_started' as const } };
+    expect(buildRelations([agent], sources, {}, stopped)).toEqual([]);
   });
 });

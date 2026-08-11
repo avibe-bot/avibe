@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import * as React from 'react';
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -7,6 +9,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { ToastProvider } from '@/context/ToastProvider';
 import i18n from '@/i18n';
+import { createPendingWrites } from './asyncLifetime';
 import { modelsApi } from './modelsApi';
 import { GuardGapList, SourceDetailPanel } from './SourceDetailPanel';
 import type { Source } from './types';
@@ -25,15 +28,31 @@ const source: Source = {
   models: [{ id: 'model-a', display_name: null, provenance: 'manual', reasoning_efforts: ['high'] }],
 };
 
-const renderPanel = (adoptedBy: React.ComponentProps<typeof SourceDetailPanel>['adoptedBy'] = undefined) => render(
+const deferred = <T,>() => {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
+};
+
+const immediateTrack = async <T,>(work: () => Promise<T>): Promise<T> => work();
+const serializedTrack = () => {
+  const writes = createPendingWrites(() => {});
+  return async <T,>(work: () => Promise<T>): Promise<T> => {
+    let result!: T;
+    await writes.track(source.id, async () => { result = await work(); });
+    return result;
+  };
+};
+
+const renderPanel = (adoptedBy: Source['adopted_by'] = undefined) => render(
   <ToastProvider>
     <I18nextProvider i18n={i18n}>
-      <SourceDetailPanel source={source} adoptedBy={adoptedBy} onMutation={vi.fn().mockResolvedValue(undefined)} onGone={vi.fn().mockResolvedValue(undefined)} />
+      <SourceDetailPanel source={{ ...source, adopted_by: adoptedBy }} onMutation={vi.fn().mockResolvedValue(undefined)} onGone={vi.fn().mockResolvedValue(undefined)} trackMutation={immediateTrack} />
     </I18nextProvider>
   </ToastProvider>,
 );
 
-const EchoPanel: React.FC<{ reconcile?: () => Promise<void> | void }> = ({ reconcile = vi.fn() }) => {
+const EchoPanel: React.FC<{ reconcile?: () => Promise<void> | void; trackMutation?: typeof immediateTrack }> = ({ reconcile = vi.fn(), trackMutation = immediateTrack }) => {
   const [current, setCurrent] = React.useState<Source | null>(source);
   const onMutation = async (echoed?: Source) => {
     if (echoed) setCurrent(echoed);
@@ -44,14 +63,14 @@ const EchoPanel: React.FC<{ reconcile?: () => Promise<void> | void }> = ({ recon
     await reconcile();
   };
   return current
-    ? <SourceDetailPanel source={current} onMutation={onMutation} onGone={onGone} />
+    ? <SourceDetailPanel source={current} onMutation={onMutation} onGone={onGone} trackMutation={trackMutation} />
     : <p data-testid="source-gone">Source gone</p>;
 };
 
-const renderEchoPanel = (reconcile = vi.fn()) => render(
+const renderEchoPanel = (reconcile = vi.fn(), trackMutation = immediateTrack) => render(
   <ToastProvider>
     <I18nextProvider i18n={i18n}>
-      <EchoPanel reconcile={reconcile} />
+      <EchoPanel reconcile={reconcile} trackMutation={trackMutation} />
     </I18nextProvider>
   </ToastProvider>,
 );
@@ -76,7 +95,7 @@ describe('SourceDetailPanel', () => {
   });
 
   it('omits native refetch because that channel has no stored discovery credential', () => {
-    render(<I18nextProvider i18n={i18n}><SourceDetailPanel source={{ ...source, kind: 'subscription', supply_channel: 'native_cli' }} onMutation={vi.fn().mockResolvedValue(undefined)} onGone={vi.fn().mockResolvedValue(undefined)} /></I18nextProvider>);
+    render(<I18nextProvider i18n={i18n}><SourceDetailPanel source={{ ...source, kind: 'subscription', supply_channel: 'native_cli' }} onMutation={vi.fn().mockResolvedValue(undefined)} onGone={vi.fn().mockResolvedValue(undefined)} trackMutation={immediateTrack} /></I18nextProvider>);
     expect(screen.queryByRole('button', { name: /^Refetch$|^重新拉取$/i })).toBeNull();
   });
 
@@ -120,6 +139,66 @@ describe('SourceDetailPanel', () => {
     expect(await screen.findByText('model-b')).toBeTruthy();
     expect(refresh).toHaveBeenCalledOnce();
     expect(reconcile).toHaveBeenCalledOnce();
+  });
+
+  it('serializes a tier write and a refetch for the same Source', async () => {
+    const tierResponse = deferred<Source>();
+    const update = vi.spyOn(modelsApi, 'updateModelReasoningEfforts').mockReturnValueOnce(tierResponse.promise);
+    const refreshed = {
+      ...source,
+      models: [...source.models, { id: 'model-b', display_name: null, provenance: 'discovered' as const, reasoning_efforts: [] }],
+    };
+    const refetch = vi.spyOn(modelsApi, 'refreshSource').mockResolvedValueOnce({ source: refreshed, discovered: refreshed.models.length });
+    renderEchoPanel(vi.fn(), serializedTrack());
+
+    await userEvent.click(screen.getByRole('button', { name: /high/i }));
+    await userEvent.type(screen.getByPlaceholderText(/Enter to add|回车添加/i), 'low{Enter}');
+    await waitFor(() => expect(update).toHaveBeenCalledOnce());
+    await userEvent.click(screen.getByRole('button', { name: /^Refetch$|^重新拉取$/i }));
+    expect(refetch).not.toHaveBeenCalled();
+
+    tierResponse.resolve({
+      ...source,
+      models: [{ ...source.models[0], reasoning_efforts: ['high', 'low'] }],
+    });
+    await waitFor(() => expect(refetch).toHaveBeenCalledOnce());
+    expect(await screen.findByText('model-b')).toBeTruthy();
+  });
+
+  it('orders every full-Source mutation family through the same Source queue', async () => {
+    const writes = createPendingWrites(() => {});
+    const started: string[] = [];
+    const gates = ['tier', 'refetch', 'add', 'remove'].map(() => deferred<void>());
+    const runs = ['tier', 'refetch', 'add', 'remove'].map((name, index) => writes.track(source.id, async () => {
+      started.push(name);
+      await gates[index].promise;
+    }));
+
+    await waitFor(() => expect(started).toEqual(['tier']));
+    for (let index = 0; index < gates.length; index += 1) {
+      gates[index].resolve();
+      await waitFor(() => expect(started).toEqual(['tier', 'refetch', 'add', 'remove'].slice(0, index + 2)));
+    }
+    await Promise.all(runs);
+  });
+
+  it('routes every full-Source mutation family through the shared per-Source queue', () => {
+    const detail = readFileSync(join(process.cwd(), 'src/components/settings/models/SourceDetailPanel.tsx'), 'utf8');
+    expect(detail).toMatch(/const refetch = \(force = false\) => trackMutation/);
+    expect(detail).toMatch(/const addManualModel = \(\) => trackMutation/);
+    expect(detail).toMatch(/const remove = \(model: SuppliedModel, force = false\) => trackMutation/);
+    expect(detail).toMatch(/const commit = async[\s\S]*return trackMutation\(async \(\) =>/);
+  });
+
+  it('keeps Source entities behind one generation authority without an adoption side cache', () => {
+    const page = readFileSync(join(process.cwd(), 'src/components/settings/models/SettingsModelsPage.tsx'), 'utf8');
+    const sourceRow = readFileSync(join(process.cwd(), 'src/components/settings/models/SourceRow.tsx'), 'utf8');
+    expect(page).toMatch(/createLatestEntityAuthorityByKey/);
+    expect(page).toMatch(/sourceEntityAuthority\.beginSnapshot\(\)/);
+    expect(page).toMatch(/sourceEntityAuthority\.settleSnapshot/);
+    expect(page).toMatch(/trackSourceMutation/);
+    expect(`${page}\n${sourceRow}`).not.toMatch(/adoptionBySource/);
+    expect(sourceRow).toMatch(/source\.adopted_by/);
   });
 
   it('applies the manual-create Source echo without waiting for a collection read', async () => {
@@ -196,7 +275,7 @@ describe('SourceDetailPanel', () => {
     const remove = vi.spyOn(modelsApi, 'deleteCustomModel').mockRejectedValueOnce(new TypeError('response lost'));
     const list = vi.spyOn(modelsApi, 'listSources').mockResolvedValueOnce([{ ...source, models: [] }]);
     const onMutation = vi.fn().mockResolvedValue(undefined);
-    render(<I18nextProvider i18n={i18n}><SourceDetailPanel source={source} onMutation={onMutation} onGone={vi.fn().mockResolvedValue(undefined)} /></I18nextProvider>);
+    render(<I18nextProvider i18n={i18n}><SourceDetailPanel source={source} onMutation={onMutation} onGone={vi.fn().mockResolvedValue(undefined)} trackMutation={immediateTrack} /></I18nextProvider>);
 
     await userEvent.click(screen.getByRole('button', { name: /Remove model-a|移除 model-a/i }));
     await userEvent.click(screen.getByRole('menuitem', { name: /^Remove$|^移除$/i }));
@@ -241,7 +320,7 @@ describe('SourceDetailPanel', () => {
     const remove = vi.spyOn(modelsApi, 'deleteCustomModel').mockRejectedValueOnce(new TypeError('response lost'));
     vi.spyOn(modelsApi, 'listSources').mockResolvedValueOnce([]);
     const onGone = vi.fn().mockResolvedValue(undefined);
-    render(<I18nextProvider i18n={i18n}><SourceDetailPanel source={source} onMutation={vi.fn().mockResolvedValue(undefined)} onGone={onGone} /></I18nextProvider>);
+    render(<I18nextProvider i18n={i18n}><SourceDetailPanel source={source} onMutation={vi.fn().mockResolvedValue(undefined)} onGone={onGone} trackMutation={immediateTrack} /></I18nextProvider>);
 
     await userEvent.click(screen.getByRole('button', { name: /Remove model-a|移除 model-a/i }));
     await userEvent.click(screen.getByRole('menuitem', { name: /^Remove$|^移除$/i }));

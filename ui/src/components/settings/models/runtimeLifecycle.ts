@@ -4,13 +4,18 @@
 // failed start. Pure of React so the contract is unit-testable
 // (see RuntimeNotStartedAction.test.tsx).
 import type { ModelsApi } from './modelsApi';
-import type { RuntimeDependency } from './types';
+import type { AgentSupply, RuntimeDependency } from './types';
 
 const runtimeIsInstalled = (runtime: RuntimeDependency): boolean =>
   runtime.status.health !== 'not_installed' && runtime.status.health !== 'installing';
 
 export const runtimeIsRunning = (runtime: RuntimeDependency): boolean =>
   runtime.status.health === 'ok' || runtime.status.health === 'degraded';
+
+export const agentHasLiveChainProjection = (
+  runtime: RuntimeDependency | null,
+  agent: AgentSupply,
+): boolean => runtime !== null && runtimeIsRunning(runtime) && agent.mode === 'hub';
 
 export const runtimeHasInstallAsset = (runtime: RuntimeDependency): boolean => {
   const host = 'host_platform' in runtime && typeof runtime.host_platform === 'string'

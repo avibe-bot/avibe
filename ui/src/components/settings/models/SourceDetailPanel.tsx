@@ -13,7 +13,9 @@ import { reconcileUnknownWrite } from './reconcileUnknownWrite';
 import { sourceStatePresentation } from './sourceStatePresentation';
 import { useDeadlineClock } from './useDeadlineClock';
 import { ACCENT_ICON, ACCENT_TILE, isCustomEndpoint, sourceVisual } from './vendorMeta';
-import type { AdoptedBy, RouteHopRef, Source, SuppliedModel, SupplyGap } from './types';
+import type { RouteHopRef, Source, SuppliedModel, SupplyGap } from './types';
+
+type TrackMutation = <T>(work: () => Promise<T>) => Promise<T>;
 
 const ManualModelMenu: React.FC<{
   model: SuppliedModel;
@@ -79,7 +81,8 @@ const TierEditor: React.FC<{
   onMutating: () => void;
   onMutation: (source?: Source) => Promise<void>;
   onGone: (sourceId: string, sources?: Source[]) => Promise<void>;
-}> = ({ source, model, onMutating, onMutation, onGone }) => {
+  trackMutation: TrackMutation;
+}> = ({ source, model, onMutating, onMutation, onGone, trackMutation }) => {
   const { t } = useTranslation();
   const [tiers, setTiers] = React.useState(model.reasoning_efforts ?? []);
   const [draft, setDraft] = React.useState('');
@@ -90,23 +93,25 @@ const TierEditor: React.FC<{
 
   const commit = async (next: string[]): Promise<boolean> => {
     if (saving) return false;
-    const previous = tiers;
-    onMutating();
-    setFailedNext(null);
-    setTiers(next);
-    setSaving(true);
-    try {
-      const echoed = await modelsApi.updateModelReasoningEfforts(source.id, model.id, next);
-      await onMutation(echoed);
-      return true;
-    } catch (error) {
-      setTiers(previous);
-      setFailedNext(next);
-      if (apiFailure(error)?.code === 'source_not_found') await onGone(source.id);
-      return false;
-    } finally {
-      setSaving(false);
-    }
+    return trackMutation(async () => {
+      const previous = tiers;
+      onMutating();
+      setFailedNext(null);
+      setTiers(next);
+      setSaving(true);
+      try {
+        const echoed = await modelsApi.updateModelReasoningEfforts(source.id, model.id, next);
+        await onMutation(echoed);
+        return true;
+      } catch (error) {
+        setTiers(previous);
+        setFailedNext(next);
+        if (apiFailure(error)?.code === 'source_not_found') await onGone(source.id);
+        return false;
+      } finally {
+        setSaving(false);
+      }
+    });
   };
   const add = async () => {
     const value = draft.trim();
@@ -197,10 +202,10 @@ const DraftTiers: React.FC<{
 
 export const SourceDetailPanel: React.FC<{
   source: Source;
-  adoptedBy?: readonly AdoptedBy[];
   onMutation: (source?: Source) => Promise<void>;
   onGone: (sourceId: string, sources?: Source[]) => Promise<void>;
-}> = ({ source, adoptedBy, onMutation, onGone }) => {
+  trackMutation: TrackMutation;
+}> = ({ source, onMutation, onGone, trackMutation }) => {
   const { t, i18n } = useTranslation();
   const now = useDeadlineClock(source.state.status === 'cooldown' ? source.state.retry_at : null);
   const { Icon, accent } = sourceVisual(source);
@@ -217,7 +222,7 @@ export const SourceDetailPanel: React.FC<{
     if (!failure || (failure.wouldRemoveHops.length === 0 && failure.wouldInterrupt.length === 0)) return null;
     return { hops: failure.wouldRemoveHops, gaps: failure.wouldInterrupt };
   };
-  const refetch = async (force = false) => {
+  const refetch = (force = false) => trackMutation(async () => {
     setResult(null);
     setRefetchFailed(false);
     setBusy(true);
@@ -243,7 +248,7 @@ export const SourceDetailPanel: React.FC<{
     } finally {
       setBusy(false);
     }
-  };
+  });
   const reconcileManualCreate = async (modelId: string) => reconcileUnknownWrite(
     () => modelsApi.listSources(),
     (sources) => {
@@ -258,7 +263,7 @@ export const SourceDetailPanel: React.FC<{
     if (value.kind === 'gone') await onGone(source.id, value.sources);
     else await onMutation(value.source);
   };
-  const addManualModel = async () => {
+  const addManualModel = () => trackMutation(async () => {
     if (!manualDraft || busy) return;
     const modelId = manualDraft.modelId.trim();
     if (!modelId || source.models.some((model) => model.id === modelId)) return;
@@ -308,7 +313,7 @@ export const SourceDetailPanel: React.FC<{
     } finally {
       setBusy(false);
     }
-  };
+  });
   const reconcileRemoval = async (model: SuppliedModel) => {
     const reconciliation = await reconcileUnknownWrite(
       () => modelsApi.listSources(),
@@ -328,7 +333,7 @@ export const SourceDetailPanel: React.FC<{
     }
     setRemoveFailure({ modelId: model.id, retryRead: reconciliation.kind === 'unread' });
   };
-  const remove = async (model: SuppliedModel, force = false) => {
+  const remove = (model: SuppliedModel, force = false) => trackMutation(async () => {
     setResult(null);
     setRefetchFailed(false);
     setRemoveFailure(null);
@@ -347,16 +352,15 @@ export const SourceDetailPanel: React.FC<{
     } finally {
       setBusy(false);
     }
-  };
+  });
   const confirmGuard = () => {
     if (!guard) return;
     if (guard.kind === 'refetch') void refetch(true);
     else void remove(guard.model, guard.hops.length > 0 || guard.gaps.length > 0);
   };
-  const effectiveAdoption = adoptedBy ?? source.adopted_by;
-  const adoptedBackends = [...new Set((effectiveAdoption ?? []).map(({ backend }) => t(`settings.models.backends.${backend}`, { defaultValue: backend }) as string))];
+  const adoptedBackends = [...new Set((source.adopted_by ?? []).map(({ backend }) => t(`settings.models.backends.${backend}`, { defaultValue: backend }) as string))];
   const state = sourceStatePresentation(source.state, 'detail', i18n.language, now, {
-    known: effectiveAdoption !== undefined,
+    known: source.adopted_by !== undefined,
     backends: adoptedBackends,
     native: source.supply_channel === 'native_cli',
   });
@@ -390,13 +394,15 @@ export const SourceDetailPanel: React.FC<{
           <div key={model.id} className="model-hub-source-table-row grid gap-3 border-b border-border last:border-b-0 md:items-center md:gap-y-0">
             <span className="flex min-w-0 items-center gap-2"><span className="model-hub-source-model truncate font-mono text-foreground" title={model.id}>{model.id}</span>{result?.added.includes(model.id) && <span className="model-hub-accent-pill--mint model-hub-source-pill rounded-full border px-2 py-0.5 font-semibold">{t('settings.models.sourceDetail.refetch.added')}</span>}</span>
             <span className="model-hub-source-pill model-hub-source-entry-pill w-fit rounded-full border border-border font-semibold text-muted">{t(`settings.models.sourceDetail.entry.${model.provenance === 'discovered' ? 'auto' : 'manual'}`)}</span>
-            <TierEditor source={source} model={model} onMutating={() => { setResult(null); setRefetchFailed(false); }} onMutation={onMutation} onGone={onGone} />
+            <TierEditor source={source} model={model} onMutating={() => { setResult(null); setRefetchFailed(false); }} onMutation={onMutation} onGone={onGone} trackMutation={trackMutation} />
             <div className="flex items-center justify-end gap-2">
-              {removeFailure?.modelId === model.id && <span className="model-hub-source-tier text-right text-destructive">{t('settings.models.sourceDetail.fail.removeModel')} <button type="button" disabled={busy} onClick={() => void (async () => {
-                if (!removeFailure.retryRead) return remove(model);
-                setBusy(true);
-                try { await reconcileRemoval(model); } finally { setBusy(false); }
-              })()} className="font-semibold underline underline-offset-2">{t('settings.models.sourceDetail.retry')}</button></span>}
+              {removeFailure?.modelId === model.id && <span className="model-hub-source-tier text-right text-destructive">{t('settings.models.sourceDetail.fail.removeModel')} <button type="button" disabled={busy} onClick={() => {
+                if (!removeFailure.retryRead) void remove(model);
+                else void trackMutation(async () => {
+                  setBusy(true);
+                  try { await reconcileRemoval(model); } finally { setBusy(false); }
+                });
+              }} className="font-semibold underline underline-offset-2">{t('settings.models.sourceDetail.retry')}</button></span>}
               {model.provenance === 'manual' && <ManualModelMenu model={model} busy={busy} onRemove={() => void remove(model)} />}
             </div>
           </div>

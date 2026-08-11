@@ -7,9 +7,10 @@ import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { ModelHubInfoHint } from './ModelHubInfoHint';
 import { collapsedModelRows, listedModelIds, modelChainKey, type ModelChainIndex, type ModelChainRead } from './modelRows';
+import { agentHasLiveChainProjection } from './runtimeLifecycle';
 import { currentChainLink, isTakeoverChain } from './takeover';
 import { ACCENT_ICON, ACCENT_TILE, backendVisual } from './vendorMeta';
-import type { AgentSupply, Source } from './types';
+import type { AgentSupply, RuntimeDependency, Source } from './types';
 
 const sourceName = (sources: Source[], id: string): string => sources.find((source) => source.id === id)?.display_name ?? id;
 const currentLink = (read: ModelChainRead | undefined) => read?.kind === 'ready' ? currentChainLink(read.data) : null;
@@ -52,6 +53,7 @@ const ModelRow: React.FC<{
 
 const AgentModelCard: React.FC<{
   agent: AgentSupply;
+  runtime: RuntimeDependency | null;
   sources: Source[];
   chains: ModelChainIndex;
   pending: boolean;
@@ -62,16 +64,17 @@ const AgentModelCard: React.FC<{
   onOpenOrder: (agent: AgentSupply) => void;
   onOpenRoute: (agent: AgentSupply, modelId: string) => void;
   onProbeSettled: (agent: AgentSupply) => void;
-}> = ({ agent, sources, chains, pending, connecting, switchFailed, onConnectHub, onSwitchDirect, onOpenOrder, onOpenRoute, onProbeSettled }) => {
+}> = ({ agent, runtime, sources, chains, pending, connecting, switchFailed, onConnectHub, onSwitchDirect, onOpenOrder, onOpenRoute, onProbeSettled }) => {
   const { t } = useTranslation();
   const { Icon, accent } = backendVisual(agent.backend);
   const [expanded, setExpanded] = React.useState(false);
   const allModels = listedModelIds(agent);
+  const chainProjectionLive = agentHasLiveChainProjection(runtime, agent);
   const collapsed = collapsedModelRows(agent, expanded);
   const collapsedAtRest = collapsedModelRows(agent);
   const models = collapsed.visible;
   const canCollapse = collapsedAtRest.hidden.length > 0;
-  const hasTakeover = agent.mode === 'hub'
+  const hasTakeover = chainProjectionLive
     && allModels.some((modelId) => isTakeoverRead(chains[modelChainKey(agent.backend, modelId)]));
   const modeWord = t(`settings.models.gateway.group.mode.${agent.mode === 'hub' ? 'gateway' : 'direct'}`) as string;
   const health = agent.supply_status ?? 'noSelection';
@@ -118,13 +121,14 @@ const AgentModelCard: React.FC<{
           <ModelHubInfoHint label={switchFailed ? t('settings.models.gateway.fail.switchToDirect') : subtitle} content={switchFailed ? t('settings.models.gateway.fail.switchToDirect') : subtitle} className="model-hub-overview-info size-[13px]" />
         </span>
       </div>
-      {agent.mode === 'hub' && (models.length === 0 ? <div className="px-4 py-10 text-center sm:px-5"><p className="text-[12.5px] text-muted">{t('settings.models.gateway.group.emptyModels')}</p></div> : <div className="space-y-2 p-2">{noUsableSource && <p className="px-3 py-1 text-[11px] font-semibold text-muted">{t('settings.models.gateway.supply.none')}</p>}{models.map((modelId) => <ModelRow key={modelId} agent={agent} modelId={modelId} sources={sources} read={chains[modelChainKey(agent.backend, modelId)]} onOpenRoute={onOpenRoute} />)}{canCollapse && <button type="button" onClick={toggleCollapsed} className="model-hub-model-collapse flex h-6 w-full items-center gap-1.5 hover:text-foreground">{expanded ? <ChevronUp /> : <ChevronDown />}{expanded ? t('settings.models.gateway.collapse', { count: collapsedAtRest.hidden.length }) : t('settings.models.gateway.collapse', { count: collapsed.hidden.length })}</button>}</div>)}
+      {agent.mode === 'hub' && (models.length === 0 ? <div className="px-4 py-10 text-center sm:px-5"><p className="text-[12.5px] text-muted">{t('settings.models.gateway.group.emptyModels')}</p></div> : <div className="space-y-2 p-2">{noUsableSource && <p className="px-3 py-1 text-[11px] font-semibold text-muted">{t('settings.models.gateway.supply.none')}</p>}{models.map((modelId) => <ModelRow key={modelId} agent={agent} modelId={modelId} sources={sources} read={chainProjectionLive ? chains[modelChainKey(agent.backend, modelId)] : undefined} onOpenRoute={onOpenRoute} />)}{canCollapse && <button type="button" onClick={toggleCollapsed} className="model-hub-model-collapse flex h-6 w-full items-center gap-1.5 hover:text-foreground">{expanded ? <ChevronUp /> : <ChevronDown />}{expanded ? t('settings.models.gateway.collapse', { count: collapsedAtRest.hidden.length }) : t('settings.models.gateway.collapse', { count: collapsed.hidden.length })}</button>}</div>)}
     </section>
   );
 };
 
 export const AgentCard: React.FC<{
   agents: AgentSupply[];
+  runtime: RuntimeDependency | null;
   sources: Source[];
   chains: ModelChainIndex;
   pendingBackends: ReadonlySet<string>;

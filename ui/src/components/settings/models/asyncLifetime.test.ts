@@ -66,6 +66,7 @@ import {
   createFlowAuthority,
   createLatestAsyncAuthority,
   createLatestAsyncAuthorityByKey,
+  createLatestEntityAuthorityByKey,
   createPendingWrites,
   failureLanded,
   flowLetGo,
@@ -80,7 +81,6 @@ import {
   savedSourcesKey,
   seedStep,
   startNeedsStatusRead,
-  sourcesWithEcho,
   terminalArrivalMovedRows,
   type FlowView,
 } from './asyncLifetime';
@@ -183,6 +183,37 @@ describe('latest async authority', () => {
   });
 });
 
+describe('latest Source entity authority', () => {
+  it('lands the later per-Source generation and rejects an older echo', () => {
+    const landed: Source[][] = [];
+    const authority = createLatestEntityAuthorityByKey((source: Source) => source.id, (sources) => landed.push(sources));
+    const initialSnapshot = authority.beginSnapshot();
+    const initial = { id: 'src_a', display_name: 'initial' } as Source;
+    authority.settleSnapshot(initialSnapshot, [initial]);
+    const older = authority.begin('src_a');
+    const newer = authority.begin('src_a');
+    const newerSource = { ...initial, display_name: 'newer' };
+
+    expect(authority.settle(newer, newerSource)).toBe('landed');
+    expect(authority.settle(older, { ...initial, display_name: 'older' })).toBe('stale');
+    expect(landed.at(-1)).toEqual([newerSource]);
+  });
+
+  it('does not let a snapshot reserved before a mutation overwrite its echo', () => {
+    const landed: Source[][] = [];
+    const authority = createLatestEntityAuthorityByKey((source: Source) => source.id, (sources) => landed.push(sources));
+    const initial = { id: 'src_a', display_name: 'initial' } as Source;
+    authority.replaceLatest([initial]);
+    const olderSnapshot = authority.beginSnapshot();
+    const mutation = authority.begin('src_a');
+    const echoed = { ...initial, display_name: 'echoed' };
+
+    expect(authority.settle(mutation, echoed)).toBe('landed');
+    authority.settleSnapshot(olderSnapshot, [initial]);
+    expect(landed.at(-1)).toEqual([echoed]);
+  });
+});
+
 describe('bounded async map', () => {
   it('caps concurrent work and preserves input order', async () => {
     const gates = Array.from({ length: 12 }, () => deferred<number>());
@@ -253,34 +284,7 @@ describe('agentsWithEcho — what speaks for a row when no read does', () => {
   });
 });
 
-describe('sourcesWithEcho — one refresh result inside the shared authority', () => {
-  const source = (id: string, models: string[]): Source => ({
-    id,
-    kind: 'api_key',
-    vendor: 'anthropic',
-    display_name: id,
-    protocol: 'anthropic',
-    supply_channel: 'hub',
-    billing: 'metered',
-    state: { status: 'standby', retry_at: null, detail_key: null },
-    last_discovered_at: '2026-07-31T05:00:00Z',
-    models: models.map((id) => ({ id, provenance: 'discovered' })),
-  });
-
-  it('replaces only the source named by the server echo', () => {
-    const first = source('src_first000', ['old-model']);
-    const second = source('src_second00', ['other-model']);
-    const echoed = source('src_first000', ['old-model', 'claude-opus-5']);
-
-    expect(sourcesWithEcho([first, second], echoed)).toEqual([echoed, second]);
-  });
-
-  it('does not append a row the inventory read never saw', () => {
-    const first = source('src_first000', ['old-model']);
-
-    expect(sourcesWithEcho([first], source('src_missing00', ['new-model']))).toEqual([first]);
-  });
-
+describe('Source entity landing through the shared authority', () => {
   it('routes Source-detail rereads and full reads through the same latest-result authority', () => {
     const page = readFileSync(join(__dirname, 'SettingsModelsPage.tsx'), 'utf8');
     const detail = readFileSync(join(__dirname, 'SourceDetailPanel.tsx'), 'utf8');

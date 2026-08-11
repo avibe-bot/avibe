@@ -7,17 +7,16 @@ import { sourceDetail } from './sourcePresentation';
 import { sourceStatePresentation } from './sourceStatePresentation';
 import { useDeadlineClock } from './useDeadlineClock';
 import { ACCENT_ICON, ACCENT_PILL, ACCENT_TILE, sourceVisual } from './vendorMeta';
-import type { AdoptedBy, Source } from './types';
+import type { Source } from './types';
 
-export const SourceRow: React.FC<{ source: Source; adoptedBy?: readonly AdoptedBy[]; onOpen: (source: Source) => void }> = ({ source, adoptedBy, onOpen }) => {
+export const SourceRow: React.FC<{ source: Source; onOpen: (source: Source) => void }> = ({ source, onOpen }) => {
   const { t, i18n } = useTranslation();
   const now = useDeadlineClock(source.state.status === 'cooldown' ? source.state.retry_at : null);
   const { Icon, accent } = sourceVisual(source);
   const detail = sourceDetail(source);
-  const effectiveAdoption = adoptedBy ?? source.adopted_by;
-  const adoptedBackends = [...new Set((effectiveAdoption ?? []).map(({ backend }) => t(`settings.models.backends.${backend}`, { defaultValue: backend }) as string))];
+  const adoptedBackends = [...new Set((source.adopted_by ?? []).map(({ backend }) => t(`settings.models.backends.${backend}`, { defaultValue: backend }) as string))];
   const state = sourceStatePresentation(source.state, 'card', i18n.language, now, {
-    known: effectiveAdoption !== undefined,
+    known: source.adopted_by !== undefined,
     backends: adoptedBackends,
     native: source.supply_channel === 'native_cli',
   });
@@ -26,7 +25,7 @@ export const SourceRow: React.FC<{ source: Source; adoptedBy?: readonly AdoptedB
     : source.kind === 'subscription'
       ? 'subscription'
       : 'apiKey';
-  const adopted = source.state.status === 'active' && (effectiveAdoption?.length ?? 0) > 0;
+  const adopted = source.state.status === 'active' && (source.adopted_by?.length ?? 0) > 0;
   return (
     <button
       type="button"

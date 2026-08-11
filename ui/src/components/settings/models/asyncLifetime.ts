@@ -2,7 +2,7 @@
 // be exercised directly: which request may land, what speaks for a row when no
 // read does, how long a write counts as outstanding, when a drawer re-seeds, and
 // whether a connect-flow transition may change an already terminal view.
-import type { AgentMenu, AgentSupply, OAuthFlow, OAuthFlowState, Source } from './types';
+import type { AgentMenu, AgentSupply, OAuthFlow, OAuthFlowState } from './types';
 
 // ── Latest async result ────────────────────────────────────────────────────
 /**
@@ -56,6 +56,68 @@ export const createLatestAsyncAuthorityByKey = <K, T>(
         if (latestRequest.get(key) !== request) return 'stale';
         throw error;
       }
+    },
+  };
+};
+
+export type EntityGeneration<K> = Readonly<{ key: K; generation: number }>;
+
+/** Owns a keyed entity collection across mutation echoes and list snapshots. */
+export const createLatestEntityAuthorityByKey = <K, T>(
+  keyOf: (value: T) => K,
+  land: (values: T[]) => void,
+) => {
+  let generation = 0;
+  const generations = new Map<K, number>();
+  const values = new Map<K, T>();
+  const publish = () => land([...values.values()]);
+  const begin = (key: K): EntityGeneration<K> => {
+    const ticket = { key, generation: ++generation } as const;
+    generations.set(key, ticket.generation);
+    return ticket;
+  };
+
+  return {
+    begin,
+    beginSnapshot: (): number => ++generation,
+    settle: (ticket: EntityGeneration<K>, value: T): 'landed' | 'stale' => {
+      if (ticket.key !== keyOf(value) || generations.get(ticket.key) !== ticket.generation) return 'stale';
+      values.set(ticket.key, value);
+      publish();
+      return 'landed';
+    },
+    settleRemoval: (ticket: EntityGeneration<K>): 'landed' | 'stale' => {
+      if (generations.get(ticket.key) !== ticket.generation) return 'stale';
+      values.delete(ticket.key);
+      publish();
+      return 'landed';
+    },
+    settleSnapshot: (snapshotGeneration: number, incoming: readonly T[]): void => {
+      const incomingByKey = new Map(incoming.map((value) => [keyOf(value), value]));
+      const keys = new Set([...values.keys(), ...incomingByKey.keys()]);
+      for (const key of keys) {
+        if ((generations.get(key) ?? 0) > snapshotGeneration) continue;
+        generations.set(key, snapshotGeneration);
+        const value = incomingByKey.get(key);
+        if (value === undefined) values.delete(key);
+        else values.set(key, value);
+      }
+      publish();
+    },
+    landLatest: (value: T): void => {
+      const ticket = begin(keyOf(value));
+      values.set(ticket.key, value);
+      publish();
+    },
+    replaceLatest: (incoming: readonly T[]): void => {
+      const snapshotGeneration = ++generation;
+      const incomingByKey = new Map(incoming.map((value) => [keyOf(value), value]));
+      for (const key of new Set([...generations.keys(), ...incomingByKey.keys()])) {
+        generations.set(key, snapshotGeneration);
+      }
+      values.clear();
+      for (const [key, value] of incomingByKey) values.set(key, value);
+      publish();
     },
   };
 };
@@ -121,11 +183,6 @@ export const agentsWithEcho = (
   agents: readonly AgentSupply[],
   echoed: AgentSupply,
 ): AgentSupply[] => agents.map((agent) => (agent.backend === echoed.backend ? echoed : agent));
-
-/** Takes one source mutation echo into the already-loaded inventory without
- *  letting that single-row response answer which other rows exist. */
-export const sourcesWithEcho = (sources: readonly Source[], echoed: Source): Source[] =>
-  sources.map((source) => (source.id === echoed.id ? echoed : source));
 
 // ── A write that outlives the drawer that issued it ────────────────────────
 /**

@@ -5,9 +5,9 @@ import { describe, expect, it, vi } from 'vitest';
 
 import zh from '../../../i18n/zh.json';
 import { failRegionRead, readyRegion, unreadRegion } from './regionRead';
-import { pollRuntimeStatus, startRuntimeWithStatusRefresh } from './runtimeLifecycle';
+import { agentHasLiveChainProjection, pollRuntimeStatus, startRuntimeWithStatusRefresh } from './runtimeLifecycle';
 import { RuntimePill } from './SettingsModelsPage';
-import type { RuntimeDependency } from './types';
+import type { AgentSupply, RuntimeDependency } from './types';
 
 const i18n = createInstance();
 void i18n.use(initReactI18next).init({
@@ -55,6 +55,18 @@ const renderPill = (
 );
 
 describe('Model Hub runtime pill', () => {
+  it('exposes chain projections only for running Hub backends', () => {
+    const agent = { backend: 'claude', mode: 'hub' } as AgentSupply;
+    for (const health of ['ok', 'degraded'] as const) {
+      expect(agentHasLiveChainProjection(runtime(health), agent)).toBe(true);
+    }
+    for (const health of ['down', 'not_started', 'not_installed', 'installing'] as const) {
+      expect(agentHasLiveChainProjection(runtime(health), agent)).toBe(false);
+    }
+    expect(agentHasLiveChainProjection(runtime('ok'), { ...agent, mode: 'direct' })).toBe(false);
+    expect(agentHasLiveChainProjection(null, agent)).toBe(false);
+  });
+
   it('maps every runtime health to its registered shell copy and activation', () => {
     expect(renderPill('ok')).toContain(zh.settings.models.shell.running);
     expect(renderPill('ok')).not.toContain('<button');

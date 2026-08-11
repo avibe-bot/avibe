@@ -20,7 +20,7 @@ import { modelsSurfaceKind } from './modelHubSurfaceState';
 import { buildSupplyRelations } from './supplyRelations';
 import { SupplyGraph, SupplyLegend } from './SupplyGraph';
 import './modelHubSurface.css';
-import { agentsWithEcho, createLatestAsyncAuthority, createLatestAsyncAuthorityByKey, createPendingWrites, mapWithConcurrency, sourcesWithEcho } from './asyncLifetime';
+import { agentsWithEcho, createLatestAsyncAuthority, createLatestAsyncAuthorityByKey, createLatestEntityAuthorityByKey, createPendingWrites, mapWithConcurrency, type EntityGeneration } from './asyncLifetime';
 import { emptyFeed, feedAfterHeadRead, feedAfterTailRead, feedTailCursor, type EventFeed } from './eventFeed';
 import { modelsApi, type SourceCreated } from './modelsApi';
 import { convergeMutation, createIntentAuthority } from './mutationConvergence';
@@ -37,9 +37,9 @@ import {
   unreadRegion,
   type RegionRead,
 } from './regionRead';
-import { pollRuntimeStatus, runtimeHasInstallAsset, startRuntimeWithStatusRefresh } from './runtimeLifecycle';
+import { agentHasLiveChainProjection, pollRuntimeStatus, runtimeHasInstallAsset, startRuntimeWithStatusRefresh } from './runtimeLifecycle';
 import { backendVisual } from './vendorMeta';
-import type { AdoptedBy, AgentBackend, AgentSupply, ResolutionEvent, RuntimeDependency, Source } from './types';
+import type { AgentBackend, AgentSupply, ResolutionEvent, RuntimeDependency, Source } from './types';
 
 const CHAIN_READ_CONCURRENCY = 6;
 const EVENT_PAGE = 20;
@@ -90,6 +90,11 @@ type SurfaceLanding = {
   supply: RegionRead<AgentSupply[]>;
   runtime: RegionRead<RuntimeDependency>;
   events: RegionRead<ResolutionEvent[]>;
+};
+
+type AuthorizedSurfaceLanding = {
+  landing: SurfaceLanding;
+  sourceSnapshot: number;
 };
 
 const readSurfaceLanding = async (): Promise<SurfaceLanding> => {
@@ -262,17 +267,40 @@ export const SettingsModelsPage: React.FC = () => {
   const [adoptAgent, setAdoptAgent] = React.useState<AgentSupply | null>(null);
   const [routeTarget, setRouteTarget] = React.useState<{ backend: AgentBackend; modelId: string } | null>(null);
   const [selectedSourceId, setSelectedSourceId] = React.useState<string | null>(null);
-  const [adoptionBySource, setAdoptionBySource] = React.useState<Readonly<Record<string, readonly AdoptedBy[]>>>({});
   const [agentWrites, setAgentWrites] = React.useState<ReadonlySet<string>>(() => new Set());
   const [switchFailures, setSwitchFailures] = React.useState<ReadonlySet<string>>(() => new Set());
   const [agentWriteRegistry] = React.useState(() => createPendingWrites(setAgentWrites));
   const [sourceIntentAuthority] = React.useState(createIntentAuthority);
   const overviewRef = React.useRef<HTMLDivElement>(null);
   const aliveRef = React.useRef(true);
+  const [sourceEntityAuthority] = React.useState(() => createLatestEntityAuthorityByKey(
+    (source: Source) => source.id,
+    (inventory) => {
+      if (aliveRef.current) setSourcesRead(readyRegion(inventory));
+    },
+  ));
+  const [sourceWriteRegistry] = React.useState(() => createPendingWrites(() => {}));
+  const activeSourceGenerations = React.useRef(new Map<string, EntityGeneration<string>>());
   React.useEffect(() => {
     aliveRef.current = true;
     return () => { aliveRef.current = false; };
   }, []);
+
+  const trackSourceMutation = React.useCallback(async <T,>(sourceId: string, work: () => Promise<T>): Promise<T> => {
+    let result!: T;
+    await sourceWriteRegistry.track(sourceId, async () => {
+      const generation = sourceEntityAuthority.begin(sourceId);
+      activeSourceGenerations.current.set(sourceId, generation);
+      try {
+        result = await work();
+      } finally {
+        if (activeSourceGenerations.current.get(sourceId) === generation) {
+          activeSourceGenerations.current.delete(sourceId);
+        }
+      }
+    });
+    return result;
+  }, [sourceEntityAuthority, sourceWriteRegistry]);
 
   const sources = regionData(sourcesRead) ?? [];
   const agents = regionData(supplyRead) ?? [];
@@ -324,9 +352,10 @@ export const SettingsModelsPage: React.FC = () => {
     if (supplyRead.kind === 'ready') refreshAllAgentChains(supplyRead.data);
   }, [refreshAllAgentChains, supplyRead]);
 
-  const [refreshAuthority] = React.useState(() => createLatestAsyncAuthority<SurfaceLanding>((landing) => {
+  const [refreshAuthority] = React.useState(() => createLatestAsyncAuthority<AuthorizedSurfaceLanding>(({ landing, sourceSnapshot }) => {
     if (!aliveRef.current) return;
-    setSourcesRead((previous) => settleRegionRead(previous, landing.sources));
+    if (landing.sources.kind === 'ready') sourceEntityAuthority.settleSnapshot(sourceSnapshot, landing.sources.data);
+    else setSourcesRead((previous) => settleRegionRead(previous, landing.sources));
     setSupplyRead((previous) => settleRegionRead(previous, landing.supply));
     setRuntimeRead((previous) => {
       const next = settleRegionRead(previous, landing.runtime);
@@ -346,13 +375,14 @@ export const SettingsModelsPage: React.FC = () => {
   const refresh = React.useCallback(async () => {
     const outcome: { landing: SurfaceLanding | null } = { landing: null };
     const result = await refreshAuthority.run(async () => {
+      const sourceSnapshot = sourceEntityAuthority.beginSnapshot();
       outcome.landing = await readSurfaceLanding();
-      return outcome.landing;
+      return { landing: outcome.landing, sourceSnapshot };
     });
     if (aliveRef.current && result === 'landed' && outcome.landing && surfaceLandingFailed(outcome.landing)) {
       showToast(t('settings.models.toast.refreshFailed') as string, 'error');
     }
-  }, [refreshAuthority, showToast, t]);
+  }, [refreshAuthority, showToast, sourceEntityAuthority, t]);
   React.useEffect(() => {
     void refresh();
   }, [refresh]);
@@ -383,8 +413,10 @@ export const SettingsModelsPage: React.FC = () => {
     });
   }, [applyAgentEcho, refresh]);
   const applySourceEcho = React.useCallback((echoed: Source) => {
-    setSourcesRead((previous) => readyRegion(sourcesWithEcho(regionData(previous) ?? [], echoed)));
-  }, []);
+    const generation = activeSourceGenerations.current.get(echoed.id);
+    if (generation) sourceEntityAuthority.settle(generation, echoed);
+    else sourceEntityAuthority.landLatest(echoed);
+  }, [sourceEntityAuthority]);
   const sourceMutation = React.useCallback(async (echoed?: Source) => {
     await convergeMutation({
       entity: echoed,
@@ -396,18 +428,15 @@ export const SettingsModelsPage: React.FC = () => {
     await convergeMutation({
       entity: { sourceId, inventory },
       applyEntity: ({ sourceId: goneId, inventory: authoritative }) => {
-        setSourcesRead((previous) => readyRegion(
-          authoritative ?? (regionData(previous) ?? []).filter((source) => source.id !== goneId),
-        ));
-        setAdoptionBySource((previous) => {
-          const next = { ...previous };
-          delete next[goneId];
-          return next;
-        });
+        if (authoritative) sourceEntityAuthority.replaceLatest(authoritative);
+        else {
+          const generation = activeSourceGenerations.current.get(goneId) ?? sourceEntityAuthority.begin(goneId);
+          sourceEntityAuthority.settleRemoval(generation);
+        }
       },
       reconcile: refresh,
     });
-  }, [refresh]);
+  }, [refresh, sourceEntityAuthority]);
 
   const switchToDirect = (agent: AgentSupply) => {
     setSwitchFailures((previous) => {
@@ -471,13 +500,13 @@ export const SettingsModelsPage: React.FC = () => {
   }, [sourceIntentAuthority]);
   const selectedSource = sources.find((source) => source.id === selectedSourceId) ?? null;
   const orderAgent = agents.find((agent) => agent.backend === orderBackend && agent.mode === 'hub') ?? null;
-  const routeAgent = agents.find((agent) => agent.backend === routeTarget?.backend && agent.mode === 'hub') ?? null;
+  const routeAgent = agents.find((agent) => agent.backend === routeTarget?.backend && agentHasLiveChainProjection(runtime, agent)) ?? null;
   const routeSelection = routeTarget && routeAgent ? {
     agent: routeAgent,
     modelId: routeTarget.modelId,
     read: chains[modelChainKey(routeTarget.backend, routeTarget.modelId)],
   } : null;
-  const supplyRelations = React.useMemo(() => buildSupplyRelations(agents, sources, chains), [agents, sources, chains]);
+  const supplyRelations = React.useMemo(() => buildSupplyRelations(agents, sources, chains, runtime), [agents, chains, runtime, sources]);
   const takeoverCount = React.useMemo(() => new Set(
     supplyRelations.filter(({ kind }) => kind === 'takeover').map(({ backend }) => backend),
   ).size, [supplyRelations]);
@@ -485,11 +514,7 @@ export const SettingsModelsPage: React.FC = () => {
     await convergeMutation({
       entity: created,
       applyEntity: (answer) => {
-        setAdoptionBySource((previous) => ({ ...previous, [answer.source.id]: answer.adopted_by }));
-        setSourcesRead((previous) => readyRegion([
-          answer.source,
-          ...(regionData(previous) ?? []).filter((source) => source.id !== answer.source.id),
-        ]));
+        sourceEntityAuthority.landLatest(answer.source);
       },
       intent: {
         authority: sourceIntentAuthority,
@@ -522,7 +547,7 @@ export const SettingsModelsPage: React.FC = () => {
       {landingLoading ? <div className="text-[13px] text-muted">{t('common.loading')}</div>
         : selectedSourceId
           ? selectedSource
-            ? <SourceDetailPanel source={selectedSource} adoptedBy={adoptionBySource[selectedSource.id]} onMutation={sourceMutation} onGone={sourceGone} />
+            ? <SourceDetailPanel source={selectedSource} onMutation={sourceMutation} onGone={sourceGone} trackMutation={(work) => trackSourceMutation(selectedSource.id, work)} />
             : <section className="rounded-xl border border-border bg-surface px-5 py-12 text-center text-[12px] text-muted">{t('settings.models.sourceDetail.gone')}</section>
           : directEmpty ? <DirectHome agents={agents} onSwitch={setAdoptAgent} />
             : <div className="space-y-[22px]">
@@ -530,7 +555,7 @@ export const SettingsModelsPage: React.FC = () => {
                   {tab === 'sources' ? <div className="model-hub-overview">
                     <div className="model-hub-overview-body">
                       <div ref={overviewRef} className="model-hub-overview-grid relative flex flex-col gap-4">
-                        <SourcesCard read={sourcesRead} adoptionBySource={adoptionBySource} onRetry={() => void retrySources()} onOpenSource={(source) => selectSource(source.id)} onAddApiKey={() => setApiKeyOpen(true)} />
+                        <SourcesCard read={sourcesRead} onRetry={() => void retrySources()} onOpenSource={(source) => selectSource(source.id)} onAddApiKey={() => setApiKeyOpen(true)} />
                         <div className="hidden lg:block" aria-hidden="true" />
                         <GatewayModule supply={supplyRead} sources={sources} chains={chains} runtime={runtime} onRetry={() => void retrySupply()} pendingBackends={agentWrites} switchFailures={switchFailures} connectingBackend={adoptAgent?.backend ?? null} onConnectHub={setAdoptAgent} onSwitchDirect={switchToDirect} onOpenOrder={(agent) => setOrderBackend(agent.backend)} onOpenRoute={(agent, modelId) => setRouteTarget({ backend: agent.backend, modelId })} onProbeSettled={(agent) => void refreshAgentChains(agent)} />
                         <SupplyGraph containerRef={overviewRef} relations={supplyRelations} />

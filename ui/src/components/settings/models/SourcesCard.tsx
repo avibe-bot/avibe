@@ -6,15 +6,14 @@ import { Button } from '@/components/ui/button';
 import { ModelHubInfoHint } from './ModelHubInfoHint';
 import { regionData, type RegionRead } from './regionRead';
 import { SourceRow } from './SourceRow';
-import type { AdoptedBy, Source } from './types';
+import type { Source } from './types';
 
 export const SourcesCard: React.FC<{
   read: RegionRead<Source[]>;
   onRetry: () => void;
   onOpenSource: (source: Source) => void;
   onAddApiKey: () => void;
-  adoptionBySource?: Readonly<Record<string, readonly AdoptedBy[]>>;
-}> = ({ read, onRetry, onOpenSource, onAddApiKey, adoptionBySource = {} }) => {
+}> = ({ read, onRetry, onOpenSource, onAddApiKey }) => {
   const { t } = useTranslation();
   const sources = regionData(read);
   const groups = [
@@ -42,7 +41,7 @@ export const SourcesCard: React.FC<{
             : <>
                 {read.kind === 'error' && <div className="mb-2 flex items-center justify-between gap-3 rounded-lg border border-destructive/25 bg-destructive/[0.08] px-3 py-2"><p className="text-[11px] text-destructive">{t('settings.models.upstream.unread')}</p><Button variant="outline" size="xs" onClick={onRetry}>{t('settings.models.upstream.retry')}</Button></div>}
                 {groups.length > 0
-                  ? groups.map((group) => <div key={group.id} className="space-y-2"><h3 className="model-hub-upstream-group-label flex h-[18px] items-center uppercase">{t(`settings.models.upstream.group.${group.id}`)}</h3>{group.sources.map((source) => <SourceRow key={source.id} source={source} adoptedBy={adoptionBySource[source.id]} onOpen={onOpenSource} />)}</div>)
+                  ? groups.map((group) => <div key={group.id} className="space-y-2"><h3 className="model-hub-upstream-group-label flex h-[18px] items-center uppercase">{t(`settings.models.upstream.group.${group.id}`)}</h3>{group.sources.map((source) => <SourceRow key={source.id} source={source} onOpen={onOpenSource} />)}</div>)
                   : <p className="px-3 py-10 text-center text-[12px] text-muted">{t('settings.models.upstream.empty')}</p>}
               </>}
       </div>
