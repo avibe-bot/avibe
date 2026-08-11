@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import ast
+import json
+from dataclasses import replace
 from itertools import product
 from pathlib import Path
+
+import pytest
 
 from core.handlers.model_hub.stream_wire import (
     PROTOCOL_STREAM_TAXONOMY,
     SSE_LINE_ENDINGS,
     ProtocolSSEState,
+    ProtocolStreamTaxonomy,
 )
 
 
@@ -19,14 +24,53 @@ ROUTER = ROOT / "modules/agents/model_hub.py"
 ADAPTER = ROOT / "vibe/model_hub_runtime/adapter.py"
 CLIENT = ROOT / "vibe/model_hub_runtime/client.py"
 
-# Owner rulings 19:50-23:36: enumerate every stream-lifecycle boundary here.
-STREAM_BOUNDARY_DIMENSIONS = {
-    "protocol": tuple(PROTOCOL_STREAM_TAXONOMY),
-    "transport_event": ("eof", "client_error"),
-    "settlement_state": ("pending", "served"),
-    "line_ending": SSE_LINE_ENDINGS,
+# Owner rulings 19:50-00:06: guard expectations must never derive from guarded code.
+# Wire sources:
+# - https://platform.claude.com/docs/en/build-with-claude/streaming
+# - https://platform.openai.com/docs/api-reference/responses-streaming
+# - https://platform.openai.com/docs/api-reference/realtime-server-events/response/done
+# - https://platform.openai.com/docs/api-reference/chat/create#chat-create-stream
+STREAM_ACCEPTANCE_FIXTURES = {
+    "anthropic": {
+        "served": (b'{"type":"message_stop"}',),
+        "failed_terminal": (
+            b'{"type":"error","error":{"type":"permission_error"}}',
+        ),
+    },
+    "openai_responses": {
+        "served": (
+            b'{"type":"response.completed"}',
+            b'{"type":"response.done"}',
+        ),
+        "failed_terminal": (
+            b'{"type":"error","code":"permission_error"}',
+        ),
+    },
+    "openai_chat": {
+        "served": (b"[DONE]",),
+        "failed_terminal": (
+            b'{"type":"error","error":{"type":"permission_error"}}',
+        ),
+    },
 }
-STREAM_BOUNDARY_CASES = tuple(product(*STREAM_BOUNDARY_DIMENSIONS.values()))
+ACCEPTED_SSE_LINE_ENDINGS = (b"\r\n", b"\n", b"\r")
+STREAM_BOUNDARY_DIMENSIONS = {
+    "transport_event": ("eof", "client_error"),
+    "settlement_state": ("pending", "served", "failed_terminal"),
+    "line_ending": ACCEPTED_SSE_LINE_ENDINGS,
+}
+STREAM_BOUNDARY_CASES = tuple(
+    (protocol, transport_event, settlement_state, line_ending, payload)
+    for protocol, fixtures in STREAM_ACCEPTANCE_FIXTURES.items()
+    for transport_event, settlement_state, line_ending in product(
+        *STREAM_BOUNDARY_DIMENSIONS.values()
+    )
+    for payload in (
+        (b"{}",)
+        if settlement_state == "pending"
+        else fixtures[settlement_state]
+    )
+)
 
 
 def _tree(path: Path) -> ast.Module:
@@ -146,17 +190,58 @@ def test_machine_error_field_access_has_one_extractor() -> None:
                 assert node.args[0].value not in {"type", "code"}, (path, node.lineno)
 
 
-def test_stream_boundary_catalog_exercises_every_enumerated_dimension() -> None:
-    expected_count = 1
-    for values in STREAM_BOUNDARY_DIMENSIONS.values():
-        expected_count *= len(values)
-    assert len(STREAM_BOUNDARY_CASES) == expected_count
+def _accepted_types(payloads: tuple[bytes, ...]) -> tuple[frozenset[str], bytes | None]:
+    types: set[str] = set()
+    literal: bytes | None = None
+    for payload in payloads:
+        try:
+            document = json.loads(payload)
+        except ValueError:
+            literal = payload
+            continue
+        assert isinstance(document, dict) and isinstance(document["type"], str)
+        types.add(document["type"])
+    return frozenset(types), literal
 
-    for protocol, transport_event, settlement_state, line_ending in STREAM_BOUNDARY_CASES:
-        taxonomy = PROTOCOL_STREAM_TAXONOMY[protocol]
-        data = taxonomy.terminal_fixture() if settlement_state == "served" else b"{}"
+
+def _assert_stream_taxonomy_matches(
+    protocol: str,
+    taxonomy: ProtocolStreamTaxonomy,
+) -> None:
+    fixtures = STREAM_ACCEPTANCE_FIXTURES[protocol]
+    success_types, success_literal = _accepted_types(fixtures["served"])
+    error_types, _error_literal = _accepted_types(fixtures["failed_terminal"])
+    assert taxonomy.success_types == success_types
+    assert taxonomy.success_literal == success_literal
+    assert taxonomy.error_types == error_types
+
+
+def test_stream_authority_and_acceptance_fixtures_match_both_ways() -> None:
+    assert set(PROTOCOL_STREAM_TAXONOMY) == set(STREAM_ACCEPTANCE_FIXTURES)
+    assert set(SSE_LINE_ENDINGS) == set(ACCEPTED_SSE_LINE_ENDINGS)
+    for protocol, taxonomy in PROTOCOL_STREAM_TAXONOMY.items():
+        _assert_stream_taxonomy_matches(protocol, taxonomy)
+
+
+def test_stream_authority_guard_rejects_an_unaccepted_alias() -> None:
+    taxonomy = PROTOCOL_STREAM_TAXONOMY["openai_responses"]
+    mutated = replace(
+        taxonomy,
+        success_types=taxonomy.success_types | {"response.unaccepted"},
+    )
+    with pytest.raises(AssertionError):
+        _assert_stream_taxonomy_matches("openai_responses", mutated)
+
+
+def test_stream_boundary_catalog_exercises_every_enumerated_dimension() -> None:
+    seen_states: set[str] = set()
+    for protocol, transport_event, settlement_state, line_ending, data in STREAM_BOUNDARY_CASES:
         state = ProtocolSSEState(protocol)
         state.observe(b"data: " + data + line_ending + line_ending)
         if transport_event == "client_error":
             state.observe(b"data: truncated")
-        assert state.terminal_seen is (settlement_state == "served")
+        seen_states.add(settlement_state)
+        assert state.terminal_outcome == (
+            None if settlement_state == "pending" else settlement_state
+        )
+    assert seen_states == set(STREAM_BOUNDARY_DIMENSIONS["settlement_state"])

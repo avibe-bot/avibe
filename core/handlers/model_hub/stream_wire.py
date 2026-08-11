@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Callable, Final, Mapping
+from typing import Callable, Final, Literal, Mapping
 
 
 SSE_LINE_ENDINGS: Final = (b"\r\n", b"\n", b"\r")
@@ -114,36 +114,38 @@ def _chat_terminal_event(
 
 @dataclass(frozen=True)
 class ProtocolStreamTaxonomy:
-    terminal_types: frozenset[str]
-    terminal_literal: bytes | None
+    success_types: frozenset[str]
+    success_literal: bytes | None
+    error_types: frozenset[str]
     render_terminal_event: Callable[[str, str, int], dict[str, object]]
-
-    def terminal_fixture(self) -> bytes:
-        if self.terminal_literal is not None:
-            return self.terminal_literal
-        return json.dumps(
-            {"type": next(iter(self.terminal_types))},
-            separators=(",", ":"),
-        ).encode("utf-8")
 
 
 PROTOCOL_STREAM_TAXONOMY: Final[Mapping[str, ProtocolStreamTaxonomy]] = {
+    # https://platform.claude.com/docs/en/build-with-claude/streaming
     "anthropic": ProtocolStreamTaxonomy(
-        terminal_types=frozenset({"message_stop"}),
-        terminal_literal=None,
+        success_types=frozenset({"message_stop"}),
+        success_literal=None,
+        error_types=frozenset({"error"}),
         render_terminal_event=_anthropic_terminal_event,
     ),
+    # https://platform.openai.com/docs/api-reference/responses-streaming
+    # https://platform.openai.com/docs/api-reference/realtime-server-events/response/done
     "openai_responses": ProtocolStreamTaxonomy(
-        terminal_types=frozenset({"response.completed"}),
-        terminal_literal=None,
+        success_types=frozenset({"response.completed", "response.done"}),
+        success_literal=None,
+        error_types=frozenset({"error"}),
         render_terminal_event=_responses_terminal_event,
     ),
+    # https://platform.openai.com/docs/api-reference/chat/create#chat-create-stream
     "openai_chat": ProtocolStreamTaxonomy(
-        terminal_types=frozenset(),
-        terminal_literal=b"[DONE]",
+        success_types=frozenset(),
+        success_literal=b"[DONE]",
+        error_types=frozenset({"error"}),
         render_terminal_event=_chat_terminal_event,
     ),
 }
+
+StreamTerminalOutcome = Literal["served", "failed_terminal"]
 
 
 @dataclass
@@ -152,7 +154,8 @@ class ProtocolSSEState:
 
     protocol: str
     tokenizer: SSEFrameTokenizer = field(default_factory=SSEFrameTokenizer)
-    terminal_seen: bool = False
+    terminal_outcome: StreamTerminalOutcome | None = None
+    error_payload: bytes | None = None
     last_sequence_number: int = -1
 
     def observe(self, chunk: bytes) -> None:
@@ -175,8 +178,10 @@ class ProtocolSSEState:
         if data is None:
             return
         taxonomy = PROTOCOL_STREAM_TAXONOMY[self.protocol]
-        if taxonomy.terminal_literal is not None and data == taxonomy.terminal_literal:
-            self.terminal_seen = True
+        if self.terminal_outcome is not None:
+            return
+        if taxonomy.success_literal is not None and data == taxonomy.success_literal:
+            self.terminal_outcome = "served"
             return
         try:
             payload = json.loads(data)
@@ -185,8 +190,11 @@ class ProtocolSSEState:
         if not isinstance(payload, dict):
             return
         event_type = payload["type"] if "type" in payload else None
-        if isinstance(event_type, str) and event_type in taxonomy.terminal_types:
-            self.terminal_seen = True
+        if isinstance(event_type, str) and event_type in taxonomy.success_types:
+            self.terminal_outcome = "served"
+        elif isinstance(event_type, str) and event_type in taxonomy.error_types:
+            self.terminal_outcome = "failed_terminal"
+            self.error_payload = data
         sequence_number = payload.get("sequence_number")
         if isinstance(sequence_number, int) and not isinstance(sequence_number, bool):
             self.last_sequence_number = max(self.last_sequence_number, sequence_number)

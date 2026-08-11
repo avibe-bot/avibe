@@ -303,6 +303,7 @@ class EngineClient:
                 source=source,
                 model_id=model_id,
                 protocol=request_protocol,
+                require_terminal_event=stream,
                 outcome_future=outcome_future,
             )
 
@@ -493,6 +494,7 @@ async def _response_stream(
     source: SourceRecord,
     model_id: str,
     protocol: str,
+    require_terminal_event: bool,
     outcome_future: asyncio.Future[RawCallOutcome],
 ) -> AsyncIterator[bytes]:
     outcome: RawCallOutcome | None = None
@@ -504,17 +506,37 @@ async def _response_stream(
             if chunk:
                 wire_state.observe(chunk)
                 yield chunk
-        outcome = _outcome(
-            kind=RawOutcomeKind.SUCCESS,
-            source=source,
-            model_id=model_id,
-            http_status=response.status,
-            stream_started=True,
+        outcome = _observed_stream_terminal_outcome(
+            wire_state,
+            source,
+            model_id,
+            response.status,
         )
+        if outcome is None:
+            outcome = _outcome(
+                kind=(
+                    RawOutcomeKind.NETWORK_ERROR
+                    if require_terminal_event
+                    else RawOutcomeKind.SUCCESS
+                ),
+                source=source,
+                model_id=model_id,
+                http_status=response.status,
+                message=(
+                    "upstream stream ended before a protocol terminal event"
+                    if require_terminal_event
+                    else None
+                ),
+                stream_started=True,
+            )
     except asyncio.TimeoutError:
-        if wire_state.terminal_seen:
-            outcome = _served_stream_outcome(source, model_id, response.status)
-        else:
+        outcome = _observed_stream_terminal_outcome(
+            wire_state,
+            source,
+            model_id,
+            response.status,
+        )
+        if outcome is None:
             outcome = _outcome(
                 kind=RawOutcomeKind.TIMEOUT,
                 source=source,
@@ -524,9 +546,14 @@ async def _response_stream(
                 stream_started=True,
             )
     except aiohttp.ClientError:
-        if wire_state.terminal_seen:
+        outcome = _observed_stream_terminal_outcome(
+            wire_state,
+            source,
+            model_id,
+            response.status,
+        )
+        if outcome is not None:
             logger.debug("ignoring transport error after protocol terminal marker")
-            outcome = _served_stream_outcome(source, model_id, response.status)
         else:
             outcome = _outcome(
                 kind=RawOutcomeKind.NETWORK_ERROR,
@@ -538,26 +565,49 @@ async def _response_stream(
                 stream_started=True,
             )
     finally:
-        if outcome is None and wire_state.terminal_seen:
-            outcome = _served_stream_outcome(source, model_id, response.status)
+        if outcome is None:
+            outcome = _observed_stream_terminal_outcome(
+                wire_state,
+                source,
+                model_id,
+                response.status,
+            )
         response.close()
         await session.close()
         if outcome is not None and not outcome_future.done():
             outcome_future.set_result(outcome)
 
 
-def _served_stream_outcome(
+def _observed_stream_terminal_outcome(
+    wire_state: ProtocolSSEState,
     source: SourceRecord,
     model_id: str,
     http_status: int,
-) -> RawCallOutcome:
-    return _outcome(
-        kind=RawOutcomeKind.SUCCESS,
-        source=source,
-        model_id=model_id,
-        http_status=http_status,
-        stream_started=True,
-    )
+) -> RawCallOutcome | None:
+    if wire_state.terminal_outcome == "served":
+        return _outcome(
+            kind=RawOutcomeKind.SUCCESS,
+            source=source,
+            model_id=model_id,
+            http_status=http_status,
+            stream_started=True,
+        )
+    if wire_state.terminal_outcome == "failed_terminal":
+        error_type, error_code, candidates = _raw_error_fields(
+            wire_state.error_payload or b""
+        )
+        return _outcome(
+            kind=RawOutcomeKind.HTTP_ERROR,
+            source=source,
+            model_id=model_id,
+            http_status=http_status,
+            error_type=error_type,
+            error_code=error_code,
+            error_candidates=candidates,
+            message="upstream returned a protocol error event",
+            stream_started=True,
+        )
+    return None
 
 
 def completed_handle(outcome: RawCallOutcome) -> EngineInvokeHandle:

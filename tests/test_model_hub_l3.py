@@ -1981,6 +1981,13 @@ def test_terminal_reinspection_uses_every_channel_in_a_mixed_chain(
             "failed_terminal",
             "standby",
         ),
+        (
+            RawOutcomeKind.HTTP_ERROR,
+            200,
+            "permission_error",
+            "failed_terminal",
+            "standby",
+        ),
         (RawOutcomeKind.TIMEOUT, 200, None, "failed_terminal", "cooldown"),
     ],
 )
@@ -2040,6 +2047,8 @@ def test_gateway_handle_terminal_matrix_always_uses_service_settlement(
                 payload = await response.read()
                 if stream or kind is RawOutcomeKind.SUCCESS:
                     assert response.status == 200
+                elif code == "permission_error":
+                    assert response.status == 403
                 else:
                     assert response.status == 502
                 if not stream and kind is RawOutcomeKind.PROTOCOL_ERROR:
@@ -2197,6 +2206,53 @@ def test_engine_down_settlement_does_not_mutate_source(
         )
         assert service.store.load().sources[0].state.status == "standby"
         assert service.events.list() == []
+        record_attempt.assert_called_once()
+
+    asyncio.run(exercise())
+
+
+def test_bare_stream_network_settlement_keeps_existing_cooldown_projection(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        source = _source("src_barenetwork1", "Incomplete stream")
+        service = _service(tmp_path, sources=[source])
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        resolved = ResolvedInvocation(
+            backend="codex",
+            requested_model_id=requested_model,
+            source_id=source.id,
+            source_label=source.display_name,
+            model_id="shared-model",
+            handle=None,
+            outcome=None,
+        )
+        outcome = _outcome(
+            RawOutcomeKind.NETWORK_ERROR,
+            status=200,
+            source_id=source.id,
+            stream_started=True,
+        )
+        record_attempt = Mock()
+
+        settlement = await service.settle_handle_outcome(
+            resolved,
+            outcome,
+            termination_origin="upstream_terminal",
+            record_attempt=record_attempt,
+        )
+
+        assert settlement.decision is not None
+        assert settlement.decision.reason == "network"
+        assert service.store.load().sources[0].state.status == "cooldown"
+        assert settlement.turn_outcome is not None
+        assert settlement.turn_outcome.discriminator == "streamed_fallback"
+        assert project_turn_outcome_copy(settlement.turn_outcome).key == (
+            "modelHub.launch.waiting"
+        )
+        # I7 will replace this persisted cooldown under the owner-approved
+        # bare-network policy once K4 adds its matching matrix row.
+        assert [event["reason"] for event in service.events.list()] == ["network"]
         record_attempt.assert_called_once()
 
     asyncio.run(exercise())

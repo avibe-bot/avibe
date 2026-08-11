@@ -27,7 +27,10 @@ from core.handlers.model_hub.adapter import (
     RetainedMaterialDisposition,
     SourceBinding,
 )
-from core.handlers.model_hub.classification import classify_outcome
+from core.handlers.model_hub.classification import (
+    classify_outcome,
+    terminal_outcome_category,
+)
 from core.handlers.model_hub.request import ModelHubRequest
 from vibe.model_hub_runtime import client as client_module
 from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
@@ -896,8 +899,8 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
         if payload['model'].endswith('/slow-stream'):
-            first = b'data: {{"type":"content_block_delta"}}\\n\\n'
-            second = b'data: {{"type":"message_stop"}}\\n\\n'
+            first = b'data: {{"object":"chat.completion.chunk","choices":[]}}\\n\\n'
+            second = b'data: [DONE]\\n\\n'
             self.send_response(200)
             self.send_header('Content-Type', 'text/event-stream')
             self.send_header('Content-Length', str(len(first) + len(second)))
@@ -908,7 +911,12 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(second)
             return
         if payload.get('stream'):
-            body = b'data: {{"type":"message_stop"}}\\n\\n'
+            if self.path == '/v1/messages':
+                body = b'data: {{"type":"message_stop"}}\\n\\n'
+            elif self.path == '/v1/responses':
+                body = b'data: {{"type":"response.completed"}}\\n\\n'
+            else:
+                body = b'data: [DONE]\\n\\n'
             self.send_response(200)
             self.send_header('Content-Type', 'text/event-stream')
             self.send_header('Content-Length', str(len(body)))
@@ -1489,8 +1497,8 @@ def test_engine_client_does_not_apply_a_total_turn_timeout(tmp_path: Path) -> No
         )
         assert handle.stream is not None
         body = b"".join([chunk async for chunk in handle.stream])
-        assert b"content_block_delta" in body
-        assert b"message_stop" in body
+        assert b"chat.completion.chunk" in body
+        assert b"[DONE]" in body
         assert (await handle.outcome()).kind is RawOutcomeKind.SUCCESS
         supervisor.stop()
 
@@ -1566,6 +1574,10 @@ def test_engine_client_marks_loopback_stream_disconnect_as_engine_down(
             "openai_responses",
             b'data: {"type":"response.completed","sequence_number":4}\n\n',
         ),
+        (
+            "openai_responses",
+            b'data: {"type":"response.done","sequence_number":4}\n\n',
+        ),
         ("openai_chat", b"data: [DONE]\n\n"),
     ],
 )
@@ -1625,6 +1637,102 @@ def test_engine_client_keeps_served_after_terminal_marker_then_disconnect(
         outcome = await handle.outcome()
         assert outcome.kind is RawOutcomeKind.SUCCESS
         assert outcome.stream_started is True
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("protocol", "first", "expected_kind"),
+    [
+        (
+            "anthropic",
+            b'event: error\ndata: {"type":"error","error":'
+            b'{"type":"permission_error","message":"denied"}}\n\n',
+            RawOutcomeKind.HTTP_ERROR,
+        ),
+        (
+            "openai_responses",
+            b'event: error\ndata: {"type":"error","code":"permission_error",'
+            b'"message":"denied","param":null,"sequence_number":1}\n\n',
+            RawOutcomeKind.HTTP_ERROR,
+        ),
+        (
+            "openai_chat",
+            b'data: {"object":"chat.completion.chunk","type":"error","error":'
+            b'{"type":"permission_error","message":"denied"},"choices":[]}\n\n',
+            RawOutcomeKind.HTTP_ERROR,
+        ),
+        (
+            "openai_chat",
+            b'data: {"object":"chat.completion.chunk","choices":[]}\n\n',
+            RawOutcomeKind.NETWORK_ERROR,
+        ),
+    ],
+)
+def test_engine_client_requires_a_protocol_terminal_event_before_clean_eof(
+    monkeypatch: pytest.MonkeyPatch,
+    protocol: str,
+    first: bytes,
+    expected_kind: RawOutcomeKind,
+) -> None:
+    async def run() -> None:
+        class Content:
+            async def read(self, _size: int) -> bytes:
+                return first
+
+            async def iter_chunked(self, _size: int):
+                if False:
+                    yield b""
+
+        class Response:
+            status = 200
+            content = Content()
+
+            def close(self) -> None:
+                return None
+
+        class Session:
+            async def post(self, *_args, **_kwargs):
+                return Response()
+
+            async def close(self) -> None:
+                return None
+
+        monkeypatch.setattr(
+            client_module.aiohttp,
+            "ClientSession",
+            lambda **_kwargs: Session(),
+        )
+        source = SourceRecord(
+            source_id="src_fixture123",
+            vendor="custom",
+            protocol=protocol,
+            base_url="https://api.example.test/v1",
+            credential_ref="cred_fixture123",
+            allowed_origins=(),
+            model_ids=("model-a",),
+            prefix="source-fixture123",
+        )
+        handle = await EngineClient(
+            EngineConnection(
+                base_url="http://127.0.0.1:15220",
+                management_key="management-key",
+                gateway_token="gateway-token",
+            )
+        ).invoke(source, "model-a", {}, stream=True, request_protocol=protocol)
+
+        assert handle.stream is not None
+        assert [chunk async for chunk in handle.stream] == [first]
+        outcome = await handle.outcome()
+        assert outcome.kind is expected_kind
+        decision = classify_outcome(outcome)
+        if expected_kind is RawOutcomeKind.HTTP_ERROR:
+            assert "permission_error" in outcome.error_candidates
+            assert decision.downstream_status == 403
+            assert terminal_outcome_category(outcome, decision) == "request_nonfallback"
+        else:
+            assert outcome.error_code is None
+            assert decision.reason == "network"
 
     asyncio.run(run())
 
