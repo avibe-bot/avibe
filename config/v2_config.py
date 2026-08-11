@@ -400,12 +400,15 @@ def _legacy_route_hops(
     target_model_id: str,
 ) -> list[dict[str, str]]:
     provider: Optional[str] = None
+    bare_target = backend == "opencode" and "/" not in target_model_id
     if backend == "opencode":
-        try:
-            provider, target_model_id = canonical_opencode_menu_identity(target_model_id)
-        except ValueError:
-            return []
+        if not bare_target:
+            try:
+                provider, target_model_id = canonical_opencode_menu_identity(target_model_id)
+            except ValueError:
+                return []
     hops: list[dict[str, str]] = []
+    bare_matches: list[dict[str, str]] = []
     for source_id in source_order:
         source = sources[source_id]
         legacy_claude_model_id = (
@@ -434,9 +437,29 @@ def _legacy_route_hops(
                         continue
                 if (source_provider, source_model_id) != (provider, target_model_id):
                     continue
-            elif model_id != target_model_id:
+                hops.append({"source_id": source_id, "model_id": model_id})
                 continue
-            hops.append({"source_id": source_id, "model_id": model_id})
+            if bare_target:
+                try:
+                    _, source_model_id = canonical_opencode_menu_identity(
+                        f"{source.get('vendor') or ''}/{model_id}"
+                    )
+                except ValueError:
+                    try:
+                        _, source_model_id = canonical_opencode_menu_identity(
+                            f"custom/{model_id}"
+                        )
+                    except ValueError:
+                        continue
+                if source_model_id == target_model_id or source_model_id.endswith(
+                    f"/{target_model_id}"
+                ):
+                    bare_matches.append({"source_id": source_id, "model_id": model_id})
+                continue
+            if model_id == target_model_id:
+                hops.append({"source_id": source_id, "model_id": model_id})
+    if bare_target and len(bare_matches) == 1:
+        return bare_matches
     return hops
 
 
@@ -475,6 +498,11 @@ def _migrate_legacy_model_hub_payload(payload: dict) -> tuple[dict, bool, tuple[
         for source in raw_sources or []
         if isinstance(source, dict) and isinstance(source.get("id"), str)
     }
+    if "priority_order" in model_hub and any(
+        source_id not in legacy_sources_by_id
+        for source_id in model_hub["priority_order"]
+    ):
+        return payload, False, ()
     for source in raw_sources or []:
         if not isinstance(source, dict):
             return payload, False, ()
@@ -483,6 +511,14 @@ def _migrate_legacy_model_hub_payload(payload: dict) -> tuple[dict, bool, tuple[
             return payload, False, ()
         if isinstance(models, list) and any(not isinstance(model, dict) for model in models):
             return payload, False, ()
+        if "experimental_consent_at" in source:
+            try:
+                _validate_optional_datetime(
+                    source["experimental_consent_at"],
+                    "model_hub.sources.experimental_consent_at",
+                )
+            except (TypeError, ValueError):
+                return payload, False, ()
     for backend, agent in agents.items():
         if not isinstance(agent, dict):
             return payload, False, ()
@@ -546,6 +582,11 @@ def _migrate_legacy_model_hub_payload(payload: dict) -> tuple[dict, bool, tuple[
     has_legacy_shape = bool(
         {"priority_order", "subscription_hub_experimental"} & set(model_hub)
         or any(isinstance(agent, dict) and "mappings" in agent for agent in agents.values())
+        or any(
+            isinstance(source, dict)
+            and "experimental_consent_at" in source
+            for source in raw_sources or []
+        )
         or any(
             isinstance(source, dict)
             and any(

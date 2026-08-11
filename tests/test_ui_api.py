@@ -1348,6 +1348,20 @@ def test_remove_backend_auth_blocks_recovery_before_service_mutation(monkeypatch
     assert service_calls == []
 
 
+def test_remove_claude_oauth_credentials_blocks_recovery_before_service_mutation(monkeypatch):
+    fake_config = SimpleNamespace(load_warnings=("recovery required",), language="zh")
+    service_calls = []
+    monkeypatch.setattr(api, "load_config", lambda: fake_config)
+    monkeypatch.setattr(api, "_get_oauth_service", lambda: service_calls.append(True))
+
+    result = asyncio.run(api.remove_claude_oauth_credentials_async())
+
+    assert result["ok"] is False
+    assert result["error"] == "config_recovery"
+    assert "配置加载时发生了恢复" in result["message"]
+    assert service_calls == []
+
+
 def test_detect_cli_prefers_claude_local(monkeypatch, tmp_path):
     claude_path = tmp_path / ".claude" / "local" / "claude"
     claude_path.parent.mkdir(parents=True, exist_ok=True)

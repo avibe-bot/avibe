@@ -1546,6 +1546,7 @@ class ModelHubService:
         binding: OAuthFlowBinding,
         flow: OAuthFlowState,
     ) -> dict:
+        self._ensure_config_writable()
         if binding.source_id is None or binding.vendor is None:
             raise ModelHubError("flow_not_found", status=404)
 

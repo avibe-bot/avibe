@@ -8974,6 +8974,9 @@ async def remove_backend_auth_async(backend: str) -> dict:
 
 async def remove_claude_oauth_credentials_async() -> dict:
     """Clear only Claude Code OAuth credentials, preserving API-key auth."""
+    recovery_message = _config_recovery_message()
+    if recovery_message:
+        return {"ok": False, "error": "config_recovery", "message": recovery_message}
     service = _get_oauth_service()
     try:
         return await service.clear_claude_oauth_credentials_only()

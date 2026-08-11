@@ -1722,6 +1722,43 @@ def test_hub_reauth_refreshes_discovery_when_engine_reuses_credential_ref(
     assert service.revocations.list() == []
 
 
+def test_completed_hub_reauth_blocks_recovery_before_discovery(tmp_path):
+    service, store, adapter = _service(tmp_path)
+    source = ModelHubSourceConfig(
+        id="src_huboauth01",
+        kind="subscription",
+        vendor="anthropic",
+        display_name="Hub subscription",
+        protocol="anthropic",
+        supply_channel="hub",
+        billing="monthly",
+        state=ModelHubSourceStateConfig(
+            status="needs_action",
+            detail_key="models.source.needs_action.oauth_expired",
+        ),
+        models=[ModelHubModelConfig(id="stale-entitlement", provenance="discovered")],
+        credential_ref="cred_hub_reused",
+    )
+    store.config.sources.append(source)
+    _refresh_fixture_routes(store.config)
+    flow = asyncio.run(service.reauth_source(source.id, {}))["flow"]
+    adapter.flows[flow["flow_id"]] = OAuthFlowState(
+        **{
+            **adapter.flows[flow["flow_id"]].__dict__,
+            "state": "success",
+            "credential_ref": "cred_hub_reused",
+        }
+    )
+    store.recovery = True
+
+    with pytest.raises(ModelHubError) as error:
+        asyncio.run(service.oauth_status(flow["flow_id"]))
+
+    assert error.value.code == "config_recovery"
+    assert adapter.secret_lengths == []
+    assert store.config.sources[0].models[0].id == "stale-entitlement"
+
+
 def test_concurrent_completed_hub_reauth_materializes_once(tmp_path):
     async def run_race():
         class BlockingDiscoveryAdapter(FakeAdapter):

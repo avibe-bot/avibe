@@ -1150,7 +1150,7 @@ def test_config_reload_preserves_enabled_unchecked_legacy_opencode_mapping(monke
     legacy["agents"]["opencode"]["mappings"] = [
         {
             "builtin_id": "custom/glm-5.2-air",
-            "target_model_id": "custom/glm-5.2-air",
+            "target_model_id": "glm-5.2-air",
             "enabled": True,
         }
     ]
@@ -1523,7 +1523,9 @@ def test_config_reload_recovers_runtime_with_the_canonical_default(
             {"sources": {"policy": "custom", "order": "invalid"}}
         ),
         lambda hub: hub.update({"priority_order": {"invalid": True}}),
+        lambda hub: hub.update({"priority_order": ["src_missing001"]}),
         lambda hub: hub.update({"subscription_hub_experimental": "false"}),
+        lambda hub: hub["sources"].append({"experimental_consent_at": 1}),
         lambda hub: hub["agents"]["claude"].update({"mappings": ["invalid"]}),
         lambda hub: hub["agents"]["claude"].update(
             {
@@ -1587,7 +1589,9 @@ def test_config_reload_recovers_runtime_with_the_canonical_default(
         "sources-not-object",
         "custom-order-not-array",
         "priority-order-not-array",
+        "priority-order-dangling",
         "subscription-hub-experimental-not-bool",
+        "experimental-consent-not-date-time",
         "mapping-not-object",
         "mapping-empty-builtin",
         "agent-invalid-mode",
@@ -1722,6 +1726,22 @@ def test_final_config_rejects_retired_consent_metadata():
     payload["sources"][0]["experimental_consent_at"] = "2026-07-23T03:00:00Z"
     with pytest.raises(ValueError):
         ModelHubConfig.from_payload(payload)
+
+
+def test_config_reload_drops_valid_retired_consent_metadata(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    payload = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    source = copy.deepcopy(_schema("source.schema.json")["examples"][1])
+    source["experimental_consent_at"] = "2026-07-23T03:00:00Z"
+    payload["model_hub"]["sources"] = [source]
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert loaded.load_warnings == ()
+    persisted = json.loads(config_path.read_text(encoding="utf-8"))
+    assert "experimental_consent_at" not in persisted["model_hub"]["sources"][0]
 
 
 def test_final_config_rejects_retired_global_priority_key():
