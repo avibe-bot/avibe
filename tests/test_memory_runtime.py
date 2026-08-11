@@ -4804,6 +4804,60 @@ async def test_runtime_rebuild_data_preflight_fails_before_destructive_stop(
     await memory_runtime_factory.close(runtime)
 
 
+async def test_runtime_rebuild_probes_candidate_before_destructive_stop(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    memory_runtime_factory,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    candidate = MemoryConfig(
+        enabled=True,
+        processing=_processing_config(),
+        recovery_intent="rebuild",
+    )
+    V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+        memory=candidate,
+    ).save()
+    runtime = memory_runtime_factory(
+        candidate,
+        artifact_manager=_installed_artifact(),
+        process_factory=FakeEverOSProcessFactory(),
+        effective_home=tmp_path,
+    )
+    old = FakeEverOSProcess(settings=_settings())
+    runtime._process = old
+    monkeypatch.setattr(runtime, "_provider_data_exists_strict", lambda: False)
+    probe_calls: list[MemoryConfig] = []
+
+    async def reject_candidate(_python: Path, config: MemoryConfig) -> bool:
+        probe_calls.append(config)
+        assert old.stopped is False
+        return False
+
+    monkeypatch.setattr(runtime, "_probe_processing", reject_candidate)
+
+    assert await runtime.rebuild() == {
+        "ok": False,
+        "error": "memory_rebuild_failed",
+        "result": "failed",
+    }
+    assert probe_calls == [candidate]
+    assert old.stopped is False
+    assert runtime._process is old
+    assert V2Config.load().memory.recovery_intent == "rebuild"
+    assert runtime.module._worker._claims_paused is True
+    assert await runtime.restart() == {
+        "ok": False,
+        "error": "memory_embedding_rebuild_required",
+    }
+    await memory_runtime_factory.close(runtime)
+
+
 @pytest.mark.parametrize(
     ("inspections", "expected_result", "expected_child_calls"),
     [
@@ -5071,6 +5125,7 @@ async def test_runtime_rebuild_maps_failed_child_without_settling(
     runtime = memory_runtime_factory(
         candidate,
         artifact_manager=_installed_artifact(),
+        process_factory=FakeEverOSProcessFactory(),
         effective_home=tmp_path,
     )
     monkeypatch.setattr(runtime, "_provider_data_exists_strict", lambda: True)
@@ -5117,6 +5172,7 @@ async def test_runtime_rebuild_rejects_stale_settlement_identity(
     runtime = memory_runtime_factory(
         candidate,
         artifact_manager=_installed_artifact(),
+        process_factory=FakeEverOSProcessFactory(),
         effective_home=tmp_path,
     )
     monkeypatch.setattr(runtime, "_provider_data_exists_strict", lambda: True)
@@ -5341,6 +5397,7 @@ async def test_runtime_rebuild_keeps_completed_result_when_root_activation_fails
     runtime = memory_runtime_factory(
         candidate,
         artifact_manager=_installed_artifact(),
+        process_factory=FakeEverOSProcessFactory(),
         effective_home=tmp_path,
     )
     monkeypatch.setattr(runtime, "_provider_data_exists_strict", lambda: False)

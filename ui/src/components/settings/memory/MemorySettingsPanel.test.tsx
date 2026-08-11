@@ -251,7 +251,8 @@ describe('MemorySettingsPanel', () => {
     const inputs = screen.getAllByPlaceholderText(
       'memory.settings.baseUrlPlaceholder',
     ) as HTMLInputElement[];
-    expect(inputs.every((input) => input.disabled)).toBe(true);
+    expect(inputs[0].disabled).toBe(true);
+    expect(inputs[1].disabled).toBe(false);
     expect(
       (screen.getByRole('switch', { name: 'memory.settings.enableLabel' }) as HTMLButtonElement)
         .disabled,
@@ -267,6 +268,49 @@ describe('MemorySettingsPanel', () => {
     await user.click(retry);
     await waitFor(() => expect(api.rebuildMemoryRuntime).toHaveBeenCalled());
     expect(onReloadSettings).toHaveBeenCalled();
+  });
+
+  it('keeps a pending embedding identity editable and reconfirms its correction', async () => {
+    api.saveMemorySettings.mockResolvedValue({
+      ...legacySettings,
+      rebuild_required: true,
+      processing: {
+        ...legacySettings.processing,
+        embedding: endpoint('https://corrected-embedding.example.test/v1'),
+      },
+      runtime: { ok: false, error: 'memory_rebuild_failed', result: 'failed' },
+    });
+    const user = userEvent.setup();
+    render(
+      <MemorySettingsPanel
+        settings={{ ...legacySettings, rebuild_required: true }}
+        maintenance={null}
+        maintenanceError={null}
+        dependencyReady
+        onSaved={() => undefined}
+        onReloadSettings={() => undefined}
+        onReloadMaintenance={() => undefined}
+        onClearAll={() => undefined}
+        clearing={false}
+      />,
+    );
+
+    const embeddingBaseUrl = screen.getAllByPlaceholderText(
+      'memory.settings.baseUrlPlaceholder',
+    )[1] as HTMLInputElement;
+    expect(embeddingBaseUrl.disabled).toBe(false);
+    await user.clear(embeddingBaseUrl);
+    await user.type(embeddingBaseUrl, 'https://corrected-embedding.example.test/v1');
+    await user.click(screen.getByRole('button', { name: 'memory.settings.save' }));
+
+    expect(api.saveMemorySettings).not.toHaveBeenCalled();
+    await user.click(await screen.findByRole('button', { name: 'confirm-rebuild' }));
+    await waitFor(() => expect(api.saveMemorySettings).toHaveBeenCalledWith({
+      processing: {
+        embedding: { base_url: 'https://corrected-embedding.example.test/v1' },
+      },
+      confirm_rebuild: true,
+    }));
   });
 
   it('keeps API-key correction available under a pending marker', async () => {

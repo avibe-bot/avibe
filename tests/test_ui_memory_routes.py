@@ -1102,6 +1102,86 @@ def test_memory_confirmed_rebuild_failure_keeps_candidate(monkeypatch, tmp_path)
     assert persisted.recovery_intent == "rebuild"
 
 
+def test_memory_confirmed_identity_correction_replaces_pending_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    current = V2Config.load()
+    current.memory = MemoryConfig(
+        enabled=False,
+        recovery_intent="rebuild",
+        processing=MemoryProcessingConfig(
+            llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-key"),
+            embedding=MemoryEndpointConfig(
+                "https://invalid-embed.example.test/v1",
+                "embed-v1",
+                "embed-key",
+            ),
+        ),
+    )
+    _save_memory(current.memory)
+    rebuild_calls: list[bool] = []
+    reconcile_calls: list[bool] = []
+
+    async def rebuild(*, user_key: str):
+        assert user_key
+        rebuild_calls.append(True)
+        candidate = V2Config.load().memory
+        assert candidate.processing.embedding.base_url == (
+            "https://corrected-embed.example.test/v1"
+        )
+        assert candidate.recovery_intent == "rebuild"
+        return {
+            "status_code": 409,
+            "body": {
+                "ok": False,
+                "error": "memory_rebuild_failed",
+                "result": "failed",
+            },
+        }
+
+    async def reconcile():
+        reconcile_calls.append(True)
+        return {"status_code": 200, "body": {"ok": True, "state": "disabled"}}
+
+    monkeypatch.setattr(internal_client, "memory_rebuild", rebuild)
+    monkeypatch.setattr(internal_client, "reconcile_memory", reconcile)
+    client = app.test_client()
+    response = client.patch(
+        "/api/memory/settings",
+        json={
+            "processing": {
+                "embedding": {
+                    "base_url": "https://corrected-embed.example.test/v1",
+                },
+            },
+            "confirm_rebuild": True,
+        },
+        headers=csrf_headers(client, "http://127.0.0.1:15131"),
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 409
+    body = response.get_json()
+    assert body["error"] == "memory_rebuild_failed"
+    assert body["runtime"] == {
+        "ok": False,
+        "error": "memory_rebuild_failed",
+        "result": "failed",
+    }
+    assert body["rebuild_required"] is True
+    assert rebuild_calls == [True]
+    assert reconcile_calls == []
+    persisted = V2Config.load().memory
+    assert persisted.processing.embedding.base_url == (
+        "https://corrected-embed.example.test/v1"
+    )
+    assert persisted.recovery_intent == "rebuild"
+
+
 def test_memory_api_key_only_under_pending_marker_does_not_reconcile(
     monkeypatch,
     tmp_path,

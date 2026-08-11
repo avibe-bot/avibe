@@ -332,7 +332,6 @@ export const MemorySettingsPanel: React.FC<{
         original={settings.processing.embedding}
         onChange={setEmbeddingDraft}
         disabled={busy}
-        identityDisabled={rebuildRequired}
         identityHint={t('memory.settings.embeddingIdentityHint')}
         canClearKey={canClearKeys}
       />

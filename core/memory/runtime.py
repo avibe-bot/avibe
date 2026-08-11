@@ -1836,6 +1836,18 @@ class MemoryRuntime:
                         "result": "failed",
                     }
 
+            try:
+                candidate_healthy = await self._probe_processing(python, candidate)
+            except Exception:
+                candidate_healthy = False
+            if not candidate_healthy:
+                self._runtime_error = "memory_rebuild_failed"
+                return {
+                    "ok": False,
+                    "error": self._runtime_error,
+                    "result": "failed",
+                }
+
             await self._stop_worker()
             await self._sidecar.stop()
 
