@@ -41,7 +41,21 @@ def test_release_workflows_emit_metadata_for_the_current_runtime_version() -> No
         assert "memory-runtime-1.2.1-${{ matrix.artifact }}.json" not in workflow
 
 
-def _write_archive(directory: Path, platform: str) -> tuple[Path, bytes]:
+def test_github_only_release_runs_memory_runtime_guard_before_uploading_assets() -> None:
+    workflow = (
+        Path(__file__).resolve().parents[1] / ".github/workflows/release_ai.yml"
+    ).read_text(encoding="utf-8")
+
+    guard = workflow.index("Run Memory Runtime release guard for GitHub-only assets")
+    upload = workflow.index("Add Show Runtime release assets")
+    guarded_section = workflow[guard:upload]
+
+    assert '[[ "$TAG" != gh-v* ]]' in guarded_section
+    assert "scripts/memory_runtime_release_guard.py" in guarded_section
+    assert "verify --asset-dir memory-release-guard-assets" in guarded_section
+
+
+def _write_archive(directory: Path, platform: str, *, sync: bool = False) -> tuple[Path, bytes]:
     binary = f"python-{platform}".encode()
     archive = directory / f"memory-runtime-1.2.3-{platform}.tar.gz"
     with tarfile.open(archive, "w:gz") as output:
@@ -49,6 +63,14 @@ def _write_archive(directory: Path, platform: str) -> tuple[Path, bytes]:
         info.mode = 0o755
         info.size = len(binary)
         output.addfile(info, io.BytesIO(binary))
+        if sync:
+            for name, contents in (
+                (manifest_generator.SYNC_BOOTSTRAP_MEMBER, b"bootstrap"),
+                (manifest_generator.SYNC_SCRUBBERS_MEMBER, b"scrubbers"),
+            ):
+                member = tarfile.TarInfo(name)
+                member.size = len(contents)
+                output.addfile(member, io.BytesIO(contents))
     metadata = {
         "platform": platform,
         "everos_version": "1.2.3",
@@ -61,6 +83,15 @@ def _write_archive(directory: Path, platform: str) -> tuple[Path, bytes]:
         "size": archive.stat().st_size,
         "bin_path": "bin/python",
     }
+    if sync:
+        metadata.update(
+            {
+                "sync_bootstrap_revision": manifest_generator.SYNC_BOOTSTRAP_REVISION,
+                "sync_bootstrap_sha256": hashlib.sha256(b"bootstrap").hexdigest(),
+                "sync_scrubbers_sha256": hashlib.sha256(b"scrubbers").hexdigest(),
+                "sync_argv": manifest_generator.SYNC_ARGV,
+            }
+        )
     archive.with_suffix("").with_suffix(".json").write_text(
         json.dumps(metadata),
         encoding="utf-8",
@@ -109,6 +140,20 @@ def test_generate_memory_runtime_manifest_fails_when_platform_archive_missing(tm
         _write_archive(tmp_path, platform)
 
     with pytest.raises(SystemExit, match="linux-x64"):
+        manifest_generator.build_manifest(
+            archive_dir=tmp_path,
+            tag="v3.1.0",
+            repo="avibe-bot/avibe",
+            output=tmp_path / "manifest.json",
+        )
+
+
+def test_generate_memory_runtime_manifest_rejects_mixed_sync_contracts(tmp_path: Path) -> None:
+    _write_archive(tmp_path, "darwin-arm64", sync=True)
+    for platform in PLATFORMS[1:]:
+        _write_archive(tmp_path, platform)
+
+    with pytest.raises(SystemExit, match="differs across platform archives"):
         manifest_generator.build_manifest(
             archive_dir=tmp_path,
             tag="v3.1.0",

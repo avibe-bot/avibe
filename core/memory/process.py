@@ -88,11 +88,13 @@ class _ProcessKind(Enum):
     SIDECAR = "sidecar"
     PROCESSING_PROBE = "processing_probe"
     CASCADE_REBUILD = "cascade_rebuild"
+    CASCADE_SYNC = "cascade_sync"
 
 
 class _MemoryChildRole(Enum):
     SIDECAR = "sidecar"
     CASCADE_REBUILD = "cascade_rebuild"
+    CASCADE_SYNC = "cascade_sync"
 
 
 class RebuildProcessResult(str, Enum):
@@ -1429,11 +1431,18 @@ def _release_rebuild_child(process: asyncio.subprocess.Process) -> None:
         pass
 
 
-def _provider_rebuild_lock_path(*, provider_root: Path) -> Path:
-    """Bind coordination to the canonical root location, outside provider data."""
+def _provider_root_coordination_path(
+    *,
+    provider_root: Path | str,
+    prefix: str,
+    suffix: str,
+) -> Path:
+    """Bind one coordination artifact to the canonical root, outside provider data."""
 
     canonical_root = _canonical_provider_root(provider_root)
-    canonical_parent = _physical_existing_path(canonical_root.parent.resolve(strict=True))
+    # A sync ownership path is derived before a first-run home creates its
+    # provider-root parent. Existing parents still retain their physical spelling.
+    canonical_parent = _physical_existing_path(canonical_root.parent.resolve(strict=False))
     root_identity_path = (
         _physical_existing_path(canonical_root)
         if canonical_root.exists()
@@ -1449,7 +1458,17 @@ def _provider_rebuild_lock_path(*, provider_root: Path) -> Path:
     return (
         canonical_parent
         / _REBUILD_LOCK_DIRECTORY
-        / f"{_REBUILD_LOCK_PREFIX}{root_identity}.lock"
+        / f"{prefix}{root_identity}{suffix}"
+    )
+
+
+def _provider_rebuild_lock_path(*, provider_root: Path) -> Path:
+    """Bind rebuild serialization to the canonical root location."""
+
+    return _provider_root_coordination_path(
+        provider_root=provider_root,
+        prefix=_REBUILD_LOCK_PREFIX,
+        suffix=".lock",
     )
 
 
@@ -2749,6 +2768,14 @@ def _cmdline_matches_role(
             "--uds",
             str(socket_path),
         )
+    if role is _MemoryChildRole.CASCADE_SYNC:
+        return cmdline[1:] == (
+            "-I",
+            "-m",
+            "everos.entrypoints.cli.main",
+            "cascade",
+            "sync",
+        )
     return cmdline[1:] == (
         "-m",
         _REBUILD_ENTRYPOINT_MODULE,
@@ -2995,6 +3022,69 @@ def _processes_rebuilding_owned_root(
             )
             or environment.get("AVIBE_MEMORY_CHILD_ROLE")
             != _MemoryChildRole.CASCADE_REBUILD.value
+        ):
+            continue
+        claimed[candidate.pid] = float(created_at)
+    return claimed
+
+
+def _processes_syncing_owned_root(
+    *,
+    provider_root: Path,
+    python: Path,
+    nonce: str,
+) -> dict[int, float]:
+    """Discover the exact nonce-bearing sync child for pending recovery."""
+
+    claimed: dict[int, float] = {}
+    own_pid = os.getpid()
+    getuid = getattr(os, "getuid", None)
+    own_uid = getuid() if callable(getuid) else None
+    for candidate in psutil.process_iter():
+        if candidate.pid == own_pid:
+            continue
+        try:
+            uid = _process_real_uid(candidate)
+            if own_uid is not None and uid is not None and uid != own_uid:
+                continue
+            cmdline = _disclosed_identity_field(candidate.cmdline)
+        except psutil.NoSuchProcess:
+            continue
+        except psutil.Error as exc:
+            raise RuntimeError(
+                f"sync child identity could not be verified (pid {candidate.pid})"
+            ) from exc
+        if cmdline is None:
+            raise RuntimeError(
+                f"sync child command line could not be verified (pid {candidate.pid})"
+            )
+        rendered = tuple(str(value) for value in cmdline)
+        if not _cmdline_matches_role(
+            rendered,
+            role=_MemoryChildRole.CASCADE_SYNC,
+            socket_path=Path(),
+            python=python,
+        ):
+            continue
+        try:
+            created_at = _disclosed_identity_field(candidate.create_time)
+            environment = _disclosed_process_environment(candidate)
+        except psutil.NoSuchProcess:
+            continue
+        except psutil.Error as exc:
+            raise RuntimeError(
+                f"sync child identity could not be verified (pid {candidate.pid})"
+            ) from exc
+        if own_uid is not None and uid is None:
+            raise RuntimeError(f"sync child uid could not be verified (pid {candidate.pid})")
+        if created_at is None or environment is None:
+            raise RuntimeError(
+                f"sync child identity could not be verified (pid {candidate.pid})"
+            )
+        if (
+            not _provider_roots_match(environment.get("EVEROS_ROOT"), provider_root)
+            or environment.get("AVIBE_MEMORY_CHILD_ROLE") != _MemoryChildRole.CASCADE_SYNC.value
+            or environment.get("AVIBE_MEMORY_SYNC_NONCE") != nonce
         ):
             continue
         claimed[candidate.pid] = float(created_at)
@@ -3349,6 +3439,15 @@ class _SystemProcessHost:
                 "rebuild",
                 "--yes",
             ]
+        elif kind is _ProcessKind.CASCADE_SYNC:
+            arguments = [
+                str(python),
+                "-I",
+                "-m",
+                "everos.entrypoints.cli.main",
+                "cascade",
+                "sync",
+            ]
         else:
             arguments = [str(python), "-m", _SIDECAR_ENTRYPOINT_MODULE]
         if kind is _ProcessKind.SIDECAR:
@@ -3406,6 +3505,19 @@ class _SystemProcessHost:
         return _processes_rebuilding_owned_root(
             provider_root=provider_root,
             python=python,
+        )
+
+    def find_syncs(
+        self,
+        *,
+        provider_root: Path,
+        python: Path,
+        nonce: str,
+    ) -> dict[int, float]:
+        return _processes_syncing_owned_root(
+            provider_root=provider_root,
+            python=python,
+            nonce=nonce,
         )
 
     def live(self, identities: Mapping[int, float]) -> dict[int, float]:
@@ -3648,3 +3760,13 @@ class FakeEverOSProcessFactory:
     @property
     def last(self) -> FakeEverOSProcess | None:
         return self.created[-1] if self.created else None
+
+
+def __getattr__(name: str) -> object:
+    """Lazily expose the auxiliary sync process without a module cycle."""
+
+    if name in {"EverOSSyncProcess", "SyncProcessResult", "sync_record_path"}:
+        from core.memory import sync_process
+
+        return getattr(sync_process, name)
+    raise AttributeError(name)

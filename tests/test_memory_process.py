@@ -51,8 +51,10 @@ from core.memory.process import (
     _classify_recorded_child,
     _classify_recorded_sidecar,
     _processes_rebuilding_owned_root,
+    _processes_syncing_owned_root,
     _REBUILD_TIMEOUT_SECONDS,
 )
+from core.memory.sync_process import SYNC_NONCE_ENV, SYNC_ROLE, SYNC_ARGV
 from core.memory.sidecar import _request_rejection
 from core.memory.types import (
     CaptureAttachment,
@@ -4029,6 +4031,96 @@ def test_rebuild_discovery_accepts_only_the_exact_role_owned_candidate(
             provider_root=tmp_path,
             python=Path(sys.executable),
         )
+
+
+def test_sync_discovery_ignores_foreign_uid_candidates(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    own_uid = os.getuid() if hasattr(os, "getuid") else 0
+    command = (
+        sys.executable,
+        "-I",
+        *SYNC_ARGV[1:],
+    )
+    environment = {
+        "EVEROS_ROOT": str(tmp_path),
+        "AVIBE_MEMORY_CHILD_ROLE": SYNC_ROLE,
+        SYNC_NONCE_ENV: "a" * 64,
+    }
+    foreign = _RebuildDiscoveryCandidate(
+        cmdline=command,
+        uid=own_uid + 1,
+        environment=None,
+    )
+    monkeypatch.setattr(memory_process.psutil, "process_iter", lambda: [foreign])
+
+    assert _processes_syncing_owned_root(
+        provider_root=tmp_path,
+        python=Path(sys.executable),
+        nonce="a" * 64,
+    ) == {}
+
+    exact = _RebuildDiscoveryCandidate(
+        cmdline=command,
+        uid=own_uid,
+        environment=environment,
+    )
+    monkeypatch.setattr(memory_process.psutil, "process_iter", lambda: [exact])
+    assert _processes_syncing_owned_root(
+        provider_root=tmp_path,
+        python=Path(sys.executable),
+        nonce="a" * 64,
+    ) == {_ORPHAN_PID: _ORPHAN_CREATE_TIME}
+
+    unverifiable = _RebuildDiscoveryCandidate(
+        cmdline=command,
+        uid=own_uid,
+        environment=None,
+    )
+    monkeypatch.setattr(memory_process.psutil, "process_iter", lambda: [unverifiable])
+    with pytest.raises(RuntimeError, match="identity could not be verified"):
+        _processes_syncing_owned_root(
+            provider_root=tmp_path,
+            python=Path(sys.executable),
+            nonce="a" * 64,
+        )
+
+    class InaccessibleCmdlineCandidate(_RebuildDiscoveryCandidate):
+        def cmdline(self) -> list[str]:
+            raise psutil.AccessDenied(pid=self.pid)
+
+    inaccessible = InaccessibleCmdlineCandidate(
+        cmdline=command,
+        uid=own_uid,
+        environment=environment,
+    )
+    monkeypatch.setattr(memory_process.psutil, "process_iter", lambda: [inaccessible])
+    with pytest.raises(RuntimeError, match="command line could not be verified"):
+        _processes_syncing_owned_root(
+            provider_root=tmp_path,
+            python=Path(sys.executable),
+            nonce="a" * 64,
+        )
+
+
+def test_sync_discovery_ignores_non_sync_candidate_with_inaccessible_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    own_uid = os.getuid() if hasattr(os, "getuid") else 0
+    unrelated = _RebuildDiscoveryCandidate(
+        cmdline=(sys.executable, "-m", "http.server"),
+        uid=own_uid,
+        environment=None,
+    )
+    monkeypatch.setattr(memory_process.psutil, "process_iter", lambda: [unrelated])
+
+    assert _processes_syncing_owned_root(
+        provider_root=tmp_path,
+        python=Path(sys.executable),
+        nonce="a" * 64,
+    ) == {}
 
 
 def test_sidecar_root_discovery_requires_exact_uid_argv_root_and_role(

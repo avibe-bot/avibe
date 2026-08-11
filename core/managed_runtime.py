@@ -158,7 +158,7 @@ class ManagedRuntimeManager:
                         archive=archive,
                     )
                 make_executable(staged_binary)
-                preparation = self._prepare_binary(staged_binary)
+                preparation = self._prepare_binary_for_manifest(staged_binary, manifest)
                 if not preparation.get("ok"):
                     return self._failure(
                         str(preparation.get("reason") or self._reason("binary_prepare_failed")),
@@ -339,6 +339,16 @@ class ManagedRuntimeManager:
 
     def _prepare_binary(self, binary: Path) -> dict[str, Any]:
         return {"ok": True, "skipped": True}
+
+    def _prepare_binary_for_manifest(
+        self,
+        binary: Path,
+        manifest: ManagedRuntimeManifest,
+    ) -> dict[str, Any]:
+        """Prepare an extracted binary with any runtime-specific manifest contract."""
+
+        del manifest
+        return self._prepare_binary(binary)
 
     def _binary_version(self, binary: Path | None) -> str | None:
         raise NotImplementedError
