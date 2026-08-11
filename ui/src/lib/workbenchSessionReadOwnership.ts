@@ -20,6 +20,7 @@ export type WorkbenchSessionReadOwnership = {
     resources?: string | readonly string[],
   ) => boolean;
   isLatestRead: (stamp: WorkbenchSessionReadStamp) => boolean;
+  latestGeneration: (resource: string) => number | undefined;
   epoch: () => number;
 };
 
@@ -52,6 +53,7 @@ export function createWorkbenchSessionReadOwnership(): WorkbenchSessionReadOwner
     },
     isLatestRead: (stamp) =>
       stamp.resources.every((resource) => latestByResource.get(resource) === stamp.generation),
+    latestGeneration: (resource) => latestByResource.get(resource),
     epoch: () => mutationEpoch,
   };
 }

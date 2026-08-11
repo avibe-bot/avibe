@@ -44,4 +44,13 @@ describe('Workbench session read ownership', () => {
     expect(ownership.isCurrent(bootstrap, ['projects-bootstrap', 'project:a'])).toBe(false);
     expect(ownership.isCurrent(project, ['projects-bootstrap', 'project:a'])).toBe(true);
   });
+
+  it('exposes the latest generation for operation-specific retry decisions', () => {
+    const ownership = createWorkbenchSessionReadOwnership();
+    const reconcile = ownership.beginRead(['inbox-feed', 'inbox-feed-reconcile']);
+    const cursor = ownership.beginRead(['inbox-feed', 'inbox-feed-cursor']);
+
+    expect(ownership.latestGeneration('inbox-feed-cursor')).toBe(cursor.generation);
+    expect(ownership.latestGeneration('inbox-feed-reconcile')).toBe(reconcile.generation);
+  });
 });

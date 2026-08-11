@@ -11,7 +11,10 @@ import {
 import { createdReconcileMinCount } from '../lib/sessionVisibilityEvents';
 import { orderProjectSessions } from '../lib/sessionPinning';
 import { errorMessage } from '@/lib/errorMessage';
-import { createWorkbenchSessionReadOwnership } from '../lib/workbenchSessionReadOwnership';
+import {
+  createWorkbenchSessionReadOwnership,
+  type WorkbenchSessionReadStamp,
+} from '../lib/workbenchSessionReadOwnership';
 
 // How many sessions to load per page under a project. The server clamps the
 // /api/sessions limit (to 200) and returns a cursor (next_before_id); both the
@@ -125,6 +128,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
   const readOwnershipRef = useRef(createWorkbenchSessionReadOwnership());
   const authoritativeProjectsLoadedRef = useRef(false);
   const bootstrapRetryPendingRef = useRef(false);
+  const projectTreeRetryPendingRef = useRef(false);
 
   const acceptSessionMutation = useCallback(() => {
     readOwnershipRef.current.acceptMutation();
@@ -283,7 +287,21 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
     [queueReconcile],
   );
 
-  const reconcileProjectTree = useCallback(async () => {
+  const reconcileProjectTree = useCallback(async function reconcileProjectTree() {
+    const retryAfterInvalidation = (read: WorkbenchSessionReadStamp) => {
+      if (
+        readOwnershipRef.current.isCurrent(read, 'projects-bootstrap') ||
+        !readOwnershipRef.current.isLatestRead(read) ||
+        projectTreeRetryPendingRef.current
+      ) {
+        return;
+      }
+      projectTreeRetryPendingRef.current = true;
+      queueMicrotask(() => {
+        projectTreeRetryPendingRef.current = false;
+        void reconcileProjectTree();
+      });
+    };
     const bootstrapGroups = new Map<number, string[]>();
     const largeProjectIds: string[] = [];
     for (const [projectId, state] of Object.entries(sessionsRef.current)) {
@@ -318,7 +336,10 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
             limit,
             cache: false,
           });
-          if (!readOwnershipRef.current.isCurrent(read, 'projects-bootstrap')) return;
+          if (!readOwnershipRef.current.isCurrent(read, 'projects-bootstrap')) {
+            retryAfterInvalidation(read);
+            return;
+          }
           nextProjects = result.projects;
           for (const [projectId, page] of Object.entries(result.sessions ?? {})) {
             const currentCount = sessionsRef.current[projectId]?.sessions?.length ?? 0;
@@ -342,13 +363,19 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
         );
         applyBootstrapSessions(currentPages);
       }
-      if (!readOwnershipRef.current.isCurrent(read, 'projects-bootstrap')) return;
+      if (!readOwnershipRef.current.isCurrent(read, 'projects-bootstrap')) {
+        retryAfterInvalidation(read);
+        return;
+      }
       if (readOwnershipRef.current.isCurrent(read, 'projects')) setProjectsError(null);
       for (const projectId of largeProjectIds) {
         void reconcileSessions(projectId);
       }
     } catch (err) {
-      if (!readOwnershipRef.current.isCurrent(read, 'projects-bootstrap')) return;
+      if (!readOwnershipRef.current.isCurrent(read, 'projects-bootstrap')) {
+        retryAfterInvalidation(read);
+        return;
+      }
       if (readOwnershipRef.current.isCurrent(read, 'projects')) setProjectsError(errorMessage(err) ?? String(err));
       const projectIds = [...bootstrapGroups.values()].flat();
       for (const projectId of [...projectIds, ...largeProjectIds]) {
@@ -376,7 +403,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
   // Load the first page (append=false) or the next page (append=true) of a
   // project's sessions, with dedupe + per-project serialisation.
   const fetchSessions = useCallback(
-    async (projectId: string, opts?: { append?: boolean }) => {
+    async function fetchSessions(projectId: string, opts?: { append?: boolean }) {
       const append = opts?.append ?? false;
       if (append && !sessionsRef.current[projectId]?.cursor) return; // nothing more to load
       if (inFlightRef.current.has(projectId)) return; // serialise per project
@@ -390,11 +417,14 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       });
       const beforeId = append ? sessionsRef.current[projectId]?.cursor ?? undefined : undefined;
       const read = readOwnershipRef.current.beginRead(`project:${projectId}`);
+      let retryFirstPage = false;
       try {
         const res = await api.listSessions({ projectId, status: 'active', limit: SESSIONS_PAGE_SIZE, beforeId });
+        const currentRead = readOwnershipRef.current.isCurrent(read, ['projects-bootstrap', `project:${projectId}`]);
+        retryFirstPage = !currentRead && !append && sessionsRef.current[projectId]?.sessions === null;
         setSessions((prev) => {
           const cur = prev[projectId] ?? EMPTY_SESSIONS;
-          if (!readOwnershipRef.current.isCurrent(read, ['projects-bootstrap', `project:${projectId}`])) {
+          if (!currentRead) {
             return {
               ...prev,
               [projectId]: append ? { ...cur, loadingMore: false } : { ...cur, loading: false },
@@ -412,10 +442,12 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
           };
         });
       } catch {
+        const currentRead = readOwnershipRef.current.isCurrent(read, ['projects-bootstrap', `project:${projectId}`]);
+        retryFirstPage = !currentRead && !append && sessionsRef.current[projectId]?.sessions === null;
         setSessions((prev) => {
           const cur = prev[projectId] ?? EMPTY_SESSIONS;
           if (!readOwnershipRef.current.isLatestRead(read)) return prev;
-          if (!readOwnershipRef.current.isCurrent(read, ['projects-bootstrap', `project:${projectId}`])) {
+          if (!currentRead) {
             return append
               ? { ...prev, [projectId]: { ...cur, loadingMore: false } }
               : { ...prev, [projectId]: { ...cur, loading: false } };
@@ -429,6 +461,14 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
         });
       } finally {
         inFlightRef.current.delete(projectId);
+        if (retryFirstPage) {
+          queueMicrotask(() => {
+            const current = sessionsRef.current[projectId];
+            if (current?.sessions === null && !inFlightRef.current.has(projectId)) {
+              void fetchSessions(projectId);
+            }
+          });
+        }
         const pendingMinCount = takePendingReconcile(projectId);
         if (pendingMinCount !== null) {
           void reconcileSessions(projectId, { minCount: pendingMinCount });
