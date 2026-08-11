@@ -1324,6 +1324,7 @@ def test_config_reload_recovers_runtime_with_the_canonical_default(
         ),
         lambda hub: hub["agents"]["claude"].update({"mode": "hbu"}),
         lambda hub: hub["agents"].update({"future-backend": {"mode": "hub"}}),
+        lambda hub: hub["agents"]["claude"].update({"future-field": True}),
         lambda hub: hub["agents"]["claude"].update(
             {"mappings": [{"builtin_id": "opus", "enabled": True}]}
         ),
@@ -1349,6 +1350,7 @@ def test_config_reload_recovers_runtime_with_the_canonical_default(
         "mapping-enabled-not-boolean",
         "agent-invalid-mode",
         "agent-unknown-backend",
+        "agent-unknown-field",
     ],
 )
 def test_config_reload_does_not_infer_malformed_legacy_source_order(

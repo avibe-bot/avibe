@@ -480,6 +480,16 @@ def _migrate_legacy_model_hub_payload(payload: dict) -> tuple[dict, bool, tuple[
     for agent in agents.values():
         if not isinstance(agent, dict):
             return payload, False, ()
+        if set(agent) - {
+            "backend",
+            "mode",
+            "menu_kind",
+            "sources",
+            "mappings",
+            "routes",
+            "menu",
+        }:
+            return payload, False, ()
         if "mode" in agent and agent["mode"] not in {"hub", "direct"}:
             return payload, False, ()
         mappings = agent.get("mappings")
