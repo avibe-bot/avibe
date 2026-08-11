@@ -14,10 +14,19 @@ describe('parseMemoryFactoryResetResult', () => {
     }).result).toBe('completed');
   });
 
+  it('accepts the exact operation-in-progress conflict contract', () => {
+    expect(parseMemoryFactoryResetResult({
+      ok: false, error: 'memory_operation_in_progress', result: 'failed',
+    })).toEqual({
+      ok: false, error: 'memory_operation_in_progress', result: 'failed',
+    });
+  });
+
   it.each([
     { status: 'completed' },
     { roots_deleted: { memory: true, state_memory: true } },
     { ok: true, result: 'completed', data_deleted: true, data_remaining: false, roots: [...roots], extra: true },
+    { ok: false, error: 'memory_operation_in_progress', result: 'failed', extra: true },
   ])('rejects aliases or extra fields: %o', (value) => {
     expect(() => parseMemoryFactoryResetResult(value)).toThrow('Invalid Memory factory reset response');
   });

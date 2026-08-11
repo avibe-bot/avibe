@@ -7,11 +7,13 @@ export type MemoryFactoryResetRootOutcome = {
 
 export type MemoryFactoryResetResult =
   | { ok: true; result: 'completed'; data_deleted: boolean; data_remaining: boolean; roots: [MemoryFactoryResetRootOutcome, MemoryFactoryResetRootOutcome] }
-  | { ok: false; result: 'partial' | 'deleted_activation_failed' | 'failed'; error: string; data_deleted: boolean; data_remaining: boolean; roots: [MemoryFactoryResetRootOutcome, MemoryFactoryResetRootOutcome]; reason?: string };
+  | { ok: false; result: 'partial' | 'deleted_activation_failed' | 'failed'; error: string; data_deleted: boolean; data_remaining: boolean; roots: [MemoryFactoryResetRootOutcome, MemoryFactoryResetRootOutcome]; reason?: string }
+  | { ok: false; result: 'failed'; error: 'memory_operation_in_progress'; roots?: never };
 
 const ROOTS = new Set(['memory', 'state/memory']);
 const SUCCESS_KEYS = new Set(['ok', 'result', 'data_deleted', 'data_remaining', 'roots']);
 const FAILURE_KEYS = new Set([...SUCCESS_KEYS, 'error', 'reason']);
+const OPERATION_IN_PROGRESS_KEYS = new Set(['ok', 'error', 'result']);
 const ROOT_KEYS = new Set(['path', 'existed', 'deleted', 'error']);
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -27,7 +29,16 @@ const isRoot = (value: unknown): value is MemoryFactoryResetRootOutcome => {
 
 /** Parse only the closed factory-reset response contract; aliases fail closed. */
 export const parseMemoryFactoryResetResult = (value: unknown): MemoryFactoryResetResult => {
-  if (!isRecord(value) || typeof value.ok !== 'boolean' || !hasOnlyKeys(value, value.ok ? SUCCESS_KEYS : FAILURE_KEYS)) {
+  if (!isRecord(value) || typeof value.ok !== 'boolean') {
+    throw new Error('Invalid Memory factory reset response');
+  }
+  if (!value.ok && value.error === 'memory_operation_in_progress') {
+    if (!hasOnlyKeys(value, OPERATION_IN_PROGRESS_KEYS) || value.result !== 'failed') {
+      throw new Error('Invalid Memory factory reset response');
+    }
+    return value as MemoryFactoryResetResult;
+  }
+  if (!hasOnlyKeys(value, value.ok ? SUCCESS_KEYS : FAILURE_KEYS)) {
     throw new Error('Invalid Memory factory reset response');
   }
   if (!Array.isArray(value.roots) || value.roots.length !== 2 || !value.roots.every(isRoot)

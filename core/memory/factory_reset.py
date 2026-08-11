@@ -97,7 +97,7 @@ def delete_memory_roots(effective_home: Path) -> FactoryResetDeletionResult:
             )
             continue
         if not existed:
-            outcomes.append(FactoryResetRootOutcome(relative_path, False, True))
+            outcomes.append(FactoryResetRootOutcome(relative_path, False, False))
             continue
         try:
             remove_confined_path(home, path)

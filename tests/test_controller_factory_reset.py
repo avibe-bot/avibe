@@ -62,6 +62,16 @@ def test_delete_memory_roots_reports_lstat_failure_per_root(tmp_path: Path, monk
     assert result.roots[1].error == "OSError"
 
 
+def test_delete_memory_roots_reports_absent_roots_as_not_deleted(tmp_path: Path) -> None:
+    from core.memory import factory_reset
+
+    result = factory_reset.delete_memory_roots(tmp_path)
+
+    assert [(root.existed, root.deleted) for root in result.roots] == [(False, False), (False, False)]
+    assert result.data_deleted is False
+    assert result.data_remaining is False
+
+
 @pytest.mark.asyncio
 async def test_factory_reset_artifact_invalid_returns_closed_unchanged_result(
     tmp_path: Path,
