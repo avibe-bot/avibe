@@ -332,6 +332,45 @@ _BLANK_DEFINITION_SUMMARY: dict[str, Any] = {
 # Where a definition's session binding hides when it has no ``session_id``: a
 # legacy IM binding, then a ``create_per_run`` delivery target. Precedence order.
 _DEFINITION_SESSION_KEY_FIELDS = ("session_key", "deliver_key")
+
+
+def definition_owner_session_id_expression() -> Any:
+    """Return the durable Session that manages a scheduled definition, when known.
+
+    Definitions created from an Avibe Agent shell preserve their creation
+    provenance under ``metadata_json.created_by.caller.session_id``. That is
+    the owner used by user-facing Session projections: the execution target may
+    be a newly-created Session, or absent for a pure command / per-run task.
+    Invalid and legacy metadata deliberately resolve to ``NULL`` so callers can
+    fall back to the historical bound ``run_definitions.session_id``.
+    """
+
+    raw_owner = func.json_extract(
+        run_definitions.c.metadata_json,
+        "$.created_by.caller.session_id",
+    )
+    return case(
+        (
+            func.json_valid(run_definitions.c.metadata_json) == 1,
+            func.nullif(func.trim(func.coalesce(raw_owner, "")), ""),
+        ),
+        else_=None,
+    )
+
+
+def scheduled_definition_owned_by_session_expression(session_id: str) -> Any:
+    """Return the owner-first Session predicate for scheduled Task projections."""
+
+    owner_session_id = definition_owner_session_id_expression()
+    return or_(
+        owner_session_id == session_id,
+        and_(
+            owner_session_id.is_(None),
+            run_definitions.c.session_id == session_id,
+        ),
+    )
+
+
 # The exit code a waiter that ran out of lifetime carries. Written by
 # ``core/watches.py`` (the ``timeout`` convention), read here to tell an ending
 # that ran out of time from one that failed.
@@ -3734,10 +3773,20 @@ class SQLiteBackgroundTaskStore:
             stmt.where(run_definitions.c.definition_type == definition_type)
             .where(run_definitions.c.deleted_at.is_(None))
         )
-        # Precise bound-session filter (ix_run_definitions_session) — powers the
-        # Harness "只看本会话" chip that background-work banner rows navigate into.
+        # This Session filter powers the Harness "只看本会话" chip that the
+        # background-work banner navigates into. Scheduled Tasks use creation
+        # provenance as the authoritative owner: a create-per-run or pure command
+        # definition may have no bound execution Session at all. Legacy Task rows
+        # without provenance retain the historical bound-session behavior.
         if session_id:
-            stmt = stmt.where(run_definitions.c.session_id == session_id)
+            if definition_type == "scheduled":
+                stmt = stmt.where(
+                    scheduled_definition_owned_by_session_expression(session_id)
+                )
+            else:
+                # A Watch is an event callback surface: its callback target, not
+                # the Session that created the definition, owns its banner row.
+                stmt = stmt.where(run_definitions.c.session_id == session_id)
         if status and status != "all":
             states = DEFINITION_STATUS_FILTERS.get(status)
             if not states:

@@ -10,6 +10,7 @@ banner stays correct across a restart.
 
 from __future__ import annotations
 
+import json
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
@@ -229,6 +230,68 @@ def test_task_label_falls_back_to_prompt_when_unnamed(tmp_path: Path):
     assert items[0]["label"] == "summarize the daily standup notes"
 
 
+def test_definition_banner_uses_creation_owner_before_execution_target(tmp_path: Path):
+    """Pending definitions belong to their creating Session, not their fire target."""
+    engine, _ = _make_engine(tmp_path)
+    owner_metadata = json.dumps(
+        {"created_by": {"caller": {"session_id": "ses-owner"}}}
+    )
+    _insert_definition(
+        engine,
+        id="task-per-run",
+        definition_type="scheduled",
+        name="per run",
+        metadata_json=owner_metadata,
+    )
+    _insert_definition(
+        engine,
+        id="task-command",
+        definition_type="scheduled",
+        name="command",
+        metadata_json=owner_metadata,
+    )
+    _insert_definition(
+        engine,
+        id="task-create-once",
+        definition_type="scheduled",
+        name="new session",
+        session_id="ses-execution",
+        metadata_json=owner_metadata,
+    )
+    # A legacy row has no creation provenance and keeps the old bound-session
+    # fallback. A row with provenance pointing elsewhere must not leak through
+    # its execution target.
+    _insert_definition(
+        engine,
+        id="task-legacy",
+        definition_type="scheduled",
+        name="legacy",
+        session_id="ses-owner",
+    )
+    _insert_definition(
+        engine,
+        id="task-owned-elsewhere",
+        definition_type="scheduled",
+        name="owned elsewhere",
+        session_id="ses-owner",
+        metadata_json=json.dumps(
+            {"created_by": {"caller": {"session_id": "ses-other"}}}
+        ),
+    )
+
+    with engine.connect() as conn:
+        owner_items = derive_session_harness_activities(conn, "ses-owner")
+        execution_items = derive_session_harness_activities(conn, "ses-execution")
+
+    assert {item["id"] for item in owner_items} == {
+        "task:task-per-run",
+        "task:task-command",
+        "task:task-create-once",
+        "task:task-legacy",
+    }
+    assert {item["id"] for item in execution_items} == set()
+
+
 def test_excludes_disabled_deleted_and_foreign_and_terminal(tmp_path: Path):
     engine, _ = _make_engine(tmp_path)
     # Disabled watch: paused, not ongoing background work.
@@ -401,24 +464,57 @@ def test_banner_enabled_pref_round_trip(tmp_path: Path):
     assert get_background_work_banner_enabled(db_path=db_path) is True
 
 
-def test_definition_session_filter_scopes_watches_and_tasks(tmp_path: Path):
-    # Spec req 4: the Harness "只看本会话" chip filters definitions by bound
-    # session. Rows for session A must exclude session B's definitions.
+def test_definition_session_filter_scopes_watches_and_tasks_by_owner(tmp_path: Path):
+    # The Harness "只看本会话" chip follows the same creation-owner rule as
+    # the banner. Legacy definitions without provenance still use their bound
+    # session as the fallback.
     engine, db_path = _make_engine(tmp_path)
     _insert_definition(engine, id="w-a", definition_type="watch", name="wa", session_id="ses-A")
     _insert_definition(engine, id="w-b", definition_type="watch", name="wb", session_id="ses-B")
+    _insert_definition(
+        engine,
+        id="w-callback-wins",
+        definition_type="watch",
+        name="wc",
+        session_id="ses-B",
+        metadata_json=json.dumps(
+            {"created_by": {"caller": {"session_id": "ses-A"}}}
+        ),
+    )
     _insert_definition(engine, id="t-a", definition_type="scheduled", name="ta", session_id="ses-A")
     _insert_definition(engine, id="t-b", definition_type="scheduled", name="tb", session_id="ses-B")
+    owner_metadata = json.dumps(
+        {"created_by": {"caller": {"session_id": "ses-A"}}}
+    )
+    _insert_definition(
+        engine,
+        id="t-owner-only",
+        definition_type="scheduled",
+        name="owner-only",
+        session_id=None,
+        metadata_json=owner_metadata,
+    )
+    _insert_definition(
+        engine,
+        id="t-owner-wins",
+        definition_type="scheduled",
+        name="owner-wins",
+        session_id="ses-B",
+        metadata_json=owner_metadata,
+    )
 
     store = SQLiteBackgroundTaskStore(db_path=db_path)
     try:
         watches_a = store.list_watches_page(session_id="ses-A", page_request=None)
         assert [w["id"] for w in watches_a.items] == ["w-a"]
+        watches_b = store.list_watches_page(session_id="ses-B", page_request=None)
+        assert {w["id"] for w in watches_b.items} == {"w-b", "w-callback-wins"}
         tasks_a = store.list_scheduled_tasks_page(session_id="ses-A", page_request=None)
-        assert [t["id"] for t in tasks_a.items] == ["t-a"]
+        assert {t["id"] for t in tasks_a.items} == {"t-a", "t-owner-only", "t-owner-wins"}
         assert store.count_watches(session_id="ses-A")["total"] == 1
         assert store.count_scheduled_tasks(session_id="ses-B")["total"] == 1
         # No filter → both sessions' definitions are returned.
-        assert len(store.list_watches_page(page_request=None).items) == 2
+        assert len(store.list_watches_page(page_request=None).items) == 3
+        assert len(store.list_scheduled_tasks_page(page_request=None).items) == 4
     finally:
         store.close()

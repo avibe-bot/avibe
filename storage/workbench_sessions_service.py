@@ -956,8 +956,11 @@ def derive_session_harness_activities(conn: Connection, session_id: str) -> list
     construction across restarts (a watch survives a restart; the registry does
     not). Three sources, all scoped to ``session_id``:
 
-    - enabled, live (not soft-deleted) watches bound to this session;
-    - enabled, live scheduled tasks bound to this session;
+    - enabled, live (not soft-deleted) watches whose callback targets this
+      session;
+    - enabled, live scheduled tasks managed by this session; creation provenance
+      is authoritative, with the bound session as a legacy fallback for
+      definitions that predate provenance capture;
     - queued/running delegated agent runs whose callback returns here (work this
       session dispatched and is waiting on).
 
@@ -971,7 +974,11 @@ def derive_session_harness_activities(conn: Connection, session_id: str) -> list
 
     # Watches + scheduled tasks live in ``run_definitions``, discriminated by
     # ``definition_type`` (see storage/background.py). Both must be enabled and
-    # not soft-deleted to count as ongoing background work for the session.
+    # not soft-deleted to count as ongoing background work for the session. The
+    # Task owner expression is shared with the Harness session filter so a
+    # row remains discoverable after the banner navigates to that filtered page.
+    from storage.background import scheduled_definition_owned_by_session_expression
+
     definition_rows = (
         conn.execute(
             select(
@@ -984,7 +991,18 @@ def derive_session_harness_activities(conn: Connection, session_id: str) -> list
                 run_definitions.c.created_at,
                 run_definitions.c.updated_at,
             )
-            .where(run_definitions.c.session_id == session_id)
+            .where(
+                or_(
+                    and_(
+                        run_definitions.c.definition_type == "watch",
+                        run_definitions.c.session_id == session_id,
+                    ),
+                    and_(
+                        run_definitions.c.definition_type == "scheduled",
+                        scheduled_definition_owned_by_session_expression(session_id),
+                    ),
+                )
+            )
             .where(run_definitions.c.deleted_at.is_(None))
             .where(run_definitions.c.enabled == 1)
             .order_by(run_definitions.c.created_at, run_definitions.c.id)

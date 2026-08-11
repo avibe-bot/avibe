@@ -8,6 +8,7 @@ capability:
     - tests/test_scheduled_tasks.py
     - tests/test_command_runner.py
     - tests/test_cli_task_command.py
+    - tests/test_background_work_banner.py
   shared_harness: []
 status_legend:
   covered: deterministic scenario or contract coverage exists
@@ -672,3 +673,10 @@ scenarios:
     # wherever ``--cwd`` set both and differ exactly where the user separated them, so
     # the stored command half now outranks the Session's: SCT-051's rule -- only the
     # explicit flag replaces a stored directory -- in the retarget lane.
+  - id: SCT-060
+    name: pending definitions remain visible in their creating Session's background banner
+    status: covered
+    kind: routing
+    layer: contract
+    backend: shared
+    test: tests/test_background_work_banner.py::test_definition_banner_uses_creation_owner_before_execution_target
