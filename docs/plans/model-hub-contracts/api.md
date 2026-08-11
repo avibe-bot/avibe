@@ -92,17 +92,30 @@ authoritative; no Source response field may be inferred backwards into the reque
 | `base_url` | no | Add Source client → observation adapter | null or omission selects the official endpoint; a custom URL is validated before provisioning. |
 | `key` | yes | Add Source client → transient and committed credential provisioning | Plaintext is write-only and never appears in a response, Source record, event, or log. |
 | `protocol_order` | no | Add Source client → observation adapter | Contains all three protocols exactly once and only orders probes. |
-| `client_nonce` | no | Add Source client → persisted Source read projection | Client-generated before send, unique among Sources when present, and echoed unchanged so the list read can reconcile a lost response. |
+| `client_nonce` | no | Add Source client → create claim and persisted Source read projection | Client-generated before send and atomically claimed before observation or credential work; the successful commit persists and echoes it unchanged so the list read can reconcile a lost response. |
 
 The request has no `id`, `created_at`, `state`, `usage`, `protocol`, discovered-model,
 credential-ref, billing, or supply-channel field. The server assigns or observes all of
 them. A successfully observed empty inventory is represented by the returned
 `source.models: []`; the client never submits a discovered inventory as authority.
 
-When `client_nonce` is present, a create whose nonce already belongs to a Source fails
-with the existing `discovery_failed` validation error before observation or credential
-provisioning. The client first re-reads `GET /api/models/sources` and identifies the
-single Source by exact nonce, so a response-lost create is not submitted twice.
+When `client_nonce` is present, the server atomically claims it before observation,
+transient-ref creation, or committed credential provisioning. A request whose nonce is
+already claimed by a live or recovering create, or already belongs to a committed
+Source, fails with HTTP 409 `source_nonce_conflict` before using its plaintext key or
+repeating any upstream work. The client first re-reads `GET /api/models/sources`: an
+exact nonce match reconciles a committed create, while no match after this refusal means
+the original operation is still settling and the client waits before reading again.
+
+The successful Source commit consumes the claim in the same transaction that persists
+`Source.client_nonce`; there is no unclaimed interval between them. Pre-commit failure
+or cancellation releases the claim only after every transient or uncommitted credential
+ref has been revoked or entered the durable pending-revocation journal under AC-26. On
+service reconstruction, an ownerless claim cannot resume because plaintext is never
+persisted: pending revocation is reconciled first, then the claim is released so a later
+request may acquire it. A concurrent-retry fixture blocks the first request immediately
+after claim, proves the second receives `source_nonce_conflict`, and observes exactly one
+observation and committed-credential provisioning sequence.
 
 Cancellation has one commit boundary. Before the durable Source commit, AC-26 applies:
 the transient or uncommitted ref is revoked, or is named by the durable pending-
@@ -801,14 +814,21 @@ route fails before download with HTTP 422 and
 `error: "runtime_platform_unsupported"`; the next status read remains truthful with
 `error_key: null`.
 
-`POST /api/models/runtime/install` is idempotent. From `not_installed` on a supported
-host it clears the previous `error_key`, durably enters `installing`, starts the owned
-install job, and returns that state. A reload and concurrent repeat read/return the same
-`installing` state instead of starting another job. Successful verification settles at
-`not_started` with `error_key: null`; it does not start the runtime. Failure settles at
-`not_installed` with `error_key: "settings.models.install.fail.detail"`. The key is the
-closed presentation carrier for the persisted failure; raw downloader or verifier text
-remains only in scrubbed logs. `/start` never performs installation.
+`POST /api/models/runtime/install` is idempotent. Only `not_installed` on a supported
+host starts work: it clears the previous `error_key`, durably enters `installing`, starts
+the owned install job, and returns that state. A reload and concurrent repeat while
+`installing` read/return the same state instead of starting another job. Calls from
+`not_started`, `ok`, `degraded`, or `down` are HTTP 200 no-ops that return the current
+RuntimeDependency without mutating runtime state: they start no download, do not clear
+or replace the verified binary, and neither start, stop, nor restart the process.
+Installed-state handling precedes host-support refusal, so an existing verified
+installation is never disrupted merely because the current manifest lacks that
+platform. Successful
+verification settles at `not_started` with `error_key: null`; it does not start the
+runtime. Failure settles at `not_installed` with
+`error_key: "settings.models.install.fail.detail"`. The key is the closed presentation
+carrier for the persisted failure; raw downloader or verifier text remains only in
+scrubbed logs. `/start` never performs installation.
 
 On service bootstrap, persisted `installing` with no worker owned by the reconstructed
 process is an orphaned install, never a live-job proof. Before runtime endpoints become
@@ -824,7 +844,8 @@ a live owned job, while a service restart cannot strand the state permanently.
 Minimum v5 set:
 
 `source_not_found`, `flow_not_found`, `flow_expired`, `discovery_failed`,
-`invalid_source_order`, `source_last_supplier`, `source_in_route_chain`,
+`invalid_source_order`, `source_nonce_conflict`, `source_last_supplier`,
+`source_in_route_chain`,
 `source_model_in_route_chain`, `mode_switch_blocked`, `engine_down`,
 `runtime_platform_unsupported`, `reauth_confirmation_required`,
 `native_source_already_exists`,
@@ -854,6 +875,7 @@ contract harness and API-boundary tests enforce:
 <!-- authority-consumer: observation.discovery succeeded failed not_attempted -->
 <!-- authority-consumer: runtime.health ok degraded down not_installed installing not_started -->
 <!-- authority-consumer: runtime.install_error runtime_platform_unsupported -->
+<!-- authority-consumer: source.create_nonce source_nonce_conflict -->
 
 | Guard | Boundary |
 | --- | --- |
@@ -871,7 +893,8 @@ contract harness and API-boundary tests enforce:
 | API AgentSupply includes `cli_present`, `selected_by_agent`, `selected_model_id`, `selected_model_explicit`, policy-free `sources.order`, `supply_status`, `model_supply[].has_runnable_hop`, and `named_agents`; every Source includes persisted `last_discovered_at`, optional persisted `client_nonce`, derived `adopted_by`, and model retirement tombstones; source creation returns `added_to` and top-level `adopted_by` equal to `source.adopted_by`; saved refresh and discovered-model retirement use the guarded Source envelope | API payload test |
 | every OAuthFlow response includes `intent` | API payload test |
 | every OAuthFlow started with `client_nonce` echoes it, and repeated start of the same nonce/vendor/channel tuple returns one `flow_id` | API payload test |
-| every RuntimeDependency API payload includes server-derived `host_platform` and `status.error_key`; install transitions follow the registered health matrix, page reload preserves a live `installing` job, and service bootstrap reconciles an orphan before serving runtime endpoints | API payload test |
+| every RuntimeDependency API payload includes server-derived `host_platform` and `status.error_key`; only supported `not_installed` starts a download, installed states are state-preserving no-ops, page reload preserves a live `installing` job, and service bootstrap reconciles an orphan before serving runtime endpoints | API payload test |
+| Source create claims `client_nonce` before observation or credential work; a concurrent or committed duplicate returns `source_nonce_conflict` without repeating either, and failure/cancellation/restart releases the claim only after retained-material reconciliation | API payload and cancellation/restart test |
 | every `RouteHopRef` carries the one-based pre-mutation `position`; refusal and forced success report byte-identical references | API payload test |
 | contract and in-repo adapter interface copies are byte-identical; the five retained-material enum members and ref-pairing predicates are mutation-tested | contract harness |
 

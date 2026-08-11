@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "model-hub/source-create.schema.json",
   "title": "SourceCreate",
-  "description": "API-key Source creation input. It extends the unsaved observation request with display and reconciliation data; the server still owns Source identity, protocol evidence, discovered inventory, health, usage, custody metadata, and timestamps.",
+  "description": "API-key Source creation input. It extends the unsaved observation request with display and reconciliation data; the server still owns Source identity, protocol evidence, discovered inventory, health, usage, custody metadata, and timestamps. When client_nonce is present, the server claims it before observation or credential work.",
   "type": "object",
   "required": ["vendor", "key"],
   "additionalProperties": false,
@@ -40,7 +40,7 @@
     "client_nonce": {
       "type": "string",
       "pattern": "^scn_[a-z0-9]{16,64}$",
-      "description": "Optional client-generated create correlation held before submission. When present, the server persists it unchanged on the resulting Source and enforces uniqueness among Sources so GET /api/models/sources can reconcile a lost create response."
+      "description": "Optional client-generated create correlation held before submission. The server atomically claims it before observation or credential work, persists it unchanged on the resulting Source, and rejects an already claimed or committed value before repeating that work. GET /api/models/sources can therefore reconcile a lost create response."
     }
   },
   "examples": [

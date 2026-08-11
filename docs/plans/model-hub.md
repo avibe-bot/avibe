@@ -248,8 +248,22 @@ only `protocol_order`, and client-generated `client_nonce`. Source identity, pro
 evidence, discovered inventory, health, usage, custody metadata, and timestamps remain
 server-owned. When supplied, `client_nonce` is persisted unchanged and unique among
 Sources, so a client that loses the create response can identify the committed row on
-the next Source list read before deciding whether to retry. It is not identity or a
-routing input.
+the next Source list read before deciding whether to retry. Before any observation or
+credential work, the server atomically claims that nonce. A concurrent or committed
+duplicate performs no upstream work and returns the refusal below. A successful commit
+atomically converts the claim into `Source.client_nonce`; pre-commit failure or
+cancellation releases it only after AC-26 retained-material settlement. On restart an
+ownerless claim cannot resume without persisted plaintext, so pending revocation is
+reconciled before the claim is released. The nonce is not Source identity or a routing
+input.
+
+**Source-create nonce refusal matrix (authoritative and exhaustive; owner ruling
+2026-08-11).** This is the only post-validation nonce-claim refusal; malformed request
+fields retain the shared request-validation behavior.
+
+| Decision | Entry condition | HTTP/API result | First consumer |
+| --- | --- | --- | --- |
+| `source_nonce_conflict` | `client_nonce` is already held by a live/recovering create claim or a committed Source | HTTP 409 normal failure envelope before observation, transient-ref creation, or committed credential provisioning | create client read-before-retry loop and API concurrency test |
 
 OAuth start offers the equivalent optional client-generated correlation on
 `(client_nonce, vendor, channel)`. Repeating that exact tuple while its flow exists
@@ -637,7 +651,11 @@ state set; prose cannot add another runtime health value.
 `POST /api/models/runtime/install` is idempotent and owns the
 `not_installed → installing → not_started | not_installed` transition. It fails before
 download on an unsupported `host_platform`; a reload never translates `installing`
-back to `not_installed`, and `/start` never performs installation.
+back to `not_installed`, and `/start` never performs installation. Calls from
+`not_started`, `ok`, `degraded`, or `down` return the current RuntimeDependency as an
+HTTP 200 no-op. They start no download, do not replace the verified binary, and never
+start, stop, or restart the process; this installed-state no-op is evaluated before the
+unsupported-host branch.
 
 A service restart distinguishes persisted state from a live worker. Before runtime
 endpoints become ready, an `installing` row with no worker in the reconstructed process
