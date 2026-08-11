@@ -41,8 +41,11 @@ Contract prose points to those authorities and does not add branches.
    or Agent runtime configuration. Hub-held material is referenced by an opaque engine
    credential id; native credentials remain in the sanctioned CLI store.
 2. Every persisted Source has a protocol proved by a real upstream response before
-   commit. Vendor names, Base URLs, and manual hints may order probes but cannot create
-   a saved protocol value.
+   commit. `POST /api/models/sources/observe` is the non-persisting API-key observation
+   surface; API-key `POST /api/models/sources` performs the same observation before
+   its independent committed credential provisioning, while subscription OAuth uses
+   its vendor-specific observation flow. Vendor names, Base URLs, and manual hints may
+   order probes but cannot create a saved protocol value.
 3. Every Source/model reference is canonical and referentially valid at write time.
    Unchanged stale Route hops may be retained or reordered, but new or changed pairs
    must validate.
@@ -77,11 +80,12 @@ comparison. A gate may not report success by comparing stale input with itself.
 
 ## Version closure
 
-The terminal value 5 must coexist in these ten locations on the same tested head:
+The terminal value 5 must coexist in all registered version locations on the same tested head:
 
 - `mirror-registry.json`
 - `agent-chain.schema.json`
 - `probe-result.schema.json`
+- `observation-result.schema.json`
 - `runtime-dependency.schema.json`
 - `turn-provenance.schema.json`
 - `core/handlers/model_hub/service.py`
@@ -103,8 +107,9 @@ revision; the discovering lane does not reinterpret or edit the contract in plac
 | --- | --- |
 | `source.schema.json` | Source identity, channel, three protocols, state, usage, inventory, credential reference, and audit metadata. |
 | `agent-supply.schema.json` | Backend mode, explicit policy-free Source order, configuration eligibility, model-supply and backend-health projections. |
-| `agent-chain.schema.json` | Read projection of exact stored hops plus current runnability, blockers, retry metadata, and model supply state. |
-| `probe-result.schema.json` | Saved recovery probes, Add-time connectivity/protocol observation, and route probes. |
+| `agent-chain.schema.json` | Read projection of exact stored hops plus current execution position, runnability, blockers, retry metadata, and model supply state. |
+| `probe-result.schema.json` | Saved recovery probes and route probes over exact configured hops. |
+| `observation-result.schema.json` | Non-persisting Add-time connectivity, authentication, response-backed protocol, and inventory observation. |
 | `turn-provenance.schema.json` | Exactly attributed turn attempts and terminal outcome; no policy or mapping discriminator. |
 | `resolution-event.schema.json` | Pull-feed Source/resolution records and their closed reason/detail vocabulary. |
 | `oauth-flow.schema.json` | Subscription creation and re-auth presentation without secret material. |

@@ -18,6 +18,8 @@ sys.path.insert(0, str(ROOT))
 from config.v2_config import (
     AgentsConfig,
     ModelHubModelConfig,
+    ModelHubRouteConfig,
+    ModelHubRouteHopConfig,
     ModelHubSourceConfig,
     ModelHubSourceStateConfig,
     PlatformsConfig,
@@ -1101,7 +1103,14 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
         harness.store.config.sources.append(source)
-        harness.store.config.refresh_follow_orders()
+        harness.store.config.agents["claude"].sources.order.append(source.id)
+        harness.store.config.agents["claude"].routes["claude-opus-4-6"] = (
+            ModelHubRouteConfig(
+                hops=(
+                    ModelHubRouteHopConfig(source.id, "claude-opus-4-6"),
+                )
+            )
+        )
 
         with self.assertRaises(ModelHubError) as refused:
             await harness.service.reauth_source(source.id, {})
@@ -1177,7 +1186,14 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
             models=[ModelHubModelConfig(id="claude-opus-4-6", provenance="discovered")],
         )
         harness.store.config.sources.append(source)
-        harness.store.config.refresh_follow_orders()
+        harness.store.config.agents["claude"].sources.order.append(source.id)
+        harness.store.config.agents["claude"].routes["claude-opus-4-6"] = (
+            ModelHubRouteConfig(
+                hops=(
+                    ModelHubRouteHopConfig(source.id, "claude-opus-4-6"),
+                )
+            )
+        )
         ack = {"acknowledge_irreversible": True}
 
         # 1. A second start for the same source is handed the SAME flow, and the

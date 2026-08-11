@@ -15,11 +15,13 @@ requirements.
 - No `avibe-` namespace anywhere (owner 07-23). Identifiers read exactly like
   native OpenCode: `anthropic/claude-opus-4-6`, `zhipuai/glm-5.2`,
   `custom/<model-id>`.
-- Each generated entry redirects transport to the local Gateway (base URL
-  `127.0.0.1:<port>` + per-protocol path) and injects the **local gateway
-  token** (never upstream credentials). Protocol is read from the exact configured
-  Source and is one of `anthropic | openai_responses | openai_chat`. A custom
-  `base_url`, not a fourth protocol, represents a relay or self-hosted upstream.
+- Each generated entry uses the OpenAI-compatible Chat frontend and redirects it to
+  the local Gateway (`127.0.0.1:<port>/v1`), injecting the **local gateway token**
+  (never upstream credentials). This frontend transport is stable for the provider
+  entry even when its models resolve to Sources with different stored protocols. The
+  Gateway uses the exact configured hop to reach an upstream whose protocol is one of
+  `anthropic | openai_responses | openai_chat`. A custom `base_url`, not a fourth
+  protocol, represents a relay or self-hosted upstream.
 - Any Hub-held subscription may supply OpenCode through an exact configured hop.
   A `native_cli` Source remains bound to its sanctioned backend and therefore cannot
   materialize as an OpenCode provider.
@@ -33,6 +35,14 @@ requirements.
   prefix, or `custom/` when the vendor is unidentifiable.
 - The invocation selects the exact stored `(source_id, model_id)` hop. Runtime never
   normalizes a provider, matches inventory, or substitutes a model.
+
+## Add-time matching (`matching-v1`)
+
+OpenCode matching occurs only while adding a Source, after its protocol and inventory
+have been observed. An exact checked identifier wins. Otherwise a bare model id is
+accepted only when exactly one checked identifier ends with `/<bare>`; zero matches and
+ambiguous matches are left unconfigured. The stored Route carries the concrete upstream
+model id and this normalization is never repeated by runtime or refresh.
 
 ## Stability invariant (test requirement, L7)
 

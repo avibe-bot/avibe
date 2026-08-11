@@ -14,7 +14,16 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, AsyncIterator, Literal, Mapping, Protocol, Sequence
 
-# authority-consumer: protocol anthropic openai_responses openai_chat
+SOURCE_PROTOCOLS = ("anthropic", "openai_responses", "openai_chat")
+OBSERVATION_OUTCOMES = (
+    "observed",
+    "ambiguous",
+    "unreachable",
+    "authentication_failed",
+    "adapter_error",
+    "timeout",
+)
+OBSERVATION_DISCOVERY_OUTCOMES = ("succeeded", "failed", "not_attempted")
 
 
 class EngineHealth(str, Enum):
@@ -78,6 +87,157 @@ class RawCallOutcome:
     stream_started: bool
     model_id: str
     source_id: str
+
+
+class ObservationOutcome(str, Enum):
+    OBSERVED = OBSERVATION_OUTCOMES[0]
+    AMBIGUOUS = OBSERVATION_OUTCOMES[1]
+    UNREACHABLE = OBSERVATION_OUTCOMES[2]
+    AUTHENTICATION_FAILED = OBSERVATION_OUTCOMES[3]
+    ADAPTER_ERROR = OBSERVATION_OUTCOMES[4]
+    TIMEOUT = OBSERVATION_OUTCOMES[5]
+
+
+class ObservationDiscovery(str, Enum):
+    SUCCEEDED = OBSERVATION_DISCOVERY_OUTCOMES[0]
+    FAILED = OBSERVATION_DISCOVERY_OUTCOMES[1]
+    NOT_ATTEMPTED = OBSERVATION_DISCOVERY_OUTCOMES[2]
+
+
+@dataclass(frozen=True)
+class SourceObservation:
+    """Response-backed result of an unsaved Source observation."""
+
+    outcome: ObservationOutcome
+    reachable: bool | None
+    authenticated: bool | None
+    protocol: str | None
+    discovery: ObservationDiscovery
+    model_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ObservationTerminalRule:
+    """Complete legal product for one response-backed observation outcome."""
+
+    reachable: frozenset[bool | None]
+    authenticated: frozenset[bool | None]
+    protocols: frozenset[str | None]
+    discoveries: frozenset[ObservationDiscovery]
+    models_must_be_empty: bool
+
+
+OBSERVATION_TERMINAL_RULES: Mapping[
+    ObservationOutcome,
+    ObservationTerminalRule,
+] = {
+    ObservationOutcome.OBSERVED: ObservationTerminalRule(
+        reachable=frozenset({True}),
+        authenticated=frozenset({True}),
+        protocols=frozenset(SOURCE_PROTOCOLS),
+        discoveries=frozenset(
+            {
+                ObservationDiscovery.SUCCEEDED,
+                ObservationDiscovery.FAILED,
+            }
+        ),
+        models_must_be_empty=False,
+    ),
+    ObservationOutcome.AMBIGUOUS: ObservationTerminalRule(
+        reachable=frozenset({True}),
+        authenticated=frozenset({True, None}),
+        protocols=frozenset({None}),
+        discoveries=frozenset({ObservationDiscovery.NOT_ATTEMPTED}),
+        models_must_be_empty=True,
+    ),
+    ObservationOutcome.UNREACHABLE: ObservationTerminalRule(
+        reachable=frozenset({False}),
+        authenticated=frozenset({None}),
+        protocols=frozenset({None}),
+        discoveries=frozenset({ObservationDiscovery.NOT_ATTEMPTED}),
+        models_must_be_empty=True,
+    ),
+    ObservationOutcome.AUTHENTICATION_FAILED: ObservationTerminalRule(
+        reachable=frozenset({True}),
+        authenticated=frozenset({False}),
+        protocols=frozenset({None}),
+        discoveries=frozenset({ObservationDiscovery.NOT_ATTEMPTED}),
+        models_must_be_empty=True,
+    ),
+    ObservationOutcome.ADAPTER_ERROR: ObservationTerminalRule(
+        reachable=frozenset({True, None}),
+        authenticated=frozenset({None}),
+        protocols=frozenset({None}),
+        discoveries=frozenset({ObservationDiscovery.NOT_ATTEMPTED}),
+        models_must_be_empty=True,
+    ),
+    ObservationOutcome.TIMEOUT: ObservationTerminalRule(
+        reachable=frozenset({None}),
+        authenticated=frozenset({None}),
+        protocols=frozenset({None}),
+        discoveries=frozenset({ObservationDiscovery.NOT_ATTEMPTED}),
+        models_must_be_empty=True,
+    ),
+}
+
+
+def validate_source_observation(observation: object) -> SourceObservation:
+    """Validate an adapter result against the sole terminal-product authority."""
+
+    if not isinstance(observation, SourceObservation):
+        raise TypeError("invalid SourceObservation")
+    if not isinstance(observation.outcome, ObservationOutcome):
+        raise ValueError("invalid SourceObservation outcome")
+    if not isinstance(observation.discovery, ObservationDiscovery):
+        raise ValueError("invalid SourceObservation discovery")
+    if observation.reachable is not None and not isinstance(observation.reachable, bool):
+        raise ValueError("invalid SourceObservation reachability")
+    if observation.authenticated is not None and not isinstance(
+        observation.authenticated,
+        bool,
+    ):
+        raise ValueError("invalid SourceObservation authentication")
+    if not isinstance(observation.model_ids, tuple) or any(
+        not isinstance(model_id, str) or not model_id for model_id in observation.model_ids
+    ):
+        raise ValueError("invalid SourceObservation inventory")
+    if len(set(observation.model_ids)) != len(observation.model_ids):
+        raise ValueError("invalid SourceObservation inventory")
+
+    rule = OBSERVATION_TERMINAL_RULES[observation.outcome]
+    if (
+        observation.reachable not in rule.reachable
+        or observation.authenticated not in rule.authenticated
+        or observation.protocol not in rule.protocols
+        or observation.discovery not in rule.discoveries
+        or (rule.models_must_be_empty and observation.model_ids)
+        or (observation.discovery is ObservationDiscovery.FAILED and observation.model_ids)
+    ):
+        raise ValueError("invalid SourceObservation terminal product")
+    return observation
+
+
+def make_source_observation(
+    *,
+    outcome: ObservationOutcome,
+    reachable: bool | None,
+    authenticated: bool | None,
+    protocol: str | None,
+    discovery: ObservationDiscovery,
+    model_ids: Sequence[str],
+) -> SourceObservation:
+    """Construct an adapter result through the terminal-product authority."""
+
+    return validate_source_observation(
+        SourceObservation(
+            outcome=outcome,
+            reachable=reachable,
+            authenticated=authenticated,
+            protocol=protocol,
+            discovery=discovery,
+            model_ids=tuple(model_ids),
+        )
+    )
 
 
 class RetainedMaterialDisposition(str, Enum):
@@ -186,8 +346,40 @@ class EngineAdapter(Protocol):
         remains CLI-owned and has no ref on this seam."""
         ...
 
+    async def retarget_api_key_credential(
+        self,
+        credential_ref: str,
+        vendor: str,
+        protocol: str,
+        base_url: str | None,
+    ) -> str:
+        """Copy an API-key credential to a fresh ref with a new target.
+
+        The old ref remains valid until L2 commits the Source mutation and
+        explicitly revokes it. The secret never crosses this adapter boundary,
+        so Base URL replacement can be staged and rolled back transactionally.
+        """
+        ...
+
+    async def credential_supports_refresh(self, credential_ref: str) -> bool:
+        """Return the credential's actual engine-side refresh capability.
+
+        This is a property of the stored credential, not an inference from
+        vendor, Source kind, or an HTTP status.
+        """
+        ...
+
     async def revoke_credential(self, credential_ref: str) -> None:
         """Release the stored credential (source deletion / key replacement)."""
+        ...
+
+    async def provision_transient_credential(
+        self,
+        vendor: str,
+        secret: str,
+        base_url: str | None,
+    ) -> str:
+        """Provision an unbound credential for an unsaved observation."""
         ...
 
     async def cleanup_orphaned_oauth_material(self, credential_ref: str) -> bool:
@@ -215,9 +407,22 @@ class EngineAdapter(Protocol):
         base_url: str | None,
         credential_ref: str,
     ) -> Sequence[str]:
-        """PROBE the upstream for supplyable model ids. Works before any
-        registration (test-and-add flow: provision → discover → persist →
-        sync); does not require or create a source binding."""
+        """Refresh supplyable model ids for a saved Source using its stored protocol."""
+        ...
+
+    async def observe_source(
+        self,
+        vendor: str,
+        base_url: str | None,
+        credential_ref: str,
+        protocol_order: Sequence[str],
+    ) -> SourceObservation:
+        """Observe connectivity, authentication, protocol, and inventory.
+
+        ``protocol_order`` only orders probes. A returned protocol must be
+        proven by a real upstream response; it cannot be inferred from vendor
+        metadata, Base URL, or the first candidate.
+        """
         ...
 
     # --- subscription OAuth (channel-specific ownership) ------------------

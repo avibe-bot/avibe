@@ -14,6 +14,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from config import paths
 from core import chat_discovery
+from core.processing_indicator import (
+    INTERRUPTED_REACTION_EMOJI,
+    STOPPED_REACTION_EMOJI,
+)
 from core.message_context import resolve_context_thread_id
 from modules.agents.native_sessions import NativeResumeSession
 from modules.im import InlineButton, InlineKeyboard, MessageContext
@@ -1113,6 +1117,51 @@ def test_add_reaction_uses_telegram_message_reactions() -> None:
 
     assert result is True
     reaction_mock.assert_awaited_once_with("123456:test-token", "-100123", "77", "👀", proxy_url=None)
+
+
+def test_terminal_receipts_are_translated_to_allowed_reactions() -> None:
+    """⏹️/⚠️ are not on Telegram's fixed reaction list.
+
+    ``setMessageReaction`` rejects the whole call for an off-list emoji, so an
+    untranslated receipt is not a degraded receipt — it is no reaction at all, on
+    exactly the turns (a /stop, a runtime that died) whose only trace it is. The
+    ack 👀 and the admission receipts are already mapped, so terminal states must
+    not be the one family that silently drops.
+    """
+
+    bot = TelegramBot(TelegramConfig(bot_token="123456:test-token"))
+    allowed = {"👀", "🤔", "🤷", "✍", "🙊", "😱"}
+
+    for emoji in (
+        STOPPED_REACTION_EMOJI,
+        INTERRUPTED_REACTION_EMOJI,
+        # The constants carry U+FE0F; a caller that strips it must map too.
+        STOPPED_REACTION_EMOJI.rstrip("️"),
+        INTERRUPTED_REACTION_EMOJI.rstrip("️"),
+    ):
+        normalized = bot._normalize_reaction_emoji(emoji)
+        assert normalized in allowed, f"{emoji!r} -> {normalized!r} is off Telegram's list"
+
+    # Distinct receipts stay distinguishable after translation.
+    assert bot._normalize_reaction_emoji(STOPPED_REACTION_EMOJI) != bot._normalize_reaction_emoji(
+        INTERRUPTED_REACTION_EMOJI
+    )
+
+
+def test_add_reaction_sends_the_translated_terminal_receipt() -> None:
+    bot = TelegramBot(TelegramConfig(bot_token="123456:test-token"))
+    context = MessageContext(user_id="42", channel_id="-100123", platform="telegram")
+
+    with patch(
+        "modules.im.telegram.telegram_api.set_message_reaction",
+        new=AsyncMock(return_value={"ok": True}),
+    ) as reaction_mock:
+        result = asyncio.run(bot.add_reaction(context, "77", STOPPED_REACTION_EMOJI))
+
+    assert result is True
+    sent = reaction_mock.await_args.args[3]
+    assert sent != STOPPED_REACTION_EMOJI
+    assert "️" not in sent
 
 
 def test_remove_reaction_clears_telegram_message_reactions() -> None:

@@ -1937,6 +1937,7 @@ def test_active_org_config_preserves_runtime_fields_but_strips_remote_access_ide
     )
     payload = json.loads(json.dumps(api.config_to_payload(config)))
     payload["language"] = "zh"
+    payload["agent_progress_style"] = "concise"
     observed = []
 
     def save_config(remote_payload):
@@ -1956,6 +1957,7 @@ def test_active_org_config_preserves_runtime_fields_but_strips_remote_access_ide
     assert response.status_code == 200
     assert len(observed) == 1
     assert observed[0]["language"] == "zh"
+    assert observed[0]["agent_progress_style"] == "concise"
     expected = dict(payload)
     expected.pop("remote_access")
     assert observed[0] == expected

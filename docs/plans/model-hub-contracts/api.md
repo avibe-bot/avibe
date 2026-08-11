@@ -16,6 +16,7 @@ Hub has not shipped, so there is no internal contract migration or compatibility
 | Method and path | Request → response | Normative notes |
 | --- | --- | --- |
 | GET `/api/models/sources` | → `{sources: Source[]}` | Unordered asset inventory. Array order is never a spend order. |
+| POST `/api/models/sources/observe` | `{vendor, base_url?, key, protocol_order?}` → `{observation: SourceObservation}` | Non-persisting connectivity/authentication/protocol/inventory observation. `protocol_order` only orders the three probes; it never supplies a conclusion. No credential reference is returned. |
 | POST `/api/models/sources` | `SourceCreate` → `{source: Source, added_to: AddedTo[], adopted_by: AdoptedBy[]}` | The server assigns `id` and `created_at`; plaintext keys are transient. Add-time matching and placement are materialized before response. |
 | PATCH `/api/models/sources/<id>` | `{display_name?, base_url?, force?: boolean}` → guarded Source-mutation envelope | Metadata/Base-URL mutation from the authoritative matrix in `model-hub.md` §4.5. |
 | PUT `/api/models/sources/<id>/credential` | `{key, force?: boolean}` → guarded Source-mutation envelope | API-key replacement. `force` is a JSON body field, never a query parameter. |
@@ -47,6 +48,54 @@ Hub has not shipped, so there is no internal contract migration or compatibility
 The removed global route `PUT /api/models/priority` has no replacement. Backend Source
 order is explicit configuration through the sources route; exact per-model order is
 explicit configuration through the chain route.
+
+## Unsaved Source observation
+
+`POST /api/models/sources/observe` accepts only the observation subset of a Source
+create request:
+
+```json
+{
+  "vendor": "custom",
+  "base_url": "https://relay.example/v1",
+  "key": "<transient plaintext key>",
+  "protocol_order": ["openai_chat", "openai_responses", "anthropic"]
+}
+```
+
+`base_url` may be null for an official vendor endpoint. `protocol_order`, when
+present, contains each protocol exactly once and is only probe ordering; omitting it
+uses the authoritative three-value order. The endpoint provisions an unbound engine
+credential only for this operation, returns `observation-result.schema.json`, then
+revokes the transient reference before settling. A revoke failure remains in the
+existing pending-revocation journal. The response never contains that reference or
+any persisted Source.
+
+For an API-key `POST /api/models/sources`, the server performs the same
+response-backed observation internally before its independent committed credential
+provisioning. It accepts the create fields and optional `protocol_order`, but never
+accepts a protocol conclusion from the caller. A null protocol produces no Source; a
+proven protocol may be saved even when inventory discovery failed, with the resulting
+Source health reflecting that uncertainty. Subscription OAuth creation follows its
+vendor-specific observation flow before commit. Saved Sources use the stored
+protocol for every later operation.
+
+The observation result has six terminal outcomes: `observed`, `ambiguous`,
+`unreachable`, `authentication_failed`, `adapter_error`, and `timeout`. Its
+`protocol` is non-null only when a real upstream response shape and positive
+authentication evidence prove the transport. Authentication is accepted only by a
+shaped success or a shaped request-level error that occurs after authentication;
+shaped authentication errors are rejected. Shaped server and rate-limit errors
+prove reachability but not authentication, so they settle as `adapter_error` with
+`reachable: true`, `authenticated: unknown`, and `protocol: null`. A local adapter
+failure may use the same outcome with `reachable: null`. A bare HTTP status proves
+reachability, but proves neither protocol nor authentication. Consequently,
+`ambiguous` always has `reachable: true` and `protocol: null`.
+`authentication_failed` also has `protocol: null`, because a rejected credential
+does not establish a persistable protocol. `ambiguous` is the sole outcome that asks
+for the one-time probe-order hint. Only `observed` attempts inventory discovery and
+therefore reports `succeeded` or `failed`; every other terminal reports
+`not_attempted` with an empty model list.
 
 ## Identifier rules
 
@@ -376,12 +425,13 @@ refresh a source whose global state is `needs_action` or `error`, even though no
 turn resolution and the chain probe exclude that source as non-runnable.
 
 On usable discovery it updates the discovered model set, clears the blocker, and
-sets the source to `standby`. The response returns that complete updated source and
-the discovered count; clients do not reconstruct the model list from the count.
-`last_discovered_at` advances only on this successful replacement. A classified
-failure updates the source-global state, preserves the last successful model list and
-timestamp, and returns the normal safe error. This route is the only refresh/recovery
-operation; there is no parallel “test” or “recover” endpoint.
+sets the source to `standby`. The success response is the guarded Source-mutation
+envelope `{source, removed_hops, interrupted}`; clients render the complete updated
+Source and the exact route impact from that envelope. `last_discovered_at` advances
+only on this successful replacement. A classified failure updates the source-global
+state, preserves the last successful model list and timestamp, and returns the normal
+safe error. This route is the only refresh/recovery operation; there is no parallel
+“test” or “recover” endpoint.
 
 ## OAuth completion
 
@@ -422,6 +472,9 @@ In Hub mode, `AgentChain.chain` is the exact stored per-model Route chain in the
 order. Runtime does not filter or rebuild it: cooling, missing, model-unsupported,
 source-blocked, and process-unavailable native CLI hops stay at their configured
 positions with live annotations.
+`AgentChain.current` is either null or the exact `{source_id, model_id}` identity of
+the hop that is current for the next execution. Recovery changes `current` on the next
+turn without changing the stored `chain` array.
 Each item carries `channel`, source-global `health`, process-aware `runnable`, and
 nullable `reason`. The complete axiom is:
 
@@ -445,15 +498,15 @@ remains a valid `interrupted` chain.
     "chain": [
       {
         "source_id": "src_chatgptplus",
+        "model_id": "gpt-5.6",
         "channel": "native_cli",
-        "via_mapping": false,
-        "resolved_model_id": null,
         "health": "healthy",
         "runnable": false,
         "reason": "native_cli_unavailable",
         "retry_at": null
       }
     ],
+    "current": null,
     "supply_state": "interrupted"
   }
 }
@@ -487,7 +540,6 @@ A successful probe nests its result:
     "source_id": "src_relay9c1x",
     "model_id": "glm-5.2",
     "latency_ms": 287,
-    "via_mapping": true,
     "error": "models.source.needs_action.balance_exhausted"
   }
 }
@@ -511,7 +563,6 @@ not-ready carries the closed i18n key `models.probe.native_cli_unavailable`.
   "source_id": "src_chatgptplus",
   "model_id": "gpt-5.6",
   "latency_ms": null,
-  "via_mapping": false,
   "error": null
 }
 ```
@@ -525,7 +576,6 @@ not-ready carries the closed i18n key `models.probe.native_cli_unavailable`.
   "source_id": "src_chatgptplus",
   "model_id": "gpt-5.6",
   "latency_ms": null,
-  "via_mapping": false,
   "error": "models.probe.native_cli_unavailable"
 }
 ```
@@ -591,8 +641,11 @@ Minimum v5 set:
 `invalid_source_order`, `source_last_supplier`, `source_in_route_chain`,
 `source_model_in_route_chain`, `mode_switch_blocked`, `engine_down`,
 `reauth_confirmation_required`, `source_model_managed_upstream`,
-`migration_item_conflict`, `turn_not_found`,
+`native_source_already_exists`, `migration_item_conflict`, `turn_not_found`,
 `provenance_unavailable`, `probe_no_candidate`, `direct_mode`.
+
+`native_source_already_exists` is an API-boundary refusal for native OAuth start;
+its structured sibling is `{existing_source_id}` and the adapter is not invoked.
 
 Boundary-only action-refusal values cover operations the UI already does not offer but
 a script or regression can call directly. `reauth_confirmation_required` and
@@ -611,6 +664,8 @@ contract harness and API-boundary tests enforce:
 <!-- authority-consumer: mutation.source_metadata mutation.credential_replace mutation.source_refresh mutation.model_create mutation.model_efforts mutation.model_delete mutation.source_delete mutation.route_replace -->
 <!-- authority-consumer: import.keep_native import.copy_key import.reauth import.controlled -->
 <!-- authority-consumer: protocol anthropic openai_responses openai_chat -->
+<!-- authority-consumer: observation.outcome observed ambiguous unreachable authentication_failed adapter_error timeout -->
+<!-- authority-consumer: observation.discovery succeeded failed not_attempted -->
 
 | Guard | Boundary |
 | --- | --- |
@@ -620,7 +675,7 @@ contract harness and API-boundary tests enforce:
 | every `sources.order` id exists, is unique, and is eligible | config loader + source-order route |
 | eligibility contains one row per source and every ordered source is eligible | AgentSupply assembler |
 | every AgentSupply eligibility row carries `in_current_model_chain` and `process_availability_reason`; membership nullability follows `selected_model_id`, and only a native source may carry `native_cli_unavailable` | AgentSupply assembler |
-| `AgentChain.chain` re-echoes the stored exact hops in the same order, including missing, model-unsupported, and process-unavailable native CLI items | chain assembler |
+| `AgentChain.chain` re-echoes the stored exact hops in the same order, including missing, model-unsupported, and process-unavailable native CLI items; `AgentChain.current` is null or identifies one exact hop in that array | chain assembler |
 | `model_supply` has one row per menu model with unique ids | AgentSupply assembler |
 | probe `source_id` names an existing source | probe assembler |
 | non-null event endpoints name existing sources at emission time | event emitter |

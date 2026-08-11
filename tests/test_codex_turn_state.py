@@ -71,3 +71,12 @@ def test_finalize_turn_start_response_removes_old_bootstrapped_active_turn():
     assert registry.get_turn("turn-old") is None
     assert registry.get_request_for_turn("turn-old") is None
     assert registry.get_active_turn("session-1") == "turn-new"
+
+
+def test_indicator_cleanup_has_exactly_one_owner():
+    registry = CodexTurnRegistry()
+    request = SimpleNamespace(base_session_id="session-1")
+    registry.register_turn("turn-1", request)
+
+    assert registry.claim_indicator_cleanup("turn-1") is request
+    assert registry.claim_indicator_cleanup("turn-1") is None

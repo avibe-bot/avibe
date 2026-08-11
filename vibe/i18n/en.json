@@ -733,7 +733,6 @@
         "network": "network unavailable",
         "recovery": "recovered",
         "manual": "manual change",
-        "mapping": "model mapping applied",
         "credential_expired": "credential expired",
         "credential_revoked": "credential revoked",
         "balance_exhausted": "balance exhausted",
@@ -742,7 +741,10 @@
         "unclassified_error": "unclassified source error",
         "no_enabled_source": "no source is enabled",
         "no_eligible_source": "no source is eligible",
-        "model_unsupported": "no source supports this model"
+        "route_unconfigured": "the route is not configured",
+        "source_missing": "the configured source no longer exists",
+        "model_unsupported": "the configured source no longer supplies this model",
+        "native_cli_unavailable": "CLI login is not available in this process"
       },
       "skip": "{from_source}: {reason}; skipped",
       "mapping_applied": "{from_source} -> {model}: model mapping applied",
@@ -757,7 +759,8 @@
       "native_cli_unavailable": "CLI login is not available in this process",
       "no_enabled_source": "Model {model} has no enabled source. Open Models to configure one.",
       "no_eligible_source": "Model {model} has no source eligible for {backend}. Open Models to configure one.",
-      "model_unsupported": "No source supports model {model}. Open Models to configure one."
+      "model_unsupported": "No source supports model {model}. Open Models to configure one.",
+      "route_unconfigured": "Model {model} has no configured route. Open Models to configure one."
     }
   },
   "errors": {
@@ -788,6 +791,11 @@
       "acceptanceUnknown": "The Show event may still be processing. It was not replayed locally.",
       "dispatchFailed": "The Show event was recorded, but its agent turn could not be delivered.",
       "idConflict": "This Show event ID is already bound to different event contents."
+    }
+  },
+  "turn": {
+    "interrupted": {
+      "serviceRestart": "⚠️ This turn was interrupted — the Avibe service restarted while it was still running, and its agent runtime could not be resumed. Nothing further will arrive for it. Send the request again if the work still needs doing."
     }
   }
 }

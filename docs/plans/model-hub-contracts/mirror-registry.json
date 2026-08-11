@@ -51,6 +51,18 @@
   ],
   "api_boundary_only_errors": [
     {
+      "value": "native_source_already_exists",
+      "contract_file": "docs/plans/model-hub-contracts/api.md",
+      "negative_test_file": "tests/test_model_hub_api.py",
+      "negative_test": "test_native_oauth_rejects_duplicate_source_before_adapter",
+      "forbidden_ui_globs": [
+        "ui/src/components/settings/models/**/*.ts",
+        "ui/src/components/settings/models/**/*.tsx",
+        "ui/src/i18n/*.json",
+        "vibe/i18n/*.json"
+      ]
+    },
+    {
       "value": "source_model_managed_upstream",
       "contract_file": "docs/plans/model-hub-contracts/api.md",
       "negative_test_file": "tests/test_model_hub_api.py",
@@ -274,7 +286,20 @@
         },
         {
           "schema": "probe-result.schema.json",
-          "path": "/allOf/6/then/properties/error",
+          "path": "/properties/error",
+          "exclude": [
+            null,
+            "models.source.cooldown.network",
+            "models.source.cooldown.timeout",
+            "models.source.cooldown.rate_limited",
+            "models.source.cooldown.quota_exhausted",
+            "models.source.cooldown.server_error",
+            "models.source.needs_action.oauth_expired",
+            "models.source.needs_action.balance_exhausted",
+            "models.source.needs_action.credential_revoked",
+            "models.source.needs_action.account_banned",
+            "models.source.error.unclassified"
+          ],
           "mapping": {
             "native_cli_unavailable": "models.probe.native_cli_unavailable"
           }
@@ -375,26 +400,31 @@
           "class": "ModelHubSourceConfig",
           "field": "protocol"
         },
-      {
-        "kind": "python_string_assignment",
-        "file": "vibe/model_hub_runtime/state.py",
-        "name": "_PROTOCOLS"
-      },
-      {
-        "kind": "marker_tail",
-        "file": "docs/plans/model-hub-contracts/adapter-interface.py",
-        "marker": "authority-consumer: protocol "
-      },
-      {
-        "kind": "marker_tail",
-        "file": "docs/plans/model-hub-contracts/opencode-overlay.md",
-        "marker": "authority-consumer: protocol "
-      },
-      {
-        "kind": "marker_tail",
-        "file": "docs/plans/model-hub-contracts/api.md",
-        "marker": "authority-consumer: protocol "
-      }
+        {
+          "kind": "python_string_assignment",
+          "file": "core/handlers/model_hub/adapter.py",
+          "name": "SOURCE_PROTOCOLS"
+        },
+        {
+          "kind": "python_string_assignment",
+          "file": "vibe/model_hub_runtime/state.py",
+          "name": "_PROTOCOLS"
+        },
+        {
+          "kind": "python_string_assignment",
+          "file": "docs/plans/model-hub-contracts/adapter-interface.py",
+          "name": "SOURCE_PROTOCOLS"
+        },
+        {
+          "kind": "marker_tail",
+          "file": "docs/plans/model-hub-contracts/opencode-overlay.md",
+          "marker": "authority-consumer: protocol "
+        },
+        {
+          "kind": "marker_tail",
+          "file": "docs/plans/model-hub-contracts/api.md",
+          "marker": "authority-consumer: protocol "
+        }
       ]
     },
     {
@@ -427,6 +457,48 @@
           "file": "ui/src/i18n/zh.json",
           "path": "/models/eligibility",
           "prefix": "models.eligibility."
+        }
+      ]
+    },
+    {
+      "id": "D7",
+      "domain": "unsaved observation outcomes",
+      "authority": {
+        "kind": "schema_vocabulary",
+        "schema": "observation-result.schema.json",
+        "paths": ["/properties/outcome"]
+      },
+      "consumers": [
+        {
+          "kind": "python_string_assignment",
+          "file": "docs/plans/model-hub-contracts/adapter-interface.py",
+          "name": "OBSERVATION_OUTCOMES"
+        },
+        {
+          "kind": "marker_tail",
+          "file": "docs/plans/model-hub-contracts/api.md",
+          "marker": "authority-consumer: observation.outcome "
+        }
+      ]
+    },
+    {
+      "id": "D8",
+      "domain": "unsaved observation discovery outcomes",
+      "authority": {
+        "kind": "schema_vocabulary",
+        "schema": "observation-result.schema.json",
+        "paths": ["/properties/discovery"]
+      },
+      "consumers": [
+        {
+          "kind": "python_string_assignment",
+          "file": "docs/plans/model-hub-contracts/adapter-interface.py",
+          "name": "OBSERVATION_DISCOVERY_OUTCOMES"
+        },
+        {
+          "kind": "marker_tail",
+          "file": "docs/plans/model-hub-contracts/api.md",
+          "marker": "authority-consumer: observation.discovery "
         }
       ]
     }
