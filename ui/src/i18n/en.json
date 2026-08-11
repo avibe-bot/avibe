@@ -3662,7 +3662,7 @@
         },
         "version": "Version",
         "capabilities": "Available capabilities",
-        "capabilitiesHelp": "The kinds of models the engine can use right now. \"Yes\" means the capability is configured and ready.",
+        "capabilitiesHelp": "The engine capabilities available right now, including models, file parsing, search, and knowledge features. \"Yes\" means the capability is configured and ready.",
         "capabilitiesHelpLabel": "About available capabilities",
         "noCapabilities": "No capability information yet.",
         "disabledFeatures": "Features not enabled",
@@ -3694,7 +3694,7 @@
             "failedRetryable": "Failed (will retry)",
             "drainConsecutiveFailures": "Consecutive failures",
             "unrecoverableTotal": "Total given up",
-            "optimizeFailureStreak": "Consecutive cleanup failures",
+            "optimizeFailureStreak": "Consecutive optimization failures",
             "pruneStaleSeconds": "Remove data older than"
           },
           "recorder": {
@@ -3712,7 +3712,7 @@
           },
           "cascadeReason": {
             "drainFailures": "Queue processing failed",
-            "optimizeStuck": "Cleanup task stuck",
+            "optimizeStuck": "Optimization task stuck",
             "pruneStale": "Old-data cleanup stuck",
             "healthProbeFailed": "Health check failed",
             "unknown": "Unknown"
@@ -3817,7 +3817,7 @@
       "sourceNote": "Distilled from your conversation history, plus any notes your Agent recorded."
     },
     "search": {
-      "description": "Search everything Memory knows about you.",
+      "description": "Search your profile, episodes, and facts.",
       "placeholder": "Search your memory…",
       "button": "Search",
       "searching": "Searching…",
@@ -3827,7 +3827,7 @@
       "sourceNote": "Distilled from your conversation history, plus any notes your Agent recorded."
     },
     "log": {
-      "description": "Follow each message's processing progress and result.",
+      "description": "See the processing history for created Memory entries.",
       "loading": "Loading processing log…",
       "loadFailed": "Couldn't load the processing log.",
       "detailLoading": "Loading processing details…",
@@ -3900,7 +3900,7 @@
       "callStage": {
         "boundary": "Request preparation",
         "strategy": "Strategy",
-        "cascade": "Queue processing",
+        "cascade": "Building memories",
         "episodeExtract": "Episode extraction",
         "parse": "Image/file parsing"
       },
@@ -3953,16 +3953,16 @@
       "disclosureTitle": "About Memory",
       "disclosure": [
         "When on, your Workbench messages and authorized users' private messages are distilled into memories; long-term notes your Agent takes while working (like your preferences and decisions) are included too.",
-        "To build memories, message content is sent to the model endpoints configured above. These are separate from your Agent's models, and those providers handle the data under their own policies.",
-        "Avibe's local Memory store stays on this machine; copies sent to configured model endpoints are outside that local store. Turning Memory off pauses it — it doesn't delete anything.",
-        "Clear all deletes all Memory data on this machine, but can't take back content already sent to the model endpoints, and doesn't touch your original chat history.",
+        "To build memories, message content is sent to the model endpoints configured above, and Search sends queries there too. These endpoints are separate from your Agent's models, and their providers handle the data under their own policies.",
+        "Avibe's local Memory store stays on this machine and includes scrubbed model-call diagnostics for every user and project on this installation. Diagnostics can contain sensitive conversation text and are kept for up to 14 days or 5,000 calls. Copies sent to model endpoints are outside this local store. Turning Memory off pauses it — it doesn't delete anything.",
+        "Clear all deletes Avibe-managed Memory data on this machine, including your profile, memories, and messages waiting to process. It can't take back content already sent to model endpoints or touch your original chat history.",
         "Accounts on different platforms each have their own separate memory; they aren't linked."
       ],
       "clearKeyLabel": "Clear the saved key",
       "rebuildRequiredTitle": "Memory index rebuild required",
       "rebuildRequiredDescription": "Your embedding endpoint or model change is saved. The Memory engine can't restart until the rebuild finishes.",
       "rebuildConfirmTitle": "Rebuild Memory index?",
-      "rebuildConfirmDescription": "Changing the embedding endpoint or model requires rebuilding the index. Your memories are kept, but the rebuild can take a while and uses embedding API credit.",
+      "rebuildConfirmDescription": "Changing the embedding endpoint or model requires rebuilding the index. Your memories are kept, but the rebuild can take a while and may use embedding API credit.",
       "rebuildConfirmLabel": "Save and rebuild",
       "retryRebuild": "Retry rebuild",
       "retryingRebuild": "Rebuilding…",
@@ -3973,7 +3973,7 @@
     "clear": {
       "button": "Clear all",
       "confirmTitle": "Clear all Memory data?",
-      "confirmDescription": "This deletes all Memory data on this machine, including your profile, distilled memories, and messages waiting to process.",
+      "confirmDescription": "This deletes Avibe-managed Memory data on this machine, including your profile, distilled memories, and messages waiting to process.",
       "removesTitle": "This deletes:",
       "removes": [
         "Your profile and all memory entries",
