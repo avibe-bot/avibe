@@ -14,6 +14,7 @@ import {
 import { Badge } from '../../ui/badge';
 import { Button } from '../../ui/button';
 import { Card, CardContent } from '../../ui/card';
+import { InfoHint } from '../../ui/info-hint';
 import type {
   MemoryClearRecovery,
   MemoryFailureLogEntry,
@@ -262,6 +263,10 @@ export const MemoryStatusPanel: React.FC<{
           <h3 id="memory-runtime-title" className="text-[13px] font-semibold text-foreground">
             {t('memory.processingRecord.runtime.title')}
           </h3>
+          <InfoHint
+            label={t('memory.processingRecord.runtime.helpLabel')}
+            content={t('memory.processingRecord.runtime.help')}
+          />
         </div>
         <Card>
           <CardContent className="flex flex-col gap-4 py-4">
@@ -287,8 +292,12 @@ export const MemoryStatusPanel: React.FC<{
                 </div>
                 <div className="grid gap-4 border-t border-border pt-3 lg:grid-cols-2">
                   <div className="min-w-0">
-                    <div className="mb-2 text-[11.5px] font-semibold text-foreground">
+                    <div className="mb-2 flex items-center gap-1.5 text-[11.5px] font-semibold text-foreground">
                       {t('memory.processingRecord.runtime.capabilities')}
+                      <InfoHint
+                        label={t('memory.processingRecord.runtime.capabilitiesHelpLabel')}
+                        content={t('memory.processingRecord.runtime.capabilitiesHelp')}
+                      />
                     </div>
                     <FactList
                       facts={health.capabilities}
@@ -297,8 +306,12 @@ export const MemoryStatusPanel: React.FC<{
                     />
                   </div>
                   <div className="min-w-0">
-                    <div className="mb-2 text-[11.5px] font-semibold text-foreground">
+                    <div className="mb-2 flex items-center gap-1.5 text-[11.5px] font-semibold text-foreground">
                       {t('memory.processingRecord.runtime.disabledFeatures')}
+                      <InfoHint
+                        label={t('memory.processingRecord.runtime.disabledFeaturesHelpLabel')}
+                        content={t('memory.processingRecord.runtime.disabledFeaturesHelp')}
+                      />
                     </div>
                     {health.disabled_features.length === 0 ? (
                       <span className="text-[11.5px] text-muted">{t('memory.processingRecord.runtime.noneDisabled')}</span>
@@ -312,7 +325,13 @@ export const MemoryStatusPanel: React.FC<{
                   </div>
                   <div className="min-w-0 border-t border-border pt-3 lg:col-span-2 lg:grid lg:grid-cols-2 lg:gap-4">
                     <div className="min-w-0">
-                      <div className="mb-2 text-[11.5px] font-semibold text-foreground">{t('memory.processingRecord.runtime.cascade')}</div>
+                      <div className="mb-2 flex items-center gap-1.5 text-[11.5px] font-semibold text-foreground">
+                        {t('memory.processingRecord.runtime.cascade')}
+                        <InfoHint
+                          label={t('memory.processingRecord.runtime.cascadeHelpLabel')}
+                          content={t('memory.processingRecord.runtime.cascadeHelp')}
+                        />
+                      </div>
                       <FactList
                         facts={health.cascade}
                         emptyLabel={t('memory.processingRecord.runtime.noFacts')}
@@ -320,7 +339,13 @@ export const MemoryStatusPanel: React.FC<{
                       />
                     </div>
                     <div className="mt-3 min-w-0 lg:mt-0">
-                      <div className="mb-2 text-[11.5px] font-semibold text-foreground">{t('memory.processingRecord.runtime.recorder')}</div>
+                      <div className="mb-2 flex items-center gap-1.5 text-[11.5px] font-semibold text-foreground">
+                        {t('memory.processingRecord.runtime.recorder')}
+                        <InfoHint
+                          label={t('memory.processingRecord.runtime.recorderHelpLabel')}
+                          content={t('memory.processingRecord.runtime.recorderHelp')}
+                        />
+                      </div>
                       <FactList
                         facts={health.recorder}
                         emptyLabel={t('memory.processingRecord.runtime.noFacts')}
@@ -342,9 +367,15 @@ export const MemoryStatusPanel: React.FC<{
 
       <section className="flex flex-col gap-2" aria-labelledby="memory-sources-title">
         <div>
-          <h3 id="memory-sources-title" className="text-[13px] font-semibold text-foreground">
-            {t('memory.processingRecord.sources.title')}
-          </h3>
+          <div className="flex items-center gap-1.5">
+            <h3 id="memory-sources-title" className="text-[13px] font-semibold text-foreground">
+              {t('memory.processingRecord.sources.title')}
+            </h3>
+            <InfoHint
+              label={t('memory.processingRecord.sources.helpLabel')}
+              content={t('memory.processingRecord.sources.help')}
+            />
+          </div>
           <p className="mt-0.5 text-[11.5px] text-muted">{t('memory.processingRecord.sources.description')}</p>
         </div>
         <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
@@ -354,9 +385,15 @@ export const MemoryStatusPanel: React.FC<{
 
       <section className="flex flex-col gap-2" aria-labelledby="memory-anomalies-title">
         <div>
-          <h3 id="memory-anomalies-title" className="text-[13px] font-semibold text-foreground">
-            {t('memory.processingRecord.anomalies.title')}
-          </h3>
+          <div className="flex items-center gap-1.5">
+            <h3 id="memory-anomalies-title" className="text-[13px] font-semibold text-foreground">
+              {t('memory.processingRecord.anomalies.title')}
+            </h3>
+            <InfoHint
+              label={t('memory.processingRecord.anomalies.helpLabel')}
+              content={t('memory.processingRecord.anomalies.help')}
+            />
+          </div>
           <p className="mt-0.5 text-[11.5px] text-muted">{t('memory.processingRecord.anomalies.description')}</p>
         </div>
         {recovery ? (

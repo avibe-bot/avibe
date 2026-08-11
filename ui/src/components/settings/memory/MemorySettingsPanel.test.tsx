@@ -102,6 +102,8 @@ describe('MemorySettingsPanel', () => {
       />,
     );
 
+    expect(screen.getByRole('button', { name: 'memory.settings.llmHelpLabel' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'memory.settings.embeddingHelpLabel' })).toBeTruthy();
     expect(screen.queryByRole('switch', { name: 'memory.settings.providerCallLoggingLabel' })).toBeNull();
 
     const llmBaseUrl = screen.getAllByPlaceholderText('memory.settings.baseUrlPlaceholder')[0];

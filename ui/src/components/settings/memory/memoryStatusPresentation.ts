@@ -70,6 +70,8 @@ const RUNTIME_FACT_LABEL_KEYS = {
     rerank: 'memory.processingRecord.runtime.fact.capability.rerank',
     multimodal_llm: 'memory.processingRecord.runtime.fact.capability.multimodalLlm',
     parser: 'memory.processingRecord.runtime.fact.capability.parser',
+    agentic_search: 'memory.processingRecord.runtime.fact.capability.agenticSearch',
+    knowledge: 'memory.processingRecord.runtime.fact.capability.knowledge',
   },
   cascade: {
     healthy: 'memory.processingRecord.runtime.fact.cascade.healthy',
@@ -170,6 +172,23 @@ export const memoryStatusRuntimeFactLabel = (
   value: string,
 ): string => knownLabel(t, RUNTIME_FACT_LABEL_KEYS[group] as Record<string, string>, value);
 
+const formatSecondsDuration = (t: TFunction, seconds: number): string => {
+  const total = Math.round(seconds);
+  if (total >= 3600) {
+    return t('memory.processingRecord.runtime.fact.duration.hoursMinutes', {
+      hours: Math.floor(total / 3600),
+      minutes: Math.floor((total % 3600) / 60),
+    });
+  }
+  if (total >= 60) {
+    return t('memory.processingRecord.runtime.fact.duration.minutesSeconds', {
+      minutes: Math.floor(total / 60),
+      seconds: total % 60,
+    });
+  }
+  return t('memory.processingRecord.runtime.fact.duration.seconds', { seconds: total });
+};
+
 export const formatMemoryStatusRuntimeFact = (
   t: TFunction,
   group: RuntimeFactGroup,
@@ -180,6 +199,9 @@ export const formatMemoryStatusRuntimeFact = (
   if (!knownField) return formatMemoryStatusFact(value);
   if (typeof value === 'boolean') {
     return t(`memory.processingRecord.runtime.fact.boolean.${value ? 'true' : 'false'}`);
+  }
+  if (group === 'cascade' && name === 'prune_stale_seconds' && typeof value === 'number') {
+    return formatSecondsDuration(t, value);
   }
   if (group === 'cascade' && name === 'reasons' && Array.isArray(value)) {
     if (value.length === 0) return formatMemoryStatusFact(value);

@@ -85,6 +85,22 @@ describe('MemoryStatusPanel', () => {
     expect(screen.queryByText('memory.status.state.degraded')).toBeNull();
   });
 
+  it('gives each processing-record help trigger an action-oriented accessible name', () => {
+    render(<MemoryStatusPanel {...baseProps} />);
+
+    for (const label of [
+      'memory.processingRecord.runtime.helpLabel',
+      'memory.processingRecord.runtime.capabilitiesHelpLabel',
+      'memory.processingRecord.runtime.disabledFeaturesHelpLabel',
+      'memory.processingRecord.runtime.cascadeHelpLabel',
+      'memory.processingRecord.runtime.recorderHelpLabel',
+      'memory.processingRecord.sources.helpLabel',
+      'memory.processingRecord.anomalies.helpLabel',
+    ]) {
+      expect(screen.getByRole('button', { name: label })).toBeTruthy();
+    }
+  });
+
   it('preserves the Processing Record structure and responsive class contract', () => {
     const { container } = render(
       <MemoryStatusPanel
@@ -100,9 +116,10 @@ describe('MemoryStatusPanel', () => {
       'memory-sources-title',
       'memory-anomalies-title',
     ]);
-    expect(container.querySelector('#memory-sources-title')?.parentElement?.nextElementSibling?.className).toBe(
-      'grid gap-2 sm:grid-cols-2 xl:grid-cols-4',
-    );
+    // The title now sits inside a flex row (title + InfoHint) within the header div.
+    expect(
+      container.querySelector('#memory-sources-title')?.parentElement?.parentElement?.nextElementSibling?.className,
+    ).toBe('grid gap-2 sm:grid-cols-2 xl:grid-cols-4');
     expect(screen.getByTestId('memory-anomaly-result_unknown').className).toBe(
       'flex min-w-0 flex-col gap-3 border-b border-border py-3 last:border-b-0 lg:flex-row lg:justify-between',
     );
