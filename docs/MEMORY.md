@@ -121,10 +121,11 @@ reaches a terminal result.
    **partially deleted**, inspect the service logs and filesystem permissions
    for that root and correct the deletion failure. If deletion completed but
    engine or sidecar activation failed because a persisted LLM or Embedding
-   URL, model, or API key is invalid, correct those processing settings in
-   Settings while the factory-reset recovery intent is pending. Endpoint repair
-   does not fix a retained or partially deleted root. After correcting the
-   applicable cause, select **Retry factory reset** to continue recovery.
+   endpoint, model, or credential is invalid, correct the corresponding
+   processing settings under **Settings > Memory** while the factory-reset
+   recovery intent is pending. Endpoint repair does not fix a retained or
+   partially deleted root. After correcting the applicable cause, select
+   **Retry factory reset** to continue recovery.
    Memory stays fenced and unavailable while the factory-reset recovery intent
    is pending.
    Retry is idempotent: it continues any remaining deletion while preserving
