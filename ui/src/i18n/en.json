@@ -1231,6 +1231,9 @@
         "quota_exhausted": "Cycle quota used up",
         "server_error": "Upstream server error"
       },
+      "backoff": {
+        "connection_failed": "Connection failed, retrying shortly"
+      },
       "needs_action": {
         "oauth_expired": "Needs a new sign-in",
         "balance_exhausted": "Out of balance — top it up",

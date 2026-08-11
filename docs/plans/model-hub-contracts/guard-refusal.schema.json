@@ -2,14 +2,12 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "model-hub/guard-refusal.schema.json",
   "title": "GuardRefusal",
-  "description": "The shared HTTP 409 envelope for a guarded Model Hub mutation with a nonempty current guarded-impact plan. The opaque token authorizes only the exact refused mutation plan and persisted-state versions from which this envelope was computed.",
+  "description": "The shared HTTP 409 envelope for a guarded Model Hub mutation with a nonempty current guarded-impact plan. A forced retry confirms this plan by echoing would_remove_hops and would_interrupt unchanged; the server recomputes the plan and commits only when both arrays match exactly.",
   "type": "object",
   "required": [
     "ok",
     "contract_version",
     "error",
-    "refusal_reason",
-    "guard_token",
     "would_remove_hops",
     "would_interrupt"
   ],
@@ -35,17 +33,7 @@
         "source_in_route_chain",
         "source_model_in_route_chain"
       ],
-      "description": "Existing lead guard code selected by the Source-mutation matrix. plan_changed is carried by refusal_reason and never introduces a parallel top-level error code."
-    },
-    "refusal_reason": {
-      "enum": ["confirmation_required", "plan_changed"],
-      "description": "For a nonempty current plan, confirmation_required is the first refusal or a forced request without its token. plan_changed means the echoed token did not bind the current request, plan, and persisted-state versions. Both require presenting the returned current plan and obtaining fresh confirmation; an empty recomputed plan returns ordinary success instead of this envelope."
-    },
-    "guard_token": {
-      "type": "string",
-      "minLength": 16,
-      "maxLength": 4096,
-      "description": "Opaque server-minted confirmation token for this nonempty plan. It binds method, target, normalized mutation input, the exact staged mutation and guard-report plan, and every relevant persisted-state version without exposing plaintext credentials."
+      "description": "Existing lead guard code selected by the Source-mutation matrix. A changed plan returns the same top-level guard error family with the newly recomputed arrays."
     },
     "would_remove_hops": {
       "type": "array",
@@ -89,8 +77,6 @@
       "ok": false,
       "contract_version": 5,
       "error": "source_model_in_route_chain",
-      "refusal_reason": "confirmation_required",
-      "guard_token": "grd_01k4opaqueconfirmationtoken",
       "would_remove_hops": [
         {
           "backend": "claude",
@@ -107,23 +93,6 @@
           "agents": ["pm"]
         }
       ]
-    },
-    {
-      "ok": false,
-      "contract_version": 5,
-      "error": "source_model_in_route_chain",
-      "refusal_reason": "plan_changed",
-      "guard_token": "grd_01k4freshchangedplantoken",
-      "would_remove_hops": [
-        {
-          "backend": "claude",
-          "menu_model": "claude-opus-4-6",
-          "source_id": "src_anthkey01",
-          "model_id": "claude-opus-4-6",
-          "position": 1
-        }
-      ],
-      "would_interrupt": []
     }
   ]
 }

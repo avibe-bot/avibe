@@ -595,22 +595,6 @@
       ]
     },
     {
-      "id": "D14",
-      "domain": "guard refusal reasons",
-      "authority": {
-        "kind": "schema_vocabulary",
-        "schema": "guard-refusal.schema.json",
-        "paths": ["/properties/refusal_reason"]
-      },
-      "consumers": [
-        {
-          "kind": "marker_tail",
-          "file": "docs/plans/model-hub-contracts/api.md",
-          "marker": "authority-consumer: guard.refusal_reason "
-        }
-      ]
-    },
-    {
       "id": "D15",
       "domain": "guard refusal error codes",
       "authority": {
@@ -657,22 +641,6 @@
           "kind": "marker",
           "file": "docs/plans/model-hub-contracts/api.md",
           "prefix": "oauth_nonce."
-        }
-      ]
-    },
-    {
-      "id": "D18",
-      "domain": "observation evidence discovery reasons",
-      "authority": {
-        "kind": "schema_vocabulary",
-        "schema": "observation-result.schema.json",
-        "paths": ["/properties/evidence/properties/reason"]
-      },
-      "consumers": [
-        {
-          "kind": "marker_tail",
-          "file": "docs/plans/model-hub-contracts/api.md",
-          "marker": "authority-consumer: observation.evidence_reason "
         }
       ]
     },

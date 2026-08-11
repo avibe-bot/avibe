@@ -91,7 +91,6 @@ The terminal value 5 must coexist in all registered version locations on the sam
 - `observation-result.schema.json`
 - `runtime-dependency.schema.json`
 - `guard-refusal.schema.json`
-- `source-create-receipt.schema.json`
 - `turn-provenance.schema.json`
 - `core/handlers/model_hub/service.py`
 - `core/handlers/model_hub/provenance.py`
@@ -112,17 +111,16 @@ revision; the discovering lane does not reinterpret or edit the contract in plac
 | --- | --- |
 | `source.schema.json` | Source identity, channel, three protocols, state, usage, inventory, credential reference, and audit metadata. |
 | `source-create.schema.json` | API-key Source creation request, transient credential boundary, probe-order hint, and lost-response correlation. |
-| `source-create-receipt.schema.json` | Server-private nonce claim, server-keyed request binding, and exact create-terminal replay; never an API payload. |
 | `agent-supply.schema.json` | Backend mode, explicit policy-free Source order, configuration eligibility, model-supply and backend-health projections. |
 | `agent-chain.schema.json` | Read projection of exact stored hops plus current execution position, runnability, blockers, live connection backoff, retry metadata, and model supply state. |
 | `probe-result.schema.json` | Saved recovery probes and route probes over exact configured hops, including the live connection-backoff reason without persistent network health. |
-| `observation-result.schema.json` | Non-persisting Add-time connectivity, authentication, response-backed protocol, inventory observation, and optional sanitized request/status/reason evidence. |
+| `observation-result.schema.json` | Non-persisting Add-time connectivity, authentication, response-backed protocol, and inventory observation. |
 | `turn-provenance.schema.json` | Exactly attributed turn attempts and terminal outcome; no policy or mapping discriminator. |
 | `resolution-event.schema.json` | Pull-feed Source/resolution records and their closed reason/detail vocabulary. |
 | `oauth-flow.schema.json` | Subscription creation and re-auth presentation without secret material. |
 | `migration-scan.schema.json` | Copy-only import of existing native CLI/provider configuration; not an internal contract migration. |
 | `runtime-dependency.schema.json` | Managed local Gateway asset, lifecycle, and health. |
-| `guard-refusal.schema.json` | Shared guarded-mutation refusal, exact-plan confirmation token, and stale-plan discriminator. |
+| `guard-refusal.schema.json` | Shared guarded-mutation refusal whose two arrays are the exact plan echoed by a confirmed retry. |
 | `api.md` | Routes, envelopes, exact Source order and Route-chain writes, guards, OAuth/import results, provenance, and runtime status. |
 | `opencode-overlay.md` | Stable OpenCode provider/model identifiers and exact configured-hop overlay behavior. |
 | `adapter-interface.py` | Adapter protocol, observation, credential, discovery, invocation, cleanup, and classification boundary. |

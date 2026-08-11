@@ -1231,6 +1231,9 @@
         "quota_exhausted": "本周期额度用完",
         "server_error": "上游服务异常"
       },
+      "backoff": {
+        "connection_failed": "连接失败，短暂退避"
+      },
       "needs_action": {
         "oauth_expired": "需要重新登录",
         "balance_exhausted": "余额不足，需要充值",

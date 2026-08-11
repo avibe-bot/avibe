@@ -34,7 +34,7 @@
     "client_nonce": {
       "type": "string",
       "pattern": "^scn_[a-z0-9]{16,64}$",
-      "description": "Optional client-generated create correlation persisted unchanged when SourceCreate supplied it. It is unique among live Sources and live Source-create receipt records, and lets a client recognize a committed Source after the create response is lost. Source deletion atomically removes the associated receipt and releases the nonce. It is not Source identity, a credential, or a routing input."
+      "description": "Optional client-generated create correlation persisted unchanged when SourceCreate supplied it. It is unique among live Sources and in-flight Source-create reservations, and lets a client recognize a committed Source after the create response is lost. Source deletion releases the nonce. It is not Source identity, a credential, or a routing input."
     },
     "last_discovered_at": {
       "type": [
@@ -382,7 +382,7 @@
     },
     "adopted_by": {
       "type": "array",
-      "description": "Server-derived Source-card projection of persisted Route references, sorted by backend then menu_model. It is returned on every current Source read and creation payload, is never persisted on the Source record, and must not be reconstructed by clients from live chains. A committed Source-create receipt separately preserves the exact create-time response snapshot for idempotent replay; that snapshot does not make adopted_by a persisted Source-record field.",
+      "description": "Server-derived Source-card projection of persisted Route references, sorted by backend then menu_model. It is returned on every current Source read and creation payload, is never persisted on the Source record, and must not be reconstructed by clients from live chains.",
       "uniqueItems": true,
       "items": {
         "type": "object",
