@@ -53,13 +53,17 @@ finish before starting another one.
 
 1. **Restart engine**: Use it for a temporary recorder or engine failure.
    Memory must be enabled. This restarts the Memory engine without changing
-   settings, rebuilding indexes, or deleting retained data.
+   settings, rebuilding indexes, or deleting retained data. If the call-log
+   database is corrupt and recording remains degraded after a restart, use
+   **Clear all** before escalating further.
 2. **Repair index**: Use it when restarting does not clear index health
-   warnings or pending work. Its appearance under **Engine status** is
-   controlled by `repair_available`; with a loaded health snapshot it appears
-   beside **Processing queue**, and an unavailable health snapshot moves it
-   beside **Engine status** rather than hiding it. Running Repair also requires
-   Memory to be enabled and the live Memory Runtime and sidecar to be available.
+   warnings or pending work. The **Repair index** action is shown only when
+   Memory is enabled and `repair_available` is true (the installed, live Memory
+   Runtime must advertise repair capability and no rebuild or factory-reset
+   marker may be pending). With a loaded health snapshot it appears beside
+   **Processing queue**; an unavailable snapshot moves it beside **Engine
+   status** rather than hiding it. Running Repair also requires the live Memory
+   Runtime and sidecar to be available.
    Requests while Memory is disabled are refused, and an unavailable runtime or
    sidecar causes Repair to fail. Repair rescans Markdown memory and drains
    pending work while keeping the engine available; it preserves the existing
@@ -72,11 +76,31 @@ finish before starting another one.
    new settings before rebuilding the local vector index and preserves Markdown
    memory. If rebuilding fails before settlement, the confirmed change remains
    saved, the recovery intent and rebuild warning remain, and **Restart engine**
-   stays unavailable. Correct the endpoint or API key as needed, then select
-   **Retry rebuild**. If rebuilding completes but the later engine or sidecar
-   activation fails, the recovery intent may already be cleared. Fix the runtime
-   problem, then select **Restart engine**; **Retry rebuild** may no longer be
-   offered.
+   stays unavailable. An endpoint or model correction changes the vector-space
+   identity, so edit it and reconfirm **Save and rebuild**; do not apply that
+   correction through **Retry rebuild**. Only an API-key-only correction (with
+   the endpoint and model unchanged) may be saved under the pending rebuild
+   marker, after which select **Retry rebuild**. If rebuilding completes but the
+   later engine or sidecar activation fails, the recovery intent may already be
+   cleared. Fix the runtime problem, then select **Restart engine**;
+   **Retry rebuild** may no longer be offered.
+
+### Clear all
+
+Before Factory reset, use **Clear all** when retained Memory data or the
+call-log database is corrupt. Clear all creates and verifies a private snapshot
+of the queue, provider data, call log, and pinned attachments, then removes only
+those four Avibe-owned surfaces under a maintenance journal. It does not delete
+the `memory` or `state/memory` roots themselves, original Avibe chats, copies
+already sent to providers, or data outside those surfaces (including logs,
+backups, and user-created snapshots); it is not a secure wipe.
+
+If Clear all is interrupted, Processing Record shows explicit **Resume** and
+**Abort** actions for that operation. **Resume** continues the journaled
+deletion; **Abort** restores every surface from the verified snapshot. Nothing
+resumes automatically, and Memory remains fenced until one action reaches a
+terminal result.
+
 4. **Factory reset**: Use it only as a last resort when the earlier actions
    cannot recover Memory. It is available under **Settings > Memory** when the
    pinned, installed Memory artifact is valid. It permanently deletes exactly
