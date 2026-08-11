@@ -1227,18 +1227,25 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       // restore the prompt + attachments for retry — unless the user typed anew.
       const started = await onSend(submitted, sent, useMentions ? sentRefs : undefined);
       if (started === false) {
-        setAttachments((cur) => (cur.length ? cur : sent));
+        if (!unmountedRef.current) {
+          setAttachments((cur) => (cur.length ? cur : sent));
+        }
         if (!valueRef.current.trim()) {
           // Only restore when the user hasn't started a new draft during the
           // in-flight send. Persist the restored text as a draft too: the
-          // optimistic blank was already cached before onSend rejected it.
+          // optimistic blank was already cached before onSend rejected it. The
+          // callback still runs after navigation unmounts this Composer, because
+          // the original session's local draft must survive even though its UI
+          // state no longer exists.
           valueRef.current = submitted;
-          setValue(submitted);
-          setHasText(Boolean(submitted));
-          if (useMentions) {
-            // Chips re-resolve when re-picked; the content is never lost.
-            referencesRef.current = sentRefs;
-            mentionRef.current?.setText(submitted);
+          if (!unmountedRef.current) {
+            setValue(submitted);
+            setHasText(Boolean(submitted));
+            if (useMentions) {
+              // Chips re-resolve when re-picked; the content is never lost.
+              referencesRef.current = sentRefs;
+              mentionRef.current?.setText(submitted);
+            }
           }
           onDraftChange?.(submitted);
         }

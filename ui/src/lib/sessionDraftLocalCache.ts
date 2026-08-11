@@ -6,6 +6,7 @@ export type SessionDraftCacheRecord = {
   mutationId: string;
   savedAt: number;
   rebaseOnConflict?: boolean;
+  rebaseOnConflictServerText?: string;
 };
 
 type DraftStorage = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>
@@ -44,6 +45,13 @@ function parseRecord(raw: string | null): SessionDraftCacheRecord | null {
       || typeof value.savedAt !== 'number'
       || !Number.isFinite(value.savedAt)
       || (value.rebaseOnConflict !== undefined && typeof value.rebaseOnConflict !== 'boolean')
+      || (
+        value.rebaseOnConflictServerText !== undefined
+        && (
+          typeof value.rebaseOnConflictServerText !== 'string'
+          || value.rebaseOnConflict !== true
+        )
+      )
     ) {
       return null;
     }
@@ -161,6 +169,7 @@ export class SessionDraftLocalCache {
     serverUpdatedAt: string | null,
     previousMutationId?: string,
     rebaseOnConflict = false,
+    rebaseOnConflictServerText?: string,
   ): SessionDraftCacheRecord {
     const record: SessionDraftCacheRecord = {
       version: 1,
@@ -170,6 +179,9 @@ export class SessionDraftLocalCache {
       mutationId: this.createId(),
       savedAt: this.now(),
       ...(rebaseOnConflict ? { rebaseOnConflict: true } : {}),
+      ...(rebaseOnConflict && rebaseOnConflictServerText !== undefined
+        ? { rebaseOnConflictServerText }
+        : {}),
     };
     try {
       const target = browserStorage(this.storage);
@@ -207,6 +219,7 @@ export class SessionDraftLocalCache {
     mutationId: string,
     serverUpdatedAt: string | null,
     rebaseOnConflict = false,
+    rebaseOnConflictServerText?: string,
   ): void {
     const target = browserStorage(this.storage);
     if (!target) return;
@@ -218,6 +231,9 @@ export class SessionDraftLocalCache {
           ...mutation,
           serverUpdatedAt,
           rebaseOnConflict: rebaseOnConflict || undefined,
+          rebaseOnConflictServerText: rebaseOnConflict
+            ? rebaseOnConflictServerText
+            : undefined,
         }));
         return;
       }
@@ -229,25 +245,40 @@ export class SessionDraftLocalCache {
         ...legacy,
         serverUpdatedAt,
         rebaseOnConflict: rebaseOnConflict || undefined,
+        rebaseOnConflictServerText: rebaseOnConflict
+          ? rebaseOnConflictServerText
+          : undefined,
       }));
     } catch {
       // Best-effort cache metadata; the live in-memory entry remains authoritative.
     }
   }
 
-  markRebaseOnConflict(sessionId: string, mutationId: string): void {
+  markRebaseOnConflict(
+    sessionId: string,
+    mutationId: string,
+    serverText?: string,
+  ): void {
     const target = browserStorage(this.storage);
     if (!target) return;
     try {
       const mutationKey = this.mutationKey(sessionId, mutationId);
       const mutation = this.readRecord(target, mutationKey);
       if (mutation?.dirty && mutation.mutationId === mutationId) {
-        target.setItem(mutationKey, JSON.stringify({ ...mutation, rebaseOnConflict: true }));
+        target.setItem(mutationKey, JSON.stringify({
+          ...mutation,
+          rebaseOnConflict: true,
+          rebaseOnConflictServerText: serverText,
+        }));
         return;
       }
       const legacy = this.readRecord(target, this.key(sessionId));
       if (!legacy?.dirty || legacy.mutationId !== mutationId) return;
-      target.setItem(this.key(sessionId), JSON.stringify({ ...legacy, rebaseOnConflict: true }));
+      target.setItem(this.key(sessionId), JSON.stringify({
+        ...legacy,
+        rebaseOnConflict: true,
+        rebaseOnConflictServerText: serverText,
+      }));
     } catch {
       // The live entry still carries the recovery marker in this tab.
     }
@@ -285,6 +316,7 @@ export class SessionDraftLocalCache {
           dirty: false,
           savedAt: this.now(),
           rebaseOnConflict: undefined,
+          rebaseOnConflictServerText: undefined,
         });
         return;
       }
@@ -304,6 +336,7 @@ export class SessionDraftLocalCache {
         dirty: false,
         savedAt: this.now(),
         rebaseOnConflict: undefined,
+        rebaseOnConflictServerText: undefined,
       });
     } catch {
       // The cloud acknowledgement succeeded; a blocked cache is non-fatal.

@@ -678,6 +678,9 @@ export type ApiContextType = {
   getSessionBootstrap: (sessionId: string) => Promise<WorkbenchSessionBootstrap>;
   updateSession: (sessionId: string, payload: Partial<WorkbenchSessionUpdate>) => Promise<WorkbenchSession>;
   archiveSession: (sessionId: string) => Promise<WorkbenchSession>;
+  /** Apply the terminal archived state for raw request paths that intentionally
+   *  bypass the shared JSON error handler. */
+  convergeSessionArchived: (sessionId: string) => void;
   /** Subscribe to "the server just refused a write because that session is
    *  archived". Fires for EVERY request whose error body carries
    *  ``session_archived``, whatever the verb — the messages POST, the sessions
@@ -2350,6 +2353,17 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const sessionArchivedHandlersRef = useRef(new Set<(sessionId: string) => void>());
   const sessionDraftPersistence = useMemo(() => new SessionDraftPersistence(), []);
 
+  const convergeSessionArchived = (sessionId: string) => {
+    sessionDraftPersistence.clearSession(sessionId);
+    for (const handler of Array.from(sessionArchivedHandlersRef.current)) {
+      try {
+        handler(sessionId);
+      } catch (err) {
+        console.error('[API] session-archived subscriber failed', err);
+      }
+    }
+  };
+
   const handleApiError = async (res: Response, path: string) => {
     let errorMessage = `Request failed: ${path} (${res.status})`;
     let errorCode: string | null = null;
@@ -2388,14 +2402,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // must never change whether/what this handler throws.
     const archivedSessionId = archivedConflictSessionId(errorCode, path);
     if (archivedSessionId) {
-      sessionDraftPersistence.clearSession(archivedSessionId);
-      for (const handler of Array.from(sessionArchivedHandlersRef.current)) {
-        try {
-          handler(archivedSessionId);
-        } catch (err) {
-          console.error('[API] session-archived subscriber failed', err);
-        }
-      }
+      convergeSessionArchived(archivedSessionId);
     }
 
     throw new ApiError(errorMessage, res.status, errorCode);
@@ -2830,7 +2837,14 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (server.text === draft.text) return { ok: true, server };
       return server.updatedAt !== draft.expectedUpdatedAt
         ? { ok: false, conflict: true, server }
-        : { ok: false, server };
+        : {
+            ok: false,
+            server,
+            // The abort only stops waiting for the response; the synchronous
+            // server transaction may still commit. If the queued successor
+            // conflicts specifically with this text, rebase and retry once.
+            retryConflictIfServerText: draft.text,
+          };
     } finally {
       window.clearTimeout(timeout);
     }
@@ -3276,6 +3290,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       sessionDraftPersistence.clearSession(sessionId);
       return payload;
     },
+    convergeSessionArchived,
     onSessionArchived,
     getArchivePreview: (sessionId) =>
       getJson(`/api/sessions/${encodeURIComponent(sessionId)}/archive-preview`),

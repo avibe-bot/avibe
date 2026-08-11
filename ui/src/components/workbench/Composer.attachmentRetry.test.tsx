@@ -129,4 +129,30 @@ describe('Composer draft retry', () => {
       'keep this',
     ]);
   });
+
+  it('persists rejected text after navigation unmounts the old composer', async () => {
+    let rejectSend!: () => void;
+    const onDraftChange = vi.fn();
+    const view = render(providers(
+      <Composer
+        onSend={() => new Promise<boolean>((resolve) => {
+          rejectSend = () => resolve(false);
+        })}
+        onDraftChange={onDraftChange}
+      />,
+    ));
+
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'survive navigation' } });
+    fireEvent.click(screen.getByLabelText(en.chat.compose.send));
+    await waitFor(() => expect(onDraftChange).toHaveBeenLastCalledWith(''));
+
+    view.unmount();
+    await act(async () => rejectSend());
+
+    expect(onDraftChange.mock.calls.map(([text]) => text)).toEqual([
+      'survive navigation',
+      '',
+      'survive navigation',
+    ]);
+  });
 });

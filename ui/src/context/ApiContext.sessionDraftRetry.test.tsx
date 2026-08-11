@@ -156,6 +156,60 @@ describe('ApiProvider session draft reconnect', () => {
     ]);
   });
 
+  it('rebases a successor when its timed-out predecessor commits after reconciliation', async () => {
+    vi.useFakeTimers();
+    const writes: Array<{ text: string; expected_updated_at: string | null }> = [];
+    apiFetch.mockImplementation(async (_path: string, init?: RequestInit) => {
+      if (!init?.method) {
+        return Response.json({ text: '', updated_at: null });
+      }
+      const body = JSON.parse(String(init.body)) as {
+        text: string;
+        expected_updated_at: string | null;
+      };
+      writes.push(body);
+      if (writes.length === 1) {
+        return new Promise<Response>((_resolve, reject) => {
+          init.signal?.addEventListener('abort', () => {
+            reject(new DOMException('aborted', 'AbortError'));
+          }, { once: true });
+        });
+      }
+      if (writes.length === 2) {
+        return Response.json({
+          ok: false,
+          code: 'draft_conflict',
+          draft: { text: 'first', updated_at: 'late-first-revision' },
+        }, { status: 409 });
+      }
+      return Response.json({
+        ok: true,
+        draft: { text: body.text, updated_at: 'second-revision' },
+      });
+    });
+
+    render(<ApiProvider><CaptureApi /></ApiProvider>);
+    capturedApi!.cacheSessionDraft('session-a', 'first');
+    const first = capturedApi!.setSessionDraft('session-a', 'first');
+    await Promise.resolve();
+    capturedApi!.cacheSessionDraft('session-a', 'second');
+    const second = capturedApi!.setSessionDraft('session-a', 'second');
+
+    await vi.advanceTimersByTimeAsync(12_000);
+    await expect(first).resolves.toMatchObject({ ok: false });
+    await expect(second).resolves.toMatchObject({ ok: true });
+    expect(writes).toEqual([
+      { text: 'first', expected_updated_at: null },
+      { text: 'second', expected_updated_at: null },
+      { text: 'second', expected_updated_at: 'late-first-revision' },
+    ]);
+    expect(new SessionDraftLocalCache(window.localStorage).read('session-a')).toMatchObject({
+      text: 'second',
+      serverUpdatedAt: 'second-revision',
+      dirty: false,
+    });
+  });
+
   it('rebases and retries text restored after a rejected send', async () => {
     let resolveDraft!: (response: Response) => void;
     const draft = new Promise<Response>((resolve) => { resolveDraft = resolve; });
@@ -236,5 +290,18 @@ describe('ApiProvider session draft reconnect', () => {
       serverUpdatedAt: 'next-revision',
       dirty: false,
     });
+  });
+
+  it('clears and announces an archived session reported by a raw request path', () => {
+    render(<ApiProvider><CaptureApi /></ApiProvider>);
+    capturedApi!.cacheSessionDraft('session-a', 'must be reclaimed');
+    const archived = vi.fn();
+    capturedApi!.onSessionArchived(archived);
+
+    act(() => capturedApi!.convergeSessionArchived('session-a'));
+
+    expect(archived).toHaveBeenCalledWith('session-a');
+    expect(new SessionDraftLocalCache(window.localStorage).read('session-a')).toBeNull();
+    expect(capturedApi!.getCachedSessionDraft('session-a')).toBeNull();
   });
 });

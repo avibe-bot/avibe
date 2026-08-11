@@ -395,6 +395,97 @@ describe('SessionDraftPersistence', () => {
     });
   });
 
+  it('does not overwrite an unrelated conflict after an uncertain write', async () => {
+    const persistence = new SessionDraftPersistence(localCache());
+    const first = deferred<SessionDraftSaveResult>();
+    const firstSave = persistence.save('session-a', 'first', async () => first.promise);
+    await Promise.resolve();
+
+    persistence.cache('session-a', 'second');
+    const successor = vi.fn(async (): Promise<SessionDraftSaveResult> => ({
+      ok: false,
+      conflict: true,
+      server: { text: 'other device', updatedAt: 'other-revision' },
+    }));
+    const secondSave = persistence.save('session-a', 'second', successor);
+    first.resolve({
+      ok: false,
+      server: { text: '', updatedAt: 'reconciled-revision' },
+      retryConflictIfServerText: 'first',
+    });
+
+    await expect(firstSave).resolves.toMatchObject({ ok: false });
+    await expect(secondSave).resolves.toMatchObject({ ok: false, conflict: true });
+    expect(successor).toHaveBeenCalledTimes(1);
+    expect(persistence.peek('session-a')).toBe('second');
+  });
+
+  it('carries timeout uncertainty into an edit made after reconciliation', async () => {
+    const persistence = new SessionDraftPersistence(localCache());
+    await persistence.save('session-a', 'first', async () => ({
+      ok: false,
+      server: { text: '', updatedAt: 'reconciled-revision' },
+      retryConflictIfServerText: 'first',
+    }));
+
+    persistence.cache('session-a', 'second');
+    const writes: SessionDraftWrite[] = [];
+    const result = await persistence.save('session-a', 'second', async (draft) => {
+      writes.push(draft);
+      if (writes.length === 1) {
+        return {
+          ok: false,
+          conflict: true,
+          server: { text: 'first', updatedAt: 'late-first-revision' },
+        };
+      }
+      return {
+        ok: true,
+        server: { text: draft.text, updatedAt: 'second-revision' },
+      };
+    });
+
+    expect(result).toMatchObject({ ok: true });
+    expect(writes).toEqual([
+      { text: 'second', expectedUpdatedAt: 'reconciled-revision' },
+      { text: 'second', expectedUpdatedAt: 'late-first-revision' },
+    ]);
+  });
+
+  it('restores the bounded timeout recovery marker after reload', async () => {
+    const storage = new MemoryStorage();
+    const cache = localCache(storage);
+    cache.writeDirty('session-a', 'second', 'reconciled-revision', undefined, true, 'first');
+    const restored = new SessionDraftPersistence(localCache(storage));
+    const writes: SessionDraftWrite[] = [];
+
+    const result = await restored.retry('session-a', async (draft) => {
+      writes.push(draft);
+      if (writes.length === 1) {
+        return {
+          ok: false,
+          conflict: true,
+          server: { text: 'first', updatedAt: 'late-first-revision' },
+        };
+      }
+      return {
+        ok: true,
+        server: { text: draft.text, updatedAt: 'second-revision' },
+      };
+    });
+
+    expect(result).toMatchObject({ ok: true });
+    expect(writes).toEqual([
+      { text: 'second', expectedUpdatedAt: 'reconciled-revision' },
+      { text: 'second', expectedUpdatedAt: 'late-first-revision' },
+    ]);
+    expect(cache.read('session-a')).toMatchObject({
+      text: 'second',
+      serverUpdatedAt: 'second-revision',
+      dirty: false,
+    });
+  });
+
   it('rebases and retries a rejected-send restoration without another edit', async () => {
     const persistence = new SessionDraftPersistence(localCache());
     persistence.cache('session-a', 'submitted');

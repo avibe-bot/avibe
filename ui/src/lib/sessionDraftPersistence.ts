@@ -14,6 +14,9 @@ export type SessionDraftSaveResult = {
   ok: boolean;
   conflict?: boolean;
   server?: SessionDraftServerState;
+  /** Retry one successor conflict only when the server contains this timed-out
+   *  predecessor, never when an unrelated device wrote instead. */
+  retryConflictIfServerText?: string;
 };
 
 export type SessionDraftRead = {
@@ -33,6 +36,7 @@ type DraftEntry = {
   conflict: boolean;
   localOwned: boolean;
   rebaseOnConflict: boolean;
+  rebaseOnConflictServerText?: string;
   serverEpoch: number;
 };
 
@@ -76,6 +80,7 @@ export class SessionDraftPersistence {
       baseUpdatedAt,
       current?.localOwned ? current.localId : undefined,
       current?.rebaseOnConflict ?? false,
+      current?.rebaseOnConflictServerText,
     );
     this.entries.set(sessionId, {
       revision: (current?.revision ?? 0) + 1,
@@ -90,6 +95,7 @@ export class SessionDraftPersistence {
       conflict: resolvesConflict ? false : current?.conflict ?? false,
       localOwned: true,
       rebaseOnConflict: current?.rebaseOnConflict ?? false,
+      rebaseOnConflictServerText: current?.rebaseOnConflictServerText,
       serverEpoch: current?.serverEpoch ?? 0,
     });
   }
@@ -227,6 +233,7 @@ export class SessionDraftPersistence {
     current.baseUpdatedAt = server.updatedAt;
     current.conflict = false;
     current.rebaseOnConflict = false;
+    current.rebaseOnConflictServerText = undefined;
     current.serverEpoch += 1;
     // The external revision is causally newer than every write already in
     // flight. Detach that promise chain; its eventual result is ignored by the
@@ -240,6 +247,7 @@ export class SessionDraftPersistence {
     const current = this.hydrateDirty(sessionId);
     if (!current) return;
     current.rebaseOnConflict = true;
+    current.rebaseOnConflictServerText = undefined;
     this.localCache.markRebaseOnConflict(sessionId, current.localId);
   }
 
@@ -265,11 +273,18 @@ export class SessionDraftPersistence {
       if (predecessorResult?.server) {
         beforeWrite.baseUpdatedAt = predecessorResult.server.updatedAt;
         beforeWrite.conflict = false;
-        beforeWrite.rebaseOnConflict = false;
+        beforeWrite.rebaseOnConflict = (
+          predecessorResult.retryConflictIfServerText !== undefined
+        );
+        beforeWrite.rebaseOnConflictServerText = (
+          predecessorResult.retryConflictIfServerText
+        );
         this.localCache.rebaseDirty(
           sessionId,
           beforeWrite.localId,
           predecessorResult.server.updatedAt,
+          beforeWrite.rebaseOnConflict,
+          beforeWrite.rebaseOnConflictServerText,
         );
       }
       if (predecessorResult?.conflict && !predecessorResult.server) {
@@ -303,7 +318,7 @@ export class SessionDraftPersistence {
         && result.server
         && beforeWrite.revision === revision
         && beforeWrite.serverEpoch === serverEpoch
-        && beforeWrite.rebaseOnConflict,
+        && this.matchesConflictRecovery(beforeWrite, result)
       );
       this.applyWriteResult(sessionId, revision, serverEpoch, result);
       if (shouldRetryRecoveredConflict) {
@@ -341,6 +356,7 @@ export class SessionDraftPersistence {
         current.dirty = false;
         current.conflict = false;
         current.rebaseOnConflict = false;
+        current.rebaseOnConflictServerText = undefined;
         current.baseUpdatedAt = server.updatedAt;
         this.localCache.acknowledge(
           sessionId,
@@ -362,22 +378,64 @@ export class SessionDraftPersistence {
       current.pending = null;
       current.pendingRevision = null;
     }
+    if (result.retryConflictIfServerText !== undefined && result.server) {
+      // No successor has to exist yet. Preserve this uncertainty on the current
+      // mutation so a later edit or a reload can recognize the timed-out write
+      // if it eventually commits and becomes the next conflict response.
+      current.baseUpdatedAt = result.server.updatedAt;
+      current.rebaseOnConflict = true;
+      current.rebaseOnConflictServerText = result.retryConflictIfServerText;
+      this.localCache.rebaseDirty(
+        sessionId,
+        current.localId,
+        result.server.updatedAt,
+        true,
+        result.retryConflictIfServerText,
+      );
+    }
     if (result.conflict) {
       if (result.server) this.serverVersions.set(sessionId, result.server.updatedAt);
       if (current.revision !== revision && result.server) {
         current.baseUpdatedAt = result.server.updatedAt;
         current.conflict = false;
         current.rebaseOnConflict = false;
+        current.rebaseOnConflictServerText = undefined;
         this.localCache.rebaseDirty(sessionId, current.localId, result.server.updatedAt, false);
-      } else if (current.rebaseOnConflict && result.server) {
+      } else if (
+        this.matchesConflictRecovery(current, result)
+        && result.server
+      ) {
         current.baseUpdatedAt = result.server.updatedAt;
         current.conflict = false;
         current.rebaseOnConflict = false;
+        current.rebaseOnConflictServerText = undefined;
         this.localCache.rebaseDirty(sessionId, current.localId, result.server.updatedAt, false);
       } else {
         current.conflict = true;
+        current.rebaseOnConflict = false;
+        current.rebaseOnConflictServerText = undefined;
+        this.localCache.rebaseDirty(
+          sessionId,
+          current.localId,
+          current.baseUpdatedAt,
+          false,
+        );
       }
     }
+  }
+
+  private matchesConflictRecovery(
+    entry: DraftEntry,
+    result: SessionDraftSaveResult,
+  ): boolean {
+    return Boolean(
+      entry.rebaseOnConflict
+      && result.server
+      && (
+        entry.rebaseOnConflictServerText === undefined
+        || result.server.text === entry.rebaseOnConflictServerText
+      )
+    );
   }
 
   private hydrateDirty(sessionId: string): DraftEntry | null {
@@ -406,6 +464,7 @@ export class SessionDraftPersistence {
       conflict: false,
       localOwned: false,
       rebaseOnConflict: cached.rebaseOnConflict ?? false,
+      rebaseOnConflictServerText: cached.rebaseOnConflictServerText,
       serverEpoch: current?.serverEpoch ?? 0,
     };
     this.entries.set(sessionId, hydrated);
