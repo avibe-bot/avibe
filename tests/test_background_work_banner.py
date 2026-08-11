@@ -240,6 +240,20 @@ def test_definition_banner_uses_creation_owner_before_execution_target(tmp_path:
     owner_metadata = json.dumps(
         {"created_by": {"caller": {"session_id": "ses-owner"}}}
     )
+    with engine.begin() as conn:
+        for session_id, session_anchor in (
+            ("ses-owner", "banner-owner"),
+            ("ses-other", "banner-other"),
+        ):
+            create_agent_session_row(
+                conn,
+                scope_id=None,
+                session_id=session_id,
+                session_anchor=session_anchor,
+                agent_backend="codex",
+                workdir="/tmp",
+                now=_NOW,
+            )
     _insert_definition(
         engine,
         id="task-per-run",
@@ -311,6 +325,54 @@ def test_definition_banner_uses_creation_owner_before_execution_target(tmp_path:
         "task:task-owner-number",
     }
     assert {item["id"] for item in execution_items} == set()
+
+
+def test_definition_banner_falls_back_to_live_target_when_owner_is_gone(tmp_path: Path):
+    """Orphaned Owner provenance falls back to the live execution target."""
+    engine, _ = _make_engine(tmp_path)
+    with engine.begin() as conn:
+        create_agent_session_row(
+            conn,
+            scope_id=None,
+            session_id="ses-execution",
+            session_anchor="banner-execution",
+            agent_backend="codex",
+            workdir="/tmp",
+            now=_NOW,
+        )
+        create_agent_session_row(
+            conn,
+            scope_id=None,
+            session_id="ses-archived-owner",
+            session_anchor="banner-archived-owner",
+            agent_backend="codex",
+            workdir="/tmp",
+            status="archived",
+            now=_NOW,
+        )
+
+    for task_id, owner_session_id in (
+        ("task-missing-owner", "ses-removed-owner"),
+        ("task-archived-owner", "ses-archived-owner"),
+    ):
+        _insert_definition(
+            engine,
+            id=task_id,
+            definition_type="scheduled",
+            name=task_id,
+            session_id="ses-execution",
+            metadata_json=json.dumps(
+                {"created_by": {"caller": {"session_id": owner_session_id}}}
+            ),
+        )
+
+    with engine.connect() as conn:
+        execution_items = derive_session_harness_activities(conn, "ses-execution")
+
+    assert {item["id"] for item in execution_items} == {
+        "task:task-missing-owner",
+        "task:task-archived-owner",
+    }
 
 
 def test_owner_session_teardown_reclaims_task_even_when_execution_target_differs(
@@ -390,6 +452,50 @@ def test_owner_session_teardown_reclaims_task_even_when_execution_target_differs
     assert row is not None
     assert target_summary["deleted"] == 1
     assert target_row is not None
+
+
+def test_archived_owner_teardown_reclaims_task_by_creation_provenance(tmp_path: Path):
+    """Teardown still uses archived Owner identity even though projection falls back."""
+    engine, _ = _make_engine(tmp_path)
+    owner_metadata = json.dumps(
+        {"created_by": {"caller": {"session_id": "ses-archived-owner"}}}
+    )
+    with engine.begin() as conn:
+        create_agent_session_row(
+            conn,
+            scope_id=None,
+            session_id="ses-archived-owner",
+            session_anchor="archive-owner",
+            agent_backend="codex",
+            workdir="/tmp",
+            status="archived",
+            now=_NOW,
+        )
+    _insert_definition(
+        engine,
+        id="task-archived-owner",
+        definition_type="scheduled",
+        name="archived-owner",
+        session_id="ses-execution",
+        metadata_json=owner_metadata,
+    )
+
+    with engine.begin() as conn:
+        assert count_bound_resources(conn, "ses-archived-owner")["tasks"] == 1
+        summary = reclaim_bound_definitions(
+            conn,
+            "ses-archived-owner",
+            mode=RECLAIM_DELETE,
+            reason="archive_session:ses-archived-owner",
+        )
+        deleted_at = conn.execute(
+            select(run_definitions.c.deleted_at).where(
+                run_definitions.c.id == "task-archived-owner"
+            )
+        ).scalar_one()
+
+    assert summary["deleted"] == 1
+    assert deleted_at is not None
 
 
 def test_excludes_disabled_deleted_and_foreign_and_terminal(tmp_path: Path):
@@ -569,6 +675,17 @@ def test_definition_session_filter_scopes_watches_and_tasks_by_owner(tmp_path: P
     # the banner. Legacy definitions without provenance still use their bound
     # session as the fallback.
     engine, db_path = _make_engine(tmp_path)
+    with engine.begin() as conn:
+        for session_id, session_anchor in (("ses-A", "filter-a"), ("ses-B", "filter-b")):
+            create_agent_session_row(
+                conn,
+                scope_id=None,
+                session_id=session_id,
+                session_anchor=session_anchor,
+                agent_backend="codex",
+                workdir="/tmp",
+                now=_NOW,
+            )
     _insert_definition(engine, id="w-a", definition_type="watch", name="wa", session_id="ses-A")
     _insert_definition(engine, id="w-b", definition_type="watch", name="wb", session_id="ses-B")
     _insert_definition(
@@ -602,6 +719,16 @@ def test_definition_session_filter_scopes_watches_and_tasks_by_owner(tmp_path: P
         session_id="ses-B",
         metadata_json=owner_metadata,
     )
+    _insert_definition(
+        engine,
+        id="t-orphan-owner",
+        definition_type="scheduled",
+        name="orphan-owner",
+        session_id="ses-B",
+        metadata_json=json.dumps(
+            {"created_by": {"caller": {"session_id": "ses-removed"}}}
+        ),
+    )
 
     store = SQLiteBackgroundTaskStore(db_path=db_path)
     try:
@@ -611,10 +738,12 @@ def test_definition_session_filter_scopes_watches_and_tasks_by_owner(tmp_path: P
         assert {w["id"] for w in watches_b.items} == {"w-b", "w-callback-wins"}
         tasks_a = store.list_scheduled_tasks_page(session_id="ses-A", page_request=None)
         assert {t["id"] for t in tasks_a.items} == {"t-a", "t-owner-only", "t-owner-wins"}
+        tasks_b = store.list_scheduled_tasks_page(session_id="ses-B", page_request=None)
+        assert {t["id"] for t in tasks_b.items} == {"t-b", "t-orphan-owner"}
         assert store.count_watches(session_id="ses-A")["total"] == 1
-        assert store.count_scheduled_tasks(session_id="ses-B")["total"] == 1
+        assert store.count_scheduled_tasks(session_id="ses-B")["total"] == 2
         # No filter → both sessions' definitions are returned.
         assert len(store.list_watches_page(page_request=None).items) == 3
-        assert len(store.list_scheduled_tasks_page(page_request=None).items) == 4
+        assert len(store.list_scheduled_tasks_page(page_request=None).items) == 5
     finally:
         store.close()

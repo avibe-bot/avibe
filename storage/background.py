@@ -342,7 +342,9 @@ def definition_owner_session_id_expression() -> Any:
     the owner used by user-facing Session projections: the execution target may
     be a newly-created Session, or absent for a pure command / per-run task.
     Invalid and legacy metadata deliberately resolve to ``NULL`` so callers can
-    fall back to the historical bound ``run_definitions.session_id``.
+    fall back to the historical bound ``run_definitions.session_id``. A recorded
+    owner that has since been archived or removed is treated the same way for
+    projections, preserving visibility for pre-upgrade orphaned definitions.
     """
 
     metadata_json = run_definitions.c.metadata_json
@@ -367,13 +369,26 @@ def definition_owner_session_id_expression() -> Any:
 
 
 def scheduled_definition_owned_by_session_expression(session_id: str) -> Any:
-    """Return the owner-first Session predicate for scheduled Task projections."""
+    """Return the owner-first Session predicate for scheduled Task projections.
+
+    Creation ownership wins while that owner Session still exists and is not
+    archived. Once the owner is gone, the execution target resumes the legacy
+    fallback so persisted Tasks remain visible instead of becoming orphaned.
+    """
 
     owner_session_id = definition_owner_session_id_expression()
+    owner_session_is_live = exists(
+        select(literal(1))
+        .select_from(agent_sessions)
+        .where(
+            agent_sessions.c.id == owner_session_id,
+            agent_sessions.c.status != "archived",
+        )
+    )
     return or_(
-        owner_session_id == session_id,
+        and_(owner_session_id == session_id, owner_session_is_live),
         and_(
-            owner_session_id.is_(None),
+            or_(owner_session_id.is_(None), ~owner_session_is_live),
             run_definitions.c.session_id == session_id,
         ),
     )
@@ -388,8 +403,13 @@ def scheduled_definition_reclaimable_by_session_expression(session_id: str) -> A
     reclaim and archive accounting.
     """
 
+    # Teardown must retain the raw provenance match even after the owner row is
+    # archived; that is the event that caused this cleanup. Projection uses the
+    # liveness-aware owner-first expression above, while teardown covers both
+    # owner identity and execution target identity.
+    owner_session_id = definition_owner_session_id_expression()
     return or_(
-        scheduled_definition_owned_by_session_expression(session_id),
+        owner_session_id == session_id,
         run_definitions.c.session_id == session_id,
     )
 
