@@ -4,7 +4,7 @@
 // failed start. Pure of React so the contract is unit-testable
 // (see RuntimeNotStartedAction.test.tsx).
 import type { ModelsApi } from './modelsApi';
-import { freshRegionData, type RegionRead } from './regionRead';
+import { foldRegionRead, type RegionRead } from './regionRead';
 import type { AgentSupply, RuntimeDependency } from './types';
 
 const FRESH_RUNTIME: unique symbol = Symbol('model-hub-fresh-runtime');
@@ -15,10 +15,12 @@ export type FreshRuntimeProjection = {
 
 export const freshRuntimeProjection = (
   read: RegionRead<RuntimeDependency>,
-): FreshRuntimeProjection | null => {
-  const runtime = freshRegionData(read);
-  return runtime ? { [FRESH_RUNTIME]: runtime } : null;
-};
+): FreshRuntimeProjection | null => foldRegionRead(read, {
+  loading: () => null,
+  ready: (runtime) => ({ [FRESH_RUNTIME]: runtime }),
+  unread: () => null,
+  degraded: () => null,
+});
 
 const runtimeIsInstalled = (runtime: RuntimeDependency): boolean =>
   runtime.status.health !== 'not_installed' && runtime.status.health !== 'installing';

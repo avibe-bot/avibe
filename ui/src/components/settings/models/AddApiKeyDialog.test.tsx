@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import i18n from '@/i18n';
 import { AddApiKeyDialog } from './AddApiKeyDialog';
+import { createSourceCollectionReadAuthority } from './collectionReadAuthority';
 import { modelsApi } from './modelsApi';
 import { CONTRACT_VERSION, SOURCE_DISPLAY_NAME_MAX_LENGTH, SOURCE_PROTOCOLS, type Source, type SourceObservation } from './types';
 
@@ -43,7 +44,7 @@ const deferred = <T,>() => {
 const renderDialog = (onClose = vi.fn(), onAdded = vi.fn()) => {
   render(
     <I18nextProvider i18n={i18n}>
-      <AddApiKeyDialog open onClose={onClose} onAdded={onAdded} />
+      <AddApiKeyDialog open sourceReads={createSourceCollectionReadAuthority(modelsApi)} onClose={onClose} onAdded={onAdded} />
     </I18nextProvider>,
   );
   return { onClose, onAdded };

@@ -207,7 +207,7 @@ describe('the page reads the feed through this owner', () => {
     // to move the feed, not a probe-only twin bolted onto one call site.
     expect(page).toMatch(/const refresh = React\.useCallback[\s\S]*?void refreshEventHead\(\)[\s\S]*?refreshAuthority\.run/);
     expect(page).toMatch(/eventReadAuthority\.run[\s\S]*?modelsApi\.listEvents\(EVENT_PAGE\)/);
-    expect(page).toMatch(/setEventsRead[\s\S]*?freshRegionData\(incoming\)[\s\S]*?feedAfterHeadRead\(previousFeed, freshEvents\)/);
+    expect(page).toMatch(/setEventsRead[\s\S]*?foldRegionRead<ResolutionEvent\[\],[\s\S]*?\(incoming,[\s\S]*?feedAfterHeadRead\(previousFeed, freshEvents\)/);
     expect(page).toMatch(/feedAfterTailRead\(emptyFeed, freshEvents, EVENT_PAGE, null\)/);
   });
 
@@ -218,7 +218,7 @@ describe('the page reads the feed through this owner', () => {
     expect(page).toMatch(/createLatestAsyncAuthority<RegionRead<ResolutionEvent\[\]>>/);
     expect(page).toMatch(/createLatestAsyncAuthority<AuthorizedSurfaceLanding>/);
     expect(page).toMatch(/sourceEntityAuthority\.beginSnapshot\(\)/);
-    expect(page).toMatch(/freshRegionData\(landing\.sources\)[\s\S]*?sourceEntityAuthority\.settleSnapshot\(sourceSnapshot, freshSources\)/);
+    expect(page).toMatch(/foldRegionRead<Source\[\],[\s\S]*?\(landing\.sources,[\s\S]*?sourceEntityAuthority\.settleSnapshot\(sourceSnapshot, freshSources\)/);
     // Region reads also settle independently: a failed source list cannot erase
     // a successful backend projection, and vice versa.
     expect(firstPaint).toMatch(/\[K in keyof FirstPaintRegionValues\]: RegionRead<FirstPaintRegionValues\[K\]>/);

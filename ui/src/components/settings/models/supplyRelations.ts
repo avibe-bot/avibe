@@ -1,6 +1,6 @@
 import { modelChainKey, type ModelChainIndex } from './modelRows';
 import { equalHopIdentity, hopBelongsToSource } from './hopIdentity';
-import { freshRegionData } from './regionRead';
+import { foldRegionRead } from './regionRead';
 import { agentHasLiveChainProjection, type FreshRuntimeProjection } from './runtimeLifecycle';
 import { classifyChainLink, classifySourceStatus } from './sourceStateClassification';
 import { isTakeoverChain } from './takeover';
@@ -25,7 +25,12 @@ const relationKind = (
   let hasRunnableLink = false;
   for (const modelId of Object.keys(agent.routes ?? {})) {
     const read = chains[modelChainKey(agent.backend, modelId)];
-    const chain = read ? freshRegionData(read) : undefined;
+    const chain = read ? foldRegionRead(read, {
+      loading: () => null,
+      ready: (value) => value,
+      unread: () => null,
+      degraded: () => null,
+    }) : null;
     if (!chain) continue;
     for (const link of chain.chain.filter((candidate) => hopBelongsToSource(candidate, source.id))) {
       hasRunnableLink ||= link.runnable;

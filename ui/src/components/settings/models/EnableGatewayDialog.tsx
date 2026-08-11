@@ -4,8 +4,10 @@ import { Check, CircleX, LoaderCircle, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
+import type { CollectionReadAuthority } from './collectionReadAuthority';
 import { resumeGatewayAdoption, type GatewayAdoptionFailure } from './gatewayAdoption';
 import { modelsApi } from './modelsApi';
+import { foldRegionRead, readyRegion, type RegionRead } from './regionRead';
 import { runtimeHasInstallAsset } from './runtimeLifecycle';
 import type { AgentSupply, RuntimeDependency } from './types';
 import { BACKEND_ADOPTION_VENDOR_KEY } from './vendorMeta';
@@ -19,34 +21,47 @@ const Bullet: React.FC<{ children: React.ReactNode }> = ({ children }) => (
 
 export const EnableGatewayDialog: React.FC<{
   agent: AgentSupply;
-  runtime: RuntimeDependency | null;
+  runtime: RegionRead<RuntimeDependency>;
+  agentReads: CollectionReadAuthority<AgentSupply[]>;
   onClose: () => void;
   onAdopted: (agent: AgentSupply) => void | Promise<void>;
   onRuntime: (runtime: RuntimeDependency) => void;
   trackWrite: (work: () => Promise<void>) => Promise<void>;
-}> = ({ agent, runtime, onClose, onAdopted, onRuntime, trackWrite }) => {
+}> = ({ agent, runtime, agentReads, onClose, onAdopted, onRuntime, trackWrite }) => {
   const { t } = useTranslation();
   const [busy, setBusy] = React.useState(false);
   const [runtimeView, setRuntimeView] = React.useState(runtime);
   const [failure, setFailure] = React.useState<GatewayAdoptionFailure | null>(null);
   const backend = t(`settings.models.backends.${agent.backend}`, { defaultValue: agent.backend });
   const vendor = t(`settings.models.adopt.vendor.${BACKEND_ADOPTION_VENDOR_KEY[agent.backend]}`);
-  const needsInstall = runtimeView?.status.health === 'not_installed';
-  const missing = Boolean(needsInstall && runtimeView && runtimeHasInstallAsset(runtimeView));
+  const runtimeDecision = foldRegionRead<RuntimeDependency, { kind: 'ready'; runtime: RuntimeDependency } | { kind: 'unavailable' }>(runtimeView, {
+    loading: () => ({ kind: 'unavailable' }),
+    ready: (value) => ({ kind: 'ready', runtime: value }),
+    unread: () => ({ kind: 'unavailable' }),
+    degraded: () => ({ kind: 'unavailable' }),
+  });
+  const runtimeValue = runtimeDecision.kind === 'ready' ? runtimeDecision.runtime : null;
+  const runtimeUnavailable = runtimeValue === null;
+  const needsInstall = runtimeValue?.status.health === 'not_installed';
+  const missing = Boolean(needsInstall && runtimeValue && runtimeHasInstallAsset(runtimeValue));
   const installUnsupported = Boolean(needsInstall && !missing);
   const effectKeys = agent.backend === 'opencode'
     ? ['1.opencode', '2.opencode', '3', '4'] as const
     : ['1', '2', '3', '4'] as const;
 
+  React.useEffect(() => {
+    if (!busy) setRuntimeView(runtime);
+  }, [busy, runtime]);
+
   const commit = () => {
-    if (busy) return;
+    if (busy || runtimeUnavailable || installUnsupported) return;
     setBusy(true);
     setFailure(null);
     void trackWrite(async () => {
       try {
-        const result = await resumeGatewayAdoption(modelsApi, agent.backend);
+        const result = await resumeGatewayAdoption(modelsApi, agentReads, agent.backend);
         if (result.runtime) {
-          setRuntimeView(result.runtime);
+          setRuntimeView(readyRegion(result.runtime));
           onRuntime(result.runtime);
         }
         if (!result.ok) {
@@ -109,11 +124,17 @@ export const EnableGatewayDialog: React.FC<{
                 </span>
               </div>
             )}
+            {runtimeUnavailable && !failure && (
+              <div className="model-hub-adopt-failure" role="status">
+                <CircleX aria-hidden />
+                <span className="min-w-0"><strong>{t('settings.models.shell.unread')}</strong></span>
+              </div>
+            )}
             <section className="model-hub-adopt-section">
               <h3>{t('settings.models.adopt.section.effects')}</h3>
               {missing && (
                 <Bullet>{t('settings.models.adopt.effects.install', {
-                  component: runtimeView?.manifest.name,
+                  component: runtimeValue?.manifest.name,
                   duration: t('settings.models.install.duration'),
                 })}</Bullet>
               )}
@@ -133,7 +154,7 @@ export const EnableGatewayDialog: React.FC<{
             <Button type="button" variant="outline" className="model-hub-adopt-action" onClick={onClose} disabled={busy}>
               {t('settings.models.adopt.cancel')}
             </Button>
-            <Button type="button" variant="brand" className="model-hub-adopt-action" onClick={commit} disabled={busy || installUnsupported}>
+            <Button type="button" variant="brand" className="model-hub-adopt-action" onClick={commit} disabled={busy || runtimeUnavailable || installUnsupported}>
               {busy && <LoaderCircle className="animate-spin" />}
               {missing ? t('settings.models.adopt.confirm.install') : t('settings.models.adopt.confirm')}
             </Button>

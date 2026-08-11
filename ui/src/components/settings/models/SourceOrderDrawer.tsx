@@ -8,6 +8,7 @@ import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { ModelHubInfoHint } from './ModelHubInfoHint';
 import type { PendingWrite } from './asyncLifetime';
+import type { CollectionReadAuthority } from './collectionReadAuthority';
 import { modelsApi } from './modelsApi';
 import { movedOrder, sameIds } from './reorder';
 import { combineSourceOrderReads } from './sourceOrderComposition';
@@ -86,7 +87,8 @@ export const SourceOrderDrawer: React.FC<{
   onClose: () => void;
   onSaved: (echoed: AgentSupply) => void | Promise<void>;
   orderWrite: PendingWrite;
-}> = ({ open, agent, sources, onClose, onSaved, orderWrite }) => {
+  sourceReads: CollectionReadAuthority<Source[]>;
+}> = ({ open, agent, sources, onClose, onSaved, orderWrite, sourceReads }) => {
   const { t } = useTranslation();
   const [viewAgent, setViewAgent] = React.useState(agent);
   const [viewSources, setViewSources] = React.useState(sources);
@@ -122,12 +124,12 @@ export const SourceOrderDrawer: React.FC<{
     try {
       const readPair = () => Promise.all([
         modelsApi.getAgentSources(agent.backend),
-        modelsApi.listSources(),
+        sourceReads.readValue(),
       ] as const);
       const [next, nextSources] = await readPair();
       if (readAttempt.current !== seq) return;
       const composition = combineSourceOrderReads(next, nextSources);
-      if (composition.missingOrderedIds.length === 0) {
+      if (!composition.hasHole) {
         applyRead(next, nextSources, 'ready');
         return;
       }
@@ -138,11 +140,11 @@ export const SourceOrderDrawer: React.FC<{
       const [regroupedAgent, regroupedSources] = await readPair();
       if (readAttempt.current !== seq) return;
       const regrouped = combineSourceOrderReads(regroupedAgent, regroupedSources);
-      applyRead(regroupedAgent, regroupedSources, regrouped.missingOrderedIds.length === 0 ? 'ready' : 'error');
+      applyRead(regroupedAgent, regroupedSources, regrouped.hasHole ? 'error' : 'ready');
     } catch {
       if (readAttempt.current === seq) setReadState('error');
     }
-  }, [agent.backend, applyRead]);
+  }, [agent.backend, applyRead, sourceReads]);
 
   React.useEffect(() => {
     if (open) void read();

@@ -42,10 +42,6 @@ export const foldRegionRead = <T, R>(read: RegionRead<T>, cases: RegionReadFold<
   }
 };
 
-/** Fresh-only access for domain projections that must never consume retained data. */
-export const freshRegionData = <T>(read: RegionRead<T>): T | undefined =>
-  read.kind === 'ready' ? read[REGION_VALUE] : undefined;
-
 /** A retry may keep the previous projection visible, but it never makes that
  *  projection authoritative again. */
 export const beginRegionRead = <T>(previous: RegionRead<T>): RegionRead<T> => {

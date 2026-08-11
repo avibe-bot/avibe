@@ -25,19 +25,27 @@ const agent = (order: string[]): AgentSupply => ({
 });
 
 describe('combineSourceOrderReads', () => {
-  it('treats a create-window mismatch as a composition hole', () => {
-    expect(combineSourceOrderReads(agent(['src_a', 'src_new']), [source('src_a')]).missingOrderedIds)
-      .toEqual(['src_new']);
+  it('detects an Agent projection newer than the Source inventory', () => {
+    const composition = combineSourceOrderReads(agent(['src_a', 'src_new']), [source('src_a')]);
+
+    expect(composition.missingOrderedIds).toEqual(['src_new']);
+    expect(composition.missingInventoryIds).toEqual([]);
+    expect(composition.hasHole).toBe(true);
   });
 
-  it('treats a delete-window mismatch as a composition hole', () => {
-    expect(combineSourceOrderReads(agent(['src_a', 'src_deleted']), [source('src_a')]).missingOrderedIds)
-      .toEqual(['src_deleted']);
+  it('detects a Source inventory newer than the Agent projection', () => {
+    const composition = combineSourceOrderReads(agent(['src_a']), [source('src_a'), source('src_new')]);
+
+    expect(composition.missingOrderedIds).toEqual([]);
+    expect(composition.missingInventoryIds).toEqual(['src_new']);
+    expect(composition.hasHole).toBe(true);
   });
 
   it('partitions a consistent eligible inventory without a hole', () => {
     const composition = combineSourceOrderReads(agent(['src_a']), [source('src_a')]);
     expect(composition.missingOrderedIds).toEqual([]);
+    expect(composition.missingInventoryIds).toEqual([]);
+    expect(composition.hasHole).toBe(false);
     expect(composition.available.map(({ id }) => id)).toEqual(['src_a']);
   });
 });

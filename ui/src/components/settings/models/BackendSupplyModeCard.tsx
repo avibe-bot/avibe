@@ -12,6 +12,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { cn } from '@/lib/utils';
+import { createAgentCollectionReadAuthority } from './collectionReadAuthority';
 import { useToast } from '@/context/ToastContext';
 import { modelsApi } from './modelsApi';
 import { MigrationDialog } from './MigrationDialog';
@@ -82,6 +83,7 @@ export const BackendSupplyModeCard: React.FC<{ backend: AgentBackend }> = ({ bac
   const [detected, setDetected] = React.useState<MigrationItem[]>([]);
   const [switching, setSwitching] = React.useState<AgentMode | null>(null);
   const [migrateOpen, setMigrateOpen] = React.useState(false);
+  const [agentReads] = React.useState(() => createAgentCollectionReadAuthority(modelsApi));
   const aliveRef = React.useRef(true);
   React.useEffect(() => {
     aliveRef.current = true;
@@ -92,12 +94,12 @@ export const BackendSupplyModeCard: React.FC<{ backend: AgentBackend }> = ({ bac
 
   const load = React.useCallback(async () => {
     try {
-      const agents = await modelsApi.listAgents();
+      const agents = await agentReads.readValue();
       if (aliveRef.current) setAgent(agents.find((a) => a.backend === backend) ?? null);
     } catch {
       /* card simply stays hidden if the hub is unreachable */
     }
-  }, [backend]);
+  }, [agentReads, backend]);
 
   const scan = React.useCallback(async () => {
     try {

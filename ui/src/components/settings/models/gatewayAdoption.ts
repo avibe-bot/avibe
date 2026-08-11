@@ -1,4 +1,5 @@
 import { apiFailure, type ModelsApi } from './modelsApi';
+import type { CollectionReadAuthority } from './collectionReadAuthority';
 import { resumeInstallAndStartRuntime } from './runtimeLifecycle';
 import type { AgentBackend, AgentSupply, RuntimeDependency } from './types';
 
@@ -46,13 +47,14 @@ const backendRow = (agents: AgentSupply[], backend: AgentBackend): AgentSupply |
  * resumes at the first step the server state has not already confirmed.
  */
 export async function resumeGatewayAdoption(
-  api: Pick<ModelsApi, 'listAgents' | 'getRuntimeStatus' | 'installRuntime' | 'startRuntime' | 'setAgentMode'>,
+  api: Pick<ModelsApi, 'getRuntimeStatus' | 'installRuntime' | 'startRuntime' | 'setAgentMode'>,
+  agentReads: CollectionReadAuthority<AgentSupply[]>,
   backend: AgentBackend,
   installPollIntervalMs = 2_000,
 ): Promise<GatewayAdoptionResult> {
   let agents: AgentSupply[];
   try {
-    agents = await api.listAgents();
+    agents = await agentReads.readValue();
   } catch (error) {
     return readFailure(error, 'GET /api/models/agents');
   }
@@ -98,7 +100,7 @@ export async function resumeGatewayAdoption(
     return { ok: true, agent, runtime };
   } catch (error) {
     try {
-      agents = await api.listAgents();
+      agents = await agentReads.readValue();
       const reconciled = backendRow(agents, backend);
       if (reconciled?.mode === 'hub') return { ok: true, agent: reconciled, runtime };
     } catch {

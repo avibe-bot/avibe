@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ToastProvider } from '@/context/ToastProvider';
 import i18n from '@/i18n';
+import { createSourceCollectionReadAuthority } from './collectionReadAuthority';
 import { modelsApi } from './modelsApi';
 import { SourceOrderDrawer } from './SourceOrderDrawer';
 import type { AgentSupply, Source } from './types';
@@ -47,6 +48,7 @@ const renderDrawer = (overrides: Partial<React.ComponentProps<typeof SourceOrder
         open
         agent={agent}
         sources={sources}
+        sourceReads={createSourceCollectionReadAuthority(modelsApi)}
         onClose={vi.fn()}
         onSaved={vi.fn()}
         orderWrite={{ pending: false, track: async (work) => work() }}
@@ -193,6 +195,38 @@ describe('SourceOrderDrawer keyboard ordering', () => {
     expect(agentRead).toHaveBeenCalledTimes(2);
   });
 
+  it('regroups when the Source inventory is newer than the Agent projection', async () => {
+    const newest = source('src_c', 'Newest source');
+    const regroupedAgent = deferred<AgentSupply>();
+    const regroupedSources = deferred<Source[]>();
+    const nextAgent = {
+      ...agent,
+      sources: {
+        order: ['src_a', 'src_b'],
+        eligibility: [...(agent.sources?.eligibility ?? []), { source_id: newest.id, eligible: true }],
+      },
+    };
+    const agentRead = vi.spyOn(modelsApi, 'getAgentSources')
+      .mockResolvedValueOnce(agent)
+      .mockReturnValueOnce(regroupedAgent.promise);
+    vi.mocked(modelsApi.listSources)
+      .mockResolvedValueOnce([...sources, newest])
+      .mockReturnValueOnce(regroupedSources.promise);
+
+    renderDrawer();
+
+    await waitFor(() => expect(agentRead).toHaveBeenCalledTimes(2));
+    await act(async () => {
+      regroupedAgent.resolve(nextAgent);
+      regroupedSources.resolve([...sources, newest]);
+      await Promise.all([regroupedAgent.promise, regroupedSources.promise]);
+    });
+
+    expect(await screen.findByText('Newest source')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Add to order' })).toBeTruthy();
+    expect(agentRead).toHaveBeenCalledTimes(2);
+  });
+
   it('moves a persistent composition hole to the drawer F1 retry state', async () => {
     const inconsistent = {
       ...agent,
@@ -203,6 +237,18 @@ describe('SourceOrderDrawer keyboard ordering', () => {
     };
     const agentRead = vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(inconsistent);
     vi.mocked(modelsApi.listSources).mockResolvedValue([sources[0]]);
+
+    renderDrawer();
+
+    expect(await screen.findByText('The source list could not be read')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeTruthy();
+    expect(agentRead).toHaveBeenCalledTimes(2);
+  });
+
+  it('moves a persistent inventory-newer hole to the drawer F1 retry state', async () => {
+    const newest = source('src_c', 'Newest source');
+    const agentRead = vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent);
+    vi.mocked(modelsApi.listSources).mockResolvedValue([...sources, newest]);
 
     renderDrawer();
 

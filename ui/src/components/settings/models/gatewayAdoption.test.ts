@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 
+import { createAgentCollectionReadAuthority } from './collectionReadAuthority';
 import { resumeGatewayAdoption } from './gatewayAdoption';
+import type { ModelsApi } from './modelsApi';
 import type { AgentSupply, RuntimeDependency } from './types';
 
 const agent = (mode: AgentSupply['mode']): AgentSupply => ({
@@ -17,7 +19,9 @@ const runtime = (health: RuntimeDependency['status']['health']): RuntimeDependen
   status: { installed_version: health === 'not_installed' ? null : '1', verified: health !== 'not_installed', health },
 });
 
-const api = (overrides: Partial<Parameters<typeof resumeGatewayAdoption>[0]> = {}) => ({
+type GatewayClient = Pick<ModelsApi, 'listAgents' | 'getRuntimeStatus' | 'installRuntime' | 'startRuntime' | 'setAgentMode'>;
+
+const api = (overrides: Partial<GatewayClient> = {}): GatewayClient => ({
   listAgents: vi.fn().mockResolvedValue([agent('direct')]),
   getRuntimeStatus: vi.fn().mockResolvedValue(runtime('ok')),
   installRuntime: vi.fn().mockResolvedValue(runtime('not_started')),
@@ -26,11 +30,16 @@ const api = (overrides: Partial<Parameters<typeof resumeGatewayAdoption>[0]> = {
   ...overrides,
 });
 
+const adopt = (
+  client: ReturnType<typeof api>,
+  intervalMs?: number,
+) => resumeGatewayAdoption(client, createAgentCollectionReadAuthority(client), 'claude', intervalMs);
+
 describe('resumeGatewayAdoption', () => {
   it('treats degraded as already started and goes straight to the mode PATCH', async () => {
     const client = api({ getRuntimeStatus: vi.fn().mockResolvedValue(runtime('degraded')) });
 
-    await expect(resumeGatewayAdoption(client, 'claude')).resolves.toMatchObject({ ok: true });
+    await expect(adopt(client)).resolves.toMatchObject({ ok: true });
 
     expect(client.startRuntime).not.toHaveBeenCalled();
     expect(client.setAgentMode).toHaveBeenCalledWith('claude', 'hub');
@@ -40,7 +49,7 @@ describe('resumeGatewayAdoption', () => {
     const adopted = { ...agent('hub'), sources: { order: ['src_native'], eligibility: [] } };
     const client = api({ setAgentMode: vi.fn().mockResolvedValue(adopted) });
 
-    await expect(resumeGatewayAdoption(client, 'claude')).resolves.toMatchObject({
+    await expect(adopt(client)).resolves.toMatchObject({
       ok: true,
       agent: { mode: 'hub', sources: { order: ['src_native'] } },
     });
@@ -49,7 +58,7 @@ describe('resumeGatewayAdoption', () => {
   it('starts an idle runtime before switching the one backend', async () => {
     const client = api({ getRuntimeStatus: vi.fn().mockResolvedValue(runtime('not_started')) });
 
-    await expect(resumeGatewayAdoption(client, 'claude')).resolves.toMatchObject({ ok: true });
+    await expect(adopt(client)).resolves.toMatchObject({ ok: true });
 
     expect(client.startRuntime).toHaveBeenCalledOnce();
     expect(client.setAgentMode).toHaveBeenCalledWith('claude', 'hub');
@@ -64,7 +73,7 @@ describe('resumeGatewayAdoption', () => {
       setAgentMode: vi.fn().mockImplementation(async () => { calls.push('mode'); return agent('hub'); }),
     });
 
-    await expect(resumeGatewayAdoption(client, 'claude', 0)).resolves.toMatchObject({ ok: true });
+    await expect(adopt(client, 0)).resolves.toMatchObject({ ok: true });
 
     expect(calls).toEqual(['install', 'start', 'mode']);
   });
@@ -75,7 +84,7 @@ describe('resumeGatewayAdoption', () => {
       installRuntime: vi.fn().mockResolvedValue(runtime('not_installed')),
     });
 
-    await expect(resumeGatewayAdoption(client, 'claude')).resolves.toEqual({
+    await expect(adopt(client)).resolves.toEqual({
       ok: false,
       failure: { step: 'install', reason: 'unknown' },
       runtime: runtime('not_installed'),
@@ -93,7 +102,7 @@ describe('resumeGatewayAdoption', () => {
       setAgentMode: vi.fn().mockRejectedValue(new TypeError('response lost')),
     });
 
-    await expect(resumeGatewayAdoption(client, 'claude')).resolves.toMatchObject({
+    await expect(adopt(client)).resolves.toMatchObject({
       ok: true,
       agent: { mode: 'hub' },
     });
@@ -104,7 +113,7 @@ describe('resumeGatewayAdoption', () => {
   it('closes an already-committed retry without touching runtime or mode', async () => {
     const client = api({ listAgents: vi.fn().mockResolvedValue([agent('hub')]) });
 
-    await expect(resumeGatewayAdoption(client, 'claude')).resolves.toMatchObject({ ok: true });
+    await expect(adopt(client)).resolves.toMatchObject({ ok: true });
 
     expect(client.getRuntimeStatus).not.toHaveBeenCalled();
     expect(client.startRuntime).not.toHaveBeenCalled();

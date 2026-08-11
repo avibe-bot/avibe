@@ -7,7 +7,7 @@ import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { ModelHubInfoHint } from './ModelHubInfoHint';
 import { collapsedModelRows, listedModelIds, modelChainKey, modelSupplyState, type ModelChainIndex, type ModelChainRead } from './modelRows';
-import { freshRegionData } from './regionRead';
+import { foldRegionRead } from './regionRead';
 import { agentHasLiveChainProjection, type FreshRuntimeProjection } from './runtimeLifecycle';
 import { currentChainLink, isTakeoverChain } from './takeover';
 import { ACCENT_ICON, ACCENT_TILE, backendVisual } from './vendorMeta';
@@ -15,11 +15,21 @@ import type { AgentSupply, Source } from './types';
 
 const sourceName = (sources: Source[], id: string): string => sources.find((source) => source.id === id)?.display_name ?? id;
 const currentLink = (read: ModelChainRead | undefined) => {
-  const chain = read ? freshRegionData(read) : undefined;
+  const chain = read ? foldRegionRead(read, {
+    loading: () => null,
+    ready: (value) => value,
+    unread: () => null,
+    degraded: () => null,
+  }) : null;
   return chain ? currentChainLink(chain) : null;
 };
 const isTakeoverRead = (read: ModelChainRead | undefined): boolean => {
-  const chain = read ? freshRegionData(read) : undefined;
+  const chain = read ? foldRegionRead(read, {
+    loading: () => null,
+    ready: (value) => value,
+    unread: () => null,
+    degraded: () => null,
+  }) : null;
   return chain ? isTakeoverChain(chain) : false;
 };
 

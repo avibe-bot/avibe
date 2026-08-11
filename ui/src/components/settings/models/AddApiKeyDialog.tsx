@@ -25,6 +25,7 @@ import {
   type AddApiKeyFailure,
   type AddApiKeyOrigin,
 } from './addApiKeyState';
+import type { CollectionReadAuthority } from './collectionReadAuthority';
 import { apiFailure, modelsApi, type SourceCreated } from './modelsApi';
 import { createContinuationSettlement, createSourceCreatedDelivery, type ContinuationTicket } from './mutationSettlement';
 import { reconcileUnknownWrite } from './reconcileUnknownWrite';
@@ -33,6 +34,7 @@ import {
   SOURCE_DISPLAY_NAME_MAX_LENGTH,
   SOURCE_PROTOCOLS,
   type ApiKeySourceCreate,
+  type Source,
   type SourceObservation,
   type SourceProtocol,
 } from './types';
@@ -69,7 +71,8 @@ export const AddApiKeyDialog: React.FC<{
   open: boolean;
   onClose: () => void;
   onAdded: (created: SourceCreated) => void;
-}> = ({ open, onClose, onAdded }) => {
+  sourceReads: CollectionReadAuthority<Source[]>;
+}> = ({ open, onClose, onAdded, sourceReads }) => {
   const { t } = useTranslation();
   const [displayName, setDisplayName] = React.useState('');
   const [baseUrl, setBaseUrl] = React.useState('');
@@ -201,7 +204,7 @@ export const AddApiKeyDialog: React.FC<{
     if (phase.kind === 'save_unconfirmed') {
       const seq = continuation.begin();
       const reconciliation = await reconcileUnknownWrite(
-        () => modelsApi.listSources(),
+        () => sourceReads.readValue(),
         (sources) => sources.find((source) => source.client_nonce === clientNonce.current),
       );
       if (reconciliation.kind === 'committed') {

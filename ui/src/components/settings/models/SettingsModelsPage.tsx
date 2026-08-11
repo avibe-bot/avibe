@@ -21,6 +21,7 @@ import { buildSupplyRelations } from './supplyRelations';
 import { SupplyGraph, SupplyLegend } from './SupplyGraph';
 import './modelHubSurface.css';
 import { agentsWithEcho, createLatestAsyncAuthority, createLatestAsyncAuthorityByKey, createLatestEntityAuthorityByKey, createPendingWrites, mapWithConcurrency } from './asyncLifetime';
+import { createAgentCollectionReadAuthority, createSourceCollectionReadAuthority, type CollectionReadAuthority } from './collectionReadAuthority';
 import { emptyFeed, feedAfterHeadRead, feedAfterTailRead, feedTailCursor, type EventFeed } from './eventFeed';
 import { readFirstPaintRegions, type SurfaceLanding } from './firstPaintRegions';
 import { modelsApi, type SourceCreated } from './modelsApi';
@@ -31,7 +32,6 @@ import {
   beginRegionRead,
   failRegionRead,
   foldRegionRead,
-  freshRegionData,
   loadingRegion,
   readyRegion,
   regionFailed,
@@ -92,9 +92,12 @@ type AuthorizedSurfaceLanding = {
   sourceSnapshot: number;
 };
 
-const readSurfaceLanding = (): Promise<SurfaceLanding> => readFirstPaintRegions({
-  sources: () => modelsApi.listSources(),
-  supply: () => modelsApi.listAgents(),
+const readSurfaceLanding = (
+  sourceReads: CollectionReadAuthority<Source[]>,
+  agentReads: CollectionReadAuthority<AgentSupply[]>,
+): Promise<SurfaceLanding> => readFirstPaintRegions({
+  sources: sourceReads.readValue,
+  supply: agentReads.readValue,
   runtime: () => modelsApi.getRuntimeStatus(),
 });
 
@@ -262,6 +265,8 @@ export const SettingsModelsPage: React.FC = () => {
   const [switchFailures, setSwitchFailures] = React.useState<ReadonlySet<string>>(() => new Set());
   const [agentWriteRegistry] = React.useState(() => createPendingWrites(setAgentWrites));
   const [sourceIntentAuthority] = React.useState(createIntentAuthority);
+  const [sourceCollectionReads] = React.useState(() => createSourceCollectionReadAuthority(modelsApi));
+  const [agentCollectionReads] = React.useState(() => createAgentCollectionReadAuthority(modelsApi));
   const overviewRef = React.useRef<HTMLDivElement>(null);
   const aliveRef = React.useRef(true);
   const [sourceEntityAuthority] = React.useState(() => createLatestEntityAuthorityByKey(
@@ -288,7 +293,12 @@ export const SettingsModelsPage: React.FC = () => {
     unread: () => [],
     degraded: (staleData) => staleData,
   });
-  const chains = freshRegionData(chainsRead) ?? {};
+  const chains = foldRegionRead<ModelChainIndex, ModelChainIndex>(chainsRead, {
+    loading: () => ({}),
+    ready: (data) => data,
+    unread: () => ({}),
+    degraded: () => ({}),
+  });
   const runtime = freshRuntimeProjection(runtimeRead);
   const retainedRuntime = foldRegionRead<RuntimeDependency, RuntimeDependency | null>(runtimeRead, {
     loading: () => null,
@@ -359,7 +369,12 @@ export const SettingsModelsPage: React.FC = () => {
   }, [chainReadAuthority, refreshAgentChains]);
 
   React.useEffect(() => {
-    const freshSupply = freshRegionData(supplyRead);
+    const freshSupply = foldRegionRead<AgentSupply[], AgentSupply[] | null>(supplyRead, {
+      loading: () => null,
+      ready: (data) => data,
+      unread: () => null,
+      degraded: () => null,
+    });
     if (freshSupply) {
       refreshAllAgentChains(freshSupply);
       setSwitchFailures((previous) => new Set(
@@ -378,7 +393,12 @@ export const SettingsModelsPage: React.FC = () => {
         unread: () => undefined,
         degraded: (staleData) => staleData,
       });
-      const freshEvents = freshRegionData(incoming);
+      const freshEvents = foldRegionRead<ResolutionEvent[], ResolutionEvent[] | null>(incoming, {
+        loading: () => null,
+        ready: (data) => data,
+        unread: () => null,
+        degraded: () => null,
+      });
       if (!freshEvents) return failRegionRead(previous);
       return readyRegion(previousFeed
         ? feedAfterHeadRead(previousFeed, freshEvents)
@@ -399,7 +419,12 @@ export const SettingsModelsPage: React.FC = () => {
 
   const [refreshAuthority] = React.useState(() => createLatestAsyncAuthority<AuthorizedSurfaceLanding>(({ landing, sourceSnapshot }) => {
     if (!aliveRef.current) return;
-    const freshSources = freshRegionData(landing.sources);
+    const freshSources = foldRegionRead<Source[], Source[] | null>(landing.sources, {
+      loading: () => null,
+      ready: (data) => data,
+      unread: () => null,
+      degraded: () => null,
+    });
     if (freshSources) sourceEntityAuthority.settleSnapshot(sourceSnapshot, freshSources);
     else setSourcesRead((previous) => settleRegionRead(previous, landing.sources));
     setSupplyRead((previous) => settleRegionRead(previous, landing.supply));
@@ -416,13 +441,13 @@ export const SettingsModelsPage: React.FC = () => {
     const outcome: { landing: SurfaceLanding | null } = { landing: null };
     const result = await refreshAuthority.run(async () => {
       const sourceSnapshot = sourceEntityAuthority.beginSnapshot();
-      outcome.landing = await readSurfaceLanding();
+      outcome.landing = await readSurfaceLanding(sourceCollectionReads, agentCollectionReads);
       return { landing: outcome.landing, sourceSnapshot };
     });
     if (aliveRef.current && result === 'landed' && outcome.landing && surfaceLandingFailed(outcome.landing)) {
       showToast(t('settings.models.toast.refreshFailed') as string, 'error');
     }
-  }, [refreshAuthority, refreshEventHead, showToast, sourceEntityAuthority, t]);
+  }, [agentCollectionReads, refreshAuthority, refreshEventHead, showToast, sourceCollectionReads, sourceEntityAuthority, t]);
 
   const trackSourceMutation = React.useCallback((sourceId: string): TrackSourceMutation => async <T,>(work: (source: Source, settlement: SourceMutationSettlement) => Promise<T>): Promise<T> => {
     let result!: T;
@@ -452,7 +477,7 @@ export const SettingsModelsPage: React.FC = () => {
         release: () => { void finish(() => { sourceEntityAuthority.abandon(generation); }, false); },
         readInventory: async () => {
           const snapshot = sourceEntityAuthority.beginSnapshot();
-          return { snapshot, sources: await modelsApi.listSources() };
+          return { snapshot, sources: await sourceCollectionReads.readValue() };
         },
       };
       try {
@@ -462,7 +487,7 @@ export const SettingsModelsPage: React.FC = () => {
       }
     });
     return result;
-  }, [refresh, sourceEntityAuthority, sourceWriteRegistry]);
+  }, [refresh, sourceCollectionReads, sourceEntityAuthority, sourceWriteRegistry]);
 
   React.useEffect(() => {
     void refresh();
@@ -515,7 +540,9 @@ export const SettingsModelsPage: React.FC = () => {
         await agentSaved(echoed);
       } catch {
         try {
-          const authoritative = await modelsApi.listAgents();
+          const result = await agentCollectionReads.read();
+          if (result.kind === 'stale') return;
+          const authoritative = result.value;
           setSupplyRead(readyRegion(authoritative));
           const committed = authoritative.some((row) => row.backend === agent.backend && row.mode === 'direct');
           setSwitchFailures((previous) => {
@@ -641,14 +668,15 @@ export const SettingsModelsPage: React.FC = () => {
                     <AdvancedRow />
                   </div> : <section className="rounded-xl border border-border bg-surface px-5 py-8"><div className="flex items-start gap-3"><Info className="mt-0.5 size-4 text-muted" /><div><h2 className="text-[14px] font-semibold text-foreground">{t('settings.models.usageTab.title')}</h2><p className="mt-1 text-[12px] text-muted">{t('settings.models.usageTab.detail')}</p></div></div></section>}
                 </div>}
-      <AddApiKeyDialog open={apiKeyOpen} onClose={() => setApiKeyOpen(false)} onAdded={(created) => void sourceAdded(created)} />
-      {orderAgent && <SourceOrderDrawer open agent={orderAgent} sources={sources} onClose={() => setOrderBackend(null)} onSaved={agentSaved} orderWrite={{ pending: agentWrites.has(orderAgent.backend), track: (work) => agentWriteRegistry.track(orderAgent.backend, work) }} />}
+      <AddApiKeyDialog open={apiKeyOpen} sourceReads={sourceCollectionReads} onClose={() => setApiKeyOpen(false)} onAdded={(created) => void sourceAdded(created)} />
+      {orderAgent && <SourceOrderDrawer open agent={orderAgent} sources={sources} sourceReads={sourceCollectionReads} onClose={() => setOrderBackend(null)} onSaved={agentSaved} orderWrite={{ pending: agentWrites.has(orderAgent.backend), track: (work) => agentWriteRegistry.track(orderAgent.backend, work) }} />}
       <RouteChainDialog selection={routeSelection} sources={sources} onClose={() => setRouteTarget(null)} />
       {adoptAgent && (
         <EnableGatewayDialog
           key={adoptAgent.backend}
           agent={adoptAgent}
-          runtime={retainedRuntime}
+          runtime={runtimeRead}
+          agentReads={agentCollectionReads}
           onClose={() => setAdoptAgent(null)}
           onAdopted={agentSaved}
           onRuntime={(next) => {

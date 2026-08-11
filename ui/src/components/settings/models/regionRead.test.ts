@@ -6,7 +6,6 @@ import {
   beginRegionRead,
   foldRegionRead,
   failRegionRead,
-  freshRegionData,
   loadingRegion,
   readRegion,
   readyRegion,
@@ -47,7 +46,6 @@ describe('RegionRead', () => {
 
   it('marks a first failure unread instead of inventing a domain value', () => {
     expect(failRegionRead(loadingRegion<number>())).toEqual({ kind: 'unread', retryable: true });
-    expect(freshRegionData(failRegionRead(loadingRegion<number>()))).toBeUndefined();
   });
 
   it('makes unclassified data access impossible on the public union', () => {
@@ -84,16 +82,24 @@ describe('RegionRead', () => {
     expect(barrier).not.toMatch(/listEvents|events/);
   });
 
-  it('allows RegionRead projection only through its fresh accessor or exhaustive fold', () => {
+  it('allows RegionRead projection only through an exhaustive fold', () => {
     const violations = productFiles(__dirname).flatMap((path) => {
       if (path.endsWith('/regionRead.ts')) return [];
       const source = readFileSync(path, 'utf8');
       const importsRegionRead = /from ['"]\.\/(?:regionRead|modelRows)['"]/.test(source);
-      const bypassesProjection = /\bregionData\s*\(|\b\w+\.data\b/.test(source);
+      const bypassesProjection = /\bfreshRegionData\b|\bregionData\s*\(|\b\w+\.data\b/.test(source);
       return importsRegionRead && bypassesProjection ? [path] : [];
     });
 
     expect(violations).toEqual([]);
+  });
+
+  it('keeps adoption decisions on the tagged runtime read', () => {
+    const dialog = readFileSync(join(__dirname, 'EnableGatewayDialog.tsx'), 'utf8');
+
+    expect(dialog).toMatch(/runtime: RegionRead<RuntimeDependency>/);
+    expect(dialog).toMatch(/foldRegionRead<RuntimeDependency,[\s\S]*?degraded: \(\) => \(\{ kind: 'unavailable' \}\)/);
+    expect(dialog).not.toMatch(/runtime: RuntimeDependency \| null/);
   });
 
   it('routes every per-model chain read through the per-backend latest authority', () => {
