@@ -576,18 +576,18 @@
     },
     {
       "id": "D13",
-      "domain": "Source-create nonce refusals",
+      "domain": "Source-create nonce claim states",
       "authority": {
         "kind": "markdown_table",
         "file": "docs/plans/model-hub.md",
-        "heading": "Source-create nonce refusal matrix",
+        "heading": "Source-create nonce state machine",
         "column": "Decision"
       },
       "consumers": [
         {
-          "kind": "marker_tail",
+          "kind": "marker",
           "file": "docs/plans/model-hub-contracts/api.md",
-          "marker": "authority-consumer: source.create_nonce "
+          "prefix": "nonce."
         }
       ]
     },
@@ -620,6 +620,23 @@
           "kind": "marker_tail",
           "file": "docs/plans/model-hub-contracts/api.md",
           "marker": "authority-consumer: guard.error "
+        }
+      ]
+    },
+    {
+      "id": "D16",
+      "domain": "guard confirmation totality",
+      "authority": {
+        "kind": "markdown_table",
+        "file": "docs/plans/model-hub.md",
+        "heading": "Guard confirmation totality matrix",
+        "column": "Decision"
+      },
+      "consumers": [
+        {
+          "kind": "marker",
+          "file": "docs/plans/model-hub-contracts/api.md",
+          "prefix": "guard_decision."
         }
       ]
     }

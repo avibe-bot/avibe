@@ -248,22 +248,23 @@ only `protocol_order`, and client-generated `client_nonce`. Source identity, pro
 evidence, discovered inventory, health, usage, custody metadata, and timestamps remain
 server-owned. When supplied, `client_nonce` is persisted unchanged and unique among
 Sources, so a client that loses the create response can identify the committed row on
-the next Source list read before deciding whether to retry. Before any observation or
-credential work, the server atomically claims that nonce. A concurrent or committed
-duplicate performs no upstream work and returns the refusal below. A successful commit
-atomically converts the claim into `Source.client_nonce`; pre-commit failure or
-cancellation releases it only after AC-26 retained-material settlement. On restart an
-ownerless claim cannot resume without persisted plaintext, so pending revocation is
-reconciled before the claim is released. The nonce is not Source identity or a routing
-input.
+the next Source list read. Before any observation or credential work, the server
+atomically claims that nonce. A successful commit atomically converts the claim into
+`Source.client_nonce`; pre-commit failure or cancellation releases it only after AC-26
+retained-material settlement. On restart an ownerless claim cannot resume without
+persisted plaintext, so pending revocation is reconciled before the claim is released.
+The nonce is not Source identity, a routing input, or a separately persisted status.
 
-**Source-create nonce refusal matrix (authoritative and exhaustive; owner ruling
-2026-08-11).** This is the only post-validation nonce-claim refusal; malformed request
-fields retain the shared request-validation behavior.
+**Source-create nonce state machine (authoritative and exhaustive; owner rulings
+2026-08-11 19:10).** After a lost response or 409/list miss, the client's only recovery
+action is to retry the same SourceCreate request with the same nonce. Malformed request
+fields retain shared request-validation behavior.
 
-| Decision | Entry condition | HTTP/API result | First consumer |
-| --- | --- | --- | --- |
-| `source_nonce_conflict` | `client_nonce` is already held by a live/recovering create claim or a committed Source | HTTP 409 normal failure envelope before observation, transient-ref creation, or committed credential provisioning | create client read-before-retry loop and API concurrency test |
+| Decision | Claim state at atomic retry boundary | Same-nonce retry result | Upstream work | First consumer |
+| --- | --- | --- | --- | --- |
+| `nonce.in_flight` | a live or recovering create owns the claim | retain the claim; HTTP 409 `source_nonce_conflict` | none | create client retry loop and API concurrency test |
+| `nonce.released` | failure/cancellation/reconstruction released the claim after retained-material settlement | atomically re-claim and proceed as a fresh create | exactly one new attempt owned by the new claim | create client retry loop and cleanup/recovery test |
+| `nonce.committed` | one Source persists the nonce | HTTP 200 ordinary create terminal envelope reading back that same Source | none | D-36 lost-response reconciliation and API idempotency test |
 
 OAuth start offers the equivalent optional client-generated correlation on
 `(client_nonce, vendor, channel)`. Repeating that exact tuple while its flow exists
@@ -984,17 +985,27 @@ identity and relative order of all survivors and keeping an empty route configur
 It also reports every resulting supply gap; force is confirmation, not a claim that
 the mutation is interruption-free.
 
-**Shared confirmation binding (owner ruling 2026-08-11 18:32).** Every guarded `409`
-returns the complete `GuardRefusal` shape: the row's existing lead `error`,
-`refusal_reason: confirmation_required | plan_changed`, an opaque `guard_token`, and
-the ordered `would_remove_hops` / `would_interrupt` arrays. The token binds method,
-target, normalized substantive input, the exact staged mutation/guard plan, and all
-relevant persisted-state versions. `force=true` MUST echo that token in the row's
-request carrier. The shared guard layer recomputes under the commit boundary and
-commits only an exact binding match; any mismatch returns the same 409 shape with the
-current plan, a fresh token, and `plan_changed`. A missing token returns
-`confirmation_required`. Neither case mutates a Route. `plan_changed` is data, not a
-new top-level error code.
+**Guard confirmation totality matrix (authoritative and exhaustive; owner rulings
+2026-08-11 18:32 and 19:10).** The shared layer recomputes under the atomic commit
+boundary. A guarded-impact plan is nonempty exactly when the staged mutation has at
+least one `would_remove_hops` or `would_interrupt` item. The token binds method, target,
+normalized substantive input, the exact staged mutation/guard plan, and all relevant
+persisted-state versions. `plan_changed` remains data, not a new top-level error code.
+
+| Decision | `force` | Recomputed plan | Token state | HTTP/API result |
+| --- | --- | --- | --- | --- |
+| `guard_decision.token_without_force` | false | any | supplied | existing ordinary invalid-request response; the guard planner does not consume the token |
+| `guard_decision.unforced_no_impact` | false | empty | absent | ordinary mutation success |
+| `guard_decision.unforced_confirmation` | false | nonempty | absent | HTTP 409 `GuardRefusal` with `confirmation_required`, current plan, and fresh token |
+| `guard_decision.forced_no_impact` | true | empty | absent, matching, stale, or expired | ordinary mutation success; `force` and any token are inert because no guarded impact remains |
+| `guard_decision.forced_confirmed` | true | nonempty | exact match for method, target, input, plan, and versions | commit once and return the matrix row's success envelope |
+| `guard_decision.forced_uncredentialed` | true | nonempty | absent | HTTP 409 `GuardRefusal` with `confirmation_required`, current plan, and fresh token |
+| `guard_decision.forced_plan_changed` | true | nonempty | mismatched, stale, or expired | HTTP 409 `GuardRefusal` with `plan_changed`, current plan, and fresh token |
+
+Every destructive guarded impact that commits therefore has a matching token. Every
+409 carries a nonempty current plan and mutates no Route. A previously refused request
+that now recomputes to an empty plan, including one carrying its old token, follows the
+ordinary success path without a fabricated guard error or request-validation variant.
 
 **Source-mutation envelope matrix (authoritative and exhaustive; owner rulings
 2026-08-09, confirmation binding revised 2026-08-11).** These are all Source/inventory mutations, including writes that cannot
@@ -1004,13 +1015,13 @@ present even when empty.
 
 | Decision | Mutation | Request | Guarded `409` | Success |
 | --- | --- | --- | --- | --- |
-| `mutation.source_metadata` | change Source metadata/Base URL | `PATCH /api/models/sources/<id>` with `{display_name?, base_url?, force?: boolean, guard_token?: string}`; `force` matters only when `base_url` changes and requires the exact token | `{error, refusal_reason, guard_token, would_remove_hops: RouteHopRef[], would_interrupt: SupplyGap[]}` | `{source: Source, removed_hops: RouteHopRef[], interrupted: SupplyGap[]}` |
+| `mutation.source_metadata` | change Source metadata/Base URL | `PATCH /api/models/sources/<id>` with `{display_name?, base_url?, force?: boolean, guard_token?: string}`; only a nonempty recomputed guarded-impact plan makes the token operative | `{error, refusal_reason, guard_token, would_remove_hops: RouteHopRef[], would_interrupt: SupplyGap[]}` | `{source: Source, removed_hops: RouteHopRef[], interrupted: SupplyGap[]}` |
 | `mutation.credential_replace` | replace API key | `PUT /api/models/sources/<id>/credential` with `{key, force?: boolean, guard_token?: string}` | same guarded `409` | same Source success envelope |
 | `mutation.source_refresh` | refresh/recover saved Source | `POST /api/models/sources/<id>/refresh` with `{force?: boolean, guard_token?: string}` | same guarded `409` | same Source success envelope |
 | `mutation.model_create` | create a user-authored model entry | `POST /api/models/sources/<source_id>/models` with `{model_id, display_name?, reasoning_efforts}` | not guarded: it creates one new exact `id` with `origin: "manual"` and changes no existing `id`, `origin`, or Route | `{source: Source}` |
 | `mutation.model_efforts` | replace one model entry's capability list | `PATCH /api/models/sources/<source_id>/models/<model_id>` with `{reasoning_efforts}` | not guarded: it changes no `id`, `origin`, or Route | `{source: Source}` |
 | `mutation.model_delete` | retire a discovered model or delete a manual model | `DELETE /api/models/sources/<source_id>/models/<model_id>` with `{force?: boolean, guard_token?: string}` | same guarded `409`; discovered retirement is staged before evaluating exact-hop and protected-supply loss | same Source success envelope; discovered success preserves the row with `retired: true`, manual success removes it |
-| `mutation.source_delete` | delete Source | `DELETE /api/models/sources/<id>?force=<bool>&guard_token=<opaque>` | same guarded `409`; the token is required exactly when force is true | `{removed_hops: RouteHopRef[], interrupted: SupplyGap[]}` after atomically pruning the Source from every backend Source order and every Route chain while preserving each survivor order; the deleted Source is not returned and legacy `{ok}` is invalid |
+| `mutation.source_delete` | delete Source | `DELETE /api/models/sources/<id>?force=<bool>&guard_token=<opaque>` | same guarded `409`; the token is required exactly when force is true and the recomputed guarded-impact plan is nonempty | `{removed_hops: RouteHopRef[], interrupted: SupplyGap[]}` after atomically pruning the Source from every backend Source order and every Route chain while preserving each survivor order; the deleted Source is not returned and legacy `{ok}` is invalid |
 | `mutation.route_replace` | replace one model's complete Route chain | `PUT /api/models/agents/<backend>/chain?model=<id>` with `{hops: RouteHop[], force?: boolean, guard_token?: string}` | same guarded `409` | `{chain: AgentChain, removed_hops: RouteHopRef[], interrupted: SupplyGap[]}`; the reporting fields are the same guarded-mutation family as Source success |
 
 The request carrier shown in each row is the only one. The final `api.md`, server/client

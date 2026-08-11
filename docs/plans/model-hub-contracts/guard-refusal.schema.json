@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "model-hub/guard-refusal.schema.json",
   "title": "GuardRefusal",
-  "description": "The shared HTTP 409 envelope for a guarded Model Hub mutation. The opaque token authorizes only the exact refused mutation plan and persisted-state versions from which this envelope was computed.",
+  "description": "The shared HTTP 409 envelope for a guarded Model Hub mutation with a nonempty current guarded-impact plan. The opaque token authorizes only the exact refused mutation plan and persisted-state versions from which this envelope was computed.",
   "type": "object",
   "required": [
     "ok",
@@ -14,6 +14,18 @@
     "would_interrupt"
   ],
   "additionalProperties": false,
+  "anyOf": [
+    {
+      "properties": {
+        "would_remove_hops": { "minItems": 1 }
+      }
+    },
+    {
+      "properties": {
+        "would_interrupt": { "minItems": 1 }
+      }
+    }
+  ],
   "properties": {
     "ok": { "const": false },
     "contract_version": { "const": 5 },
@@ -27,13 +39,13 @@
     },
     "refusal_reason": {
       "enum": ["confirmation_required", "plan_changed"],
-      "description": "confirmation_required is the first refusal or a force request without its token. plan_changed means the echoed token did not bind the current request, plan, and persisted-state versions. Both require presenting the returned current plan and obtaining fresh confirmation."
+      "description": "For a nonempty current plan, confirmation_required is the first refusal or a forced request without its token. plan_changed means the echoed token did not bind the current request, plan, and persisted-state versions. Both require presenting the returned current plan and obtaining fresh confirmation; an empty recomputed plan returns ordinary success instead of this envelope."
     },
     "guard_token": {
       "type": "string",
       "minLength": 16,
       "maxLength": 4096,
-      "description": "Opaque server-minted confirmation token. It binds method, target, normalized mutation input, the exact staged mutation and guard-report plan, and every relevant persisted-state version without exposing plaintext credentials."
+      "description": "Opaque server-minted confirmation token for this nonempty plan. It binds method, target, normalized mutation input, the exact staged mutation and guard-report plan, and every relevant persisted-state version without exposing plaintext credentials."
     },
     "would_remove_hops": {
       "type": "array",
@@ -102,7 +114,15 @@
       "error": "source_model_in_route_chain",
       "refusal_reason": "plan_changed",
       "guard_token": "grd_01k4freshchangedplantoken",
-      "would_remove_hops": [],
+      "would_remove_hops": [
+        {
+          "backend": "claude",
+          "menu_model": "claude-opus-4-6",
+          "source_id": "src_anthkey01",
+          "model_id": "claude-opus-4-6",
+          "position": 1
+        }
+      ],
       "would_interrupt": []
     }
   ]

@@ -20,10 +20,10 @@ Hub has not shipped, so there is no internal contract migration or compatibility
 | GET `/api/models/sources` | → `{sources: Source[]}` | Unordered asset inventory. Every Source carries server-derived `adopted_by` and any persisted `client_nonce`; array order is never a spend order. |
 | POST `/api/models/sources/observe` | `{vendor, base_url?, key, protocol_order?}` → `{observation: SourceObservation}` | Non-persisting connectivity/authentication/protocol/inventory observation. `protocol_order` only orders the three probes; it never supplies a conclusion. No credential reference is returned. |
 | POST `/api/models/sources` | `source-create.schema.json` → `{source: Source, added_to: AddedTo[], adopted_by: AdoptedBy[]}` | The server assigns `id` and `created_at`; plaintext keys are transient. Add-time matching and placement are materialized before response. An optional `client_nonce` is persisted for lost-response reconciliation. |
-| PATCH `/api/models/sources/<id>` | `{display_name?, base_url?, force?: boolean, guard_token?: string}` → guarded Source-mutation envelope | Metadata/Base-URL mutation from the authoritative matrix in `model-hub.md` §4.5. `guard_token` is required when `force` is true. |
+| PATCH `/api/models/sources/<id>` | `{display_name?, base_url?, force?: boolean, guard_token?: string}` → guarded Source-mutation envelope | Metadata/Base-URL mutation from the authoritative matrix in `model-hub.md` §4.5. A forced retry requires `guard_token` only while its recomputed guarded-impact plan is nonempty. |
 | PUT `/api/models/sources/<id>/credential` | `{key, force?: boolean, guard_token?: string}` → guarded Source-mutation envelope | API-key replacement. `force` and its token are JSON body fields, never query parameters. |
 | POST `/api/models/sources/<id>/reauth` | `{acknowledge_irreversible?: true}` → `{flow: OAuthFlow}` | A `native_cli` source requires the acknowledgement before OAuth starts. See repair rules. |
-| DELETE `/api/models/sources/<id>?force=<bool>&guard_token=<opaque>` | → guarded `409` or `{removed_hops, interrupted}` | A confirmed delete removes the Source from every backend Source order and Route chain in one transaction. The token is required exactly when `force=true`. |
+| DELETE `/api/models/sources/<id>?force=<bool>&guard_token=<opaque>` | → guarded `409` or `{removed_hops, interrupted}` | A confirmed delete removes the Source from every backend Source order and Route chain in one transaction. The token is required exactly when `force=true` and the recomputed guarded-impact plan is nonempty. |
 | POST `/api/models/sources/<id>/refresh` | `{force?: boolean, guard_token?: string}` → guarded Source-mutation envelope | The sole saved connectivity/discovery/recovery mutation. |
 | POST `/api/models/sources/<source_id>/models` | `{model_id, display_name?, reasoning_efforts}` → `{source: Source}` | Creates one user-authored model entry. The Source identity comes only from the path. |
 | PATCH `/api/models/sources/<source_id>/models/<model_id>` | `{reasoning_efforts}` → `{source: Source}` | Replaces the complete capability list on either model origin without changing identity, origin, or Routes. |
@@ -102,22 +102,26 @@ them. A successfully observed empty inventory is represented by the returned
 `source.models: []`; the client never submits a discovered inventory as authority.
 
 When `client_nonce` is present, the server atomically claims it before observation,
-transient-ref creation, or committed credential provisioning. A request whose nonce is
-already claimed by a live or recovering create, or already belongs to a committed
-Source, fails with HTTP 409 `source_nonce_conflict` before using its plaintext key or
-repeating any upstream work. The client first re-reads `GET /api/models/sources`: an
-exact nonce match reconciles a committed create, while no match after this refusal means
-the original operation is still settling and the client waits before reading again.
+transient-ref creation, or committed credential provisioning. After a lost response or
+`source_nonce_conflict`, the client first re-reads `GET /api/models/sources`: an exact
+nonce match reconciles the committed Source, while a miss is followed only by a retry of
+the same SourceCreate request with the same nonce. The atomic retry boundary mirrors the
+authoritative three-state machine:
+
+| Decision | Claim state at retry | Server action and HTTP/API result | Upstream work |
+| --- | --- | --- | --- |
+| `nonce.in_flight` | a live or recovering create owns the claim | retain the claim; HTTP 409 `source_nonce_conflict` | none |
+| `nonce.released` | a failed or canceled attempt released the claim after cleanup | atomically claim it again and run the request as a fresh create | exactly one new attempt under the new claim |
+| `nonce.committed` | one Source already persists the nonce | HTTP 200 ordinary create terminal envelope reading back that same Source; no new claim or mutation | none |
 
 The successful Source commit consumes the claim in the same transaction that persists
 `Source.client_nonce`; there is no unclaimed interval between them. Pre-commit failure
 or cancellation releases the claim only after every transient or uncommitted credential
 ref has been revoked or entered the durable pending-revocation journal under AC-26. On
 service reconstruction, an ownerless claim cannot resume because plaintext is never
-persisted: pending revocation is reconciled first, then the claim is released so a later
-request may acquire it. A concurrent-retry fixture blocks the first request immediately
-after claim, proves the second receives `source_nonce_conflict`, and observes exactly one
-observation and committed-credential provisioning sequence.
+persisted: pending revocation is reconciled first, then the claim is released so the same-
+nonce retry may acquire it. No separate released-state record or reconciliation endpoint
+exists. The persisted Source is the committed-state receipt required by D-36.
 
 Cancellation has one commit boundary. Before the durable Source commit, AC-26 applies:
 the transient or uncommitted ref is revoked, or is named by the durable pending-
@@ -177,7 +181,7 @@ route corrections; no existing field or enum meaning changes.
 | `RuntimeDependency.status.error_key` | runtime installer | install-failed runtime state | Closed persisted i18n key: `settings.models.install.fail.detail` after installation fails; null after a new attempt begins and in every non-failure state. |
 | `RouteHopRef.position` | guarded mutation planner | guarded-change hop row | One-based position in the named Route before the attempted mutation. |
 | `GuardRefusal.refusal_reason` | shared guard planner | guarded-change confirmation flow | Closed data discriminator: `confirmation_required` for a fresh or uncredentialed refusal, `plan_changed` when an echoed token no longer binds the current plan. |
-| `GuardRefusal.guard_token` | shared guard planner | forced mutation retry | Opaque required echo for `force: true`; binds the exact request, staged plan, and relevant persisted-state versions and never contains plaintext input. |
+| `GuardRefusal.guard_token` | shared guard planner | forced mutation retry | Opaque required echo only for `force: true` with a nonempty recomputed guarded-impact plan; binds the exact request, plan, and relevant persisted-state versions and never contains plaintext input. It is inert when that plan is empty. |
 | `OAuthStart.client_nonce` | OAuth client before send | OAuth start idempotency | Optional client-generated correlation; the exact tuple with vendor and channel is the idempotency scope while the flow exists. |
 | `OAuthFlow.client_nonce` | OAuth start echo | lost-start reconciliation | When the request supplied the nonce, every flow response echoes it unchanged. |
 
@@ -493,23 +497,27 @@ and guard report (including its lead `error`), and every persisted-state version
 the plan. Credential input is bound by a server-side collision-resistant digest; the
 token and logs never reveal the plaintext key.
 
-A forced request is only a retry of a returned plan. It MUST echo both `force=true` and
-that plan's `guard_token` in the same carrier used by the route: Source DELETE uses the
-query, while every other guarded mutation uses the JSON body. `force=true` without a
-token returns the current plan with `refusal_reason: confirmation_required` and a fresh
-token; it never commits. A token without `force=true` is invalid request input.
+The shared layer recomputes the current guarded-impact plan and then applies this total
+decision matrix. A plan is nonempty exactly when the staged mutation has at least one
+`would_remove_hops` or `would_interrupt` item. Token validation, recomputation, and any
+commit share one atomic boundary. Source DELETE carries confirmation metadata in the
+query; every other guarded mutation carries it in the JSON body.
 
-Token validation, plan recomputation, and commit share one atomic guard boundary. The
-server commits only when method, target, canonical mutation input, exact staged result,
-ordered report arrays, lead error, and all relevant persisted-state versions are
-identical to the token binding. Any mismatch returns HTTP 409 with the same
-`GuardRefusal` envelope, the newly recomputed arrays, a fresh token, and
-`refusal_reason: plan_changed`; no hop is removed. When concurrent state makes both
-current arrays empty, that response retains the token's prior lead guard `error` because
-`refusal_reason` is the authoritative discriminator, and the fresh token confirms the
-now-current empty-impact plan. A subsequent exact retry may then commit. This rule
-prevents stale confirmation from authorizing a different mutation without adding a
-parallel top-level error code.
+| Decision | `force` | Recomputed plan | Token state | HTTP/API result |
+| --- | --- | --- | --- | --- |
+| `guard_decision.token_without_force` | false | any | supplied | existing ordinary invalid-request response; guard planning does not consume the token |
+| `guard_decision.unforced_no_impact` | false | empty | absent | ordinary mutation success |
+| `guard_decision.unforced_confirmation` | false | nonempty | absent | HTTP 409 `GuardRefusal`, `confirmation_required`, current plan, and fresh token |
+| `guard_decision.forced_no_impact` | true | empty | absent, matching, stale, or expired | ordinary mutation success; `force` and any token are inert |
+| `guard_decision.forced_confirmed` | true | nonempty | exact match for method, target, input, plan, and versions | commit once and return the row's success envelope |
+| `guard_decision.forced_uncredentialed` | true | nonempty | absent | HTTP 409 `GuardRefusal`, `confirmation_required`, current plan, and fresh token |
+| `guard_decision.forced_plan_changed` | true | nonempty | mismatched, stale, or expired | HTTP 409 `GuardRefusal`, `plan_changed`, current plan, and fresh token |
+
+Thus every destructive guarded impact that commits has its exact matching token. If a
+previously refused request recomputes to an empty plan, including a request carrying its
+old token, there is no destructive referent left to confirm: the ordinary path commits
+without inventing a guard error or request-validation variant. Every 409 plan is
+nonempty, and no refused branch removes a hop.
 
 Success returns the exact envelope selected by the authoritative matrix and the
 byte-identical `RouteHopRef` array from the accepted plan.
@@ -912,9 +920,10 @@ contract harness and API-boundary tests enforce:
 <!-- authority-consumer: observation.discovery succeeded failed not_attempted -->
 <!-- authority-consumer: runtime.health ok degraded down not_installed installing not_started -->
 <!-- authority-consumer: runtime.install_error runtime_platform_unsupported -->
-<!-- authority-consumer: source.create_nonce source_nonce_conflict -->
+<!-- authority-consumer: source.create_nonce nonce.in_flight nonce.released nonce.committed -->
 <!-- authority-consumer: guard.refusal_reason confirmation_required plan_changed -->
 <!-- authority-consumer: guard.error source_last_supplier source_in_route_chain source_model_in_route_chain -->
+<!-- authority-consumer: guard.decision guard_decision.token_without_force guard_decision.unforced_no_impact guard_decision.unforced_confirmation guard_decision.forced_no_impact guard_decision.forced_confirmed guard_decision.forced_uncredentialed guard_decision.forced_plan_changed -->
 
 | Guard | Boundary |
 | --- | --- |
@@ -933,8 +942,8 @@ contract harness and API-boundary tests enforce:
 | every OAuthFlow response includes `intent` | API payload test |
 | every OAuthFlow started with `client_nonce` echoes it, and repeated start of the same nonce/vendor/channel tuple returns one `flow_id` | API payload test |
 | every RuntimeDependency API payload includes server-derived `host_platform` and `status.error_key`; only supported `not_installed` starts a download, installed states are state-preserving no-ops, page reload preserves a live `installing` job, and service bootstrap reconciles an orphan before serving runtime endpoints | API payload test |
-| Source create claims `client_nonce` before observation or credential work; a concurrent or committed duplicate returns `source_nonce_conflict` without repeating either, and failure/cancellation/restart releases the claim only after retained-material reconciliation | API payload and cancellation/restart test |
-| every `GuardRefusal` validates against `guard-refusal.schema.json`; `force=true` never commits without the exact token; same-plan retry commits once with byte-identical `RouteHopRef` values, while changed input, plan, or relevant version returns `plan_changed` with a fresh token and removes no hop | API payload and concurrent-mutation test |
+| Source create claims `client_nonce` before observation or credential work; same-nonce retry covers `nonce.in_flight` (409/no work), `nonce.released` (atomic re-claim/exactly one new attempt), and `nonce.committed` (same Source readback/no work), while cleanup/restart releases a claim only after retained-material reconciliation | API payload and cancellation/restart test |
+| every `GuardRefusal` validates against `guard-refusal.schema.json` and has a nonempty current plan; fixtures cover every guard-decision row, including tokenless nonempty refusal, exact confirmation, stale nonempty replacement, and stale-token empty-plan ordinary success without a fabricated 409 | API payload and concurrent-mutation test |
 | contract and in-repo adapter interface copies are byte-identical; the five retained-material enum members and ref-pairing predicates are mutation-tested | contract harness |
 
 Serializer completeness follows the issue #939 pattern. Persisted fields must
