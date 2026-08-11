@@ -54,7 +54,7 @@ export class SessionDraftLocalCache {
   private readonly storage?: DraftStorage;
   private readonly createId: CreateId;
   private readonly now: Now;
-  private readonly memoryInvalidations = new Map<string, string>();
+  private readonly memoryInvalidations = new Map<string, { token: string; persisted: boolean }>();
 
   constructor(
     storage?: DraftStorage,
@@ -81,25 +81,31 @@ export class SessionDraftLocalCache {
   }
 
   readInvalidation(sessionId: string): string | null {
-    const memory = this.memoryInvalidations.get(sessionId) ?? null;
+    const memory = this.memoryInvalidations.get(sessionId);
+    // A failed write leaves an older token readable in storage. The newer
+    // process-local token must win until it can be persisted.
+    if (memory && !memory.persisted) return memory.token;
     const target = browserStorage(this.storage);
-    if (!target) return memory;
+    if (!target) return memory?.token ?? null;
     try {
       const stored = target.getItem(this.invalidationKey(sessionId));
-      return stored || memory;
+      return stored || memory?.token || null;
     } catch {
-      return memory;
+      return memory?.token ?? null;
     }
   }
 
   invalidate(sessionId: string): string {
     const token = this.createId();
-    this.memoryInvalidations.set(sessionId, token);
+    let persisted = false;
     try {
-      browserStorage(this.storage)?.setItem(this.invalidationKey(sessionId), token);
+      const target = browserStorage(this.storage);
+      target?.setItem(this.invalidationKey(sessionId), token);
+      persisted = Boolean(target);
     } catch {
-      // The in-memory token still invalidates reads in this tab.
+      // Recorded below so this token remains newer than stale stored state.
     }
+    this.memoryInvalidations.set(sessionId, { token, persisted });
     return token;
   }
 

@@ -177,6 +177,23 @@ export class SessionDraftPersistence {
       return dirty.text;
     }
 
+    if (current && this.hasOlderRead(sessionId, current.revision)) {
+      // A read that began after this successful write may settle before a read
+      // from the older revision. Keep one retained value as a read barrier so
+      // every older response returns the newest value instead of deleting the
+      // only stale-response guard.
+      this.localCache.acknowledge(
+        sessionId,
+        current.localId,
+        server.text,
+        server.updatedAt,
+      );
+      current.text = server.text;
+      current.baseUpdatedAt = server.updatedAt;
+      this.serverVersions.set(sessionId, server.updatedAt);
+      return current.text;
+    }
+
     this.acceptServer(sessionId, server);
     this.cleanupSuccessfulEntry(sessionId);
     return server.text;
@@ -208,11 +225,27 @@ export class SessionDraftPersistence {
       );
       const beforeWrite = this.entries.get(sessionId);
       if (!beforeWrite || beforeWrite.revision !== revision) return { ok: true };
-      if (beforeWrite.conflict || predecessorResult?.conflict) {
+      if (predecessorResult?.conflict) {
+        if (predecessorResult.server) {
+          beforeWrite.baseUpdatedAt = predecessorResult.server.updatedAt;
+          beforeWrite.conflict = false;
+          this.localCache.rebaseDirty(
+            sessionId,
+            beforeWrite.localId,
+            predecessorResult.server.updatedAt,
+          );
+        } else {
+          beforeWrite.pending = null;
+          beforeWrite.pendingRevision = null;
+          beforeWrite.conflict = true;
+          return { ok: false, conflict: true };
+        }
+      }
+      if (beforeWrite.conflict) {
         beforeWrite.pending = null;
         beforeWrite.pendingRevision = null;
         beforeWrite.conflict = true;
-        return { ok: false, conflict: true, server: predecessorResult?.server };
+        return { ok: false, conflict: true };
       }
 
       let result: SessionDraftSaveResult;
@@ -278,8 +311,14 @@ export class SessionDraftPersistence {
       current.pendingRevision = null;
     }
     if (result.conflict) {
-      current.conflict = true;
       if (result.server) this.serverVersions.set(sessionId, result.server.updatedAt);
+      if (current.revision !== revision && result.server) {
+        current.baseUpdatedAt = result.server.updatedAt;
+        current.conflict = false;
+        this.localCache.rebaseDirty(sessionId, current.localId, result.server.updatedAt);
+      } else {
+        current.conflict = true;
+      }
     }
   }
 
@@ -348,5 +387,10 @@ export class SessionDraftPersistence {
     if (current && !current.pending && !current.dirty && !this.activeReads.has(sessionId)) {
       this.entries.delete(sessionId);
     }
+  }
+
+  private hasOlderRead(sessionId: string, revision: number): boolean {
+    const reads = this.activeReads.get(sessionId);
+    return Boolean(reads && [...reads].some((read) => read.revision < revision));
   }
 }

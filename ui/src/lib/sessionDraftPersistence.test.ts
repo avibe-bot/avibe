@@ -167,6 +167,29 @@ describe('SessionDraftPersistence', () => {
     expect(persistence.revision('session-a')).toBe(0);
   });
 
+  it('keeps the saved revision when a newer read settles before an older read', async () => {
+    const persistence = new SessionDraftPersistence(localCache());
+    const olderRead = persistence.beginRead('session-a');
+    await persistence.save('session-a', 'newer', async () => ({
+      ok: true,
+      server: { text: 'newer', updatedAt: 'rev-2' },
+    }));
+    const newerRead = persistence.beginRead('session-a');
+
+    expect(persistence.reconcileRead(
+      'session-a',
+      newerRead,
+      { text: 'newer', updatedAt: 'rev-2' },
+    )).toBe('newer');
+    expect(persistence.revision('session-a')).toBe(1);
+    expect(persistence.reconcileRead(
+      'session-a',
+      olderRead,
+      { text: 'old', updatedAt: 'rev-1' },
+    )).toBe('newer');
+    expect(persistence.revision('session-a')).toBe(0);
+  });
+
   it('recovers a failed write from local storage in a new persistence instance', async () => {
     const storage = new MemoryStorage();
     const first = new SessionDraftPersistence(localCache(storage));
@@ -297,6 +320,32 @@ describe('SessionDraftPersistence', () => {
     expect(resolved).toHaveBeenCalledWith({
       text: 'local edit resolved',
       expectedUpdatedAt: 'rev-2',
+    });
+  });
+
+  it('rebases a newer edit made before the previous write conflict returns', async () => {
+    const persistence = new SessionDraftPersistence(localCache());
+    const first = deferred<SessionDraftSaveResult>();
+    const firstSave = persistence.save('session-a', 'before send', async () => first.promise);
+    await Promise.resolve();
+
+    persistence.cache('session-a', 'typed after send');
+    const successor = vi.fn(async (draft: SessionDraftWrite): Promise<SessionDraftSaveResult> => ({
+      ok: true,
+      server: { text: draft.text, updatedAt: 'rev-3' },
+    }));
+    const secondSave = persistence.save('session-a', 'typed after send', successor);
+    first.resolve({
+      ok: false,
+      conflict: true,
+      server: { text: '', updatedAt: 'clear-revision' },
+    });
+
+    await expect(firstSave).resolves.toMatchObject({ ok: false, conflict: true });
+    await expect(secondSave).resolves.toMatchObject({ ok: true });
+    expect(successor).toHaveBeenCalledWith({
+      text: 'typed after send',
+      expectedUpdatedAt: 'clear-revision',
     });
   });
 

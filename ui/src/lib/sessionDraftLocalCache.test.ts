@@ -109,6 +109,30 @@ describe('SessionDraftLocalCache', () => {
     )).toBe('archive-1');
   });
 
+  it('keeps a newer in-memory invalidation when storage retains an older token', () => {
+    const storage = new MemoryStorage();
+    let sequence = 0;
+    let blockWrites = false;
+    const setItem = storage.setItem.bind(storage);
+    storage.setItem = (key, value) => {
+      if (blockWrites) throw new Error('read only');
+      setItem(key, value);
+    };
+    const cache = new SessionDraftLocalCache(
+      storage,
+      () => `archive-${++sequence}`,
+      () => sequence,
+    );
+
+    expect(cache.invalidate('session-a')).toBe('archive-1');
+    blockWrites = true;
+    expect(cache.invalidate('session-a')).toBe('archive-2');
+    expect(storage.getItem(
+      `${SESSION_DRAFT_INVALIDATION_PREFIX}session-a`,
+    )).toBe('archive-1');
+    expect(cache.readInvalidation('session-a')).toBe('archive-2');
+  });
+
   it('discards malformed data and tolerates blocked storage', () => {
     const storage = new MemoryStorage();
     storage.setItem(`${SESSION_DRAFT_STORAGE_PREFIX}broken`, '{not-json');

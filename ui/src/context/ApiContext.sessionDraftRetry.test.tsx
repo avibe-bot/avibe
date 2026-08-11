@@ -31,6 +31,27 @@ afterEach(() => {
 });
 
 describe('ApiProvider session draft reconnect', () => {
+  it('syncs restored dirty drafts when a visible provider mounts', async () => {
+    const cache = new SessionDraftLocalCache(window.localStorage);
+    cache.writeDirty('session-a', 'restored A', 'rev-a');
+    apiFetch.mockImplementation(async (_path: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { text: string };
+      return new Response(JSON.stringify({
+        ok: true,
+        draft: { text: body.text, updated_at: 'synced-a' },
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+
+    render(<ApiProvider><div /></ApiProvider>);
+
+    await waitFor(() => expect(apiFetch).toHaveBeenCalledTimes(1));
+    expect(apiFetch.mock.calls[0]?.[0]).toBe('/api/sessions/session-a/draft');
+    expect(cache.read('session-a')?.dirty).toBe(false);
+  });
+
   it('syncs dirty drafts for every session when the browser comes online', async () => {
     const cache = new SessionDraftLocalCache(window.localStorage);
     cache.writeDirty('session-a', 'offline A', 'rev-a');

@@ -2733,6 +2733,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     document.addEventListener('visibilitychange', wakeIfVisible);
     window.addEventListener('online', wakeIfVisible);
     window.addEventListener('focus', wakeIfVisible);
+    if (document.visibilityState === 'visible') syncSessionDraftsRef.current();
     return () => {
       document.removeEventListener('visibilitychange', wakeIfVisible);
       window.removeEventListener('online', wakeIfVisible);
