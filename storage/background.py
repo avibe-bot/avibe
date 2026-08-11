@@ -61,6 +61,8 @@ from storage.session_reclaim import (
 
 logger = logging.getLogger(__name__)
 
+CALLBACK_TERMINAL_TURN_ID_METADATA_KEY = "callback_terminal_turn_id"
+
 
 def _json_dumps(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
@@ -3229,15 +3231,29 @@ class SQLiteBackgroundTaskStore:
             ).mappings().first()
             if parent is None:
                 raise ValueError(f"callback parent Run not found: {parent_run_id}")
-            callback_run_id = conn.execute(
-                select(agent_runs.c.id)
-                .where(agent_runs.c.run_type == "agent_run")
-                .where(agent_runs.c.source_kind == "callback")
-                .where(agent_runs.c.parent_run_id == parent_run_id)
-                .where(agent_runs.c.source_actor == source_actor)
-                .order_by(agent_runs.c.created_at, agent_runs.c.id)
-                .limit(1)
-            ).scalar_one_or_none()
+            terminal_turn_id = str(values.get("callback_terminal_turn_id") or "").strip()
+            callback_session_id = str(values.get("session_id") or "").strip()
+            callback_run_id = None
+            if terminal_turn_id and callback_session_id:
+                callback_run_id = conn.execute(
+                    select(agent_runs.c.id)
+                    .where(agent_runs.c.run_type == "agent_run")
+                    .where(agent_runs.c.source_kind == "callback")
+                    .where(agent_runs.c.callback_terminal_turn_id == terminal_turn_id)
+                    .where(agent_runs.c.session_id == callback_session_id)
+                    .order_by(agent_runs.c.created_at, agent_runs.c.id)
+                    .limit(1)
+                ).scalar_one_or_none()
+            if callback_run_id is None:
+                callback_run_id = conn.execute(
+                    select(agent_runs.c.id)
+                    .where(agent_runs.c.run_type == "agent_run")
+                    .where(agent_runs.c.source_kind == "callback")
+                    .where(agent_runs.c.parent_run_id == parent_run_id)
+                    .where(agent_runs.c.source_actor == source_actor)
+                    .order_by(agent_runs.c.created_at, agent_runs.c.id)
+                    .limit(1)
+                ).scalar_one_or_none()
             parent_status = normalize_run_status(parent["status"])
             parent_refuses_new_child = bool(parent["cancel_requested"]) and (
                 parent_status != "canceled"
@@ -5821,10 +5837,41 @@ class SQLiteBackgroundTaskStore:
         *,
         parent_run_id: str,
         source_actor: str,
+        terminal_turn_id: Optional[str] = None,
+        callback_session_id: Optional[str] = None,
     ) -> Optional[dict[str, Any]]:
-        """Return the callback Run for one parent callback identity."""
+        """Return the callback Run referenced by one parent callback ledger."""
 
         with self.engine.connect() as conn:
+            callback_run_id = conn.execute(
+                select(agent_runs.c.callback_run_id)
+                .where(agent_runs.c.id == parent_run_id)
+                .limit(1)
+            ).scalar_one_or_none()
+            if callback_run_id:
+                row = conn.execute(
+                    select(agent_runs)
+                    .where(agent_runs.c.id == callback_run_id)
+                    .where(agent_runs.c.run_type == "agent_run")
+                    .where(agent_runs.c.source_kind == "callback")
+                    .limit(1)
+                ).mappings().first()
+                if row is not None:
+                    return self._run_from_row(row)
+            normalized_turn_id = str(terminal_turn_id or "").strip()
+            normalized_session_id = str(callback_session_id or "").strip()
+            if normalized_turn_id and normalized_session_id:
+                row = conn.execute(
+                    select(agent_runs)
+                    .where(agent_runs.c.run_type == "agent_run")
+                    .where(agent_runs.c.source_kind == "callback")
+                    .where(agent_runs.c.callback_terminal_turn_id == normalized_turn_id)
+                    .where(agent_runs.c.session_id == normalized_session_id)
+                    .order_by(agent_runs.c.created_at, agent_runs.c.id)
+                    .limit(1)
+                ).mappings().first()
+                if row is not None:
+                    return self._run_from_row(row)
             row = conn.execute(
                 select(agent_runs)
                 .where(agent_runs.c.run_type == "agent_run")
@@ -7585,6 +7632,8 @@ class SQLiteBackgroundTaskStore:
     def _run_values(self, payload: dict[str, Any]) -> dict[str, Any]:
         created_at = payload.get("created_at") or payload.get("updated_at")
         message = payload.get("message") or payload.get("prompt")
+        raw_metadata = payload.get("metadata")
+        metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
         return {
             "id": payload["id"],
             "definition_id": payload.get("definition_id") or payload.get("task_id"),
@@ -7615,6 +7664,10 @@ class SQLiteBackgroundTaskStore:
             "callback_error": payload.get("callback_error"),
             "callback_run_id": payload.get("callback_run_id"),
             "callback_completed_at": payload.get("callback_completed_at"),
+            "callback_terminal_turn_id": str(
+                metadata.get(CALLBACK_TERMINAL_TURN_ID_METADATA_KEY) or ""
+            ).strip()
+            or None,
             "cancel_requested": 1 if payload.get("cancel_requested") else 0,
             "cancel_requested_at": payload.get("cancel_requested_at"),
             "pid": payload.get("pid"),
@@ -7626,7 +7679,7 @@ class SQLiteBackgroundTaskStore:
             "started_at": payload.get("started_at"),
             "completed_at": payload.get("completed_at"),
             "updated_at": payload.get("updated_at") or created_at,
-            "metadata_json": _json_dumps(payload.get("metadata") or {}),
+            "metadata_json": _json_dumps(raw_metadata or {}),
         }
 
     @staticmethod
@@ -7740,6 +7793,7 @@ class SQLiteBackgroundTaskStore:
             "callback_error": row["callback_error"],
             "callback_run_id": row["callback_run_id"],
             "callback_completed_at": row["callback_completed_at"],
+            "callback_terminal_turn_id": row["callback_terminal_turn_id"],
             "cancel_requested": bool(row["cancel_requested"]),
             "cancel_requested_at": row["cancel_requested_at"],
             "pid": row["pid"],
