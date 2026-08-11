@@ -167,6 +167,159 @@ def model_hub_fixed_menu_ids(backend: str) -> tuple[str, ...]:
     )
 
 
+def _legacy_model_hub_eligible_source_ids(sources_payload: object, backend: str) -> set[str]:
+    """Return the ids in ``sources_payload`` a legacy agent could have supplied from.
+
+    Eligibility is decided by the live rule rather than a copy of it, so a
+    migrated hop can never reference a source the parser then rejects. A source
+    entry that no longer parses is simply not eligible; ``from_payload`` reports
+    it with its own precise error once migration finishes.
+    """
+
+    if not isinstance(sources_payload, list):
+        return set()
+    eligible: set[str] = set()
+    for raw_source in sources_payload:
+        try:
+            source = ModelHubSourceConfig.from_payload(raw_source)
+        except (ValueError, TypeError):
+            continue
+        if ModelHubConfig.source_eligible_for_backend(source, backend):
+            eligible.add(source.id)
+    return eligible
+
+
+def _legacy_model_hub_routes(
+    raw_agent: dict,
+    backend: str,
+    sources_payload: object,
+) -> dict:
+    """Build v5 routes for a pre-v5 agent that only persisted ``mappings``.
+
+    A legacy mapping rewrote the requested menu model and left source choice to
+    the agent's ``sources.order``; a v5 hop pins both. The rewrite is therefore
+    preserved by enumerating the ordered eligible sources for that target model,
+    which reproduces the old "rewrite, then walk the order" behavior. Everything
+    a v5 route cannot express — a mapping for a model the current menu no longer
+    offers, or one with no eligible source to walk — degrades to an empty route
+    rather than inventing a supply path.
+    """
+
+    if backend in {"claude", "codex"}:
+        menu_ids: tuple[str, ...] = model_hub_fixed_menu_ids(backend)
+    else:
+        menu = raw_agent.get("menu")
+        checked = menu.get("checked") if isinstance(menu, dict) else None
+        menu_ids = tuple(item for item in checked if isinstance(item, str)) if isinstance(checked, list) else ()
+
+    mappings = raw_agent.get("mappings")
+    # Legacy resolution only consulted mappings for fixed menus, so an open
+    # (OpenCode) menu's mappings were already inert and stay inert here.
+    if not isinstance(mappings, list) or raw_agent.get("menu_kind") != "fixed":
+        return {model_id: {"hops": []} for model_id in menu_ids}
+
+    targets: dict[str, str] = {}
+    for mapping in mappings:
+        if not isinstance(mapping, dict) or mapping.get("enabled") is not True:
+            continue
+        builtin_id = mapping.get("builtin_id")
+        target_model_id = mapping.get("target_model_id")
+        if not isinstance(builtin_id, str) or not isinstance(target_model_id, str):
+            continue
+        if builtin_id == target_model_id or builtin_id not in menu_ids:
+            continue
+        targets.setdefault(builtin_id, target_model_id)
+
+    order = raw_agent.get("sources", {}).get("order") if isinstance(raw_agent.get("sources"), dict) else None
+    eligible = _legacy_model_hub_eligible_source_ids(sources_payload, backend)
+    ordered_source_ids = (
+        [source_id for source_id in order if isinstance(source_id, str) and source_id in eligible]
+        if isinstance(order, list)
+        else []
+    )
+
+    routes: dict[str, dict] = {}
+    for model_id in menu_ids:
+        target_model_id = targets.get(model_id)
+        hops = (
+            [
+                {"source_id": source_id, "model_id": target_model_id}
+                for source_id in ordered_source_ids
+            ]
+            if target_model_id is not None
+            else []
+        )
+        if target_model_id is not None and not hops:
+            logger.warning(
+                "Model Hub migration dropped a '%s' mapping for '%s': no eligible source to route through",
+                backend,
+                model_id,
+            )
+        routes[model_id] = {"hops": hops}
+    dropped = sorted(set(targets) - set(menu_ids))
+    for model_id in dropped:
+        logger.warning(
+            "Model Hub migration dropped a '%s' mapping for '%s': the model is no longer offered",
+            backend,
+            model_id,
+        )
+    return routes
+
+
+def _migrate_legacy_model_hub_on_load(payload: dict) -> dict:
+    """Upgrade a pre-v5 ``model_hub`` payload to the current supply contract.
+
+    Configs written before the v5 supply contract persist
+    ``subscription_hub_experimental``, per-agent ``mappings``, and a
+    ``sources.policy`` selector. The parser is strict about unknown fields, so
+    without this step every install that predates v5 fails to start on upgrade
+    instead of migrating. Reading the old shape here keeps that upgrade silent
+    for the user; a payload that is already v5 is returned untouched.
+    """
+
+    model_hub = payload.get("model_hub")
+    if not isinstance(model_hub, dict):
+        return payload
+
+    migrated_model_hub = dict(model_hub)
+    changed = migrated_model_hub.pop("subscription_hub_experimental", None) is not None
+
+    agents = model_hub.get("agents")
+    if isinstance(agents, dict):
+        migrated_agents = dict(agents)
+        for backend, raw_agent in agents.items():
+            if not isinstance(raw_agent, dict):
+                continue
+            migrated_agent = dict(raw_agent)
+            agent_changed = migrated_agent.pop("mappings", None) is not None
+
+            raw_sources = migrated_agent.get("sources")
+            if isinstance(raw_sources, dict) and "policy" in raw_sources:
+                migrated_agent["sources"] = {
+                    key: value for key, value in raw_sources.items() if key != "policy"
+                }
+                agent_changed = True
+
+            if "routes" not in migrated_agent:
+                migrated_agent["routes"] = _legacy_model_hub_routes(
+                    raw_agent,
+                    backend,
+                    model_hub.get("sources"),
+                )
+                agent_changed = True
+
+            if agent_changed:
+                migrated_agents[backend] = migrated_agent
+                changed = True
+        migrated_model_hub["agents"] = migrated_agents
+
+    if not changed:
+        return payload
+    migrated_payload = dict(payload)
+    migrated_payload["model_hub"] = migrated_model_hub
+    return migrated_payload
+
+
 def _migrate_fixed_menu_routes_on_load(payload: dict) -> dict:
     """Adapt fixed-menu route keys to the current bundled catalog on reload.
 
@@ -1557,7 +1710,9 @@ class V2Config:
             if not path.exists():
                 raise FileNotFoundError(f"Config not found: {path}")
             payload = json.loads(path.read_text(encoding="utf-8"))
-        return cls.from_payload(_migrate_fixed_menu_routes_on_load(payload))
+        return cls.from_payload(
+            _migrate_fixed_menu_routes_on_load(_migrate_legacy_model_hub_on_load(payload))
+        )
 
     @classmethod
     def from_payload(cls, payload: dict) -> "V2Config":

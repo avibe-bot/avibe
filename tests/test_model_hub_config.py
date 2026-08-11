@@ -1103,6 +1103,87 @@ def test_config_reload_migrates_fixed_routes_when_bundled_catalog_changes(monkey
     assert stale_id not in migrated_routes
 
 
+def _legacy_model_hub_payload(payload: dict) -> dict:
+    """Rewrite a current config payload into the pre-v5 persisted ``model_hub`` shape.
+
+    Derived from the live default rather than a frozen literal, so every agent
+    shape that exists today is seeded and a backend added later is covered
+    without editing this helper.
+    """
+
+    legacy = copy.deepcopy(payload)
+    model_hub = legacy["model_hub"]
+    model_hub["subscription_hub_experimental"] = False
+    for agent in model_hub["agents"].values():
+        agent.pop("routes")
+        agent["mappings"] = []
+        agent["sources"] = {"policy": "follow", **agent["sources"]}
+    return legacy
+
+
+def test_mh_cfg_mig_001_pre_v5_model_hub_config_still_loads(tmp_path):
+    current = api.config_to_payload(default_config())
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(_legacy_model_hub_payload(current)), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert loaded.model_hub.to_payload() == current["model_hub"]
+
+
+def test_mh_cfg_mig_001_pre_v5_mapping_becomes_a_route_over_ordered_sources(tmp_path):
+    current = api.config_to_payload(default_config())
+    legacy = _legacy_model_hub_payload(current)
+    source = copy.deepcopy(_schema("source.schema.json")["examples"][0])
+    legacy["model_hub"]["sources"] = [source]
+    claude = legacy["model_hub"]["agents"]["claude"]
+    claude["sources"]["order"] = [source["id"]]
+    mapped_id, disabled_id, *_ = tuple(current["model_hub"]["agents"]["claude"]["routes"])
+    claude["mappings"] = [
+        {"builtin_id": mapped_id, "target_model_id": "target-model", "enabled": True},
+        {"builtin_id": disabled_id, "target_model_id": "never-routed", "enabled": False},
+        {"builtin_id": "retired-menu-model", "target_model_id": "target-model", "enabled": True},
+    ]
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    routes = V2Config.load(config_path=config_path).model_hub.agents["claude"].routes
+
+    assert set(routes) == set(current["model_hub"]["agents"]["claude"]["routes"])
+    assert [(hop.source_id, hop.model_id) for hop in routes[mapped_id].hops] == [
+        (source["id"], "target-model")
+    ]
+    assert all(
+        routes[model_id].hops == () for model_id in routes if model_id != mapped_id
+    )
+
+
+def test_mh_cfg_mig_001_pre_v5_mapping_without_eligible_source_degrades_to_empty_route(tmp_path):
+    current = api.config_to_payload(default_config())
+    legacy = _legacy_model_hub_payload(current)
+    claude = legacy["model_hub"]["agents"]["claude"]
+    mapped_id = next(iter(current["model_hub"]["agents"]["claude"]["routes"]))
+    claude["mappings"] = [
+        {"builtin_id": mapped_id, "target_model_id": "target-model", "enabled": True}
+    ]
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert loaded.model_hub.to_payload() == current["model_hub"]
+
+
+def test_current_model_hub_config_survives_load_unchanged(tmp_path):
+    current = api.config_to_payload(default_config())
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(current), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert loaded.model_hub.to_payload() == current["model_hub"]
+
+
 @pytest.mark.parametrize(
     ("status", "retry_at", "detail_key"),
     [
