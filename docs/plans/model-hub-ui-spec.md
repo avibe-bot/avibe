@@ -686,7 +686,7 @@ as everywhere else in this document.
 | §1.1 | Empty | `sources == []` | F5 | `upstream.empty` | 添加订阅 → 13, then a vendor row → 04; 添加 API Key → 05 |
 | §1.1 | Loading | First paint | → §1.0 Unreachable / §1.0 Sources unread / §1.0 Partial — the same three §1.0 disperses first paint into, because this row is that same first paint seen from the module | — | The payload decides where it lands, not the fact that it arrived — the same reading §1.0 makes one module up: `sources == []` → Empty; anything else → Ready, whose per-source and per-group rows below are drawn from that same payload |
 | §1.1 | Per-source `cooldown` | Source reports cooling `[spec §4.5]` | F5 — a rendered report, not a request | `upstream.state.unavailableRetry` while `retry_at` is still ahead, `upstream.state.unavailableDue` once it has passed `[derived]`, `legend.unavailable` | A later payload reports the source in a different state → that state. `retry_at` is when it becomes worth asking again, not evidence that asking worked, so nothing here promotes the source on a clock — and the two keys are that same fact said in copy: the clock running out changes the sentence and not the state |
-| §1.1 | Per-source `needs_action` | The source reports `needs_action` `[spec §4.5]` | F5 | `sourceDetail.status.needsAction.oauthExpired`, `sourceDetail.status.needsAction.balanceExhausted`, `sourceDetail.status.needsAction.credentialRevoked`, `sourceDetail.status.needsAction.accountBanned`, `upstream.repair.reauthorize`, `upstream.repair.replaceKey` | A later payload reports the source in a different state → that state, whatever it says `[contract]`. The payload carries the source's current status and no history, so on a first load that already reads `needs_action` there is no prior state to go back to; and the recovery has a resulting status of its own that the authority writes — a usable refresh clears the blocker and lands `standby` `[contract]` — so remembering one here could only contradict it. Frame 12 registers the card-level repair: OAuth expiry → Reauthorizing; a revoked API key → Key entry. Balance exhaustion and account ban keep their contracted vendor exits and do not borrow either credential action |
+| §1.1 | Per-source `needs_action` | The source reports `needs_action` `[spec §4.5]` | F5 | `sourceDetail.status.needsAction.oauthExpired`, `sourceDetail.status.needsAction.balanceExhausted`, `sourceDetail.status.needsAction.credentialRevoked`, `sourceDetail.status.needsAction.accountBanned`, `upstream.repair.reauthorize`, `upstream.repair.replaceKey`, `upstream.repair.topUp`, `upstream.repair.contactVendor`, `upstream.repair.contactProvider` | A later payload reports the source in a different state → that state, whatever it says `[contract]`. The payload carries the source's current status and no history, so on a first load that already reads `needs_action` there is no prior state to go back to; and the recovery has a resulting status of its own that the authority writes — a usable refresh clears the blocker and lands `standby` `[contract]` — so remembering one here could only contradict it. Frame 12 registers the card-level repair: OAuth expiry → Reauthorizing; a revoked API key → Key entry; balance exhaustion or account ban on a known subscription vendor → the §1.4 static top-up or support destination; the same two causes on an `api_key` Source → the non-linked service-provider fallback. None borrows another cause's action |
 | §1.1 | Per-source `error` | Unclassified failure `[spec §4.5]` | F5 | `sourceDetail.status.error` | The source leaves `error`; the card is one tap to 06 |
 | §1.1 | Group waiting | Every member of that backend's chain is cooling and none is retry-ready `[contract]` | F5 — no request of this state's can fail, and no elapsed time resolves it either | `gateway.group.status.waiting` | A later payload reports a runnable member → Ready or Takeover active. Every member's `retry_at` can pass with the group still waiting, so the exit is the next payload's reading and never the elapsed time. F5 says this state issues nothing, not that waiting is the cure |
 | §1.1 | Group interrupted — CLI unavailable | `supply_status` reads `interrupted` and the blocker is the native CLI that backend depends on being unreachable **in this process**, at any source health `[contract]` | F2 — the group keeps its last rendering | `gateway.group.status.interrupted` | The CLI becomes reachable → Ready. Waiting does not resolve this one, which is why it is a different word from 暂时全部在冷却 |
@@ -750,7 +750,7 @@ as everywhere else in this document.
 | §1.6 | Cooling | The source is `cooldown` `[contract]` | F5 | `upstream.state.unavailableRetry` while `retry_at` is still ahead, `upstream.state.unavailableDue` once it has passed `[derived]` | A later payload reports the source in another state → that state; `retry_at` passing is not that payload — it changes which of the two keys the bar renders and nothing else. Separate from *Not supplying* because the two answer different questions — standby says nothing is drawing from this source, cooling says nothing *can* yet and names when that changes. This section's own status mapping gives `cooldown` the gold `upstream.state.unavailableRetry`; a row that folded it into the muted standby word dropped the one fact the mapping exists to carry |
 | §1.6 | Needs action | The source is `needs_action` `[spec §4.5]` | F5 | `sourceDetail.status.needsAction.oauthExpired`, `sourceDetail.status.needsAction.balanceExhausted`, `sourceDetail.status.needsAction.credentialRevoked`, `sourceDetail.status.needsAction.accountBanned` | The reported cause clears. The bar states which cause `state.detail_key` carries and the table stays live; frame 12 owns the card-level repair controls, while this page keeps 重新拉取 enabled |
 | §1.6 | Unclassified error | The source is `error` `[spec §4.5]` | F5 | `sourceDetail.status.error` | The source leaves `error`. The bar reads 异常 and claims no cause; the table and both actions stay live |
-| §1.6 | Source gone | The selected source is not in a `GET /api/models/sources` read this page makes, or a mutation on it answers `source_not_found` `[contract]` — removed by another tab, another API client, or a guarded cascade while 06 was open. Distinct from every empty reading above, which are about this source's *models*; here the subject of the page is what is gone, and the list may still hold others, so §1.0's Empty does not answer either | F5 — this state issues nothing. It is what the page renders once a read or a mutation has already told it | `sourceDetail.gone` | The detail is dropped rather than left standing over a source that is not there (D-16), and the frame's own back control `iGcAi` → 01, where the list is the surface of truth — the same answer §1.4's *Dismissing* gives for the same reason (D-16). Re-entry is not a state of this frame: there is no source left to open |
+| §1.6 | Source gone | The selected source is not in a `GET /api/models/sources` read this page makes, or any source-bound mutation registered in §1.6, §1.10 or §1.11 answers `source_not_found` `[contract]` — removed by another tab, another API client, or a guarded cascade while the surface was open. This entry has precedence over every caller's F1/F3 branch; those treatments apply only after the absence reading is excluded. Distinct from every empty reading above, which is about this source's *models*; here the subject of the page is what is gone, and the list may still hold others, so §1.0's Empty does not answer either | F5 — this state issues nothing. It is what the page renders once a read or a mutation has already told it | `sourceDetail.gone` | The detail or card overlay is dropped rather than left standing over a source that is not there (D-16), and the frame's own back control `iGcAi` → 01, where the list is the surface of truth — the same answer §1.4's *Dismissing* gives for the same reason (D-16). Re-entry is not a state of this frame: there is no source left to open |
 | §1.7 | Nominal | **No route is taken over or exhausted** — every configured chain is serving its own first stored hop. AC-30 makes takeover 「a projection of visible configuration plus live runnability」 rather than a stored sibling state `[contract]`, so the subject of this frame is chains and the predicate is read per chain: a Source no chain draws from, and a non-head hop that is unavailable while the head still serves, are both outside it. Reading it globally — 「no source is unavailable」 — activated 08 for an unhealthy Source nothing was using, and left the frame with no valid state whenever one existed | F5 | — | A head enters `cooldown` while a later candidate serves → Takeover; a head stops being runnable for something waiting does not clear → §1.1 *Serving past a blocked head*, which is not this frame |
 | §1.7 | Takeover | The head is unavailable **for a recoverable quota/cooldown reason** and a next candidate is serving `[contract]` — §4.3 derives takeover from exactly that pair, and the paragraph below says what the other blocker kinds render instead | F5 | `takeover.pill`, `takeover.chip` | Recovery → Nominal, on the next turn `[spec §4.3]` |
 | §1.7 | Exhausted | The head is unavailable and **no** candidate remains | F5 | `gateway.supply.none` | Any candidate recovers → Takeover or Nominal |
@@ -772,7 +772,7 @@ as everywhere else in this document.
 | §1.10 | Removing source | The destructive primary was activated in Remove confirmation or Source remove refused — `DELETE /api/models/sources/<id>` is non-forced on the first path and carries `?force=true` only on the second `[contract]` | F3 on refusal; F1 otherwise → Source remove failed | `sourceDetail.remove.checking` | Success → §1.6 Source gone; an initial guard refusal → Source remove refused |
 | §1.10 | Source remove refused | The non-forced delete returned the guarded envelope; frame 11 renders its source-removal variant while retaining the held §1.6 origin | F3 — shared refusal semantics and the frame 11 dialog | `guard.title.removeSource`, `guard.confirm.removeSource`, `guard.label.removeSource`, `guard.count`, `guard.hop.position.removeSource`, `guard.hint.removeSource`, `guard.gap.label`, `guard.gap.subject`, `guard.gap.agents`, `gateway.modelCount`, `guard.cancel` | 移除来源 re-sends the same `DELETE` with `force` → Removing source; 取消 / close / outside press restores the held origin by the shared conservation rule |
 | §1.10 | Source remove failed `[derived]` | Either delete request failed or never answered | F1, in place | `sourceDetail.remove.fail`, `sourceDetail.retry` | 重试 re-reads `GET /api/models/sources` by the held id (D-36): absent → §1.6 Source gone; present → re-send the same stage, non-forced before refusal and forced after one |
-| §1.11 | Needs-action card | Frame 12's card delta is rendered for a source whose status is `needs_action` | F5 | the selected `sourceDetail.status.needsAction.*` key plus `upstream.state.supplyStopped`, and `upstream.repair.reauthorize` or `upstream.repair.replaceKey` when that cause has a credential repair | 重新授权 on a `native_cli` source → Reauth confirmation; on a Hub source → Reauthorizing; 更换 Key → Key entry; the remaining causes use their contracted vendor exits |
+| §1.11 | Needs-action card | Frame 12's card delta is rendered for a source whose status is `needs_action` | F5 | the selected `sourceDetail.status.needsAction.*` key plus `upstream.state.supplyStopped`; one of `upstream.repair.reauthorize`, `upstream.repair.replaceKey`, `upstream.repair.topUp`, `upstream.repair.contactVendor`, or the non-linked `upstream.repair.contactProvider` fallback | 重新授权 on a `native_cli` source → Reauth confirmation; on a Hub source → Reauthorizing; 更换 Key → Key entry. A subscription's 补充额度 or 联系厂商 opens the matching §1.4 static destination in a new browser context and keeps this card in place; a later source payload decides whether its state changed. An `api_key` Source renders 联系你的服务商 with no link for either vendor-directed cause, because a compatibility vendor id does not identify the account operator |
 | §1.11 | Reauth confirmation `[derived]` `[contract]` | 重新授权 pressed for a `native_cli` source | F5 — no request has been sent | `upstream.repair.reauthConfirm.title`, `upstream.repair.reauthConfirm.detail`, `upstream.repair.reauthConfirm.confirm`, `upstream.repair.reauthConfirm.cancel` | 继续登录 sends `POST /api/models/sources/<id>/reauth` with `{acknowledge_irreversible: true}` → Reauthorizing; 取消 / close / Escape restores the held Needs-action card by the shared conservation rule |
 | §1.11 | Reauthorizing | The Hub card action was pressed, or the native acknowledgement was confirmed — `POST /api/models/sources/<id>/reauth` sends `{}` for Hub and the acknowledged body above for `native_cli` `[contract]` | F1 before a flow is held → Repair failed; after acquisition, §1.4's F1–F5 treatments apply | `upstream.repair.reauthorizing` | An acquired flow reuses §1.4's declarative presentation, submit, 2s poll, cancel, timeout and retry machine with held `intent: reauth`; its terminal with non-empty `interrupted_pairs` → Repair impact reported; an empty array → re-read the card and render the returned source state. It never consumes create-only arrays `[contract]` |
 | §1.11 | Key entry `[derived]` | 更换 Key pressed, or a guarded refusal is abandoned | F5 — the secret remains local and no request is sent until submit | `upstream.repair.replaceKey` | Submit holds the typed key and sends `PUT /api/models/sources/<id>/credential` with `{key}` → Replacing key; cancel restores the held Needs-action card by the shared conservation rule |
@@ -1243,6 +1243,9 @@ unable to outlive its surface, which is the cheaper answer wherever it is availa
 | `upstream.addApiKey` | 添加 API Key | Add API key |
 | `upstream.repair.reauthorize` `[frame]` | 重新授权 | Reauthorize |
 | `upstream.repair.replaceKey` `[frame]` | 更换 Key | Replace key |
+| `upstream.repair.topUp` `[derived]` | 补充额度 | Add credits |
+| `upstream.repair.contactVendor` `[derived]` | 联系厂商 | Contact vendor |
+| `upstream.repair.contactProvider` `[derived]` | 联系你的服务商 | Contact your provider |
 | `upstream.repair.reauthConfirm.title` `[derived]` `[contract]` | 重新授权 {{source}} | Reauthorize {{source}} |
 | `upstream.repair.reauthConfirm.detail` `[derived]` `[contract]` | 开始登录后无法回滚本机凭据变更。来源身份和路由位置会保留,新凭据和型号结果在流程完成时生效。 | Once sign-in starts, changes to the local credential cannot be rolled back. The source identity and route positions stay in place; the new credential and model result take effect when the flow finishes. |
 | `upstream.repair.reauthConfirm.confirm` `[derived]` `[contract]` | 继续登录 | Continue to sign in |
@@ -2184,6 +2187,23 @@ ToS note and the hint — while the producer is now explicit: Claude 订阅 sele
 radio group here still produces only `channel`; `POST /api/models/oauth/start` combines
 the vendor already held with the channel chosen here.
 
+**Static subscription-vendor register**. These are client-owned brand destinations, the
+same class of declaration as the vendor name, plan subtitle and ToS note above; they are
+not OAuth-flow fields and do not travel through the server. Frame 12 consumes the top-up
+destination for `balance_exhausted` and the support destination for `account_banned`:
+
+| Subscription vendor | `Source.vendor` | Top-up destination | Support / appeal destination | Implementation consumer |
+| --- | --- | --- | --- | --- |
+| Claude | `anthropic` | `https://claude.ai/settings/usage` | `https://claude.ai/restricted` | I4 extends `ui/src/components/settings/models/vendorMeta.ts` with both static destinations |
+| ChatGPT | `openai` | `https://chatgpt.com/codex/settings/usage` | `https://openai.com/form/appeal/` | I4 extends `ui/src/components/settings/models/vendorMeta.ts` with both static destinations |
+
+This register is total only for the two subscription vendors the frame-13 producer can
+emit. An `api_key` Source does not consume it: even when its compatibility preset leaves a
+known `vendor` string on the Source, that string does not identify who operates the
+account or where that operator takes payment and support requests. Frame 12 renders the
+non-linked 联系你的服务商 fallback for that population. Adding a provider is therefore a
+static-register change with a matching I4 consumer, not a new wire member.
+
 **Element inventory**
 
 | Element | Displays | Data source | Interactive | On activate |
@@ -2222,8 +2242,9 @@ The provider handoff belongs to the start transition, not to a second control in
 inside this exhibit `[contract]` `[derived]`. Every accepted start flow opens its non-null
 `presentation.auth_url` once before the dialog enters either awaiting state. That is how
 the user obtains the code or callback URL the frame asks for. The URL is server-declared;
-the client keeps no vendor-to-URL table, and polling, re-rendering or reconciling a submit
-never opens it again. A submit response is not assumed terminal: `starting`,
+the client keeps no vendor-to-**OAuth**-URL table, and the static top-up/support register
+above is never consulted for this transition. Polling, re-rendering or reconciling a submit
+never opens the authorization URL again. A submit response is not assumed terminal: `starting`,
 `awaiting_action` and `verifying` transfer ownership to the same 2s status poll as the
 no-paste branch. A reconciliation read that finds one of those states resumes that poll
 without sending the pasted value a second time.
@@ -2296,9 +2317,10 @@ claude.ai / Max · Pro and chatgpt.com / Plus · Pro, and this section registere
 as `{{host}} / {{plans}}` — two promises nothing here can keep. A subscription carries no
 `base_url` at all, so there is no entered host to interpolate; and no contract in this set
 publishes which plans a channel accepts, so there is no list to join either. Synthesizing
-the vendor's endpoint is ruled out for the reason §1.6 gives when it rules the same move
-out: it needs a vendor→URL table no contract here holds. Every other string in this dialog
-is already static per vendor — which is what the element inventory says this head is — so
+the vendor's **API endpoint** from the remediation register is ruled out: a billing or
+support destination says nothing about the endpoint a Source calls, and the two facts may
+not substitute for each other. Every other string in this dialog is already static per
+vendor — which is what the element inventory says this head is — so
 the subtitle is two rows beside `tos.claude` and `hint.chatgpt` rather than a template with
 nothing behind it. `{{plans}}` had no second consumer and its §0.9 row goes with it.
 
@@ -3427,17 +3449,19 @@ Five rules:
 - **Needs action** `[derived]` keeps the whole table visible and
   read-only-ish: you can still see what you had configured. Hiding the inventory
   because the credential stopped working destroys the only copy of the user's intent.
-- **Every mutation on this page can answer that its subject is gone, and one state
-  absorbs all of them** `[contract]` `[derived]`. `source_not_found` is in `api.md`'s
-  minimum error set and every route this page sends takes the source id in its path, so
-  a tier edit, a manual add, a manual removal and a refetch can each come back with it —
+- **Every source-bound mutation on this page or in its frame-11/frame-12 overlays can
+  answer that its subject is gone, and one state absorbs all of them** `[contract]`
+  `[derived]`. `source_not_found` is in `api.md`'s minimum error set and every route these
+  surfaces send takes the source id in its path, so a tier edit, manual add/removal,
+  refetch, source edit/removal, reauthorization and key replacement can each come back with it —
   the source having been deleted from another tab, another API client, or a guarded
   cascade while 06 sat open. Four F1 rows each inventing a sentence for it would be four
   ways of saying the same thing, and each would leave the user on a page whose subject
   does not exist: the retry those rows offer cannot succeed, which is the dead control
   D-9a rules out. So the reading is promoted out of the treatments — any of them
   answering `source_not_found` lands *Source gone*, whose only affordance is the way
-  back to a list that is still true.
+  back to a list that is still true. §0.8 declares that dispatch once, with precedence
+  over F1/F3, for §1.6, §1.10 and §1.11; their caller rows do not restate it.
 - **重新拉取 is the only action here that contacts the upstream, and the contract has
   only one to draw** `[frame]` `[contract]` AC-26. The frame draws 重新拉取 and 添加模型
   and nothing else — no connectivity test — and of those two only 重新拉取 leaves the
@@ -3595,9 +3619,10 @@ drawn from them.
   dropped and the line renders `gateway.modelCount` instead, reused verbatim rather than
   restated under a new key; this bar already reuses `upstream.state.standby` the same
   way and for the same reason. Synthesizing the vendor's official hostname to fill the
-  slot is specifically ruled out — it would need a vendor→URL table no contract here
-  holds, and it would teach every subscription user an endpoint they cannot change and
-  did not ask about, which is the mechanism D-8 exists to keep off the screen.
+  slot is specifically ruled out — it would need a separate vendor→API-host registry,
+  and §1.4's billing/support destinations are no such input. It would also teach every
+  subscription user an endpoint they cannot change and did not ask about, which is the
+  mechanism D-8 exists to keep off the screen.
 - **`sourceDetail.empty` claims a fetch happened.** 这个来源没有返回型号 is a statement about a
   completed discovery, and it is false for a source that has never had one — where the
   honest sentence is a different sentence with a different first action, since refetching
@@ -4306,7 +4331,8 @@ card variants from this frame; derive downstream rollups from the normal §1.1 p
 | --- | --- | --- | --- | --- |
 | OAuth needs-action card | Existing source identity and detail; rose dot; canonical `sourceDetail.status.needsAction.*` cause + `upstream.state.supplyStopped` | source | card + 重新授权 | Card → 06; 重新授权 → native acknowledgement or Hub reauth by channel |
 | API-key needs-action card | Existing source identity and detail; rose dot; canonical cause + `upstream.state.supplyStopped` | source | card + 更换 Key | Card → 06; 更换 Key → credential replacement entry |
-| Repair action | One action selected by credential capability and cause | source | yes | Starts the matching repair; it never also opens 06 |
+| Repair action | One action selected by credential capability and cause | source + §1.4 static vendor register for the two vendor-directed causes | yes when a registered action exists | Starts the matching credential repair, or opens the registered external destination; it never also opens 06 |
+| Self-managed fallback | `upstream.repair.contactProvider` after either vendor-directed cause on an `api_key` Source | source kind | no | — |
 
 **Geometry** `[frame]`
 
@@ -4331,6 +4357,21 @@ consequence without replacing the canonical cause `[frame]` `[contract]`.
 `[contract]`: refresh-capable auth reauthorizes; a static API key is replaced; balance is
 topped up; a banned account goes to the vendor. Frame 12 draws the first two producers.
 It does not turn the two drawn buttons into remedies for every `needs_action` cause.
+
+The other two branches consume §1.4's static subscription-vendor register rather than an
+OAuth-flow field `[derived]`. On a subscription Source, `balance_exhausted` renders
+`upstream.repair.topUp` and opens that vendor's top-up destination;
+`account_banned` renders `upstream.repair.contactVendor` and opens its support/appeal
+destination. Both reuse the drawn repair-button shell, open in a new browser context and
+leave the card in `needs_action`; returning from a vendor page is not evidence that the
+vendor changed the account. A later source payload decides the state, and 06's contracted
+重新拉取 remains the explicit recovery test after the user acts.
+
+An `api_key` Source takes neither link branch, including one created from an official
+compatibility preset. Its `vendor` says which protocol family was configured, not who
+operates the account. For `balance_exhausted` or `account_banned` it therefore renders the
+non-interactive `upstream.repair.contactProvider` fallback and keeps the card target to 06;
+it never sends that user to Anthropic or OpenAI on an identity the payload did not prove.
 
 For a `native_cli` source, 重新授权 first opens the registered acknowledgement state:
 its warning names the irreversible local-credential boundary, 继续登录 is the only
@@ -4377,10 +4418,10 @@ traps focus; Escape is cancel; Enter activates only the focused control. The imp
 keeps focus inside until 完成 `[derived]`.
 
 **Copy** — the causes reuse `models.hub.sourceDetail.status.needsAction.*`; the drawn supply
-suffix is `models.hub.upstream.state.supplyStopped`; actions, acknowledgement and terminal
-impact strings are registered under `models.hub.upstream.repair.*` in §1.0; the credential
-refusal's operation strings are `models.hub.guard.*.replaceKey` in §1.6. No i18n file is
-changed by this registration.
+suffix is `models.hub.upstream.state.supplyStopped`; credential actions, vendor exits,
+self-managed fallback, acknowledgement and terminal impact strings are registered under
+`models.hub.upstream.repair.*` in §1.0; the credential refusal's operation strings are
+`models.hub.guard.*.replaceKey` in §1.6. No i18n file is changed by this registration.
 
 ---
 
