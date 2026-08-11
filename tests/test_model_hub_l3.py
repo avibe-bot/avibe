@@ -49,6 +49,7 @@ from core.handlers.model_hub.provenance import (
     TURN_OUTCOME_RENDERING_AUTHORITY,
     TurnOutcomeProductionError,
     TurnCorrelationRegistry,
+    exact_hop_blockers,
     produce_turn_outcome,
     project_turn_outcome_copy,
     render_turn_outcome_copy,
@@ -712,6 +713,8 @@ class FakeStreamResponse:
         self.write_error = write_error
         self.eof_error = eof_error
         self.eof_reached = eof_reached
+        self.writes: list[bytes] = []
+        self.eof_called = False
 
     async def prepare(self, _request) -> None:
         if self.prepare_error is not None:
@@ -719,11 +722,13 @@ class FakeStreamResponse:
         return None
 
     async def write(self, _chunk: bytes) -> None:
+        self.writes.append(_chunk)
         if self.write_error is not None:
             raise self.write_error
         return None
 
     async def write_eof(self) -> None:
+        self.eof_called = True
         if self.eof_reached is not None:
             self.eof_reached.set()
         if self.eof_error is not None:
@@ -1385,6 +1390,47 @@ def test_runtime_no_candidate_projects_live_exact_hop_blockers(
     _assert_valid("turn-provenance.schema.json", record)
 
 
+def test_runtime_no_candidate_reinspects_the_full_chain_for_terminal_facts(
+    tmp_path: Path,
+) -> None:
+    hub = _source(
+        "src_precheckhub",
+        "Hub cooling",
+        status="cooldown",
+        retry_at=(NOW + timedelta(hours=1)).isoformat(),
+    )
+    native = _source("src_prechecknative", "Native ready", channel="native_cli")
+    service = _service(tmp_path, sources=[hub, native])
+    requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+    service.store.config.agents["codex"].routes[requested_model] = ModelHubRouteConfig(
+        hops=(
+            ModelHubRouteHopConfig(hub.id, "shared-model"),
+            ModelHubRouteHopConfig(native.id, "shared-model"),
+        )
+    )
+
+    with pytest.raises(ModelHubError) as raised:
+        asyncio.run(
+            service.resolve(
+                backend="codex",
+                model_id=requested_model,
+                request=ModelHubRequest(
+                    {"model": requested_model, "input": "ping"},
+                    protocol="openai_responses",
+                ),
+                supply_channel="hub",
+            )
+        )
+
+    projection = raised.value.turn_outcome
+    assert projection is not None
+    assert projection.supply_facts is not None
+    assert projection.supply_facts.supply_state == "waiting"
+    assert raised.value.blockers == exact_hop_blockers(
+        service._inspect_terminal_chain(backend="codex", model_id=requested_model)[1]
+    )
+
+
 def test_gateway_no_candidate_projects_live_exact_hop_blockers(
     tmp_path: Path,
 ) -> None:
@@ -1672,6 +1718,49 @@ def test_gateway_streamed_fallback_settles_source_before_rendering_next_current(
             "stream_started": True,
         }
         _assert_valid("turn-provenance.schema.json", record)
+
+    asyncio.run(exercise())
+
+
+def test_gateway_live_settlement_emits_matrix_copy_before_eof(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        source = _source("src_streamcopy1", "Stream copy")
+        backup = _source("src_streamcopy2", "Stream copy backup")
+        service = _service(
+            tmp_path,
+            sources=[source, backup],
+            live_handles=[
+                LiveInvokeHandle(
+                    _outcome(
+                        RawOutcomeKind.TIMEOUT,
+                        status=200,
+                        source_id=source.id,
+                        stream_started=True,
+                    ),
+                    (b"data: partial\n\n",),
+                )
+            ],
+        )
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        response = FakeStreamResponse()
+        gateway = ModelHubTurnGateway(service)
+        request = _prepared_gateway_request(
+            gateway,
+            turn_id="turn_stream_copy",
+            requested_model=requested_model,
+            source_id=source.id,
+            stream=True,
+        )
+        with patch(
+            "core.handlers.model_hub.turn_gateway.web.StreamResponse",
+            return_value=response,
+        ):
+            result = await gateway._handle_request(request)
+        assert result is response
+        assert any(b"modelHub.launch.retry" in chunk for chunk in response.writes)
+        assert response.eof_called
 
     asyncio.run(exercise())
 
@@ -2188,7 +2277,7 @@ def test_gateway_cancellation_matrix_settles_once_without_upstream_facts(
     asyncio.run(exercise())
 
 
-def test_gateway_cancellation_after_write_eof_preserves_upstream_settlement(
+def test_gateway_cancellation_during_upstream_settlement_preserves_history(
     tmp_path: Path,
 ) -> None:
     async def exercise() -> None:
@@ -2227,7 +2316,6 @@ def test_gateway_cancellation_after_write_eof_preserves_upstream_settlement(
             return_value=FakeStreamResponse(eof_reached=eof_reached),
         ):
             task = asyncio.create_task(gateway._handle_request(request))
-            await asyncio.wait_for(eof_reached.wait(), timeout=1)
             await asyncio.wait_for(settlement_started.wait(), timeout=1)
             task.cancel()
             release_settlement.set()

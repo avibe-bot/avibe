@@ -83,6 +83,7 @@ from .oauth import (
 )
 from .provenance import (
     BoundedProvenanceStore,
+    ENGINE_DOWN_TURN_OUTCOME,
     ExactHopBlocker,
     TurnOutcomeProjectionInput,
     exact_hop_blockers,
@@ -4002,6 +4003,34 @@ class ModelHubService:
             attempted_hop=(source_id, source_model_id),
         )
 
+    @staticmethod
+    def _produce_no_candidate_terminal_outcome(
+        *,
+        config: ModelHubConfig,
+        resolution: ModelHubTurnResolution,
+    ) -> TurnOutcomeProjectionInput:
+        return produce_turn_outcome(
+            (
+                "turn.no_candidate.unconfigured"
+                if resolution.route_unconfigured
+                else "turn.no_candidate.blocked"
+            ),
+            config=config,
+            resolution=resolution,
+        )
+
+    @staticmethod
+    def _produce_exhausted_terminal_outcome(
+        *,
+        config: ModelHubConfig,
+        resolution: ModelHubTurnResolution,
+    ) -> TurnOutcomeProjectionInput:
+        return produce_turn_outcome(
+            "turn.exhausted",
+            config=config,
+            resolution=resolution,
+        )
+
     async def settle_handle_outcome(
         self,
         resolved: ResolvedInvocation | None,
@@ -4233,14 +4262,15 @@ class ModelHubService:
         event_agent = cast(EventAgent, backend)
         candidate_hops = list(resolution.candidate_hops)
         if not candidate_hops:
-            turn_outcome = produce_turn_outcome(
-                (
-                    "turn.no_candidate.unconfigured"
-                    if resolution.route_unconfigured
-                    else "turn.no_candidate.blocked"
-                ),
-                config=config,
-                resolution=resolution,
+            projection_config, projection_resolution = config, resolution
+            if supply_channel is not None:
+                projection_config, projection_resolution = self._inspect_terminal_chain(
+                    backend=cast(BackendName, backend),
+                    model_id=model_id,
+                )
+            turn_outcome = self._produce_no_candidate_terminal_outcome(
+                config=projection_config,
+                resolution=projection_resolution,
             )
             facts = turn_outcome.supply_facts
             if facts is None:
@@ -4249,7 +4279,7 @@ class ModelHubService:
                 "mapping_target_unavailable",
                 status=409,
                 supply_state=facts.supply_state,
-                blockers=exact_hop_blockers(resolution),
+                blockers=exact_hop_blockers(projection_resolution),
                 turn_outcome=turn_outcome,
             )
 
@@ -4414,14 +4444,13 @@ class ModelHubService:
             raise ModelHubError(
                 decision.error_code or "engine_down",
                 status=502,
-                turn_outcome=produce_turn_outcome("turn.engine_down"),
+                turn_outcome=ENGINE_DOWN_TURN_OUTCOME,
             )
         final_config, final_resolution = self._inspect_terminal_chain(
             backend=cast(BackendName, backend),
             model_id=model_id,
         )
-        turn_outcome = produce_turn_outcome(
-            "turn.exhausted",
+        turn_outcome = self._produce_exhausted_terminal_outcome(
             config=final_config,
             resolution=final_resolution,
         )

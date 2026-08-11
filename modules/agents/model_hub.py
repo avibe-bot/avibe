@@ -656,19 +656,21 @@ class ModelHubRuntimeRouter:
         *,
         backend: BackendName,
         requested_model: str,
-        config: ModelHubConfig,
-        resolution: ModelHubTurnResolution,
         process_scope: Optional[str],
         turn_id: Optional[str],
     ) -> ModelHubError:
+        projection_config, projection_resolution = self.service._inspect_terminal_chain(
+            backend=backend,
+            model_id=requested_model,
+        )
         turn_outcome = produce_turn_outcome(
             (
                 "turn.no_candidate.unconfigured"
-                if resolution.route_unconfigured
+                if projection_resolution.route_unconfigured
                 else "turn.no_candidate.blocked"
             ),
-            config=config,
-            resolution=resolution,
+            config=projection_config,
+            resolution=projection_resolution,
         )
         facts = turn_outcome.supply_facts
         if facts is None:
@@ -685,13 +687,16 @@ class ModelHubRuntimeRouter:
                 turn_id=turn_id,
                 requested_model_id=requested_model,
                 supply_state=supply_state,
-                blockers=exact_hop_blockers(resolution),
+                blockers=exact_hop_blockers(projection_resolution),
             )
         if (
-            not resolution.matching_sources
-            or resolution.structural_blocker_reason is not None
+            not projection_resolution.matching_sources
+            or projection_resolution.structural_blocker_reason is not None
         ):
-            reason = cast(EventReason, supply_interruption_reason(config, resolution))
+            reason = cast(
+                EventReason,
+                supply_interruption_reason(projection_config, projection_resolution),
+            )
             supply_key = (backend, requested_model)
             current_state = ("interrupted", reason)
             if self._last_supply_state.get(supply_key) != current_state:
@@ -707,7 +712,7 @@ class ModelHubRuntimeRouter:
             "mapping_target_unavailable",
             status=409,
             supply_state=supply_state,
-            blockers=exact_hop_blockers(resolution),
+            blockers=exact_hop_blockers(projection_resolution),
             turn_outcome=turn_outcome,
         )
 
@@ -770,8 +775,6 @@ class ModelHubRuntimeRouter:
             raise self._no_candidate_error(
                 backend=backend,
                 requested_model=requested_model,
-                config=config,
-                resolution=resolution,
                 process_scope=process_scope,
                 turn_id=turn_id,
             )
@@ -854,8 +857,6 @@ class ModelHubRuntimeRouter:
                 raise self._no_candidate_error(
                     backend="opencode",
                     requested_model=requested_model,
-                    config=config,
-                    resolution=resolution,
                     process_scope="opencode:shared-server",
                     turn_id=None,
                 )

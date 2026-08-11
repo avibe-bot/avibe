@@ -23,6 +23,7 @@ from .provenance import (
     REQUEST_NONFALLBACK_TURN_OUTCOME,
     TurnOutcomeProjectionInput,
     TurnCorrelationRegistry,
+    project_turn_outcome_copy,
     render_turn_outcome_copy,
 )
 from .request import ModelHubRequest
@@ -208,11 +209,12 @@ class ModelHubTurnGateway:
                 raise
             except Exception:
                 if execution.handle is not None:
-                    await self._settle_turn_handle(
+                    _outcome, settlement = await self._settle_turn_handle(
                         execution,
                         terminalizer,
                         termination_origin="upstream_terminal",
                     )
+                    terminalizer.record_turn_outcome(settlement.turn_outcome)
                 raise
 
     async def _run_request_turn(
@@ -362,6 +364,7 @@ class ModelHubTurnGateway:
                 terminalizer,
                 termination_origin="upstream_terminal",
             )
+            terminalizer.record_turn_outcome(settlement.turn_outcome)
             assert outcome is not None
             assert settlement.decision is not None
             if settlement.decision.action != "return":
@@ -390,13 +393,39 @@ class ModelHubTurnGateway:
         async for chunk in handle.stream:
             terminalizer.mark_stream_started()
             await self._downstream_io(response.write(chunk))
-        await self._downstream_io(response.write_eof())
-        await self._settle_turn_handle(
+        _outcome, settlement = await self._settle_turn_handle(
             execution,
             terminalizer,
             termination_origin="upstream_terminal",
         )
+        terminalizer.record_turn_outcome(settlement.turn_outcome)
+        await self._write_stream_terminal_copy(response, settlement.turn_outcome)
+        await self._downstream_io(response.write_eof())
         return response
+
+    async def _write_stream_terminal_copy(
+        self,
+        response: web.StreamResponse,
+        turn_outcome: TurnOutcomeProjectionInput | None,
+    ) -> None:
+        if turn_outcome is None:
+            return
+        copy = project_turn_outcome_copy(turn_outcome)
+        message = render_turn_outcome_copy(turn_outcome, self._language_provider() or "en")
+        if copy is None or message is None:
+            return
+        payload = json.dumps(
+            {
+                "error": {
+                    "type": "model_hub_terminal",
+                    "code": copy.key,
+                    "message": message,
+                }
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        await self._downstream_io(response.write(b"event: error\ndata: " + payload + b"\n\n"))
 
     @staticmethod
     async def _downstream_io(operation):
@@ -420,11 +449,12 @@ class ModelHubTurnGateway:
             # The producer has already recorded the upstream history. A later
             # downstream write failure cannot rewrite that history as cancel.
             termination_origin = "upstream_terminal"
-        await self._settle_turn_handle(
+        _outcome, settlement = await self._settle_turn_handle(
             execution,
             terminalizer,
             termination_origin=termination_origin,
         )
+        terminalizer.record_turn_outcome(settlement.turn_outcome)
         if execution.settlement_origin == "downstream_cancel":
             terminalizer.mark_downstream_canceled()
 

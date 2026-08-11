@@ -284,7 +284,7 @@ def produce_turn_outcome(
                 next_current_changed = True
         if not next_current_changed:
             recovered_after_exhaustion = (
-                decision == "turn.exhausted"
+                decision in {"turn.exhausted", "turn.no_candidate.blocked"}
                 and resolution.supply_status in {"ok", "degraded"}
                 and bool(resolution.candidate_hops)
             )
@@ -486,6 +486,7 @@ class TurnTrace:
     gateway_source_id: Optional[str] = None
     gateway_model_id: Optional[str] = None
     ambiguous: bool = False
+    terminal_outcome: TurnOutcomeProjectionInput | None = None
 
 
 @dataclass
@@ -607,6 +608,15 @@ class GatewayTurnTerminalizer:
 
     def mark_stream_started(self) -> None:
         self._stream_started = True
+
+    def record_turn_outcome(
+        self,
+        turn_outcome: TurnOutcomeProjectionInput | None,
+    ) -> None:
+        """Keep the settlement projection attached to the correlated turn event."""
+
+        if self.turn_id is not None:
+            self._registry.record_turn_outcome(self.turn_id, turn_outcome)
 
     def mark_downstream_canceled(self) -> None:
         """Leave the live attempt pending for the outer stopped settlement."""
@@ -1074,6 +1084,18 @@ class TurnCorrelationRegistry:
                 trace.terminal_error = None
                 trace.model_supply_state = supply_state
                 trace.blockers = [blocker.payload() for blocker in blockers]
+
+    def record_turn_outcome(
+        self,
+        turn_id: Optional[str],
+        turn_outcome: TurnOutcomeProjectionInput | None,
+    ) -> None:
+        if turn_id is None:
+            return
+        with self._lock:
+            trace = self._traces.get(turn_id)
+            if trace is not None:
+                trace.terminal_outcome = turn_outcome
 
     def begin_attempt(
         self,
