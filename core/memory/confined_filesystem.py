@@ -22,6 +22,20 @@ class ConfinedFilesystemError(RuntimeError):
     """A confined filesystem operation refused an unsafe path or entry."""
 
 
+@dataclass(slots=True)
+class ConfinedRemovalProgress:
+    """Track entries removed before a confined deletion raises."""
+
+    removed_entries: int = 0
+
+    @property
+    def changed(self) -> bool:
+        return self.removed_entries > 0
+
+    def record(self) -> None:
+        self.removed_entries += 1
+
+
 def required_no_follow_flag() -> int:
     """Return the host no-follow capability or disable Memory persistence."""
 
@@ -747,6 +761,8 @@ class _DirectoryDescriptorCache:
 def remove_confined_path(
     home: Path,
     path: Path,
+    *,
+    progress: ConfinedRemovalProgress | None = None,
 ) -> None:
     """Remove one entry through anchored, no-follow directory handles."""
 
@@ -754,10 +770,15 @@ def remove_confined_path(
     relative = _relative_to_home(path, home)
     if not relative.parts:
         raise ConfinedFilesystemError("refusing to remove the confinement root")
-    current: int | None = None
+    anchored: list[int] = []
     try:
         current = os.open(home, strict_directory_open_flags())
-        _require_exact_private_directory(os.fstat(current), "confinement root")
+        anchored.append(current)
+        # ``paths.ensure_data_dirs`` historically created the home with the
+        # process umask (commonly 0755). We own the descriptor and pin it with
+        # O_NOFOLLOW, so harden that app-created mode in place before traversing
+        # instead of leaving a durable reset marker that can never be retried.
+        _harden_private_directory_fd(current, "confinement root", sync=False)
         for component in relative.parts[:-1]:
             try:
                 next_descriptor = os.open(
@@ -766,14 +787,28 @@ def remove_confined_path(
                     dir_fd=current,
                 )
             except FileNotFoundError:
+                _fsync_anchored_deletion(anchored)
                 return
-            os.close(current)
             current = next_descriptor
-            _require_private_directory(os.fstat(current), "confined directory")
-        remove_anchored_entry(current, relative.parts[-1])
+            anchored.append(current)
+            _harden_private_directory_fd(current, "confined directory", sync=False)
+        remove_anchored_entry(current, relative.parts[-1], progress=progress)
+        _fsync_anchored_deletion(anchored)
     finally:
-        if current is not None:
-            os.close(current)
+        for descriptor in reversed(anchored):
+            os.close(descriptor)
+
+
+def _fsync_anchored_deletion(anchored: list[int]) -> None:
+    """Persist an entry's absence from its nearest parent through the root."""
+
+    try:
+        for descriptor in reversed(anchored):
+            os.fsync(descriptor)
+    except OSError as error:
+        raise ConfinedFilesystemError(
+            "confined deletion parent cannot be synchronized safely"
+        ) from error
 
 
 def remove_anchored_entry(
@@ -781,6 +816,7 @@ def remove_anchored_entry(
     name: str,
     *,
     expected_identity: tuple[int, int] | None = None,
+    progress: ConfinedRemovalProgress | None = None,
 ) -> None:
     """Remove one safe relative name beneath an already anchored directory."""
 
@@ -796,6 +832,7 @@ def remove_anchored_entry(
         parent_fd,
         name,
         expected_identity=expected_identity,
+        progress=progress,
     )
 
 
@@ -804,6 +841,7 @@ def _remove_entry_at(
     name: str,
     *,
     expected_identity: tuple[int, int] | None = None,
+    progress: ConfinedRemovalProgress | None = None,
 ) -> None:
     try:
         initial = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
@@ -816,6 +854,8 @@ def _remove_entry_at(
         raise ConfinedFilesystemError("confined entry changed during removal")
     if stat.S_ISLNK(initial.st_mode) or stat.S_ISREG(initial.st_mode):
         os.unlink(name, dir_fd=parent_fd)
+        if progress is not None:
+            progress.record()
         return
     if not stat.S_ISDIR(initial.st_mode):
         raise ConfinedFilesystemError("confined removal refuses special files")
@@ -850,6 +890,8 @@ def _remove_entry_at(
                         )
                     if stat.S_ISLNK(before.st_mode) or stat.S_ISREG(before.st_mode):
                         os.unlink(item.name, dir_fd=node_parent_fd)
+                        if progress is not None:
+                            progress.record()
                         continue
                     if not stat.S_ISDIR(before.st_mode):
                         raise ConfinedFilesystemError(
@@ -915,6 +957,8 @@ def _remove_entry_at(
                         "confined directory changed during removal"
                     )
                 os.rmdir(item.node.name, dir_fd=node_parent_fd)
+                if progress is not None:
+                    progress.record()
             finally:
                 os.close(node_parent_fd)
 
@@ -978,11 +1022,17 @@ def _require_exact_private_directory(info: os.stat_result, label: str) -> None:
         raise ConfinedFilesystemError(f"{label} mode mismatch")
 
 
-def _harden_private_directory_fd(descriptor: int, label: str) -> None:
+def _harden_private_directory_fd(
+    descriptor: int,
+    label: str,
+    *,
+    sync: bool = True,
+) -> None:
     _require_directory(os.fstat(descriptor), label)
     try:
         os.fchmod(descriptor, 0o700)
-        os.fsync(descriptor)
+        if sync:
+            os.fsync(descriptor)
     except OSError as error:
         raise ConfinedFilesystemError(f"{label} cannot be hardened safely") from error
     _require_exact_private_directory(os.fstat(descriptor), label)

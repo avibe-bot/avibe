@@ -5,6 +5,7 @@ import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 import type { MemorySettings } from '../../../context/ApiContext';
+import type { MemoryFactoryResetResult } from '../../../lib/memoryFactoryReset';
 import { MemorySettingsPanel } from './MemorySettingsPanel';
 
 const api = vi.hoisted(() => ({
@@ -34,7 +35,10 @@ vi.mock('../../ui/confirm-dialog', () => ({
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
-    t: (key: string, options?: { returnObjects?: boolean }) => options?.returnObjects ? [] : key,
+    t: (key: string, options?: { returnObjects?: boolean; deleted?: string }) => {
+      if (options?.returnObjects) return [];
+      return options?.deleted ? `${key}:${options.deleted}` : key;
+    },
   }),
 }));
 
@@ -76,6 +80,140 @@ afterEach(() => {
 });
 
 describe('MemorySettingsPanel', () => {
+  it('allows endpoint repair while retaining only factory reset lifecycle controls', () => {
+    render(
+      <MemorySettingsPanel
+        settings={legacySettings}
+        maintenance={{ status: 'ok', data_exists: true, can_clear: true, clear_recovery: null }}
+        maintenanceError={null}
+        dependencyReady
+        onSaved={() => undefined}
+        onReloadSettings={() => undefined}
+        onReloadMaintenance={() => undefined}
+        onClearAll={() => undefined}
+        clearing={false}
+        onFactoryReset={() => undefined}
+        factoryResetPending
+        factoryResetArtifactValid
+      />,
+    );
+
+    expect(screen.getAllByPlaceholderText('memory.settings.baseUrlPlaceholder').every((input) => !(input as HTMLInputElement).disabled)).toBe(true);
+    expect((screen.getByRole('button', { name: 'memory.settings.save' }) as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByRole('switch', { name: 'memory.settings.enableLabel' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: 'memory.clear.button' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: 'memory.factoryReset.retry' }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('submits endpoint identity corrections directly while factory reset is pending', async () => {
+    api.saveMemorySettings.mockResolvedValue({
+      ...legacySettings,
+      factory_reset_required: true,
+      processing: {
+        ...legacySettings.processing,
+        embedding: endpoint('https://corrected-embedding.example.test/v1'),
+      },
+    });
+    const user = userEvent.setup();
+    render(
+      <MemorySettingsPanel
+        settings={{ ...legacySettings, factory_reset_required: true }}
+        maintenance={null}
+        maintenanceError={null}
+        dependencyReady
+        onSaved={() => undefined}
+        onReloadSettings={() => undefined}
+        onReloadMaintenance={() => undefined}
+        onClearAll={() => undefined}
+        clearing={false}
+        onFactoryReset={() => undefined}
+        factoryResetPending
+        factoryResetArtifactValid
+      />,
+    );
+
+    const embeddingBaseUrl = screen.getAllByPlaceholderText(
+      'memory.settings.baseUrlPlaceholder',
+    )[1];
+    await user.clear(embeddingBaseUrl);
+    await user.type(embeddingBaseUrl, 'https://corrected-embedding.example.test/v1');
+    await user.click(screen.getByRole('button', { name: 'memory.settings.save' }));
+
+    await waitFor(() => expect(api.saveMemorySettings).toHaveBeenCalledWith({
+      processing: { embedding: { base_url: 'https://corrected-embedding.example.test/v1' } },
+    }));
+    expect(screen.queryByRole('button', { name: 'confirm-rebuild' })).toBeNull();
+  });
+
+  it('renders absent factory-reset roots separately from retained roots', () => {
+    const result: MemoryFactoryResetResult = {
+      ok: false,
+      result: 'partial',
+      error: 'memory_factory_reset_failed',
+      data_deleted: false,
+      data_remaining: false,
+      roots: [
+        { path: 'memory', existed: false, deleted: false },
+        { path: 'state/memory', existed: true, deleted: false },
+      ],
+    };
+
+    render(
+      <MemorySettingsPanel
+        settings={legacySettings}
+        maintenance={null}
+        maintenanceError={null}
+        dependencyReady
+        onSaved={() => undefined}
+        onReloadSettings={() => undefined}
+        onReloadMaintenance={() => undefined}
+        onClearAll={() => undefined}
+        clearing={false}
+        factoryResetResult={result}
+      />,
+    );
+
+    expect(
+      screen.getByText('memory.factoryReset.rootOutcome:memory.factoryReset.absent'),
+    ).toBeTruthy();
+    expect(
+      screen.getByText('memory.factoryReset.rootOutcome:memory.factoryReset.retained'),
+    ).toBeTruthy();
+  });
+
+  it('labels a root with deletion progress and an error as partial', () => {
+    const result: MemoryFactoryResetResult = {
+      ok: false,
+      result: 'partial',
+      error: 'memory_factory_reset_failed',
+      data_deleted: true,
+      data_remaining: true,
+      roots: [
+        { path: 'memory', existed: true, deleted: true, error: 'ConfinedFilesystemError' },
+        { path: 'state/memory', existed: false, deleted: false },
+      ],
+    };
+
+    render(
+      <MemorySettingsPanel
+        settings={legacySettings}
+        maintenance={null}
+        maintenanceError={null}
+        dependencyReady
+        onSaved={() => undefined}
+        onReloadSettings={() => undefined}
+        onReloadMaintenance={() => undefined}
+        onClearAll={() => undefined}
+        clearing={false}
+        factoryResetResult={result}
+      />,
+    );
+
+    expect(
+      screen.getByText('memory.factoryReset.rootOutcome:memory.factoryReset.partial'),
+    ).toBeTruthy();
+  });
+
   it('does not expose a provider logging switch and omits diagnostics from saves', async () => {
     const saved = {
       ...legacySettings,

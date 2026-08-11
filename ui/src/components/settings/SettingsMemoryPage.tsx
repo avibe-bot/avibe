@@ -21,6 +21,7 @@ import type {
   MemorySettingsResult,
   MemoryStatus,
 } from '../../context/ApiContext';
+import type { MemoryFactoryResetResult } from '../../lib/memoryFactoryReset';
 import { useToast } from '../../context/ToastContext';
 import { memoryErrorMessage } from '../../lib/memoryRead';
 
@@ -38,7 +39,11 @@ export const SettingsMemoryPage: React.FC = () => {
   const [tab, setTab] = useState<MemoryTab>('processingRecord');
   const [clearOpen, setClearOpen] = useState(false);
   const [clearing, setClearing] = useState(false);
+  const [factoryResetOpen, setFactoryResetOpen] = useState(false);
+  const [factoryResetBusy, setFactoryResetBusy] = useState(false);
+  const [factoryResetResult, setFactoryResetResult] = useState<MemoryFactoryResetResult | null>(null);
   const [dependencyReady, setDependencyReady] = useState(true);
+  const [memoryArtifactValid, setMemoryArtifactValid] = useState(false);
   const [runtimeInstalled, setRuntimeInstalled] = useState<boolean | null>(null);
   const [restarting, setRestarting] = useState(false);
   const [rebuildBusy, setRebuildBusy] = useState(false);
@@ -87,14 +92,18 @@ export const SettingsMemoryPage: React.FC = () => {
       if (dep) {
         setRuntimeInstalled(dep.installed);
         setDependencyReady(dep.installed && dep.status === 'ready');
+        setMemoryArtifactValid(dep.installed && dep.status === 'ready');
       } else {
         setRuntimeInstalled(true);
+        // Factory reset must fail closed when the pinned artifact cannot be proven valid.
+        setMemoryArtifactValid(false);
       }
     } catch {
       // Older/unavailable dependency APIs must not leave the whole page in its
       // initial loading state. Fail open like the absent-row compatibility path.
       setRuntimeInstalled(true);
       setDependencyReady(true);
+      setMemoryArtifactValid(false);
     }
   }, [api]);
 
@@ -129,6 +138,42 @@ export const SettingsMemoryPage: React.FC = () => {
       showToast(t('memory.clear.failed'), 'error');
     } finally {
       setClearing(false);
+    }
+  };
+
+  const confirmFactoryReset = async () => {
+    setFactoryResetBusy(true);
+    setFactoryResetResult(null);
+    setLogGeneration((generation) => generation + 1);
+    try {
+      const res = await api.factoryResetMemory();
+      setFactoryResetResult(res);
+      if (res.ok === true) {
+        showToast(t('memory.factoryReset.completed'), 'success');
+        setFactoryResetOpen(false);
+      } else {
+        // The result panel owns the authoritative per-root outcome. Close the
+        // confirmation so partial or activation-failed resets are visible
+        // before the Retry action becomes available again.
+        setFactoryResetOpen(false);
+        showToast(memoryErrorMessage(t, res.error || 'memory_factory_reset_failed'), 'error');
+      }
+      await Promise.all([
+        loadSettings(),
+        loadProcessingRecord(),
+        loadMaintenance(),
+        loadDependency(),
+      ]);
+    } catch {
+      showToast(t('memory.factoryReset.failed'), 'error');
+      await Promise.all([
+        loadSettings(),
+        loadProcessingRecord(),
+        loadMaintenance(),
+        loadDependency(),
+      ]);
+    } finally {
+      setFactoryResetBusy(false);
     }
   };
 
@@ -190,6 +235,7 @@ export const SettingsMemoryPage: React.FC = () => {
   );
 
   const rebuildRequired = settings?.rebuild_required === true;
+  const factoryResetPending = settings?.factory_reset_required === true;
   const settingsPanel = settings ? (
     <MemorySettingsPanel
       settings={settings}
@@ -214,6 +260,14 @@ export const SettingsMemoryPage: React.FC = () => {
       }}
       onClearAll={() => setClearOpen(true)}
       clearing={clearing}
+      onFactoryReset={() => {
+        setFactoryResetResult(null);
+        setFactoryResetOpen(true);
+      }}
+      factoryResetBusy={factoryResetBusy}
+      factoryResetPending={factoryResetPending}
+      factoryResetArtifactValid={memoryArtifactValid}
+      factoryResetResult={factoryResetResult}
     />
   ) : null;
 
@@ -229,7 +283,7 @@ export const SettingsMemoryPage: React.FC = () => {
             variant="secondary"
             size="xs"
             onClick={() => void restartEngine()}
-            disabled={restarting || rebuildRequired || rebuildBusy}
+            disabled={restarting || rebuildRequired || rebuildBusy || factoryResetBusy || factoryResetPending}
           >
             {restarting ? <Loader2 className="animate-spin" /> : <RotateCw />}
             {t('memory.status.restartEngine')}
@@ -361,6 +415,43 @@ export const SettingsMemoryPage: React.FC = () => {
             <div className="mb-1 font-semibold text-foreground">{t('memory.clear.keepsTitle')}</div>
             <ul className="flex flex-col gap-1">
               {(t('memory.clear.keeps', { returnObjects: true }) as string[]).map((line, idx) => (
+                <li key={idx} className="flex gap-2 text-muted">
+                  <span className="mt-1 size-1 shrink-0 rounded-full bg-muted" />
+                  {line}
+                </li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      </ConfirmDialog>
+
+      <ConfirmDialog
+        open={factoryResetOpen}
+        onOpenChange={setFactoryResetOpen}
+        destructive
+        holdSeconds={5}
+        title={t('memory.factoryReset.confirmTitle')}
+        description={t('memory.factoryReset.confirmDescription')}
+        confirmLabel={t('memory.factoryReset.confirmLabel')}
+        confirmDisabled={factoryResetBusy || !memoryArtifactValid}
+        onConfirm={confirmFactoryReset}
+      >
+        <div className="flex flex-col gap-3 text-[12.5px] leading-snug">
+          <div className="rounded-[10px] border border-border bg-surface-2 px-3 py-2.5">
+            <div className="mb-1 font-semibold text-foreground">{t('memory.factoryReset.deletesTitle')}</div>
+            <ul className="flex flex-col gap-1">
+              {(t('memory.factoryReset.deletes', { returnObjects: true }) as string[]).map((line, idx) => (
+                <li key={idx} className="flex gap-2 text-muted">
+                  <span className="mt-1 size-1 shrink-0 rounded-full bg-muted" />
+                  {line}
+                </li>
+              ))}
+            </ul>
+          </div>
+          <div className="rounded-[10px] border border-warning/30 bg-warning/5 px-3 py-2.5">
+            <div className="mb-1 font-semibold text-foreground">{t('memory.factoryReset.retainsTitle')}</div>
+            <ul className="flex flex-col gap-1">
+              {(t('memory.factoryReset.retains', { returnObjects: true }) as string[]).map((line, idx) => (
                 <li key={idx} className="flex gap-2 text-muted">
                   <span className="mt-1 size-1 shrink-0 rounded-full bg-muted" />
                   {line}

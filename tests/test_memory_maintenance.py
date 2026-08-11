@@ -2023,6 +2023,7 @@ async def test_queued_backup_stage_reconcile_rechecks_artifact_install(
     )
     terminal_gc_entered = asyncio.Event()
     release_terminal_gc = asyncio.Event()
+    cleanup_finished = threading.Event()
     cleanup_calls: list[bool] = []
     maintenance = _maintenance(runtime)
 
@@ -2033,11 +2034,11 @@ async def test_queued_backup_stage_reconcile_rechecks_artifact_install(
     manager = maintenance._backup_manager
     assert manager is not None
     monkeypatch.setattr(maintenance, "_run_terminal_snapshot_gc", blocked_terminal_gc)
-    monkeypatch.setattr(
-        manager,
-        "reconcile_unpublished_backup_stages",
-        lambda: cleanup_calls.append(runtime._artifact_installing),
-    )
+    def reconcile_unpublished_backup_stages() -> None:
+        cleanup_calls.append(runtime._artifact_installing)
+        cleanup_finished.set()
+
+    monkeypatch.setattr(manager, "reconcile_unpublished_backup_stages", reconcile_unpublished_backup_stages)
 
     maintenance.ensure_housekeeping()
     await terminal_gc_entered.wait()
@@ -2052,10 +2053,14 @@ async def test_queued_backup_stage_reconcile_rechecks_artifact_install(
 
     release_install.set()
     assert (await installing)["ok"] is True
+    assert await asyncio.to_thread(cleanup_finished.wait, 2)
     deferred_reconcile = maintenance._backup_stage_reconcile_task
-    assert deferred_reconcile is not None
-    assert deferred_reconcile is not queued_reconcile
-    await deferred_reconcile
+    # The completion callback may clear a task before this assertion runs on a
+    # fast event loop. Observe the cleanup contract instead of that transient
+    # implementation detail, while still awaiting a task if it remains held.
+    if deferred_reconcile is not None:
+        assert deferred_reconcile is not queued_reconcile
+        await deferred_reconcile
     assert cleanup_calls == [False]
     await memory_runtime_factory.close(runtime)
 

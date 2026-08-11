@@ -39,6 +39,7 @@ MemoryErrorCode = Literal[
     "memory_embedding_rebuild_required",
     "memory_rebuild_failed",
     "memory_rebuild_root_busy",
+    "memory_factory_reset_failed",
     "memory_operation_in_progress",
 ]
 
@@ -68,6 +69,7 @@ CLOSED_MEMORY_ERROR_CODES = frozenset(
         "memory_embedding_rebuild_required",
         "memory_rebuild_failed",
         "memory_rebuild_root_busy",
+        "memory_factory_reset_failed",
         "memory_operation_in_progress",
     }
 )

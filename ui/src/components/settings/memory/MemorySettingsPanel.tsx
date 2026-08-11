@@ -19,6 +19,7 @@ import type {
   MemorySettingsPatch,
   MemorySettingsResult,
 } from '../../../context/ApiContext';
+import type { MemoryFactoryResetResult } from '../../../lib/memoryFactoryReset';
 import { useToast } from '../../../context/ToastContext';
 import { buildEndpointPatch, draftFromConfig } from '../../../lib/memorySettings';
 import type { EndpointDraft } from '../../../lib/memorySettings';
@@ -139,6 +140,11 @@ export const MemorySettingsPanel: React.FC<{
   onReloadMaintenance: () => void;
   onClearAll: () => void;
   clearing: boolean;
+  onFactoryReset?: () => void;
+  factoryResetBusy?: boolean;
+  factoryResetPending?: boolean;
+  factoryResetArtifactValid?: boolean;
+  factoryResetResult?: MemoryFactoryResetResult | null;
 }> = ({
   settings,
   maintenance,
@@ -151,6 +157,11 @@ export const MemorySettingsPanel: React.FC<{
   onReloadMaintenance,
   onClearAll,
   clearing,
+  onFactoryReset,
+  factoryResetBusy = false,
+  factoryResetPending = false,
+  factoryResetArtifactValid = false,
+  factoryResetResult = null,
 }) => {
   const { t } = useTranslation();
   const api = useApi();
@@ -171,9 +182,10 @@ export const MemorySettingsPanel: React.FC<{
   }, [settings]);
 
   const rebuildRequired = settings.rebuild_required === true;
+  const factoryResetRequired = factoryResetPending;
   const canClearKeys = !enabledDraft;
   const canClearMemory = maintenance?.can_clear === true;
-  const busy = saving || rebuildBusy;
+  const busy = saving || rebuildBusy || factoryResetBusy;
 
   const buildPatch = (): MemorySettingsPatch => {
     const patch: MemorySettingsPatch = {};
@@ -249,7 +261,10 @@ export const MemorySettingsPanel: React.FC<{
       showToast(t('memory.settings.saved'), 'success');
       return;
     }
-    if (identityChanged(embeddingDraft, settings.processing.embedding)) {
+    if (
+      identityChanged(embeddingDraft, settings.processing.embedding)
+      && !factoryResetRequired
+    ) {
       // Retain the draft and open confirmation; the same patch is replayed with
       // confirm_rebuild: true after the user accepts the cost/duration disclosure.
       setPendingPatch(patch);
@@ -316,7 +331,7 @@ export const MemorySettingsPanel: React.FC<{
         <Switch
           checked={enabledDraft}
           onCheckedChange={setEnabledDraft}
-          disabled={busy || rebuildRequired || (!enabledDraft && !dependencyReady)}
+          disabled={busy || factoryResetRequired || rebuildRequired || (!enabledDraft && !dependencyReady)}
           label={t('memory.settings.enableLabel')}
         />
       </div>
@@ -358,23 +373,79 @@ export const MemorySettingsPanel: React.FC<{
             {saving ? <Loader2 className="size-3.5 animate-spin" /> : null}
             {saving ? t('memory.settings.saving') : t('memory.settings.save')}
           </Button>
-          {rebuildRequired ? (
+          {rebuildRequired && !factoryResetRequired ? (
             <Button variant="secondary" onClick={() => void retryRebuild()} disabled={busy}>
               {rebuildBusy ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
               {rebuildBusy ? t('memory.settings.retryingRebuild') : t('memory.settings.retryRebuild')}
             </Button>
           ) : null}
         </div>
-        <Button
-          variant="destructive"
-          size="sm"
-          onClick={onClearAll}
-          disabled={clearing || !canClearMemory || busy}
-        >
-          <Trash2 className="size-3.5" />
-          {t('memory.clear.button')}
-        </Button>
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          <Button
+            variant="destructive"
+            size="sm"
+            onClick={onClearAll}
+            disabled={clearing || !canClearMemory || busy || factoryResetRequired}
+          >
+            <Trash2 className="size-3.5" />
+            {t('memory.clear.button')}
+          </Button>
+          {onFactoryReset ? (
+            <Button
+              variant="destructive"
+              size="sm"
+              onClick={onFactoryReset}
+              disabled={busy || !factoryResetArtifactValid}
+            >
+              <Trash2 className="size-3.5" />
+              {factoryResetPending ? t('memory.factoryReset.retry') : t('memory.factoryReset.button')}
+            </Button>
+          ) : null}
+        </div>
       </div>
+
+      {!factoryResetArtifactValid && onFactoryReset ? (
+        <div className="flex flex-wrap items-center gap-2 text-[11.5px] text-warning">
+          <ShieldAlert className="size-3.5 shrink-0" />
+          <span>{t('memory.factoryReset.artifactRepairRequired')}</span>
+          <Button asChild variant="secondary" size="xs">
+            <Link to="/admin/settings/dependencies">
+              {t('memory.settings.goToDependencies')}
+              <ArrowUpRight className="size-3.5" />
+            </Link>
+          </Button>
+        </div>
+      ) : null}
+
+      {factoryResetResult ? (
+        <div
+          role="status"
+          className="rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-[12px] text-foreground"
+        >
+          <div className="font-semibold">{t('memory.factoryReset.resultTitle')}</div>
+          <div className="mt-1 text-muted">
+            {factoryResetResult.ok === true
+              ? t('memory.factoryReset.resultCompleted')
+              : memoryErrorMessage(t, factoryResetResult.error || 'memory_factory_reset_failed')}
+          </div>
+          {factoryResetResult.roots ? (
+            <ul className="mt-2 flex flex-col gap-1 text-muted">
+              {factoryResetResult.roots.map((root) => (
+                <li key={root.path}>{t('memory.factoryReset.rootOutcome', {
+                  path: root.path ?? t('memory.factoryReset.unknownRoot'),
+                  deleted: root.deleted === true
+                    ? root.error
+                      ? t('memory.factoryReset.partial')
+                      : t('memory.factoryReset.deleted')
+                    : root.existed === false
+                      ? t('memory.factoryReset.absent')
+                      : t('memory.factoryReset.retained'),
+                })}</li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
+      ) : null}
 
       <div className="rounded-xl border border-border bg-surface p-4">
         <h3 className="mb-2 text-[13px] font-semibold text-foreground">{t('memory.settings.disclosureTitle')}</h3>

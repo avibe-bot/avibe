@@ -377,6 +377,7 @@ _MEMORY_CLI_REASON_I18N_KEYS = {
     "memory_capability_unavailable": "memory.cli.reason.capabilityUnavailable",
     "memory_processing_failed": "memory.cli.reason.processingFailed",
     "memory_clear_failed": "memory.cli.reason.clearFailed",
+    "memory_factory_reset_failed": "memory.cli.reason.factoryResetFailed",
 }
 
 

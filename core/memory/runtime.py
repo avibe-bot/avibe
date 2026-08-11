@@ -351,6 +351,8 @@ class MemoryRuntime:
         self._worker_task: asyncio.Task[None] | None = None
         self._activation_loop: asyncio.AbstractEventLoop | None = None
         self._artifact_installing = False
+        self._retired = False
+        self._closed = False
         self._store: MemoryStore | None = None
         self._module: MemoryModule | None = None
         self._store_error: Exception | None = None
@@ -409,7 +411,7 @@ class MemoryRuntime:
         self._store = opened
         self._module = module
         self._require_maintenance().attach_store(opened)
-        if self._maintenance_open():
+        if self._maintenance_open() or self.factory_reset_pending:
             module.pause_claims()
         self._store_error = None
         self._configure_insight_reader(self._config)
@@ -420,7 +422,116 @@ class MemoryRuntime:
     def available(self) -> bool:
         """Whether the local store opened. False keeps every read closed."""
 
-        return self._module is not None
+        return self._module is not None and not self._retired
+
+    @property
+    def factory_reset_pending(self) -> bool:
+        """Whether this aggregate is fenced by a durable factory-reset intent."""
+
+        return any(
+            getattr(config, "recovery_intent", None) == "factory_reset"
+            for config in (self._config, self._restart_config)
+        )
+
+    @property
+    def retired(self) -> bool:
+        """Whether this aggregate has been permanently retired."""
+
+        return self._retired
+
+    @property
+    def closed(self) -> bool:
+        """Whether the last close attempt completed all cleanup steps."""
+
+        return self._closed
+
+    @property
+    def effective_home(self) -> Path:
+        """Return the pinned home used by this aggregate's mutable state."""
+
+        return self._effective_home
+
+    @property
+    def artifact_manager(self) -> MemoryArtifactPort:
+        return self._artifact_manager
+
+    @property
+    def process_factory(self) -> EverOSProcessFactory:
+        return self._process_factory
+
+    def retire(self) -> None:
+        """Tombstone this aggregate and its module before mutable roots die."""
+
+        self._retired = True
+        self._closing = True
+        self._sidecar.close_ready_admission()
+        if self._module is not None:
+            self._module.retire()
+        self._advance_processing_lifecycle()
+
+    def artifact_admitted(self) -> bool:
+        """Return whether the pinned artifact is valid for a reset admission."""
+
+        try:
+            status = self._artifact_manager.status()
+            return (
+                self._artifact_manager.resolve_python() is not None
+                and status.get("status") == "ready"
+                and status.get("reason") is None
+            )
+        except Exception:
+            return False
+
+    def adopt_recovery_intent(self, config: MemoryConfig) -> None:
+        """Publish a durable recovery candidate and fence all module claims."""
+
+        self._config = deepcopy(config)
+        self._restart_config = deepcopy(config)
+        if self.available and config.recovery_intent is not None:
+            self.module.pause_claims()
+
+    async def activate_fresh(self, config: MemoryConfig) -> dict[str, Any]:
+        """Activate a newly constructed aggregate without re-reading old intent."""
+
+        if self._retired:
+            return {"ok": False, "error": "memory_operation_in_progress"}
+        if not self.available:
+            return {"ok": False, "error": "memory_store_unavailable"}
+        self._activation_loop = asyncio.get_running_loop()
+        self.module.pause_claims()
+        async with self._reconcile_lock:
+            async with self.module.lifecycle():
+                result = await self._reconcile_locked(
+                    config,
+                    claims_already_paused=True,
+                    skip_embedding_guard=True,
+                    resume_claims_on_failure=False,
+                )
+                if result.get("ok") is True:
+                    # Fresh runtimes start fenced while the child is proved;
+                    # settled recovery must leave ordinary capture admission open.
+                    self.module.resume_claims()
+                return result
+
+    async def retain_factory_reset_recovery(self, config: MemoryConfig) -> None:
+        """Keep a failed fresh aggregate available for pending-reset repair.
+
+        Factory reset has already removed the mutable roots at this point. A
+        failed activation therefore must stop any partially-started sidecar and
+        leave the aggregate fenced, but it must not tombstone the object: the
+        Dependencies Repair path needs its artifact coordinator and store.
+        """
+
+        if self._retired:
+            return
+        async with self._reconcile_lock:
+            async with self.module.lifecycle():
+                self.module.pause_claims()
+                await self._stop_worker()
+                await self._sidecar.stop()
+                self.adopt_recovery_intent(config)
+                self._runtime_error = "memory_factory_reset_failed"
+                self._advance_processing_lifecycle()
 
     @property
     def module(self) -> MemoryModule | _UnavailableMemoryModule:
@@ -602,7 +713,7 @@ class MemoryRuntime:
             exact_redaction_values=exact_redaction_values,
         )
 
-    async def _reap_recorded_sidecar_if_unowned(self) -> bool:
+    async def _reap_recorded_sidecar_if_unowned(self, *, fail_closed: bool = False) -> bool:
         """Reap a previous run's sidecar when this runtime supervises none.
 
         ``EverOSProcess`` reaps a recorded orphan on its way to spawning a
@@ -637,7 +748,9 @@ class MemoryRuntime:
         would report a failure they cannot act on. On the enabled path the launch
         runs the same reap again moments later and fails closed there, so the
         guarantee is kept where it means something. Either way the record is
-        retained, so the recovery stays available to the next attempt.
+        retained, so the recovery stays available to the next attempt. A caller
+        that is about to delete the provider root may pass ``fail_closed=True``
+        to stop on that recovery failure instead.
         """
 
         async with self._reconcile_lock:
@@ -653,12 +766,16 @@ class MemoryRuntime:
                 await recovery.reconcile_orphan()
             except Exception as exc:
                 logger.warning("Recorded EverOS sidecar recovery did not finish: %s", exc)
+                if fail_closed:
+                    raise
                 return False
             return True
 
     async def reconcile(self, config: MemoryConfig) -> dict[str, Any]:
         """Apply persisted config without restarting the Avibe service."""
 
+        if self._retired:
+            return {"ok": False, "error": "memory_operation_in_progress"}
         try:
             return await self._reconcile(config)
         finally:
@@ -794,6 +911,15 @@ class MemoryRuntime:
             self._config = deepcopy(config)
             self._restart_config = deepcopy(config)
             self._runtime_error = "memory_embedding_rebuild_required"
+            return {"ok": False, "error": self._runtime_error}
+
+        if config.recovery_intent == "factory_reset":
+            self.module.pause_claims()
+            await self._stop_worker()
+            await self._sidecar.stop()
+            self._config = deepcopy(config)
+            self._restart_config = deepcopy(config)
+            self._runtime_error = "memory_factory_reset_failed"
             return {"ok": False, "error": self._runtime_error}
 
         embedding_changed = (
@@ -1292,6 +1418,8 @@ class MemoryRuntime:
         )
 
     async def clear(self, *, operator_ref: str) -> dict[str, Any]:
+        if self._retired or getattr(self._restart_config, "recovery_intent", None) == "factory_reset":
+            return {"status": "failed", "error": "memory_operation_in_progress"}
         if not self.available:
             raise self._unavailable()
         maintenance = self._require_maintenance()
@@ -1305,6 +1433,8 @@ class MemoryRuntime:
         *,
         operator_ref: str,
     ) -> dict[str, Any]:
+        if self._retired or getattr(self._restart_config, "recovery_intent", None) == "factory_reset":
+            return {"status": "failed", "error": "memory_operation_in_progress"}
         if not self.available:
             raise self._unavailable()
         maintenance = self._require_maintenance()
@@ -1321,6 +1451,8 @@ class MemoryRuntime:
         *,
         operator_ref: str,
     ) -> dict[str, Any]:
+        if self._retired or getattr(self._restart_config, "recovery_intent", None) == "factory_reset":
+            return {"status": "failed", "error": "memory_operation_in_progress"}
         if not self.available:
             raise self._unavailable()
         maintenance = self._require_maintenance()
@@ -1335,6 +1467,8 @@ class MemoryRuntime:
         self,
         operation: Callable[[], Awaitable[ClearResult]],
     ) -> dict[str, Any]:
+        if self._retired or getattr(self._restart_config, "recovery_intent", None) == "factory_reset":
+            return {"status": "failed", "error": "memory_operation_in_progress"}
         if self._rebuild_running():
             return {"status": "failed", "error": "memory_operation_in_progress"}
         lease = MemoryOperationLease(self._effective_home)
@@ -1457,6 +1591,23 @@ class MemoryRuntime:
                 "download_error": None,
             }
 
+        lease = MemoryOperationLease(self._effective_home)
+        try:
+            await run_blocking(lease.acquire)
+        except MemoryOperationBusy:
+            return {
+                "ok": False,
+                "reason": "memory_operation_in_progress",
+                "download_error": None,
+            }
+        try:
+            return await self._install_artifact_with_lease()
+        finally:
+            await run_blocking(lease.release)
+
+    async def _install_artifact_with_lease(self) -> dict[str, Any]:
+        """Run the installer after destructive-operation admission succeeds."""
+
         self._activation_loop = asyncio.get_running_loop()
         async with self._reconcile_lock:
             if self._rebuild_running() and asyncio.current_task() is not self._rebuild_task:
@@ -1572,6 +1723,8 @@ class MemoryRuntime:
     async def restart(self) -> dict[str, Any]:
         """Join or start one process-only replacement of the Memory sidecar."""
 
+        if self._retired:
+            return {"ok": False, "error": "memory_operation_in_progress"}
         if self._rebuild_running():
             return {"ok": False, "error": "memory_operation_in_progress"}
         task = self._restart_task
@@ -1589,7 +1742,7 @@ class MemoryRuntime:
     async def rebuild(self) -> dict[str, Any]:
         """Join or start one retained embedding-index rebuild over the cascade child."""
 
-        if self._closing:
+        if self._closing or self._retired:
             return {
                 "ok": False,
                 "error": "memory_operation_in_progress",
@@ -1663,7 +1816,9 @@ class MemoryRuntime:
         replay = deepcopy(self._restart_config)
         if not replay.enabled:
             return {"ok": False, "error": "memory_disabled"}
-        if replay.recovery_intent == "rebuild":
+        if replay.recovery_intent in {"rebuild", "factory_reset"}:
+            if replay.recovery_intent == "factory_reset":
+                return {"ok": False, "error": "memory_operation_in_progress"}
             return {"ok": False, "error": "memory_embedding_rebuild_required"}
 
         python = await asyncio.to_thread(self._artifact_manager.resolve_python)
@@ -2063,8 +2218,12 @@ class MemoryRuntime:
     async def _close_after_rebuild(self) -> None:
         """Finish ordinary shutdown after rebuild ownership is fully released."""
 
+        cleanup_error: BaseException | None = None
         if self._maintenance is not None:
-            await self._maintenance.close()
+            try:
+                await self._maintenance.close()
+            except BaseException as error:
+                cleanup_error = error
         retained = self._restart_task
         if retained is not None and retained is not asyncio.current_task():
             try:
@@ -2082,14 +2241,36 @@ class MemoryRuntime:
                 raise
             except Exception:
                 pass
-        if self.available:
+        if self._module is not None:
+            self._module.pause_claims()
             try:
-                await self.module.prepare_shutdown()
-            finally:
                 await self._stop_worker()
-        await self._stop_call_log_retention()
-        await self._sidecar.close()
+            except BaseException as error:
+                cleanup_error = error
+            async with self._module.provider_root_lifecycle():
+                try:
+                    if (
+                        self._retired
+                        and not await self._module.quiesce_claims_for_clear()
+                    ):
+                        raise RuntimeError(
+                            "Memory worker did not quiesce during retired close"
+                        )
+                    await self._module.prepare_shutdown()
+                except BaseException as error:
+                    cleanup_error = cleanup_error or error
+        try:
+            await self._stop_call_log_retention()
+        except BaseException as error:
+            cleanup_error = cleanup_error or error
+        try:
+            await self._sidecar.close()
+        except BaseException as error:
+            cleanup_error = cleanup_error or error
         self._artifact_manager.set_activation_coordinator(None)
+        if cleanup_error is not None:
+            raise cleanup_error
+        self._closed = True
         self._advance_processing_lifecycle()
 
     def _active_provider_root_metadata(self) -> ProviderRootMetadata:
@@ -2112,11 +2293,24 @@ class MemoryRuntime:
     def _coordinate_artifact_activation(
         self,
         candidate: MemoryArtifactCandidate,
-        root_state: MemoryProviderRootState,
+        root_state: MemoryProviderRootState | None,
         commit: Callable[[], None],
         rollback: Callable[[], None],
     ) -> None:
         """Bridge the synchronous shared installer into the controller loop."""
+
+        # A durable factory-reset marker deliberately fences runtime activation.
+        # Repair still needs to publish an admitted pointer so the next reset
+        # attempt can proceed, but it must not resurrect the pending runtime.
+        if (
+            getattr(self._config, "recovery_intent", None) == "factory_reset"
+            or getattr(self._restart_config, "recovery_intent", None) == "factory_reset"
+        ):
+            commit()
+            return
+
+        if root_state is None:
+            raise MemoryRuntimeActivationError("memory provider root could not be inspected")
 
         loop = self._activation_loop
         if loop is None or loop.is_closed():

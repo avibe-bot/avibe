@@ -125,6 +125,7 @@ class MemoryModule:
         ] = weakref.WeakValueDictionary()
         self._invalid_capture_admission_lock = asyncio.Lock()
         self._clear_active = False
+        self._retired = False
         self._attachment_store = attachment_store or AttachmentPinStore(
             effective_home=self._effective_home
         )
@@ -142,6 +143,19 @@ class MemoryModule:
         """Whether Runtime-owned maintenance currently fences module work."""
 
         return self._clear_active
+
+    @property
+    def retired(self) -> bool:
+        """Whether this captured module has been permanently tombstoned."""
+
+        return self._retired
+
+    def retire(self) -> None:
+        """Permanently close this module to stale callers before root deletion."""
+
+        self._retired = True
+        self._clear_active = True
+        self._worker.pause_claims()
 
     def enter_maintenance(self) -> None:
         """Fence capture and reads before a maintenance transition begins."""
@@ -427,6 +441,8 @@ class MemoryModule:
     async def capture(self, request: CaptureRequest) -> CaptureReceipt:
         """Validate and persist one source capture without touching the provider."""
 
+        if self._retired:
+            return CaptureSkipped(reason="memory_operation_in_progress")
         if not self._is_enabled():
             return CaptureSkipped(reason="memory_disabled")
         if self._clear_active or self._is_maintenance_open():
@@ -443,6 +459,8 @@ class MemoryModule:
         )
         async with admission_lock:
             async with self._root_lifecycle_lock():
+                if self._retired:
+                    return CaptureSkipped(reason="memory_operation_in_progress")
                 if not self._is_enabled():
                     return CaptureSkipped(reason="memory_disabled")
                 if self._clear_active or self._is_maintenance_open():
@@ -820,6 +838,8 @@ class MemoryModule:
         return _utf8_bytes("\0".join((value.name, value.uri, value.ext))) is not None
 
     def _is_enabled(self) -> bool:
+        if self._retired:
+            return False
         try:
             value = self._enabled_source() if callable(self._enabled_source) else self._enabled_source
         except Exception:

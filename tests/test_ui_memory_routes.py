@@ -82,6 +82,134 @@ def _local_headers() -> dict[str, str]:
     return {"Origin": "http://127.0.0.1:15131"}
 
 
+def test_memory_factory_reset_public_result_keeps_truthful_root_contract() -> None:
+    payload = {
+        "ok": False,
+        "result": "partial",
+        "error": "memory_factory_reset_failed",
+        "data_deleted": True,
+        "data_remaining": True,
+        "roots": [
+            {"path": "memory", "existed": True, "deleted": True},
+            {
+                "path": "state/memory",
+                "existed": True,
+                "deleted": False,
+                "error": "ConfinedFilesystemError",
+            },
+        ],
+        "secret": "must-not-cross",
+    }
+    public, status_code = ui_memory_routes._memory_factory_reset_result(payload, 503)
+    assert status_code == 503
+    assert public == {
+        "ok": False,
+        "result": "partial",
+        "error": "memory_factory_reset_failed",
+        "data_deleted": True,
+        "data_remaining": True,
+        "roots": [
+            {"path": "memory", "existed": True, "deleted": True},
+            {
+                "path": "state/memory",
+                "existed": True,
+                "deleted": False,
+                "error": "ConfinedFilesystemError",
+            },
+        ],
+    }
+
+
+def test_memory_factory_reset_public_conflict_preserves_exact_closed_envelope() -> None:
+    payload = {
+        "ok": False,
+        "error": "memory_operation_in_progress",
+        "result": "failed",
+    }
+
+    public, status_code = ui_memory_routes._memory_factory_reset_result(payload, 409)
+
+    assert status_code == 409
+    assert public == payload
+
+
+def test_memory_factory_reset_public_conflict_rejects_extra_fields() -> None:
+    public, status_code = ui_memory_routes._memory_factory_reset_result(
+        {
+            "ok": False,
+            "error": "memory_operation_in_progress",
+            "result": "failed",
+            "secret": "must-not-cross",
+        },
+        409,
+    )
+
+    assert status_code == 503
+    assert public == {
+        "ok": False,
+        "error": "memory_factory_reset_failed",
+        "result": "failed",
+    }
+
+
+def test_memory_factory_reset_public_success_rejects_extra_fields() -> None:
+    public, status_code = ui_memory_routes._memory_factory_reset_result(
+        {
+            "ok": True,
+            "result": "completed",
+            "data_deleted": True,
+            "data_remaining": False,
+            "roots": [
+                {"path": "memory", "existed": True, "deleted": True},
+                {"path": "state/memory", "existed": True, "deleted": True},
+            ],
+            "secret": "must-not-cross",
+        },
+        200,
+    )
+
+    assert status_code == 503
+    assert public == {
+        "ok": False,
+        "error": "memory_factory_reset_failed",
+        "result": "failed",
+    }
+
+
+def test_memory_factory_reset_route_returns_conflict_envelope(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    monkeypatch.setattr(ui_memory_routes, "_memory_ui_user_key", lambda: "avibe:local")
+
+    async def conflict(*, user_key: str):
+        assert user_key == "avibe:local"
+        return {
+            "status_code": 409,
+            "body": {
+                "ok": False,
+                "error": "memory_operation_in_progress",
+                "result": "failed",
+            },
+        }
+
+    monkeypatch.setattr(internal_client, "memory_factory_reset", conflict)
+    client = app.test_client()
+    response = client.post(
+        "/api/memory/runtime/factory-reset",
+        json={"confirm": True},
+        headers=csrf_headers(client, "http://127.0.0.1:15131"),
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 409
+    assert response.get_json() == {
+        "ok": False,
+        "error": "memory_operation_in_progress",
+        "result": "failed",
+    }
+
+
 def test_memory_settings_are_direct_loopback_only_and_write_only(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
@@ -102,6 +230,101 @@ def test_memory_settings_are_direct_loopback_only_and_write_only(monkeypatch, tm
     assert "recovery_intent" not in response.get_json()
     assert "embedding_change_pending" not in response.get_json()
     assert "diagnostics" not in response.get_json()
+
+
+def test_memory_factory_reset_marker_allows_endpoint_repair_without_reconcile(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _save_memory(
+        MemoryConfig(
+            enabled=True,
+            recovery_intent="factory_reset",
+            processing=MemoryProcessingConfig(
+                llm=MemoryEndpointConfig("https://old-llm.example.test/v1", "old-chat", "old-llm-key"),
+                embedding=MemoryEndpointConfig(
+                    "https://old-embed.example.test/v1",
+                    "old-embed",
+                    "old-embed-key",
+                ),
+            ),
+        )
+    )
+    reconcile_calls: list[None] = []
+
+    async def reconcile_must_not_run(*_args, **_kwargs):
+        reconcile_calls.append(None)
+        raise AssertionError("endpoint repair must leave the factory-reset marker fenced")
+
+    monkeypatch.setattr(internal_client, "reconcile_memory", reconcile_must_not_run)
+    client = app.test_client()
+    settings = client.get(
+        "/api/memory/settings",
+        headers=_local_headers(),
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+    assert settings.status_code == 200
+    public = settings.get_json()
+    assert public["factory_reset_required"] is True
+    assert "recovery_intent" not in public
+
+    response = client.patch(
+        "/api/memory/settings",
+        json={
+            "processing": {
+                "llm": {
+                    "base_url": "https://new-llm.example.test/v1",
+                    "model": "new-chat",
+                    "api_key": "new-llm-key",
+                },
+                "embedding": {
+                    "base_url": "https://new-embed.example.test/v1",
+                    "model": "new-embed",
+                    "api_key": "new-embed-key",
+                },
+            }
+        },
+        headers=csrf_headers(client, "http://127.0.0.1:15131"),
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["status"] == "ok"
+    assert body["factory_reset_required"] is True
+    assert body["processing"]["llm"]["has_api_key"] is True
+    assert body["processing"]["embedding"]["has_api_key"] is True
+    assert reconcile_calls == []
+
+    persisted = V2Config.load().memory
+    assert persisted.recovery_intent == "factory_reset"
+    assert persisted.processing.llm.model == "new-chat"
+    assert persisted.processing.embedding.base_url == "https://new-embed.example.test/v1"
+
+
+def test_memory_factory_reset_marker_still_blocks_lifecycle_patch(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _save_memory(MemoryConfig(recovery_intent="factory_reset"))
+
+    client = app.test_client()
+    response = client.patch(
+        "/api/memory/settings",
+        json={"enabled": False},
+        headers=csrf_headers(client, "http://127.0.0.1:15131"),
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 409
+    assert response.get_json() == {
+        "status": "failed",
+        "error": "memory_operation_in_progress",
+    }
+    assert V2Config.load().memory.recovery_intent == "factory_reset"
 
 
 def test_memory_settings_get_accepts_same_origin_referer_without_origin(monkeypatch, tmp_path) -> None:

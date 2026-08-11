@@ -1316,6 +1316,7 @@
     "memory_rebuild_failed": "Rebuilding the Memory index failed. Retry when ready; your markdown memory is still kept.",
     "memory_rebuild_root_busy": "Another process is using the Memory root. Wait and retry the rebuild.",
     "memory_operation_in_progress": "A Memory operation is already in progress. Wait for it to finish.",
+    "memory_factory_reset_failed": "Factory reset could not finish. Memory data may be partially deleted; retry from Settings → Memory.",
     "memory_embedding_rebuild_required": "Changing the embedding endpoint or model rebuilds the Memory index. Confirm to continue."
   },
   "apps": {
@@ -3994,6 +3995,35 @@
       "clearing": "Clearing…",
       "cleared": "Memory data cleared.",
       "failed": "Clear failed."
+    },
+    "factoryReset": {
+      "button": "Factory reset",
+      "retry": "Retry factory reset",
+      "artifactRepairRequired": "Factory reset is unavailable until the pinned Memory artifact is valid. Repair it from Dependencies.",
+      "confirmTitle": "Factory reset Memory?",
+      "confirmDescription": "This permanently removes both mutable Memory roots. Settings and the installed Memory artifact are retained.",
+      "confirmLabel": "Factory reset",
+      "deletesTitle": "This deletes exactly:",
+      "deletes": [
+        "The installed Memory root (memory)",
+        "The mutable Memory state root (state/memory)"
+      ],
+      "retainsTitle": "This keeps:",
+      "retains": [
+        "Memory settings and credentials",
+        "The pinned, installed Memory artifact",
+        "Original Avibe chats and data outside these roots"
+      ],
+      "resultTitle": "Factory reset result",
+      "resultCompleted": "The fresh Memory state is ready. The per-root report below is authoritative.",
+      "rootOutcome": "{{path}}: {{deleted}}",
+      "unknownRoot": "unknown root",
+      "deleted": "deleted",
+      "partial": "partially deleted",
+      "absent": "absent",
+      "retained": "retained",
+      "completed": "Memory factory reset completed.",
+      "failed": "Memory factory reset failed. Check the result and retry when ready."
     },
     "kind": {
       "profile": "Profile",

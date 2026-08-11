@@ -104,7 +104,7 @@ class MemoryRuntimeActivationError(RuntimeError):
 
 
 MemoryArtifactActivationCoordinator = Callable[
-    [MemoryArtifactCandidate, MemoryProviderRootState, Callable[[], None], Callable[[], None]],
+    [MemoryArtifactCandidate, MemoryProviderRootState | None, Callable[[], None], Callable[[], None]],
     None,
 ]
 
@@ -459,7 +459,13 @@ class MemoryArtifactManager(ManagedRuntimeManager):
         try:
             root_state = self._provider_root.inspect(candidate)
         except ProviderRootError as error:
-            raise MemoryRuntimeActivationError(str(error)) from error
+            # A durable factory-reset fence may intentionally leave an old,
+            # incompatible root in place until the retry deletes it. Let the
+            # lifecycle coordinator decide whether pointer-only repair is safe;
+            # ordinary activation still fails closed on ``None`` below.
+            if self._activation_coordinator is None:
+                raise MemoryRuntimeActivationError(str(error)) from error
+            root_state = None
         previous_pointer = self._active_pointer()
 
         def commit() -> None:

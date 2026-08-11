@@ -11,6 +11,7 @@ import type { MemoryProcessingRecordSummary } from '../../context/ApiContext';
 const api = vi.hoisted(() => ({
   abortMemoryClear: vi.fn(),
   clearMemory: vi.fn(),
+  factoryResetMemory: vi.fn(),
   getMemoryMaintenance: vi.fn(),
   getMemoryProcessingRecord: vi.fn(),
   getMemorySettings: vi.fn(),
@@ -42,8 +43,8 @@ vi.mock('./SettingsPageShell', () => ({
 }));
 
 vi.mock('../ui/confirm-dialog', () => ({
-  ConfirmDialog: ({ open, onConfirm }: { open: boolean; onConfirm: () => void | Promise<void> }) =>
-    open ? <button type="button" onClick={() => void onConfirm()}>confirm-clear</button> : null,
+  ConfirmDialog: ({ open, onConfirm, title }: { open: boolean; onConfirm: () => void | Promise<void>; title?: string }) =>
+    open ? <button type="button" onClick={() => void onConfirm()}>{title?.includes('factoryReset') ? 'confirm-factory' : 'confirm-clear'}</button> : null,
 }));
 
 vi.mock('./memory/MemoryLogPanel', async () => {
@@ -62,15 +63,26 @@ vi.mock('./memory/MemorySettingsPanel', () => ({
   MemorySettingsPanel: ({
     maintenance,
     onClearAll,
+    onFactoryReset,
+    factoryResetBusy,
+    factoryResetArtifactValid,
+    factoryResetPending,
     onRebuildBusyChange,
   }: {
     maintenance: { can_clear: boolean } | null;
     onClearAll: () => void;
+    onFactoryReset?: () => void;
+    factoryResetBusy?: boolean;
+    factoryResetArtifactValid?: boolean;
+    factoryResetPending?: boolean;
     onRebuildBusyChange: (busy: boolean) => void;
   }) => (
     <div>
       <span>{maintenance?.can_clear ? 'maintenance-ready' : 'maintenance-unknown'}</span>
       <button type="button" onClick={onClearAll}>open-clear</button>
+      <button type="button" onClick={onFactoryReset} disabled={factoryResetBusy || !factoryResetArtifactValid}>
+        {factoryResetPending ? 'retry-factory' : 'open-factory'}
+      </button>
       <button type="button" onClick={() => onRebuildBusyChange(true)}>
         begin-rebuild
       </button>
@@ -136,6 +148,15 @@ beforeEach(() => {
   api.listDependencies.mockResolvedValue({ ok: true, deps: [] });
   api.restartMemoryRuntime.mockResolvedValue({ ok: true, state: 'ready' });
   api.clearMemory.mockResolvedValue({ status: 'completed', operation_id: 'clear-ok', epoch: 1 });
+  api.factoryResetMemory.mockResolvedValue({
+    ok: true,
+    result: 'completed',
+    data_deleted: true,
+    roots: [
+      { path: 'memory', existed: true, deleted: true },
+      { path: 'state/memory', existed: true, deleted: true },
+    ],
+  });
   api.resumeMemoryClear.mockResolvedValue({ status: 'completed', operation_id: 'clear-42' });
   api.abortMemoryClear.mockResolvedValue({ status: 'aborted', operation_id: 'clear-42' });
 });
@@ -347,5 +368,126 @@ describe('SettingsMemoryPage restart action', () => {
 
     await user.click(screen.getByRole('button', { name: 'end-rebuild' }));
     expect((action as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('awaits factory reset and posts the exact confirmation contract', async () => {
+    api.listDependencies.mockResolvedValue({
+      ok: true,
+      deps: [{ id: 'memory-runtime', kind: 'runtime', required: false, installed: true, status: 'ready', version: '1.0.0' }],
+    });
+    const user = userEvent.setup();
+    renderPage();
+
+    await user.click(await screen.findByRole('radio', { name: 'memory.tabs.settings' }));
+    await user.click(await screen.findByRole('button', { name: 'open-factory' }));
+    await user.click(screen.getByRole('button', { name: 'confirm-factory' }));
+
+    await waitFor(() => expect(api.factoryResetMemory).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(api.getMemorySettings).toHaveBeenCalledTimes(2));
+  });
+
+  it('closes confirmation before exposing a terminal partial reset result', async () => {
+    api.listDependencies.mockResolvedValue({
+      ok: true,
+      deps: [{ id: 'memory-runtime', kind: 'runtime', required: false, installed: true, status: 'ready', version: '1.0.0' }],
+    });
+    api.factoryResetMemory.mockResolvedValue({
+      ok: false,
+      result: 'partial',
+      error: 'memory_factory_reset_failed',
+      data_deleted: true,
+      data_remaining: true,
+      roots: [
+        { path: 'memory', existed: true, deleted: true },
+        { path: 'state/memory', existed: true, deleted: false, error: 'PermissionError' },
+      ],
+    });
+    const user = userEvent.setup();
+    renderPage();
+
+    await user.click(await screen.findByRole('radio', { name: 'memory.tabs.settings' }));
+    await user.click(await screen.findByRole('button', { name: 'open-factory' }));
+    await user.click(screen.getByRole('button', { name: 'confirm-factory' }));
+
+    await waitFor(() => expect(api.factoryResetMemory).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'confirm-factory' })).toBeNull());
+  });
+
+  it('refreshes artifact readiness after a reset reports repair required', async () => {
+    api.listDependencies
+      .mockResolvedValueOnce({
+        ok: true,
+        deps: [{ id: 'memory-runtime', kind: 'runtime', required: false, installed: true, status: 'ready', version: '1.0.0' }],
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        deps: [{ id: 'memory-runtime', kind: 'runtime', required: false, installed: false, status: 'missing', version: null }],
+      });
+    api.factoryResetMemory.mockResolvedValue({
+      ok: false,
+      result: 'failed',
+      error: 'memory_factory_reset_failed',
+      reason: 'artifact_repair_required',
+      data_deleted: false,
+      data_remaining: true,
+      roots: [
+        { path: 'memory', existed: true, deleted: false },
+        { path: 'state/memory', existed: true, deleted: false },
+      ],
+    });
+    const user = userEvent.setup();
+    renderPage();
+
+    await user.click(await screen.findByRole('radio', { name: 'memory.tabs.settings' }));
+    const openFactory = await screen.findByRole('button', { name: 'open-factory' });
+    await waitFor(() => expect((openFactory as HTMLButtonElement).disabled).toBe(false));
+    await user.click(openFactory);
+    await user.click(screen.getByRole('button', { name: 'confirm-factory' }));
+
+    await waitFor(() => expect(api.factoryResetMemory).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(api.listDependencies).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(
+      (screen.getByRole('button', { name: 'open-factory' }) as HTMLButtonElement).disabled,
+    ).toBe(true));
+  });
+
+  it('shows Retry while a durable factory reset intent remains pending', async () => {
+    api.listDependencies.mockResolvedValue({
+      ok: true,
+      deps: [{ id: 'memory-runtime', kind: 'runtime', required: false, installed: true, status: 'ready', version: '1.0.0' }],
+    });
+    api.getMemorySettings.mockResolvedValue({
+      status: 'ok',
+      enabled: true,
+      factory_reset_required: true,
+      processing: { llm: endpoint, embedding: endpoint },
+    });
+    const user = userEvent.setup();
+    renderPage();
+
+    await user.click(await screen.findByRole('radio', { name: 'memory.tabs.settings' }));
+    const retry = await screen.findByRole('button', { name: 'retry-factory' });
+    expect((retry as HTMLButtonElement).disabled).toBe(false);
+    await user.click(retry);
+    expect(await screen.findByRole('button', { name: 'confirm-factory' })).toBeTruthy();
+  });
+
+  it('does not derive Retry from a raw recovery_intent field', async () => {
+    api.listDependencies.mockResolvedValue({
+      ok: true,
+      deps: [{ id: 'memory-runtime', kind: 'runtime', required: false, installed: true, status: 'ready', version: '1.0.0' }],
+    });
+    api.getMemorySettings.mockResolvedValue({
+      status: 'ok',
+      enabled: true,
+      processing: { llm: endpoint, embedding: endpoint },
+      recovery_intent: 'factory_reset',
+    } as never);
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(await screen.findByRole('radio', { name: 'memory.tabs.settings' }));
+
+    expect(await screen.findByRole('button', { name: 'open-factory' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'retry-factory' })).toBeNull();
   });
 });

@@ -459,13 +459,18 @@ class MemoryConfig:
     enabled: bool = False
     processing: MemoryProcessingConfig = field(default_factory=MemoryProcessingConfig)
     diagnostics: MemoryDiagnosticsConfig = field(default_factory=MemoryDiagnosticsConfig)
-    recovery_intent: Literal["rebuild"] | None = None
+    recovery_intent: Literal["rebuild", "factory_reset"] | None = None
 
     def validate(self) -> None:
         if not isinstance(self.enabled, bool):
             raise ValueError("Config 'memory.enabled' must be a boolean")
-        if self.recovery_intent is not None and self.recovery_intent != "rebuild":
-            raise ValueError("Config 'memory.recovery_intent' must be 'rebuild' or null")
+        if self.recovery_intent is not None and (
+            not isinstance(self.recovery_intent, str)
+            or self.recovery_intent not in {"rebuild", "factory_reset"}
+        ):
+            raise ValueError(
+                "Config 'memory.recovery_intent' must be 'rebuild', 'factory_reset', or null"
+            )
         self.processing.validate()
         self.diagnostics.validate()
         if self.enabled and not (self.processing.llm.complete() and self.processing.embedding.complete()):
@@ -615,8 +620,13 @@ def memory_config_from_payload(payload: object) -> MemoryConfig:
     legacy_intent = "rebuild" if legacy_pending else None
     if "recovery_intent" in payload:
         recovery_intent = payload.get("recovery_intent")
-        if recovery_intent is not None and recovery_intent != "rebuild":
-            raise ValueError("Config 'memory.recovery_intent' must be 'rebuild' or null")
+        if recovery_intent is not None and (
+            not isinstance(recovery_intent, str)
+            or recovery_intent not in {"rebuild", "factory_reset"}
+        ):
+            raise ValueError(
+                "Config 'memory.recovery_intent' must be 'rebuild', 'factory_reset', or null"
+            )
         if legacy_present and recovery_intent != legacy_intent:
             raise ValueError("Config 'memory' contains conflicting recovery intent fields")
     else:

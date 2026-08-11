@@ -385,6 +385,24 @@ async def memory_rebuild(
     )
 
 
+async def memory_factory_reset(
+    *,
+    user_key: str,
+    socket_path: Optional[Path] = None,
+) -> dict[str, Any]:
+    """Wait for the Controller-owned factory reset and return its final result."""
+
+    path = "/internal/memory/factory-reset"
+    return await _memory_request(
+        "POST",
+        path,
+        payload={"confirm": True},
+        headers=_memory_user_key_headers("POST", path, user_key),
+        socket_path=socket_path,
+        timeout=None,
+    )
+
+
 async def memory_final_flush(
     session_id: str,
     *,

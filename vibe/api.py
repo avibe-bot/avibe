@@ -1006,7 +1006,7 @@ def save_config(
 def save_memory_config(
     memory_payload: dict,
     *,
-    recovery_intent: Literal["rebuild"] | None = None,
+    recovery_intent: Literal["rebuild", "factory_reset"] | None = None,
     expected: MemoryConfig | None = None,
 ) -> V2Config:
     """Persist Memory settings only from the direct-loopback Memory route.

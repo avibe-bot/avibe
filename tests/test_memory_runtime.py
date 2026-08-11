@@ -997,6 +997,51 @@ def test_memory_artifact_coordinator_rolls_back_the_active_pointer(tmp_path: Pat
     assert manager.provider_root_format() == "everos-1.0"
 
 
+def test_memory_artifact_pending_reset_can_commit_when_old_root_is_incompatible(
+    tmp_path: Path,
+) -> None:
+    provider_root = tmp_path / "memory" / "everos-root"
+    provider_root.mkdir(parents=True, mode=0o700)
+    provider_root.parent.chmod(0o700)
+    (provider_root / "data").write_text("old", encoding="utf-8")
+    (provider_root / "data").chmod(0o600)
+    (provider_root / ".avibe-memory-root.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "provider_root_id": "root-id",
+                "provider_id": "everos",
+                "provider_root_format": "everos-1.0",
+                "created_by_artifact_fingerprint": "old-artifact",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (provider_root / ".avibe-memory-root.json").chmod(0o600)
+    manager = MemoryArtifactManager(
+        runtime_dir=tmp_path / "runtime",
+        offline=True,
+        provider_root=provider_root,
+    )
+    manager.runtime_dir.mkdir(parents=True, mode=0o700)
+    calls: list[object] = []
+
+    def defer_pointer(_candidate, root_state, commit, _rollback) -> None:
+        calls.append(root_state)
+        assert root_state is None
+        commit()
+
+    manager.set_activation_coordinator(defer_pointer)
+    manager._write_current_pointer(
+        manager.runtime_dir / "versions" / "candidate",
+        _artifact_manifest("everos-2.0", compatible_formats=[]),
+        _artifact_archive(),
+    )
+
+    assert calls == [None]
+    assert manager._active_pointer() is not None
+
+
 def test_memory_artifact_first_activation_rollback_does_not_need_temp_sqlite(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1305,6 +1350,24 @@ def _recording_ownership(
 
     monkeypatch.setattr(memory_runtime, "EverOSRebuildProcess", _Recovery)
     return reaps
+
+
+async def test_recorded_orphan_recovery_can_fail_closed_for_root_deletion(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    memory_runtime_factory,
+) -> None:
+    reaps = _recording_ownership(monkeypatch, failure=RuntimeError("orphan still serving"))
+    runtime = memory_runtime_factory(
+        MemoryConfig(enabled=False),
+        artifact_manager=_installed_artifact(),
+        effective_home=tmp_path,
+    )
+
+    with pytest.raises(RuntimeError, match="orphan still serving"):
+        await runtime._reap_recorded_sidecar_if_unowned(fail_closed=True)
+    assert len(reaps) == 1
+    await memory_runtime_factory.close(runtime)
 
 
 async def test_recorded_orphan_recovery_routes_through_provider_root_exclusion(
@@ -2063,6 +2126,43 @@ async def test_session_lifecycle_does_not_reset_when_capture_fence_times_out(
         await memory_runtime_factory.close(runtime)
 
 
+async def test_retired_close_aborts_when_claim_quiescence_times_out(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    memory_runtime_factory,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime = memory_runtime_factory(
+        MemoryConfig(enabled=True),
+        store=MemoryStore(),
+        artifact_manager=_installed_artifact(),
+        effective_home=tmp_path,
+    )
+    original_quiesce_claims = runtime.module.quiesce_claims_for_clear
+    original_prepare_shutdown = runtime.module.prepare_shutdown
+
+    async def refuse_quiescence(*_args, **_kwargs) -> bool:
+        return False
+
+    async def shutdown_must_not_run(*_args, **_kwargs) -> None:
+        raise AssertionError("shutdown must not run after a failed claim drain")
+
+    monkeypatch.setattr(runtime.module, "quiesce_claims_for_clear", refuse_quiescence)
+    monkeypatch.setattr(runtime.module, "prepare_shutdown", shutdown_must_not_run)
+    runtime.retire()
+    with pytest.raises(RuntimeError, match="did not quiesce"):
+        await runtime.close()
+    assert runtime.closed is False
+
+    monkeypatch.setattr(
+        runtime.module,
+        "quiesce_claims_for_clear",
+        original_quiesce_claims,
+    )
+    monkeypatch.setattr(runtime.module, "prepare_shutdown", original_prepare_shutdown)
+    await memory_runtime_factory.close(runtime)
+
+
 @pytest.mark.parametrize("outcome", ["exception", "cancellation"])
 async def test_session_lifecycle_releases_capture_fence_after_aborted_reset(
     monkeypatch: pytest.MonkeyPatch,
@@ -2228,6 +2328,159 @@ async def test_runtime_install_artifact_uses_controller_owned_manager(
     assert callable(artifact.activation_coordinator)
     assert calls == [True]
     assert runtime._config.enabled is False
+    await memory_runtime_factory.close(runtime)
+
+
+async def test_runtime_repairs_artifact_without_activating_pending_factory_reset(
+    tmp_path: Path,
+    memory_runtime_factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repair may admit the pointer while the durable reset fence remains set."""
+
+    class _RepairArtifact(FakeMemoryArtifactManager):
+        def ensure(self, *, force: bool = False) -> dict:
+            self.ensure_calls.append(force)
+            assert self.activation_coordinator is not None
+            self.activation_coordinator(
+                MemoryArtifactCandidate(
+                    provider_root_format="everos-1.2.3",
+                    compatible_provider_root_formats=frozenset({"everos-1.2.3"}),
+                    artifact_fingerprint="repaired-artifact",
+                ),
+                MemoryProviderRootState(exists=True, empty=False),
+                commit,
+                rollback,
+            )
+            return dict(self.ensure_payload)
+
+    committed: list[bool] = []
+    rolled_back: list[bool] = []
+
+    def commit() -> None:
+        committed.append(True)
+
+    def rollback() -> None:
+        rolled_back.append(True)
+
+    artifact = _RepairArtifact(python=Path(sys.executable))
+    runtime = memory_runtime_factory(
+        MemoryConfig(enabled=False, recovery_intent="factory_reset"),
+        artifact_manager=artifact,
+        effective_home=tmp_path,
+    )
+    monkeypatch.setattr(
+        runtime,
+        "_activate_artifact_candidate",
+        lambda *_args: pytest.fail("pending reset repair must not activate Runtime"),
+    )
+
+    result = await runtime.install_artifact()
+
+    assert result == {"ok": True, "reason": None, "download_error": None}
+    assert artifact.ensure_calls == [True]
+    assert committed == [True]
+    assert rolled_back == []
+    assert runtime._config.recovery_intent == "factory_reset"
+    await memory_runtime_factory.close(runtime)
+
+
+async def test_failed_fresh_runtime_stays_available_for_pending_reset_repair(
+    tmp_path: Path,
+    memory_runtime_factory,
+) -> None:
+    runtime = memory_runtime_factory(
+        MemoryConfig(enabled=True, processing=_processing_config()),
+        artifact_manager=_installed_artifact(),
+        effective_home=tmp_path,
+    )
+    pending = replace(runtime._config, recovery_intent="factory_reset")
+
+    await runtime.retain_factory_reset_recovery(pending)
+
+    assert runtime.available is True
+    assert runtime.retired is False
+    assert runtime.closed is False
+    assert runtime.factory_reset_pending is True
+    assert runtime.module._worker._claims_paused is True
+    assert await runtime.install_artifact() == {
+        "ok": True,
+        "reason": None,
+        "download_error": None,
+    }
+
+    await memory_runtime_factory.close(runtime)
+
+
+async def test_pending_factory_reset_repair_reports_pointer_commit_failure(
+    tmp_path: Path,
+    memory_runtime_factory,
+) -> None:
+    """A failed admission commit remains a failed Repair with the fence intact."""
+
+    class _RepairArtifact(FakeMemoryArtifactManager):
+        def ensure(self, *, force: bool = False) -> dict:
+            self.ensure_calls.append(force)
+            assert self.activation_coordinator is not None
+            self.activation_coordinator(
+                MemoryArtifactCandidate(
+                    provider_root_format="everos-1.2.3",
+                    compatible_provider_root_formats=frozenset({"everos-1.2.3"}),
+                    artifact_fingerprint="repaired-artifact",
+                ),
+                MemoryProviderRootState(exists=True, empty=False),
+                commit,
+                lambda: pytest.fail("an atomic commit failure has nothing to roll back"),
+            )
+            return dict(self.ensure_payload)
+
+    def commit() -> None:
+        raise OSError("simulated pointer commit failure")
+
+    artifact = _RepairArtifact(python=Path(sys.executable))
+    runtime = memory_runtime_factory(
+        MemoryConfig(enabled=False, recovery_intent="factory_reset"),
+        artifact_manager=artifact,
+        effective_home=tmp_path,
+    )
+
+    assert await runtime.install_artifact() == {
+        "ok": False,
+        "reason": "memory_runtime_install_failed",
+        "download_error": None,
+    }
+    assert artifact.ensure_calls == [True]
+    assert runtime._config.recovery_intent == "factory_reset"
+    await memory_runtime_factory.close(runtime)
+
+
+async def test_artifact_repair_rejects_uninspectable_root_without_pending_reset(
+    tmp_path: Path,
+    memory_runtime_factory,
+) -> None:
+    """Pointer-only admission is exclusive to the durable factory-reset fence."""
+
+    runtime = memory_runtime_factory(
+        MemoryConfig(enabled=False),
+        artifact_manager=FakeMemoryArtifactManager(python=Path(sys.executable)),
+        effective_home=tmp_path,
+    )
+
+    with pytest.raises(
+        MemoryRuntimeActivationError,
+        match="provider root could not be inspected",
+    ):
+        runtime._coordinate_artifact_activation(
+            MemoryArtifactCandidate(
+                provider_root_format="everos-1.2.3",
+                compatible_provider_root_formats=frozenset({"everos-1.2.3"}),
+                artifact_fingerprint="candidate",
+            ),
+            None,
+            lambda: pytest.fail("ordinary repair must not commit"),
+            lambda: pytest.fail("nothing was committed to roll back"),
+        )
+
     await memory_runtime_factory.close(runtime)
 
 
@@ -4300,6 +4553,19 @@ async def test_cancelled_artifact_install_owns_ensure_until_restart_can_enter(
     monkeypatch.setattr(runtime, "_ensure_worker", lambda: activations.append(None))
     installing = asyncio.create_task(runtime.install_artifact())
     assert await asyncio.to_thread(entered.wait, 1.0)
+    competing = MemoryOperationLease(tmp_path)
+    with pytest.raises(MemoryOperationBusy):
+        competing.acquire()
+    from core.controller import Controller
+
+    controller = Controller.__new__(Controller)
+    controller.memory_runtime = runtime
+    assert await controller._factory_reset_memory_once() == {
+        "ok": False,
+        "error": "memory_operation_in_progress",
+        "result": "failed",
+    }
+    assert runtime.retired is False
     candidate = FakeEverOSProcess()
     candidate.on_ready = lambda: runtime._schedule_sidecar_ready(candidate)
     runtime._process = candidate
@@ -4326,6 +4592,8 @@ async def test_cancelled_artifact_install_owns_ensure_until_restart_can_enter(
     release.set()
     with pytest.raises(asyncio.CancelledError):
         await installing
+    competing.acquire()
+    competing.release()
     assert await runtime.restart() == {"ok": True, "state": "ready"}
     assert activations == [None]
     await memory_runtime_factory.close(runtime)
