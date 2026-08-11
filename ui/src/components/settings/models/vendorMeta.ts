@@ -7,7 +7,7 @@
 import type React from 'react';
 import { Bot, KeyRound, Sparkles, Terminal } from 'lucide-react';
 
-import type { AgentBackend, Source, SourceProtocol } from './types';
+import type { AgentBackend, Source } from './types';
 
 export type Accent = 'mint' | 'gold' | 'cyan' | 'violet' | 'muted';
 
@@ -82,27 +82,15 @@ export function backendVisual(backend: AgentBackend): BackendVisual {
   return BACKEND_VISUAL[backend] ?? { Icon: Bot, accent: 'muted' };
 }
 
-// ── API-key vendor picker (frame 06r) ───────────────────────────────────
-// value = standard vendor id; labelKey → i18n; base_url prefilled for official
-// vendors (editable), null for 自定义. Probe order is only a hint; the server
-// still requires upstream response evidence before it stores a protocol.
-export type VendorOption = {
-  value: string;
-  labelKey: string;
-  base_url: string | null;
-  probe_order: SourceProtocol[];
+// Official endpoints are used only to classify an existing Source as custom.
+// Add API key accepts a Base URL directly and intentionally has no vendor picker.
+const OFFICIAL_BASE_URLS: Record<string, string> = {
+  anthropic: 'https://api.anthropic.com/v1',
+  openai: 'https://api.openai.com/v1',
+  zhipuai: 'https://open.bigmodel.cn/api/paas/v4',
+  kimi: 'https://api.moonshot.cn/v1',
+  xai: 'https://api.x.ai/v1',
 };
-
-export const VENDOR_OPTIONS: VendorOption[] = [
-  { value: 'custom', labelKey: 'settings.models.addKey.vendors.custom', base_url: null, probe_order: ['openai_responses', 'openai_chat', 'anthropic'] },
-  { value: 'anthropic', labelKey: 'settings.models.addKey.vendors.anthropic', base_url: 'https://api.anthropic.com/v1', probe_order: ['anthropic', 'openai_responses', 'openai_chat'] },
-  { value: 'openai', labelKey: 'settings.models.addKey.vendors.openai', base_url: 'https://api.openai.com/v1', probe_order: ['openai_responses', 'openai_chat', 'anthropic'] },
-  { value: 'zhipuai', labelKey: 'settings.models.addKey.vendors.zhipuai', base_url: 'https://open.bigmodel.cn/api/paas/v4', probe_order: ['openai_responses', 'openai_chat', 'anthropic'] },
-  { value: 'kimi', labelKey: 'settings.models.addKey.vendors.kimi', base_url: 'https://api.moonshot.cn/v1', probe_order: ['openai_responses', 'openai_chat', 'anthropic'] },
-  { value: 'xai', labelKey: 'settings.models.addKey.vendors.xai', base_url: 'https://api.x.ai/v1', probe_order: ['openai_responses', 'openai_chat', 'anthropic'] },
-];
-
-export const DEFAULT_VENDOR = VENDOR_OPTIONS[0];
 
 // An api_key points at a custom endpoint when its base URL is set and differs
 // from the vendor's official one — covers both vendor='custom' (official = null)
@@ -110,6 +98,6 @@ export const DEFAULT_VENDOR = VENDOR_OPTIONS[0];
 // by the 来源 list (SourceRow) and the custom-model source picker.
 export function isCustomEndpoint(source: Pick<Source, 'vendor' | 'base_url'>): boolean {
   if (!source.base_url) return false;
-  const official = VENDOR_OPTIONS.find((v) => v.value === source.vendor)?.base_url ?? null;
+  const official = OFFICIAL_BASE_URLS[source.vendor] ?? null;
   return source.base_url !== official;
 }

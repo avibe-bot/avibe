@@ -1,8 +1,9 @@
 import { eligibleSources } from './eligibility';
 import { buildIdentifier } from './menus/identifiers';
-import type { AgentBackend, AgentChain, AgentMapping, AgentSupply, RuntimeDependency, Source } from './types';
+import type { AgentBackend, AgentChain, AgentSupply, Source } from './types';
 
 export type ModelChainRead =
+  | { kind: 'loading' }
   | { kind: 'ready'; chain: AgentChain }
   | { kind: 'error' };
 
@@ -15,10 +16,6 @@ export type ModelChainRequest = {
 
 export const modelChainKey = (backend: AgentBackend, modelId: string): string =>
   `${backend}\u0000${modelId}`;
-
-/** Lazy-start idleness is runnable-on-demand; only actual failures block Hub rows. */
-export const runtimeHealthNeedsAttention = (health: RuntimeDependency['status']['health']): boolean =>
-  health !== 'ok' && health !== 'not_started';
 
 /** Manual inventory is a credential-backed capability; subscriptions are read-only. */
 export function manualModelSources(sources: Source[]): Source[] {
@@ -60,21 +57,13 @@ export function modelHasOffOrderSupplier(agent: AgentSupply, sources: Source[], 
   );
 }
 
-/** Enabled fixed-menu routes whose target still exists in an eligible source inventory. */
-export function routableMappings(agent: AgentSupply, sources: Source[]): AgentMapping[] {
-  const targets = new Set(
-    orderedRouteSources(agent, sources).flatMap((source) => source.models.map((model) => model.id)),
-  );
-  return (agent.mappings ?? []).filter((mapping) => mapping.enabled && targets.has(mapping.target_model_id));
-}
-
 /** The model list the server says this backend exposes. */
 export function listedModelIds(agent: AgentSupply): string[] {
   const primary = agent.menu_kind === 'fixed' ? agent.builtin_models ?? [] : agent.menu?.checked ?? [];
   const extras = [
     ...(agent.selected_model_id ? [agent.selected_model_id] : []),
     ...(agent.model_supply ?? []).map((model) => model.model_id),
-    ...(agent.menu_kind === 'fixed' ? (agent.mappings ?? []).map((mapping) => mapping.builtin_id) : []),
+    ...Object.keys(agent.routes ?? {}),
   ];
   const seen = new Set<string>();
   return [...primary, ...extras].filter((modelId) => {
@@ -82,6 +71,34 @@ export function listedModelIds(agent: AgentSupply): string[] {
     seen.add(modelId);
     return true;
   });
+}
+
+export const NOMINAL_MODEL_BASELINE = 3;
+
+export type CollapsedModelRows = {
+  visible: string[];
+  hidden: string[];
+};
+
+/**
+ * Keep every structurally unsupplied model plus a small nominal baseline.
+ * This reads only AgentSupply, so late or failed per-model chain reads cannot
+ * reorganize the group under the user's pointer.
+ */
+export function collapsedModelRows(agent: AgentSupply, expanded = false): CollapsedModelRows {
+  const models = listedModelIds(agent);
+  if (expanded) return { visible: models, hidden: [] };
+  const emptyRoutes = new Set(
+    (agent.model_supply ?? [])
+      .filter((row) => row.chain_length === 0)
+      .map((row) => row.model_id),
+  );
+  const baseline = new Set(
+    models.filter((modelId) => !emptyRoutes.has(modelId)).slice(0, NOMINAL_MODEL_BASELINE),
+  );
+  const visible = models.filter((modelId) => emptyRoutes.has(modelId) || baseline.has(modelId));
+  const visibleSet = new Set(visible);
+  return { visible, hidden: models.filter((modelId) => !visibleSet.has(modelId)) };
 }
 
 /** One chain read per backend/model pair, even if a duplicated Agent row reaches the page. */
@@ -95,34 +112,4 @@ export function modelChainRequests(agents: AgentSupply[]): ModelChainRequest[] {
     }
   }
   return [...requests.values()];
-}
-
-/** Whether a row belongs in the non-healthy rollup, including automatic cooldowns. */
-export function modelNeedsAttention(
-  agent: AgentSupply,
-  modelId: string,
-  read: ModelChainRead | undefined,
-  runtime?: RuntimeDependency | null,
-): boolean {
-  if (agent.mode !== 'hub') return false;
-  if (read?.kind === 'error') return true;
-  if (read?.kind === 'ready') {
-    const head = read.chain.chain.find((link) => link.runnable);
-    if (head?.channel === 'hub' && runtime && runtimeHealthNeedsAttention(runtime.status.health)) return true;
-    return read.chain.supply_state !== 'ok';
-  }
-  return agent.model_supply?.find((model) => model.model_id === modelId)?.chain_length === 0;
-}
-
-export function modelIssueCount(
-  agents: AgentSupply[],
-  chains: ModelChainIndex,
-  runtime?: RuntimeDependency | null,
-): number {
-  return agents.reduce((count, agent) => {
-    const modelIssues = listedModelIds(agent).filter((modelId) =>
-      modelNeedsAttention(agent, modelId, chains[modelChainKey(agent.backend, modelId)], runtime),
-    ).length;
-    return count + modelIssues;
-  }, 0);
 }

@@ -1,0 +1,128 @@
+// @vitest-environment jsdom
+import { cleanup, render, screen } from '@testing-library/react';
+import { I18nextProvider } from 'react-i18next';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+import { ToastProvider } from '@/context/ToastProvider';
+import i18n from '@/i18n';
+import { modelsApi } from './modelsApi';
+import { SettingsModelsPage } from './SettingsModelsPage';
+import type { AgentBackend, AgentChain, AgentSupply, RuntimeDependency, Source } from './types';
+
+const directAgent = (backend: AgentBackend): AgentSupply => ({
+  backend,
+  mode: 'direct',
+  menu_kind: backend === 'opencode' ? 'open' : 'fixed',
+});
+
+const runtime: RuntimeDependency = {
+  contract_version: 5,
+  manifest: { name: 'cliproxyapi', version: '1', source_sha: 'a'.repeat(40), assets: [] },
+  status: { installed_version: '1', verified: true, health: 'ok' },
+};
+
+const retainedSource: Source = {
+  id: 'src_retained',
+  last_discovered_at: null,
+  kind: 'api_key',
+  vendor: 'anthropic',
+  display_name: 'Retained source',
+  protocol: 'anthropic',
+  base_url: null,
+  supply_channel: 'hub',
+  billing: 'metered',
+  state: { status: 'standby', retry_at: null, detail_key: null },
+  masked_credential: null,
+  models: [],
+};
+
+const takeoverAgent: AgentSupply = {
+  backend: 'codex',
+  mode: 'hub',
+  menu_kind: 'fixed',
+  selected_model_id: 'gpt-5.6-sol',
+  selected_model_explicit: true,
+  sources: { order: ['src_head', 'src_relay'], eligibility: [] },
+  routes: { 'gpt-5.6-sol': { hops: [{ source_id: 'src_head', model_id: 'gpt-5.6-sol' }, { source_id: 'src_relay', model_id: 'gpt-5.6-sol' }] } },
+  supply_status: 'degraded',
+  model_supply: [{ model_id: 'gpt-5.6-sol', chain_length: 2 }],
+  builtin_models: ['gpt-5.6-sol'],
+  named_agents: [],
+  menu: null,
+};
+
+const takeoverChain: AgentChain = {
+  contract_version: 5,
+  backend: 'codex',
+  model_id: 'gpt-5.6-sol',
+  current: { source_id: 'src_relay', model_id: 'gpt-5.6-sol' },
+  chain: [
+    { source_id: 'src_head', model_id: 'gpt-5.6-sol', channel: 'hub', health: 'cooldown', runnable: false, reason: null, retry_at: '2099-01-01T00:00:00Z' },
+    { source_id: 'src_relay', model_id: 'gpt-5.6-sol', channel: 'hub', health: 'healthy', runnable: true, reason: null, retry_at: null },
+  ],
+  supply_state: 'ok',
+};
+
+const renderPage = (sources: Source[]) => {
+  vi.spyOn(modelsApi, 'listSources').mockResolvedValue(sources);
+  vi.spyOn(modelsApi, 'listAgents').mockResolvedValue([
+    directAgent('claude'),
+    directAgent('codex'),
+    directAgent('opencode'),
+  ]);
+  vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
+  vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
+  return render(
+    <ToastProvider>
+      <I18nextProvider i18n={i18n}>
+        <SettingsModelsPage />
+      </I18nextProvider>
+    </ToastProvider>,
+  );
+};
+
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
+
+describe('SettingsModelsPage surface branches', () => {
+  it('renders Frame 09 without tabs when every backend is direct and no source exists', async () => {
+    renderPage([]);
+
+    expect(await screen.findByText(/^Currently: direct$|^当前:直连$/i)).toBeTruthy();
+    expect(screen.getAllByRole('button', { name: /^Switch to Gateway$|^切换到网关$/i })).toHaveLength(3);
+    expect(screen.getByText(/^Switch to the gateway and you gain three things$|^切换到网关，你会多出三件事$/i)).toBeTruthy();
+    expect(screen.queryByRole('tab')).toBeNull();
+  });
+
+  it('renders Frame 01 with tabs when retained sources remain under all-direct backends', async () => {
+    renderPage([retainedSource]);
+
+    expect(await screen.findByText('Retained source')).toBeTruthy();
+    expect(screen.getAllByRole('tab')).toHaveLength(2);
+    expect(screen.queryByText(/^Switch to the gateway and you gain three things$|^切换到网关，你会多出三件事$/i)).toBeNull();
+  });
+
+  it('counts a recoverable reroute once per backend in Frame 08', async () => {
+    const head = { ...retainedSource, id: 'src_head', display_name: 'Paused source', state: { status: 'cooldown' as const, retry_at: '2099-01-01T00:00:00Z', detail_key: null } };
+    const relay = { ...retainedSource, id: 'src_relay', display_name: 'Replacement source', state: { status: 'active' as const, retry_at: null, detail_key: null } };
+    vi.spyOn(modelsApi, 'listSources').mockResolvedValue([head, relay]);
+    vi.spyOn(modelsApi, 'listAgents').mockResolvedValue([takeoverAgent]);
+    vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
+    vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
+    vi.spyOn(modelsApi, 'getAgentChain').mockResolvedValue(takeoverChain);
+
+    render(
+      <ToastProvider>
+        <I18nextProvider i18n={i18n}>
+          <SettingsModelsPage />
+        </I18nextProvider>
+      </ToastProvider>,
+    );
+
+    expect(await screen.findByText(/^1 takeover active$|^1 处接管中$/i)).toBeTruthy();
+    expect(screen.getByText(/^Taken over$|^接管中$/i)).toBeTruthy();
+    expect(screen.getByText(/Now: Replacement source \(takeover\)|当前 Replacement source（接管）/i)).toBeTruthy();
+  });
+});

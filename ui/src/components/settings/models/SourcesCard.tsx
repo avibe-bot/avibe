@@ -1,76 +1,62 @@
-// Demoted account-management section. Each source keeps its repair journeys and
-// exposes the server-provided model inventory plus the shared manual-model action.
-//
-// Mobile header (design.pen M01 m01SrcHead): the title block and 添加来源 stack
-// instead of competing for one line, with 添加来源 as a full-width primary
-// button — at 360px the side-by-side desktop header squeezed the sub-line to two
-// or three lines and left the button a cramped tap target.
 import * as React from 'react';
+import { LoaderCircle, Plus } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
-import { AddSourceMenu } from './AddSourceMenu';
+import { Button } from '@/components/ui/button';
 import { SourceRow } from './SourceRow';
-import type { RaisedRepair } from './SourceRowMenu';
-import type { Source } from './types';
+import type { AdoptedBy, Source } from './types';
 
 export const SourcesCard: React.FC<{
   sources: Source[];
-  onConnectClaude: () => void;
-  onConnectChatGPT: () => void;
+  readState: 'loading' | 'ready' | 'error';
+  onRetry: () => void;
+  onOpenSource: (source: Source) => void;
   onAddApiKey: () => void;
-  /** Re-fetch after a per-row action (rename / delete). */
-  onSourceChanged: () => void;
-  onRefreshSource: (source: Source) => void;
-  refreshingSourceId: string | null;
-  /** Open a repair journey the page hosts — see SourceRowMenu's `onRepair`. */
-  onRepair?: (source: Source, kind: RaisedRepair) => void;
-  onAddModel: (source: Source) => void;
-}> = ({
-  sources,
-  onConnectClaude,
-  onConnectChatGPT,
-  onAddApiKey,
-  onSourceChanged,
-  onRefreshSource,
-  refreshingSourceId,
-  onRepair,
-  onAddModel,
-}) => {
+  adoptionBySource?: Readonly<Record<string, readonly AdoptedBy[]>>;
+}> = ({ sources, readState, onRetry, onOpenSource, onAddApiKey, adoptionBySource = {} }) => {
   const { t } = useTranslation();
-
+  const groups = [
+    { id: 'native', sources: sources.filter((source) => source.supply_channel === 'native_cli') },
+    { id: 'hub', sources: sources.filter((source) => source.supply_channel === 'hub') },
+  ].filter((group) => group.sources.length > 0);
   return (
-    // Not overflow-hidden: the row supply tooltip must escape the card bounds.
-    <section className="rounded-xl border border-border bg-background">
-      <div className="flex flex-col gap-2.5 border-b border-border px-4 py-4 sm:flex-row sm:items-start sm:justify-between sm:gap-4 sm:px-5">
-        <div className="flex min-w-0 flex-col gap-1">
-          <h2 className="text-[15px] font-semibold text-foreground">{t('settings.models.sources.title')}</h2>
-          <p className="text-[12px] leading-relaxed text-muted">{t('settings.models.sources.subtitle')}</p>
-        </div>
-        <AddSourceMenu
-          onConnectClaude={onConnectClaude}
-          onConnectChatGPT={onConnectChatGPT}
-          onAddApiKey={onAddApiKey}
-        />
+    <section className="relative z-20 flex max-h-full min-h-[420px] flex-col self-start overflow-hidden rounded-[14px] border border-border bg-surface">
+      <div className="flex h-14 shrink-0 items-center justify-between border-b border-border px-3.5">
+        <h2 className="text-[16px] font-bold text-foreground">{t('settings.models.upstream.heading')}</h2>
+        {readState === 'ready' && <span className="rounded-full border border-border bg-foreground/[0.04] px-2 py-[3px] text-[10.5px] font-semibold text-muted">{t('settings.models.upstream.count', { count: sources.length })}</span>}
       </div>
-
-      {sources.length === 0 ? (
-        <div className="px-4 py-12 text-center sm:px-5 text-[13px] text-muted">{t('settings.models.sources.empty')}</div>
-      ) : (
-        <div className="flex flex-col">
-          {sources.map((source) => (
-            <SourceRow
-              key={source.id}
-              source={source}
-              onChanged={onSourceChanged}
-              onRefresh={onRefreshSource}
-              refreshing={refreshingSourceId === source.id}
-              refreshDisabled={refreshingSourceId !== null}
-              onRepair={onRepair}
-              onAddModel={onAddModel}
-            />
-          ))}
-        </div>
-      )}
+      <div className="min-h-0 flex-1 space-y-2.5 overflow-y-auto p-3">
+        {readState === 'loading'
+          ? <div className="flex h-full min-h-36 items-center justify-center"><LoaderCircle className="size-4 animate-spin text-muted" /></div>
+          : readState === 'error'
+            ? <div className="flex h-full min-h-36 flex-col items-center justify-center gap-3 px-4 text-center"><p className="text-[12px] text-muted">{t('settings.models.upstream.unread')}</p><Button variant="outline" size="xs" onClick={onRetry}>{t('settings.models.upstream.retry')}</Button></div>
+            : groups.length > 0
+              ? groups.map((group) => <div key={group.id} className="space-y-2"><h3 className="flex h-[18px] items-center text-[10.5px] font-semibold uppercase text-muted/70">{t(`settings.models.upstream.group.${group.id}`)}</h3>{group.sources.map((source) => <SourceRow key={source.id} source={source} adoptedBy={adoptionBySource[source.id]} onOpen={onOpenSource} />)}</div>)
+              : <p className="px-3 py-10 text-center text-[12px] text-muted">{t('settings.models.upstream.empty')}</p>}
+      </div>
+      <div className="flex h-14 shrink-0 items-center gap-2 border-t border-border px-3.5">
+        {/* G-21: the frame supplies no vendor for the per-vendor subscription
+            dialog. Keep the drawn command visible without inventing a picker or
+            a default vendor. */}
+        <Button
+          variant="default"
+          size="xs"
+          disabled
+          className="model-hub-footer-action shadow-none disabled:opacity-100"
+        >
+          <Plus className="size-3" />
+          {t('settings.models.upstream.addSubscription')}
+        </Button>
+        <Button
+          variant="outline"
+          size="xs"
+          className="model-hub-footer-action"
+          onClick={onAddApiKey}
+        >
+          <Plus className="size-3" />
+          {t('settings.models.upstream.addApiKey')}
+        </Button>
+      </div>
     </section>
   );
 };

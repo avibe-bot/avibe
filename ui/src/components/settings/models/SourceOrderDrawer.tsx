@@ -1,98 +1,79 @@
 import * as React from 'react';
+import * as DialogPrimitive from '@radix-ui/react-dialog';
 import { Reorder, useDragControls } from 'framer-motion';
-import { CirclePlus, GripVertical, X } from 'lucide-react';
+import { GripVertical, LoaderCircle, Minus, Plus, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
-import { useToast } from '@/context/ToastContext';
 import { cn } from '@/lib/utils';
-import { useIsMobile } from '@/lib/useIsMobile';
-import { initialSeedState, savedSourcesKey, seedStep, type PendingWrite } from './asyncLifetime';
-import { eligibilityOf } from './eligibility';
-import { MenuDrawer } from './menus/MenuDrawer';
+import { ModelHubInfoHint } from './ModelHubInfoHint';
+import type { PendingWrite } from './asyncLifetime';
+import { eligibleSources } from './eligibility';
 import { modelsApi } from './modelsApi';
 import { movedOrder, sameIds } from './reorder';
-import { ACCENT_ICON, ACCENT_TILE, backendVisual, sourceVisual } from './vendorMeta';
-import type { AgentSourcesPut, AgentSupply, Source, SourcePolicy } from './types';
+import { sourceDetail } from './sourcePresentation';
+import type { AgentSupply, Source } from './types';
 
-const ROW = 'flex items-center gap-2.5 rounded-xl border px-3 py-2.5 sm:gap-3 sm:px-3.5 sm:py-3';
-const NUMBER =
-  'grid size-5 shrink-0 place-items-center rounded-md border border-border bg-foreground/[0.03] text-[10.5px] font-bold text-muted sm:size-[22px] sm:text-[11px]';
+type OrderAnnouncement =
+  | { key: 'grabbed' | 'moved' | 'dropped'; source: string; position: number; count: number }
+  | { key: 'grabCancelled'; source: string }
+  | null;
 
-const SourceTile: React.FC<{ source: Source }> = ({ source }) => {
-  const { Icon, accent } = sourceVisual(source);
+type ReadState = 'loading' | 'ready' | 'error';
+
+const SourceIdentity: React.FC<{ source: Source }> = ({ source }) => {
+  const { t } = useTranslation();
+  const detail = sourceDetail(source);
   return (
-    <span className={cn('flex size-[30px] shrink-0 items-center justify-center rounded-[9px] sm:size-[34px]', ACCENT_TILE[accent])}>
-      <Icon className={cn('size-3.5 sm:size-4', ACCENT_ICON[accent])} />
-    </span>
+    <>
+      <span className="min-w-0 flex-1">
+        <span className="model-hub-order-name block truncate" title={source.display_name}>{source.display_name}</span>
+        {detail && <span className="model-hub-order-meta block truncate" title={detail}>{detail}</span>}
+      </span>
+      <span className={cn('model-hub-order-tag', source.kind === 'subscription' && 'model-hub-order-tag--subscription')}>
+        {t(`settings.models.sourceKind.${source.kind}`)}
+      </span>
+    </>
   );
 };
 
-const Identity: React.FC<{ source: Source; detail?: string }> = ({ source, detail }) => (
-  <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-    <span className="truncate text-[13px] font-semibold text-foreground sm:text-[13.5px]">{source.display_name}</span>
-    {(source.account_label || source.masked_credential || detail) && (
-      <span className="truncate font-mono text-[10px] text-muted sm:text-[11px]">
-        {[source.account_label ?? source.masked_credential, detail].filter(Boolean).join(' · ')}
-      </span>
-    )}
-  </span>
-);
-
-const GroupHeader: React.FC<{ label: string; first?: boolean; children?: React.ReactNode }> = ({ label, first, children }) => (
-  <div className={cn('flex items-center justify-between gap-3 px-1', first ? 'pt-0.5' : 'pt-2')}>
-    <span className="text-[10px] font-bold tracking-[1px] text-muted">{label}</span>
-    {children}
-  </div>
-);
-
-const EnabledRow: React.FC<{
+const OrderedRow: React.FC<{
   source: Source;
   index: number;
+  count: number;
   busy: boolean;
-  onCommit: () => void;
-  onMove: (delta: -1 | 1) => void;
-  onRemove: () => void;
-}> = ({ source, index, busy, onCommit, onMove, onRemove }) => {
+  grabbed: boolean;
+  handleRef: (node: HTMLButtonElement | null) => void;
+  onExclude: () => void;
+  onKeyDown: (event: React.KeyboardEvent<HTMLButtonElement>) => void;
+}> = ({ source, index, count, busy, grabbed, handleRef, onExclude, onKeyDown }) => {
   const { t } = useTranslation();
   const controls = useDragControls();
+  const inert = count <= 1;
   return (
     <Reorder.Item
       value={source.id}
       dragListener={false}
       dragControls={controls}
-      onDragEnd={onCommit}
-      className={cn(ROW, 'list-none border-border bg-background')}
+      className="model-hub-order-row model-hub-order-row--ordered list-none"
     >
       <button
+        ref={handleRef}
         type="button"
-        aria-label={t('settings.models.source.reorder') as string}
-        aria-keyshortcuts="ArrowUp ArrowDown"
-        disabled={busy}
-        onPointerDown={(event) => controls.start(event)}
-        onKeyDown={(event) => {
-          if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
-          event.preventDefault();
-          onMove(event.key === 'ArrowUp' ? -1 : 1);
-        }}
-        className="relative flex size-4 shrink-0 cursor-grab touch-none items-center justify-center text-muted/60 active:cursor-grabbing disabled:cursor-default disabled:opacity-50"
+        aria-label={t('settings.models.order.reorder')}
+        aria-grabbed={grabbed}
+        disabled={busy || inert}
+        onPointerDown={(event) => !inert && controls.start(event)}
+        onKeyDown={onKeyDown}
+        className={cn('model-hub-order-grip', grabbed && 'is-grabbed')}
       >
-        <GripVertical className="size-4" />
-        <span className="absolute -inset-3 sm:hidden" aria-hidden />
+        <GripVertical />
       </button>
-      <span className={NUMBER}>{index + 1}</span>
-      <SourceTile source={source} />
-      <Identity source={source} />
-      <button
-        type="button"
-        aria-label={t('settings.models.order.disable') as string}
-        onClick={onRemove}
-        disabled={busy}
-        className="relative flex size-7 shrink-0 items-center justify-center rounded-md text-muted transition hover:bg-surface-2 hover:text-foreground disabled:opacity-50"
-      >
-        <X className="size-4" />
-        <span className="absolute -inset-2 sm:hidden" aria-hidden />
-      </button>
+      <span className={cn('model-hub-order-ordinal', index === 0 && 'is-first')}>{index + 1}</span>
+      <SourceIdentity source={source} />
+      <Button type="button" variant="outline" className="model-hub-order-row-action" disabled={busy} onClick={onExclude}>
+        {t('settings.models.order.action.exclude')}
+      </Button>
     </Reorder.Item>
   );
 };
@@ -100,182 +81,279 @@ const EnabledRow: React.FC<{
 export const SourceOrderDrawer: React.FC<{
   open: boolean;
   agent: AgentSupply;
-  agents: AgentSupply[];
   sources: Source[];
   onClose: () => void;
   onSaved: (echoed: AgentSupply) => void | Promise<void>;
   orderWrite: PendingWrite;
-}> = ({ open, agent, agents, sources, onClose, onSaved, orderWrite }) => {
+}> = ({ open, agent, sources, onClose, onSaved, orderWrite }) => {
   const { t } = useTranslation();
-  const { showToast } = useToast();
-  const mobile = useIsMobile();
-  const { Icon, accent } = backendVisual(agent.backend);
-  const [policy, setPolicy] = React.useState<SourcePolicy>(agent.sources?.policy ?? 'follow');
-  const [order, setOrder] = React.useState<string[]>(agent.sources?.order ?? []);
+  const [viewAgent, setViewAgent] = React.useState(agent);
+  const [readState, setReadState] = React.useState<ReadState>('loading');
+  const [order, setOrder] = React.useState<string[]>([]);
+  const [dirty, setDirty] = React.useState(false);
+  const [saveFailed, setSaveFailed] = React.useState(false);
+  const [grabbedId, setGrabbedId] = React.useState<string | null>(null);
+  const [announcement, setAnnouncement] = React.useState<OrderAnnouncement>(null);
+  const saved = React.useRef<string[]>([]);
+  const grabbedFrom = React.useRef<string[]>([]);
+  const handles = React.useRef(new Map<string, HTMLButtonElement>());
+  const heldOutActions = React.useRef(new Map<string, HTMLButtonElement>());
+  const readAttempt = React.useRef(0);
   const saving = orderWrite.pending;
-  const saved = React.useRef<{ policy: SourcePolicy; order: string[] }>({ policy, order });
-  const seed = React.useRef(initialSeedState);
-  const authoritative = savedSourcesKey(agent);
+
+  const applyRead = React.useCallback((next: AgentSupply) => {
+    const nextOrder = next.sources?.order ?? [];
+    setViewAgent(next);
+    saved.current = nextOrder;
+    setOrder(nextOrder);
+    setDirty(false);
+    setSaveFailed(false);
+    setGrabbedId(null);
+    setAnnouncement(null);
+    setReadState('ready');
+  }, []);
+
+  const read = React.useCallback(async () => {
+    const seq = ++readAttempt.current;
+    setReadState('loading');
+    try {
+      const next = await modelsApi.getAgentSources(agent.backend);
+      if (readAttempt.current === seq) applyRead(next);
+    } catch {
+      if (readAttempt.current === seq) setReadState('error');
+    }
+  }, [agent.backend, applyRead]);
 
   React.useEffect(() => {
-    if (!open) return;
-    const step = seedStep(seed.current, authoritative);
-    seed.current = step.state;
-    if (!step.reseed) return;
-    const next = { policy: agent.sources?.policy ?? 'follow', order: agent.sources?.order ?? [] };
-    saved.current = next;
-    setPolicy(next.policy);
-    setOrder(next.order);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, authoritative]);
+    if (open) void read();
+    else readAttempt.current += 1;
+  }, [open, read]);
 
-  const backendName = t(`settings.models.backends.${agent.backend}`, { defaultValue: agent.backend }) as string;
-  const byId = React.useMemo(() => new Map(sources.map((source) => [source.id, source])), [sources]);
-  const enabledSources = order.map((sourceId) => byId.get(sourceId)).filter((source): source is Source => Boolean(source));
-  const enabledIds = enabledSources.map((source) => source.id);
-  const rest = sources.filter((source) => !order.includes(source.id));
-  const disabledSources = rest.filter((source) => eligibilityOf(agent, source.id).eligible);
-  const ineligible = rest
-    .map((source) => ({ source, ...eligibilityOf(agent, source.id) }))
-    .filter((entry) => !entry.eligible);
-
-  const backendLabel = (backend: string) =>
-    t(`settings.models.backends.${backend}`, { defaultValue: backend }) as string;
-  const vendorLabel = (source: Source) =>
-    t(`settings.models.addKey.vendors.${source.vendor}`, { defaultValue: source.vendor }) as string;
-  const ineligibleDetail = (source: Source, reasonKey: string | null): string => {
-    if (!reasonKey) return t('settings.models.order.ineligibleUnknown', { backend: backendName }) as string;
-    if (reasonKey === 'models.eligibility.subscription_wrong_client') {
-      const owners = agents.filter(
-        (candidate) => candidate.backend !== agent.backend && eligibilityOf(candidate, source.id).eligible,
-      );
-      return owners.length === 1
-        ? t(reasonKey, { vendor: vendorLabel(source), backend: backendLabel(owners[0].backend) }) as string
-        : t('settings.models.order.ineligibleClientUnknown', { vendor: vendorLabel(source) }) as string;
-    }
-    return t(reasonKey, { vendor: vendorLabel(source) }) as string;
+  const available = eligibleSources(sources, viewAgent);
+  const byId = React.useMemo(() => new Map(available.map((source) => [source.id, source])), [available]);
+  const ordered = order.map((id) => byId.get(id)).filter((source): source is Source => Boolean(source));
+  const heldOut = available.filter((source) => !order.includes(source.id));
+  const persist = (next: string[]) => {
+    if (sameIds(next, order)) return;
+    setOrder(next);
+    setDirty(!sameIds(next, saved.current));
+    setSaveFailed(false);
   };
-
-  const persist = (body: AgentSourcesPut, next: { policy: SourcePolicy; order: string[] }) =>
-    orderWrite.track(async () => {
-      const previous = saved.current;
-      setPolicy(next.policy);
-      setOrder(next.order);
-      try {
-        const echoed = await modelsApi.putAgentSources(agent.backend, body);
-        const adopted = {
-          policy: echoed.sources?.policy ?? next.policy,
-          order: echoed.sources?.order ?? next.order,
-        };
-        saved.current = adopted;
-        setPolicy(adopted.policy);
-        setOrder(adopted.order);
-        await Promise.resolve(onSaved(echoed)).catch(() => {});
-      } catch {
-        saved.current = previous;
-        setPolicy(previous.policy);
-        setOrder([...previous.order]);
-        showToast(t('settings.models.toast.reorderFailed') as string, 'error');
-      }
+  const focusHandle = (sourceId: string) => handles.current.get(sourceId)?.focus();
+  const focusHandleAfterRender = (sourceId: string) => requestAnimationFrame(() => focusHandle(sourceId));
+  const focusHeldOutAfterRender = (sourceId: string) => requestAnimationFrame(() => heldOutActions.current.get(sourceId)?.focus());
+  const startGrab = (sourceId: string) => {
+    grabbedFrom.current = [...order];
+    setGrabbedId(sourceId);
+    setAnnouncement({
+      key: 'grabbed',
+      source: byId.get(sourceId)?.display_name ?? sourceId,
+      position: order.indexOf(sourceId) + 1,
+      count: order.length,
     });
-
-  const commitOrder = (nextOrder: string[]) => {
-    if (sameIds(saved.current.order, nextOrder)) {
-      setOrder([...saved.current.order]);
+  };
+  const dropGrab = () => {
+    if (!grabbedId) return;
+    setAnnouncement({
+      key: 'dropped',
+      source: byId.get(grabbedId)?.display_name ?? grabbedId,
+      position: order.indexOf(grabbedId) + 1,
+      count: order.length,
+    });
+    setGrabbedId(null);
+  };
+  const cancelGrab = () => {
+    if (!grabbedId) return;
+    const sourceId = grabbedId;
+    const restored = grabbedFrom.current;
+    setOrder(restored);
+    setDirty(!sameIds(restored, saved.current));
+    setAnnouncement({ key: 'grabCancelled', source: byId.get(sourceId)?.display_name ?? sourceId });
+    setGrabbedId(null);
+    requestAnimationFrame(() => focusHandle(sourceId));
+  };
+  const handleRowKey = (sourceId: string, event: React.KeyboardEvent<HTMLButtonElement>) => {
+    if (event.key === ' ') {
+      event.preventDefault();
+      if (grabbedId === sourceId) dropGrab();
+      else startGrab(sourceId);
       return;
     }
-    void persist({ policy: 'custom', order: nextOrder }, { policy: 'custom', order: nextOrder });
+    if (event.key === 'Escape' && grabbedId === sourceId) {
+      event.preventDefault();
+      event.stopPropagation();
+      cancelGrab();
+      return;
+    }
+    if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
+    event.preventDefault();
+    const index = order.indexOf(sourceId);
+    const delta = event.key === 'ArrowUp' ? -1 : 1;
+    if (grabbedId === sourceId) {
+      const next = movedOrder(order, index, delta);
+      if (sameIds(next, order)) return;
+      persist(next);
+      setAnnouncement({
+        key: 'moved',
+        source: byId.get(sourceId)?.display_name ?? sourceId,
+        position: next.indexOf(sourceId) + 1,
+        count: next.length,
+      });
+      requestAnimationFrame(() => focusHandle(sourceId));
+    } else {
+      const target = order[index + delta];
+      if (target) focusHandle(target);
+    }
   };
-  const restoreDefault = () => void persist({ policy: 'follow' }, { policy: 'follow', order });
+
+  const save = () => {
+    if (saving || readState !== 'ready' || available.length === 0) return;
+    void orderWrite.track(async () => {
+      try {
+        const echoed = await modelsApi.putAgentSources(agent.backend, { order });
+        saved.current = echoed.sources?.order ?? order;
+        setOrder(saved.current);
+        setDirty(false);
+        setSaveFailed(false);
+        await Promise.resolve(onSaved(echoed)).catch(() => {});
+        onClose();
+      } catch {
+        // F1: the request failed, not the user's draft. Keep every move and let
+        // the same primary retry the exact order.
+        setSaveFailed(true);
+      }
+    });
+  };
+
+  const backend = t(`settings.models.backends.${agent.backend}`, { defaultValue: agent.backend });
+  const title = t('settings.models.order.title', { backend });
+  const announcementText = announcement ? t(`settings.models.order.${announcement.key}`, announcement) : '';
+  const saveEnabled = readState === 'ready' && available.length > 0 && (dirty || order.length === 0);
 
   return (
-    <MenuDrawer
-      open={open}
-      onClose={onClose}
-      Icon={Icon}
-      accent={accent}
-      title={t('settings.models.order.title', { backend: backendName }) as string}
-      subtitle={t(mobile ? 'settings.models.order.subtitleShort' : 'settings.models.order.subtitle', { backend: backendName }) as string}
-      footer={
-        <Button variant="brand" size="sm" className="h-10" onClick={onClose}>
-          {t('settings.models.menus.done')}
-        </Button>
-      }
-    >
-      <div className="flex flex-col gap-2.5">
-        <GroupHeader label={t('settings.models.order.groupEnabled', { count: enabledIds.length }) as string} first>
-          {policy === 'custom' && (
-            <span className="text-[11.5px] font-medium text-muted">
-              {t('settings.models.order.customized')}
-              <span aria-hidden> · </span>
-              <button
-                type="button"
-                onClick={restoreDefault}
-                disabled={saving}
-                className="font-semibold text-mint hover:text-mint/80 disabled:opacity-50"
-              >
-                {t('settings.models.order.restore')}
-              </button>
-            </span>
-          )}
-        </GroupHeader>
-
-        {enabledSources.length === 0 ? (
-          <p className="rounded-xl border border-border bg-foreground/[0.02] px-3.5 py-3 text-[12px] text-muted">
-            {t('settings.models.order.enabledEmpty', { backend: backendName })}
-          </p>
-        ) : (
-          <Reorder.Group axis="y" values={enabledIds} onReorder={setOrder} className="flex list-none flex-col gap-2.5">
-            {enabledSources.map((source, index) => (
-              <EnabledRow
-                key={source.id}
-                source={source}
-                index={index}
-                busy={saving}
-                onCommit={() => commitOrder(enabledIds)}
-                onMove={(delta) => commitOrder(movedOrder(enabledIds, index, delta))}
-                onRemove={() => commitOrder(enabledIds.filter((sourceId) => sourceId !== source.id))}
-              />
-            ))}
-          </Reorder.Group>
-        )}
-
-        {disabledSources.length > 0 && (
-          <>
-            <GroupHeader label={t('settings.models.order.groupDisabled', { count: disabledSources.length }) as string} />
-            <div className="flex flex-col gap-2.5 rounded-xl border border-dashed border-border p-2">
-              {disabledSources.map((source) => (
-                <button
-                  key={source.id}
-                  type="button"
-                  aria-label={t('settings.models.order.enableAria', { name: source.display_name }) as string}
-                  onClick={() => commitOrder([...enabledIds, source.id])}
-                  disabled={saving}
-                  className={cn(ROW, 'w-full border-transparent bg-background text-left transition hover:border-border-strong disabled:opacity-50')}
-                >
-                  <CirclePlus className="size-[17px] shrink-0 text-mint" />
-                  <SourceTile source={source} />
-                  <Identity source={source} />
-                  <span className="shrink-0 text-[11.5px] font-semibold text-foreground">{t('settings.models.order.enable')}</span>
-                </button>
-              ))}
-            </div>
-          </>
-        )}
-
-        {ineligible.length > 0 && (
-          <>
-            <GroupHeader label={t('settings.models.order.groupIneligible', { count: ineligible.length }) as string} />
-            {ineligible.map(({ source, reasonKey }) => (
-              <div key={source.id} className={cn(ROW, 'border-border opacity-55')}>
-                <SourceTile source={source} />
-                <Identity source={source} detail={ineligibleDetail(source, reasonKey)} />
+    <DialogPrimitive.Root open={open} onOpenChange={(next) => !next && !saving && onClose()}>
+      <DialogPrimitive.Portal>
+        <DialogPrimitive.Overlay className="model-hub-order-overlay fixed inset-0 z-50" />
+        <DialogPrimitive.Content
+          className="model-hub-order-drawer fixed inset-y-0 right-0 z-50 flex flex-col overflow-hidden bg-surface outline-none"
+          onEscapeKeyDown={(event) => {
+            if (grabbedId) {
+              event.preventDefault();
+              cancelGrab();
+            } else if (saving) event.preventDefault();
+          }}
+        >
+          <header className="model-hub-order-head shrink-0 border-b border-border">
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex min-w-0 items-center gap-[7px]">
+                <DialogPrimitive.Title className="model-hub-order-title truncate font-bold text-foreground">{title}</DialogPrimitive.Title>
+                <ModelHubInfoHint
+                  label={t('settings.models.order.subtitle')}
+                  content={t('settings.models.order.subtitle')}
+                  className="model-hub-order-info"
+                />
               </div>
-            ))}
-          </>
-        )}
-      </div>
-    </MenuDrawer>
+              <DialogPrimitive.Close asChild>
+                <Button type="button" variant="ghost" size="icon" className="size-[27px] text-foreground/35" aria-label={t('settings.models.order.cancel')} disabled={saving}>
+                  <X className="size-[15px]" />
+                </Button>
+              </DialogPrimitive.Close>
+            </div>
+            <DialogPrimitive.Description className="model-hub-order-subtitle text-foreground/45">
+              {t('settings.models.order.subtitle')}
+            </DialogPrimitive.Description>
+          </header>
+
+          <div className="model-hub-order-body flex min-h-0 flex-1 flex-col overflow-y-auto">
+            {readState === 'loading' && (
+              <div className="model-hub-order-state"><LoaderCircle className="size-4 animate-spin text-mint" />{t('common.loading')}</div>
+            )}
+            {readState === 'error' && (
+              <div className="model-hub-order-state model-hub-order-state--error">{t('settings.models.order.fail.read')}</div>
+            )}
+            {readState === 'ready' && available.length === 0 && (
+              <div className="model-hub-order-state">{t('settings.models.order.empty.noEligible')}</div>
+            )}
+            {readState === 'ready' && available.length > 0 && (
+              <>
+                <section className="model-hub-order-section">
+                  <div className="model-hub-order-section-head">
+                    <h3>{t('settings.models.order.section.ordered')}</h3>
+                    <span>{t('settings.models.order.section.ordered.note')}</span>
+                  </div>
+                  {ordered.length === 0
+                    ? <div className="model-hub-order-empty">{t('settings.models.order.empty.ordered')}</div>
+                    : <Reorder.Group axis="y" values={order} onReorder={persist} className="flex flex-col gap-2">
+                      {ordered.map((source, index) => (
+                        <OrderedRow
+                          key={source.id}
+                          source={source}
+                          index={index}
+                          count={ordered.length}
+                          busy={saving}
+                          grabbed={grabbedId === source.id}
+                          handleRef={(node) => {
+                            if (node) handles.current.set(source.id, node);
+                            else handles.current.delete(source.id);
+                          }}
+                          onExclude={() => {
+                            if (grabbedId === source.id) setGrabbedId(null);
+                            persist(order.filter((id) => id !== source.id));
+                            focusHeldOutAfterRender(source.id);
+                          }}
+                          onKeyDown={(event) => handleRowKey(source.id, event)}
+                        />
+                      ))}
+                    </Reorder.Group>}
+                </section>
+                <section className="model-hub-order-section">
+                  <div className="model-hub-order-section-head"><h3>{t('settings.models.order.section.heldOut')}</h3></div>
+                  <div className="flex flex-col gap-2">
+                    {heldOut.map((source) => (
+                      <div key={source.id} className="model-hub-order-row model-hub-order-row--held">
+                        <Minus className="model-hub-order-held-icon" />
+                        <SourceIdentity source={source} />
+                        <Button
+                          ref={(node) => {
+                            if (node) heldOutActions.current.set(source.id, node);
+                            else heldOutActions.current.delete(source.id);
+                          }}
+                          type="button"
+                          variant="outline"
+                          className="model-hub-order-row-action"
+                          disabled={saving}
+                          onClick={() => {
+                            persist([...order, source.id]);
+                            focusHandleAfterRender(source.id);
+                          }}
+                        >
+                          <Plus className="size-3.5" />
+                          {t('settings.models.order.action.include')}
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              </>
+            )}
+            <p aria-live="polite" className="sr-only">{announcementText}</p>
+          </div>
+
+          <footer className="model-hub-order-foot flex shrink-0 items-center justify-end border-t border-border">
+            {saveFailed && <span className="mr-auto text-[11px] text-destructive">{t('settings.models.order.fail.save')}</span>}
+            <Button type="button" variant="outline" className="model-hub-order-action" disabled={saving} onClick={onClose}>
+              {t('settings.models.order.cancel')}
+            </Button>
+            {readState === 'error'
+              ? <Button type="button" variant="brand" className="model-hub-order-action" onClick={() => void read()}>{t('settings.models.order.retry')}</Button>
+              : <Button type="button" variant="brand" className="model-hub-order-action" disabled={!saveEnabled || saving} onClick={save}>
+                {saving && <LoaderCircle className="size-3 animate-spin" />}
+                {saveFailed ? t('settings.models.order.retry') : t('settings.models.order.save')}
+              </Button>}
+          </footer>
+        </DialogPrimitive.Content>
+      </DialogPrimitive.Portal>
+    </DialogPrimitive.Root>
   );
 };
 

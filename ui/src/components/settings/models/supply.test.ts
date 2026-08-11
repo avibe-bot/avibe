@@ -55,11 +55,10 @@ const hubAgent = (over: Partial<AgentSupply> = {}): AgentSupply => ({
   selected_by_agent: 'claude',
   selected_model_id: 'claude-opus-4-6',
   selected_model_explicit: true,
-  sources: { policy: 'follow', order: ['src_a', 'src_b'], eligibility: [] },
+  sources: { order: ['src_a', 'src_b'], eligibility: [] },
   supply_status: 'ok',
   model_supply: [],
   named_agents: [],
-  mappings: [],
   menu: null,
   builtin_models: [],
   standard_vendors: null,
@@ -113,7 +112,7 @@ describe('needsAttention', () => {
 
 describe('healthyButUnrunnable', () => {
   const agentWith = (eligibility: NonNullable<AgentSupply['sources']>['eligibility']) =>
-    hubAgent({ sources: { policy: 'follow', order: ['src_a', 'src_b'], eligibility } });
+    hubAgent({ sources: { order: ['src_a', 'src_b'], eligibility } });
 
   it('retracts a healthy row promise this machine cannot keep', () => {
     expect(healthyButUnrunnable(agentWith(cannotLaunch('src_b')), nativeSource('src_b', ACTIVE))).toBe(true);

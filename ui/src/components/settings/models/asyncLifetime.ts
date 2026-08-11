@@ -197,13 +197,9 @@ export type PendingWrite = {
 // colliding with ['a b'].
 const sig = (parts: readonly (string | number | boolean)[]): string => parts.join('\u0000');
 
-/** 来源顺序 drawer: the per-backend policy + ordered subset it edits. */
+/** Source-order drawer: the exact ordered subset it edits. */
 export const savedSourcesKey = (agent: AgentSupply): string =>
-  sig([agent.sources?.policy ?? 'follow', ...(agent.sources?.order ?? [])]);
-
-/** 映射 drawer: the stored overrides its draft is seeded from. */
-export const savedMappingsKey = (agent: AgentSupply): string =>
-  sig((agent.mappings ?? []).flatMap((m) => [m.builtin_id, m.target_model_id, m.enabled]));
+  sig(agent.sources?.order ?? []);
 
 /** OpenCode 模型菜单 drawer: the stored view + checked identifiers. */
 export const savedMenuKey = (menu: AgentMenu | null | undefined): string =>

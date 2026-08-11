@@ -75,7 +75,6 @@ import {
   mapWithConcurrency,
   pollFailureSettles,
   releaseFlow,
-  savedMappingsKey,
   savedMenuKey,
   savedSourcesKey,
   seedStep,
@@ -90,7 +89,7 @@ const agent = (over: Partial<AgentSupply> = {}): AgentSupply => ({
   backend: 'claude',
   mode: 'hub',
   menu_kind: 'fixed',
-  sources: { policy: 'custom', order: ['src_a', 'src_b'] },
+  sources: { order: ['src_a', 'src_b'] },
   ...over,
 });
 
@@ -169,11 +168,11 @@ describe('bounded async map', () => {
 });
 
 describe('agentsWithEcho — what speaks for a row when no read does', () => {
-  const claude = agent({ backend: 'claude', sources: { policy: 'custom', order: ['src_a'] } });
-  const codex = agent({ backend: 'codex', sources: { policy: 'follow', order: ['src_b'] } });
+  const claude = agent({ backend: 'claude', sources: { order: ['src_a'] } });
+  const codex = agent({ backend: 'codex', sources: { order: ['src_b'] } });
 
   it('takes the write’s echo into the row it is about', () => {
-    const echoed = agent({ backend: 'claude', sources: { policy: 'custom', order: ['src_a', 'src_c'] } });
+    const echoed = agent({ backend: 'claude', sources: { order: ['src_a', 'src_c'] } });
 
     expect(agentsWithEcho([claude, codex], echoed)).toEqual([echoed, codex]);
   });
@@ -181,7 +180,7 @@ describe('agentsWithEcho — what speaks for a row when no read does', () => {
   it('leaves every other Agent to the read that owns it', () => {
     // An order write is per backend; it says nothing about the others, so it may
     // not answer for them either.
-    const echoed = agent({ backend: 'codex', sources: { policy: 'custom', order: ['src_b', 'src_c'] } });
+    const echoed = agent({ backend: 'codex', sources: { order: ['src_b', 'src_c'] } });
 
     expect(agentsWithEcho([claude, codex], echoed)[0]).toBe(claude);
   });
@@ -195,7 +194,7 @@ describe('agentsWithEcho — what speaks for a row when no read does', () => {
 
   it('does not mutate the list it was handed', () => {
     const before = [claude, codex];
-    agentsWithEcho(before, agent({ backend: 'claude', sources: { policy: 'follow', order: [] } }));
+    agentsWithEcho(before, agent({ backend: 'claude', sources: { order: [] } }));
 
     expect(before).toEqual([claude, codex]);
   });
@@ -207,16 +206,12 @@ describe('agentsWithEcho — what speaks for a row when no read does', () => {
   it('is how every Agent write on the page reports itself', () => {
     const page = readFileSync(join(__dirname, 'SettingsModelsPage.tsx'), 'utf8');
 
-    expect(page).toMatch(/const next = agentsWithEcho\(prev, echoed\)/);
+    expect(page).toMatch(/setAgents\(\(previous\) => agentsWithEcho\(previous, echoed\)\)/);
     // The mode PATCH echoes the same row the drawers' writes do.
     expect(page).toMatch(/await agentSaved\(echoed\)/);
 
-    const handlers = [...page.matchAll(/onSaved=\{([^}]*)\}/g)].map((m) => m[1]);
-    expect(handlers.length).toBeGreaterThanOrEqual(2);
-    expect(handlers.filter((h) => h.includes('agentSaved')).length).toBeGreaterThanOrEqual(2);
-    // The shared manual-model dialog is a source write and intentionally has no
-    // Agent echo; it refreshes the model surface instead.
-    expect(page).toMatch(/<AddCustomModelDialog[\s\S]*?onSaved=\{\(\) => void refreshSourcesAgents\(\)\}/);
+    expect(page).toMatch(/onSaved=\{agentSaved\}/);
+    expect(page).toMatch(/const echoed = await modelsApi\.setAgentMode[\s\S]*?await agentSaved\(echoed\)/);
   });
 });
 
@@ -248,19 +243,22 @@ describe('sourcesWithEcho — one refresh result inside the shared authority', (
     expect(sourcesWithEcho([first], source('src_missing00', ['new-model']))).toEqual([first]);
   });
 
-  it('routes refresh and full reads through the same latest-result authority', () => {
+  it('routes Source-detail rereads and full reads through the same latest-result authority', () => {
     const page = readFileSync(join(__dirname, 'SettingsModelsPage.tsx'), 'utf8');
+    const detail = readFileSync(join(__dirname, 'SourceDetailPanel.tsx'), 'utf8');
 
-    expect(page).toMatch(/const refreshed = await modelsApi\.refreshSource\(source\.id\);\s*await refreshAuthority\.run/);
-    expect(page).toMatch(/if \(landing\.kind === 'source'\)[\s\S]*?sourcesWithEcho\(previous, landing\.source\)/);
+    expect(detail).toMatch(/modelsApi\.refreshSource\(source\.id, force\)/);
+    expect(detail).toMatch(/await onChanged\(\)/);
+    expect(page).toMatch(/await refreshAuthority\.run/);
   });
 
   it('keeps the mutating refresh failure outside stale-read suppression', () => {
-    const page = readFileSync(join(__dirname, 'SettingsModelsPage.tsx'), 'utf8');
-    const refresh = page.slice(page.indexOf('const refreshSource ='), page.indexOf('// Resolve an open drawer'));
+    const detail = readFileSync(join(__dirname, 'SourceDetailPanel.tsx'), 'utf8');
+    const refresh = detail.slice(detail.indexOf('const refetch ='), detail.indexOf('const remove ='));
 
-    expect(refresh.indexOf('modelsApi.refreshSource')).toBeLessThan(refresh.indexOf('refreshAuthority.run'));
-    expect(refresh).toMatch(/catch \{[\s\S]*?sourceActions\.refreshFailed/);
+    expect(refresh).toMatch(/modelsApi\.refreshSource/);
+    expect(refresh).toMatch(/catch \(error\)[\s\S]*?setRefetchFailed\(true\)/);
+    expect(detail).toMatch(/refetchFailed[\s\S]*?sourceDetail\.fail\.refetch/);
   });
 });
 
@@ -454,21 +452,19 @@ describe('createPendingWrites — a write that outlives the drawer that issued i
     expect(page).toMatch(/createPendingWrites\(setAgentWrites\)/);
     expect(page).toMatch(/pending: agentWrites\.has\(orderAgent\.backend\)/);
     expect(page).toMatch(/track: \(work\) => agentWriteRegistry\.track\(orderAgent\.backend, work\)/);
-    // Every OpenCode menu door disables at the card, and the page repeats the
-    // guard at the ownership boundary so a stale click cannot bypass it.
-    expect(page).toMatch(/agent\.backend === menuBackend && !agentWrites\.has\(agent\.backend\)/);
-    expect(page).toMatch(/if \(!agentWrites\.has\(agent\.backend\)\) setMenuBackend\(agent\.backend\)/);
+    // The page owns the write after the drawer unmounts, and only a Hub backend
+    // can remain the owner of an open order drawer.
+    expect(page).toMatch(/agents\.find\(\(agent\) => agent\.backend === orderBackend && agent\.mode === 'hub'\)/);
+    expect(page).toMatch(/pending: agentWrites\.has\(orderAgent\.backend\)/);
   });
 });
 
-describe('savedSourcesKey / savedMappingsKey / savedMenuKey', () => {
+describe('savedSourcesKey / savedMenuKey', () => {
   it('moves when the saved state moves', () => {
-    expect(savedSourcesKey(agent({ sources: { policy: 'custom', order: ['src_b', 'src_a'] } }))).not.toBe(
+    expect(savedSourcesKey(agent({ sources: { order: ['src_b', 'src_a'] } }))).not.toBe(
       savedSourcesKey(agent()),
     );
-    expect(savedSourcesKey(agent({ sources: { policy: 'follow', order: ['src_a', 'src_b'] } }))).not.toBe(
-      savedSourcesKey(agent()),
-    );
+    expect(savedSourcesKey(agent({ sources: { order: ['src_a', 'src_b', 'src_c'] } }))).not.toBe(savedSourcesKey(agent()));
   });
 
   it('holds still across a refetch that changed nothing', () => {
@@ -478,16 +474,12 @@ describe('savedSourcesKey / savedMappingsKey / savedMenuKey', () => {
   });
 
   it('cannot be spoofed by an id that contains the separator', () => {
-    expect(savedSourcesKey(agent({ sources: { policy: 'custom', order: ['src_a src_b'] } }))).not.toBe(
+    expect(savedSourcesKey(agent({ sources: { order: ['src_a src_b'] } }))).not.toBe(
       savedSourcesKey(agent()),
     );
   });
 
-  it('reads the mapping overrides and the menu the drawers seed from', () => {
-    const base = agent({ mappings: [{ builtin_id: 'claude-opus-4-6', target_model_id: 'm1', enabled: true }] });
-    expect(savedMappingsKey(base)).not.toBe(
-      savedMappingsKey(agent({ mappings: [{ builtin_id: 'claude-opus-4-6', target_model_id: 'm1', enabled: false }] })),
-    );
+  it('reads the menu the drawer seeds from', () => {
     expect(savedMenuKey({ view: 'featured', checked: ['zhipuai/glm-5.2'] })).not.toBe(
       savedMenuKey({ view: 'full', checked: ['zhipuai/glm-5.2'] }),
     );
@@ -515,8 +507,8 @@ describe('seedStep', () => {
     // so it seeds from the pre-save props — and only then does the save land and
     // the refetch deliver [b, a]. Whatever the drawer is holding at that point
     // came from a snapshot the server has since replaced.
-    const stale = savedSourcesKey(agent({ sources: { policy: 'custom', order: ['src_a', 'src_b'] } }));
-    const landed = savedSourcesKey(agent({ sources: { policy: 'custom', order: ['src_b', 'src_a'] } }));
+    const stale = savedSourcesKey(agent({ sources: { order: ['src_a', 'src_b'] } }));
+    const landed = savedSourcesKey(agent({ sources: { order: ['src_b', 'src_a'] } }));
 
     const reopened = seedStep(initialSeedState, stale).state;
     const after = seedStep(reopened, landed);
@@ -526,7 +518,7 @@ describe('seedStep', () => {
   });
 
   it('re-seats only once per move, so a redundant refetch stays inert', () => {
-    const landed = savedSourcesKey(agent({ sources: { policy: 'custom', order: ['src_b', 'src_a'] } }));
+    const landed = savedSourcesKey(agent({ sources: { order: ['src_b', 'src_a'] } }));
     const reseated = seedStep(seedStep(initialSeedState, savedSourcesKey(agent())).state, landed).state;
     expect(seedStep(reseated, landed).reseed).toBe(false);
   });
@@ -900,7 +892,9 @@ describe('failureLanded — whose account of the rows is the one on screen', () 
     // The two paths reached after the attempt is over take the default rather than
     // restating it — including the release re-read, which awaits the cancel first
     // and is therefore the latest-landing arrival in the file.
-    expect(dialog).toMatch(/const resolvedAfterAttempt = \(\) => rowsBehindAreStale\(\);/);
+    expect(dialog).toMatch(
+      /const resolvedAfterAttempt = React\.useCallback\(\(\) => rowsBehindAreStale\(\), \[rowsBehindAreStale\]\);/,
+    );
     expect(dialog).toMatch(/reread: \(\) => rowsBehindAreStale\(\),/);
   });
 });

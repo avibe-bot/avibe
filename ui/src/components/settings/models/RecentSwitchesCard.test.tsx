@@ -104,19 +104,10 @@ describe('RecentSwitchesCard (AC-18)', () => {
     expect(render(four, [source('src_live01')])).toContain(zh.settings.models.recent.viewAll);
   });
 
-  it('keeps route configuration out of the user event feed', () => {
-    const configured = event({ kind: 'mapping_applied', human_zh: '内部路由配置已变更' });
-    const html = render([configured, event({ id: 'evt_2', human_zh: '已自动换到 openai' })], [source('src_live01')]);
-    expect(html).not.toContain(configured.human_zh);
-    expect(html).toContain('已自动换到 openai');
-  });
-
-  it('keeps a paging door open when the fetched page contains only route configuration', () => {
-    const configured = event({ kind: 'mapping_applied', human_zh: '内部路由配置已变更' });
-    const html = render([configured], [source('src_live01')], 'zh', true);
-    expect(html).not.toContain(configured.human_zh);
+  it('keeps a paging door open when more events exist', () => {
+    const html = render([event()], [source('src_live01')], 'zh', true);
     expect(html).not.toContain(zh.settings.models.recent.empty);
-    expect(html).toContain(zh.settings.models.recent.loadMore);
+    expect(html).toContain(zh.settings.models.recent.viewAll);
   });
 });
 

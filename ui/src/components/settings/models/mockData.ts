@@ -1,5 +1,5 @@
-// Typed fixtures for the Model Hub UI while the L2 REST API is unmerged.
-// Mirrors the V6 design mock story (design.pen `产品改造 V6 01`) and the frozen
+// Typed fixtures for hermetic Model Hub visual tests.
+// Mirrors the frozen
 // v3 contract example payloads. Timestamps are computed relative to "now" at
 // fetch time so the 最近切换 list always renders 今天 / 昨天 correctly.
 //
@@ -17,7 +17,6 @@ import type {
   Source,
   SourceEligibility,
 } from './types';
-import { SUBSCRIPTION_HUB_EXPERIMENTAL } from './featureFlags';
 
 const iso = (offsetMs: number) => new Date(Date.now() + offsetMs).toISOString();
 const MIN = 60_000;
@@ -157,7 +156,6 @@ export function buildMockAgents(sources: Source[] = buildMockSources()): AgentSu
       // as explicit — the resolver-picked case only exists on the open menu.
       selected_model_explicit: true,
       sources: {
-        policy: 'custom',
         order: claudeOrder,
         eligibility: mockEligibility(sources, 'claude'),
       },
@@ -177,16 +175,14 @@ export function buildMockAgents(sources: Source[] = buildMockSources()): AgentSu
         { name: 'claude', effective_model_id: 'claude-opus-4-6', supply_status: 'ok' },
         { name: 'pm', effective_model_id: 'claude-opus-4-6', supply_status: 'ok' },
       ],
-      // Fixed-menu backends surface their full built-in id list as mappings; an
-      // enabled entry is an override (frame 04), disabled = 跟随原生 (identity).
-      mappings: [
-        { builtin_id: 'claude-opus-4-6', target_model_id: '', enabled: false },
-        { builtin_id: 'claude-sonnet-4-6', target_model_id: '', enabled: false },
-        { builtin_id: 'claude-haiku-4-5', target_model_id: 'glm-5.2', enabled: true },
-      ],
+      routes: {
+        'claude-opus-4-6': { hops: [{ source_id: 'src_claudepro1', model_id: 'claude-opus-4-6' }, { source_id: 'src_anthkey01', model_id: 'claude-opus-4-6' }] },
+        'claude-sonnet-4-6': { hops: [{ source_id: 'src_claudepro1', model_id: 'claude-sonnet-4-6' }, { source_id: 'src_anthkey01', model_id: 'claude-sonnet-4-6' }] },
+        'claude-haiku-4-5': { hops: [] },
+      },
       menu: null,
       // Fixed-menu backends carry the server-populated built-in catalog
-      // (agent-supply v1.2); the mapping drawer renders these rows.
+      // The server projects these ids; the route editor never hardcodes them.
       builtin_models: ['claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5'],
       standard_vendors: null,
     },
@@ -198,8 +194,6 @@ export function buildMockAgents(sources: Source[] = buildMockSources()): AgentSu
       selected_model_id: 'gpt-5.6',
       selected_model_explicit: true,
       sources: {
-        policy: 'follow',
-        // Recomputed on every read: 跟随推荐 means a new source joins by itself.
         order: mockRecommendedOrder(sources, 'codex'),
         eligibility: mockEligibility(sources, 'codex'),
       },
@@ -209,10 +203,10 @@ export function buildMockAgents(sources: Source[] = buildMockSources()): AgentSu
         { model_id: 'gpt-5.6-mini', chain_length: 1 },
       ],
       named_agents: [{ name: 'codex', effective_model_id: 'gpt-5.6', supply_status: 'ok' }],
-      mappings: [
-        { builtin_id: 'gpt-5.6', target_model_id: '', enabled: false },
-        { builtin_id: 'gpt-5.6-mini', target_model_id: '', enabled: false },
-      ],
+      routes: {
+        'gpt-5.6': { hops: [{ source_id: 'src_chatgptplus', model_id: 'gpt-5.6' }] },
+        'gpt-5.6-mini': { hops: [{ source_id: 'src_chatgptplus', model_id: 'gpt-5.6-mini' }] },
+      },
       menu: null,
       builtin_models: ['gpt-5.6', 'gpt-5.6-mini'],
       standard_vendors: null,
@@ -230,7 +224,6 @@ export function buildMockAgents(sources: Source[] = buildMockSources()): AgentSu
       supply_status: null,
       model_supply: null,
       named_agents: [{ name: 'opencode', effective_model_id: null, supply_status: null }],
-      mappings: [],
       // Prefixed identifiers (opencode-overlay.md): provider = the SOURCE's
       // vendor (custom fallback). Retained across the mode switch — it is stored
       // config, not live state, and applies again the moment OpenCode rejoins.
@@ -377,15 +370,10 @@ export function buildMockRuntime(): RuntimeDependency {
 // Migration scan fixture (frame 03). Mirrors the frozen migration-scan schema
 // example, adapted to the mock backends. Per spec v1.1 + the 2026-07-23 L6
 // finding: API keys / base URLs → import; subscription OAuth (Claude account +
-// Codex auth.json) → keep_native ALWAYS (controlled_import is deferred — adapter
-// v1.2 forbids OAuth material in provision_credential). When the experimental
-// flag is on, those rows only add a "re-authorize inside the hub" hint; they
-// never become an import. So this fixture emits only import / keep_native.
+// Codex auth.json) → keep_native. controlled_import is reserved and not
+// applicable in v3, so this fixture emits only import / keep_native.
 export function buildMockMigration(): MigrationScan {
-  // Subscription-OAuth rows stay native; the flag only swaps their hint line.
-  const oauthNote = SUBSCRIPTION_HUB_EXPERIMENTAL
-    ? 'settings.models.migration.notes.keepNativeReauthHint'
-    : 'settings.models.migration.notes.keepNativeSanctioned';
+  const oauthNote = 'settings.models.migration.notes.keepNativeSanctioned';
   return {
     items: [
       {

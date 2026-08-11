@@ -13,15 +13,17 @@
 // schemas — never ahead of them.
 
 export const CONTRACT_VERSION = 5 as const;
-export const AGENT_CHAIN_CONTRACT_VERSION = 5 as const;
-export const PROBE_RESULT_CONTRACT_VERSION = 5 as const;
+export const AGENT_CHAIN_CONTRACT_VERSION = CONTRACT_VERSION;
+export const PROBE_RESULT_CONTRACT_VERSION = CONTRACT_VERSION;
 
 // ── source.schema.json ──────────────────────────────────────────────────
 export type SourceKind = 'subscription' | 'api_key';
-export type SourceProtocol =
-  | 'anthropic'
-  | 'openai_responses'
-  | 'openai_chat';
+export const SOURCE_PROTOCOLS = [
+  'anthropic',
+  'openai_responses',
+  'openai_chat',
+] as const;
+export type SourceProtocol = (typeof SOURCE_PROTOCOLS)[number];
 export type SupplyChannel = 'native_cli' | 'hub';
 /** v3 (§4.5): classified by whether the state heals itself. cooldown carries a
  *  `retry_at` and clears on its own; needs_action never recovers unattended;
@@ -95,8 +97,6 @@ export type Source = {
   /** api_key kind only. null = vendor official default. */
   base_url?: string | null;
   supply_channel: SupplyChannel;
-  /** Set iff a hub-held subscription the user explicitly consented to. */
-  experimental_consent_at?: string | null;
   billing: 'monthly' | 'metered';
   state: SourceState;
   usage?: SourceUsage;
@@ -121,23 +121,11 @@ export type AgentBackend = 'claude' | 'codex' | 'opencode';
 export type AgentMode = 'hub' | 'direct';
 export type MenuKind = 'fixed' | 'open';
 
-export type AgentMapping = {
-  /** real built-in model id, e.g. claude-opus-4-6. */
-  builtin_id: string;
-  target_model_id: string;
-  enabled: boolean;
-};
-
 export type AgentMenu = {
   view: 'featured' | 'full';
   /** prefixed identifiers, e.g. zhipuai/glm-5.2. */
   checked: string[];
 };
-
-/** Whether the per-backend order is server-recommended or user-owned. `follow`
- *  recomputes on every read, so a newly eligible source joins automatically;
- *  `custom` is a frozen subset the server never reorders and never extends. */
-export type SourcePolicy = 'follow' | 'custom';
 
 /** Why a source cannot serve this backend at all. A closed vocabulary — a new
  *  cause ships its enum member and its locale copy in the same change. */
@@ -166,13 +154,26 @@ export type SourceEligibility = {
 };
 
 export type AgentSources = {
-  policy: SourcePolicy;
   /** Enabled source ids for THIS backend, position 0 = tried first. A subset:
    *  ids absent from it are not enabled here, not merely lower-priority. */
   order: string[];
   /** Every source the hub holds, eligible or not — the drawer's 不适用 section
    *  reads its `reason_key` from here. */
   eligibility?: SourceEligibility[] | null;
+};
+
+export type RouteHop = {
+  source_id: string;
+  model_id: string;
+};
+
+export type RouteHopRef = RouteHop & {
+  backend: AgentBackend;
+  menu_model: string;
+};
+
+export type AgentRoute = {
+  hops: RouteHop[];
 };
 
 /** Agent-level supply rollup (§4.5). `waiting` = every enabled source is
@@ -211,8 +212,10 @@ export type AgentSupply = {
   /** TRUE iff `selected_model_id` originates from the Agent's explicit
    *  configuration. FALSE covers a resolver-picked value. */
   selected_model_explicit?: boolean;
-  /** Per-backend enabled subset + order + policy. null when mode=direct. */
+  /** Per-backend enabled subset + order. null when mode=direct. */
   sources?: AgentSources | null;
+  /** Exact configured Route for each menu model. Runtime reads this verbatim. */
+  routes?: Record<string, AgentRoute> | null;
   /** Rollup over `sources.order` for the current selection. null in direct mode
    *  and whenever `selected_model_id` is null. */
   supply_status?: SupplyStatus | null;
@@ -221,11 +224,10 @@ export type AgentSupply = {
   /** AC-9 attribution source. Always present; every entry's `supply_status` is
    *  null in direct mode. */
   named_agents?: NamedAgentSupply[];
-  mappings?: AgentMapping[];
   menu?: AgentMenu | null;
   /** v1.2 read-only projection: fixed-menu backends only — the backend's real
    *  built-in model ids (from vibe/backend_model_catalog.py). null for open-menu
-   *  backends. The mapping drawer renders these; the UI never hardcodes menus. */
+   *  backends. The route editor renders these; the UI never hardcodes menus. */
   builtin_models?: string[] | null;
   /** v1.2 read-only projection: opencode only — server mirror of
    *  STANDARD_OPENCODE_VENDOR_IDS, so the UI never hand-mirrors vendor prefixes.
@@ -235,9 +237,8 @@ export type AgentSupply = {
 
 // ── migration-scan.schema.json ──────────────────────────────────────────
 export type MigrationKind = 'api_key' | 'oauth_native' | 'opencode_provider';
-/** Option 1 (spec v1.1): Claude oauth_native → keep_native (sanctioned as-is);
- *  Codex auth.json → controlled_import behind the consent-gated flag, else
- *  keep_native; keys / base URLs → import. */
+/** Native OAuth remains native; controlled_import is reserved and not
+ *  applicable in v3. Keys and base URLs may be imported. */
 export type MigrationAction = 'import' | 'controlled_import' | 'keep_native' | 'reauth';
 
 export type MigrationItem = {
@@ -260,7 +261,6 @@ export type ResolutionEventKind =
   | 'cooldown'
   | 'recover'
   | 'skip'
-  | 'mapping_applied'
   | 'channel_switch'
   /** v3: a source stopped in a way that will never heal unattended. */
   | 'needs_action'
@@ -273,17 +273,17 @@ export type ResolutionReason =
   | 'network'
   | 'recovery'
   | 'manual'
-  | 'mapping'
-  // v3 — the five non-self-healing causes, a bijection with the needs_action /
-  // error detail keys above.
+  // Non-self-healing causes mirror the source-state detail vocabulary.
   | 'credential_expired'
   | 'credential_revoked'
   | 'balance_exhausted'
   | 'account_banned'
+  | 'permission_denied'
   | 'unclassified_error'
-  // v3 — supply exhaustion causes.
   | 'no_enabled_source'
   | 'no_eligible_source'
+  | 'route_unconfigured'
+  | 'source_missing'
   | 'model_unsupported';
 export type BillingNote = null | 'entered_metered' | 'left_metered';
 /** v3: `action_required` on needs_action / supply_interrupted, `info` on the six
@@ -312,21 +312,19 @@ export type ResolutionEvent = {
 // ── agent-chain.schema.json ─────────────────────────────────────────────
 export type ChainHealth = 'healthy' | 'cooldown' | 'needs_action' | 'error';
 
-/** v4: the only process-unavailability state in v2. `chain[].reason` is its
- *  VOCABULARY HOME; `ProbeResult.error` carries the i18n spelling of the same
- *  fact (`models.probe.native_cli_unavailable`), a mapping registered as M8 in
- *  mirror-registry.json. */
-export type ChainUnavailableReason = 'native_cli_unavailable';
+/** Closed runtime-unavailability vocabulary shared by chain and probe results. */
+export type ChainUnavailableReason =
+  | 'native_cli_unavailable'
+  | 'source_missing'
+  | 'model_unsupported';
 
 export type AgentChainLink = {
   source_id: string;
+  model_id: string;
   /** v4: the source's serving channel, mirroring `Source.supply_channel`. `hub`
    *  is definitionally process-available; `native_cli` is additionally gated by
    *  whether this process can launch the sanctioned CLI under its own login. */
   channel: SupplyChannel;
-  via_mapping: boolean;
-  /** The id actually sent upstream. Non-null whenever `via_mapping` is true. */
-  resolved_model_id: string | null;
   health: ChainHealth;
   /** Health permits the turn AND this process can serve the channel. Always
    *  false for needs_action / error, and whenever `reason` is non-null; true for
@@ -349,6 +347,7 @@ export type AgentChain = {
   contract_version: typeof AGENT_CHAIN_CONTRACT_VERSION;
   backend: AgentBackend;
   model_id: string;
+  current: RouteHop | null;
   chain: AgentChainLink[];
   /** v4 pins this to the array it summarises: `ok` iff some member is runnable,
    *  the two blocked values iff none is. */
@@ -379,37 +378,25 @@ export type ProbeResult = {
    *  because nothing upstream is timed — a local number would impersonate
    *  completion evidence. */
   latency_ms: number | null;
-  via_mapping: boolean;
   /** Closed vocabulary, null on every reachable result. hub: the ten
    *  `state.detail_key` values. native_cli: only the unavailability key. */
   error: ProbeErrorKey | null;
 };
 
-/** api.md — returned by the source-creation routes: which backends adopted the
- *  new source into their order, and where. `position` is ONE-based. A `custom`
- *  backend is absent (the UI hints 「有新来源未启用」 instead). */
-export type AdoptedBy = {
+/** api.md — the exact Route hops materialized by Add Source. */
+export type AddedTo = {
   backend: AgentBackend;
-  policy: SourcePolicy;
+  menu_model: string;
+  source_id: string;
+  model_id: string;
+  /** One-based position in the persisted Route chain. */
   position: number;
 };
 
-/**
- * api.md — the eligible-but-skipped complement of `adopted_by`, returned beside it
- * by both creation routes.
- *
- * It exists because absence in `adopted_by` says two different things: a backend
- * that could never use this source, and one that could and was left out. Only the
- * second is worth telling the user about, and only the server can tell them apart —
- * `_skipped_by` filters on `_eligible_for_agent` before reporting a `custom` order
- * that omits the id.
- */
-export type SkippedBy = {
+/** api.md — stable Source-card projection of persisted Route references. */
+export type AdoptedBy = {
   backend: AgentBackend;
-  /** v2's only cause: the backend keeps a `custom` order, which the server never
-   *  extends on its own. An INELIGIBLE backend is not 「skipped」 — it was never a
-   *  candidate, and it appears in neither list. */
-  reason: 'custom_order';
+  menu_model: string;
 };
 
 // ── oauth-flow.schema.json ──────────────────────────────────────────────
@@ -502,12 +489,46 @@ export type SupplyGap = {
   agents: string[];
 };
 
-/** POST /api/models/sources — api_key create validates + discovers models. */
-export type ApiKeySourceCreate = {
-  kind: 'api_key';
+// ── observation-result.schema.json ─────────────────────────────────────
+export type ObservationOutcome =
+  | 'observed'
+  | 'ambiguous'
+  | 'unreachable'
+  | 'authentication_failed'
+  | 'adapter_error'
+  | 'timeout';
+
+export type ObservationAuthentication = 'authenticated' | 'rejected' | 'unknown';
+export type ObservationDiscovery = 'succeeded' | 'failed' | 'not_attempted';
+
+export type SourceObservation = {
+  contract_version: typeof CONTRACT_VERSION;
+  outcome: ObservationOutcome;
+  reachable: boolean | null;
+  authenticated: ObservationAuthentication;
+  protocol: SourceProtocol | null;
+  discovery: ObservationDiscovery;
+  models: string[];
+};
+
+/** POST /api/models/sources/observe — never persists a Source. */
+export type ApiKeySourceObservation = {
   vendor: string;
   base_url?: string | null;
   key: string;
+  /** Probe order only. Every member occurs exactly once. */
+  protocol_order?: SourceProtocol[];
+};
+
+/** POST /api/models/sources — api_key create observes again before persisting. */
+export type ApiKeySourceCreate = {
+  kind: 'api_key';
+  vendor: string;
+  display_name?: string;
+  base_url?: string | null;
+  key: string;
+  /** Probe order only; the client never sends a protocol conclusion. */
+  protocol_order?: SourceProtocol[];
 };
 
 /**
@@ -526,7 +547,6 @@ export type OAuthSourceCreate = {
   oauth_flow_ref: string;
   supply_channel: SupplyChannel;
   display_name?: string;
-  experimental_consent?: boolean;
 };
 
 /** PATCH /api/models/sources/<id> — display_name and/or base_url only
@@ -536,10 +556,11 @@ export type SourcePatch = {
   base_url?: string | null;
 };
 
-/** PUT /api/models/agents/<backend>/sources — a TOTAL body: `follow` hands the
- *  order back to the server, `custom` freezes exactly the ids sent. The route
- *  rejects unknown keys, so `contract_version` is deliberately NOT part of it. */
-export type AgentSourcesPut = { policy: 'follow' } | { policy: 'custom'; order: string[] };
+/** PUT /api/models/agents/<backend>/sources — replaces the complete order. */
+export type AgentSourcesPut = { order: string[] };
+
+/** PUT /api/models/agents/<backend>/chain?model=<id> — replaces exact hops. */
+export type AgentChainPut = { hops: RouteHop[]; force?: boolean };
 
 /**
  * PUT /api/models/sources/<id>/credential — hub-channel api_key sources only.

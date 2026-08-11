@@ -1,8 +1,8 @@
 // 迁移对话框 · 接入模型中枢 (frame 03). Non-destructive: a per-backend checklist of
 // detected native configs. Actions follow migration-scan.schema (spec v1.1,
-// Option 1): API keys / base URLs → import; Claude account OAuth → keep_native
-// (sanctioned as-is); Codex auth.json → controlled_import behind the
-// experimental flag, else keep_native. Originals are never modified or deleted.
+// Option 1): API keys / base URLs → import; subscription OAuth → keep_native.
+// controlled_import is reserved and not applicable in v3. Originals are never
+// modified or deleted.
 // Scans via POST /migration/scan; applies the selection via /migration/apply.
 import * as React from 'react';
 import { ArrowDownToLine, Bot, KeyRound, ShieldCheck, Sparkles } from 'lucide-react';
@@ -185,7 +185,7 @@ export const MigrationDialog: React.FC<{
           <div className="flex flex-col gap-4">
             {grouped.map((group) => (
               <div key={group.backend} className="flex flex-col gap-2">
-                <span className="px-1 font-mono text-[11px] font-semibold uppercase tracking-[0.08em] text-muted">
+                <span className="px-1 font-mono text-[11px] font-semibold uppercase tracking-normal text-muted">
                   {t(`settings.models.backends.${group.backend}`, { defaultValue: group.backend })}
                 </span>
                 {group.rows.map((item) => (

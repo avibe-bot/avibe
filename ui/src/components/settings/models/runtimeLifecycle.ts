@@ -11,12 +11,18 @@ export async function startRuntimeWithStatusRefresh(
 ): Promise<{ runtime: RuntimeDependency | null; failed: boolean }> {
   try {
     const runtime = await api.startRuntime();
-    return { runtime, failed: runtime.status.health !== 'ok' };
+    return {
+      runtime,
+      failed: runtime.status.health !== 'ok' && runtime.status.health !== 'degraded',
+    };
   } catch {
     // A failed start changes supervisor health. Read that authoritative state
     // back so the persistent page does not keep presenting lazy-start idleness.
     const runtime = await api.getRuntimeStatus().catch(() => null);
-    return { runtime, failed: runtime?.status.health !== 'ok' };
+    return {
+      runtime,
+      failed: runtime?.status.health !== 'ok' && runtime?.status.health !== 'degraded',
+    };
   }
 }
 

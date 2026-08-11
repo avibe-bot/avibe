@@ -33,13 +33,13 @@ afterEach(() => {
 describe('apiFailure — whether the route named the failure', () => {
   it('reads a route-declared code as named', async () => {
     const failure = await failureFor(() => Response.json({ error: 'discovery_failed' }, { status: 409 }));
-    expect(failure).toMatchObject({ code: 'discovery_failed', serverNamed: true });
+    expect(failure).toMatchObject({ code: 'discovery_failed', serverNamed: true, responseStatus: 409 });
   });
 
   it('reads a body that would not parse as UNNAMED', async () => {
     // The server may well have written before this response was truncated.
     const failure = await failureFor(() => new Response('<html>502</html>', { status: 502 }));
-    expect(failure).toMatchObject({ code: 'bad_response', serverNamed: false });
+    expect(failure).toMatchObject({ code: 'bad_response', serverNamed: false, responseStatus: 502 });
   });
 
   it('reads a status this client had to summarize itself as UNNAMED', async () => {

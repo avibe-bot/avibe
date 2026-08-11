@@ -1,0 +1,147 @@
+// @vitest-environment jsdom
+import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { I18nextProvider } from 'react-i18next';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+import i18n from '@/i18n';
+import { AddApiKeyDialog } from './AddApiKeyDialog';
+import { modelsApi } from './modelsApi';
+import { CONTRACT_VERSION, SOURCE_PROTOCOLS, type Source, type SourceObservation } from './types';
+
+const observed = (patch: Partial<SourceObservation> = {}): SourceObservation => ({
+  contract_version: CONTRACT_VERSION,
+  outcome: 'observed',
+  reachable: true,
+  authenticated: 'authenticated',
+  protocol: 'openai_chat',
+  discovery: 'succeeded',
+  models: ['model-a', 'model-b'],
+  ...patch,
+});
+
+const source: Source = {
+  id: 'src_new',
+  last_discovered_at: null,
+  kind: 'api_key',
+  vendor: 'custom',
+  display_name: 'Relay',
+  protocol: 'openai_chat',
+  base_url: 'https://relay.example/v1',
+  supply_channel: 'hub',
+  billing: 'metered',
+  state: { status: 'standby', retry_at: null, detail_key: null },
+  models: [],
+};
+
+const renderDialog = (onClose = vi.fn(), onAdded = vi.fn()) => {
+  render(
+    <I18nextProvider i18n={i18n}>
+      <AddApiKeyDialog open onClose={onClose} onAdded={onAdded} />
+    </I18nextProvider>,
+  );
+  return { onClose, onAdded };
+};
+
+const fillCredentials = async () => {
+  const user = userEvent.setup();
+  await user.type(screen.getByRole('textbox', { name: /^Base URL$/i }), 'https://relay.example/v1');
+  await user.type(screen.getByLabelText(/^API key$/i), 'secret-key');
+  return user;
+};
+
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
+
+describe('AddApiKeyDialog', () => {
+  it('pulls models without persisting and drops the report when credentials change', async () => {
+    vi.spyOn(modelsApi, 'observeApiKeySource').mockResolvedValueOnce(observed());
+    const create = vi.spyOn(modelsApi, 'createApiKeySource');
+    renderDialog();
+    const user = await fillCredentials();
+
+    await user.click(screen.getByRole('button', { name: /Fetch models|拉取型号/i }));
+    expect(await screen.findByText(/Fetched 2 models|拉到 2 个型号/i)).toBeTruthy();
+    expect(create).not.toHaveBeenCalled();
+
+    await user.type(screen.getByRole('textbox', { name: /^Base URL$/i }), '/changed');
+    expect(screen.queryByText(/Fetched 2 models|拉到 2 个型号/i)).toBeNull();
+  });
+
+  it('uses the interface choice only as the next complete probe order', async () => {
+    const observe = vi.spyOn(modelsApi, 'observeApiKeySource')
+      .mockResolvedValueOnce(observed({
+        outcome: 'ambiguous',
+        authenticated: 'unknown',
+        protocol: null,
+        discovery: 'not_attempted',
+        models: [],
+      }))
+      .mockResolvedValueOnce(observed({ protocol: 'openai_responses' }));
+    const create = vi.spyOn(modelsApi, 'createApiKeySource').mockResolvedValueOnce({
+      source,
+      added_to: [],
+      adopted_by: [],
+    });
+    const { onAdded } = renderDialog();
+    const user = await fillCredentials();
+
+    await user.click(screen.getByRole('button', { name: /^Add$|^添加$/i }));
+    const retry = await screen.findByRole('button', { name: /^Retry$|^重试$/i });
+    expect((retry as HTMLButtonElement).disabled).toBe(true);
+    await user.click(screen.getByRole('button', { name: 'OpenAI Responses' }));
+    await user.click(retry);
+
+    await waitFor(() => expect(create).toHaveBeenCalledOnce());
+    const secondObservation = observe.mock.calls[1][0];
+    expect(secondObservation.protocol_order?.[0]).toBe('openai_responses');
+    expect(new Set(secondObservation.protocol_order)).toEqual(new Set(SOURCE_PROTOCOLS));
+    expect(create.mock.calls[0][0]).not.toHaveProperty('protocol');
+    expect(create.mock.calls[0][0].protocol_order?.[0]).toBe('openai_responses');
+    expect(onAdded).toHaveBeenCalledWith({ source, added_to: [], adopted_by: [] });
+  });
+
+  it('retries the complete observation from inventory failure and persists only through Add anyway', async () => {
+    const inventory = observed({ discovery: 'failed', models: [] });
+    const observe = vi.spyOn(modelsApi, 'observeApiKeySource').mockResolvedValue(inventory);
+    const create = vi.spyOn(modelsApi, 'createApiKeySource').mockResolvedValue({
+      source,
+      added_to: [],
+      adopted_by: [],
+    });
+    renderDialog();
+    const user = await fillCredentials();
+
+    await user.click(screen.getByRole('button', { name: /^Add$|^添加$/i }));
+    await screen.findByRole('button', { name: /Add anyway|仍要添加/i });
+    await user.click(screen.getByRole('button', { name: /^Retry$|^重试$/i }));
+    await waitFor(() => expect(observe).toHaveBeenCalledTimes(2));
+    expect(create).not.toHaveBeenCalled();
+
+    await user.click(await screen.findByRole('button', { name: /Add anyway|仍要添加/i }));
+    await waitFor(() => expect(create).toHaveBeenCalledOnce());
+    expect(create.mock.calls[0][0]).not.toHaveProperty('protocol');
+    expect(create.mock.calls[0][0].protocol_order?.[0]).toBe('openai_chat');
+  });
+
+  it('aborts an in-flight pull and returns to the form without dismissing', async () => {
+    let wasAborted = false;
+    vi.spyOn(modelsApi, 'observeApiKeySource').mockImplementation((_draft, signal) => new Promise((_resolve, reject) => {
+      signal?.addEventListener('abort', () => {
+        wasAborted = true;
+        reject(new DOMException('aborted', 'AbortError'));
+      }, { once: true });
+    }));
+    const { onClose } = renderDialog();
+    const user = await fillCredentials();
+
+    await user.click(screen.getByRole('button', { name: /Fetch models|拉取型号/i }));
+    await user.click(screen.getAllByRole('button', { name: /^Cancel$|^取消$/i }).at(-1)!);
+
+    expect(wasAborted).toBe(true);
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: /Fetch models|拉取型号/i })).toBeTruthy();
+  });
+});

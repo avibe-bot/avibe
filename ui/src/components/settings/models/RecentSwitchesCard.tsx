@@ -22,9 +22,6 @@ import type { ResolutionEvent, Source } from './types';
 const COLLAPSED = 3;
 
 /** Route configuration is visible on the model row; it is not a user event. */
-const visibleResolutionEvents = (events: ResolutionEvent[]): ResolutionEvent[] =>
-  events.filter((event) => event.kind !== 'mapping_applied');
-
 function useEventTime() {
   const { t } = useTranslation();
   return (ts: string): string => {
@@ -61,15 +58,14 @@ export const RecentSwitchesCard: React.FC<{
   const namesDeletedSource = (e: ResolutionEvent) =>
     [e.from_source, e.to_source].some((id) => typeof id === 'string' && id !== '' && !liveIds.has(id));
 
-  const visibleEvents = visibleResolutionEvents(events);
+  const visibleEvents = events;
   const shown = expanded ? visibleEvents : visibleEvents.slice(0, COLLAPSED);
   const rawTailId = events.at(-1)?.id ?? '';
   const backfilledTailRef = React.useRef<string | null>(null);
 
-  // The API pages the raw journal, while this card deliberately omits route
-  // configuration rows. Walk past mapping-only pages until the collapsed feed
-  // has three user events (or the server says there are no older rows). The raw
-  // tail is the generation key: it advances after every useful page and keeps a
+  // Walk older pages until the collapsed feed has three events (or the server
+  // says there are no older rows). The raw tail is the generation key: it
+  // advances after every useful page and keeps a
   // failed/overlapping response from becoming an automatic retry loop.
   React.useEffect(() => {
     if (visibleEvents.length >= COLLAPSED || !hasMore || loadingMore || !onLoadMore) return;
