@@ -56,6 +56,13 @@ def test_g1_cancelled_error_has_one_boundary_owner() -> None:
     parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
     found = [_owner_name(node, parents) for node in ast.walk(tree) if isinstance(node, ast.Try) and any(_is_cancel(h) for h in node.handlers)]
     assert found == ["_handle_request"]
+    terminalizer = _functions(_tree(PROVENANCE))["mark_downstream_canceled"]
+    assert any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "clear_prepared_attempt"
+        for node in ast.walk(terminalizer)
+    )
 
 
 def test_g2_outcome_reads_have_one_settlement_owner() -> None:

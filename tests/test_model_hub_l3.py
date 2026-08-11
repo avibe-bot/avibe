@@ -61,7 +61,11 @@ from core.handlers.model_hub.service import (
     ModelHubService,
     ResolvedInvocation,
 )
-from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway, render_protocol_terminal_event
+from core.handlers.model_hub.turn_gateway import (
+    ModelHubTurnGateway,
+    _SSEWireState,
+    render_protocol_terminal_event,
+)
 from core.run_settlement import (
     SETTLED_BY_NO_TERMINAL_RESULT,
     SETTLED_BY_STOPPED,
@@ -178,7 +182,12 @@ def test_terminal_event_renderer_uses_native_protocol_shape(
     protocol: str,
     expected_shape: str,
 ) -> None:
-    event = render_protocol_terminal_event(protocol, "modelHub.launch.retry", "Retry directly.")
+    event = render_protocol_terminal_event(
+        protocol,
+        "modelHub.launch.retry",
+        "Retry directly.",
+        next_sequence_number=0,
+    )
 
     assert "model_hub_terminal" not in str(event)
     if expected_shape == "anthropic":
@@ -221,6 +230,23 @@ def test_terminal_event_renderer_uses_native_protocol_shape(
         assert isinstance(event["error"]["code"], str)
         assert isinstance(event["error"]["message"], str)
         assert isinstance(event["choices"], list)
+
+
+def test_responses_terminal_event_continues_sequence_and_closes_partial_frame() -> None:
+    wire = _SSEWireState()
+    wire.observe(b'data: {"type":"response.output_text.delta","sequence_number":7}\n\n')
+    wire.observe(b'data: {"type":"response.output_text.delta","sequence_number":8}')
+
+    assert wire.next_sequence_number == 8
+    assert wire.close_partial_frame() == b"\n\n"
+    assert wire.next_sequence_number == 9
+    event = render_protocol_terminal_event(
+        "openai_responses",
+        "modelHub.launch.retry",
+        "Retry directly.",
+        next_sequence_number=wire.next_sequence_number,
+    )
+    assert event["sequence_number"] == 9
 
 
 def test_turn_outcome_copy_projection_has_one_runtime_owner() -> None:
@@ -1819,7 +1845,11 @@ def test_gateway_live_settlement_emits_matrix_copy_before_eof(
                         source_id=source.id,
                         stream_started=True,
                     ),
-                    (b"data: partial\n\n",),
+                    (
+                        b'data: {"type":"response.output_text.delta",'
+                        b'"sequence_number":7}\n\n',
+                        b"data: partial",
+                    ),
                 )
             ],
         )
@@ -1839,7 +1869,16 @@ def test_gateway_live_settlement_emits_matrix_copy_before_eof(
         ):
             result = await gateway._handle_request(request)
         assert result is response
-        assert any(b"modelHub.launch.retry" in chunk for chunk in response.writes)
+        assert response.writes[:2] == [
+            b'data: {"type":"response.output_text.delta",'
+            b'"sequence_number":7}\n\n',
+            b"data: partial",
+        ]
+        terminal = response.writes[-1]
+        assert terminal.startswith(b"\n\nevent: error\ndata: ")
+        payload = json.loads(terminal.removeprefix(b"\n\nevent: error\ndata: "))
+        assert payload["sequence_number"] == 8
+        assert payload["code"] == "modelHub.launch.retry"
         assert response.eof_called
 
     asyncio.run(exercise())
@@ -2344,6 +2383,9 @@ def test_gateway_cancellation_matrix_settles_once_without_upstream_facts(
         assert settlement_call.args[1] is None
         assert service.store.load().sources[0].state.status == "standby"
         assert service.events.list() == []
+        if phase == "resolve":
+            trace = gateway.correlation._traces[turn_id]
+            assert trace.pending_attempt is None
         gateway.correlation.settle(
             turn_id,
             settled_by=SETTLED_BY_STOPPED,
@@ -2353,6 +2395,8 @@ def test_gateway_cancellation_matrix_settles_once_without_upstream_facts(
         assert record is not None
         assert record["outcome"] == "canceled"
         assert record["terminal_error"] is None
+        if phase == "resolve":
+            assert record["canceled_attempt"] is None
 
     asyncio.run(exercise())
 

@@ -516,6 +516,7 @@ class GatewayTurnTerminalizer:
             token=token,
         )
         self._stream_started = False
+        self._attempt_started = False
         self._downstream_canceled = False
 
     def __enter__(self) -> "GatewayTurnTerminalizer":
@@ -587,6 +588,7 @@ class GatewayTurnTerminalizer:
         channel: SupplyChannel,
         via_mapping: bool,
     ) -> None:
+        self._attempt_started = True
         self._registry.begin_attempt(
             self.turn_id,
             source_id=source_id,
@@ -601,6 +603,7 @@ class GatewayTurnTerminalizer:
         outcome: RawCallOutcome,
         decision: ResolutionDecision,
     ) -> None:
+        self._attempt_started = True
         self._registry.finish_attempt(
             self.turn_id,
             outcome=outcome,
@@ -620,8 +623,10 @@ class GatewayTurnTerminalizer:
             self._registry.record_turn_outcome(self.turn_id, turn_outcome)
 
     def mark_downstream_canceled(self) -> None:
-        """Leave the live attempt pending for the outer stopped settlement."""
+        """Clear a prepared-only attempt before the outer stopped settlement."""
 
+        if not self._attempt_started:
+            self._registry.clear_prepared_attempt(self.turn_id)
         self._downstream_canceled = True
 
 
@@ -943,6 +948,17 @@ class TurnCorrelationRegistry:
                 channel="hub",
             )
             return turn_id
+
+    def clear_prepared_attempt(self, turn_id: Optional[str]) -> None:
+        """Remove the launch identity when cancellation precedes invocation."""
+
+        if turn_id is None:
+            return
+        with self._lock:
+            trace = self._traces.get(turn_id)
+            if trace is not None and trace.pending_attempt is not None:
+                if trace.pending_attempt.channel == "hub":
+                    trace.pending_attempt = None
 
     def _terminalize_gateway_exit(
         self,
