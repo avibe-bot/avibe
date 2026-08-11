@@ -267,10 +267,10 @@ half named in its Missing cell has an owner.
 
 | # | Surface | Missing | Evidence / disposition (contract baseline `ea26ee6a0`) |
 | --- | --- | --- | --- |
-| G-3 | 06 model inventory — **retirement is contracted; its discovered-row affordance remains open** | a way to retire a *discovered* model from the drawn inventory; ~~a place to remember that it was retired~~ | `DELETE /api/models/sources/<source_id>/models/<model_id>` now persists `models[].retired: true` for a discovered row instead of deleting it. `source.schema.json` keeps that row readable, never supplying, and refresh never revives it; §4.5 applies the same exact-hop and last-supplier guards. That closes the route and representation half. Frame 06 still draws removal only for manual entries, so no registered control invokes the discovered-row route; §1.6 keeps that surface half live instead of treating wire reachability as a UI consumer. |
+| G-3 | 06 model inventory — **retirement is contracted; its discovered-row affordance remains open** | a way to retire a *discovered* model from the drawn inventory; ~~a place to remember that it was retired~~ | `DELETE /api/models/sources/<source_id>/models/<model_id>` now persists `models[].retired: true` for a discovered row instead of deleting it. `source.schema.json` keeps that row readable, never supplying, and refresh never revives it; §4.5 applies the same exact-hop and last-supplier guards. §1.6 registers that representation as the ordinary row chrome with muted ink and the existing tag component. Frame 06 still draws removal only for manual entries, so no registered control invokes the discovered-row route; only that producer half remains live instead of treating wire reachability as a UI consumer. |
 | G-9 | ~~03 order save that drops sources~~ **withdrawn — this was never a gap** | ~~the guarded-change response for the whole-order `PUT`~~ nothing | The row read the absence of a `409` branch on the whole-order `PUT` (§1.3 Saving names the route; a withdrawn row deliberately does not, so it can excuse nothing) as something `api.md` still owed, on the strength of FC-12's 「row-for-row」 clause. It owed nothing. `model-hub.md` §4.5's Source-mutation envelope matrix is declared **authoritative and exhaustive** over 「all Source/inventory mutations, including writes that cannot remove supply」, and its eight rows do not include this route; FC-12 names 「the explicit backend Source-order PUT」 as a separate item from the mirroring clause. So the whole-order write's success echo, with 「no policy state exists」 beside it, *is* the mirror, and the absent `409` is the contract agreeing with S-1 and D-9 that reordering reaches no existing chain. Kept as a withdrawn row rather than deleted, because the number is cited in this file's own history and because a gap register that silently loses entries cannot be audited. The row names no route and quotes no body, so there is nothing left in it for a checker to excuse — but a withdrawn row is still a *number* the register defines, and a citation resolves against numbers, not against verdicts. So the rule that keeps it inert is written here rather than enforced: **no surface may carry `[contract-gap]` G-9**, and the number is not reused |
-| G-10 | 01 shell pill, install in flight — **and 08's 安装并切换**, the other press that promises one — **registered against the runtime install contract** | ~~a server-side install state, and the route that enters it~~ nothing | `POST /api/models/runtime/install` is the idempotent producer. `RuntimeDependency.status.health: installing` survives reload, successful verification settles at `not_started`, and failure settles at `not_installed` with the closed `status.error_key`. §1.0 and §1.9 consume that one machine; a mounted client-held initiating sequence decides whether `not_started` is the landing or the proof that Starting is next. |
-| G-11 | 09 direct-only home, zero backends — **registered against AgentSupply** | ~~an installation flag per agent backend, and the payload that carries it~~ nothing | Every `GET /api/models/agents` row now carries server-authoritative `cli_present`; the zero-installed state is exactly all rows false. §1.8 derives `installedAgents` once from that field, gives the empty set precedence, and uses the same set for mode dispatch, rows and the count pill. |
+| G-10 | 01 shell pill, install in flight — **and 08's 安装并切换**, the other press that promises one — **registered against the runtime install contract** | ~~a server-side install state, and the route that enters it~~ nothing | `POST /api/models/runtime/install` is the idempotent producer. `RuntimeDependency.status.health: installing` survives reload, successful verification settles at `not_started`, and failure settles at `not_installed` with the closed `status.error_key`. §1.0 and §1.9 consume that one machine; while mounted, a client-held initiating sequence owns a derived 2s status loop and decides whether `not_started` is the landing or the proof that Starting is next. Unmount stops the loop; reload owns G-10's one read and no restored intent. |
+| G-11 | 09 direct-only home, zero backends — **registered against AgentSupply** | ~~an installation flag per agent backend, and the payload that carries it~~ nothing | Every `GET /api/models/agents` row now carries server-authoritative `cli_present`; the zero-installed state is exactly all rows false. §1.8 derives `installedAgents` once from that field and uses the same set for mode dispatch, rows and the count pill. Source presence is evaluated first so an empty installed set cannot hide retained Sources; only `sources == []` + the empty set enters No backend found. |
 | G-12 | 01 upstream card and 06 header, `needs_action` — **registered by frame 12** | ~~the control that replaces a dead credential~~ nothing | §1.11 registers the two repair producers drawn on the source cards: 更换 Key sends the credential-replacement flow to `PUT /api/models/sources/<id>/credential`, and 重新授权 starts `POST /api/models/sources/<id>/reauth`. §1.1 and §1.6 cite that owner instead of pointing at each other. Kept as a registered row so the former absence and its closing frame remain auditable |
 | G-13 | 03 order drawer, chains that already exist — **the route is contracted; its action remains open** | an action that re-applies the current order to chains built before it; ~~the route behind it~~ | `POST /api/models/agents/<backend>/chains/reorder` is the sole explicit operation that reorders every stored Route by the current Source order. It is idempotent, adds/removes/remaps nothing and has no guard, closing the wire half. Frame 03 still draws only order editing, so no registered control invokes that route; §1.3 keeps the surface half `[contract-gap]` G-13 rather than silently attaching it to 保存顺序. |
 | G-14 | 08 adopt-gateway confirm, `effects.1` — **registered against the mode transaction** | ~~the adoption itself: turning the backend's existing CLI login into that backend's first `native_cli` Source~~ nothing | A qualifying `direct` → `hub` mode `PATCH` now atomically adopts the recognized CLI login as the first singleton `native_cli` Source and returns the updated `AgentSupply`; an absent or unrecognized login or an existing native Source creates and reorders nothing, and repeats create no duplicate. §1.9's consequence pair states both branches and never treats `cli_present` as recognition evidence; its M5 handoff rereads Sources before the committed result lands because the response cannot carry the possibly created Source. |
@@ -284,9 +284,9 @@ half named in its Missing cell has an owner.
 | G-22 | 06 for a source just added — the add flow's terminal, reached from §1.4's *Awaiting sign-in* and §1.5's ② | an element that renders `added_to` | **The contract answers a question no frame asks.** `POST /api/models/sources` and the `create` OAuth terminal both return `added_to: AddedTo[]`, an entry naming `backend`, `menu_model`, `source_id`, `model_id` and `position`, the last one-based in the persisted Route chain after commit `[contract]`. Add-time placement (`model-hub.md` §4.2) is what makes it worth showing: the source the user just added has been written into chains they did not open, and this array is the only statement of where. Unlike persisted `Source.adopted_by`, `added_to` has one-response lifetime: later Source and Agent reads carry no placement report, so the landing cannot be recovered by a later read. Nothing in this document claims to render it; §1.3 names this number rather than specifying an element, because §0.2 leaves drawing to the frame |
 | G-23 | `Qp6FI`, the shared guarded-change confirm — both callers, §1.6's *Refetch refused* and *Guard refused* | a body block that lists `would_interrupt` | **The refusal carries a list and the dialog draws a sentence.** `would_interrupt` is `SupplyGap[]`, each entry `{backend, model_id, agents}` with `model_id` the protected **menu** model and `agents` the enabled named Vibe Agents that pinned it `[contract]`, and `model-hub.md` requires that 「the confirm copy names affected Agents when any exist」. `Qp6FI` as measured has exactly one label, one count pill, one row list and one hint line, and all four are the `would_remove_hops` side; the only rendering of the gap array is `guard.hint.interrupt`, one sentence that reports the array is non-empty. The strings are specified — `guard.gap.label`, `guard.gap.subject`, `guard.gap.agents`, with `gateway.modelCount` as the pill — because copy is this document's register and an authority requires these; the block that holds them is drawing, so it is a gap rather than an invention. The same absence makes `source_last_supplier` unrenderable: its `api.md` example carries `would_remove_hops: []` beside a populated `would_interrupt`, which this dialog would draw as an empty list under a bare sentence |
 | G-24 | 01 run pill, *Unsupported host* — **registered against RuntimeDependency** | ~~a host-platform or installability discriminator in the runtime payload~~ nothing | Every runtime response now carries server-authoritative `host_platform`; an exact match in `manifest.assets[].platform` is the support predicate. §1.0 never substitutes the browser platform. |
-| G-25 | 01 gateway group, the collapse predicate and unavailable marker — **registered against AgentSupply model supply** | ~~a per-model fact that separates a chain with a live hop from one whose hops are all stale~~ nothing | `model_supply[].has_runnable_hop` now carries that server-derived fact under the same runnability axiom as AgentChain. §1.1 uses it at page grain both to protect the row from collapse and to render `legend.unavailable` in the existing current-text slot; `chain_length: 0` forces false. |
+| G-25 | 01 gateway group, the collapse predicate and unavailable marker — **registered against AgentSupply model supply** | ~~a per-model fact that separates a chain with a live hop from one whose hops are all stale~~ nothing | `model_supply[].has_runnable_hop` now carries that server-derived fact under the same runnability axiom as AgentChain. §1.1 uses it at page grain to protect every non-runnable row from collapse. A nonempty chain with no runnable hop renders `legend.unavailable`; the forced-false `chain_length: 0` subset branches first to the existing `models.launch.route_unconfigured` treatment instead of borrowing paused-supply copy. |
 | G-26 | 03 order drawer, a reorder — **registered against the same explicit reorder contract as G-13** | ~~a policy value that reads the stored Source order~~ nothing | `POST /api/models/agents/<backend>/chains/reorder` consumes the current Source-order sequence with a stable total sort over every stored Route. The order PUT remains chain-byte-identical; invocation is explicit and separate. |
-| G-27 | 05 add-by-key, the persisting `POST /api/models/sources` — **registered against `source-create.schema.json`** | ~~the request shape that route accepts~~ nothing | The schema is the complete request: required `vendor` and write-only `key`; optional `display_name`, `base_url`, `protocol_order` and `client_nonce`. The client submits no protocol conclusion or discovered inventory; the server observes both. §1.5 consumes that shape. |
+| G-27 | 05 add-by-key, the persisting `POST /api/models/sources` — **registered against `source-create.schema.json`** | ~~the request shape that route accepts~~ nothing | The schema is the complete request: required `vendor` and write-only `key`; optional `display_name`, `base_url`, `protocol_order`, `client_nonce` and `accept_unavailable_inventory` `(pending #1349)`. The client submits no protocol conclusion or discovered inventory; the server observes both. §1.5 sends the consent boolean true only from ⑤, where a repeated observation still has to prove the protocol before a failed inventory may commit. |
 | G-28 | `Qp6FI` guarded-change hop rows — **registered against `RouteHopRef.position`** | ~~the hop's position, on the reference the refusal returns~~ nothing | `guard-refusal.schema.json` carries one-based pre-mutation `position` on every `RouteHopRef`. §1.6 and §1.10 render it directly and issue no per-chain lookup. |
 | G-29 | 05 add-by-key, ⑦'s lost-response reconciliation — **registered against Source-create nonce totality** | ~~anything the client holds *before* the send that the committed Source can afterwards be recognized by~~ nothing | The client generates `SourceCreate.client_nonce` before send. A list read finds exact `Source.client_nonce` after commit; in-flight and committed retries return distinct `409` conflicts, released/list-miss retries are fresh. A committed retry never replays an old response; it returns `source_nonce_conflict` and the client rereads the list to claim the Source. |
 | G-30 | 04 add-subscription, *Start failed* entered by a lost response — **registered against OAuth start nonce totality** | ~~a way to reach a flow whose `flow_id` never arrived~~ nothing | The client generates `client_nonce` before start; the server claims the exact `(client_nonce, vendor, channel)` tuple before provider work. Concurrent retry coalesces to one pending start/result, every resulting flow echoes the nonce, and nonce-bearing cancellation remains bounded by its non-null `expires_at`. §1.4 retries the held tuple without opening a second provider start. |
@@ -352,9 +352,10 @@ a chain references that no source supplies any more must be visibly marked on th
 menu, and must never be silently skipped.** The original ruling landed on the retained
 hop's live non-runnable reason and the empty-route case. The closed
 `model_supply.has_runnable_hop` projection now makes the same rule total at page grain:
-false keeps the row visible and renders its explicit unavailable marker, while
-`chain_length: 0` forces false. §1.6 states the rule, while G-25 records the field that
-now carries it.
+false keeps the row visible. A nonempty chain renders its explicit unavailable marker;
+the forced-false `chain_length: 0` subset is visibly structural and therefore uses the
+existing `models.launch.route_unconfigured` treatment instead. §1.6 states the rule,
+while G-25 records the fields that carry it.
 
 **What that ruling costs, stated plainly.** The requirement moved to the menu, so the
 *source page* loses the story. Frame 06's inventory is the discovered set and stays the
@@ -769,9 +770,20 @@ classifier enters ⑦.
 | --- | --- | --- | --- |
 | `authentication_failed`, `unreachable`, `timeout` or `adapter_error` | ③ | ③′ | ③; no Source committed |
 | `ambiguous` | ④ | ④′ | ④; no Source committed |
-| `observed`, protocol non-null, `discovery: failed` | ⑤ | ⑤′ | ⑤ when returned as a classified pre-commit result |
-| accepted producer result: explicit `observed` + `discovery: succeeded`, or a Source-create committed success envelope | Send the complete `SourceCreate` | ①′ | Close into 06 with the returned Source and placement evidence |
+| `observed`, protocol non-null, `discovery: failed` | ⑤ | ⑤′ | ⑤ when `SourceCreate.accept_unavailable_inventory` is false / omitted; only ⑤ resends it as true `(pending #1349)` |
+| accepted producer result: explicit `observed` + `discovery: succeeded`, or a Source-create committed success envelope | Send the complete `SourceCreate` with `accept_unavailable_inventory` false / omitted `(pending #1349)` | ①′ | Close into 06 with the returned Source and placement evidence |
 | no terminal observation classifier | The explicit observe failure remains F1 and sends no create | The explicit observe failure remains F1 and sends no create | ⑦; commit status is genuinely unconfirmed |
+
+**Held-install status-read owner** `[derived]`. The existing `BackendOAuthPanel`
+establishes the product's 2s polling cadence; installation borrows that cadence, not its
+OAuth timeout. While a mounted surface holds `install_and_start` or
+`install_start_switch` and the last `GET /api/models/runtime/status` reading is
+`installing`, that surface reads the same route every 2s. There is no terminal bound:
+`installing` is durable server truth rather than a client-owned flow lifetime. A failed
+read is F2 — keep the last Installing projection, render the read cause and let the next
+2s tick retry. Unmount cancels the read owner. Reload performs G-10's one status read but
+restores no local sequence; any later sequence advance is therefore keyed only by the
+held-intent rule below, never by seeing `not_started` in isolation.
 
 | Frame | State | Entry condition | Failure / pending | Copy keys | Exit |
 | --- | --- | --- | --- | --- | --- |
@@ -780,7 +792,7 @@ classifier enters ⑦.
 | §1.0 | Empty (no sources) | `sources == []` | F5 | `upstream.empty` | 添加订阅 → 13, then a vendor row → 04; 添加 API Key → 05; first source → Ready |
 | §1.0 | Not installed | `health: not_installed`, `error_key: null`, and an exact asset exists for server-derived `host_platform` `[contract]` | F5 | `shell.notInstalled`, `install.title` … `install.cancel` | Confirm holds initiating sequence `install_and_start` → Installing |
 | §1.0 | Unsupported host | `health: not_installed`, `error_key: null`, and no `manifest.assets[].platform` exactly equals server-derived `host_platform` `[contract]` | F5 | `shell.unsupported` | Not from this page — 直连 (§1.8) is the documented escape hatch |
-| §1.0 | Installing | `health: installing` from `POST /api/models/runtime/install` or a later status read `[contract]` | F2 — keep the owned progress state across a failed read | `install.progress` | `not_started` + held `install_and_start` or `install_start_switch` → Starting; `not_started` without either held sequence (install-only or reload) → Not started; `not_installed` + the closed install `error_key` → Install failed |
+| §1.0 | Installing | `health: installing` from `POST /api/models/runtime/install` or a later status read `[contract]` | F2 — the held-install read owner keeps the last progress state and read cause across a failed tick; the next 2s tick retries `[derived]` | `install.progress` | A later status payload is dispatched in full: `not_started` + held `install_and_start` or `install_start_switch` → Starting; `not_started` without either held sequence (install-only or reload) → Not started; `not_installed` + the closed install `error_key` → Install failed. Unmount stops polling; reload owns only G-10's one read |
 | §1.0 | Install failed | `health: not_installed` with `error_key: settings.models.install.fail.detail` `[contract]` | F1 lands here | `install.fail.title`, `settings.models.install.fail.detail`, `install.retry` | 重试 sends the idempotent install route → Installing; dismiss leaves the persisted failed projection, and a later successful install clears it before entering Installing |
 | §1.0 | Not started | `health` reads `not_started` `[contract]` | F5 | `shell.notStarted` | Run pill → Starting |
 | §1.0 | Starting | Start accepted — `POST /api/models/runtime/start` | → Unreachable | `shell.starting` | Live → whichever state the payload that reports it names, the same dispatch Loading makes (D-33): both page reads answered with at least one source → Ready, `sources == []` → Empty (no sources), a page read failing → Sources unread or Partial |
@@ -803,12 +815,13 @@ classifier enters ⑦.
 | §1.1 | Backend has no usable source | Every candidate filtered out | F5 | `gateway.supply.none` | Any source becomes eligible; 来源顺序 → 03 |
 | §1.1 | Backend has no models | The group resolves to zero model rows `[derived]` | F5 | `gateway.group.emptyModels` | A model becomes available to that backend |
 | §1.1 | Nothing pinned | `mode` reads `hub` and `selected_model_id` is `null`, which is exactly when `supply_status` is `null` on the gateway `[contract]` | F5 — a rendered report, not a request | `gateway.group.subtitle.gateway`, `gateway.group.mode.gateway`, `gateway.group.status.noSelection` | A pinned model gives the rollup something to answer with → Ready, or whichever rollup state that reading names |
-| §1.1 | Per-model supply paused | The page-grain `model_supply` row reads `has_runnable_hop: false`, including the forced `chain_length: 0` case `[contract]` | F5 for the page-grain marker; an outstanding or failed chain detail read remains F2 only for its other derived columns | `legend.unavailable` in the existing current-text slot | Render 供给已暂停 / Supply paused immediately in `$--gold`; do not wait for the per-model chain read. A later page-grain payload with `has_runnable_hop: true` removes the marker. The chain read may still fill its other derived columns, but a pending or failed detail read cannot erase or replace this page-owned marker |
-| §1.1 | Takeover active | The chain read — `GET /api/models/agents/<backend>/chain?model=<id>` — returns non-null `current` different from `chain[0]`, while the head is unavailable for a recoverable quota/cooldown or live connection-backoff reason `[contract]` | F5 | `gateway.group.takenOver`, `gateway.row.currentTakeover`, `gateway.group.status.degraded` | Re-evaluate the complete predicate on every later chain payload. `current` back at the head → Ready. A head that is runnable / no longer recoverably unavailable also retires Takeover immediately under the derived-state predicate rule: if `current` still names the later hop, render the ordinary serving/current-hop projection without violet takeover ink or copy until the next turn updates `current`. A local clock alone changes no payload. This is frame 08 (§1.7) |
+| §1.1 | Per-model route unconfigured | The page-grain `model_supply` row reads `chain_length: 0`; this structural branch is evaluated before the forced `has_runnable_hop: false` reading `[contract]` | F5 for the page-grain statement; an outstanding or failed chain detail read remains F2 only for its other derived columns | server-owned `models.launch.route_unconfigured`, consumed verbatim | Render the existing route-unconfigured family in the current-text slot; never gold 供给已暂停 / Supply paused. A later page-grain payload with `chain_length > 0` leaves this structural state and is dispatched by `has_runnable_hop` |
+| §1.1 | Per-model supply paused | The page-grain `model_supply` row reads `chain_length > 0` and `has_runnable_hop: false` `[contract]` | F5 for the page-grain marker; an outstanding or failed chain detail read remains F2 only for its other derived columns | `legend.unavailable` in the existing current-text slot | Render 供给已暂停 / Supply paused immediately in `$--gold`; do not wait for the per-model chain read. A later page-grain payload with `has_runnable_hop: true` removes the marker; `chain_length: 0` instead enters Per-model route unconfigured. The chain read may still fill its other derived columns, but a pending or failed detail read cannot erase or replace this page-owned marker |
+| §1.1 | Takeover active | The chain read — `GET /api/models/agents/<backend>/chain?model=<id>` — returns non-null `current` different from `chain[0]`, while the head is unavailable for a recoverable quota/cooldown or live connection-backoff reason `[contract]` | F5 | `gateway.group.takenOver`, `gateway.row.currentTakeover`, `gateway.group.status.degraded` | Re-evaluate the complete predicate on every later chain payload. `current` back at the head → Ready. A head that is runnable / no longer recoverably unavailable also retires Takeover immediately under the derived-state predicate rule: if `current` still names the later hop, render the ordinary serving/current-hop projection without violet takeover ink or copy until a later payload changes `current`. A local clock alone changes no payload. This is frame 08 (§1.7) |
 | §1.1 | Serving past a blocked head | The serving hop is not the head, and the head is blocked by something waiting does not clear — **stated as the negation of the row above, not as a list of causes.** `runnable = health-permits AND process-available` `[contract]`, so a head is here whenever it is not runnable and its block is not a recoverable quota/cooldown or live connection-backoff reason: the head's source reading `needs_action` or `error`, a source that is `healthy` while the native CLI it needs is unavailable in this process (`reason: native_cli_unavailable` `[contract]`), and a head the chain reports as `source_missing` or `model_unsupported` `[contract]`. Defined by negation because the set of non-self-healing blockers is the contract's to extend, and a row enumerated by cause has to be reopened every time it does | F5 | `gateway.group.status.degraded` | The head becomes runnable again → Ready; the head enters a recoverable quota/cooldown or live connection-backoff while a later hop serves → Takeover active. Both are readings of a later payload and neither is a clock (D-16) — including the user-cleared blocks, which are reported by the same read as the rest |
-| §1.1 | Chain unresolved | Row grain, not group. That same chain read is outstanding for this row, or came back failed or refused, while the two page payloads are in hand | F2 read at row grain — the group keeps everything those two payloads drew. A row whose page-grain `has_runnable_hop` is true renders `—` in its three derived columns; a false row keeps `legend.unavailable` in the current-text slot and renders `—` only in the other unresolved columns. The engine is not implicated and nothing on the head changes | `legend.unavailable` only for the false page-grain row | The read answers → Ready, Takeover active or Per-model supply paused. What re-issues it is the collapse row (D-35): collapsing and re-expanding the group re-reads every row in it, and it is the drawn control this row's repair uses, there being no per-row 重试 on the frame. The two triggers beside it are the page's own — any mutation that re-renders the group (*Ready* above) and the next load — so a row that failed is never waiting on a request nobody will send |
+| §1.1 | Chain unresolved | Row grain, not group. That same chain read is outstanding for this row, or came back failed or refused, while the two page payloads are in hand | F2 read at row grain — the group keeps everything those two payloads drew. A page-grain `chain_length: 0` row keeps `models.launch.route_unconfigured`; otherwise a row whose `has_runnable_hop` is true renders `—` in its three derived columns and a false row keeps `legend.unavailable` in the current-text slot. Every case renders `—` only in the other unresolved columns. The engine is not implicated and nothing on the head changes | `models.launch.route_unconfigured` for the empty Route; `legend.unavailable` only for a nonempty false row | The read answers → Ready, Takeover active, Per-model route unconfigured or Per-model supply paused. What re-issues it is the collapse row (D-35): collapsing and re-expanding the group re-reads every row in it, and it is the drawn control this row's repair uses, there being no per-row 重试 on the frame. The two triggers beside it are the page's own — any mutation that re-renders the group (*Ready* above) and the next load — so a row that failed is never waiting on a request nobody will send |
 | §1.1 | Group expanded | Collapse row activated | F5 | `gateway.collapse` | Collapse toggled back → Ready |
-| §1.1 | Leaving the gateway | 切换到直连 pressed on a gateway group `[frame]` D-30 — `PATCH /api/models/agents/<backend>/mode` | F1, in place on the group head | `gateway.switchToDirect`, `gateway.fail.switchToDirect`, `gateway.retry` | Success → the group re-renders in its 直连 form; when it was the last gateway backend the page is decided by the sources that are still there, not by the switch — no source left → 09, at least one source retained → **01** with every group in its 直连 form, which is §1.8's own *Retained sources, all direct* branch and not this frame; a failure keeps the group on the gateway and puts the line and 重试 on the group head, which is the slot the re-rendered form would have used |
+| §1.1 | Leaving the gateway | 切换到直连 pressed on a gateway group `[frame]` D-30 — `PATCH /api/models/agents/<backend>/mode` | F1, in place on the group head | `gateway.switchToDirect`, `gateway.fail.switchToDirect`, `gateway.retry` | Success → the group re-renders in its 直连 form; when it was the last gateway backend the page is decided by the sources that are still there, not by the switch — no source left → 09, at least one source retained → **01**, which is §1.8's own *Retained sources* branch and not this frame; a failure keeps the group on the gateway and puts the line and 重试 on the group head, which is the slot the re-rendered form would have used |
 | §1.3 | Ready | Drawer opened and the eligible sources resolved | F1, in the region the list would have filled → Sources unread | `order.title`, `order.subtitle`, `order.section.ordered`, `order.section.ordered.note`, `order.section.heldOut` | 取消 / 关闭 / Escape → close, discarding uncommitted moves; 保存顺序 → Saving |
 | §1.3 | Sources unread | The eligible-source read came back failed while the page behind the drawer is still rendering a healthy runtime `[derived]` | F1, in place | `order.fail.read`, `order.retry` | 重试 → the read runs again, and what it answers with decides: at least one eligible source → Ready, none → Zero eligible sources, another failure → back here; 取消 / 关闭 / Escape → close, having changed nothing |
 | §1.3 | Zero eligible sources | No source is eligible for this backend | F5 | `order.empty.noEligible` | 关闭. A source becomes eligible → Ready. 保存顺序 is disabled |
@@ -830,18 +843,19 @@ classifier enters ⑦.
 | §1.4 | Start failed | `POST /api/models/oauth/start` did not put a flow in this dialog's hands, for any reason that is not the singleton refusal above — a refusal, or no answer at all. The exact generated `(client_nonce, vendor, channel)` tuple remains held `[contract]` | F1, in place — there is no `flow_id` to poll or cancel, so D-36 reconciliation repeats only the held tuple. The server coalesces an in-flight claim, returns its one committed flow, or releases the tuple for one fresh provider start | `addSub.error.startFailed`, `addSub.retry` | 重试 sends the same tuple and classifies the answer as Default does: accepted/coalesced flow → RR-1/RR-2, singleton refusal → Already bound, still no flow → back here. It never opens a second provider start beside the first. 取消 dismisses; a claim released before flow creation has no Source binding `[derived]` |
 | §1.5 | ① Default | Dialog opened | F5 | `addKey.title` … `addKey.submit` | 添加 → ②; 拉取型号 → ②′; 取消 → dismiss |
 | §1.5 | ①′ Pull result, **Pull origin** `[derived]` | ②′ came back with an inventory — including after a hint in ④′, and after 重试 reran the entire observation from ⑤′ | F5 — the request already succeeded | `addKey.pull.result`, `addKey.pull.empty`, and ①'s own keys, which all still render | Editing Base URL or API Key → ①, the report dropped; 拉取型号 again → ②′; 添加 → ②, which runs its own observation and reuses nothing from here; 取消 → dismiss |
-| §1.5 | ② Adding | 添加 pressed — `POST /api/models/sources/observe` runs first, and `POST /api/models/sources` with one generated `client_nonce` goes out only on the outcome that has consent `[contract]` | → ③ / ④ / ⑤ / ⑦ through O1 | `addKey.adding`, `addKey.adding.detail` | O1 classifies both producers. An accepted explicit observation sends the complete `SourceCreate`; its committed success envelope closes into 06. A classified create refusal returns to ③ / ④ / ⑤ exactly as the same observation would; only transport/no answer or a create response with no terminal observation classifier → ⑦ |
+| §1.5 | ② Adding | 添加 pressed — `POST /api/models/sources/observe` runs first, and `POST /api/models/sources` with one generated `client_nonce` goes out only on the outcome that has consent `[contract]` | → ③ / ④ / ⑤ / ⑦ through O1 | `addKey.adding`, `addKey.adding.detail` | O1 classifies both producers. An accepted explicit observation sends the complete `SourceCreate` with `accept_unavailable_inventory` false / omitted `(pending #1349)`; its committed success envelope closes into 06. A classified create refusal returns to ③ / ④ / ⑤ exactly as the same observation would; only transport/no answer or a create response with no terminal observation classifier → ⑦ |
 | §1.5 | ②′ Pulling, **Pull origin** `[derived]` | 拉取型号 pressed, or 重试 pressed from ③′ / ④′ / ⑤′ | → ③′ / ④′ / ⑤′ | `addKey.adding`, `addKey.adding.detail` | Success → ①′, persisting nothing |
 | §1.5 | ③ Failure, **Add origin** | O1 received one of four closed unsuccessful outcomes from the explicit 添加 observation or Source create's repeated observation: `authentication_failed`, `unreachable`, `timeout` or `adapter_error` `[contract]` | F1 | `addKey.fail.subtitle`; exactly one outcome line: `authentication_failed` → `addKey.fail.auth` + `addKey.fail.auth.detail`, `unreachable` → `addKey.fail.address`, `timeout` → `addKey.fail.network`, `adapter_error` → `addKey.fail.unclassified`; `addKey.retry` | 重试 → ②, whichever producer returned the line — the retry re-runs the explicit observation before any create and does not depend on what the last one concluded |
 | §1.5 | ③′ Failure, **Pull origin** `[derived]` | A probe run by 拉取型号 classified the failure | F1 | as ③ | 重试 → **another 拉取型号, not ②** |
-| §1.5 | ④ Interface undetermined, **Add origin** | O1 received `SourceObservation.outcome: ambiguous` from the explicit 添加 observation or Source create's repeated observation: reachable, protocol null, and authentication authenticated or unknown `[contract]` | F1 | `addKey.undetermined.title`, `addKey.undetermined.detail`, `addKey.undetermined.label`, `addKey.undetermined.hint`, `addKey.protocol.anthropicMessages`, `addKey.protocol.openaiResponses`, `addKey.protocol.openaiChatCompletions`, `addKey.retry` | Pick a hint + 重试 → run the entire explicit observation with that `protocol_order`; identified → send the complete `SourceCreate`, whose result re-enters O1; still ambiguous → back to ④ |
+| §1.5 | ④ Interface undetermined, **Add origin** | O1 received `SourceObservation.outcome: ambiguous` from the explicit 添加 observation or Source create's repeated observation: reachable, protocol null, and authentication authenticated or unknown `[contract]` | F1 | `addKey.undetermined.title`, `addKey.undetermined.detail`, `addKey.undetermined.label`, `addKey.undetermined.hint`, `addKey.protocol.anthropicMessages`, `addKey.protocol.openaiResponses`, `addKey.protocol.openaiChatCompletions`, `addKey.retry` | Pick a hint + 重试 → run the entire explicit observation with that `protocol_order`; identified with discovery succeeded → send the complete `SourceCreate` with `accept_unavailable_inventory` false / omitted `(pending #1349)`, whose result re-enters O1; identified with discovery failed → ⑤; still ambiguous → back to ④ |
 | §1.5 | ④′ Interface undetermined, **Pull origin** `[derived]` | The same outcome, from 拉取型号 | F1 | as ④ | Pick a hint + 重试, still as a pull → identified: → ①′, persisting nothing; still undetermined: back to ④′ |
-| §1.5 | ⑤ Identified, inventory unavailable, **Add origin** `[frame]` `d6bFlX` | O1 received `SourceObservation.outcome: observed`, protocol non-null, and `discovery: failed` from the explicit 添加 observation or Source create's repeated observation; the contract carries no request/status/reason evidence `[contract]` | F1 | `addKey.inventory.title`, `addKey.inventory.detail`, `addKey.retry`, `addKey.addAnyway` | 重试 → run **the entire explicit observation** again; 仍要添加 → send `SourceCreate`, whose result re-enters O1 and closes into 06 only on its committed success envelope |
+| §1.5 | ⑤ Identified, inventory unavailable, **Add origin** `[frame]` `d6bFlX` | O1 received `SourceObservation.outcome: observed`, protocol non-null, and `discovery: failed` from the explicit 添加 observation or Source create's repeated observation; the contract carries no request/status/reason evidence `[contract]` | F1 | `addKey.inventory.title`, `addKey.inventory.detail`, `addKey.retry`, `addKey.addAnyway` | 重试 → run **the entire explicit observation** again. 仍要添加 → send `SourceCreate` with **`accept_unavailable_inventory: true`** `(pending #1349)`; false / omitted remains the clean path and may not commit this repeated discovery-failed observation. The server still repeats response-backed observation: only the same protocol-proved / discovery-failed cell may commit with `models: []`; every other classified result remains O1's own and the flag supplies no evidence. Only that committed success envelope closes into 06 |
 | §1.5 | ⑤′ Identified, inventory unavailable, **Pull origin** `[derived]` | The same outcome, from 拉取型号 | F1 | as ⑤ without `addKey.addAnyway` | 重试 → run the entire observation again as a pull |
 | §1.5 | ⑥ Engine unavailable, **Add origin** `[derived]` | The gateway is not running when 添加 is pressed | F1 | `addKey.fail.engineDown`, `addKey.retry` | F1 in full: the form keeps every value it holds and the primary becomes 重试. Pressing it **is** the recovery observation — nothing here watches for one — and re-attempts 添加 → ②, whose own outcomes then apply; the engine still down → back here; 取消 → dismiss |
 | §1.5 | ⑥′ Engine unavailable, **Pull origin** `[derived]` | The gateway is not running when 拉取型号 is pressed | F1 | as ⑥ | The same, one control over: 重试 re-attempts 拉取型号 → ②′. Nothing was going to be persisted either way, so the two rows differ only in which request the press re-sends |
 | §1.5 | ⑦ Save unconfirmed, **Add origin** `[derived]` | The observation 添加 owed has already come back with consent — clean in ②, identified by a hint in ④, or waived in ⑤ — and the complete `SourceCreate` then returned no terminal observation classifier or never answered. Every classified pre-commit observation instead leaves through O1 to ③ / ④ / ⑤. The generated `client_nonce` and every request field remain held `[contract]` | F1 | `addKey.fail.save`, `addKey.retry` | 重试 first reads `GET /api/models/sources` for an exact nonce. Match → the committed Source is claimed and enters 06 through the ordinary projection read. Miss → resend the same request/nonce and classify every answer through O1: `source_create_in_progress` waits and rereads; `source_nonce_conflict` rereads the list and claims the committed Source; a classified pre-commit observation → ③ / ④ / ⑤; a released slot starts one fresh create. Committed never replays the original response, and no branch matches by URL/name or creates a second Source (D-36). 取消 dismisses; after a committed boundary it ends only the caller's wait and the next Source/Agent read owns the result. There is no ⑦′ because Pull origin persists nothing |
 | §1.6 | Ready | Source detail loaded and the table holds at least one model — discovered, added by hand, or both. When `last_discovered_at` is null the inventory has no age, `{{time}}` is absent by §0.9's rule, and the status line drops that segment `[contract]` | F5 | `sourceDetail.status.inUse`, `sourceDetail.status.listUpdated`, `sourceDetail.summary` | `iGcAi` → 01; a rendered 重新拉取 → Refetching; 添加模型 → Manual draft; a tier area → Tiers editing; a row's overflow → Removing a manual entry. The §1.6 action-capability row decides whether 重新拉取 exists |
+| §1.6 | Retired discovered row | A model row carries `origin: discovered` and `retired: true` `[contract]` | F5 — a durable projection, not a request | `sourceDetail.entry.retired` | Keep the ordinary row chrome, switch its ink to muted and append the existing tag component with 已退役 / Retired. The row stays readable and never supplies. It renders no discovered-row delete action; refetch preserves the tombstone and cannot revive it. No new component or reactivation exit exists |
 | §1.6 | Empty (no models) | The table is empty **and** a discovery has completed — `last_discovered_at` is non-null `[contract]` | F5 | `sourceDetail.empty` | Manual add, or a successful refetch |
 | §1.6 | Never fetched | The table is empty **and** no successful discovery has ever completed — `last_discovered_at` is null `[contract]` | F5 | `sourceDetail.emptyNeverFetched` | A successful 重新拉取, or a manual add that commits → Ready |
 | §1.6 | Refetching | 重新拉取 pressed — `POST /api/models/sources/<source_id>/refresh`, guarded | F3 when the response is a guard refusal, F2 otherwise → Refetch failed | `sourceDetail.action.refetch` | Any answer this page can read → Refetch result, **whatever the row count comes back as, none included**. An emptying refetch is not a different kind of answer, and it is the one where the diff is worth most: every id the source used to advertise has just left the discovered slice, so it is where `sourceDetail.refetch.removed` names the largest set it will ever name. Leaving straight for Empty (no models) — as this row read until this round — dropped that report at that exact moment, and replaced it with a sentence that says a fetch returned nothing and not what stopped being there. The empty table is still an empty table: *Refetch result* renders `sourceDetail.empty` under the removal line, and of §1.6's two empty readings only that one is reachable from here, since this refetch completing is what makes `last_discovered_at` non-null. It is where *Refetch result* lands rather than what this state enters; a refusal → Refetch refused |
@@ -860,14 +874,14 @@ classifier enters ⑦.
 | §1.6 | Unclassified error | The source is `error` `[spec §4.5]` | F5 | `sourceDetail.status.error` | The source leaves `error`. The bar reads 异常 and claims no cause; the table and every action the capability row renders stay live |
 | §1.6 | Source gone | The selected source is not in a `GET /api/models/sources` read this page makes, or any source-bound mutation registered in §1.6, §1.10 or §1.11 answers `source_not_found` `[contract]` — removed by another tab, another API client, or a guarded cascade while the surface was open. This entry has precedence over every caller's F1/F3 branch; those treatments apply only after the absence reading is excluded. Distinct from every empty reading above, which is about this source's *models*; here the subject of the page is what is gone, and the list may still hold others, so §1.0's Empty does not answer either | M0 owns the read: preserve exact absence, remove the Source locally and refresh Sources + Agent supply/order + every Route chain. F2 if that read fails; the absence itself remains authoritative | `sourceDetail.gone`; on stale dependent projections reuse `sourceDetail.remove.impact.refreshFail`, `sourceDetail.retry`, `sourceDetail.remove.impact.done` | Drop the detail/card overlay immediately. M0 success hands current projections to 01. On read failure → Committed projection stale with the exact absence and last-good dependent projections. Retry repeats only M0; DP-4's Done, back, close, Escape, outside press and ordinary navigation remain legal non-mutating exits. No caller may bypass M0, re-send the mutation, restore the Source, question the absence or invent impact (C13/C14) |
 | §1.7 | Nominal | **No route is taken over or exhausted** — every configured chain is serving its own first stored hop. AC-30 makes takeover 「a projection of visible configuration plus live runnability」 rather than a stored sibling state `[contract]`, so the subject of this frame is chains and the predicate is read per chain: a Source no chain draws from, and a non-head hop that is unavailable while the head still serves, are both outside it. Reading it globally — 「no source is unavailable」 — activated 08 for an unhealthy Source nothing was using, and left the frame with no valid state whenever one existed | F5 | — | A head enters a recoverable quota/cooldown or live connection-backoff while a later candidate serves → Takeover; a head stops being runnable for something waiting does not clear → §1.1 *Serving past a blocked head*, which is not this frame |
-| §1.7 | Takeover | The head is unavailable **for a recoverable quota/cooldown or live connection-backoff reason** and a next candidate is serving `[contract]` — §4.3 derives takeover from exactly that pair, and the paragraph below says what the other blocker kinds render instead | F5 | `takeover.pill`, `takeover.chip` | Recovery → Nominal, on the next turn `[spec §4.3]` |
+| §1.7 | Takeover | The head is unavailable **for a recoverable quota/cooldown or live connection-backoff reason** and a next candidate is serving `[contract]` — §4.3 derives takeover from exactly that pair, and the paragraph below says what the other blocker kinds render instead | F5 | `takeover.pill`, `takeover.chip` | Re-evaluate the complete predicate on every authoritative chain payload under §0.8's shared derived-state rule. As soon as it is false, retire Takeover: a recovered head serving → Nominal; `current` still naming the successor after the head recovers → the ordinary serving/current-hop projection, with no violet latch and no wait for another turn |
 | §1.7 | Exhausted | The head is unavailable and **no** candidate remains | F5 | `gateway.supply.none` | Any candidate recovers → Takeover or Nominal |
 | §1.7 | Multiple takeovers | More than one backend was rerouted | F5 | `takeover.pill` | Each backend recovers independently |
 | §1.7 | Loading / Empty / Unreachable | As §1.0 | As §1.0 | — | As §1.0 |
 | §1.8 | Ready (first run) | `installedAgents` is nonempty, every member is in 直连, and no source exists | F5 | `direct.card.current`, `direct.card.current.sub`, `direct.pill.direct`, `direct.backend.claude.detail`, `direct.backend.codex.detail`, `direct.backend.opencode.detail`, `direct.benefits.title`, `direct.benefits.1` … `direct.note.perBackend`, `shell.allDirect` | 切换到网关 on a row → 10's confirm for that backend; a source added or an installed backend switched → 01 |
-| §1.8 | Loading | First paint | → §1.0 Unreachable / §1.0 Sources unread / §1.0 Partial — the same three §1.0 disperses first paint into, because this is that same first paint seen from the direct home: the runtime status failing or reading `down` → Unreachable, `GET /api/models/sources` failing → Sources unread, per-backend supply failing → Partial. Neither page read may be dropped into Unreachable, whose entry is a runtime-status reading: this frame needs the source list to tell *Ready (first run)* from *Retained sources, all direct*, and needs the supply read to derive `installedAgents`, so a read that failed is what has to be said `[derived]` D-34 | — | Payload arrives → No backend found when `installedAgents` is empty; otherwise Retained sources, all direct when a source exists and every member is direct — which is 01, not this page — or Ready (first run) when no source exists and every member is direct. Any installed Hub member selects 01. These are exactly §1.8's branch rules below |
-| §1.8 | No backend found | `installedAgents` is empty: every `AgentSupply.cli_present` is false `[contract]` | F5 | `direct.empty.title`, `direct.empty.body`, `direct.empty.install` | **Install a backend CLI and reload.** Neither card renders and the pill is absent; the page leaves this state only when at least one row enters `installedAgents`. Hidden persisted modes cannot suppress this zero-installed branch |
-| §1.8 | Retained sources, all direct | `installedAgents` is nonempty, every member is in 直连, and at least one source exists — reachable through `adopt.undo.3` | F5 | — | The page is 01 with every installed backend group in its 直连 form, not this frame |
+| §1.8 | Loading | First paint | → §1.0 Unreachable / §1.0 Sources unread / §1.0 Partial — the same three §1.0 disperses first paint into, because this is that same first paint seen from the direct home: the runtime status failing or reading `down` → Unreachable, `GET /api/models/sources` failing → Sources unread, per-backend supply failing → Partial. Neither page read may be dropped into Unreachable, whose entry is a runtime-status reading: this frame needs the source list to tell *Ready (first run)* from *Retained sources*, and needs the supply read to derive `installedAgents`, so a read that failed is what has to be said `[derived]` D-34 | — | Payload arrives → Retained sources when any Source exists, even with `installedAgents` empty; otherwise No backend found when `installedAgents` is empty, Ready (first run) when every nonempty member is direct, or 01 when any installed member is on Hub. These are exactly §1.8's branch rules below |
+| §1.8 | No backend found | No Source exists **and** `installedAgents` is empty: every `AgentSupply.cli_present` is false `[contract]` | F5 | `direct.empty.title`, `direct.empty.body`, `direct.empty.install` | **Install a backend CLI and reload.** Neither card renders and the pill is absent; a Source appearing selects 01, while an installed Agent appearing re-dispatches the no-Source page by mode. Hidden persisted modes cannot suppress this zero-installed branch |
+| §1.8 | Retained sources | At least one Source exists, regardless of whether `installedAgents` is empty, all direct or contains a Hub member — reachable through `adopt.undo.3` and retained storage `[contract]` | F5 | — | The page is 01: render the upstream module and exactly the zero or more groups in `installedAgents`. An empty installed set renders zero groups and is never quantified or described as “all direct.” This frame stays absent until the last Source is removed, when the no-Source branch is evaluated |
 | §1.9 | Default | 切换到网关 pressed on a backend row | F5 | `adopt.title` … `adopt.undo.3`, `adopt.confirm`, `adopt.cancel` | 取消 → dismiss unchanged; 切换到网关 → Committing |
 | §1.9 | Committing | The confirm's primary was pressed — `PATCH /api/models/agents/<backend>/mode` | F1 → Failed | — | Success holds the returned `AgentSupply` as write evidence and enters M5's Source-list read. That read succeeds → the dialog closes and page 01 receives both current projections; it fails → Committed projection stale, never Failed and never a repeated mode `PATCH` |
 | §1.9 | Failed | A step this confirm promised did not go through | F1 lands here | `adopt.fail.title`, `adopt.fail.detail`, `adopt.fail.reason.transport`, `adopt.fail.reason.refused`, `adopt.fail.reason.notReady`, `adopt.fail.reason.unknown`, `settings.models.install.fail.detail` | The dialog stays open, states the failure, keeps 取消 enabled and the primary retryable. The install step consumes the closed `settings.models.install.fail.detail` verbatim from `RuntimeDependency.status.error_key`; start and mode request failures render `adopt.fail.detail`, whose `{{request}}`, optional `{{status}}` and total `{{reason}}` come only from that request state. **重试 re-reads before it resumes** `[derived]`: `installing` stays busy; `not_installed` with the install error retries install; `not_started` or `down` resumes at runtime start; `ok` or `degraded` resumes at the mode `PATCH`; `GET /api/models/agents` reading `mode: hub` holds that AgentSupply as D-36 commit evidence and enters M5 instead of resending or closing. The install route is not retried from `down`, where the contract makes it a no-op. No branch replays a step the authoritative reads already prove complete (D-36) |
@@ -931,7 +945,7 @@ a different key.
 | `{{vendor}}` | The upstream vendor's product name, as the user chose it. | Always present | `addSub.title`, `addSub.paste.title.code`, `addSub.paste.title.callbackUrl`, `adopt.effects.1` |
 | `{{host}}` | The source's host, as entered, without scheme or path. | **Absent when the source has no entered host** `[contract]`: `base_url` is `api_key`-kind only, null there means the vendor's official endpoint, and a subscription may not carry one at all. §1.6 states what the one string that interpolates it renders instead. | `sourceDetail.summary` |
 | `{{source}}` | A source's display name. | Always present | `gateway.row.current`, `gateway.row.currentTakeover`, `guard.title.editSource`, `guard.title.refetch`, `guard.title.removeModel`, `guard.title.removeSource`, `guard.title.replaceKey`, `sourceDetail.edit.title`, `upstream.repair.reauthConfirm.title` |
-| `{{model}}` | A model's display id, as the source reports it. | Always present | `guard.title.removeModel` |
+| `{{model}}` | A model's display id, as the source reports it. | Always present | `guard.title.removeModel`, server-owned `models.launch.route_unconfigured` |
 | `{{models}}` | Several model ids, joined by `、` / `,` — the ids that left the discovered slice on one fetch. Ids as the source reported them, never display names, because the row that carried a display name is the row that is gone. | Always present in the one key that carries it: `sourceDetail.refetch.removed` renders only when at least one id was removed, which is the same branch guarantee that keeps its `{{count}}` off zero. | `sourceDetail.refetch.removed` |
 | `{{n}}` | A hop's 1-based position in the configured order. | Always present | `guard.hop.position`, `guard.hop.position.removeSource` |
 | `{{menuModel}}` | A protected **menu** model's id — `SupplyGap.model_id`. It is its own slot rather than a second use of `{{model}}` because the two name different things and the guard turns on the difference: `{{model}}` is an id a source reports, and `model-hub.md` says 「the protected identifier is always the menu model, never a hop's upstream `model_id`」. | Always present | `guard.gap.subject` |
@@ -1123,6 +1137,11 @@ Every state above except Ready is **not drawn** `[derived]`. Required behaviour:
   download in flight would be a button that lies. What it costs to say so is one
   sentence; what it costs to leave unsaid is a user who presses 取消, sees the dialog
   close, and has no idea whether a binary is landing on their disk.
+  While this mounted dialog holds either initiating sequence, it owns the 2s
+  `GET /api/models/runtime/status` loop registered above. Unlike the borrowed
+  `BackendOAuthPanel` cadence, installation has no client timeout: each durable
+  `installing` reading continues the loop, a read failure keeps the progress and cause
+  under F2, and unmount ends the owner.
 - **Install failed**: the dialog stays open, the message is replaced, and the primary
   becomes 重试 `[derived]` — the same shape §1.4's failure rows take, and for the same
   reason. The authoritative failure reading is `health: not_installed` with the closed
@@ -1381,6 +1400,7 @@ unable to outlive its surface, which is the cheaper answer wherever it is availa
 | `gateway.group.emptyModels` `[derived]` | 这个后端没有可用型号 | This backend has no models |
 | `gateway.row.current` | 当前 {{source}} | Now: {{source}} |
 | `gateway.row.currentTakeover` | 当前 {{source}}(接管) | Now: {{source}} (takeover) |
+| `models.launch.route_unconfigured` `[contract]` | 模型 {{model}} 尚未配置路由。请前往 Models 配置。 | Model {{model}} has no configured route. Open Models to configure one. |
 | `gateway.collapse_one` | 还有 {{count}} 个型号 | {{count}} more model |
 | `gateway.collapse_other` | 还有 {{count}} 个型号 | {{count}} more models |
 | `legend.native` `[frame]` | 原生 | Native |
@@ -1666,17 +1686,20 @@ one — there is nothing there to be pending about.
 renders that member and never substitutes the first runnable hop. Takeover is true only
 when `current` is not the chain head and that head is unavailable for a recoverable
 quota/cooldown or live connection-backoff reason. A null `current` or a blocked head with any non-recoverable reason has
-no takeover visual. This preserves §4.3's next-turn handoff interval without client-side
-prediction.
+no takeover visual. Every later chain payload re-evaluates that complete predicate under
+§0.8's shared rule; there is no next-turn latch. If the head is now runnable while
+`current` still names the successor, that successor is rendered as the ordinary serving
+hop without takeover ink or copy.
 
 **Until that read answers, only facts the page payload already proved may replace `—`**
 `[derived]`. Chain and takeover render `—` while the chain read is outstanding, and
 again when it comes back failed or refused. Current source does too when
 `has_runnable_hop` is true. When that page-grain field is false, however, the existing
-current-text slot immediately renders `legend.unavailable` in `$--gold`: the page has
-already proved that this model has no runnable supply, even though it cannot yet name a
-current hop or detailed cause. This reuses the row's measured 10.5px text slot and the
-legend's existing semantic ink; it adds no geometry. The unresolved rendering otherwise
+current-text slot immediately renders a page-owned statement: `chain_length: 0` first
+selects server-owned `models.launch.route_unconfigured`, while a nonempty chain selects
+`legend.unavailable` in `$--gold`. The page has already proved which of those two facts
+holds even though it cannot yet name a current hop or detailed cause. This reuses the
+row's measured 10.5px text slot and adds no geometry. The unresolved rendering otherwise
 matches the one §1.0 gives those same columns when the engine is unreachable, for the same reason (D-3
 — a surface that cannot prove a fact must say so). **The rendering is shared; the state
 is not** — 「Chain unresolved」 is a row-grain state of its own precisely so that this
@@ -1789,8 +1812,9 @@ chain may carry either value. This gives the collapse predicate the exact row-gr
 it needs without asking the backend-level `supply_status` which model it describes.
 
 The Boolean has two page-grain consumers: collapse and the row marker. It keeps the row
-visible and renders `legend.unavailable` in the existing current-text slot whenever
-false. Which hop is current and why another is unavailable belong to the third read
+visible whenever false; `chain_length` first partitions that marker into structural
+`models.launch.route_unconfigured` at zero and `legend.unavailable` for a nonempty
+chain. Which hop is current and why another is unavailable belong to the third read
 (「Chain unresolved」 above), and **neither consumer may manufacture those details.**
 That read is per model, asynchronous, and allowed to fail: a predicate reading it decides visibility
 from how many requests have come back, so the group renders one way at first paint and
@@ -1802,12 +1826,13 @@ both wrong: treat a pending row as non-nominal and the whole menu expands on eve
 treat a failed read as nominal and the rule quietly stops being hard. A row whose chain
 read is outstanding, failed or refused keeps exactly the visibility this predicate already
 gave it. A true page-grain row renders `—` in its three derived columns; a false row keeps
-the unavailable marker in the current-text slot and renders `—` only for unresolved
-details.
+the page-grain marker selected above in the current-text slot and renders `—` only for
+unresolved details.
 
-The predicate therefore treats every false row as non-nominal, keeps it visible and
-marks it 供给已暂停 / Supply paused without waiting on the per-model chain read. A
-nonzero stored chain whose hops are all stale is not mistaken for a healthy row, and an
+The predicate therefore treats every false row as non-nominal and keeps it visible
+without waiting on the per-model chain read. A nonzero stored chain whose hops are all
+stale is marked 供给已暂停 / Supply paused; a zero-length Route instead reports that it
+is unconfigured and never borrows paused-supply ink. A
 outstanding or failed detail read can neither erase that marker nor reorganize the group
 under the user's pointer.
 
@@ -2901,14 +2926,20 @@ that persist a source equals the set whose protocol came from an observed respon
 build that lets ③ or ④ save, and a build that refuses ⑤, break the same equality from
 opposite sides — which is why it is worth stating as one.
 
-**The persisting body is the complete `SourceCreate` schema** `[contract]`. It carries
-required `vendor` and write-only `key`, optional `display_name`, normalized `base_url`,
-the one-time `protocol_order` hint when present, and the generated `client_nonce`. It
+**The persisting body is the complete `SourceCreate` schema, including
+`accept_unavailable_inventory`** `[contract]` `(pending #1349)`. The frozen schema
+carries required `vendor` and write-only `key`,
+optional `display_name`, normalized `base_url`, the one-time `protocol_order` hint when
+present, and the generated `client_nonce`. It
 carries no protocol conclusion or discovered inventory: the server repeats the same
 response-backed observation inside the create attempt and owns the stored protocol,
 models and health. Thus ④'s pick remains ordering rather than authority, and ⑤'s
-仍要添加 is consent to persist if that server-side observation again proves a protocol
-while discovery remains unavailable. The response is `{source, added_to, adopted_by}`;
+仍要添加 is the only producer that sets `accept_unavailable_inventory: true`;
+the clean path sends false or omits it and may not commit when that server-side
+observation again proves a protocol while discovery remains unavailable. The flag never
+supplies or overrides observation evidence, is inert on successful discovery, and cannot
+bypass reachability, authentication or protocol proof. The response is
+`{source, added_to, adopted_by}`;
 the plaintext key and nonce reservation never become routing inputs.
 
 **The reveal control is named by its action, and the value's state is the input's**
@@ -3065,6 +3096,7 @@ them do I actually want, and what reasoning tiers does each accept?* Nothing els
 | 重新拉取 action capability `[derived]` | `sourceDetail.action.refetch` | `Source.supply_channel` | render for `hub`; do not render for `native_cli` | A Hub Source → Refetching. A native Source has no stored credential for this route to validate, so it exposes no activation |
 | `myA8k` header | 型号 ID (250) · 录入 (84) · 推理强度 (470, with info) · fill spacer | static | no | — |
 | `OM5PH` row | model id, entry-kind pill, tier chips, overflow icon | one model | tiers, overflow | Edit tiers / row menu |
+| Retired discovered-row delta `[derived]` | same `OM5PH` chrome, muted ink, existing tag component with `sourceDetail.entry.retired`; never a new row component | `origin: discovered`, `retired: true` `[contract]` | no delete or reactivation action | Remains readable and non-supplying; refetch preserves it |
 | `p2JwTz` tiers | chips, or 未设置档位 + `+ 添加档位` | `reasoning_efforts[]` `[contract]` FC-03 | yes | Enter edit mode |
 | `eVavA` tiers (editing) | removable chips + text input + 回车添加 · 任意文本 | local edit → `PATCH /api/models/sources/<source_id>/models/<model_id>` `[contract]` | yes | Add / remove a tier |
 | `nN4TZ` manual row | editable id input, 手动添加 pill, tier affordance, 取消 / 添加 | local draft → `POST /api/models/sources/<source_id>/models` `[contract]` | yes | Commit or discard |
@@ -3096,7 +3128,11 @@ persists `retired: true`, remains readable and never supplies. Therefore `origin
 be used as a capability predicate for the route, and the missing discovered-row producer
 cannot be explained as server impossibility. This specification preserves the measured
 manual-only menu and registers the absent producer; it does not add an unframed control
-or advertise the existing route as unreachable.
+or advertise the existing route as unreachable. It does register the producer's durable
+projection: a retired discovered row keeps `OM5PH`'s chrome, uses muted ink, and appends
+the existing tag component with `sourceDetail.entry.retired`. It has no discovered-row
+delete or reactivation action, remains readable but never supplies, and no refetch may
+clear the tombstone `[contract]`.
 
 **G-3's route and tombstone are closed; its frame affordance is not.** Refresh never
 revives a retired row, and the shared guards run before either delete outcome
@@ -3442,8 +3478,9 @@ Five rules:
   What survives unchanged is the rule the earlier text was written to protect, and it was
   never about hops: **一条链引用的型号,若在所有来源上都不再供应,必须在型号菜单上可见地
   标出,不得静默跳过。** §4.4's `model_supply.has_runnable_hop: false` makes that row
-  non-nominal on frame 01 and renders `legend.unavailable` in its existing current-text
-  slot; `chain_length: 0` is its forced empty-route case. The projection
+  non-nominal on frame 01. A nonempty chain renders `legend.unavailable` in its existing
+  current-text slot; `chain_length: 0` branches first to the existing
+  `models.launch.route_unconfigured` family. The projection
   is reached both by the retained-hop path and by a confirmed cascade that empties a route
   — an emptied route stays an explicit empty configuration, so the menu still has something
   to mark. **No stale row is invented on frame 06.** Frame 01 is the registered model-row
@@ -3579,6 +3616,7 @@ Five rules:
 | `col.tiers` | 推理强度 | Reasoning tiers |
 | `entry.auto` | 自动拉取 | Auto-fetched |
 | `entry.manual` | 手动添加 | Added manually |
+| `entry.retired` `[derived]` | 已退役 | Retired |
 | `tiers.empty` | 未设置档位 | No tiers set |
 | `tiers.addFirst` | + 添加档位 | + Add tier |
 | `tiers.add` | + 档位 | + Tier |
@@ -3842,10 +3880,13 @@ where nothing is adopted. Upgrading into it is the common way to arrive; it is n
 only one.
 
 **One visible backend set owns filtering and page dispatch** `[derived]` `[contract]`:
-`installedAgents = AgentSupply[]` filtered to `cli_present: true`. The zero-installed
-branch is evaluated first; only a nonempty `installedAgents` set is quantified for
-all-direct / any-Hub page selection, counted in the pill and rendered as rows. A hidden
-catalogue row's persisted mode therefore cannot select a page that has no row for it.
+`installedAgents = AgentSupply[]` filtered to `cli_present: true`. Source presence is
+evaluated before that set: any retained Source selects 01 so its registered UI cannot be
+hidden by an empty Agent set. Only when `sources == []` may an empty `installedAgents`
+set select No backend found; only a nonempty set is quantified for all-direct / any-Hub
+page selection, counted in the pill and rendered as rows. A hidden catalogue row's
+persisted mode therefore cannot select a page that has no row for it, and the empty set
+is never treated as vacuously “all direct.”
 
 **Display condition** `[derived]`: `installedAgents` is nonempty, every member is in 直连
 mode and no source exists. The empty `installedAgents` case is this section's No backend
@@ -3868,29 +3909,33 @@ moment one installed backend switches, the page becomes 01. Specifying it as a r
 a second address that has to be kept in sync with the first and that users can reach
 after it stops being true.
 
-After the zero-installed branch, the rule an implementation has to encode is a switch on
-**two** terms — *does any member of `installedAgents` run through the gateway*, and *does
-any source exist* — because
+The rule an implementation has to encode is an ordered switch on **three** terms — *does
+any source exist*, *is `installedAgents` empty*, and only for a nonempty set, *does any
+member run through the gateway* — because
 `undo.3` (§1.9) promises that switching the last backend back to 直连 keeps the sources
 the user added. That promise makes 「all direct, sources non-empty」 a reachable state,
-and it is the one state where the two terms disagree.
+and retained storage makes 「zero installed, sources non-empty」 reachable too. Both must
+keep 01's Source consumer visible.
 
-| Any installed backend on the gateway | Any source exists | Page title | Tab strip | Body |
+| Any source exists | `installedAgents` | Any installed backend on the gateway | Page title / tabs | Body |
 | --- | --- | --- | --- | --- |
-| **No** | **no** | `oPD53` 「模型」 | **absent** | this frame, and it occupies the whole page |
-| **No** | **yes** | 「模型」 (`YkN0P`) | present `[frame]` | 01, every installed backend group in its 直连 form |
-| **Yes** | either | 「模型」 (`YkN0P` on 01, `VaXos` on 08) | present: 「来源与网关」 · 「用量与额度」 `[frame]` | 01 — this frame is gone as a page |
+| **Yes** | empty or nonempty | either | 01 title + tabs `[frame]` | 01; upstream Sources plus exactly zero or more installed Agent groups |
+| **No** | empty | not quantified | `oPD53` 「模型」, tabs absent | No backend found; neither card renders |
+| **No** | nonempty | **No** | `oPD53` 「模型」, tabs absent | this frame, and it occupies the whole page |
+| **No** | nonempty | **Yes** | 01 title + tabs `[frame]` | 01 — this frame is gone as a page |
 
-**The middle row needs no new frame, and this section's own reasoning is what settles
-it** `[derived]`. 09 is 01 「in the state where nothing is adopted」, and in the middle
-row something is: the sources are still there. That alone would leave the choice open,
+**The retained-Source row needs no new frame, and this section's own reasoning is what settles
+it** `[derived]`. 09 is 01 「in the state where nothing is adopted」, and in that row
+something is: the sources are still there. That alone would leave the choice open,
 so the frame decides it — 09 draws no upstream column, so rendering it here would hide
 sources the product just promised to keep, leaving no surface to inspect or delete them
 on. So the
 page is 01, and every element of it is already specified: the upstream module lists the
-retained sources (§1.1), each `installedAgents` group renders in the 直连 form with 切换到网关 on
+retained sources (§1.1), and each of zero or more `installedAgents` groups renders in its
+current mode. An all-direct group carries 切换到网关 on
 its header (`g3Wh0P`) exactly as a partially-adopted page renders its still-direct
-groups, and the wire layer draws nothing because there are no supply relations. The run
+groups; an empty set renders no group and is never summarized as all direct. The wire
+layer draws only actual supply relations. The run
 pill follows §1.0's runtime keying here, not 09's adoption keying — the engine's
 liveness is a real fact again once the component has been installed, which is the split
 the pill paragraph below already draws.
@@ -3979,20 +4024,22 @@ machine keys the pill on runtime status *and* this page keys it on adoption. A b
 that shows 「网关未运行」 in red on a first-run screen is reporting a problem the user
 does not have.
 
-**At zero installed backends the pill does not render, and that absence is what gives
-`shell.allDirect` its branch guarantee** `[derived]` `[contract]`. Every AgentSupply row
+**At zero installed backends the all-direct pill does not render, and Source presence
+still owns the body** `[derived]` `[contract]`. Every AgentSupply row
 carries server-authoritative `cli_present`; the page derives `installedAgents` once, then
 uses that same set for rows, mode quantification and `{{count}}`. An empty set therefore
-reaches the zero branch without pretending that the fixed backend catalogue is itself an installed set.
+renders zero Agent groups without pretending that the fixed backend catalogue is itself
+an installed set. With Sources it remains on 01; without Sources it reaches No backend found.
 The branch occurs before plural selection, so the UI never renders 「0 个后端都在直连」 /
 「All 0 backends are direct」.
 
 So the page branches once more, and it branches **before** the pill:
 
-| Backends installed | Header pill | Body |
-| --- | --- | --- |
-| **0** | absent `[derived]` `[contract]` (`cli_present` is false for every row) | Empty state: `empty.title` / `empty.body`, and neither card renders |
-| **≥1** | `shell.allDirect`, count = `installedAgents.length` | This frame as drawn |
+| Sources | Backends installed | Header pill | Body |
+| --- | --- | --- | --- |
+| **≥1** | **0** | 01's runtime-owned pill, never `shell.allDirect` | 01: Sources module, zero Agent groups |
+| **0** | **0** | absent `[derived]` `[contract]` (`cli_present` is false for every row) | Empty state: `empty.title` / `empty.body`, and neither card renders |
+| **0** | **≥1**, all direct | `shell.allDirect`, count = `installedAgents.length` | This frame as drawn |
 
 The empty state keeps the 你会多出三件事 card off the page too: three benefits that all
 begin 「切换到网关」 argue for an action with no subject here, and the row list that would
@@ -4114,7 +4161,7 @@ difference is not an inconsistency: that frame's entry condition is *every backe
 | `title` | 把 {{backend}} 切换到网关 | Switch {{backend}} to the gateway |
 | `subtitle` `[derived]` | 只影响 {{backend}},其余后端保持原样 | Affects {{backend}} only; the other backends are unchanged |
 | `section.effects` | 会发生什么 | What will happen |
-| `effects.1` `[contract]` | 若 Avibe 识别到当前 {{vendor}} 登录,且这个后端还没有原生来源,该登录会成为第一个来源。 | If Avibe recognizes the current {{vendor}} login and this backend has no native source, that login becomes the first source. |
+| `effects.1` `[contract]` | 若 Avibe 识别到当前 {{vendor}} 登录,且这个后端还没有原生来源,该登录会成为这个后端的原生来源。 | If Avibe recognizes the current {{vendor}} login and this backend has no native Source, that login becomes this backend's native Source. |
 | `effects.2` `[contract]` | 否则这次只切换模式:不创建来源,也不调整已有来源的顺序。 | Otherwise this changes only the mode: it creates no source and does not reorder existing sources. |
 | `effects.1.opencode` `[derived]` | OpenCode 自己的模型配置原样保留,这次切换不改动它 | OpenCode's own model configuration is kept as it is; this switch does not change it |
 | `effects.2.opencode` `[derived]` | 它的型号从此由这一页上的来源供给;还没有来源时,先添加一个 | Its models are supplied from the sources on this page; if there are none yet, add one first |
@@ -4699,7 +4746,8 @@ as "this backend is 直连" will draw the wrong thing on that row (E-4, D-24).
 **D-7 — A collapse never swallows an active state.** Every non-nominal model row
 is visible even if that pushes the group past three rows. §1.1 defines non-nominal as
 `model_supply.has_runnable_hop: false`; a structurally empty Route is the forced
-`chain_length: 0` subset. The same fact also renders the row's explicit
+`chain_length: 0` subset. That structural subset renders
+`models.launch.route_unconfigured`; a nonempty false row renders the explicit
 `legend.unavailable` marker, so visibility is never mistaken for the state indication.
 The definition lives there because that is where the payload it has to be readable from
 is stated.
@@ -5010,7 +5058,7 @@ are not symmetric. Adopting changes where a backend's traffic goes and is the st
 10 exists to explain, down to where the undo lives (`undo.1`, `undo.2`). Leaving
 destroys nothing: the same dialog's third line already promises
 that the sources stay and only stop supplying that backend `undo.3`, and §1.8's
-*Retained sources, all direct* is the state that promise lands in. Putting a confirm on
+*Retained sources* is the state that promise lands in. Putting a confirm on
 the reversible half would make the product ask twice for the thing it just told the user
 was free, and a confirm the user learns to click through stops protecting the adoption
 that needed one. This is the same asymmetry D-15 applies to a cancel: the direction that
