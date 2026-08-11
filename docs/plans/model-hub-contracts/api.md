@@ -42,7 +42,7 @@ Hub has not shipped, so there is no internal contract migration or compatibility
 | POST `/api/models/oauth/start` | `{vendor, channel, client_nonce?}` → `{flow: OAuthFlow}` | Starts creation of a new subscription source. Before provider work, the optional exact `(client_nonce, vendor, channel)` tuple is atomically claimed; concurrent retries coalesce to its one pending start and terminal result. |
 | GET `/api/models/oauth/status/<flow_id>` | → OAuth result | Terminal create and reauth shapes are below. |
 | POST `/api/models/oauth/submit` | `{flow_id, value}` → OAuth result | Same terminal shape as status. |
-| POST `/api/models/oauth/cancel` | `{flow_id}` → `{ok}` | Cancels and forgets the flow. |
+| POST `/api/models/oauth/cancel` | `{flow_id}` → `{ok}` | Cancels provider work. A committed flow with `client_nonce` remains the same bounded terminal `OAuthFlow` with `state: "cancelled"` until its existing `expires_at`; a flow without a nonce is forgotten. |
 | POST `/api/models/migration/scan` | → `{scan: MigrationScan}` | Read-only. |
 | POST `/api/models/migration/apply` | `{item_ids: string[]}` → `{applied, sources, added_to}` | Each accepted import runs the same one-time matching and placement as Add Source; original files remain byte-identical. |
 | GET `/api/models/turns/<turn_id>/provenance` | → `{provenance: TurnProvenance}` or documented absence error | Debug read for exactly attributed Hub turns. |
@@ -193,7 +193,7 @@ every other existing field and enum meaning remains unchanged.
 | `RuntimeDependency.host_platform` | server host detector | unsupported-host runtime pill | Names the Avibe host, not the browser; exact membership in `manifest.assets[].platform` decides install support. |
 | `RuntimeDependency.status.error_key` | runtime installer | install-failed runtime state | Closed persisted i18n key: `settings.models.install.fail.detail` after installation fails; null after a new attempt begins and in every non-failure state. |
 | `RouteHopRef.position` | guarded mutation planner | guarded-change hop row | One-based position in the named Route before the attempted mutation. |
-| `OAuthStart.client_nonce` | OAuth client before send | OAuth start idempotency | Optional client-generated correlation; the server claims its exact tuple with vendor and channel before provider work, coalesces an in-flight retry, releases after failed/canceled cleanup, and converts success atomically to the flow. |
+| `OAuthStart.client_nonce` | OAuth client before send | OAuth start idempotency | Optional client-generated correlation; the server claims its exact tuple with vendor and channel before provider work, coalesces an in-flight retry, releases after failure or task cancellation before a flow exists, and converts success atomically to the flow. Explicitly canceling that committed flow retains its terminal `cancelled` correlation until the existing expiry. |
 | `OAuthFlow.client_nonce` | OAuth start echo | lost-start reconciliation | When the request supplied the nonce, every flow response echoes it unchanged. |
 | `AgentChain.chain[].health: backoff` | configured-chain live annotator | chain/AgentSupply health reads | Source-scoped in-memory connection throttle before the first user-visible model-output byte, with `retry_at` strictly later than the assembler's captured read time, never persisted in Source/config. It overlays only an otherwise healthy hop whose exact Source/model capability is present. Cooldown, durable Source health, missing Source, or unsupported model suppresses it and keeps the stronger blocker's established projection; simultaneous native-process unavailability is the sole exception and takes the reason slot without erasing the deadline. Before serialization, an expired overlay is normalized to the underlying non-backoff facts. Ordinary backoff rolls up `waiting`; every durable/capability/process blocker rolls up `interrupted`. |
 
@@ -671,16 +671,21 @@ atomically claims the tuple and applies this total state/action table:
 
 | Decision | Tuple state at start | Server action and HTTP/API result | Provider starts |
 | --- | --- | --- | --- |
-| `oauth_nonce.released` | no claim or flow exists, including after a shared start failure/cancellation | atomically claim, start once, and make every coalesced caller await the same terminal result | exactly one under the new claim |
+| `oauth_nonce.released` | no claim or unexpired flow exists, including after a shared pending-start failure/task cancellation or after a retained canceled flow reaches its existing `expires_at` | atomically claim, start once, and make every coalesced caller await the same terminal result | exactly one under the new claim |
 | `oauth_nonce.in_flight` | a provider start owns the claim but has not produced a flow | coalesce with that pending start and return its same terminal result; never create a parallel flow | none for the retry |
-| `oauth_nonce.committed` | provider success atomically converted the claim into one `OAuthFlow` | return that same `flow_id`, current state, and presentation | none |
+| `oauth_nonce.committed` | provider success atomically converted the claim into one unexpired `OAuthFlow`, including one explicitly canceled afterward | return that same `flow_id`, current state, and presentation; explicit cancellation returns the retained `state: "cancelled"` flow | none |
 
-A shared provider-start failure or cancellation returns the same terminal failure to all
-coalesced callers and releases the claim only after its cleanup settles; the next exact-
-tuple retry therefore enters `oauth_nonce.released`. Provider success converts the claim
-to `OAuthFlow` atomically, with no unclaimed interval. Every returned flow echoes the
-nonce. A new user action generates a new nonce. Omitting it preserves the ordinary
-one-action/one-start behavior and makes no lost-response reconciliation promise.
+A shared provider-start failure or task cancellation before a flow exists returns the
+same terminal failure to all coalesced callers and releases the claim only after cleanup
+settles; the next exact-tuple retry therefore enters `oauth_nonce.released`. Provider
+success converts the claim to `OAuthFlow` atomically, with no unclaimed interval. If the
+user then explicitly cancels a nonce-bearing committed flow, the provider work is
+canceled but that same flow remains as bounded terminal `state: "cancelled"`; a delayed
+exact-tuple retry returns it without another provider start. Its existing `expires_at`
+ends the reconciliation window and releases the tuple, so a later retry is a fresh
+start. Canceling a flow created without a nonce forgets it because no D-36 correlation
+promise exists. Every returned flow echoes the nonce. A new user action generates a new
+nonce. Omitting it otherwise preserves ordinary one-action/one-start behavior.
 
 `OAuthFlow.intent` makes the terminal shape a function of the flow:
 
@@ -1037,7 +1042,7 @@ contract harness and API-boundary tests enforce:
 | API AgentSupply includes `cli_present`, `selected_by_agent`, `selected_model_id`, `selected_model_explicit`, policy-free `sources.order`, `supply_status`, `model_supply[].has_runnable_hop`, and `named_agents`; every Source includes persisted `last_discovered_at`, optional persisted `client_nonce`, derived `adopted_by`, and model retirement tombstones; source creation returns `added_to` and top-level `adopted_by` equal to `source.adopted_by`; saved refresh and discovered-model retirement use the guarded Source envelope | API payload test |
 | every OAuthFlow response includes `intent` | API payload test |
 | Hub OAuth and native CLI `POST /sources/<id>/reauth` requests with missing or false `acknowledge_irreversible` return `reauth_confirmation_required` before the OAuth adapter is called; true acknowledgement is the only start path, while transactional API-key PUT is unaffected | API route negative/positive fixtures |
-| OAuth start claims `(client_nonce, vendor, channel)` before provider work; a blocked first call plus concurrent same-tuple retry coalesces to one pending result and exactly one provider start, failure/cancellation releases, and success atomically exposes one echoed-nonce flow | OAuth registry, API payload, and auth-setup closed-loop tests |
+| OAuth start claims `(client_nonce, vendor, channel)` before provider work; a blocked first call plus concurrent same-tuple retry coalesces to one pending result and exactly one provider start; pending-start failure/task cancellation releases after cleanup; success atomically exposes one echoed-nonce flow; explicit cancellation retains that nonce-bearing flow as `cancelled` so a same-tuple retry starts no provider, while existing expiry releases it for exactly one fresh start; no-nonce cancellation forgets | OAuth registry totality, clocked expiry, API payload, and auth-setup closed-loop tests |
 | every RuntimeDependency API payload includes server-derived `host_platform` and `status.error_key`; `installing` has exactly null `installed_version`, false `verified`, and null `listening`, with one positive and each-field contradiction fixtures; only supported `not_installed` starts a download, installed states are state-preserving no-ops, page reload preserves a live `installing` job, and service bootstrap reconciles an orphan before serving runtime endpoints | RuntimeDependency schema and API payload tests |
 | Source create reserves `client_nonce` in process before work; the client reads Sources before any lost-response retry; fixtures cover `nonce.in_flight` (`source_create_in_progress`/no work), `nonce.released` (atomic reserve/exactly one fresh attempt), and `nonce.committed` (`source_nonce_conflict` followed by a list read that finds exactly one Source with that nonce), while AC-26 cleanup or process restart releases any live reservation and Source deletion releases its committed nonce; after restart or deletion and a list miss, same-nonce create is positively asserted as a fresh creation | config, API payload, cancellation/restart, Source-delete, and client retry tests |
 | Source observation rejects unregistered request/status evidence fields; clients consume only the contracted outcome, reachability, authentication, protocol, discovery, and models facts | observation schema and API payload tests |

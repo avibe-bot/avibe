@@ -678,6 +678,58 @@ def test_targeted_permission_denial_contract_is_request_scoped_and_mirrored():
         )
 
 
+def test_oauth_nonce_explicit_cancel_totality_is_closed():
+    api_contract = (CONTRACTS / "api.md").read_text(encoding="utf-8")
+    model_hub_plan = (CONTRACTS.parent / "model-hub.md").read_text(encoding="utf-8")
+    implementation_plan = (
+        CONTRACTS.parent / "model-hub-implementation.md"
+    ).read_text(encoding="utf-8")
+
+    cancel_route = next(
+        line
+        for line in api_contract.splitlines()
+        if "POST `/api/models/oauth/cancel`" in line
+    )
+    assert "Cancels and forgets the flow." not in api_contract
+    assert "committed flow with `client_nonce`" in cancel_route
+    assert '`state: "cancelled"`' in cancel_route
+    assert "existing `expires_at`" in cancel_route
+    assert "flow without a nonce is forgotten" in cancel_route
+
+    api_oauth = api_contract.split("## OAuth completion", 1)[1].split(
+        "## Chain and probe", 1
+    )[0]
+    plan_oauth = model_hub_plan.split(
+        "**OAuth-start nonce state machine", 1
+    )[1].split("**Protocol observation", 1)[0]
+    for section in (api_oauth, plan_oauth):
+        assert section.count("| `oauth_nonce.released` |") == 1
+        assert section.count("| `oauth_nonce.in_flight` |") == 1
+        assert section.count("| `oauth_nonce.committed` |") == 1
+        assert "retained canceled flow" in section
+        assert "existing `expires_at`" in section
+        assert 'retained `state: "cancelled"` flow' in section
+        assert "none" in next(
+            line
+            for line in section.splitlines()
+            if line.startswith("| `oauth_nonce.committed` |")
+        )
+
+    nonce_description = _schema("oauth-flow.schema.json")["properties"][
+        "client_nonce"
+    ]["description"]
+    assert "Explicit cancellation retains that committed flow" in nonce_description
+    assert "starts no provider on a same-tuple retry" in nonce_description
+
+    ac_48 = implementation_plan.split("### AC-48", 1)[1].split("### AC-49", 1)[0]
+    for fixture_pattern in (
+        r"same-tuple canceled replay with zero provider calls",
+        r"existing-expiry\s+release followed by one fresh provider start",
+        r"no-nonce\s+forget",
+    ):
+        assert re.search(fixture_pattern, ac_48)
+
+
 def test_v5_shape_amendments_reject_the_false_states_they_replace():
     api_contract = (CONTRACTS / "api.md").read_text(encoding="utf-8")
     credential_contract = api_contract.split(

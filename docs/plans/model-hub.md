@@ -285,13 +285,17 @@ claimed before provider work. A different tuple never resolves to this claim or 
 
 | Decision | Tuple condition | Server action and HTTP/API result | Provider starts | First consumer |
 | --- | --- | --- | --- | --- |
-| `oauth_nonce.released` | no claim or flow exists, including after pending-start failure/cancellation cleanup | atomically claim, start once, and make all coalesced callers await the same terminal result | exactly one under the new claim | I3 OAuth registry and AUTH-SETUP-210 first-call fixture |
+| `oauth_nonce.released` | no claim or unexpired flow exists, including after pending-start failure/task-cancellation cleanup or after a retained canceled flow reaches its existing `expires_at` | atomically claim, start once, and make all coalesced callers await the same terminal result | exactly one under the new claim | I3 OAuth registry, cleanup-release fixture, and clocked expiry/restart fixture |
 | `oauth_nonce.in_flight` | one provider start owns the claim but has not produced a flow | coalesce the exact-tuple retry with that pending start and return its same terminal result | none for the retry | AUTH-SETUP-210 blocked-first-call/concurrent-retry fixture |
-| `oauth_nonce.committed` | provider success atomically converted the claim into one `OAuthFlow` | return the same `flow_id`, current state, presentation, and echoed nonce | none | OAuth API idempotency fixture |
+| `oauth_nonce.committed` | provider success atomically converted the claim into one unexpired `OAuthFlow`, including one explicitly canceled afterward | return the same `flow_id`, current state, presentation, and echoed nonce; a canceled retry returns the retained `state: "cancelled"` flow | none | OAuth API idempotency and canceled-retry/provider-zero fixtures |
 
-A shared provider-start failure or cancellation settles cleanup and releases the claim;
-success creates the flow atomically with no claim gap. Omitting the nonce preserves the
-ordinary one-action/one-start path. Source-create and OAuth-start correlation therefore
+A shared provider-start failure or task cancellation before a flow exists settles
+cleanup and releases the claim; success creates the flow atomically with no claim gap.
+Explicitly canceling a nonce-bearing committed flow cancels provider work but retains
+that same bounded terminal flow until its existing expiry, so a delayed exact-tuple
+retry cannot reverse the user's cancellation. Expiry releases the tuple and makes a
+later same-tuple request a fresh start. Canceling a flow without a nonce forgets it. A
+new user action uses a new nonce. Source-create and OAuth-start correlation therefore
 share D-36's rule: reconciliation is possible only when the client held the subject
 correlation before sending.
 

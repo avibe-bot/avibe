@@ -12,7 +12,7 @@
     "client_nonce": {
       "type": "string",
       "pattern": "^ofn_[a-z0-9]{16,64}$",
-      "description": "Optional client-generated OAuth-start correlation echoed from the start request. Before provider work the server atomically claims the exact (client_nonce, vendor, channel) tuple; concurrent retries coalesce to its one pending start and terminal result. Provider failure or pending-start cancellation releases the claim after cleanup, while success atomically converts it to the one OAuthFlow returned by every later retry."
+      "description": "Optional client-generated OAuth-start correlation echoed from the start request. Before provider work the server atomically claims the exact (client_nonce, vendor, channel) tuple; concurrent retries coalesce to its one pending start and terminal result. Provider failure or task cancellation before a flow exists releases the claim after cleanup, while success atomically converts it to the one OAuthFlow returned by every retry until its existing expires_at. Explicit cancellation retains that committed flow with state cancelled until expiry and starts no provider on a same-tuple retry."
     },
     "intent": {
       "enum": ["create", "reauth"],
