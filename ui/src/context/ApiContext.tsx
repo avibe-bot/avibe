@@ -725,6 +725,10 @@ export type ApiContextType = {
   cacheSessionDraft: (sessionId: string, text: string) => void;
   getSessionDraft: (sessionId: string) => Promise<{ text: string }>;
   setSessionDraft: (sessionId: string, text: string) => Promise<{ ok: boolean }>;
+  reconcileSessionDraftAfterSend: (
+    sessionId: string,
+    draft: { text: string; updated_at: string | null },
+  ) => Promise<void>;
   recoverSessionDraftAfterRejectedSend: (sessionId: string) => Promise<void>;
   listInbox: (params?: { platform?: string; unreadOnly?: boolean; limit?: number; before?: string; onlySession?: string; cache?: boolean; handleError?: boolean }) => Promise<InboxFeedResult>;
   connectWorkbenchEvents: (handlers: WorkbenchEventHandlers) => () => void;
@@ -2831,6 +2835,16 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       window.clearTimeout(timeout);
     }
   };
+  const rebaseAndRetrySessionDraft = async (
+    sessionId: string,
+    server: SessionDraftServerState,
+  ): Promise<void> => {
+    sessionDraftPersistence.rebase(sessionId, server);
+    await sessionDraftPersistence.retry(
+      sessionId,
+      (draft) => writeSessionDraft(sessionId, draft),
+    );
+  };
   syncSessionDraftsRef.current = () => {
     void sessionDraftPersistence.retryAll(writeSessionDraft);
   };
@@ -3373,6 +3387,9 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       text,
       (draft) => writeSessionDraft(sessionId, draft),
     ),
+    reconcileSessionDraftAfterSend: (sessionId, draft) => (
+      rebaseAndRetrySessionDraft(sessionId, sessionDraftServerState(draft))
+    ),
     recoverSessionDraftAfterRejectedSend: async (sessionId) => {
       // The message reservation clears the cloud draft before dispatch. A
       // rejected/unknown dispatch therefore needs an authoritative revision
@@ -3380,11 +3397,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       sessionDraftPersistence.markRejectedSend(sessionId);
       const server = await readSessionDraftServer(sessionId);
       if (!server) return;
-      sessionDraftPersistence.rebase(sessionId, server);
-      await sessionDraftPersistence.retry(
-        sessionId,
-        (draft) => writeSessionDraft(sessionId, draft),
-      );
+      await rebaseAndRetrySessionDraft(sessionId, server);
     },
     listInbox: (params) => {
       const search = new URLSearchParams();

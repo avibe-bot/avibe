@@ -33,6 +33,7 @@ type DraftEntry = {
   conflict: boolean;
   localOwned: boolean;
   rebaseOnConflict: boolean;
+  serverEpoch: number;
 };
 
 type DraftSave = (draft: SessionDraftWrite) => Promise<SessionDraftSaveResult>;
@@ -89,6 +90,7 @@ export class SessionDraftPersistence {
       conflict: resolvesConflict ? false : current?.conflict ?? false,
       localOwned: true,
       rebaseOnConflict: current?.rebaseOnConflict ?? false,
+      serverEpoch: current?.serverEpoch ?? 0,
     });
   }
 
@@ -225,6 +227,12 @@ export class SessionDraftPersistence {
     current.baseUpdatedAt = server.updatedAt;
     current.conflict = false;
     current.rebaseOnConflict = false;
+    current.serverEpoch += 1;
+    // The external revision is causally newer than every write already in
+    // flight. Detach that promise chain; its eventual result is ignored by the
+    // epoch guard below, while retry() starts from this exact server revision.
+    current.pending = null;
+    current.pendingRevision = null;
     this.localCache.rebaseDirty(sessionId, current.localId, server.updatedAt, false);
   }
 
@@ -245,6 +253,7 @@ export class SessionDraftPersistence {
 
     const predecessor = entry.pending;
     const revision = entry.revision;
+    const serverEpoch = entry.serverEpoch;
     const text = entry.text;
     const pending = (async (): Promise<SessionDraftSaveResult> => {
       const predecessorResult: SessionDraftSaveResult | undefined = await predecessor?.catch(
@@ -252,6 +261,7 @@ export class SessionDraftPersistence {
       );
       const beforeWrite = this.entries.get(sessionId);
       if (!beforeWrite || beforeWrite.revision !== revision) return { ok: true };
+      if (beforeWrite.serverEpoch !== serverEpoch) return { ok: false };
       if (predecessorResult?.server) {
         beforeWrite.baseUpdatedAt = predecessorResult.server.updatedAt;
         beforeWrite.conflict = false;
@@ -292,9 +302,10 @@ export class SessionDraftPersistence {
         result.conflict
         && result.server
         && beforeWrite.revision === revision
+        && beforeWrite.serverEpoch === serverEpoch
         && beforeWrite.rebaseOnConflict,
       );
-      this.applyWriteResult(sessionId, revision, result);
+      this.applyWriteResult(sessionId, revision, serverEpoch, result);
       if (shouldRetryRecoveredConflict) {
         const retry = this.entries.get(sessionId);
         if (retry?.dirty && !retry.conflict && !retry.pending) {
@@ -312,10 +323,11 @@ export class SessionDraftPersistence {
   private applyWriteResult(
     sessionId: string,
     revision: number,
+    serverEpoch: number,
     result: SessionDraftSaveResult,
   ): void {
     const current = this.entries.get(sessionId);
-    if (!current) return;
+    if (!current || current.serverEpoch !== serverEpoch) return;
 
     if (result.ok) {
       const server = result.server ?? {
@@ -394,6 +406,7 @@ export class SessionDraftPersistence {
       conflict: false,
       localOwned: false,
       rebaseOnConflict: cached.rebaseOnConflict ?? false,
+      serverEpoch: current?.serverEpoch ?? 0,
     };
     this.entries.set(sessionId, hydrated);
     return hydrated;

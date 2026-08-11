@@ -131,6 +131,32 @@ describe('SessionDraftLocalCache', () => {
     });
   });
 
+  it('retires mutations older than the acknowledged reload winner', () => {
+    const storage = new MemoryStorage();
+    let sequence = 0;
+    const writer = new SessionDraftLocalCache(
+      storage,
+      () => `mutation-${++sequence}`,
+      () => sequence,
+    );
+    const older = writer.writeDirty('session-a', 'older text', 'rev-0');
+    const winner = writer.writeDirty('session-a', 'selected text', 'rev-0');
+    const restored = new SessionDraftLocalCache(storage, () => 'unused', () => 10);
+
+    expect(restored.read('session-a')?.mutationId).toBe(winner.mutationId);
+    restored.acknowledge('session-a', winner.mutationId, winner.text, 'rev-1');
+
+    expect(storage.getItem(
+      `${SESSION_DRAFT_MUTATION_PREFIX}session-a:${older.mutationId}`,
+    )).toBeNull();
+    expect(restored.dirtySessionIds()).toEqual([]);
+    expect(restored.read('session-a')).toMatchObject({
+      text: 'selected text',
+      serverUpdatedAt: 'rev-1',
+      dirty: false,
+    });
+  });
+
   it('persists archive invalidation across cache instances', () => {
     const storage = new MemoryStorage();
     const first = new SessionDraftLocalCache(storage, () => 'archive-1', () => 1);

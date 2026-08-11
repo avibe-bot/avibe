@@ -219,6 +219,11 @@ def test_route_fire_and_forgets_dispatch(isolated_state, tmp_path):
     ):
         client = app.test_client()
         headers = csrf_headers(client)
+        saved_draft = client.put(
+            f"/api/sessions/{session_id}/draft",
+            json={"text": "draft before send", "expected_updated_at": None},
+            headers=headers,
+        ).get_json()["draft"]
         response = client.post(
             f"/api/sessions/{session_id}/messages",
             json={"text": "no stream", "author_id": "remote:spoofed"},
@@ -231,6 +236,9 @@ def test_route_fire_and_forgets_dispatch(isolated_state, tmp_path):
     assert payload["metadata"]["_web_push_user_key"] == "remote:user-a"
     assert payload["metadata"]["_memory_cli_admitted"] is False
     assert payload["text"] == "no stream"
+    assert payload["draft_advanced"] is True
+    assert payload["draft"]["text"] == ""
+    assert payload["draft"]["updated_at"] not in (None, saved_draft["updated_at"])
     # The turn was kicked off fire-and-forget with the session + text.
     dispatch_mock.assert_awaited_once()
     sent = dispatch_mock.await_args.args[0]
@@ -266,6 +274,9 @@ def test_workbench_side_actions_are_not_marked_as_ordinary_memory_input(
 
     assert response.status_code == 201
     assert dispatch.await_args.args[0]["is_ordinary_text"] is False
+    assert response.get_json()["draft_advanced"] is (
+        "quick_reply_for" not in payload.get("metadata", {})
+    )
 
 
 
@@ -1213,6 +1224,18 @@ def test_session_draft_compare_and_set_protects_newer_writes_and_clears(
     )
     assert stale.status_code == 409
     assert stale.get_json() == {
+        "ok": False,
+        "code": "draft_conflict",
+        "draft": created_draft,
+    }
+
+    revisionless = client.put(
+        path,
+        json={"text": "legacy overwrite"},
+        headers=headers,
+    )
+    assert revisionless.status_code == 409
+    assert revisionless.get_json() == {
         "ok": False,
         "code": "draft_conflict",
         "draft": created_draft,

@@ -188,4 +188,53 @@ describe('ApiProvider session draft reconnect', () => {
       expected_updated_at: 'clear-revision',
     });
   });
+
+  it('rebases text typed while an accepted send advances the draft revision', async () => {
+    let resolveStaleWrite!: (response: Response) => void;
+    const staleWrite = new Promise<Response>((resolve) => { resolveStaleWrite = resolve; });
+    let putCount = 0;
+    apiFetch.mockImplementation(async (_path: string, init?: RequestInit) => {
+      if (++putCount === 1) return staleWrite;
+      const body = JSON.parse(String(init?.body)) as { text: string };
+      return new Response(JSON.stringify({
+        ok: true,
+        draft: { text: body.text, updated_at: 'next-revision' },
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+
+    render(<ApiProvider><CaptureApi /></ApiProvider>);
+    capturedApi!.cacheSessionDraft('session-a', 'submitted');
+    capturedApi!.cacheSessionDraft('session-a', '');
+    capturedApi!.cacheSessionDraft('session-a', 'next prompt');
+    const stale = capturedApi!.setSessionDraft('session-a', 'next prompt');
+    await Promise.resolve();
+
+    await capturedApi!.reconcileSessionDraftAfterSend('session-a', {
+      text: '',
+      updated_at: 'clear-revision',
+    });
+    resolveStaleWrite(new Response(JSON.stringify({
+      ok: true,
+      draft: { text: 'next prompt', updated_at: 'stale-write-revision' },
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }));
+    await stale;
+
+    const writes = apiFetch.mock.calls.map(([, init]) => JSON.parse(String(init?.body)));
+    expect(writes).toEqual([
+      { text: 'next prompt', expected_updated_at: null },
+      { text: 'next prompt', expected_updated_at: 'clear-revision' },
+    ]);
+    const cache = new SessionDraftLocalCache(window.localStorage);
+    expect(cache.read('session-a')).toMatchObject({
+      text: 'next prompt',
+      serverUpdatedAt: 'next-revision',
+      dirty: false,
+    });
+  });
 });

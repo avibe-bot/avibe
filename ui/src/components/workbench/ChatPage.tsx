@@ -1766,6 +1766,18 @@ export const ChatPage: React.FC = () => {
           body: JSON.stringify(requestBody),
         });
         const body = await response.json().catch(() => null);
+        // Reserving an accepted message advances the server draft to a blank
+        // revision. Apply that exact causal revision before handling this chat's
+        // UI response, so text typed while the POST was in flight is rebased and
+        // synced even if the user has already navigated to another session.
+        if (
+          response.ok
+          && body?.draft_advanced === true
+          && body?.draft
+          && typeof body.draft === 'object'
+        ) {
+          void api.reconcileSessionDraftAfterSend(sessionId, body.draft);
+        }
         // If the user switched chats while this POST was in flight, the response
         // belongs to the previous session — don't append it / mutate working /
         // error on the chat they moved to (Codex P2). The turn still ran for the

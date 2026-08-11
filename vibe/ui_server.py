@@ -8613,8 +8613,12 @@ async def sessions_messages_create(session_id: str):
             )
             if not quick_reply_for:
                 message_deliveries.set_draft(conn, session_id, None)
+            draft = message_deliveries.get_draft_state(conn, session_id)
             workbench_sessions_service.touch_session(conn, session_id)
-        return message_deliveries.delivery_payload(row)
+        result = message_deliveries.delivery_payload(row)
+        result["draft"] = _session_draft_payload(draft)
+        result["draft_advanced"] = not bool(quick_reply_for)
+        return result
 
     # Reserve the row FIRST (pending), then decide by the dispatch outcome.
     message = _persist_user_row()
@@ -8662,6 +8666,8 @@ async def sessions_messages_create(session_id: str):
         if current is None:
             return dict(message)
         payload = message_deliveries.delivery_payload(current)
+        payload["draft"] = message["draft"]
+        payload["draft_advanced"] = message["draft_advanced"]
         if current["state"] == "queued":
             payload["type"] = "queued"
             payload["queued"] = True
@@ -8744,7 +8750,14 @@ async def sessions_messages_create(session_id: str):
                         "dispatch_error": "dispatch_pending",
                     }
                 ), 502
-            return jsonify({**accepted, **body}), 201
+            return jsonify(
+                {
+                    **accepted,
+                    **body,
+                    "draft": message["draft"],
+                    "draft_advanced": message["draft_advanced"],
+                }
+            ), 201
         return jsonify({**current, **body}), 202
     current = _retire_unclaimed_delivery(f"internal_dispatch_rejected_{status}")
     return jsonify(
@@ -8945,7 +8958,11 @@ def sessions_draft_set(session_id: str):
                 current = message_deliveries.get_draft_state(conn, session_id)
                 return jsonify({"ok": True, "draft": _session_draft_payload(current)})
             current = message_deliveries.get_draft_state(conn, session_id)
-            if expected_supplied and (current or {}).get("updated_at") != expected_updated_at:
+            current_updated_at = (current or {}).get("updated_at")
+            if (
+                (not expected_supplied and current_updated_at is not None)
+                or (expected_supplied and current_updated_at != expected_updated_at)
+            ):
                 return jsonify(
                     {
                         "ok": False,

@@ -78,8 +78,7 @@ export class SessionDraftLocalCache {
       if (stored?.dirty) dirty.push(stored); // Legacy single-record cache.
       if (dirty.length) {
         return dirty.reduce((latest, record) => (
-          record.savedAt > latest.savedAt
-          || (record.savedAt === latest.savedAt && record.mutationId > latest.mutationId)
+          this.compareMutationOrder(record, latest) > 0
             ? record
             : latest
         ));
@@ -268,6 +267,12 @@ export class SessionDraftLocalCache {
       if (mutation?.dirty && mutation.mutationId === mutationId) {
         // Dirty mutations use independent keys, so acknowledging this tab can
         // never replace another tab's concurrently-written text.
+        // A reload replays the newest stored mutation. Once that winner reaches
+        // the cloud, every mutation at or before its ordering frontier is stale;
+        // otherwise the next reload would reveal and replay an older hidden key.
+        // Retire older keys first so a partial storage failure leaves the winner
+        // available for an idempotent retry instead of exposing an older draft.
+        this.retireMutationsBefore(target, sessionId, mutation);
         target.removeItem(mutationKey);
         if (!text) {
           target.removeItem(this.key(sessionId));
@@ -365,5 +370,32 @@ export class SessionDraftLocalCache {
       .filter((key) => key.startsWith(prefix))
       .map((key) => this.readRecord(target, key))
       .filter((record): record is SessionDraftCacheRecord => Boolean(record?.dirty));
+  }
+
+  private compareMutationOrder(
+    left: SessionDraftCacheRecord,
+    right: SessionDraftCacheRecord,
+  ): number {
+    if (left.savedAt !== right.savedAt) return left.savedAt - right.savedAt;
+    if (left.mutationId === right.mutationId) return 0;
+    return left.mutationId > right.mutationId ? 1 : -1;
+  }
+
+  private retireMutationsBefore(
+    target: DraftStorage,
+    sessionId: string,
+    acknowledged: SessionDraftCacheRecord,
+  ): void {
+    const prefix = this.mutationPrefix(sessionId);
+    for (const key of this.keys(target)) {
+      if (!key.startsWith(prefix)) continue;
+      const record = this.readRecord(target, key);
+      if (
+        record?.dirty
+        && this.compareMutationOrder(record, acknowledged) < 0
+      ) {
+        target.removeItem(key);
+      }
+    }
   }
 }
