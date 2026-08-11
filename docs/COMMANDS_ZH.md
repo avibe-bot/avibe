@@ -873,12 +873,12 @@ Run 默认异步：命令会队列化 run，立即返回包含 `run_id` / `sessi
 payload，并按 callback 策略稍后投递最终结果。只有终端需要等待完成时才使用
 `--sync`。`--async` 仍兼容旧脚本，但不再需要显式传入。
 
-和现有 `--session-id` 一起使用时，`--send-now` 会先持久化 Agent Run，
-然后复用 Workbench 的 Session 级打断并发送操作：通过共享 Stop 路径停止活动
-Turn，再把现有 FIFO 队头作为新 Turn 发送。它不提供同 Turn steering，也不重排
-队列；如果打断被拒绝，Run 会继续保持排队。命令响应包含
-`delivery_intent`，Controller 消费请求后，`vibe runs show <run-id>` 会显示持久化的
-`metadata.delivery_outcome`。
+对于现有 `--session-id`，默认投递是 P1：新消息会 steering 进活动 native Turn，
+Session 空闲时立即启动；明确拒绝后，同一个 Delivery 才回退到 P3。`--queue` 会
+直接选择 P3。`--send-now` 显式选择相同的带内容 P1 语义，只针对这条新消息，
+不会提升更早的排队工作。`vibe session send-now` 是无内容 P1 操作，只提升现有的
+精确 FIFO 队头，不新增消息。命令响应包含 `delivery_intent`，Controller 消费请求后，
+`vibe runs show <run-id>` 会显示持久化的 `metadata.delivery_outcome`。
 
 `--fork-session <session_id>` 会基于源 Session 的 native backend 上下文创建一个新的
 Agent Session，适合在保留上下文的同时做分支调查或委派工作，而不修改源 Session。
