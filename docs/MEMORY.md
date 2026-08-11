@@ -76,12 +76,14 @@ finish before starting another one.
    new settings before rebuilding the local vector index and preserves Markdown
    memory. If rebuilding fails before settlement, the confirmed change remains
    saved, the recovery intent and rebuild warning remain, and **Restart engine**
-   stays unavailable. An endpoint or model correction changes the vector-space
-   identity, so edit it and reconfirm **Save and rebuild**; do not apply that
-   correction through **Retry rebuild**. Only an API-key-only correction (with
-   the endpoint and model unchanged) may be saved under the pending rebuild
-   marker, after which select **Retry rebuild**. If rebuilding completes but the
-   later engine or sidecar activation fails, the recovery intent may already be
+   stays unavailable. An Embedding endpoint or model correction changes the
+   vector-space identity, so edit it and reconfirm **Save and rebuild**; do not
+   apply that correction through **Retry rebuild**. While the rebuild marker is
+   pending, LLM endpoint or model corrections may be saved normally before
+   selecting **Retry rebuild**; API-key-only corrections for either provider
+   may also be saved under the marker without touching the fenced runtime,
+   after which select **Retry rebuild**. If rebuilding completes but the later
+   engine or sidecar activation fails, the recovery intent may already be
    cleared. Fix the runtime problem, then select **Restart engine**;
    **Retry rebuild** may no longer be offered.
 
@@ -110,13 +112,16 @@ terminal result.
    artifact, original Avibe chats, and data outside those two roots. If engine
    or sidecar activation fails after deletion, the old contents under `memory`
    and `state/memory` stay deleted, but construction of the fresh runtime may
-   have recreated empty or partial roots. Factory reset reports a terminal
-   result for each root independently, so a partial-delete result can show one
-   root deleted while the other is retained or reports a deletion error; read
-   each root's outcome independently rather than as a clean reset.
+   have recreated empty or partial roots. Factory reset reports a visible status
+   for each root independently: **deleted**, **partially deleted**, **absent**,
+   or **retained**. Settings also shows a generic failure status, not a
+   per-root error or reason; read each root's status independently rather than
+   treating the result as a clean reset. Follow the displayed status, inspect
+   the service logs and filesystem permissions for the affected roots, correct
+   the issue, then select **Retry factory reset** to continue any remaining
+   deletion.
    Memory stays fenced and unavailable while the factory-reset recovery intent
    is pending.
-   Correct the filesystem or reported cause, then select **Retry factory reset**.
    Retry is idempotent: it continues any remaining deletion while preserving
    the truthful outcome reported for each root.
 
