@@ -88,6 +88,7 @@ type FakeApi = {
   listSessions?: (args: { projectId: string }) => Promise<unknown>;
   getSession?: () => Promise<unknown>;
   listInbox?: () => Promise<unknown>;
+  markSessionRead?: () => Promise<unknown>;
   connectWorkbenchEvents: (handlers: WorkbenchEventHandlers) => () => void;
 };
 
@@ -241,7 +242,12 @@ describe('Workbench session read ownership', () => {
     });
     await settle();
     act(() => {
-      handlers?.onSessionStatus?.({ session_id: session.id, agent_status: 'idle' });
+      handlers?.onSessionActivity?.({
+        session_id: session.id,
+        scope_id: session.scope_id,
+        event: 'updated',
+        title: 'Fresh title',
+      });
     });
     await act(async () => {
       staleFirstPage.resolve({ sessions: [session], next_before_id: null });
@@ -350,6 +356,115 @@ describe('Workbench session read ownership', () => {
 
     expect(listSessions).toHaveBeenCalledTimes(2);
     expect(tree?.sessionsOf(project.id).sessions).toEqual([{ ...trackedSession, agent_status: 'idle' }]);
+  });
+
+  it('retries a created-session reconcile invalidated before the row is cached', async () => {
+    const staleRead = deferred({ sessions: [], next_before_id: null });
+    const listSessions = vi.fn()
+      .mockReturnValueOnce(staleRead.promise)
+      .mockResolvedValueOnce({ sessions: [session], next_before_id: null });
+    let handlers: WorkbenchEventHandlers | null = null;
+    apiRef.current = {
+      getWorkbenchProjectsBootstrap: vi.fn().mockResolvedValue({
+        projects: [project],
+        sessions: { [project.id]: { sessions: [], next_before_id: null } },
+      }),
+      listSessions,
+      connectWorkbenchEvents: vi.fn((next) => {
+        handlers = next;
+        return vi.fn();
+      }),
+    };
+    let tree: ReturnType<typeof useWorkbenchProjectsTree> | null = null;
+    const Probe = () => {
+      const value = useWorkbenchProjectsTree();
+      useEffect(() => {
+        tree = value;
+      }, [value]);
+      return null;
+    };
+
+    render(
+      <WorkbenchProjectsProvider>
+        <Probe />
+      </WorkbenchProjectsProvider>,
+    );
+    await settle();
+    act(() => {
+      handlers?.onSessionActivity?.({
+        session_id: session.id,
+        scope_id: session.scope_id,
+        event: 'created',
+      });
+    });
+    await settle();
+    act(() => {
+      handlers?.onSessionStatus?.({ session_id: session.id, agent_status: 'idle' });
+    });
+    await act(async () => {
+      staleRead.resolve({ sessions: [], next_before_id: null });
+      await staleRead.promise;
+    });
+    await settle();
+
+    expect(listSessions).toHaveBeenCalledTimes(2);
+    expect(tree?.sessionsOf(project.id).sessions).toEqual([session]);
+  });
+
+  it('retries an invalidated project pagination read', async () => {
+    const pageSession = { ...sessionB, scope_id: project.scope_id, project_id: project.id };
+    const stalePage = deferred({ sessions: [pageSession], next_before_id: null });
+    const listSessions = vi.fn()
+      .mockReturnValueOnce(stalePage.promise)
+      .mockResolvedValueOnce({ sessions: [pageSession], next_before_id: null });
+    let handlers: WorkbenchEventHandlers | null = null;
+    apiRef.current = {
+      getWorkbenchProjectsBootstrap: vi.fn().mockResolvedValue({
+        projects: [project],
+        sessions: { [project.id]: { sessions: [session], next_before_id: 'cursor_a' } },
+      }),
+      listSessions,
+      connectWorkbenchEvents: vi.fn((next) => {
+        handlers = next;
+        return vi.fn();
+      }),
+    };
+    let tree: ReturnType<typeof useWorkbenchProjectsTree> | null = null;
+    const Probe = () => {
+      const value = useWorkbenchProjectsTree();
+      useEffect(() => {
+        tree = value;
+      }, [value]);
+      return null;
+    };
+
+    render(
+      <WorkbenchProjectsProvider>
+        <Probe />
+      </WorkbenchProjectsProvider>,
+    );
+    await settle();
+    act(() => {
+      tree?.loadMore(project.id);
+    });
+    await settle();
+    act(() => {
+      handlers?.onSessionActivity?.({
+        session_id: session.id,
+        scope_id: session.scope_id,
+        event: 'updated',
+        title: 'Fresh title',
+      });
+    });
+    await act(async () => {
+      stalePage.resolve({ sessions: [pageSession], next_before_id: null });
+      await stalePage.promise;
+    });
+    await settle();
+
+    expect(listSessions).toHaveBeenCalledTimes(2);
+    expect(tree?.sessionsOf(project.id).sessions?.map((row) => row.id)).toEqual([session.id, pageSession.id]);
+    expect(tree?.sessionsOf(project.id).cursor).toBeNull();
   });
 
   it('retries a reconnect project tree read invalidated by a live event', async () => {
@@ -502,6 +617,58 @@ describe('Workbench session read ownership', () => {
     expect(inbox?.inboxSessions).toEqual([]);
     expect(inbox?.unreadBySession).toEqual({});
     expect(inbox?.nextCursor).toBeNull();
+  });
+
+  it('does not let an older mark-read response restore unread after hide', async () => {
+    const staleMarkRead = deferred({ unread_by_session: { [session.id]: 2 } });
+    let handlers: WorkbenchEventHandlers | null = null;
+    apiRef.current = {
+      listInbox: vi.fn().mockResolvedValue({
+        sessions: [inboxRow],
+        next_cursor: null,
+        unread_by_session: { [session.id]: 3 },
+      }),
+      markSessionRead: vi.fn().mockReturnValue(staleMarkRead.promise),
+      connectWorkbenchEvents: vi.fn((next) => {
+        handlers = next;
+        return vi.fn();
+      }),
+    };
+    let inbox: ReturnType<typeof useWorkbenchInbox> | null = null;
+    const Probe = () => {
+      const value = useWorkbenchInbox();
+      useEffect(() => {
+        inbox = value;
+      }, [value]);
+      return null;
+    };
+
+    render(
+      <WorkbenchInboxProvider>
+        <Probe />
+      </WorkbenchInboxProvider>,
+    );
+    await settle();
+    act(() => {
+      void inbox?.markRead(session.id);
+    });
+    await settle();
+    act(() => {
+      handlers?.onSessionActivity?.({
+        session_id: session.id,
+        scope_id: session.scope_id,
+        event: 'updated',
+        visibility: 'background',
+      });
+    });
+    await act(async () => {
+      staleMarkRead.resolve({ unread_by_session: { [session.id]: 2 } });
+      await staleMarkRead.promise;
+    });
+    await settle();
+
+    expect(inbox?.inboxSessions).toEqual([]);
+    expect(inbox?.unreadBySession).toEqual({});
   });
 
   it('retries a resume reconcile invalidated by activity', async () => {
@@ -711,9 +878,9 @@ describe('Workbench session read ownership', () => {
     expect(inbox?.nextCursor).toBe('cursor_before_restore');
   });
 
-  it('keeps a targeted restore when a newer broad feed read completes first', async () => {
+  it('keeps a targeted restore without replacing a newer broad unread map', async () => {
     const targetedRead = deferred({ sessions: [inboxRow], next_cursor: null, unread_by_session: { [session.id]: 3 } });
-    const broadRead = deferred({ sessions: [], next_cursor: 'cursor_after_refresh', unread_by_session: {} });
+    const broadRead = deferred({ sessions: [], next_cursor: 'cursor_after_refresh', unread_by_session: { [sessionB.id]: 5 } });
     const listInbox = vi.fn()
       .mockResolvedValueOnce({ sessions: [], next_cursor: 'cursor_before_restore', unread_by_session: {} })
       .mockReturnValueOnce(targetedRead.promise)
@@ -752,7 +919,7 @@ describe('Workbench session read ownership', () => {
     });
     await settle();
     await act(async () => {
-      broadRead.resolve({ sessions: [], next_cursor: 'cursor_after_refresh', unread_by_session: {} });
+      broadRead.resolve({ sessions: [], next_cursor: 'cursor_after_refresh', unread_by_session: { [sessionB.id]: 5 } });
       await broadRead.promise;
     });
     await act(async () => {
@@ -762,6 +929,127 @@ describe('Workbench session read ownership', () => {
     await settle();
 
     expect(inbox?.inboxSessions.map((row) => row.session_id)).toEqual([session.id]);
+    expect(inbox?.unreadBySession).toEqual({ [sessionB.id]: 5 });
+    expect(inbox?.nextCursor).toBe('cursor_after_refresh');
+  });
+
+  it('does not let an older targeted row replace a newer broad row that completed first', async () => {
+    const refreshedRow = {
+      ...inboxRow,
+      title: 'Fresh from broad feed',
+      last_activity_at: '2026-08-11T01:00:00Z',
+    };
+    const targetedRead = deferred({ sessions: [inboxRow], next_cursor: null, unread_by_session: { [session.id]: 3 } });
+    const broadRead = deferred({
+      sessions: [refreshedRow],
+      next_cursor: 'cursor_after_refresh',
+      unread_by_session: { [session.id]: 4 },
+    });
+    const listInbox = vi.fn()
+      .mockResolvedValueOnce({ sessions: [], next_cursor: 'cursor_before_restore', unread_by_session: {} })
+      .mockReturnValueOnce(targetedRead.promise)
+      .mockReturnValueOnce(broadRead.promise);
+    let handlers: WorkbenchEventHandlers | null = null;
+    apiRef.current = {
+      listInbox,
+      connectWorkbenchEvents: vi.fn((next) => {
+        handlers = next;
+        return vi.fn();
+      }),
+    };
+    let inbox: ReturnType<typeof useWorkbenchInbox> | null = null;
+    const Probe = () => {
+      const value = useWorkbenchInbox();
+      useEffect(() => {
+        inbox = value;
+      }, [value]);
+      return null;
+    };
+
+    render(
+      <WorkbenchInboxProvider>
+        <Probe />
+      </WorkbenchInboxProvider>,
+    );
+    await settle();
+    act(() => {
+      handlers?.onSessionActivity?.({
+        session_id: session.id,
+        scope_id: session.scope_id,
+        event: 'updated',
+        visibility: 'foreground',
+      });
+      void inbox?.refresh();
+    });
+    await settle();
+    await act(async () => {
+      broadRead.resolve({
+        sessions: [refreshedRow],
+        next_cursor: 'cursor_after_refresh',
+        unread_by_session: { [session.id]: 4 },
+      });
+      await broadRead.promise;
+    });
+    await act(async () => {
+      targetedRead.resolve({ sessions: [inboxRow], next_cursor: null, unread_by_session: { [session.id]: 3 } });
+      await targetedRead.promise;
+    });
+    await settle();
+
+    expect(inbox?.inboxSessions).toEqual([refreshedRow]);
+    expect(inbox?.unreadBySession).toEqual({ [session.id]: 4 });
+    expect(inbox?.nextCursor).toBe('cursor_after_refresh');
+  });
+
+  it('lets a later broad feed replace a targeted session snapshot', async () => {
+    const refreshedRow = {
+      ...inboxRow,
+      title: 'Fresh from broad feed',
+      last_activity_at: '2026-08-11T01:00:00Z',
+    };
+    const listInbox = vi.fn()
+      .mockResolvedValueOnce({ sessions: [], next_cursor: 'cursor_before_restore', unread_by_session: {} })
+      .mockResolvedValueOnce({ sessions: [inboxRow], next_cursor: null, unread_by_session: { [session.id]: 3 } })
+      .mockResolvedValueOnce({ sessions: [refreshedRow], next_cursor: 'cursor_after_refresh', unread_by_session: { [session.id]: 4 } });
+    let handlers: WorkbenchEventHandlers | null = null;
+    apiRef.current = {
+      listInbox,
+      connectWorkbenchEvents: vi.fn((next) => {
+        handlers = next;
+        return vi.fn();
+      }),
+    };
+    let inbox: ReturnType<typeof useWorkbenchInbox> | null = null;
+    const Probe = () => {
+      const value = useWorkbenchInbox();
+      useEffect(() => {
+        inbox = value;
+      }, [value]);
+      return null;
+    };
+
+    render(
+      <WorkbenchInboxProvider>
+        <Probe />
+      </WorkbenchInboxProvider>,
+    );
+    await settle();
+    act(() => {
+      handlers?.onSessionActivity?.({
+        session_id: session.id,
+        scope_id: session.scope_id,
+        event: 'updated',
+        visibility: 'foreground',
+      });
+    });
+    await settle();
+    act(() => {
+      void inbox?.refresh();
+    });
+    await settle();
+
+    expect(inbox?.inboxSessions).toEqual([refreshedRow]);
+    expect(inbox?.unreadBySession).toEqual({ [session.id]: 4 });
     expect(inbox?.nextCursor).toBe('cursor_after_refresh');
   });
 
@@ -817,7 +1105,7 @@ describe('Workbench session read ownership', () => {
     await settle();
 
     expect(inbox?.inboxSessions.map((row) => row.session_id)).toEqual([session.id]);
-    expect(inbox?.unreadBySession).toEqual({ [session.id]: 3 });
+    expect(inbox?.unreadBySession).toEqual({});
     expect(inbox?.nextCursor).toBe('cursor_after_refresh');
   });
 });
