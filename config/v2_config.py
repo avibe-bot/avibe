@@ -350,10 +350,7 @@ def _legacy_claude_matching_model_id(source: dict, requested_model: str) -> str 
     intentionally only follows persisted exact hops.
     """
 
-    if (
-        source.get("vendor") != "anthropic"
-        or source.get("supply_channel") != "native_cli"
-    ):
+    if source.get("vendor") != "anthropic":
         return None
     observed_models = [
         model
@@ -477,7 +474,7 @@ def _migrate_legacy_model_hub_payload(payload: dict) -> tuple[dict, bool, tuple[
             return payload, False, ()
         if isinstance(models, list) and any(not isinstance(model, dict) for model in models):
             return payload, False, ()
-    for agent in agents.values():
+    for backend, agent in agents.items():
         if not isinstance(agent, dict):
             return payload, False, ()
         if set(agent) - {
@@ -490,6 +487,9 @@ def _migrate_legacy_model_hub_payload(payload: dict) -> tuple[dict, bool, tuple[
             "menu",
         }:
             return payload, False, ()
+        expected_menu_kind = "open" if backend == "opencode" else "fixed"
+        if agent.get("backend") != backend or agent.get("menu_kind") != expected_menu_kind:
+            return payload, False, ()
         if "mode" in agent and agent["mode"] not in {"hub", "direct"}:
             return payload, False, ()
         mappings = agent.get("mappings")
@@ -499,6 +499,13 @@ def _migrate_legacy_model_hub_payload(payload: dict) -> tuple[dict, bool, tuple[
             not _legacy_mapping_is_valid(mapping) for mapping in mappings
         ):
             return payload, False, ()
+        if backend in {"claude", "codex"}:
+            fixed_menu_ids = set(model_hub_fixed_menu_ids(backend))
+            if any(
+                mapping["enabled"] and mapping["builtin_id"] not in fixed_menu_ids
+                for mapping in mappings or []
+            ):
+                return payload, False, ()
         menu = agent.get("menu")
         if isinstance(menu, dict) and "checked" in menu and not isinstance(menu["checked"], list):
             return payload, False, ()

@@ -1044,9 +1044,17 @@ def test_config_reload_migrates_legacy_mapping_to_exact_route_hop(monkeypatch, t
     assert loaded.load_warnings == ()
 
 
-def test_config_reload_preserves_legacy_claude_alias_resolution(monkeypatch, tmp_path):
+@pytest.mark.parametrize("supply_channel", ["native_cli", "hub"])
+def test_config_reload_preserves_legacy_claude_alias_resolution(
+    monkeypatch,
+    tmp_path,
+    supply_channel,
+):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     source = copy.deepcopy(_schema("source.schema.json")["examples"][0])
+    source["supply_channel"] = supply_channel
+    if supply_channel == "hub":
+        source["credential_ref"] = "cred_anthropic_hub"
     older = source["models"][0]
     newer = {
         **older,
@@ -1325,8 +1333,23 @@ def test_config_reload_recovers_runtime_with_the_canonical_default(
         lambda hub: hub["agents"]["claude"].update({"mode": "hbu"}),
         lambda hub: hub["agents"].update({"future-backend": {"mode": "hub"}}),
         lambda hub: hub["agents"]["claude"].update({"future-field": True}),
+        lambda hub: hub["agents"]["claude"].update({"backend": "codex"}),
+        lambda hub: hub["agents"]["claude"].pop("backend"),
+        lambda hub: hub["agents"]["claude"].update({"menu_kind": "open"}),
+        lambda hub: hub["agents"]["claude"].pop("menu_kind"),
         lambda hub: hub["agents"]["claude"].update(
             {"mappings": [{"builtin_id": "opus", "enabled": True}]}
+        ),
+        lambda hub: hub["agents"]["claude"].update(
+            {
+                "mappings": [
+                    {
+                        "builtin_id": "retired-model",
+                        "target_model_id": "claude-opus-4-6",
+                        "enabled": True,
+                    }
+                ]
+            }
         ),
         lambda hub: hub["agents"]["claude"].update(
             {
@@ -1346,11 +1369,16 @@ def test_config_reload_recovers_runtime_with_the_canonical_default(
         "priority-order-not-array",
         "mapping-not-object",
         "mapping-empty-builtin",
-        "mapping-missing-target",
-        "mapping-enabled-not-boolean",
         "agent-invalid-mode",
         "agent-unknown-backend",
         "agent-unknown-field",
+        "agent-backend-mismatch",
+        "agent-backend-missing",
+        "agent-menu-kind-mismatch",
+        "agent-menu-kind-missing",
+        "mapping-missing-target",
+        "mapping-retired-menu",
+        "mapping-enabled-not-boolean",
     ],
 )
 def test_config_reload_does_not_infer_malformed_legacy_source_order(
