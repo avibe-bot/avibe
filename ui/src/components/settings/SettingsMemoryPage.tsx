@@ -49,6 +49,7 @@ export const SettingsMemoryPage: React.FC = () => {
   const [restarting, setRestarting] = useState(false);
   const [rebuildBusy, setRebuildBusy] = useState(false);
   const [repairBusy, setRepairBusy] = useState(false);
+  const [settingsSaving, setSettingsSaving] = useState(false);
   const [repairError, setRepairError] = useState<string | null>(null);
   const [repairHealth, setRepairHealth] = useState<MemoryCascadeHealth | null>(null);
   const [logGeneration, setLogGeneration] = useState(0);
@@ -85,6 +86,8 @@ export const SettingsMemoryPage: React.FC = () => {
   // sticky per resource, so the static state never flickers away on a later request.
   const remoteUnavailable =
     settingsRead.forbidden || processingRecordRead.forbidden || maintenanceRead.forbidden;
+  const repairMutationBusy =
+    restarting || rebuildBusy || clearing || clearOpen || recoveryAction !== null || settingsSaving;
 
   // Dependency readiness comes from the authoritative Dependencies source. Processing Record
   // health is observational and never doubles as installation or enablement state.
@@ -119,7 +122,7 @@ export const SettingsMemoryPage: React.FC = () => {
   }, [loadSettings, loadProcessingRecord, loadMaintenance, loadDependency]);
 
   const confirmClear = async () => {
-    if (repairBusy || restarting || rebuildBusy) return;
+    if (repairBusy || restarting || rebuildBusy || clearing || recoveryAction !== null || settingsSaving) return;
     setClearing(true);
     // Clear can delete provider payloads before a failed receipt or a lost
     // response, so purge cached payloads for every confirmed attempt.
@@ -189,6 +192,7 @@ export const SettingsMemoryPage: React.FC = () => {
   };
 
   const runClearRecovery = async (action: 'resume' | 'abort', operationId: string) => {
+    if (repairBusy || restarting || rebuildBusy || clearing || clearOpen || recoveryAction !== null || settingsSaving) return;
     setRecoveryAction(action);
     try {
       const res = action === 'resume'
@@ -213,7 +217,7 @@ export const SettingsMemoryPage: React.FC = () => {
   };
 
   const restartEngine = async () => {
-    if (repairBusy || rebuildBusy || clearing || clearOpen) return;
+    if (repairBusy || rebuildBusy || clearing || clearOpen || recoveryAction !== null || settingsSaving) return;
     setRestarting(true);
     try {
       const res = await api.restartMemoryRuntime();
@@ -231,7 +235,7 @@ export const SettingsMemoryPage: React.FC = () => {
   };
 
   const repairIndex = async () => {
-    if (restarting || rebuildBusy || clearing || clearOpen) return;
+    if (settings?.enabled !== true || repairBusy || repairMutationBusy) return;
     setRepairBusy(true);
     setRepairError(null);
     setRepairHealth(null);
@@ -278,7 +282,9 @@ export const SettingsMemoryPage: React.FC = () => {
       dependencyReady={dependencyReady}
       rebuildBusy={rebuildBusy}
       repairBusy={repairBusy}
+      mutationBusy={restarting || recoveryAction !== null}
       onRebuildBusyChange={setRebuildBusy}
+      onSavingChange={setSettingsSaving}
       onSaved={(next) => {
         setSettings(next);
         window.dispatchEvent(new Event('avibe:memory-settings-changed'));
@@ -318,7 +324,7 @@ export const SettingsMemoryPage: React.FC = () => {
             variant="secondary"
             size="xs"
             onClick={() => void restartEngine()}
-            disabled={restarting || rebuildRequired || rebuildBusy || repairBusy || factoryResetBusy || factoryResetPending}
+            disabled={restarting || rebuildRequired || rebuildBusy || repairBusy || repairMutationBusy || factoryResetBusy || factoryResetPending}
           >
             {restarting ? <Loader2 className="animate-spin" /> : <RotateCw />}
             {t('memory.status.restartEngine')}
@@ -385,9 +391,9 @@ export const SettingsMemoryPage: React.FC = () => {
                 onRefresh={refreshProcessingRecord}
                 onResumeClear={(operationId) => void runClearRecovery('resume', operationId)}
                 onAbortClear={(operationId) => void runClearRecovery('abort', operationId)}
-                repairSupported={settings.repair_available === true}
+                repairSupported={settings.enabled === true && settings.repair_available === true}
                 repairBusy={repairBusy}
-                mutationBusy={restarting || rebuildBusy || clearing || clearOpen}
+                mutationBusy={repairMutationBusy}
                 repairError={repairError}
                 repairHealth={repairHealth}
                 onRepair={() => void repairIndex()}

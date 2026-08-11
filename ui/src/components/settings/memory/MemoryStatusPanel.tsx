@@ -148,9 +148,10 @@ const FailureRow: React.FC<{ entry: MemoryFailureLogEntry }> = ({ entry }) => {
 const ClearRecoveryCard: React.FC<{
   recovery: MemoryClearRecovery;
   action: 'resume' | 'abort' | null;
+  mutationBusy: boolean;
   onResume: (operationId: string) => void;
   onAbort: (operationId: string) => void;
-}> = ({ recovery, action, onResume, onAbort }) => {
+}> = ({ recovery, action, mutationBusy, onResume, onAbort }) => {
   const { t } = useTranslation();
   return (
     <div className="flex flex-col gap-3 rounded-md border border-gold/40 bg-gold/[0.06] px-4 py-3">
@@ -182,7 +183,7 @@ const ClearRecoveryCard: React.FC<{
           <Button
             size="xs"
             variant="secondary"
-            disabled={action !== null || !recovery.can_resume}
+            disabled={mutationBusy || action !== null || !recovery.can_resume}
             onClick={() => onResume(recovery.operation_id)}
           >
             {action === 'resume' ? <Loader2 className="animate-spin" /> : <RotateCcw />}
@@ -191,7 +192,7 @@ const ClearRecoveryCard: React.FC<{
           <Button
             size="xs"
             variant="destructive"
-            disabled={action !== null || !recovery.can_abort}
+            disabled={mutationBusy || action !== null || !recovery.can_abort}
             onClick={() => onAbort(recovery.operation_id)}
           >
             {action === 'abort' ? <Loader2 className="animate-spin" /> : <XCircle />}
@@ -449,6 +450,7 @@ export const MemoryStatusPanel: React.FC<{
           <ClearRecoveryCard
             recovery={recovery}
             action={recoveryAction}
+            mutationBusy={repairBusy || mutationBusy}
             onResume={onResumeClear}
             onAbort={onAbortClear}
           />

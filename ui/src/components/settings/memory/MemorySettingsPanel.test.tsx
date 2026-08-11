@@ -80,6 +80,26 @@ afterEach(() => {
 });
 
 describe('MemorySettingsPanel', () => {
+  it('locks settings mutations while the page owns another mutation', () => {
+    render(
+      <MemorySettingsPanel
+        settings={legacySettings}
+        maintenance={{ status: 'ok', data_exists: true, can_clear: true, clear_recovery: null }}
+        maintenanceError={null}
+        dependencyReady
+        mutationBusy
+        onSaved={() => undefined}
+        onReloadSettings={() => undefined}
+        onReloadMaintenance={() => undefined}
+        onClearAll={() => undefined}
+        clearing={false}
+      />,
+    );
+    expect((screen.getByRole('button', { name: 'memory.settings.save' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: 'memory.clear.button' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('switch', { name: 'memory.settings.enableLabel' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
   it('allows endpoint repair while retaining only factory reset lifecycle controls', () => {
     render(
       <MemorySettingsPanel

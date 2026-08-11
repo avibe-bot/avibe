@@ -135,7 +135,9 @@ export const MemorySettingsPanel: React.FC<{
   dependencyReady: boolean;
   rebuildBusy?: boolean;
   repairBusy?: boolean;
+  mutationBusy?: boolean;
   onRebuildBusyChange?: (busy: boolean) => void;
+  onSavingChange?: (saving: boolean) => void;
   onSaved: (next: MemorySettingsOk) => void;
   onReloadSettings: () => void;
   onReloadMaintenance: () => void;
@@ -153,7 +155,9 @@ export const MemorySettingsPanel: React.FC<{
   dependencyReady,
   rebuildBusy = false,
   repairBusy = false,
+  mutationBusy = false,
   onRebuildBusyChange,
+  onSavingChange,
   onSaved,
   onReloadSettings,
   onReloadMaintenance,
@@ -187,7 +191,7 @@ export const MemorySettingsPanel: React.FC<{
   const factoryResetRequired = factoryResetPending;
   const canClearKeys = !enabledDraft;
   const canClearMemory = maintenance?.can_clear === true;
-  const busy = saving || rebuildBusy || repairBusy || factoryResetBusy || factoryResetPending;
+  const busy = saving || rebuildBusy || repairBusy || mutationBusy || factoryResetBusy || factoryResetPending;
 
   const buildPatch = (): MemorySettingsPatch => {
     const patch: MemorySettingsPatch = {};
@@ -213,6 +217,7 @@ export const MemorySettingsPanel: React.FC<{
 
   const submitPatch = async (patch: MemorySettingsPatch) => {
     setSaving(true);
+    onSavingChange?.(true);
     setError(null);
     const needsRebuild = Boolean(patch.confirm_rebuild);
     if (needsRebuild) onRebuildBusyChange?.(true);
@@ -253,6 +258,7 @@ export const MemorySettingsPanel: React.FC<{
       onReloadMaintenance();
     } finally {
       setSaving(false);
+      onSavingChange?.(false);
       if (needsRebuild) onRebuildBusyChange?.(false);
     }
   };

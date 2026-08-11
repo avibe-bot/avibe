@@ -120,6 +120,19 @@ describe('MemoryStatusPanel', () => {
     expect((screen.getByRole('button', { name: 'memory.processingRecord.repair.action' }) as HTMLButtonElement).disabled).toBe(true);
   });
 
+  it('blocks Clear recovery while Repair owns the page', () => {
+    render(
+      <MemoryStatusPanel
+        {...baseProps}
+        recovery={{ operation_id: 'clear-locked', state: 'recovery_needed', can_resume: true, can_abort: true }}
+        repairBusy
+      />,
+    );
+
+    expect((screen.getByRole('button', { name: 'memory.processingRecord.clearRecovery.resume' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: 'memory.processingRecord.clearRecovery.abort' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
   it('shows the structured final health projection and running lock', () => {
     const health = memoryCascadeHealth({
       healthy: false,
