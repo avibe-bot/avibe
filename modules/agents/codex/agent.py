@@ -1561,6 +1561,10 @@ class CodexAgent(BaseAgent):
             async with self._transport_locks[cwd]:
                 # Double-check after acquiring lock
                 existing = self._transports.get(cwd)
+                existing_dead = bool(
+                    existing is not None
+                    and self._transport_alive(existing) is False
+                )
                 desired_fingerprint = launch.fingerprint if launch is not None else "direct"
                 existing_fingerprint = getattr(existing, "runtime_fingerprint", "direct")
                 runtime_changed = existing_fingerprint != desired_fingerprint
@@ -1599,14 +1603,22 @@ class CodexAgent(BaseAgent):
                             ownership = (
                                 await self._runtime_ownership_snapshot_for_cwd_async(cwd)
                             )
+                            replacement_blocked = getattr(
+                                ownership,
+                                (
+                                    "blocks_dead_transport_replacement"
+                                    if existing_dead
+                                    else "blocks_transport_replacement"
+                                ),
+                                True,
+                            )
                             return bool(
                                 ownership is not None
-                                and not getattr(
-                                    ownership,
-                                    "blocks_transport_replacement",
-                                    True,
+                                and not replacement_blocked
+                                and (
+                                    existing_dead
+                                    or not self._has_active_turns_for_cwd(cwd)
                                 )
-                                and not self._has_active_turns_for_cwd(cwd)
                             )
 
                         detached = await self._stop_and_detach_transport_generation(
