@@ -23,7 +23,7 @@ Hub has not shipped, so there is no internal contract migration or compatibility
 | POST `/api/models/sources` | `source-create.schema.json` → `{source: Source, added_to: AddedTo[], adopted_by: AdoptedBy[]}` | The server assigns `id` and `created_at`; plaintext keys are transient. Add-time matching and placement are materialized before response. An optional `client_nonce` is reserved only in process before work and persisted only on the committed Source for list-based lost-response reconciliation. |
 | PATCH `/api/models/sources/<id>` | `{display_name?, base_url?, force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded Source-mutation envelope | Metadata/Base-URL mutation from the authoritative matrix in `model-hub.md` §4.5. A forced retry confirms only an exact echo of the refusal plan. |
 | PUT `/api/models/sources/<id>/credential` | `{key, force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded Source-mutation envelope | API-key replacement. Confirmation fields are JSON body fields. Success is exactly `{source, removed_hops, interrupted}`; the OAuth-only repair tail never appears here. |
-| POST `/api/models/sources/<id>/reauth` | `{acknowledge_irreversible?: true}` → `{flow: OAuthFlow}` | A `native_cli` source requires the acknowledgement before OAuth starts. See repair rules. |
+| POST `/api/models/sources/<id>/reauth` | `{acknowledge_irreversible?: true}` → `{flow: OAuthFlow}` | Both Hub OAuth and `native_cli` Sources require the acknowledgement before OAuth starts. Missing or false acknowledgement returns `reauth_confirmation_required` before any adapter call. See repair rules. |
 | DELETE `/api/models/sources/<id>?force=<bool>` | `{would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded `409` or `{removed_hops, interrupted}` | A confirmed delete removes the Source from every backend Source order and Route chain in one transaction. A nonempty destructive plan commits only when the body exactly echoes the current refusal plan. |
 | POST `/api/models/sources/<id>/refresh` | `{force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded Source-mutation envelope | The sole saved connectivity/discovery/recovery mutation. |
 | POST `/api/models/sources/<source_id>/models` | `{model_id, display_name?, reasoning_efforts}` → `{source: Source}` | Creates one user-authored model entry. The Source identity comes only from the path. |
@@ -571,11 +571,13 @@ differently only if all invariants remain true:
    Hub OAuth material is engine-owned but identity-bound to a stable ref, so replacing
    its grant is irreversible once the new material is written. Native credentials are
    CLI-owned and replacement is likewise irreversible once login starts.
-5. **Server-enforced native acknowledgement.** For a `native_cli` source,
-   `POST …/reauth` requires `{"acknowledge_irreversible": true}`. Missing or false
-   returns `reauth_confirmation_required` before any OAuth adapter call. This is
-   unconditional and does not claim that a pre-login supply prediction exists.
-   Hub-channel repair does not require this acknowledgement.
+5. **Server-enforced OAuth re-auth acknowledgement.** For both Hub OAuth and
+   `native_cli` Sources, `POST …/reauth` requires
+   `{"acknowledge_irreversible": true}`. Missing or false returns
+   `reauth_confirmation_required` before any OAuth adapter call. This is unconditional
+   across both supply channels and does not claim that a pre-login supply prediction
+   exists. Transactional API-key repair through `PUT …/credential` remains outside
+   this acknowledgement rule.
 6. **Repair-result ownership.** API-key replacement returns only the standard guarded
    Source-mutation success envelope `{source, removed_hops, interrupted}`. Its repair
    effect is read from the returned `Source.state`, while `removed_hops` and
@@ -1034,6 +1036,7 @@ contract harness and API-boundary tests enforce:
 | `channel_switch.from_source == channel_switch.to_source` | event emitter |
 | API AgentSupply includes `cli_present`, `selected_by_agent`, `selected_model_id`, `selected_model_explicit`, policy-free `sources.order`, `supply_status`, `model_supply[].has_runnable_hop`, and `named_agents`; every Source includes persisted `last_discovered_at`, optional persisted `client_nonce`, derived `adopted_by`, and model retirement tombstones; source creation returns `added_to` and top-level `adopted_by` equal to `source.adopted_by`; saved refresh and discovered-model retirement use the guarded Source envelope | API payload test |
 | every OAuthFlow response includes `intent` | API payload test |
+| Hub OAuth and native CLI `POST /sources/<id>/reauth` requests with missing or false `acknowledge_irreversible` return `reauth_confirmation_required` before the OAuth adapter is called; true acknowledgement is the only start path, while transactional API-key PUT is unaffected | API route negative/positive fixtures |
 | OAuth start claims `(client_nonce, vendor, channel)` before provider work; a blocked first call plus concurrent same-tuple retry coalesces to one pending result and exactly one provider start, failure/cancellation releases, and success atomically exposes one echoed-nonce flow | OAuth registry, API payload, and auth-setup closed-loop tests |
 | every RuntimeDependency API payload includes server-derived `host_platform` and `status.error_key`; `installing` has exactly null `installed_version`, false `verified`, and null `listening`, with one positive and each-field contradiction fixtures; only supported `not_installed` starts a download, installed states are state-preserving no-ops, page reload preserves a live `installing` job, and service bootstrap reconciles an orphan before serving runtime endpoints | RuntimeDependency schema and API payload tests |
 | Source create reserves `client_nonce` in process before work; the client reads Sources before any lost-response retry; fixtures cover `nonce.in_flight` (`source_create_in_progress`/no work), `nonce.released` (atomic reserve/exactly one fresh attempt), and `nonce.committed` (`source_nonce_conflict` followed by a list read that finds exactly one Source with that nonce), while AC-26 cleanup or process restart releases any live reservation and Source deletion releases its committed nonce; after restart or deletion and a list miss, same-nonce create is positively asserted as a fresh creation | config, API payload, cancellation/restart, Source-delete, and client retry tests |

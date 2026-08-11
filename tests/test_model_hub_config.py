@@ -690,6 +690,16 @@ def test_v5_shape_amendments_reject_the_false_states_they_replace():
         '- terminal `intent: "reauth"` → '
         '`{flow, source, recovered, interrupted_pairs}`.'
     ) == 1
+    reauth_contract = api_contract.split(
+        "## Credential replacement and reauth", 1
+    )[1].split("## Source refresh and blocked-source recovery", 1)[0]
+    assert "Hub-channel repair does not require this acknowledgement" not in reauth_contract
+    assert "For both Hub OAuth and\n   `native_cli` Sources" in reauth_contract
+    assert re.search(
+        r"Missing or false returns\s+`reauth_confirmation_required` before any OAuth adapter call",
+        reauth_contract,
+    )
+    assert "Transactional API-key repair through `PUT …/credential` remains outside" in reauth_contract
 
     runtime_schema = _schema("runtime-dependency.schema.json")
     runtime_validator = Draft7Validator(runtime_schema)
