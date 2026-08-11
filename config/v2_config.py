@@ -227,10 +227,8 @@ def _migrate_fixed_menu_routes_on_load(payload: dict) -> dict:
 def _legacy_source_eligible_for_backend(source: object, backend: str) -> bool:
     if not isinstance(source, dict):
         return False
-    if source.get("supply_channel") == "hub":
-        return True
     if source.get("kind") == "api_key":
-        return False
+        return source.get("supply_channel") == "hub"
     expected_backend = {"anthropic": "claude", "openai": "codex"}.get(source.get("vendor"))
     return expected_backend == backend
 
@@ -526,7 +524,8 @@ def _migrate_legacy_model_hub_payload(payload: dict) -> tuple[dict, bool, tuple[
         or any(
             isinstance(source, dict)
             and any(
-                isinstance(model, dict) and "provenance" in model
+                isinstance(model, dict)
+                and ("provenance" in model or "reasoning_efforts" not in model)
                 for model in source.get("models") or []
             )
             for source in raw_sources or []
@@ -547,10 +546,14 @@ def _migrate_legacy_model_hub_payload(payload: dict) -> tuple[dict, bool, tuple[
             continue
         source.pop("experimental_consent_at", None)
         for model in source.get("models") or []:
-            if isinstance(model, dict) and "provenance" in model:
+            if not isinstance(model, dict):
+                continue
+            if "provenance" in model:
                 if "origin" not in model:
                     model["origin"] = model["provenance"]
                 model.pop("provenance", None)
+            if "reasoning_efforts" not in model:
+                model["reasoning_efforts"] = []
         source_id = source.get("id")
         if isinstance(source_id, str):
             sources_by_id[source_id] = source
@@ -587,6 +590,12 @@ def _migrate_legacy_model_hub_payload(payload: dict) -> tuple[dict, bool, tuple[
                 builtin_id = item.get("builtin_id")
                 if isinstance(builtin_id, str) and builtin_id not in mapping_by_menu:
                     mapping_by_menu[builtin_id] = item
+            if backend == "opencode":
+                route_ids.extend(
+                    builtin_id
+                    for builtin_id, mapping in mapping_by_menu.items()
+                    if builtin_id not in route_ids and mapping.get("enabled") is True
+                )
             routes = {}
             for model_id in route_ids:
                 mapping = mapping_by_menu.get(model_id)

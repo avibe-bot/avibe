@@ -1042,6 +1042,68 @@ def test_config_reload_migrates_legacy_mapping_to_exact_route_hop(monkeypatch, t
     assert route.hops[0].source_id == source["id"]
     assert route.hops[0].model_id == model_id
     assert loaded.load_warnings == ()
+    assert loaded.model_hub.sources[0].models[0].reasoning_efforts == []
+
+
+def test_config_reload_preserves_enabled_unchecked_legacy_opencode_mapping(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    source = copy.deepcopy(_schema("source.schema.json")["examples"][1])
+    source["models"][0]["provenance"] = source["models"][0].pop("origin")
+    source["models"][0].pop("reasoning_efforts")
+    current = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    legacy = _legacy_model_hub_payload(current["model_hub"])
+    legacy["sources"] = [source]
+    legacy["agents"]["opencode"]["mode"] = "hub"
+    legacy["agents"]["opencode"]["sources"] = {
+        "policy": "custom",
+        "order": [source["id"]],
+    }
+    legacy["agents"]["opencode"]["menu"] = {"view": "featured", "checked": []}
+    legacy["agents"]["opencode"]["mappings"] = [
+        {
+            "builtin_id": "custom/glm-5.2-air",
+            "target_model_id": "custom/glm-5.2-air",
+            "enabled": True,
+        }
+    ]
+    current["model_hub"] = legacy
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(current), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    route = loaded.model_hub.agents["opencode"].routes["custom/glm-5.2-air"]
+    assert [(hop.source_id, hop.model_id) for hop in route.hops] == [
+        (source["id"], source["models"][0]["id"]),
+    ]
+    assert loaded.load_warnings == ()
+
+
+def test_config_reload_keeps_legacy_hub_subscription_backend_specific(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    source = copy.deepcopy(_schema("source.schema.json")["examples"][0])
+    source["supply_channel"] = "hub"
+    source["credential_ref"] = "cred_anthropic_hub"
+    for model in source["models"]:
+        model["provenance"] = model.pop("origin")
+    current = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    legacy = _legacy_model_hub_payload(current["model_hub"])
+    legacy["sources"] = [source]
+    for backend in ("claude", "codex"):
+        legacy["agents"][backend]["mode"] = "hub"
+        legacy["agents"][backend]["sources"] = {
+            "policy": "custom",
+            "order": [source["id"]],
+        }
+    current["model_hub"] = legacy
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(current), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert loaded.model_hub.agents["claude"].sources.order == [source["id"]]
+    assert loaded.model_hub.agents["codex"].sources.order == []
+    assert loaded.load_warnings == ()
 
 
 @pytest.mark.parametrize("supply_channel", ["native_cli", "hub"])
