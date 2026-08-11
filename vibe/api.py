@@ -671,6 +671,17 @@ def load_config() -> V2Config:
     return V2Config.load()
 
 
+def config_recovery_notice(config: V2Config) -> Optional[str]:
+    """Return the localized, non-diagnostic message for a recovered config."""
+
+    if not getattr(config, "load_warnings", ()):
+        return None
+    return backend_t(
+        "error.configRecovery.beforeAuth",
+        getattr(config, "language", "en") or "en",
+    )
+
+
 def _config_recovery_message() -> Optional[str]:
     """Return a localized guard message before mutating backend-owned auth files."""
 
@@ -679,10 +690,7 @@ def _config_recovery_message() -> Optional[str]:
             config = load_config()
         except FileNotFoundError:
             return None
-    if getattr(config, "load_warnings", ()):
-        language = getattr(config, "language", "en") or "en"
-        return backend_t("error.configRecovery.beforeAuth", language)
-    return None
+    return config_recovery_notice(config)
 
 
 def _deep_merge_dicts(base: dict, patch: dict) -> dict:
@@ -1249,14 +1257,8 @@ def client_config_payload(config: V2Config) -> dict:
 
     payload = config_to_payload(config)
     payload.pop("memory", None)
-    recovery_warnings = []
-    if config.load_warnings:
-        recovery_warnings.append(
-            backend_t(
-                "error.configRecovery.beforeAuth",
-                getattr(config, "language", "en") or "en",
-            )
-        )
+    recovery_notice = config_recovery_notice(config)
+    recovery_warnings = [recovery_notice] if recovery_notice else []
     payload["config_recovery"] = {
         "required": bool(config.load_warnings),
         "warnings": recovery_warnings,

@@ -624,6 +624,18 @@ class ModelHubService:
         self.store.save(canonical)
         return canonical
 
+    def _save_runtime_config(self, config: ModelHubConfig) -> bool:
+        """Best-effort persistence for runtime state during config recovery."""
+
+        try:
+            self._save_config(config)
+        except ValueError as exc:
+            if "recovery warnings" not in str(exc):
+                raise
+            logger.warning("Skipped Model Hub runtime-state persistence during config recovery")
+            return False
+        return True
+
     def _ensure_config_writable(self) -> None:
         ensure_writable = getattr(self.store, "ensure_writable", None)
         if callable(ensure_writable):
@@ -3208,8 +3220,8 @@ class ModelHubService:
                 status=status,
                 detail_key=detail_key,
             )
-            self._save_config(config)
-            if not unchanged:
+            persisted = self._save_runtime_config(config)
+            if persisted and not unchanged:
                 self._record_event(
                     agent=cast(EventAgent, backend),
                     kind="needs_action",
@@ -3829,6 +3841,7 @@ class ModelHubService:
         async with self._mutation_lock:
             config = self.store.load()
             config_changed = False
+            recovered_sources: list[ModelHubSourceConfig] = []
             for source_id in resolution.recoverable_source_ids:
                 source = next(
                     (item for item in config.sources if item.id == source_id),
@@ -3841,17 +3854,19 @@ class ModelHubService:
                     continue
                 source.state = recovered_source.state
                 config_changed = True
-                self._record_event(
-                    agent=cast(EventAgent, resolution.backend),
-                    kind="recover",
-                    model_id=resolution.requested_model,
-                    reason="recovery",
-                    to_source=source.id,
-                    to_label=source.display_name,
-                    now=self.now(),
-                )
+                recovered_sources.append(source)
             if config_changed:
-                self._save_config(config)
+                if self._save_runtime_config(config):
+                    for source in recovered_sources:
+                        self._record_event(
+                            agent=cast(EventAgent, resolution.backend),
+                            kind="recover",
+                            model_id=resolution.requested_model,
+                            reason="recovery",
+                            to_source=source.id,
+                            to_label=source.display_name,
+                            now=self.now(),
+                        )
 
     async def _cooldown(
         self,
@@ -3874,8 +3889,8 @@ class ModelHubService:
                 retry_at=(self.now() + timedelta(seconds=decision.cooldown_seconds)).isoformat(),
                 detail_key=detail_key or f"models.source.cooldown.{decision.reason}",
             )
-            self._save_config(config)
-            if not already_cooling:
+            persisted = self._save_runtime_config(config)
+            if persisted and not already_cooling:
                 self._record_event(
                     agent=agent,
                     kind="cooldown",

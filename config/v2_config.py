@@ -465,6 +465,11 @@ def _migrate_legacy_model_hub_payload(payload: dict) -> tuple[dict, bool, tuple[
         {"order": model_hub["priority_order"]}
     ):
         return payload, False, ()
+    if (
+        "subscription_hub_experimental" in model_hub
+        and not isinstance(model_hub["subscription_hub_experimental"], bool)
+    ):
+        return payload, False, ()
     for source in raw_sources or []:
         if not isinstance(source, dict):
             return payload, False, ()
@@ -2421,6 +2426,13 @@ class V2Config:
             if platform_payload is None:
                 platform_configs[descriptor.id] = None
                 continue
+
+            for credential_field in descriptor.credential_fields:
+                credential_value = platform_payload.get(credential_field)
+                if credential_value is not None and not isinstance(credential_value, str):
+                    raise ValueError(
+                        f"Config '{descriptor.config_key}.{credential_field}' must be a string"
+                    )
 
             platform_configs[descriptor.id] = descriptor.create_config(platform_payload)
 

@@ -926,9 +926,12 @@ def test_config_reload_recovers_invalid_platform_metadata_only(monkeypatch, tmp_
     ("platform", "invalid_fields"),
     [
         ("slack", {"bot_token": "invalid"}),
+        ("slack", {"bot_token": 123}),
         ("discord", {"thread_auto_archive_minutes": 1}),
+        ("discord", {"bot_token": {}}),
         ("telegram", {"bot_token": "invalid"}),
         ("lark", {"domain": "invalid"}),
+        ("lark", {"app_id": 123}),
     ],
 )
 def test_config_reload_recovers_invalid_platform_adapter_only(
@@ -1429,6 +1432,7 @@ def test_config_reload_recovers_runtime_with_the_canonical_default(
             {"sources": {"policy": "custom", "order": "invalid"}}
         ),
         lambda hub: hub.update({"priority_order": {"invalid": True}}),
+        lambda hub: hub.update({"subscription_hub_experimental": "false"}),
         lambda hub: hub["agents"]["claude"].update({"mappings": ["invalid"]}),
         lambda hub: hub["agents"]["claude"].update(
             {
@@ -1491,6 +1495,7 @@ def test_config_reload_recovers_runtime_with_the_canonical_default(
         "sources-not-object",
         "custom-order-not-array",
         "priority-order-not-array",
+        "subscription-hub-experimental-not-bool",
         "mapping-not-object",
         "mapping-empty-builtin",
         "agent-invalid-mode",

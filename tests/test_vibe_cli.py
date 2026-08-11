@@ -288,7 +288,7 @@ def test_doctor_surfaces_configuration_recovery_warnings(monkeypatch, tmp_path):
     config_path = tmp_path / "config.json"
     config_path.write_text("{}", encoding="utf-8")
     doctor_path = tmp_path / "doctor.json"
-    warning = "Recovered invalid config section 'model_hub': invalid route"
+    warning = "Recovered invalid config section 'platforms': sk-leaked-platform-token"
     config = cli.V2Config.default()
     config.load_warnings = (warning,)
 
@@ -309,9 +309,11 @@ def test_doctor_surfaces_configuration_recovery_warnings(monkeypatch, tmp_path):
     result = cli._doctor()
 
     config_group = next(group for group in result["groups"] if group["name"] == "Configuration")
-    recovery_item = next(item for item in config_group["items"] if item["message"] == warning)
+    recovery_item = next(item for item in config_group["items"] if item.get("code") == "config.recovery")
     assert recovery_item["status"] == "warn"
     assert recovery_item["code"] == "config.recovery"
+    assert recovery_item["message"] != warning
+    assert "sk-leaked-platform-token" not in json.dumps(result)
     assert result["summary"]["warn"] >= 1
 
 

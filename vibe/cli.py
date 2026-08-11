@@ -10655,11 +10655,12 @@ def _doctor(*, deep: bool = False):
     try:
         config = V2Config.load(config_path)
         if config.load_warnings:
-            for warning in config.load_warnings:
+            recovery_notice = api.config_recovery_notice(config)
+            if recovery_notice:
                 _add_doctor_item(
                     config_items,
                     "warn",
-                    warning,
+                    recovery_notice,
                     "Review the preserved config backup and repair it before changing settings.",
                     code="config.recovery",
                 )
