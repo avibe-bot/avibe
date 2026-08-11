@@ -3899,6 +3899,80 @@ class CodexTransportCwdStalenessTests(unittest.IsolatedAsyncioTestCase):
             stale.stop.assert_not_awaited()
             self.assertIs(agent._transports[cwd], stale)
 
+    async def test_hfr_473_dead_transport_restarts_past_stale_turn_ownership(self):
+        import tempfile
+
+        agent = self._agent()
+        with tempfile.TemporaryDirectory() as cwd:
+            dead = SimpleNamespace(
+                is_initialized=False,
+                is_alive=False,
+                has_pending_notifications=False,
+                runtime_fingerprint="direct",
+                stop=AsyncMock(),
+            )
+            agent._transports[cwd] = dead
+            agent._transport_cwd_inodes[cwd] = os.stat(cwd).st_ino
+            agent._runtime_ownership_snapshot_for_cwd = Mock(
+                return_value=SimpleNamespace(
+                    blocks_transport_replacement=True,
+                    blocks_dead_transport_replacement=False,
+                )
+            )
+            agent._session_mgr = SimpleNamespace(
+                sessions_for_cwd=Mock(return_value=["session-1"]),
+                invalidate_thread=Mock(),
+            )
+            agent._turn_registry = SimpleNamespace(
+                get_active_turn=Mock(return_value="turn-from-dead-generation"),
+                has_pending_turn_start=Mock(return_value=False),
+                clear_session=Mock(),
+            )
+            agent._clear_thread_developer_instructions = Mock()
+            fresh = SimpleNamespace(
+                is_initialized=True,
+                pid=2468,
+                start=AsyncMock(),
+                on_notification=Mock(),
+                on_server_request=Mock(),
+            )
+
+            with patch.object(_MODULE, "CodexTransport", return_value=fresh):
+                result = await agent._get_or_create_transport(cwd)
+
+            self.assertIs(result, fresh)
+            dead.stop.assert_awaited_once()
+            fresh.start.assert_awaited_once()
+            agent._session_mgr.invalidate_thread.assert_called_once_with("session-1")
+            agent._turn_registry.clear_session.assert_called_once_with("session-1")
+
+    async def test_dead_transport_preserves_generation_with_active_activity_owner(self):
+        import tempfile
+
+        agent = self._agent()
+        with tempfile.TemporaryDirectory() as cwd:
+            dead = SimpleNamespace(
+                is_initialized=False,
+                is_alive=False,
+                has_pending_notifications=False,
+                runtime_fingerprint="direct",
+                stop=AsyncMock(),
+            )
+            agent._transports[cwd] = dead
+            agent._transport_cwd_inodes[cwd] = os.stat(cwd).st_ino
+            agent._runtime_ownership_snapshot_for_cwd = Mock(
+                return_value=SimpleNamespace(
+                    blocks_transport_replacement=True,
+                    blocks_dead_transport_replacement=True,
+                )
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "durable owner"):
+                await agent._get_or_create_transport(cwd)
+
+            dead.stop.assert_not_awaited()
+            self.assertIs(agent._transports[cwd], dead)
+
     async def test_runtime_change_preserves_transport_with_pid_run_owner(self):
         import tempfile
 
