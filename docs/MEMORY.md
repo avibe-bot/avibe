@@ -55,10 +55,11 @@ finish before starting another one.
    Memory must be enabled. This restarts the Memory engine without changing
    settings, rebuilding indexes, or deleting retained data.
 2. **Repair index**: Use it when restarting does not clear index health
-   warnings or pending work. Its appearance under **Engine status > Available capabilities**
-   is controlled by `repair_available`; an unavailable health snapshot alone does
-   not hide it. Running Repair also requires Memory to be enabled and the live
-   Memory Runtime and sidecar to be available.
+   warnings or pending work. Its appearance under **Engine status** is
+   controlled by `repair_available`; with a loaded health snapshot it appears
+   beside **Processing queue**, and an unavailable health snapshot moves it
+   beside **Engine status** rather than hiding it. Running Repair also requires
+   Memory to be enabled and the live Memory Runtime and sidecar to be available.
    Requests while Memory is disabled are refused, and an unavailable runtime or
    sidecar causes Repair to fail. Repair rescans Markdown memory and drains
    pending work while keeping the engine available; it preserves the existing
