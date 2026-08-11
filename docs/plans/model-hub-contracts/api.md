@@ -20,7 +20,7 @@ Hub has not shipped, so there is no internal contract migration or compatibility
 | --- | --- | --- |
 | GET `/api/models/sources` | → `{sources: Source[]}` | Unordered asset inventory. Every Source carries server-derived `adopted_by` and any persisted `client_nonce`; array order is never a spend order. |
 | POST `/api/models/sources/observe` | `{vendor, base_url?, key, protocol_order?}` → `{observation: SourceObservation}` | Non-persisting connectivity/authentication/protocol/inventory observation. `protocol_order` only orders the three probes; it never supplies a conclusion. No credential reference is returned. |
-| POST `/api/models/sources` | `source-create.schema.json` → `{source: Source, added_to: AddedTo[], adopted_by: AdoptedBy[]}` | The server assigns `id` and `created_at`; plaintext keys are transient. Add-time matching and placement are materialized before response. An optional `client_nonce` is reserved only in process before work and persisted only on the committed Source for list-based lost-response reconciliation. |
+| POST `/api/models/sources` | `source-create.schema.json` → `{source: Source, added_to: AddedTo[], adopted_by: AdoptedBy[]}` | The server assigns `id` and `created_at`; plaintext keys are transient. Add-time matching and placement are materialized before response. Optional `accept_unavailable_inventory` is the sole explicit consent for a repeated, protocol-proven observation whose inventory discovery fails. An optional `client_nonce` is reserved only in process before work and persisted only on the committed Source for list-based lost-response reconciliation. |
 | PATCH `/api/models/sources/<id>` | `{display_name?, base_url?, force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded Source-mutation envelope | Metadata/Base-URL mutation from the authoritative matrix in `model-hub.md` §4.5. A forced retry confirms only an exact echo of the refusal plan. |
 | PUT `/api/models/sources/<id>/credential` | `{key, force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded Source-mutation envelope | API-key replacement. Confirmation fields are JSON body fields. Success is exactly `{source, removed_hops, interrupted}`; the OAuth-only repair tail never appears here. |
 | POST `/api/models/sources/<id>/reauth` | `{acknowledge_irreversible?: true}` → `{flow: OAuthFlow}` | Both Hub OAuth and `native_cli` Sources require the acknowledgement before OAuth starts. Missing or false acknowledgement returns `reauth_confirmation_required` before any adapter call. See repair rules. |
@@ -79,11 +79,12 @@ any persisted Source.
 For an API-key `POST /api/models/sources`, the server performs the same
 response-backed observation internally before its independent committed credential
 provisioning. It accepts the create fields and optional `protocol_order`, but never
-accepts a protocol conclusion from the caller. A null protocol produces no Source; a
-proven protocol may be saved even when inventory discovery failed, with the resulting
-Source health reflecting that uncertainty. Subscription OAuth creation follows its
-vendor-specific observation flow before commit. Saved Sources use the stored
-protocol for every later operation.
+accepts a protocol conclusion or inventory result from the caller. A null protocol
+produces no Source. A proven protocol with failed inventory discovery produces no Source
+unless this request explicitly carries `accept_unavailable_inventory: true`; the accepted
+Source has `models: []` and the existing uncertain health projection. Subscription OAuth
+creation follows its vendor-specific observation flow before commit. Saved Sources use
+the stored protocol for every later operation.
 
 `source-create.schema.json` is the complete `SourceCreate` request. Its field table is
 authoritative; no Source response field may be inferred backwards into the request:
@@ -96,11 +97,26 @@ authoritative; no Source response field may be inferred backwards into the reque
 | `key` | yes | Add Source client → transient and committed credential provisioning | Plaintext is write-only and never appears in a response, Source record, event, or log. |
 | `protocol_order` | no | Add Source client → observation adapter | Contains all three protocols exactly once and only orders probes. |
 | `client_nonce` | no | Add Source client → process-local create reservation and persisted Source read projection | Client-generated before send and atomically reserved in the live process before observation or credential work; only the successful commit persists and echoes it unchanged so an ordinary list read can reconcile a lost response. |
+| `accept_unavailable_inventory` | no | Add Source state ⑤ client → Source-create commit gate | Boolean; omission is `false`. It consents only to the server's repeated observation returning a proven protocol with `discovery: failed`; it never supplies or overrides observation evidence. |
 
 The request has no `id`, `created_at`, `state`, `usage`, `protocol`, discovered-model,
 credential-ref, billing, or supply-channel field. The server assigns or observes all of
 them. A successfully observed empty inventory is represented by the returned
 `source.models: []`; the client never submits a discovered inventory as authority.
+
+### Source-create unavailable-inventory consent
+
+`POST /api/models/sources` always repeats response-backed observation; it never trusts the
+earlier unsaved result that led the client to this request. The boolean is inert outside
+the one inventory-failure cell, so a stale state ⑤ decision cannot weaken any other
+create precondition:
+
+| Repeated server observation | `accept_unavailable_inventory` | Server result |
+| --- | --- | --- |
+| Protocol proved; `discovery: succeeded` | omitted, `false`, or `true` | Ordinary create from the newly observed inventory; a legitimately empty result may commit as `models: []`. |
+| Protocol proved; `discovery: failed` | omitted or `false` | Existing classified `discovery_failed`; no Source or committed credential is written, and AC-26 cleanup settles before return. |
+| Protocol proved; `discovery: failed` | `true` | Commit exactly one Source with the proved protocol, `models: []`, and the existing uncertain health projection; matching has no inventory candidates. |
+| Protocol not proved, or an earlier reachability/authentication failure | omitted, `false`, or `true` | Existing classified failure; no Source is committed. The flag cannot authorize this result. |
 
 When `client_nonce` is present, the server atomically reserves it in the live process
 before observation, transient-ref creation, or committed credential provisioning. The
