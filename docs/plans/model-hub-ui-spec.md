@@ -839,7 +839,7 @@ state exit; held intent never bypasses the evidence column.
 | §1.1 | Leaving the gateway | 切换到直连 pressed on a gateway group `[frame]` D-30 — `PATCH /api/models/agents/<backend>/mode` | F1, in place on the group head | `gateway.switchToDirect`, `gateway.fail.switchToDirect`, `gateway.retry` | Success → the group re-renders in its 直连 form; when it was the last gateway backend the page is decided by the sources that are still there, not by the switch — no source left → 09, at least one source retained → **01**, which is §1.8's own *Retained sources* branch and not this frame; a failure keeps the group on the gateway and puts the line and 重试 on the group head, which is the slot the re-rendered form would have used |
 | §1.2 | Loading route | A model row opens 02 with the exact `(backend, menu_model)` held; `GET /api/models/agents/<backend>/chain?model=<id>` owns the dialog body | F1 → Route unread | `route.title`, `route.loading`, `route.cancel` | An AgentChain answer installs its exact ordered pair projection as both origin and draft → Ready. `direct_mode` closes into the current Direct projection and restores focus to its row; no local draft survives a mode change |
 | §1.2 | Route unread `[derived]` | The dialog-owned opening chain read failed while the containing page remains mounted | F1, in place | `route.fail.read`, `route.retry`, `route.cancel` | 重试 → Loading route. 取消 / close / Escape sends no mutation, closes and returns focus to the invoking row. The independent dialog read never overwrites that page row: it retains the exact pre-open Ready / takeover / unconfigured / paused / Chain unresolved projection, and D-35 repair is needed only if that held row was already unresolved |
-| §1.2 | Ready | The exact AgentChain is held and the local pair projection is byte-identical to its opening `chain` | F5 | `route.title`, `route.section`, `route.addHop`, `route.reorder`, `route.hint`, `route.cancel`, `route.save`; `route.removeHop` / `route.grip` when `hops` is nonempty; `route.empty` only when it is empty; `route.add.none` when no candidate remains; `route.sourceMissing` on a hop whose Source join misses | A valid add, removal, drag, keyboard move or source-order sort that changes the pair array → Dirty. No-op reorder remains Ready. 取消 / close / Escape → close unchanged. Save is disabled while unchanged or V5-invalid; an empty but changed array is valid and may be submitted |
+| §1.2 | Ready | The exact AgentChain is held and the local pair projection is byte-identical to its opening `chain` | F5 | `route.title`, `route.section`, `route.addHop`, `route.reorder`, `route.hint`, `route.cancel`, `route.save`; `route.removeHop` / `route.grip` when `hops` is nonempty; `route.empty` only when it is empty; `route.add.none` when no candidate remains; `route.add.source`, `route.add.model`, `route.add.confirm` while the Add selector is open; `route.sourceMissing` only on a hop whose authoritative chain annotation reads `reason: source_missing` | A valid add, removal, drag, keyboard move or source-order sort that changes the pair array → Dirty. No-op reorder remains Ready. 取消 / close / Escape → close unchanged. Save is disabled while unchanged or V5-invalid; an empty but changed array is valid and may be submitted |
 | §1.2 | Dirty | The ordered pair draft differs from the current reversible origin; it may become V5-invalid only after a reconciliation refresh changes its authorities | F5 — every edit is local | Same normal-frame keys as Ready | A V5-valid draft enables 保存 → Saving with one immutable submitted draft; an invalid draft stays visible with Save disabled until edited. 取消 / close / Escape discards the draft and restores the exact current reversible origin. Add/remove/reorder continue to edit only the local draft |
 | §1.2 | Saving | 保存 or guard confirmation activated — `PUT /api/models/agents/<backend>/chain?model=<id>` sends the complete submitted `hops`; the first request is non-forced and a confirmed retry carries `force: true` plus both exact refusal arrays `[contract]` | F3 on guarded `409` → Route save refused; `direct_mode` → discard the obsolete draft, close immediately into the current Direct projection and return focus to that model row; another shaped rejection → Route save rejected; transport/no answer → Route save outcome unknown. This request owns the dialog and disables every dismissal path | `route.saving` | R6 consumes success: either impact array non-empty → Route impact reported; both empty → Route committed, reconciling with the returned AgentChain held. A guarded 409 holds the current plan only; no intermediate/accepted response exists |
 | §1.2 | Route committed, reconciling `[derived]` | R6 success carries two empty impact arrays, or an authoritative matching readback proves the desired Route while response-only arrays are unavailable; the exact returned/readback AgentChain and tail disposition are held while M6 reads the complete model surface. Entry moves focus to 完成 | F2 → Committed projection stale; the Route write/desired state is already proven | `route.refreshing`, `route.impact.done` | M6 success closes into the current model row. 完成, close, Escape or outside press is a DP-4 committed exit: hand the held chain to the row, return focus there, mark every not-yet-read dependent projection stale and transfer the in-flight M6 read to the page owner. Its late success installs current projections; late failure renders `route.impact.refreshFail` at page grain with read-only `route.retry`. No exit restores the origin or resends the PUT |
@@ -1960,11 +1960,19 @@ the menu model, the subtitle holds the backend product name, and the opening mod
 the focus owner. Error, refusal and committed-report bodies replace the normal body in the
 same modal; they do not create another Route editor `[derived]`.
 
-The Source-name line joins each exact `source_id` to the page-held `Source[]` projection
-`[derived]`. A persisted `source_missing` hop has no matching Source row by definition,
-so it renders localized `route.sourceMissing` followed by ` · ` and the exact raw
-`source_id` in mono; its second line still renders the exact upstream `model_id`. The row
-therefore remains identifiable, removable and reorderable without inventing a Source name.
+**Hop-projection precedence is total** `[contract]` `[derived]`. The exact chain hop is
+classified before any display join. A stale page-held `Source[]` row can still match a
+Source that the later dialog-owned chain read marks missing, so join presence is never a
+substitute for `AgentChain.chain[*].reason`:
+
+| Priority | Authoritative chain classification | Page-held `Source[]` consumption | Rendered identity and action disposition |
+| --- | --- | --- | --- |
+| HP-1 | `reason: source_missing` | Do not consume a matching stale row and do not let a join override this classification | Render localized `route.sourceMissing`, then ` · ` and the exact raw `source_id` in mono. Keep the exact upstream `model_id` on line two; the persisted row remains removable and reorderable |
+| HP-2 | The hop has no `source_missing` annotation and the exact `source_id` joins to a live/page-held Source row | The Source projection may supply only that row's display name | Render the joined display name and exact upstream `model_id`; all draft actions follow V5 |
+| HP-3 | The hop has no `source_missing` annotation but the page-held projection has no exact match | Do not invent a Source name, relabel the chain reason or start another refresh | Render the exact raw `source_id` in mono and the exact upstream `model_id`. The persisted pair retains the same remove/reorder affordances as HP-1 |
+
+Only HP-2 consumes Source display metadata. Every row remains identifiable and actionable,
+while `route.sourceMissing` means the chain annotation and never the local join result.
 
 **One held identity, one origin and one wire projection** `[contract]` `[derived]`.
 Opening 02 holds `(backend, menu_model)` and reads
@@ -2050,21 +2058,53 @@ as current, create a second read owner or resend on dismissal. A shaped
 rejection is different evidence: the server answered without a commit, so its cancel path
 may restore the latest authoritative chain after the registered refresh.
 
+**Frame-02 control × state totality** `[frame]` `[derived]`. This is the exhaustive
+interaction register for the Route editor. Within a state/surface, a control not listed in
+that state's rows is not rendered or interactive; informational copy remains exhaustive in
+the state table above. Each listed control supplies its own copy key, enable predicate and
+keyboard/focus path, so an accessible name or reachability rule cannot appear only after a
+state transition:
+
+| State / surface | Control | Copy key | Rendered / enabled condition | Keyboard and focus path |
+| --- | --- | --- | --- | --- |
+| Loading route | 取消 button + title-bar close | `route.cancel` | Enabled while the opening GET owns no mutation | 取消 receives initial focus; `Enter` / `Space`, close, Escape or outside press closes and returns focus to the invoking model row |
+| Route unread | 重试 | `route.retry` | Enabled | Failure entry focuses 重试; activation returns to Loading route |
+| Route unread | 取消 button + title-bar close | `route.cancel` | Enabled | Normal Tab order; close, Escape and outside press are the same non-mutating exit |
+| Ready / Dirty | 添加一跳 | `route.addHop`; disabled explanation `route.add.none` | Enabled exactly when V5 exposes at least one candidate; otherwise disabled | Normal Tab order. `Enter` / `Space` opens the anchored selector and focuses its first exact candidate |
+| Ready / Dirty + Add selector | Source/model candidate region | `route.add.source`, `route.add.model` | Both labels render whenever the selector is open; candidate focus is enabled while a V5-valid pair remains | Arrow keys move among the grouped exact pairs; Home/End jump. Escape closes only the selector and restores 添加一跳 focus |
+| Ready / Dirty + Add selector | 添加 confirmation | `route.add.confirm` | Enabled only for the currently selected exact V5-valid pair | Tab reaches the confirmation from the candidate region; `Enter` / `Space` appends that pair, closes the selector and focuses the new row's grip |
+| Ready / Dirty | 按来源顺序重排 | `route.reorder` | Enabled; an activation whose stable sort changes nothing is a registered no-op | Normal Tab order; `Enter` / `Space` runs the one local-draft sort |
+| Ready / Dirty | Each hop grip | `route.grip` | Rendered for every hop; exactly one grip is the roving list tab stop | Arrow/Home/End move the roving row; Space starts/drops a grab. Tab moves next to that same row's remove action |
+| Ready / Dirty | Each hop remove action | `route.removeHop` | Rendered for every hop; only the current roving row's remove action joins the Tab order | From the current grip, Tab reaches its remove action and Shift+Tab returns to the grip. `Enter` / `Space` removes the row and focuses the successor grip, predecessor grip when last, or 添加一跳 when empty |
+| Ready / Dirty | 取消 button + title-bar close | `route.cancel` | Enabled | Normal Tab order; close, Escape and outside press are the same DP-1 exit and return focus to the invoking row |
+| Ready / Dirty | 保存 | `route.save` | Ready: disabled. Dirty: enabled only when the draft differs from origin and V5 is valid | Normal Tab order; `Enter` / `Space` freezes one submitted draft and enters Saving |
+| Saving | No action control; owned progress status only | `route.saving` | Every command, close, Escape and outside dismissal is disabled until the PUT response is classified | Focus remains trapped on the request-owning modal; no key starts another request or changes the submitted draft |
+| Route save refused | 仍要保存 | `guard.confirm.saveRoute` | Enabled for the exact currently rendered refusal arrays | Shared Qp6FI focus order; activation sends RS-5 and enters Saving |
+| Route save refused | 取消 + title-bar close | `guard.cancel` | Enabled | Close, Escape and outside press equal 取消 and return to Dirty with the draft intact |
+| Route save rejected / Route save outcome unknown | 重试 | `route.retry` | Enabled | Failure entry focuses 重试; activation runs that state's registered read-before-resend sequence |
+| Route save rejected / Route save outcome unknown | 取消 button + title-bar close | `route.cancel` | Enabled | Normal Tab order; close, Escape and outside press take the state's registered non-mutating exit |
+| Route committed, reconciling | 完成 + title-bar close | `route.impact.done` | Enabled while M6 is pending | Entry focuses 完成. Activation, close, Escape or outside press is the DP-4 exit and transfers the pending read owner |
+| Route impact reported | 完成 + title-bar close | `route.impact.done` | Enabled before and after any M6 read failure | Normal Tab order; every dismissal path is the same DP-4 exit |
+| Route impact reported after M6 failure | 重试 | `route.retry` | Enabled in addition to every Done-equivalent exit | Normal Tab order; activation repeats only M6 and leaves the held report mounted |
+| Committed projection stale for a report-free M6 result | 重试 | `route.retry` | Enabled while the stale projection remains mounted | Activation repeats only M6; it never resends the PUT |
+| Committed projection stale for a report-free M6 result | 完成 + title-bar close | `route.impact.done` | Enabled when the producer dialog remains mounted | Close, Escape and outside press equal 完成, preserve commit evidence and return focus to the receiving model row |
+
 **Keyboard contract** `[derived]`. Focus is trapped while the dialog is mounted. Loading
 focuses 取消, the only available command, and installing the read result never steals focus.
-The list is one roving-tab-stop region: entering it focuses the first hop grip, or
-添加一跳 when the Route is empty. The ordered list reuses §1.3's one reorder path, so
-pointer drag and keyboard moves mutate the same draft:
+The list has one roving row: entering it focuses that row's grip, followed in Tab order by
+that same row's remove action; an empty Route enters at 添加一跳. Arrowing the grip changes
+which row and remove action own those two stops. The ordered list reuses §1.3's one reorder
+path, so pointer drag and keyboard moves mutate the same draft:
 
 | Key | Effect |
 | --- | --- |
-| `Tab` / `Shift+Tab` | Move through the modal's enabled controls and wrap inside it; the ordered list contributes only its current roving tab stop |
+| `Tab` / `Shift+Tab` | Move through the modal's enabled controls and wrap inside it; a nonempty ordered list contributes its current roving grip followed by that same row's remove action |
 | `Space` on a grip | Grab the row, or drop it at its current position |
 | `↑` / `↓` | Grabbed: move the row one position. Not grabbed: move focus between hop rows |
 | `Home` / `End` | Move focus to the first / last hop; while grabbed, move the row there |
 | `Escape` | Grabbed: cancel the grab and restore its pre-grab order. Add selector open: close it and focus 添加一跳. Otherwise follow the current dialog phase — discard a reversible draft, do nothing while Saving, or take the DP-4 Done-equivalent exit |
-| `Enter` / `Space` on a remove action | Remove that local row; focus the row that takes its position, the previous row if it was last, or 添加一跳 if the list became empty |
-| `Enter` / `Space` on 添加一跳 | Open the candidate selector. Arrow keys move, Home/End jump, Enter/Space appends the focused exact pair, Escape returns to 添加一跳 |
+| `Enter` / `Space` on a remove action | Remove that local row; focus the successor grip, the predecessor grip if it was last, or 添加一跳 if the list became empty |
+| `Enter` / `Space` on 添加一跳 | Open the candidate selector and focus its first exact pair. Arrow keys move, Home/End jump, Tab reaches `route.add.confirm`, its activation appends the selected pair, and Escape returns to 添加一跳 |
 
 Ordinals renumber contiguously from 1 after every move. Grab state and every new position
 are announced through the same `aria-grabbed` + live-region treatment as §1.3. Enter does
