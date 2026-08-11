@@ -2294,7 +2294,7 @@ def _delete_agent_session_rows(
         # the read pins a snapshot, and the reclaim's UPDATE then fails outright with
         # ``SQLITE_BUSY_SNAPSHOT`` ("database is locked") on exactly the interleaving this
         # whole guard exists to survive. Measured, not assumed. Leaving the reclaim in
-        # place is also the recoverable half: the definitions were bound to the session
+        # place is also the recoverable half: the definitions were owned by the session
         # the user asked to clear, ``pause`` keeps them re-enablable, and the kept row is
         # a superseded one the thread has already moved off.
         reclaim_bound_definitions(conn, session_id, mode=reclaim_mode, reason=reclaim_reason)

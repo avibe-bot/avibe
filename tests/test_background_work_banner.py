@@ -15,7 +15,7 @@ from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
-from sqlalchemy import insert
+from sqlalchemy import insert, select
 
 from core.session_activities import SessionActivityRegistry
 from core.session_turns import SessionTurnManager
@@ -25,7 +25,11 @@ from storage.background import SQLiteBackgroundTaskStore
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
 from storage.models import agent_runs, run_definitions
-from storage.workbench_sessions_service import derive_session_harness_activities
+from storage.session_reclaim import RECLAIM_DELETE, reclaim_bound_definitions
+from storage.workbench_sessions_service import (
+    count_bound_resources,
+    derive_session_harness_activities,
+)
 
 _NOW = "2026-07-16T00:00:00Z"
 
@@ -231,7 +235,7 @@ def test_task_label_falls_back_to_prompt_when_unnamed(tmp_path: Path):
 
 
 def test_definition_banner_uses_creation_owner_before_execution_target(tmp_path: Path):
-    """Pending definitions belong to their creating Session, not their fire target."""
+    """SCT-060: pending definitions belong to their creating Session, not their fire target."""
     engine, _ = _make_engine(tmp_path)
     owner_metadata = json.dumps(
         {"created_by": {"caller": {"session_id": "ses-owner"}}}
@@ -278,6 +282,21 @@ def test_definition_banner_uses_creation_owner_before_execution_target(tmp_path:
             {"created_by": {"caller": {"session_id": "ses-other"}}}
         ),
     )
+    # Schema-invalid owner values must not suppress the legacy bound-session fallback.
+    for task_id, owner_value in (
+        ("task-owner-object", {}),
+        ("task-owner-number", 42),
+    ):
+        _insert_definition(
+            engine,
+            id=task_id,
+            definition_type="scheduled",
+            name=task_id,
+            session_id="ses-owner",
+            metadata_json=json.dumps(
+                {"created_by": {"caller": {"session_id": owner_value}}}
+            ),
+        )
 
     with engine.connect() as conn:
         owner_items = derive_session_harness_activities(conn, "ses-owner")
@@ -288,8 +307,55 @@ def test_definition_banner_uses_creation_owner_before_execution_target(tmp_path:
         "task:task-command",
         "task:task-create-once",
         "task:task-legacy",
+        "task:task-owner-object",
+        "task:task-owner-number",
     }
     assert {item["id"] for item in execution_items} == set()
+
+
+def test_owner_session_teardown_reclaims_task_even_when_execution_target_differs(
+    tmp_path: Path,
+):
+    """Owner-first projection also governs archive/delete cleanup and its counts."""
+    engine, _ = _make_engine(tmp_path)
+    owner_metadata = json.dumps(
+        {"created_by": {"caller": {"session_id": "ses-owner"}}}
+    )
+    with engine.begin() as conn:
+        create_agent_session_row(
+            conn,
+            scope_id=None,
+            session_id="ses-owner",
+            session_anchor="anchor-owner",
+            agent_backend="codex",
+            workdir="/tmp",
+            now=_NOW,
+        )
+    _insert_definition(
+        engine,
+        id="task-owner-targeted",
+        definition_type="scheduled",
+        name="owner-targeted",
+        session_id="ses-execution",
+        metadata_json=owner_metadata,
+    )
+
+    with engine.begin() as conn:
+        assert count_bound_resources(conn, "ses-owner")["tasks"] == 1
+        summary = reclaim_bound_definitions(
+            conn,
+            "ses-owner",
+            mode=RECLAIM_DELETE,
+            reason="archive_session:ses-owner",
+        )
+        row = conn.execute(
+            select(run_definitions.c.deleted_at).where(
+                run_definitions.c.id == "task-owner-targeted"
+            )
+        ).scalar_one()
+
+    assert summary["deleted"] == 1
+    assert row is not None
 
 
 def test_excludes_disabled_deleted_and_foreign_and_terminal(tmp_path: Path):

@@ -345,14 +345,22 @@ def definition_owner_session_id_expression() -> Any:
     fall back to the historical bound ``run_definitions.session_id``.
     """
 
+    metadata_json = run_definitions.c.metadata_json
     raw_owner = func.json_extract(
-        run_definitions.c.metadata_json,
+        metadata_json,
         "$.created_by.caller.session_id",
     )
     return case(
         (
-            func.json_valid(run_definitions.c.metadata_json) == 1,
-            func.nullif(func.trim(func.coalesce(raw_owner, "")), ""),
+            func.json_valid(metadata_json) == 1,
+            case(
+                (
+                    func.json_type(metadata_json, "$.created_by.caller.session_id")
+                    == "text",
+                    func.nullif(func.trim(raw_owner), ""),
+                ),
+                else_=None,
+            ),
         ),
         else_=None,
     )

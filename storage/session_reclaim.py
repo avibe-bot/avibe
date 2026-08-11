@@ -1,7 +1,7 @@
-"""Reclaim the definitions bound to a Session that is going away.
+"""Reclaim the definitions owned by a Session that is going away.
 
 Two teardown paths, one contract. ``archive_session`` already reclaimed —
-it vacates the anchor and soft-deletes bound ``run_definitions`` — while the IM
+it vacates the anchor and soft-deletes owned ``run_definitions`` — while the IM
 ``/new`` path hard-deleted the session rows and reclaimed nothing, so a
 ``create_once`` task pinned to that session fired and failed forever with nobody
 told. This module owns the shared half so a new teardown path cannot forget it.
@@ -31,7 +31,7 @@ from contextvars import ContextVar
 from datetime import datetime, timezone
 from typing import Any, Iterable, Iterator, Literal
 
-from sqlalchemy import select, update
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.engine import Connection
 
 from storage.models import agent_sessions, run_definitions
@@ -294,7 +294,7 @@ def reclaim_bound_definitions(
     mode: ReclaimMode,
     reason: str | None = None,
 ) -> dict[str, int]:
-    """Detach scheduled tasks / watches from a session that is going away.
+    """Detach scheduled tasks / watches owned by a session that is going away.
 
     ``mode`` is required: ``delete`` soft-deletes (terminal teardown), ``pause``
     sets ``enabled=0`` and records ``last_error`` (recoverable teardown). Runs in
@@ -314,6 +314,23 @@ def reclaim_bound_definitions(
     if not sid:
         return summary
 
+    # A scheduled Task is managed by the Session that created it, while a Watch
+    # belongs to its callback target. Keep teardown on the same owner contract as
+    # the banner and Harness filters; otherwise an owner-targeted Task can keep
+    # firing after its creating Session is archived.
+    from storage.background import scheduled_definition_owned_by_session_expression
+
+    definition_binding = or_(
+        and_(
+            run_definitions.c.definition_type == "watch",
+            run_definitions.c.session_id == sid,
+        ),
+        and_(
+            run_definitions.c.definition_type == "scheduled",
+            scheduled_definition_owned_by_session_expression(sid),
+        ),
+    )
+
     rows = (
         conn.execute(
             select(
@@ -322,7 +339,7 @@ def reclaim_bound_definitions(
                 run_definitions.c.enabled,
                 run_definitions.c.metadata_json,
             )
-            .where(run_definitions.c.session_id == sid)
+            .where(definition_binding)
             .where(run_definitions.c.deleted_at.is_(None))
         )
         .mappings()
@@ -373,11 +390,18 @@ def reclaim_bound_definitions(
         # belongs to -- so a later ``create_once`` rebind carries the wrong model
         # forward. Both re-asserted: the binding this reclaim was decided for, and the
         # live ``deleted_at`` state.
+        current_binding = (
+            run_definitions.c.session_id == sid
+            if row["definition_type"] == "watch"
+            else scheduled_definition_owned_by_session_expression(sid)
+        )
         reclaimed = conn.execute(
             update(run_definitions)
             .where(run_definitions.c.id == row["id"])
-            # Still bound to the session that is going away.
-            .where(run_definitions.c.session_id == sid)
+            # Still owned by the session that is going away. The scheduled-task
+            # branch uses creation provenance; the Watch branch uses its callback
+            # target.
+            .where(current_binding)
             # Still live: a definition deleted inside the window stays deleted, and its
             # ``deleted_at`` must not be restamped with this teardown's clock.
             .where(run_definitions.c.deleted_at.is_(None))
@@ -413,7 +437,7 @@ def reclaim_bound_definitions(
 
     if summary["paused"] or summary["deleted"]:
         logger.info(
-            "Reclaimed definitions bound to session %s mode=%s paused=%d deleted=%d",
+            "Reclaimed definitions owned by session %s mode=%s paused=%d deleted=%d",
             sid,
             mode,
             summary["paused"],

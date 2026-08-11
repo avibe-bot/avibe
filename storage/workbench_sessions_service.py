@@ -848,14 +848,26 @@ def is_session_archived(conn: Connection, session_id: str) -> bool:
 
 
 def count_bound_resources(conn: Connection, session_id: str) -> dict[str, int]:
-    """Count what archiving ``session_id`` will permanently reclaim: bound
-    scheduled tasks + watches (live, not-yet-deleted definitions) and
+    """Count what archiving ``session_id`` will permanently reclaim: owned
+    scheduled tasks + callback-targeted watches (live, not-yet-deleted definitions) and
     not-yet-terminal runs. Shared by the archive teardown and the confirm-dialog
     preview so both agree on the numbers shown vs. acted on."""
+    from storage.background import scheduled_definition_owned_by_session_expression
+
+    definition_binding = or_(
+        and_(
+            run_definitions.c.definition_type == "watch",
+            run_definitions.c.session_id == session_id,
+        ),
+        and_(
+            run_definitions.c.definition_type == "scheduled",
+            scheduled_definition_owned_by_session_expression(session_id),
+        ),
+    )
     types = (
         conn.execute(
             select(run_definitions.c.definition_type)
-            .where(run_definitions.c.session_id == session_id)
+            .where(definition_binding)
             .where(run_definitions.c.deleted_at.is_(None))
         )
         .scalars()
@@ -1125,7 +1137,7 @@ def archive_session(conn: Connection, session_id: str) -> dict[str, Any]:
 
     Archive is terminal (there is no un-archive) — so we don't just flip a flag,
     we tear down the resources that would otherwise keep firing into a hidden
-    session: bound scheduled tasks + watches are soft-deleted, queued/running
+    session: owned scheduled tasks + callback-targeted watches are soft-deleted, queued/running
     runs are cancelled, and the Show Page is taken offline. All of it rides the
     caller's transaction so the teardown is atomic with the status flip.
 
@@ -1183,7 +1195,7 @@ def archive_session(conn: Connection, session_id: str) -> dict[str, Any]:
     # Tally before teardown so the response reports what was reclaimed.
     reclaimed = count_bound_resources(conn, session_id)
 
-    # 2) Soft-delete bound scheduled tasks + watches (same table, distinguished by
+    # 2) Soft-delete owned scheduled tasks + callback-targeted watches (same table, distinguished by
     #    ``definition_type``). Deleting — not pausing — is deliberate: a paused
     #    definition could be re-enabled later and would then target a dead session.
     #    Shared with the hard-delete teardown path, which passes ``pause`` instead
