@@ -21,7 +21,7 @@ describe('VaultRequestSessionLink', () => {
 
   it('marks an explicitly selected provision request for chat anchoring', () => {
     expect(render(<VaultRequestSessionLink session={session} requestId="request/456" />)).toContain(
-      'href="/chat/session%2F123?vault_request=request%2F456"',
+      'href="/chat/session%2F123?vault_request=request%2F456&amp;view=chat"',
     );
   });
 });

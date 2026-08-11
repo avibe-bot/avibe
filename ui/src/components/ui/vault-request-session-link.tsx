@@ -17,9 +17,14 @@ export const VaultRequestSessionLink: React.FC<{
   if (!session.isWorkbench) {
     return <span className={cn('min-w-0 truncate', className)}>{label}</span>;
   }
-  const query = requestId?.trim()
-    ? `?${new URLSearchParams({ vault_request: requestId.trim() }).toString()}`
-    : '';
+  const params = new URLSearchParams();
+  if (requestId?.trim()) {
+    params.set('vault_request', requestId.trim());
+    // A request link is an explicit request to inspect the transcript. Do not
+    // restore a remembered Show Page surface over that intent.
+    params.set('view', 'chat');
+  }
+  const query = params.toString() ? `?${params.toString()}` : '';
   return (
     <Link
       to={`/chat/${encodeURIComponent(session.id)}${query}`}

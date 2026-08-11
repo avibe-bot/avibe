@@ -765,11 +765,14 @@ export const ChatPage: React.FC = () => {
       !targetRequestId
     ) return;
     if (handledVaultAnchorRef.current === targetRequestId) return;
+    let cancelled = false;
 
     // Clear only the Vault anchor parameter so unrelated navigation state (for
-    // example a Show Page signal) remains intact.
+    // example a Show Page signal) remains intact. A stale completion must not
+    // remove a newer request's marker from the current URL.
     const clearVaultAnchorParam = () => {
       const next = new URLSearchParams(window.location.search);
+      if (cancelled || next.get('vault_request')?.trim() !== targetRequestId) return;
       next.delete('vault_request');
       setSearchParams(next, { replace: true });
     };
@@ -871,6 +874,7 @@ export const ChatPage: React.FC = () => {
     void fetchAnchorWindow()
       .then((res) => {
         if (
+          cancelled ||
           sessionId !== sessionIdRef.current ||
           deepLinkMessageIdRef.current ||
           jumpTargetRef.current
@@ -978,6 +982,10 @@ export const ChatPage: React.FC = () => {
         vaultAnchorFetchesRef.current.delete(fetchKey);
       })
       .catch(() => {
+        if (cancelled || sessionId !== sessionIdRef.current) {
+          vaultAnchorFetchesRef.current.delete(fetchKey);
+          return;
+        }
         // Retry transient failures with bounded exponential backoff. Once the
         // budget is exhausted, wait for an explicit reload/dismissal boundary
         // instead of polling an unavailable backend for the life of the chat.
@@ -995,6 +1003,14 @@ export const ChatPage: React.FC = () => {
       .finally(() => {
         if (sessionId !== sessionIdRef.current) return;
         vaultAnchorInFlightRef.current = false;
+        if (cancelled) {
+          // A transcript/request update can legitimately replace this effect
+          // while the fetch is pending. Re-arm only if this exact navigation
+          // marker is still current; a newer request must own the next cycle.
+          const currentRequestId = new URLSearchParams(window.location.search).get('vault_request')?.trim();
+          if (currentRequestId === targetRequestId) setVaultAnchorCycle((cycle) => cycle + 1);
+          return;
+        }
         if (retryDelayMs !== null) {
           window.setTimeout(() => {
             vaultAnchorRetryWaitingRef.current.delete(fetchKey);
@@ -1004,6 +1020,9 @@ export const ChatPage: React.FC = () => {
           setVaultAnchorCycle((cycle) => cycle + 1);
         }
       });
+    return () => {
+      cancelled = true;
+    };
   }, [
     api,
     deepLinkMessageId,
