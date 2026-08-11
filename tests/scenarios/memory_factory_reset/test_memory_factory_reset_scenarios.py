@@ -152,12 +152,12 @@ async def test_memory_factory_002_partial_delete_is_truthful_and_retryable(
 
     real_remove = factory_reset.remove_confined_path
 
-    def remove(home: Path, path: Path) -> None:
+    def remove(home: Path, path: Path, **kwargs: object) -> None:
         nonlocal failed_once
         if failed_once and path.relative_to(home).as_posix() == "state/memory":
             failed_once = False
             raise PermissionError("test partial delete")
-        real_remove(home, path)
+        real_remove(home, path, **kwargs)
 
     monkeypatch.setattr(factory_reset, "remove_confined_path", remove)
     monkeypatch.setattr("core.memory.runtime.create_memory_runtime", lambda *args, **kwargs: _FreshRuntime(tmp_path))

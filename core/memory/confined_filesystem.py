@@ -22,6 +22,20 @@ class ConfinedFilesystemError(RuntimeError):
     """A confined filesystem operation refused an unsafe path or entry."""
 
 
+@dataclass(slots=True)
+class ConfinedRemovalProgress:
+    """Track entries removed before a confined deletion raises."""
+
+    removed_entries: int = 0
+
+    @property
+    def changed(self) -> bool:
+        return self.removed_entries > 0
+
+    def record(self) -> None:
+        self.removed_entries += 1
+
+
 def required_no_follow_flag() -> int:
     """Return the host no-follow capability or disable Memory persistence."""
 
@@ -747,6 +761,8 @@ class _DirectoryDescriptorCache:
 def remove_confined_path(
     home: Path,
     path: Path,
+    *,
+    progress: ConfinedRemovalProgress | None = None,
 ) -> None:
     """Remove one entry through anchored, no-follow directory handles."""
 
@@ -776,7 +792,7 @@ def remove_confined_path(
             current = next_descriptor
             anchored.append(current)
             _harden_private_directory_fd(current, "confined directory", sync=False)
-        remove_anchored_entry(current, relative.parts[-1])
+        remove_anchored_entry(current, relative.parts[-1], progress=progress)
         _fsync_anchored_deletion(anchored)
     finally:
         for descriptor in reversed(anchored):
@@ -800,6 +816,7 @@ def remove_anchored_entry(
     name: str,
     *,
     expected_identity: tuple[int, int] | None = None,
+    progress: ConfinedRemovalProgress | None = None,
 ) -> None:
     """Remove one safe relative name beneath an already anchored directory."""
 
@@ -815,6 +832,7 @@ def remove_anchored_entry(
         parent_fd,
         name,
         expected_identity=expected_identity,
+        progress=progress,
     )
 
 
@@ -823,6 +841,7 @@ def _remove_entry_at(
     name: str,
     *,
     expected_identity: tuple[int, int] | None = None,
+    progress: ConfinedRemovalProgress | None = None,
 ) -> None:
     try:
         initial = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
@@ -835,6 +854,8 @@ def _remove_entry_at(
         raise ConfinedFilesystemError("confined entry changed during removal")
     if stat.S_ISLNK(initial.st_mode) or stat.S_ISREG(initial.st_mode):
         os.unlink(name, dir_fd=parent_fd)
+        if progress is not None:
+            progress.record()
         return
     if not stat.S_ISDIR(initial.st_mode):
         raise ConfinedFilesystemError("confined removal refuses special files")
@@ -869,6 +890,8 @@ def _remove_entry_at(
                         )
                     if stat.S_ISLNK(before.st_mode) or stat.S_ISREG(before.st_mode):
                         os.unlink(item.name, dir_fd=node_parent_fd)
+                        if progress is not None:
+                            progress.record()
                         continue
                     if not stat.S_ISDIR(before.st_mode):
                         raise ConfinedFilesystemError(
@@ -934,6 +957,8 @@ def _remove_entry_at(
                         "confined directory changed during removal"
                     )
                 os.rmdir(item.node.name, dir_fd=node_parent_fd)
+                if progress is not None:
+                    progress.record()
             finally:
                 os.close(node_parent_fd)
 

@@ -157,10 +157,20 @@ export const SettingsMemoryPage: React.FC = () => {
         setFactoryResetOpen(false);
         showToast(memoryErrorMessage(t, res.error || 'memory_factory_reset_failed'), 'error');
       }
-      await Promise.all([loadSettings(), loadProcessingRecord(), loadMaintenance()]);
+      await Promise.all([
+        loadSettings(),
+        loadProcessingRecord(),
+        loadMaintenance(),
+        loadDependency(),
+      ]);
     } catch {
       showToast(t('memory.factoryReset.failed'), 'error');
-      await Promise.all([loadSettings(), loadProcessingRecord(), loadMaintenance()]);
+      await Promise.all([
+        loadSettings(),
+        loadProcessingRecord(),
+        loadMaintenance(),
+        loadDependency(),
+      ]);
     } finally {
       setFactoryResetBusy(false);
     }

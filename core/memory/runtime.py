@@ -2249,10 +2249,13 @@ class MemoryRuntime:
                 cleanup_error = error
             async with self._module.provider_root_lifecycle():
                 try:
-                    if self._retired and not await self._module.quiesce_claims(
-                        timeout_seconds=self._clear_drain_timeout_seconds
+                    if (
+                        self._retired
+                        and not await self._module.quiesce_claims_for_clear()
                     ):
-                        logger.warning("Memory worker did not quiesce during retired close")
+                        raise RuntimeError(
+                            "Memory worker did not quiesce during retired close"
+                        )
                     await self._module.prepare_shutdown()
                 except BaseException as error:
                     cleanup_error = cleanup_error or error

@@ -412,6 +412,44 @@ describe('SettingsMemoryPage restart action', () => {
     await waitFor(() => expect(screen.queryByRole('button', { name: 'confirm-factory' })).toBeNull());
   });
 
+  it('refreshes artifact readiness after a reset reports repair required', async () => {
+    api.listDependencies
+      .mockResolvedValueOnce({
+        ok: true,
+        deps: [{ id: 'memory-runtime', kind: 'runtime', required: false, installed: true, status: 'ready', version: '1.0.0' }],
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        deps: [{ id: 'memory-runtime', kind: 'runtime', required: false, installed: false, status: 'missing', version: null }],
+      });
+    api.factoryResetMemory.mockResolvedValue({
+      ok: false,
+      result: 'failed',
+      error: 'memory_factory_reset_failed',
+      reason: 'artifact_repair_required',
+      data_deleted: false,
+      data_remaining: true,
+      roots: [
+        { path: 'memory', existed: true, deleted: false },
+        { path: 'state/memory', existed: true, deleted: false },
+      ],
+    });
+    const user = userEvent.setup();
+    renderPage();
+
+    await user.click(await screen.findByRole('radio', { name: 'memory.tabs.settings' }));
+    const openFactory = await screen.findByRole('button', { name: 'open-factory' });
+    await waitFor(() => expect((openFactory as HTMLButtonElement).disabled).toBe(false));
+    await user.click(openFactory);
+    await user.click(screen.getByRole('button', { name: 'confirm-factory' }));
+
+    await waitFor(() => expect(api.factoryResetMemory).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(api.listDependencies).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(
+      (screen.getByRole('button', { name: 'open-factory' }) as HTMLButtonElement).disabled,
+    ).toBe(true));
+  });
+
   it('shows Retry while a durable factory reset intent remains pending', async () => {
     api.listDependencies.mockResolvedValue({
       ok: true,

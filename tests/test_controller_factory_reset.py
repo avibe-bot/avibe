@@ -102,6 +102,33 @@ def test_delete_memory_roots_hardens_default_application_directory_modes(tmp_pat
     assert stat.S_IMODE((tmp_path / "state").stat().st_mode) == 0o700
 
 
+def test_delete_memory_roots_reports_partial_progress_before_unsafe_entry(
+    tmp_path: Path,
+) -> None:
+    """A rejected child must not hide files removed earlier in the same root."""
+
+    from core.memory import factory_reset
+
+    _create_roots(tmp_path)
+    (tmp_path / "state" / "memory").rmdir()
+    removed = tmp_path / "memory" / "a-removed.txt"
+    removed.write_text("removed", encoding="utf-8")
+    unsafe = tmp_path / "memory" / "z-special"
+    os.mkfifo(unsafe, mode=0o600)
+
+    result = factory_reset.delete_memory_roots(tmp_path)
+
+    memory_root = result.roots[0]
+    assert memory_root.existed is True
+    assert memory_root.deleted is True
+    assert memory_root.error == "ConfinedFilesystemError"
+    assert result.data_deleted is True
+    assert result.data_remaining is True
+    assert not removed.exists()
+    assert stat.S_ISFIFO(os.lstat(unsafe).st_mode)
+    assert result.roots[1].deleted is False
+
+
 @pytest.mark.asyncio
 async def test_factory_reset_reaps_recorded_sidecar_before_marker_or_delete(
     tmp_path: Path,
@@ -305,7 +332,7 @@ def test_factory_reset_fsync_failure_stays_pending_and_retry_syncs_absence(
 
     assert [(root.deleted, root.error) for root in first.roots] == [
         (True, None),
-        (False, "ConfinedFilesystemError"),
+        (True, "ConfinedFilesystemError"),
     ]
     assert first.data_remaining is True
     assert not (tmp_path / "state" / "memory").exists()

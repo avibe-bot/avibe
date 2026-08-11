@@ -2126,6 +2126,43 @@ async def test_session_lifecycle_does_not_reset_when_capture_fence_times_out(
         await memory_runtime_factory.close(runtime)
 
 
+async def test_retired_close_aborts_when_claim_quiescence_times_out(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    memory_runtime_factory,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    runtime = memory_runtime_factory(
+        MemoryConfig(enabled=True),
+        store=MemoryStore(),
+        artifact_manager=_installed_artifact(),
+        effective_home=tmp_path,
+    )
+    original_quiesce_claims = runtime.module.quiesce_claims_for_clear
+    original_prepare_shutdown = runtime.module.prepare_shutdown
+
+    async def refuse_quiescence(*_args, **_kwargs) -> bool:
+        return False
+
+    async def shutdown_must_not_run(*_args, **_kwargs) -> None:
+        raise AssertionError("shutdown must not run after a failed claim drain")
+
+    monkeypatch.setattr(runtime.module, "quiesce_claims_for_clear", refuse_quiescence)
+    monkeypatch.setattr(runtime.module, "prepare_shutdown", shutdown_must_not_run)
+    runtime.retire()
+    with pytest.raises(RuntimeError, match="did not quiesce"):
+        await runtime.close()
+    assert runtime.closed is False
+
+    monkeypatch.setattr(
+        runtime.module,
+        "quiesce_claims_for_clear",
+        original_quiesce_claims,
+    )
+    monkeypatch.setattr(runtime.module, "prepare_shutdown", original_prepare_shutdown)
+    await memory_runtime_factory.close(runtime)
+
+
 @pytest.mark.parametrize("outcome", ["exception", "cancellation"])
 async def test_session_lifecycle_releases_capture_fence_after_aborted_reset(
     monkeypatch: pytest.MonkeyPatch,

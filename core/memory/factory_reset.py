@@ -12,7 +12,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from config import paths
-from core.memory.confined_filesystem import remove_confined_path
+from core.memory.confined_filesystem import (
+    ConfinedRemovalProgress,
+    remove_confined_path,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,14 +102,15 @@ def delete_memory_roots(effective_home: Path) -> FactoryResetDeletionResult:
                 )
             )
             continue
+        progress = ConfinedRemovalProgress()
         try:
-            remove_confined_path(home, path)
+            remove_confined_path(home, path, progress=progress)
         except Exception as error:  # noqa: BLE001
             outcomes.append(
                 FactoryResetRootOutcome(
                     relative_path,
                     existed=existed,
-                    deleted=False,
+                    deleted=progress.changed,
                     error=type(error).__name__,
                 )
             )
@@ -117,7 +121,7 @@ def delete_memory_roots(effective_home: Path) -> FactoryResetDeletionResult:
                     FactoryResetRootOutcome(
                         relative_path,
                         existed=True,
-                        deleted=False,
+                        deleted=progress.changed,
                         error=observation_error,
                     )
                 )
@@ -126,7 +130,7 @@ def delete_memory_roots(effective_home: Path) -> FactoryResetDeletionResult:
                     FactoryResetRootOutcome(
                         relative_path,
                         existed=True,
-                        deleted=False,
+                        deleted=progress.changed,
                         error="root_reappeared",
                     )
                 )
