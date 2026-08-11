@@ -53,6 +53,10 @@ from core.show_pages import (
     SHOW_EVENT_WRITE_TOKEN_COOKIE,
     SHOW_EVENT_WRITE_TOKEN_HEADER,
     SHOW_PAGE_ICON_MAX_UPLOAD_BYTES,
+    VISIBILITY_OFFLINE,
+    VISIBILITY_PRIVATE,
+    VISIBILITY_PUBLIC,
+    ShowPage,
     show_cli_event_token,
     show_event_write_token,
     show_public_event_write_token,
@@ -10012,7 +10016,7 @@ def _public_show_referer_matches(share_id: str) -> bool:
 
 def _sanitize_public_show_event_payload(payload: dict[str, Any]) -> dict[str, Any]:
     sanitized = dict(payload)
-    for key in ("id", "dispatch", "sessionId", "session_id"):
+    for key in ("id", "sessionId", "session_id"):
         sanitized.pop(key, None)
     for key in ("payload", "annotation", "mark"):
         nested = sanitized.get(key)
@@ -10020,9 +10024,30 @@ def _sanitize_public_show_event_payload(payload: dict[str, Any]) -> dict[str, An
             sanitized[key] = {
                 nested_key: value
                 for nested_key, value in nested.items()
-                if nested_key not in {"dispatch", "sessionId", "session_id"}
+                if nested_key not in {"sessionId", "session_id"}
             }
     return sanitized
+
+
+def _show_annotation_capability(
+    *,
+    author: dict[str, str] | None,
+    page: ShowPage,
+    public_share_id: str | None = None,
+) -> bool:
+    """Return whether this request may write and dispatch Show annotations.
+
+    The current device-side authorization boundary is the validated Workbench
+    session (or trusted local access), represented by ``author``. Page
+    visibility and the share/session binding remain independent structural
+    checks so a future ACL can extend the author decision without changing the
+    event pipeline.
+    """
+    if author is None or page.visibility == VISIBILITY_OFFLINE:
+        return False
+    if public_share_id is not None:
+        return page.visibility == VISIBILITY_PUBLIC and page.share_id == public_share_id
+    return page.visibility in {VISIBILITY_PRIVATE, VISIBILITY_PUBLIC}
 
 
 def _show_request_author(*, public: bool = False) -> dict[str, str] | None:
@@ -10047,10 +10072,16 @@ def _show_request_author(*, public: bool = False) -> dict[str, str] | None:
     return {"kind": "local"}
 
 
-def _show_me_response(author: dict[str, str] | None, *, write_token: str | None = None):
+def _show_me_response(
+    author: dict[str, str] | None,
+    *,
+    can_annotate: bool | None = None,
+    write_token: str | None = None,
+):
     authenticated = author is not None
-    payload = {"authenticated": authenticated, "canAnnotate": authenticated}
-    if authenticated and write_token:
+    capability = authenticated if can_annotate is None else bool(can_annotate)
+    payload = {"authenticated": authenticated, "canAnnotate": capability}
+    if capability and write_token:
         payload["writeToken"] = write_token
     response = jsonify(payload)
     response.headers["Cache-Control"] = "no-store, private"
@@ -11361,8 +11392,10 @@ async def serve_private_show_page(session_id, asset_path):
         if asset_path.strip("/") == "__show/me":
             if request.method not in {"GET", "HEAD"}:
                 return jsonify({"ok": False, "code": "method_not_allowed"}), 405
+            author = {"kind": "local"}
             return _show_me_response(
-                {"kind": "local"},
+                author,
+                can_annotate=_show_annotation_capability(author=author, page=page),
                 write_token=show_event_write_token(page.session_id),
             )
         if asset_path.strip("/") in {"__show/events", "__events"}:
@@ -11446,10 +11479,16 @@ async def serve_public_show_page(share_id, asset_path):
             if request.method not in {"GET", "HEAD"}:
                 return jsonify({"ok": False, "code": "method_not_allowed"}), 405
             author = _show_request_author(public=True)
+            can_annotate = _show_annotation_capability(
+                author=author,
+                page=page,
+                public_share_id=share_id,
+            )
             return _show_me_response(
                 author,
+                can_annotate=can_annotate,
                 write_token=(
-                    show_public_event_write_token(share_id, page.session_id) if author is not None else None
+                    show_public_event_write_token(share_id, page.session_id) if can_annotate else None
                 ),
             )
         if asset_path.strip("/").startswith("__show/media/"):
@@ -11475,6 +11514,13 @@ async def serve_public_show_page(share_id, asset_path):
             author = _show_request_author(public=True)
             if author is None:
                 return jsonify({"ok": False, "code": "public_show_events_login_required"}), 403
+            can_annotate = _show_annotation_capability(
+                author=author,
+                page=page,
+                public_share_id=share_id,
+            )
+            if not can_annotate:
+                return jsonify({"ok": False, "code": "public_show_events_forbidden"}), 403
             if not _public_show_referer_matches(share_id):
                 return jsonify({"ok": False, "code": "public_show_events_origin_mismatch"}), 403
             if not _public_show_event_write_authorized(share_id, page.session_id):
@@ -11498,7 +11544,7 @@ async def serve_public_show_page(share_id, asset_path):
                 author=author,
                 public=True,
                 public_share_id=share_id,
-                allow_dispatch=False,
+                allow_dispatch=can_annotate,
             )
         if request.method in {"GET", "HEAD"}:
             if shim_response := _show_runtime_public_client_shim_response(asset_path):
