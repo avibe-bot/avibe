@@ -37,7 +37,6 @@ from config.v2_config import V2Config
 from core.scheduled_tasks import (
     AGENT_RUN_DELIVERY_QUEUE,
     AGENT_RUN_DELIVERY_STEER,
-    AGENT_RUN_DELIVERY_SEND_NOW,
     BINDING_FOLLOWS_SESSION_METADATA_KEY,
     ScheduledTaskStore,
     TaskExecutionStore,
@@ -77,6 +76,7 @@ from storage.db import create_sqlite_engine
 from storage.background import (
     DefinitionWriteConflict,
     SQLiteBackgroundTaskStore,
+    TaskResumeBlocked,
     compute_next_run_at,
     normalize_run_status,
 )
@@ -1388,7 +1388,7 @@ def _agent_run_examples_text() -> str:
           Use --session-id to continue an existing Agent Session.
           The default is P1: steer an active native Turn, start when idle, or fall back to the durable P3 queue.
           Add --queue to persist this Run as P3 behind the active Turn.
-          Add --send-now to persist the new Run and steer the exact FIFO head into the active Turn.
+          --send-now explicitly selects the same P1 content delivery for an existing Session.
           To promote the exact existing P3 queue head without a new message, use: vibe session send-now <session-id>
           Inspect queued work with: vibe session queue list <session-id>
           Remove one exact queued row with: vibe session queue remove <session-id> <message-id>
@@ -1982,6 +1982,7 @@ _DEFINITION_FAILURE_FIELDS = (
     "processing_recent_failures",
     # The one field that says WHY, dropped from the brief list payload before.
     "last_error",
+    "resume_blocked",
 )
 
 
@@ -3686,6 +3687,21 @@ def cmd_task_set_enabled(task_id: str, enabled: bool):
         return 1
     try:
         updated = store.set_enabled(task_id, enabled)
+    except TaskResumeBlocked as exc:
+        lang = _memory_cli_language()
+        _print_task_error(
+            TaskCliError(
+                i18n_t("error.taskOwnerUnavailable.message", lang),
+                code=exc.code,
+                hint=i18n_t("error.taskOwnerUnavailable.hint", lang, id=task_id),
+                help_command=f"vibe task remove {task_id}",
+                details={
+                    "task_id": task_id,
+                    "owner_session_id": exc.owner_session_id,
+                },
+            )
+        )
+        return 1
     except DefinitionWriteConflict as exc:
         # Pause/resume is also a full-row write, so it is refused when a teardown
         # changed the definition first. Reporting the switch as flipped would be a lie
@@ -5788,13 +5804,11 @@ def cmd_agent_run(args):
         )
         session_policy = _validate_run_session_policy(args, help_command="vibe agent run --help")
         delivery_intent = (
-            AGENT_RUN_DELIVERY_SEND_NOW
-            if bool(getattr(args, "send_now", False))
-            else AGENT_RUN_DELIVERY_QUEUE
+            AGENT_RUN_DELIVERY_QUEUE
             if bool(getattr(args, "queue", False))
             else AGENT_RUN_DELIVERY_STEER
         )
-        if delivery_intent == AGENT_RUN_DELIVERY_SEND_NOW and session_policy != "existing":
+        if bool(getattr(args, "send_now", False)) and session_policy != "existing":
             raise TaskCliError(
                 "--send-now requires an existing Agent Session",
                 code="send_now_requires_existing_session",
@@ -6003,7 +6017,7 @@ def cmd_agent_run(args):
                 "parent_run_id": parent_run_id,
             },
         }
-        if delivery_intent != AGENT_RUN_DELIVERY_STEER:
+        if bool(getattr(args, "send_now", False)) or delivery_intent != AGENT_RUN_DELIVERY_STEER:
             payload["delivery_intent"] = delivery_intent
             payload["run"]["delivery_intent"] = delivery_intent
         if fork_result:
@@ -14169,7 +14183,7 @@ def build_parser():
     agent_run_delivery_group.add_argument(
         "--send-now",
         action="store_true",
-        help="Persist this Run, then steer the exact FIFO head without stopping the active Turn",
+        help="Explicitly deliver this Run as P1 to an existing Session (the default behavior)",
     )
     agent_run_delivery_group.add_argument(
         "--queue",

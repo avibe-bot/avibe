@@ -1245,6 +1245,65 @@ def test_harness_routes_page_filter_and_return_counts(monkeypatch, tmp_path):
     assert counts["runs"]["all"] == 4
 
 
+def test_harness_task_resume_rejects_orphaned_owner_without_target(
+    monkeypatch, tmp_path
+):
+    from storage.background import SQLiteBackgroundTaskStore
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    store = SQLiteBackgroundTaskStore()
+    try:
+        store.upsert_scheduled_task(
+            {
+                "id": "orphaned-task",
+                "name": "Orphaned task",
+                "prompt": "run it",
+                "schedule_type": "cron",
+                "cron": "0 * * * *",
+                "enabled": False,
+                "created_at": "2026-08-11T00:00:00+00:00",
+                "updated_at": "2026-08-11T00:00:00+00:00",
+                "metadata": {
+                    "orphaned_task_owner": {
+                        "reason_code": "task_owner_session_unavailable",
+                        "owner_session_id": "ses-removed",
+                    }
+                },
+            }
+        )
+    finally:
+        store.close()
+
+    client = app.test_client()
+    response = client.patch(
+        "/api/harness/tasks/orphaned-task",
+        json={"enabled": True},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 409
+    body = response.get_json()
+    assert body["code"] == "task_owner_session_unavailable"
+    assert body["error"]["code"] == "task_owner_session_unavailable"
+    assert "Create a replacement Task" in body["hint"]
+    assert body["details"] == {
+        "task_id": "orphaned-task",
+        "owner_session_id": "ses-removed",
+    }
+    store = SQLiteBackgroundTaskStore()
+    try:
+        saved = store.get_scheduled_task("orphaned-task")
+    finally:
+        store.close()
+    assert saved is not None
+    assert saved["enabled"] is False
+    assert saved["resume_blocked"] == {
+        "code": "task_owner_session_unavailable",
+        "owner_session_id": "ses-removed",
+    }
+
+
 def test_harness_bootstrap_returns_counts_and_selected_page(monkeypatch, tmp_path):
     from storage.background import SQLiteBackgroundTaskStore
 

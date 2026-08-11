@@ -1486,6 +1486,7 @@
     "retry": "Retry"
   },
   "errors": {
+    "task_owner_session_unavailable": "This Task's managing Session is no longer available. Create a replacement Task from an available Agent Session.",
     "share_id_taken": "That custom link is already taken. Pick another.",
     "invalid_share_id": "A custom link may use only 3–64 letters, numbers, dash, or underscore, starting and ending with a letter or number.",
     "missing_share_id": "Enter a custom link first.",
@@ -3196,6 +3197,7 @@
       "runtime": "Runtime",
       "eventProcessing": "Event processing",
       "lastError": "Last error",
+      "pauseReason": "Pause reason",
       "type": "Type",
       "triggeredBy": "Triggered by",
       "result": "Result",
@@ -3227,6 +3229,9 @@
     },
     "taskKind": {
       "command": "Command"
+    },
+    "taskPauseReason": {
+      "ownerSessionUnavailable": "The Session that managed this Task is no longer available. Create a replacement Task from an available Agent Session."
     },
     "onFailure": {
       "none": "Notice only (no Agent)",

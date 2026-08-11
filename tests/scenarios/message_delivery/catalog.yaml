@@ -61,7 +61,7 @@ scenarios:
     status: covered
     kind: concurrency
     layer: contract
-    test: tests/test_scheduled_tasks.py::test_one_terminal_turn_fans_out_each_accepted_run_callback_once
+    test: tests/test_scheduled_tasks.py::test_directed_run_and_callback_remain_distinct_while_target_busy
   - id: MESSAGE-DELIVERY-009
     name: P1 terminal race produces one accepted attachment or one P3 fallback owner
     status: covered
@@ -242,5 +242,11 @@ scenarios:
     kind: recovery
     layer: contract
     test: tests/test_session_delivery_fsm.py::test_accepted_receipt_recovery_preserves_attempt_batch_and_run_attachment
+  - id: MESSAGE-DELIVERY-314
+    name: One callee terminal Turn callbacks each callback Session once
+    status: covered
+    kind: concurrency
+    layer: contract
+    test: tests/test_scheduled_tasks.py::test_one_terminal_turn_callbacks_once_per_callback_session
 next_priority:
-  - MESSAGE-DELIVERY-314
+  - MESSAGE-DELIVERY-315

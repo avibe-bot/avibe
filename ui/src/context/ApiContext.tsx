@@ -1369,6 +1369,10 @@ export type HarnessTask = HarnessSessionSummary & HarnessDefinitionState & {
   last_run_at: string | null;
   last_run_id: string | null;
   last_error: string | null;
+  resume_blocked?: {
+    code: string;
+    owner_session_id: string;
+  } | null;
   // Command tasks: a scheduled definition that runs a subprocess instead of
   // prompting an Agent. Non-null ``shell_command`` OR a non-empty ``command``
   // argv is what makes a row one (see ``taskIsCommand``); its ``prompt`` is
