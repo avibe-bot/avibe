@@ -243,6 +243,12 @@ def test_gateway_handle_termination_has_one_settlement_owner() -> None:
     owner_outcome_calls = {
         node.lineno for node in ast.walk(owner) if is_call(node, "outcome")
     }
+    all_close_calls = {
+        node.lineno for node in ast.walk(tree) if is_call(node, "close_stream")
+    }
+    owner_close_calls = {
+        node.lineno for node in ast.walk(owner) if is_call(node, "close_stream")
+    }
     all_settlement_calls = {
         node.lineno
         for node in ast.walk(tree)
@@ -259,13 +265,47 @@ def test_gateway_handle_termination_has_one_settlement_owner() -> None:
         if is_call(node, "settle_handle_outcome")
     ]
     assert owner_outcome_calls
+    assert owner_close_calls
     assert owner_settlement_calls
     assert all_outcome_calls == owner_outcome_calls
+    assert all_close_calls == owner_close_calls
+    assert max(owner_close_calls) < min(owner_outcome_calls)
     assert all_settlement_calls == owner_settlement_calls
     assert all(
         any(keyword.arg == "termination_origin" for keyword in node.keywords)
         for node in settlement_nodes
     )
+    assert all(
+        any(keyword.arg == "record_attempt" for keyword in node.keywords)
+        for node in settlement_nodes
+    )
+
+
+def test_terminal_chain_reinspection_has_no_execution_channel_input() -> None:
+    path = Path(__file__).parents[1] / "core/handlers/model_hub/service.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    functions = {
+        node.name: node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    owner = functions["_inspect_terminal_chain"]
+    owner_inputs = {
+        argument.arg
+        for argument in (*owner.args.args, *owner.args.kwonlyargs)
+    }
+    assert "supply_channel" not in owner_inputs
+
+    def calls_owner(function_name: str) -> bool:
+        return any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "_inspect_terminal_chain"
+            for node in ast.walk(functions[function_name])
+        )
+
+    assert calls_owner("_produce_attempt_terminal_outcome")
+    assert calls_owner("resolve")
 
 
 def _terminal_resolution_facts(
@@ -519,6 +559,13 @@ class InvokeHandle:
     def stream(self):
         return None
 
+    @property
+    def outcome_available(self) -> bool:
+        return True
+
+    async def close_stream(self) -> None:
+        return None
+
     async def outcome(self) -> RawCallOutcome:
         return self._outcome
 
@@ -536,6 +583,13 @@ class LiveInvokeHandle:
     @property
     def stream(self):
         return self._stream
+
+    @property
+    def outcome_available(self) -> bool:
+        return True
+
+    async def close_stream(self) -> None:
+        await self._stream.aclose()
 
     async def outcome(self) -> RawCallOutcome:
         return self._outcome
@@ -562,6 +616,16 @@ class BlockingLiveInvokeHandle:
     def stream(self):
         return self._stream
 
+    @property
+    def outcome_available(self) -> bool:
+        return True
+
+    async def close_stream(self) -> None:
+        await self._stream.aclose()
+
+    def release(self) -> None:
+        self._release.set()
+
     async def outcome(self) -> RawCallOutcome:
         return self._outcome
 
@@ -581,19 +645,72 @@ class BrokenUpstreamInvokeHandle:
     def stream(self):
         return self._stream
 
+    @property
+    def outcome_available(self) -> bool:
+        return True
+
+    async def close_stream(self) -> None:
+        await self._stream.aclose()
+
     async def outcome(self) -> RawCallOutcome:
         return self._outcome
 
 
 class FakeStreamResponse:
+    def __init__(
+        self,
+        *,
+        prepare_error: BaseException | None = None,
+        write_error: BaseException | None = None,
+    ) -> None:
+        self.prepare_error = prepare_error
+        self.write_error = write_error
+
     async def prepare(self, _request) -> None:
+        if self.prepare_error is not None:
+            raise self.prepare_error
         return None
 
     async def write(self, _chunk: bytes) -> None:
+        if self.write_error is not None:
+            raise self.write_error
         return None
 
     async def write_eof(self) -> None:
         return None
+
+
+class DeferredLifecycleHandle:
+    def __init__(self, outcome: RawCallOutcome):
+        self._outcome = outcome
+        self._available = False
+        self._stream = self._iterate()
+        self.close_calls = 0
+        self.outcome_calls = 0
+
+    async def _iterate(self):
+        try:
+            yield b"data: {}\n\n"
+        finally:
+            self._available = True
+
+    @property
+    def stream(self):
+        return self._stream
+
+    @property
+    def outcome_available(self) -> bool:
+        return self._available
+
+    async def close_stream(self) -> None:
+        self.close_calls += 1
+        await self._stream.aclose()
+
+    async def outcome(self) -> RawCallOutcome:
+        self.outcome_calls += 1
+        if not self._available:
+            await asyncio.Event().wait()
+        return self._outcome
 
 
 class ProbeAdapter:
@@ -1476,6 +1593,73 @@ def test_gateway_streamed_fallback_settles_source_before_rendering_next_current(
     asyncio.run(exercise())
 
 
+@pytest.mark.parametrize(
+    ("stream_started", "expected_key", "expected_next_current"),
+    [
+        (True, "modelHub.launch.retry", True),
+        (False, "modelHub.launch.waiting_without_retry", False),
+    ],
+)
+def test_terminal_reinspection_uses_every_channel_in_a_mixed_chain(
+    tmp_path: Path,
+    stream_started: bool,
+    expected_key: str,
+    expected_next_current: bool,
+) -> None:
+    async def exercise() -> None:
+        hub = _source("src_mixedhub1", "Hub source")
+        native = _source(
+            "src_mixednative1",
+            "Native source",
+            channel="native_cli",
+        )
+        service = _service(
+            tmp_path,
+            sources=[hub, native],
+            outcomes=[
+                _outcome(
+                    RawOutcomeKind.NETWORK_ERROR,
+                    source_id=hub.id,
+                    stream_started=stream_started,
+                )
+            ],
+        )
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        service.store.config.agents["codex"].routes[requested_model] = (
+            ModelHubRouteConfig(
+                hops=(
+                    ModelHubRouteHopConfig(hub.id, "shared-model"),
+                    ModelHubRouteHopConfig(native.id, "shared-model"),
+                )
+            )
+        )
+
+        with pytest.raises(ModelHubError) as raised:
+            await service.resolve(
+                backend="codex",
+                model_id=requested_model,
+                request=ModelHubRequest(
+                    {"model": requested_model, "input": "ping"},
+                    protocol="openai_responses",
+                ),
+                supply_channel="hub",
+            )
+
+        projection = raised.value.turn_outcome
+        assert projection is not None
+        assert projection.next_current_changed is expected_next_current
+        assert project_turn_outcome_copy(projection).key == expected_key
+        assert service.adapter.invocations == [
+            (hub.id, "shared-model", "codex")
+        ]
+        assert service.agent_chain("codex", requested_model)["current"] == {
+            "source_id": native.id,
+            "model_id": "shared-model",
+        }
+
+    asyncio.run(exercise())
+
+
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize(
     ("kind", "status", "code", "expected_outcome", "expected_source_status"),
@@ -1585,23 +1769,141 @@ def test_handle_settlement_requires_an_explicit_termination_origin(
             backend="codex",
             requested_model_id="shared-model",
             source_id=source.id,
+            source_label=source.display_name,
             model_id="shared-model",
             handle=None,
             outcome=None,
-            requested_supply_channel="hub",
         )
 
         with pytest.raises(TypeError, match="termination_origin"):
             await service.settle_handle_outcome(resolved, outcome)  # type: ignore[call-arg]
 
+        record_attempt = Mock()
         settlement = await service.settle_handle_outcome(
             resolved,
             outcome,
             termination_origin="downstream_cancel",
+            record_attempt=record_attempt,
         )
         assert settlement.decision is None
         assert settlement.turn_outcome == produce_turn_outcome("turn.canceled")
         assert render_turn_outcome_copy(settlement.turn_outcome, "en") is None
+        assert service.store.load().sources[0].state.status == "standby"
+        record_attempt.assert_not_called()
+
+    asyncio.run(exercise())
+
+
+def test_handle_settlement_records_history_before_source_mutation(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        source = _source("src_ordered1", "Ordered settlement")
+        service = _service(tmp_path, sources=[source])
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        resolved = ResolvedInvocation(
+            backend="codex",
+            requested_model_id=requested_model,
+            source_id=source.id,
+            source_label=source.display_name,
+            model_id="shared-model",
+            handle=None,
+            outcome=None,
+        )
+        outcome = _outcome(RawOutcomeKind.NETWORK_ERROR, source_id=source.id)
+        order: list[str] = []
+        record_event = service._record_event
+        settle_source = service._settle_fallback_source
+
+        def ordered_event(**kwargs) -> None:
+            order.append("event")
+            record_event(**kwargs)
+
+        async def ordered_source_mutation(*args, **kwargs):
+            order.append("source_mutation")
+            return await settle_source(*args, **kwargs)
+
+        service._record_event = Mock(side_effect=ordered_event)
+        service._settle_fallback_source = AsyncMock(
+            side_effect=ordered_source_mutation
+        )
+
+        await service.settle_handle_outcome(
+            resolved,
+            outcome,
+            termination_origin="upstream_terminal",
+            record_attempt=lambda _outcome, _decision: order.append("provenance"),
+        )
+
+        assert order == ["provenance", "event", "source_mutation"]
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize(
+    ("failure_phase", "expected_outcome_calls"),
+    [("prepare", 0), ("write", 1)],
+)
+def test_gateway_closes_producer_before_downstream_cancel_settlement(
+    tmp_path: Path,
+    failure_phase: str,
+    expected_outcome_calls: int,
+) -> None:
+    async def exercise() -> None:
+        source = _source("src_close01", "Closed producer")
+        outcome = _outcome(
+            RawOutcomeKind.NETWORK_ERROR,
+            source_id=source.id,
+        )
+        handle = DeferredLifecycleHandle(outcome)
+        service = _service(tmp_path, sources=[source])
+        resolved = ResolvedInvocation(
+            backend="codex",
+            requested_model_id="shared-model",
+            source_id=source.id,
+            source_label=source.display_name,
+            model_id="shared-model",
+            handle=handle,
+            outcome=None,
+        )
+        terminalizer = SimpleNamespace(
+            mark_stream_started=Mock(),
+            mark_downstream_canceled=Mock(),
+            finish_attempt=Mock(),
+        )
+        response = FakeStreamResponse(
+            prepare_error=(
+                ConnectionResetError("downstream prepare failed")
+                if failure_phase == "prepare"
+                else None
+            ),
+            write_error=(
+                ConnectionResetError("downstream write failed")
+                if failure_phase == "write"
+                else None
+            ),
+        )
+        gateway = ModelHubTurnGateway(service)
+
+        with patch(
+            "core.handlers.model_hub.turn_gateway.web.StreamResponse",
+            return_value=response,
+        ):
+            with pytest.raises(ConnectionResetError, match="downstream"):
+                await asyncio.wait_for(
+                    gateway._resolved_response(
+                        SimpleNamespace(),
+                        resolved,
+                        stream=True,
+                        terminalizer=terminalizer,
+                    ),
+                    timeout=1,
+                )
+
+        assert handle.close_calls == 1
+        assert handle.outcome_calls == expected_outcome_calls
+        terminalizer.mark_downstream_canceled.assert_called_once_with()
+        terminalizer.finish_attempt.assert_not_called()
         assert service.store.load().sources[0].state.status == "standby"
 
     asyncio.run(exercise())
@@ -1688,10 +1990,10 @@ def test_gateway_upstream_stream_failure_remains_source_attributable(
             backend="codex",
             requested_model_id=requested_model,
             source_id=source.id,
+            source_label=source.display_name,
             model_id="shared-model",
             handle=handle,
             outcome=None,
-            requested_supply_channel="hub",
         )
         terminalizer = SimpleNamespace(
             mark_stream_started=Mock(),
@@ -1716,6 +2018,80 @@ def test_gateway_upstream_stream_failure_remains_source_attributable(
         terminalizer.finish_attempt.assert_called_once()
         assert service.store.load().sources[0].state.status == "cooldown"
         assert [event["reason"] for event in service.events.list()] == ["network"]
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize(
+    ("kind", "expected_status", "expected_provenance", "expected_event"),
+    [
+        (RawOutcomeKind.SUCCESS, 200, "served", None),
+        (RawOutcomeKind.NETWORK_ERROR, 502, "failed_terminal", "network"),
+    ],
+)
+def test_live_handle_settlement_survives_concurrent_source_deletion(
+    tmp_path: Path,
+    kind: RawOutcomeKind,
+    expected_status: int,
+    expected_provenance: str,
+    expected_event: str | None,
+) -> None:
+    async def exercise() -> None:
+        source = _source("src_deletedlive1", "Deleted during live call")
+        outcome = _outcome(kind, source_id=source.id)
+        handle = BlockingLiveInvokeHandle(outcome)
+        service = _service(
+            tmp_path,
+            sources=[source],
+            live_handles=[handle],
+        )
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        turn_id = f"turn_deleted_live_{kind.value}"
+        gateway = ModelHubTurnGateway(service)
+        base_url, token = await gateway.endpoint(
+            "codex",
+            process_scope="/repo",
+            turn_id=turn_id,
+            requested_model_id=requested_model,
+            resolved_model_id="shared-model",
+            source_id=source.id,
+        )
+        try:
+            async with aiohttp.ClientSession(trust_env=False) as client:
+                response_task = asyncio.create_task(
+                    client.post(
+                        f"{base_url}/v1/responses",
+                        json={
+                            "model": "shared-model",
+                            "input": "ping",
+                            "stream": False,
+                        },
+                        headers={"Authorization": f"Bearer {token}"},
+                    )
+                )
+                await asyncio.wait_for(handle.started.wait(), timeout=1)
+                await service.delete_source(source.id, force=True)
+                handle.release()
+                response = await asyncio.wait_for(response_task, timeout=1)
+                payload = await response.read()
+                assert response.status == expected_status
+                assert b"source_not_found" not in payload
+        finally:
+            handle.release()
+            await gateway.close()
+
+        assert service.store.load().sources == []
+        gateway.correlation.settle(
+            turn_id,
+            settled_by=SETTLED_BY_TERMINAL_RESULT,
+            ts=NOW.isoformat(),
+        )
+        record = service.provenance.get(turn_id)
+        assert record is not None
+        assert record["outcome"] == expected_provenance
+        assert [event["reason"] for event in service.events.list()] == (
+            [] if expected_event is None else [expected_event]
+        )
 
     asyncio.run(exercise())
 

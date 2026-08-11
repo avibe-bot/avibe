@@ -307,6 +307,7 @@ class ModelHubTurnGateway:
                 terminalizer,
                 termination_origin="upstream_terminal",
             )
+            assert outcome is not None
             assert settlement.decision is not None
             if settlement.decision.action != "return":
                 return self._outcome_response(
@@ -368,23 +369,25 @@ class ModelHubTurnGateway:
         terminalizer: GatewayTurnTerminalizer,
         *,
         termination_origin: HandleTerminationOrigin,
-    ) -> tuple[RawCallOutcome, HandleSettlement]:
+    ) -> tuple[RawCallOutcome | None, HandleSettlement]:
         """Route every handle terminal through the service settlement owner."""
 
-        outcome = await handle.outcome()
+        await handle.close_stream()
+        outcome = await handle.outcome() if handle.outcome_available else None
         settlement = await self.service.settle_handle_outcome(
             resolved,
             outcome,
             termination_origin=termination_origin,
+            record_attempt=lambda terminal_outcome, decision: terminalizer.finish_attempt(
+                outcome=terminal_outcome,
+                decision=decision,
+            ),
         )
         if termination_origin == "downstream_cancel":
             terminalizer.mark_downstream_canceled()
             return settlement.outcome, settlement
+        assert settlement.outcome is not None
         assert settlement.decision is not None
-        terminalizer.finish_attempt(
-            outcome=settlement.outcome,
-            decision=settlement.decision,
-        )
         return settlement.outcome, settlement
 
     def _outcome_response(

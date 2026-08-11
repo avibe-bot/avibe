@@ -71,17 +71,23 @@ class AdapterResult:
 class InvokeHandle:
     def __init__(self, outcome: RawCallOutcome, body: bytes | None) -> None:
         self._outcome = outcome
-        self._body = body
+        self._stream = self._chunks(body) if body is not None else None
+
+    @staticmethod
+    async def _chunks(body: bytes) -> AsyncIterator[bytes]:
+        yield body
 
     @property
     def stream(self) -> AsyncIterator[bytes] | None:
-        if self._body is None:
-            return None
+        return self._stream
 
-        async def chunks() -> AsyncIterator[bytes]:
-            yield self._body
+    @property
+    def outcome_available(self) -> bool:
+        return True
 
-        return chunks()
+    async def close_stream(self) -> None:
+        if self._stream is not None:
+            await self._stream.aclose()
 
     async def outcome(self) -> RawCallOutcome:
         return self._outcome

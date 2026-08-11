@@ -6,6 +6,7 @@ import socket
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Mapping
 
@@ -84,13 +85,34 @@ class EngineInvokeHandle:
         *,
         stream: AsyncIterator[bytes] | None,
         outcome: asyncio.Future[RawCallOutcome],
+        stream_closer: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self._stream = stream
         self._outcome = outcome
+        self._stream_closer = stream_closer
+        self._close_lock = asyncio.Lock()
+        self._stream_closed = False
 
     @property
     def stream(self) -> AsyncIterator[bytes] | None:
         return self._stream
+
+    @property
+    def outcome_available(self) -> bool:
+        return self._outcome.done()
+
+    async def close_stream(self) -> None:
+        async with self._close_lock:
+            if self._stream_closed:
+                return
+            try:
+                stream_close = getattr(self._stream, "aclose", None)
+                if stream_close is not None:
+                    await stream_close()
+            finally:
+                if self._stream_closer is not None:
+                    await self._stream_closer()
+                self._stream_closed = True
 
     async def outcome(self) -> RawCallOutcome:
         return await asyncio.shield(self._outcome)
@@ -299,7 +321,16 @@ class EngineClient:
             model_id=model_id,
             outcome_future=outcome_future,
         )
-        return EngineInvokeHandle(stream=response_stream, outcome=outcome_future)
+
+        async def close_response_stream() -> None:
+            response.close()
+            await session.close()
+
+        return EngineInvokeHandle(
+            stream=response_stream,
+            outcome=outcome_future,
+            stream_closer=close_response_stream,
+        )
 
     def _request_json(
         self,

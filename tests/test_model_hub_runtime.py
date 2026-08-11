@@ -1454,6 +1454,9 @@ def test_adapter_stream_outcome_commits_after_first_byte(tmp_path: Path) -> None
         assert handle.stream is not None
         body = b"".join([chunk async for chunk in handle.stream])
         assert body.startswith(b"data:")
+        assert handle.outcome_available is True
+        await handle.close_stream()
+        await handle.close_stream()
         outcome = await handle.outcome()
         assert outcome.kind is RawOutcomeKind.SUCCESS
         assert outcome.stream_started is True

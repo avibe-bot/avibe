@@ -240,16 +240,16 @@ class ResolvedInvocation:
     backend: BackendName
     requested_model_id: str
     source_id: str
+    source_label: str
     model_id: str
     handle: Optional[InvokeHandle]
     outcome: Optional[RawCallOutcome]
     supply_channel: Literal["native_cli", "hub"] = "hub"
-    requested_supply_channel: Literal["hub"] | None = None
 
 
 @dataclass(frozen=True)
 class HandleSettlement:
-    outcome: RawCallOutcome
+    outcome: RawCallOutcome | None
     decision: ResolutionDecision | None
     turn_outcome: TurnOutcomeProjectionInput
 
@@ -965,12 +965,18 @@ class ModelHubService:
         observation = await self._observe_source_payload(payload)
         return {"observation": self._observation_payload(observation)}
 
-    def _record_event(self, **event_fields: Any) -> None:
+    def _record_event(
+        self,
+        *,
+        historical_source_ids: Iterable[str] = (),
+        **event_fields: Any,
+    ) -> None:
         try:
             source_ids = {
                 source.id
                 for source in self.store.load().sources
             }
+            source_ids.update(historical_source_ids)
             for field in ("from_source", "to_source"):
                 source_id = event_fields.get(field)
                 if source_id is not None and source_id not in source_ids:
@@ -3196,6 +3202,7 @@ class ModelHubService:
         model_id: str,
         detail_key: str,
         reason: EventReason,
+        emit_event: bool = True,
     ) -> None:
         async with self._mutation_lock:
             config = self.store.load()
@@ -3214,7 +3221,7 @@ class ModelHubService:
                 detail_key=detail_key,
             )
             self._save_config(config)
-            if not unchanged:
+            if not unchanged and emit_event:
                 self._record_event(
                     agent=cast(EventAgent, backend),
                     kind="needs_action",
@@ -3862,6 +3869,7 @@ class ModelHubService:
         agent: EventAgent,
         model_id: str,
         detail_key: Optional[str] = None,
+        emit_event: bool = True,
     ) -> None:
         async with self._mutation_lock:
             config = self.store.load()
@@ -3876,7 +3884,7 @@ class ModelHubService:
                 detail_key=detail_key or f"models.source.cooldown.{decision.reason}",
             )
             self._save_config(config)
-            if not already_cooling:
+            if not already_cooling and emit_event:
                 self._record_event(
                     agent=agent,
                     kind="cooldown",
@@ -3894,6 +3902,7 @@ class ModelHubService:
         *,
         backend: BackendName,
         model_id: str,
+        emit_event: bool = True,
     ) -> EventReason:
         """Persist one fallback-class Source result before the turn settles."""
 
@@ -3911,6 +3920,7 @@ class ModelHubService:
                 decision,
                 agent=cast(EventAgent, backend),
                 model_id=model_id,
+                emit_event=emit_event,
             )
         else:
             detail_key = {
@@ -3926,24 +3936,17 @@ class ModelHubService:
                 model_id=model_id,
                 detail_key=detail_key,
                 reason=event_reason,
+                emit_event=emit_event,
             )
         return event_reason
 
-    def _produce_attempt_terminal_outcome(
+    def _inspect_terminal_chain(
         self,
         *,
         backend: BackendName,
         model_id: str,
-        supply_channel: Literal["hub"] | None,
-        source_id: str,
-        source_model_id: str,
-        outcome: RawCallOutcome,
-        decision: ResolutionDecision,
-    ) -> TurnOutcomeProjectionInput:
-        """Produce the sole complete terminal projection after attempt settlement."""
-
-        if not outcome.stream_started or decision.reason is None:
-            return produce_turn_outcome("turn.request_nonfallback")
+    ) -> tuple[ModelHubConfig, ModelHubTurnResolution]:
+        """Inspect the complete persisted chain used by the next turn."""
 
         config = self.store.load()
         resolution = resolve_model_hub_turn(
@@ -3955,7 +3958,27 @@ class ModelHubService:
                 config,
                 backend,
             ),
-            supply_channel=supply_channel,
+        )
+        return config, resolution
+
+    def _produce_attempt_terminal_outcome(
+        self,
+        *,
+        backend: BackendName,
+        model_id: str,
+        source_id: str,
+        source_model_id: str,
+        outcome: RawCallOutcome,
+        decision: ResolutionDecision,
+    ) -> TurnOutcomeProjectionInput:
+        """Produce the sole complete terminal projection after attempt settlement."""
+
+        if not outcome.stream_started or decision.reason is None:
+            return produce_turn_outcome("turn.request_nonfallback")
+
+        config, resolution = self._inspect_terminal_chain(
+            backend=backend,
+            model_id=model_id,
         )
         return produce_turn_outcome(
             "turn.streamed_fallback",
@@ -3967,9 +3990,10 @@ class ModelHubService:
     async def settle_handle_outcome(
         self,
         resolved: ResolvedInvocation,
-        outcome: RawCallOutcome,
+        outcome: RawCallOutcome | None,
         *,
         termination_origin: HandleTerminationOrigin,
+        record_attempt: Callable[[RawCallOutcome, ResolutionDecision], None],
     ) -> HandleSettlement:
         """Settle every consumed hub handle before its terminal facts are exposed."""
 
@@ -3983,12 +4007,13 @@ class ModelHubService:
             )
         if termination_origin != "upstream_terminal":
             raise AssertionError("unknown handle termination origin")
+        if outcome is None:
+            raise AssertionError("upstream handle termination requires an outcome")
         # A consumed non-null handle is first-byte evidence even if an adapter
         # omitted the redundant flag from its terminal report.
         outcome = replace(outcome, stream_started=True)
-        config = self.store.load()
-        source = self._source(config, resolved.source_id)
-        decision = await self._classify_source_outcome(source, outcome)
+        decision = classify_outcome(outcome)
+        record_attempt(outcome, decision)
         if decision.action == "return":
             return HandleSettlement(
                 outcome=outcome,
@@ -3998,19 +4023,46 @@ class ModelHubService:
         if decision.action != "surface":
             raise AssertionError("consumed streams cannot retry or fall through")
         if decision.reason is not None:
-            await self._settle_fallback_source(
-                source,
-                decision,
-                backend=resolved.backend,
+            event_reason = cast(EventReason, decision.reason)
+            self._record_event(
+                historical_source_ids=(resolved.source_id,),
+                agent=cast(EventAgent, resolved.backend),
+                kind=(
+                    "cooldown"
+                    if event_reason
+                    in {
+                        "quota_exhausted",
+                        "rate_limited",
+                        "server_error",
+                        "network",
+                    }
+                    else "needs_action"
+                ),
                 model_id=resolved.requested_model_id,
+                reason=event_reason,
+                from_source=resolved.source_id,
+                from_label=resolved.source_label,
+                now=self.now(),
             )
+            config = self.store.load()
+            source = next(
+                (item for item in config.sources if item.id == resolved.source_id),
+                None,
+            )
+            if source is not None:
+                await self._settle_fallback_source(
+                    source,
+                    decision,
+                    backend=resolved.backend,
+                    model_id=resolved.requested_model_id,
+                    emit_event=False,
+                )
         return HandleSettlement(
             outcome=outcome,
             decision=decision,
             turn_outcome=self._produce_attempt_terminal_outcome(
                 backend=resolved.backend,
                 model_id=resolved.requested_model_id,
-                supply_channel=resolved.requested_supply_channel,
                 source_id=resolved.source_id,
                 source_model_id=resolved.model_id,
                 outcome=outcome,
@@ -4228,11 +4280,11 @@ class ModelHubService:
                     backend=cast(BackendName, backend),
                     requested_model_id=model_id,
                     source_id=source.id,
+                    source_label=source.display_name,
                     model_id=target_model,
                     handle=None,
                     outcome=None,
                     supply_channel="native_cli",
-                    requested_supply_channel=supply_channel,
                 )
             await self._prepare_engine_for_demand(already_synced=engine_prepared)
             engine_prepared = True
@@ -4264,10 +4316,10 @@ class ModelHubService:
                     backend=cast(BackendName, backend),
                     requested_model_id=model_id,
                     source_id=source.id,
+                    source_label=source.display_name,
                     model_id=target_model,
                     handle=handle,
                     outcome=None,
-                    requested_supply_channel=supply_channel,
                 )
             decision = await self._classify_source_outcome(source, outcome)
             if decision.action == "refresh":
@@ -4292,10 +4344,10 @@ class ModelHubService:
                         backend=cast(BackendName, backend),
                         requested_model_id=model_id,
                         source_id=source.id,
+                        source_label=source.display_name,
                         model_id=target_model,
                         handle=handle,
                         outcome=None,
-                        requested_supply_channel=supply_channel,
                     )
                 decision = classify_outcome(outcome, refresh_attempted=True)
             if attempt_observer is not None:
@@ -4319,10 +4371,10 @@ class ModelHubService:
                     backend=cast(BackendName, backend),
                     requested_model_id=model_id,
                     source_id=source.id,
+                    source_label=source.display_name,
                     model_id=target_model,
                     handle=handle,
                     outcome=outcome,
-                    requested_supply_channel=supply_channel,
                 )
             if decision.action == "surface":
                 if outcome.stream_started and decision.reason is not None:
@@ -4342,7 +4394,6 @@ class ModelHubService:
                     turn_outcome=self._produce_attempt_terminal_outcome(
                         backend=cast(BackendName, backend),
                         model_id=model_id,
-                        supply_channel=supply_channel,
                         source_id=source.id,
                         source_model_id=target_model,
                         outcome=outcome,
@@ -4365,17 +4416,9 @@ class ModelHubService:
                 status=502,
                 turn_outcome=produce_turn_outcome("turn.engine_down"),
             )
-        final_config = self.store.load()
-        final_resolution = resolve_model_hub_turn(
-            final_config,
-            cast(BackendName, backend),
-            model_id,
-            now=self.now(),
-            unavailable_source_ids=self._unavailable_native_sources(
-                final_config,
-                cast(BackendName, backend),
-            ),
-            supply_channel=supply_channel,
+        final_config, final_resolution = self._inspect_terminal_chain(
+            backend=cast(BackendName, backend),
+            model_id=model_id,
         )
         turn_outcome = produce_turn_outcome(
             "turn.exhausted",

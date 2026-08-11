@@ -298,13 +298,20 @@ class InvokeHandle(Protocol):
     """One in-flight upstream call.
 
     ``stream`` is None iff the call failed before the first byte (outcome is
-    then immediately awaitable). When ``stream`` is not None, the caller must
-    consume it; ``outcome()`` resolves after the stream ends and reports
-    ``stream_started=True`` — per spec §4.2 no transparent retry then.
+    then immediately awaitable). When ``stream`` is not None, the settlement
+    owner closes it before reading the outcome. A never-started stream may have
+    no outcome after closing; ``outcome_available`` is the non-blocking guard.
+    A consumed stream reports ``stream_started=True`` — per spec §4.2 no
+    transparent retry then. ``close_stream()`` is idempotent.
     """
 
     @property
     def stream(self) -> AsyncIterator[bytes] | None: ...
+
+    @property
+    def outcome_available(self) -> bool: ...
+
+    async def close_stream(self) -> None: ...
 
     async def outcome(self) -> RawCallOutcome: ...
 
