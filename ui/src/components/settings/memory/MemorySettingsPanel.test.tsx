@@ -251,8 +251,7 @@ describe('MemorySettingsPanel', () => {
     const inputs = screen.getAllByPlaceholderText(
       'memory.settings.baseUrlPlaceholder',
     ) as HTMLInputElement[];
-    expect(inputs[0].disabled).toBe(true);
-    expect(inputs[1].disabled).toBe(false);
+    expect(inputs.every((input) => !input.disabled)).toBe(true);
     expect(
       (screen.getByRole('switch', { name: 'memory.settings.enableLabel' }) as HTMLButtonElement)
         .disabled,
@@ -311,6 +310,59 @@ describe('MemorySettingsPanel', () => {
       },
       confirm_rebuild: true,
     }));
+  });
+
+  it('keeps a pending LLM identity editable so a failed probe can be corrected', async () => {
+    api.saveMemorySettings.mockResolvedValue({
+      ...legacySettings,
+      rebuild_required: true,
+      processing: {
+        ...legacySettings.processing,
+        llm: {
+          ...legacySettings.processing.llm,
+          base_url: 'https://corrected-llm.example.test/v1',
+          model: 'corrected-model',
+        },
+      },
+    });
+    const user = userEvent.setup();
+    render(
+      <MemorySettingsPanel
+        settings={{ ...legacySettings, rebuild_required: true }}
+        maintenance={null}
+        maintenanceError={null}
+        dependencyReady
+        onSaved={() => undefined}
+        onReloadSettings={() => undefined}
+        onReloadMaintenance={() => undefined}
+        onClearAll={() => undefined}
+        clearing={false}
+      />,
+    );
+
+    const llmBaseUrl = screen.getAllByPlaceholderText(
+      'memory.settings.baseUrlPlaceholder',
+    )[0] as HTMLInputElement;
+    const llmModel = screen.getAllByPlaceholderText(
+      'memory.settings.modelPlaceholder',
+    )[0] as HTMLInputElement;
+    expect(llmBaseUrl.disabled).toBe(false);
+    expect(llmModel.disabled).toBe(false);
+    await user.clear(llmBaseUrl);
+    await user.type(llmBaseUrl, 'https://corrected-llm.example.test/v1');
+    await user.clear(llmModel);
+    await user.type(llmModel, 'corrected-model');
+    await user.click(screen.getByRole('button', { name: 'memory.settings.save' }));
+
+    await waitFor(() => expect(api.saveMemorySettings).toHaveBeenCalledWith({
+      processing: {
+        llm: {
+          base_url: 'https://corrected-llm.example.test/v1',
+          model: 'corrected-model',
+        },
+      },
+    }));
+    expect(screen.queryByRole('button', { name: 'confirm-rebuild' })).toBeNull();
   });
 
   it('keeps API-key correction available under a pending marker', async () => {

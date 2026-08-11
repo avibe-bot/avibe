@@ -1294,10 +1294,10 @@ class MemoryRuntime:
     async def clear(self, *, operator_ref: str) -> dict[str, Any]:
         if not self.available:
             raise self._unavailable()
-        if self._rebuild_running():
-            return {"status": "failed", "error": "memory_operation_in_progress"}
-        result = await self._require_maintenance().clear(operator_ref=operator_ref)
-        return _clear_result_payload(result)
+        maintenance = self._require_maintenance()
+        return await self._run_clear_with_operation_lease(
+            lambda: maintenance.clear(operator_ref=operator_ref)
+        )
 
     async def resume_clear(
         self,
@@ -1307,13 +1307,13 @@ class MemoryRuntime:
     ) -> dict[str, Any]:
         if not self.available:
             raise self._unavailable()
-        if self._rebuild_running():
-            return {"status": "failed", "error": "memory_operation_in_progress"}
-        result = await self._require_maintenance().resume_clear(
-            operation_id,
-            operator_ref=operator_ref,
+        maintenance = self._require_maintenance()
+        return await self._run_clear_with_operation_lease(
+            lambda: maintenance.resume_clear(
+                operation_id,
+                operator_ref=operator_ref,
+            )
         )
-        return _clear_result_payload(result)
 
     async def abort_clear(
         self,
@@ -1323,13 +1323,28 @@ class MemoryRuntime:
     ) -> dict[str, Any]:
         if not self.available:
             raise self._unavailable()
+        maintenance = self._require_maintenance()
+        return await self._run_clear_with_operation_lease(
+            lambda: maintenance.abort_clear(
+                operation_id,
+                operator_ref=operator_ref,
+            )
+        )
+
+    async def _run_clear_with_operation_lease(
+        self,
+        operation: Callable[[], Awaitable[ClearResult]],
+    ) -> dict[str, Any]:
         if self._rebuild_running():
             return {"status": "failed", "error": "memory_operation_in_progress"}
-        result = await self._require_maintenance().abort_clear(
-            operation_id,
-            operator_ref=operator_ref,
-        )
-        return _clear_result_payload(result)
+        lease = MemoryOperationLease(self._effective_home)
+        try:
+            await run_blocking(lease.acquire)
+            return _clear_result_payload(await operation())
+        except MemoryOperationBusy:
+            return {"status": "failed", "error": "memory_operation_in_progress"}
+        finally:
+            await run_blocking(lease.release)
 
     async def _pause_clear_claims(self) -> None:
         if not await self.module.quiesce_claims_for_clear():

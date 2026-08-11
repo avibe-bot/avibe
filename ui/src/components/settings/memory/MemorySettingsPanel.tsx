@@ -31,7 +31,6 @@ const EndpointFields: React.FC<{
   original: MemoryEndpointConfig;
   onChange: (next: EndpointDraft) => void;
   disabled: boolean;
-  identityDisabled?: boolean;
   identityHint?: string;
   canClearKey: boolean;
 }> = ({
@@ -40,7 +39,6 @@ const EndpointFields: React.FC<{
   original,
   onChange,
   disabled,
-  identityDisabled = false,
   identityHint,
   canClearKey,
 }) => {
@@ -61,7 +59,7 @@ const EndpointFields: React.FC<{
           <Label className="text-[12px] text-muted">{t('memory.settings.baseUrl')}</Label>
           <Input
             value={draft.baseUrl}
-            disabled={disabled || identityDisabled}
+            disabled={disabled}
             placeholder={t('memory.settings.baseUrlPlaceholder')}
             onChange={(e) => onChange({ ...draft, baseUrl: e.target.value })}
             className="text-[13px]"
@@ -71,7 +69,7 @@ const EndpointFields: React.FC<{
           <Label className="text-[12px] text-muted">{t('memory.settings.model')}</Label>
           <Input
             value={draft.model}
-            disabled={disabled || identityDisabled}
+            disabled={disabled}
             placeholder={t('memory.settings.modelPlaceholder')}
             onChange={(e) => onChange({ ...draft, model: e.target.value })}
             className="text-[13px]"
@@ -322,7 +320,6 @@ export const MemorySettingsPanel: React.FC<{
         original={settings.processing.llm}
         onChange={setLlmDraft}
         disabled={busy}
-        identityDisabled={rebuildRequired}
         canClearKey={canClearKeys}
       />
 

@@ -5512,6 +5512,18 @@ async def test_runtime_rebuild_lease_rejects_a_second_controller(
         "error": "memory_operation_in_progress",
         "result": "failed",
     }
+    assert await second.clear(operator_ref="user:owner") == {
+        "status": "failed",
+        "error": "memory_operation_in_progress",
+    }
+    assert await second.resume_clear("clear-1", operator_ref="user:owner") == {
+        "status": "failed",
+        "error": "memory_operation_in_progress",
+    }
+    assert await second.abort_clear("clear-1", operator_ref="user:owner") == {
+        "status": "failed",
+        "error": "memory_operation_in_progress",
+    }
 
     release.set()
     assert await rebuilding == {
