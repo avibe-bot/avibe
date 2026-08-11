@@ -574,12 +574,15 @@ start the model-output stream.
 
 Connection backoff is live execution state, never Source/configuration state. For the
 same Source, consecutive `transport_before_first_byte` decisions use delays
-`1, 2, 4, 8, 16, 30, 30, ...` seconds. While the deadline is future, every exact hop
-for that Source reads `health: backoff`, `runnable: false`, and that deadline as
-`retry_at`. Its reason is `models.source.backoff.connection_failed` unless a
-`native_cli` process is simultaneously unavailable; that actionable process blocker
-takes the single reason slot as `native_cli_unavailable`, while the backoff health and
-deadline remain visible and the chain is `interrupted`.
+`1, 2, 4, 8, 16, 30, 30, ...` seconds. While the deadline is future, it overlays only
+an otherwise `healthy` exact hop whose Source and configured model capability are still
+present. That hop reads `health: backoff`, `runnable: false`, the deadline as `retry_at`,
+and `reason: models.source.backoff.connection_failed`. Source cooldown,
+`needs_action`, `error`, `source_missing`, or `model_unsupported` suppresses the live
+overlay and keeps that durable/self-healing blocker's established health, reason, and
+retry facts. The one process-layer exception is simultaneous `native_cli` unavailability:
+its actionable `native_cli_unavailable` reason takes the single reason slot while the
+backoff health and deadline remain visible and the chain is `interrupted`.
 Deadline expiry makes the hop runnable again without a write. The first subsequent
 user-visible model-output byte produced by that same affected Source clears both
 deadline and streak automatically; successful fallback output from another Source does
@@ -598,6 +601,21 @@ persisted Source-state counterpart.
 | Decision | Required live annotation | Persistence | First consumer |
 | --- | --- | --- | --- |
 | `backoff` | `runnable: false`, future `retry_at`, and `reason: models.source.backoff.connection_failed`; simultaneous native-process unavailability instead takes reason precedence as `native_cli_unavailable` without erasing health/deadline | in-memory only; never Source/configuration state | AgentChain and AgentSupply health reads |
+
+**Live-backoff blocker-precedence totality (exhaustive; PM ruling
+2026-08-11 23:49).** This is projection precedence, not a second health classifier.
+An internal deadline may continue to age while a stronger fact suppresses its read
+overlay.
+
+| Underlying hop fact while the deadline is live | Backoff projection | Emitted hop facts | Fully blocked chain rollup |
+| --- | --- | --- | --- |
+| Source `healthy`, exact Source/model capability present, process available | apply | `backoff`, `connection_failed`, future deadline, not runnable | `waiting` when every hop is cooldown or this row |
+| Source `cooldown` | suppress | existing cooldown health/reason/deadline, not runnable | `waiting` when every hop is cooldown or ordinary backoff |
+| Source `needs_action` | suppress | existing `needs_action` health/reason and retry facts, not runnable | `interrupted` |
+| Source `error` | suppress | existing `error` health/reason and retry facts, not runnable | `interrupted` |
+| Source absent (`source_missing`) | suppress | existing missing-Source health, `source_missing`, and retry facts, not runnable | `interrupted` |
+| Exact model capability absent (`model_unsupported`) | suppress | existing capability-missing health, `model_unsupported`, and retry facts, not runnable | `interrupted` |
+| Source `healthy`, exact capability present, `native_cli` process unavailable | apply with the process-reason exception | `backoff`, `native_cli_unavailable`, the same future deadline, not runnable | `interrupted` |
 
 The final mirror registry checks the closed (classification, credential capability) →
 `detail_key` → remedy relation in both directions. The resolver suite executes every

@@ -22,7 +22,7 @@ Hub has not shipped, so there is no internal contract migration or compatibility
 | POST `/api/models/sources/observe` | `{vendor, base_url?, key, protocol_order?}` → `{observation: SourceObservation}` | Non-persisting connectivity/authentication/protocol/inventory observation. `protocol_order` only orders the three probes; it never supplies a conclusion. No credential reference is returned. |
 | POST `/api/models/sources` | `source-create.schema.json` → `{source: Source, added_to: AddedTo[], adopted_by: AdoptedBy[]}` | The server assigns `id` and `created_at`; plaintext keys are transient. Add-time matching and placement are materialized before response. An optional `client_nonce` is reserved only in process before work and persisted only on the committed Source for list-based lost-response reconciliation. |
 | PATCH `/api/models/sources/<id>` | `{display_name?, base_url?, force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded Source-mutation envelope | Metadata/Base-URL mutation from the authoritative matrix in `model-hub.md` §4.5. A forced retry confirms only an exact echo of the refusal plan. |
-| PUT `/api/models/sources/<id>/credential` | `{key, force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded Source-mutation envelope | API-key replacement. Confirmation fields are JSON body fields. |
+| PUT `/api/models/sources/<id>/credential` | `{key, force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded Source-mutation envelope | API-key replacement. Confirmation fields are JSON body fields. Success is exactly `{source, removed_hops, interrupted}`; the OAuth-only repair tail never appears here. |
 | POST `/api/models/sources/<id>/reauth` | `{acknowledge_irreversible?: true}` → `{flow: OAuthFlow}` | A `native_cli` source requires the acknowledgement before OAuth starts. See repair rules. |
 | DELETE `/api/models/sources/<id>?force=<bool>` | `{would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded `409` or `{removed_hops, interrupted}` | A confirmed delete removes the Source from every backend Source order and Route chain in one transaction. A nonempty destructive plan commits only when the body exactly echoes the current refusal plan. |
 | POST `/api/models/sources/<id>/refresh` | `{force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded Source-mutation envelope | The sole saved connectivity/discovery/recovery mutation. |
@@ -195,7 +195,7 @@ every other existing field and enum meaning remains unchanged.
 | `RouteHopRef.position` | guarded mutation planner | guarded-change hop row | One-based position in the named Route before the attempted mutation. |
 | `OAuthStart.client_nonce` | OAuth client before send | OAuth start idempotency | Optional client-generated correlation; the server claims its exact tuple with vendor and channel before provider work, coalesces an in-flight retry, releases after failed/canceled cleanup, and converts success atomically to the flow. |
 | `OAuthFlow.client_nonce` | OAuth start echo | lost-start reconciliation | When the request supplied the nonce, every flow response echoes it unchanged. |
-| `AgentChain.chain[].health: backoff` | configured-chain live annotator | chain/AgentSupply health reads | Source-scoped in-memory connection throttle before the first user-visible model-output byte, with `retry_at` strictly later than the assembler's captured read time, never persisted in Source/config. Before serialization, an expired overlay is normalized to the same Source's underlying non-backoff health and runnability; stale backoff is never emitted. Its reason is `models.source.backoff.connection_failed` unless simultaneous native-process unavailability takes the single reason slot as `native_cli_unavailable`; the ordinary case rolls up as self-healing `waiting`, while that process-blocked case is `interrupted`. |
+| `AgentChain.chain[].health: backoff` | configured-chain live annotator | chain/AgentSupply health reads | Source-scoped in-memory connection throttle before the first user-visible model-output byte, with `retry_at` strictly later than the assembler's captured read time, never persisted in Source/config. It overlays only an otherwise healthy hop whose exact Source/model capability is present. Cooldown, durable Source health, missing Source, or unsupported model suppresses it and keeps the stronger blocker's established projection; simultaneous native-process unavailability is the sole exception and takes the reason slot without erasing the deadline. Before serialization, an expired overlay is normalized to the underlying non-backoff facts. Ordinary backoff rolls up `waiting`; every durable/capability/process blocker rolls up `interrupted`. |
 
 ## AgentSupply read projection
 
@@ -576,9 +576,12 @@ differently only if all invariants remain true:
    returns `reauth_confirmation_required` before any OAuth adapter call. This is
    unconditional and does not claim that a pre-login supply prediction exists.
    Hub-channel repair does not require this acknowledgement.
-6. **Recovery symmetry.** Both routes return the same repair tail:
-   `{source, recovered, interrupted_pairs}`. `recovered` is true exactly when the
-   prior source state was `needs_action` or `error`.
+6. **Repair-result ownership.** API-key replacement returns only the standard guarded
+   Source-mutation success envelope `{source, removed_hops, interrupted}`. Its repair
+   effect is read from the returned `Source.state`, while `removed_hops` and
+   `interrupted` report the exact Route impact. `recovered` and `interrupted_pairs`
+   belong only to a terminal OAuth flow with `intent: "reauth"`; they never appear on
+   `PUT …/credential`.
 7. **Durable failed-revocation reconciliation.** If old engine material cannot be
    revoked after commit, the service persists a pending-revocation record before
    returning success. A reconstructed service reads the same journal and retries it.
@@ -621,9 +624,13 @@ API-key success:
 {
   "ok": true,
   "contract_version": 5,
-  "source": {"id": "src_relay9c1x", "kind": "api_key"},
-  "recovered": true,
-  "interrupted_pairs": []
+  "source": {
+    "id": "src_relay9c1x",
+    "kind": "api_key",
+    "state": {"status": "standby"}
+  },
+  "removed_hops": [],
+  "interrupted": []
 }
 ```
 
@@ -729,8 +736,11 @@ Process availability is definitionally true for `channel: "hub"` in v2; there is
 configuration knob for it. For `native_cli`, `reason: "native_cli_unavailable"` is an
 orthogonal process fact legal at every health and always forces `runnable: false`. The
 item stays visible and dimmed, and makes a fully blocked chain `interrupted`, even when
-its health is `cooldown` or `backoff`. A hub or process-available native hop under
-short connection throttle carries `health: backoff`,
+its health is `cooldown` or `backoff`. A short connection throttle overlays only an
+otherwise healthy, capability-present Hub or process-available native hop. Source
+cooldown, `needs_action`, `error`, `source_missing`, and `model_unsupported` suppress
+that overlay and retain their established health/reason/retry projection. An eligible
+throttled hop carries `health: backoff`,
 `reason: models.source.backoff.connection_failed`, and the future deadline in
 `retry_at`; this blocker rolls up as `waiting`. If the native CLI also becomes
 unavailable, the actionable process fact takes the single `reason` slot, while
@@ -871,9 +881,21 @@ Source does not clear the affected Source's streak. The delay is capped at 30 se
 For a native hop whose process is simultaneously unavailable, the live deadline remains
 visible but `native_cli_unavailable` takes the single reason slot and the chain remains
 `interrupted`; restoring the process reveals any still-live connection backoff.
+Projection precedence while a deadline is live is total:
+
+| Underlying hop fact | Backoff overlay | Emitted facts | Fully blocked rollup |
+| --- | --- | --- | --- |
+| healthy + exact capability present + process available | apply | `backoff`, `connection_failed`, future deadline | `waiting` when all hops are cooldown/ordinary backoff |
+| cooldown | suppress | existing cooldown health/reason/deadline | `waiting` when all hops are cooldown/ordinary backoff |
+| `needs_action` or `error` | suppress | existing Source health/reason/retry facts | `interrupted` |
+| `source_missing` or `model_unsupported` | suppress | existing capability-blocker health/reason/retry facts | `interrupted` |
+| healthy + exact capability present + native process unavailable | apply with process-reason exception | `backoff`, `native_cli_unavailable`, same future deadline | `interrupted` |
+
 `Source.state`, Source serialization, and every `models.source.cooldown.*` key remain
 untouched by unclassified transport failure. Probe connection failure uses the same
-closed live key; it never reports the removed persistent network/timeout cooldown keys.
+closed live key and validates only as `channel: hub`, `reachable: false`, and
+`latency_ms: null`; native probes and Hub probes with measured latency cannot carry it.
+It never reports the removed persistent network/timeout cooldown keys.
 
 ## Turn provenance absence
 
@@ -1016,8 +1038,9 @@ contract harness and API-boundary tests enforce:
 | every RuntimeDependency API payload includes server-derived `host_platform` and `status.error_key`; `installing` has exactly null `installed_version`, false `verified`, and null `listening`, with one positive and each-field contradiction fixtures; only supported `not_installed` starts a download, installed states are state-preserving no-ops, page reload preserves a live `installing` job, and service bootstrap reconciles an orphan before serving runtime endpoints | RuntimeDependency schema and API payload tests |
 | Source create reserves `client_nonce` in process before work; the client reads Sources before any lost-response retry; fixtures cover `nonce.in_flight` (`source_create_in_progress`/no work), `nonce.released` (atomic reserve/exactly one fresh attempt), and `nonce.committed` (`source_nonce_conflict` followed by a list read that finds exactly one Source with that nonce), while AC-26 cleanup or process restart releases any live reservation and Source deletion releases its committed nonce; after restart or deletion and a list miss, same-nonce create is positively asserted as a fresh creation | config, API payload, cancellation/restart, Source-delete, and client retry tests |
 | Source observation rejects unregistered request/status evidence fields; clients consume only the contracted outcome, reachability, authentication, protocol, discovery, and models facts | observation schema and API payload tests |
-| network fixtures cover shaped/transport × `stream_started: false/true`, where the boundary is the first user-visible model-output byte: shaped results at either phase enter only their existing non-permanent Source classifier; unclassified pre-output connection failure creates bounded live backoff with no config write; only later output from that same Source clears its streak, while another Source's successful fallback does not; the API/read assembler emits a future deadline for a live overlay and normalizes an expired overlay to underlying non-backoff health before serialization; unclassified post-output interruption is event-only with no backoff/state mutation or replay; simultaneous native-process unavailability takes reason precedence while preserving backoff health/deadline and yields interrupted; a pure cooldown/backoff chain validates only as waiting | clocked table-driven resolver/API/event and AgentChain boundary tests |
+| network fixtures cover shaped/transport × `stream_started: false/true`, where the boundary is the first user-visible model-output byte: shaped results at either phase enter only their existing non-permanent Source classifier; unclassified pre-output connection failure creates bounded live backoff with no config write; only later output from that same Source clears its streak, while another Source's successful fallback does not; the API/read assembler emits a future deadline for a live overlay and normalizes an expired overlay before serialization; concurrent cooldown/needs-action/error/missing-Source/unsupported-model facts suppress the overlay and keep stronger projections, so waiting never hides a durable blocker; simultaneous native-process unavailability alone preserves backoff health/deadline while taking reason precedence and yielding interrupted; probe `connection_failed` requires the exact Hub/unreachable/null-latency shape | clocked table-driven resolver/API/event, AgentChain precedence, ProbeResult relation, and concurrent-transition tests |
 | every `GuardRefusal` validates against `guard-refusal.schema.json` and has a nonempty current plan; fixtures cover every guard-decision row, including unforced refusal, exact echoed-plan confirmation, missing/different echo returning the new plan, and old-echo empty-plan ordinary success without a fabricated 409 | API payload and concurrent-mutation test |
+| `PUT /sources/<id>/credential` success contains exactly the standard `{source, removed_hops, interrupted}` mutation tail; `{recovered, interrupted_pairs}` is absent there and remains owned only by terminal OAuth `intent: "reauth"` | contract negative fixture and API payload test |
 | each `source_in_route_chain` or `source_model_in_route_chain` refusal has nonempty `would_remove_hops`; each `source_last_supplier` refusal has nonempty `would_interrupt`; mismatched code/empty-required-array combinations fail schema validation even when the other array is nonempty | guard schema relation fixture |
 | both GuardRefusal plan arrays contain unique objects; duplicate hop and supply-gap entries fail schema validation; producers emit SupplyGap rows in ascending `(backend, model_id)` order and each `agents` array in stable-id lexicographic order, with permutation fixtures proving canonical output | guard schema uniqueness and producer-order fixtures |
 | `model_supply[].chain_length: 0` implies `has_runnable_hop: false`; the opposite pair fails schema validation | AgentSupply schema correlation fixture |

@@ -38,7 +38,7 @@
           "channel": { "enum": ["hub", "native_cli"] },
           "health": {
             "enum": ["healthy", "cooldown", "backoff", "needs_action", "error"],
-            "description": "Source-global health mapped to this hop, plus live backoff. backoff is an in-memory connection throttle before the first user-visible model-output byte and is never persisted on Source or configuration."
+            "description": "Source-global health mapped to this hop, plus live backoff. backoff is an in-memory connection throttle before the first user-visible model-output byte and is never persisted on Source or configuration. It is projected only over an otherwise healthy hop whose exact Source/model capability is present; every durable Source/capability blocker suppresses it."
           },
           "runnable": { "type": "boolean" },
           "reason": {
@@ -105,7 +105,7 @@
     },
     "supply_state": {
       "enum": ["ok", "waiting", "interrupted"],
-      "description": "ok has a runnable hop; waiting is a non-empty chain whose only blockers are Source cooldown or live connection backoff and which has no process blocker; interrupted covers an empty chain or an action/process blocker."
+      "description": "ok has a runnable hop; waiting is a non-empty chain whose only blockers are Source cooldown or live connection backoff and which has no process blocker; interrupted covers an empty chain or an action/process blocker. A durable blocker cannot be hidden by a simultaneous live backoff."
     }
   },
   "allOf": [

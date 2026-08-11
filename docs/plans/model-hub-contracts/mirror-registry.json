@@ -716,6 +716,23 @@
           "marker": "authority-consumer: live_backoff.reason "
         },
         {
+          "kind": "schema_vocabulary",
+          "schema": "probe-result.schema.json",
+          "paths": ["/properties/error"],
+          "exclude": [
+            null,
+            "models.source.cooldown.rate_limited",
+            "models.source.cooldown.quota_exhausted",
+            "models.source.cooldown.server_error",
+            "models.source.needs_action.oauth_expired",
+            "models.source.needs_action.balance_exhausted",
+            "models.source.needs_action.credential_revoked",
+            "models.source.needs_action.account_banned",
+            "models.source.error.unclassified",
+            "models.probe.native_cli_unavailable"
+          ]
+        },
+        {
           "kind": "json_object_keys",
           "file": "ui/src/i18n/en.json",
           "path": "/models/source/backoff",

@@ -569,6 +569,62 @@ def test_v5_mirror_registry_mutation_probes_detect_every_comparable_drift():
                 _validate_mirror_entry(entry, mutated)
 
 
+def test_d21_live_backoff_reason_consumers_match_authority_individually():
+    registry = json.loads(
+        (CONTRACTS / "mirror-registry.json").read_text(encoding="utf-8")
+    )
+    decision = next(
+        item for item in registry["decision_tables"] if item["id"] == "D21"
+    )
+    authority_spec = decision["authority"]
+    authority = _vocabulary(
+        _schema(authority_spec["schema"]), authority_spec["paths"]
+    )
+
+    observed = []
+    for consumer in decision["consumers"]:
+        if consumer["kind"] == "schema_vocabulary":
+            observed.append(
+                _vocabulary(
+                    _schema(consumer["schema"]),
+                    consumer["paths"],
+                    exclude=consumer.get("exclude", ()),
+                )
+            )
+        elif consumer["kind"] == "marker_tail":
+            values = set()
+            for line in Path(consumer["file"]).read_text(encoding="utf-8").splitlines():
+                if consumer["marker"] in line:
+                    tail = line.split(consumer["marker"], 1)[1].split("-->", 1)[0]
+                    values.update(tail.split())
+            observed.append(values)
+        elif consumer["kind"] == "json_object_keys":
+            payload = json.loads(Path(consumer["file"]).read_text(encoding="utf-8"))
+            keys = _json_pointer(payload, consumer["path"])
+            observed.append({f"{consumer.get('prefix', '')}{key}" for key in keys})
+        else:
+            raise AssertionError(consumer)
+
+    assert observed
+    assert all(values == authority for values in observed)
+
+    mutated_probe = _schema("probe-result.schema.json")
+    mutated_probe["properties"]["error"]["enum"].remove(
+        "models.source.backoff.connection_failed"
+    )
+    probe_spec = next(
+        item for item in decision["consumers"] if item["kind"] == "schema_vocabulary"
+    )
+    assert (
+        _vocabulary(
+            mutated_probe,
+            probe_spec["paths"],
+            exclude=probe_spec.get("exclude", ()),
+        )
+        != authority
+    )
+
+
 def test_model_hub_authority_closure_is_generated_from_live_files():
     result = check_model_hub_authorities(Path.cwd())
     assert result["input_mode"] == "same_run_live_files"
@@ -623,6 +679,18 @@ def test_targeted_permission_denial_contract_is_request_scoped_and_mirrored():
 
 
 def test_v5_shape_amendments_reject_the_false_states_they_replace():
+    api_contract = (CONTRACTS / "api.md").read_text(encoding="utf-8")
+    credential_contract = api_contract.split(
+        "## Credential replacement and reauth", 1
+    )[1].split("## Source refresh and blocked-source recovery", 1)[0]
+    assert "{source, recovered, interrupted_pairs}" not in credential_contract
+    assert '"recovered"' not in credential_contract
+    assert '"interrupted_pairs"' not in credential_contract
+    assert api_contract.count(
+        '- terminal `intent: "reauth"` → '
+        '`{flow, source, recovered, interrupted_pairs}`.'
+    ) == 1
+
     runtime_schema = _schema("runtime-dependency.schema.json")
     runtime_validator = Draft7Validator(runtime_schema)
     installing_runtime = copy.deepcopy(runtime_schema["examples"][0])
@@ -751,10 +819,55 @@ def test_v5_shape_amendments_reject_the_false_states_they_replace():
     with pytest.raises(ValidationError):
         event_validator.validate(invalid_event)
 
-    probe = copy.deepcopy(_schema("probe-result.schema.json")["examples"][0])
+    probe_schema = _schema("probe-result.schema.json")
+    probe_validator = Draft7Validator(probe_schema)
+    connection_failure = next(
+        copy.deepcopy(example)
+        for example in probe_schema["examples"]
+        if example["error"] == "models.source.backoff.connection_failed"
+    )
+    probe_validator.validate(connection_failure)
+    for contradiction in (
+        {"channel": "native_cli"},
+        {"latency_ms": 1},
+    ):
+        invalid_connection_failure = {**connection_failure, **contradiction}
+        with pytest.raises(ValidationError):
+            probe_validator.validate(invalid_connection_failure)
+
+    probe = copy.deepcopy(probe_schema["examples"][0])
     probe["source_id"] = "direct"
     with pytest.raises(ValidationError):
-        Draft7Validator(_schema("probe-result.schema.json")).validate(probe)
+        probe_validator.validate(probe)
+
+    chain_schema = _schema("agent-chain.schema.json")
+    chain_validator = Draft7Validator(chain_schema)
+    ordinary_backoff = next(
+        copy.deepcopy(example)
+        for example in chain_schema["examples"]
+        if example["chain"]
+        and example["chain"][0]["reason"]
+        == "models.source.backoff.connection_failed"
+    )
+    for blocker in (
+        {
+            "health": "needs_action",
+            "reason": "models.source.needs_action.credential_revoked",
+            "retry_at": None,
+        },
+        {
+            "health": "healthy",
+            "reason": "model_unsupported",
+            "retry_at": None,
+        },
+    ):
+        blocked = copy.deepcopy(ordinary_backoff)
+        blocked["chain"][0].update(blocker)
+        blocked["supply_state"] = "interrupted"
+        chain_validator.validate(blocked)
+        mislabeled_waiting = {**blocked, "supply_state": "waiting"}
+        with pytest.raises(ValidationError):
+            chain_validator.validate(mislabeled_waiting)
 
     canceled = next(
         example
