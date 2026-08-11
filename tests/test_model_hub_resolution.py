@@ -28,7 +28,10 @@ from core.handlers.model_hub.adapter import (
     RawOutcomeKind,
     SourceObservation,
 )
-from core.handlers.model_hub.classification import classify_outcome
+from core.handlers.model_hub.classification import (
+    classify_outcome,
+    terminal_outcome_category,
+)
 from core.handlers.model_hub.events import BoundedEventLog
 from core.handlers.model_hub.errors import ModelDiscoveryError
 from core.handlers.model_hub.provenance import (
@@ -402,7 +405,7 @@ def test_supply_is_degraded_when_a_later_exact_hop_is_blocked():
     assert resolution.supply_status == "degraded"
 
 
-def test_streamed_nonfallback_preserves_the_terminal_interruption_code():
+def test_streamed_protocol_failure_preserves_its_positive_terminal_category():
     decision = classify_outcome(
         RawCallOutcome(
             kind=RawOutcomeKind.PROTOCOL_ERROR,
@@ -417,7 +420,70 @@ def test_streamed_nonfallback_preserves_the_terminal_interruption_code():
 
     assert decision.action == "surface"
     assert decision.reason is None
-    assert decision.error_code == "stream_interrupted"
+    assert decision.error_code == "upstream_protocol_error"
+
+
+@pytest.mark.parametrize(
+    ("outcome", "expected_category"),
+    [
+        (
+            RawCallOutcome(
+                kind=RawOutcomeKind.SUCCESS,
+                http_status=200,
+                error_code=None,
+                redacted_message=None,
+                stream_started=True,
+                model_id="upstream-first",
+                source_id="src_route006",
+            ),
+            "served",
+        ),
+        (
+            RawCallOutcome(
+                kind=RawOutcomeKind.HTTP_ERROR,
+                http_status=403,
+                error_code="permission_error",
+                redacted_message=None,
+                stream_started=True,
+                model_id="upstream-first",
+                source_id="src_route006",
+            ),
+            "request_nonfallback",
+        ),
+        (
+            RawCallOutcome(
+                kind=RawOutcomeKind.PROTOCOL_ERROR,
+                http_status=502,
+                error_code=None,
+                redacted_message=None,
+                stream_started=True,
+                model_id="upstream-first",
+                source_id="src_route006",
+            ),
+            "upstream_protocol",
+        ),
+        (
+            RawCallOutcome(
+                kind=RawOutcomeKind.NETWORK_ERROR,
+                http_status=None,
+                error_code=None,
+                redacted_message=None,
+                stream_started=True,
+                model_id="upstream-first",
+                source_id="src_route006",
+            ),
+            "fallback_source",
+        ),
+    ],
+)
+def test_terminal_outcome_category_authority_has_a_behavior_consumer(
+    outcome: RawCallOutcome,
+    expected_category: str,
+) -> None:
+    assert terminal_outcome_category(
+        outcome,
+        classify_outcome(outcome),
+    ) == expected_category
 
 
 @pytest.mark.parametrize("status", [401, 402, 403, 429, 500])

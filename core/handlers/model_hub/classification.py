@@ -4,11 +4,17 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, replace
-from typing import Literal, Optional
+from typing import Literal, Mapping, Optional
 
 from .adapter import RawCallOutcome, RawOutcomeKind
 
 ResolutionAction = Literal["return", "surface", "refresh", "fallback"]
+TerminalOutcomeCategory = Literal[
+    "served",
+    "request_nonfallback",
+    "fallback_source",
+    "upstream_protocol",
+]
 ResolutionReason = Literal[
     "quota_exhausted",
     "rate_limited",
@@ -56,6 +62,32 @@ class ResolutionDecision:
     reason: Optional[ResolutionReason] = None
     error_code: Optional[str] = None
     cooldown_seconds: int = 0
+
+
+_TERMINAL_OUTCOME_CATEGORIES: Mapping[
+    tuple[ResolutionAction, RawOutcomeKind, bool],
+    TerminalOutcomeCategory,
+] = {
+    ("return", RawOutcomeKind.SUCCESS, False): "served",
+    ("surface", RawOutcomeKind.HTTP_ERROR, False): "request_nonfallback",
+    ("surface", RawOutcomeKind.PROTOCOL_ERROR, False): "upstream_protocol",
+    ("surface", RawOutcomeKind.HTTP_ERROR, True): "fallback_source",
+    ("surface", RawOutcomeKind.NETWORK_ERROR, True): "fallback_source",
+    ("surface", RawOutcomeKind.TIMEOUT, True): "fallback_source",
+}
+
+
+def terminal_outcome_category(
+    outcome: RawCallOutcome,
+    decision: ResolutionDecision,
+) -> TerminalOutcomeCategory:
+    """Select a terminal row from positive classification facts only."""
+
+    key = (decision.action, outcome.kind, decision.reason is not None)
+    try:
+        return _TERMINAL_OUTCOME_CATEGORIES[key]
+    except KeyError as exc:
+        raise AssertionError("unclassified terminal outcome") from exc
 
 
 def _error_text(outcome: RawCallOutcome) -> str:
@@ -158,8 +190,4 @@ def classify_outcome(
             action="surface",
             error_code="stream_interrupted",
         )
-    return replace(
-        decision,
-        action="surface",
-        error_code="stream_interrupted",
-    )
+    return decision

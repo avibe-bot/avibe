@@ -53,7 +53,11 @@ from .adapter import (
     make_source_observation,
     validate_source_observation,
 )
-from .classification import ResolutionDecision, classify_outcome
+from .classification import (
+    ResolutionDecision,
+    classify_outcome,
+    terminal_outcome_category,
+)
 from .events import (
     BoundedEventLog,
     EventAgent,
@@ -251,7 +255,7 @@ class ResolvedInvocation:
 class HandleSettlement:
     outcome: RawCallOutcome | None
     decision: ResolutionDecision | None
-    turn_outcome: TurnOutcomeProjectionInput
+    turn_outcome: TurnOutcomeProjectionInput | None
 
 
 HandleTerminationOrigin = Literal["downstream_cancel", "upstream_terminal"]
@@ -965,18 +969,12 @@ class ModelHubService:
         observation = await self._observe_source_payload(payload)
         return {"observation": self._observation_payload(observation)}
 
-    def _record_event(
-        self,
-        *,
-        historical_source_ids: Iterable[str] = (),
-        **event_fields: Any,
-    ) -> None:
+    def _record_event(self, **event_fields: Any) -> None:
         try:
             source_ids = {
                 source.id
                 for source in self.store.load().sources
             }
-            source_ids.update(historical_source_ids)
             for field in ("from_source", "to_source"):
                 source_id = event_fields.get(field)
                 if source_id is not None and source_id not in source_ids:
@@ -3206,7 +3204,10 @@ class ModelHubService:
     ) -> None:
         async with self._mutation_lock:
             config = self.store.load()
-            source = self._source(config, source_id)
+            try:
+                source = self._source(config, source_id)
+            except ModelHubError:
+                return
             status: Literal["error", "needs_action"] = (
                 "error"
                 if reason == "unclassified_error"
@@ -3970,11 +3971,20 @@ class ModelHubService:
         source_model_id: str,
         outcome: RawCallOutcome,
         decision: ResolutionDecision,
-    ) -> TurnOutcomeProjectionInput:
+    ) -> TurnOutcomeProjectionInput | None:
         """Produce the sole complete terminal projection after attempt settlement."""
 
-        if not outcome.stream_started or decision.reason is None:
+        category = terminal_outcome_category(outcome, decision)
+        if category == "served":
+            return produce_turn_outcome("turn.served")
+        if category == "request_nonfallback":
             return produce_turn_outcome("turn.request_nonfallback")
+        if category == "upstream_protocol":
+            # The Gateway's existing protocol-error copy is the positive row;
+            # a request-incompatible projection would misclassify the failure.
+            return None
+        if category != "fallback_source":
+            raise AssertionError("attempt terminal producer received a non-failure")
 
         config, resolution = self._inspect_terminal_chain(
             backend=backend,
@@ -3989,7 +3999,7 @@ class ModelHubService:
 
     async def settle_handle_outcome(
         self,
-        resolved: ResolvedInvocation,
+        resolved: ResolvedInvocation | None,
         outcome: RawCallOutcome | None,
         *,
         termination_origin: HandleTerminationOrigin,
@@ -3997,8 +4007,6 @@ class ModelHubService:
     ) -> HandleSettlement:
         """Settle every consumed hub handle before its terminal facts are exposed."""
 
-        if resolved.supply_channel != "hub":
-            raise AssertionError("post-handle settlement requires a hub stream")
         if termination_origin == "downstream_cancel":
             return HandleSettlement(
                 outcome=outcome,
@@ -4007,6 +4015,8 @@ class ModelHubService:
             )
         if termination_origin != "upstream_terminal":
             raise AssertionError("unknown handle termination origin")
+        if resolved is None or resolved.supply_channel != "hub":
+            raise AssertionError("post-handle settlement requires a hub stream")
         if outcome is None:
             raise AssertionError("upstream handle termination requires an outcome")
         # A consumed non-null handle is first-byte evidence even if an adapter
@@ -4018,32 +4028,18 @@ class ModelHubService:
             return HandleSettlement(
                 outcome=outcome,
                 decision=decision,
-                turn_outcome=produce_turn_outcome("turn.served"),
+                turn_outcome=self._produce_attempt_terminal_outcome(
+                    backend=resolved.backend,
+                    model_id=resolved.requested_model_id,
+                    source_id=resolved.source_id,
+                    source_model_id=resolved.model_id,
+                    outcome=outcome,
+                    decision=decision,
+                ),
             )
         if decision.action != "surface":
             raise AssertionError("consumed streams cannot retry or fall through")
         if decision.reason is not None:
-            event_reason = cast(EventReason, decision.reason)
-            self._record_event(
-                historical_source_ids=(resolved.source_id,),
-                agent=cast(EventAgent, resolved.backend),
-                kind=(
-                    "cooldown"
-                    if event_reason
-                    in {
-                        "quota_exhausted",
-                        "rate_limited",
-                        "server_error",
-                        "network",
-                    }
-                    else "needs_action"
-                ),
-                model_id=resolved.requested_model_id,
-                reason=event_reason,
-                from_source=resolved.source_id,
-                from_label=resolved.source_label,
-                now=self.now(),
-            )
             config = self.store.load()
             source = next(
                 (item for item in config.sources if item.id == resolved.source_id),
@@ -4055,7 +4051,6 @@ class ModelHubService:
                     decision,
                     backend=resolved.backend,
                     model_id=resolved.requested_model_id,
-                    emit_event=False,
                 )
         return HandleSettlement(
             outcome=outcome,

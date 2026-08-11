@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import secrets
@@ -518,8 +519,8 @@ class GatewayTurnTerminalizer:
     def __enter__(self) -> "GatewayTurnTerminalizer":
         return self
 
-    def __exit__(self, _exc_type, _exc, _traceback) -> None:
-        if self._downstream_canceled:
+    def __exit__(self, exc_type, _exc, _traceback) -> None:
+        if self._downstream_canceled or exc_type is asyncio.CancelledError:
             return
         self._registry._terminalize_gateway_exit(
             self.turn_id,

@@ -35,7 +35,11 @@ from vibe.model_hub_runtime.client import EngineClient, EngineClientError, Engin
 from vibe.model_hub_runtime.config import write_engine_config
 from vibe.model_hub_runtime.installer import EngineRuntimeManager
 from vibe.model_hub_runtime.environment import engine_subprocess_environment
-from vibe.model_hub_runtime.state import EngineStateError, EngineStateStore
+from vibe.model_hub_runtime.state import (
+    EngineStateError,
+    EngineStateStore,
+    SourceRecord,
+)
 from vibe.model_hub_runtime.supervisor import EngineSupervisor, EngineUnavailableError
 
 
@@ -1491,6 +1495,118 @@ def test_engine_client_does_not_apply_a_total_turn_timeout(tmp_path: Path) -> No
         supervisor.stop()
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("phase", ["connect", "first_byte"])
+def test_engine_client_cancellation_closes_pre_handle_resources(
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+) -> None:
+    async def run() -> None:
+        reached = asyncio.Event()
+        never = asyncio.Event()
+
+        class Content:
+            async def read(self, _size: int) -> bytes:
+                reached.set()
+                await never.wait()
+                return b""
+
+        class Response:
+            status = 200
+            content = Content()
+
+            def __init__(self) -> None:
+                self.close_calls = 0
+
+            def close(self) -> None:
+                self.close_calls += 1
+
+        response = Response()
+
+        class Session:
+            def __init__(self, **_kwargs) -> None:
+                self.close_calls = 0
+
+            async def post(self, *_args, **_kwargs):
+                if phase == "connect":
+                    reached.set()
+                    await never.wait()
+                return response
+
+            async def close(self) -> None:
+                self.close_calls += 1
+
+        session = Session()
+        monkeypatch.setattr(
+            client_module.aiohttp,
+            "ClientSession",
+            lambda **_kwargs: session,
+        )
+        source = SourceRecord(
+            source_id="src_fixture123",
+            vendor="custom",
+            protocol="openai_chat",
+            base_url="https://api.example.test/v1",
+            credential_ref="cred_fixture123",
+            allowed_origins=(),
+            model_ids=("model-a",),
+            prefix="source-fixture123",
+        )
+        client = EngineClient(
+            EngineConnection(
+                base_url="http://127.0.0.1:15220",
+                management_key="management-key",
+                gateway_token="gateway-token",
+            )
+        )
+
+        task = asyncio.create_task(
+            client.invoke(source, "model-a", {}, stream=True)
+        )
+        await asyncio.wait_for(reached.wait(), timeout=1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=1)
+
+        assert session.close_calls == 1
+        assert response.close_calls == (1 if phase == "first_byte" else 0)
+
+    asyncio.run(run())
+
+
+def test_engine_error_code_parser_prefers_specific_nested_code() -> None:
+    payload = json.dumps(
+        {"error": {"type": "api_error", "code": "permission_error"}}
+    ).encode()
+
+    error_code = client_module._error_code(payload)
+
+    assert error_code == "permission_error"
+    assert client_module._ERROR_CODE_PATHS.index(("error", "code")) < (
+        client_module._ERROR_CODE_PATHS.index(("error", "type"))
+    )
+    decision = classify_outcome(
+        client_module._outcome(
+            kind=RawOutcomeKind.HTTP_ERROR,
+            source=SourceRecord(
+                source_id="src_fixture123",
+                vendor="custom",
+                protocol="openai_chat",
+                base_url="https://api.example.test/v1",
+                credential_ref="cred_fixture123",
+                allowed_origins=(),
+                model_ids=("model-a",),
+                prefix="source-fixture123",
+            ),
+            model_id="model-a",
+            http_status=403,
+            error_code=error_code,
+            message="permission denied",
+        )
+    )
+    assert decision.action == "surface"
+    assert decision.error_code == "request_incompatible"
 
 
 @pytest.mark.parametrize(

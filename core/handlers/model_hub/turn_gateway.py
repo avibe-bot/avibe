@@ -6,6 +6,8 @@ import asyncio
 import json
 import socket
 from collections.abc import Callable
+from contextlib import AsyncExitStack
+from dataclasses import dataclass
 from typing import Final, Optional
 
 from aiohttp import web
@@ -53,6 +55,20 @@ _PROTOCOL_HEADERS: Final = frozenset(
         "openai-beta",
     }
 )
+
+
+@dataclass
+class _TurnExecution:
+    """Resources and settlement state owned by one gateway request boundary."""
+
+    resolved: ResolvedInvocation | None = None
+    handle: InvokeHandle | None = None
+    settlement_task: asyncio.Task[tuple[RawCallOutcome | None, HandleSettlement]] | None = None
+    settlement_origin: HandleTerminationOrigin | None = None
+
+
+class _DownstreamDisconnected(ConnectionError):
+    pass
 
 
 class ModelHubTurnGateway:
@@ -166,106 +182,154 @@ class ModelHubTurnGateway:
             backend=backend,
             token=token,
         ) as terminalizer:
-            endpoint = request.match_info["endpoint"].strip("/")
-            if backend not in {"claude", "codex", "opencode"} or endpoint not in _SUPPORTED_PATHS:
-                terminalizer.fail("protocol_error")
-                return self._error_response(
-                    status=404,
-                    code="not_found_error",
-                    turn_outcome=REQUEST_NONFALLBACK_TURN_OUTCOME,
-                )
+            execution = _TurnExecution()
             try:
-                payload = await request.json(loads=json.loads)
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                terminalizer.fail("invalid_parameter")
-                return self._error_response(
-                    status=400,
-                    code="invalid_request_error",
-                    turn_outcome=REQUEST_NONFALLBACK_TURN_OUTCOME,
-                )
-            if not isinstance(payload, dict):
-                terminalizer.fail("invalid_parameter")
-                return self._error_response(
-                    status=400,
-                    code="invalid_request_error",
-                    turn_outcome=REQUEST_NONFALLBACK_TURN_OUTCOME,
-                )
-            model_id = payload.get("model")
-            stream = payload.get("stream", False)
-            if not isinstance(model_id, str) or not model_id or not isinstance(stream, bool):
-                terminalizer.fail("invalid_parameter")
-                return self._error_response(
-                    status=400,
-                    code="invalid_request_error",
-                    turn_outcome=REQUEST_NONFALLBACK_TURN_OUTCOME,
-                )
-            resolution_model = terminalizer.resolution_model(model_id)
-
-            def observe_attempt(
-                source_id: str,
-                resolved_model_id: str,
-                channel: str,
-                via_mapping: bool,
-                outcome: Optional[RawCallOutcome],
-                decision,
-            ) -> None:
-                if outcome is None or decision is None:
-                    terminalizer.begin_attempt(
-                        source_id=source_id,
-                        resolved_model_id=resolved_model_id,
-                        channel=channel,
-                        via_mapping=via_mapping,
+                async with AsyncExitStack() as resources:
+                    return await self._run_request_turn(
+                        request,
+                        backend=backend,
+                        terminalizer=terminalizer,
+                        execution=execution,
+                        resources=resources,
                     )
-                    return
-                terminalizer.finish_attempt(
-                    outcome=outcome,
-                    decision=decision,
+            except asyncio.CancelledError:
+                await self._settle_boundary_termination(
+                    execution,
+                    terminalizer,
+                    termination_origin="downstream_cancel",
                 )
+                raise
+            except _DownstreamDisconnected:
+                await self._settle_boundary_termination(
+                    execution,
+                    terminalizer,
+                    termination_origin="downstream_cancel",
+                )
+                raise
+            except Exception:
+                if execution.handle is not None:
+                    await self._settle_turn_handle(
+                        execution,
+                        terminalizer,
+                        termination_origin="upstream_terminal",
+                    )
+                raise
 
-            try:
-                protocol_headers = {
-                    name.lower(): value
-                    for name, value in request.headers.items()
-                    if name.lower() in _PROTOCOL_HEADERS
-                }
-                resolved = await self.service.resolve(
-                    backend=backend,
-                    model_id=resolution_model,
-                    request=ModelHubRequest(
-                        payload,
-                        protocol=_REQUEST_PROTOCOLS[endpoint],
-                        headers=protocol_headers,
-                    ),
-                    stream=stream,
-                    supply_channel="hub",
-                    attempt_observer=observe_attempt,
-                )
-            except ModelHubError as exc:
-                turn_outcome = exc.turn_outcome
-                if turn_outcome is None and exc.code == "engine_down":
-                    turn_outcome = ENGINE_DOWN_TURN_OUTCOME
-                if (
-                    turn_outcome is not None
-                    and turn_outcome.discriminator == "engine_down"
-                ):
-                    terminalizer.engine_down()
-                elif (
-                    turn_outcome is not None
-                    and turn_outcome.outcome == "no_candidate"
-                    and exc.supply_state is not None
-                ):
-                    terminalizer.mark_no_candidate(exc.supply_state, exc.blockers)
-                return self._error_response(
-                    status=exc.status,
-                    code=exc.code,
-                    turn_outcome=turn_outcome,
-                )
-            return await self._resolved_response(
-                request,
-                resolved,
-                stream=stream,
-                terminalizer=terminalizer,
+    async def _run_request_turn(
+        self,
+        request: web.Request,
+        *,
+        backend: str,
+        terminalizer: GatewayTurnTerminalizer,
+        execution: _TurnExecution,
+        resources: AsyncExitStack,
+    ) -> web.StreamResponse:
+        endpoint = request.match_info["endpoint"].strip("/")
+        if backend not in {"claude", "codex", "opencode"} or endpoint not in _SUPPORTED_PATHS:
+            terminalizer.fail("protocol_error")
+            return self._error_response(
+                status=404,
+                code="not_found_error",
+                turn_outcome=REQUEST_NONFALLBACK_TURN_OUTCOME,
             )
+        try:
+            payload = await request.json(loads=json.loads)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            terminalizer.fail("invalid_parameter")
+            return self._error_response(
+                status=400,
+                code="invalid_request_error",
+                turn_outcome=REQUEST_NONFALLBACK_TURN_OUTCOME,
+            )
+        if not isinstance(payload, dict):
+            terminalizer.fail("invalid_parameter")
+            return self._error_response(
+                status=400,
+                code="invalid_request_error",
+                turn_outcome=REQUEST_NONFALLBACK_TURN_OUTCOME,
+            )
+        model_id = payload.get("model")
+        stream = payload.get("stream", False)
+        if not isinstance(model_id, str) or not model_id or not isinstance(stream, bool):
+            terminalizer.fail("invalid_parameter")
+            return self._error_response(
+                status=400,
+                code="invalid_request_error",
+                turn_outcome=REQUEST_NONFALLBACK_TURN_OUTCOME,
+            )
+        resolution_model = terminalizer.resolution_model(model_id)
+
+        def observe_attempt(
+            source_id: str,
+            resolved_model_id: str,
+            channel: str,
+            via_mapping: bool,
+            outcome: Optional[RawCallOutcome],
+            decision,
+        ) -> None:
+            if outcome is None or decision is None:
+                terminalizer.begin_attempt(
+                    source_id=source_id,
+                    resolved_model_id=resolved_model_id,
+                    channel=channel,
+                    via_mapping=via_mapping,
+                )
+                return
+            terminalizer.finish_attempt(
+                outcome=outcome,
+                decision=decision,
+            )
+
+        try:
+            protocol_headers = {
+                name.lower(): value
+                for name, value in request.headers.items()
+                if name.lower() in _PROTOCOL_HEADERS
+            }
+            resolved = await self.service.resolve(
+                backend=backend,
+                model_id=resolution_model,
+                request=ModelHubRequest(
+                    payload,
+                    protocol=_REQUEST_PROTOCOLS[endpoint],
+                    headers=protocol_headers,
+                ),
+                stream=stream,
+                supply_channel="hub",
+                attempt_observer=observe_attempt,
+            )
+        except ModelHubError as exc:
+            turn_outcome = exc.turn_outcome
+            if turn_outcome is None and exc.code == "engine_down":
+                turn_outcome = ENGINE_DOWN_TURN_OUTCOME
+            if (
+                turn_outcome is not None
+                and turn_outcome.discriminator == "engine_down"
+            ):
+                terminalizer.engine_down()
+            elif (
+                turn_outcome is not None
+                and turn_outcome.outcome == "no_candidate"
+                and exc.supply_state is not None
+            ):
+                terminalizer.mark_no_candidate(exc.supply_state, exc.blockers)
+            return self._error_response(
+                status=exc.status,
+                code=exc.code,
+                turn_outcome=turn_outcome,
+            )
+
+        execution.resolved = resolved
+        if resolved.handle is not None and resolved.handle.stream is not None:
+            execution.handle = resolved.handle
+            resources.push_async_callback(resolved.handle.close_stream)
+        return await self._resolved_response(
+            request,
+            resolved,
+            stream=stream,
+            terminalizer=terminalizer,
+            execution=execution,
+        )
 
     async def _resolved_response(
         self,
@@ -274,6 +338,7 @@ class ModelHubTurnGateway:
         *,
         stream: bool,
         terminalizer: GatewayTurnTerminalizer,
+        execution: _TurnExecution,
     ) -> web.StreamResponse:
         if resolved.supply_channel != "hub":
             return self._error_response(status=409, code="mode_switch_blocked")
@@ -290,20 +355,10 @@ class ModelHubTurnGateway:
 
         if not stream:
             payload = bytearray()
-            try:
-                async for chunk in handle.stream:
-                    payload.extend(chunk)
-            except asyncio.CancelledError:
-                await self._settle_consumed_handle(
-                    resolved,
-                    handle,
-                    terminalizer,
-                    termination_origin="downstream_cancel",
-                )
-                raise
-            outcome, settlement = await self._settle_consumed_handle(
-                resolved,
-                handle,
+            async for chunk in handle.stream:
+                payload.extend(chunk)
+            outcome, settlement = await self._settle_turn_handle(
+                execution,
                 terminalizer,
                 termination_origin="upstream_terminal",
             )
@@ -331,49 +386,76 @@ class ModelHubTurnGateway:
                 "X-Content-Type-Options": "nosniff",
             },
         )
-        termination_origin: HandleTerminationOrigin = "upstream_terminal"
-        try:
-            try:
-                await response.prepare(request)
-            except (ConnectionResetError, BrokenPipeError):
-                termination_origin = "downstream_cancel"
-                raise
-            async for chunk in handle.stream:
-                terminalizer.mark_stream_started()
-                try:
-                    await response.write(chunk)
-                except (ConnectionResetError, BrokenPipeError):
-                    termination_origin = "downstream_cancel"
-                    raise
-            try:
-                await response.write_eof()
-            except (ConnectionResetError, BrokenPipeError):
-                termination_origin = "downstream_cancel"
-                raise
-        except asyncio.CancelledError:
-            termination_origin = "downstream_cancel"
-            raise
-        finally:
-            await self._settle_consumed_handle(
-                resolved,
-                handle,
-                terminalizer,
-                termination_origin=termination_origin,
-            )
+        await self._downstream_io(response.prepare(request))
+        async for chunk in handle.stream:
+            terminalizer.mark_stream_started()
+            await self._downstream_io(response.write(chunk))
+        await self._downstream_io(response.write_eof())
+        await self._settle_turn_handle(
+            execution,
+            terminalizer,
+            termination_origin="upstream_terminal",
+        )
         return response
+
+    @staticmethod
+    async def _downstream_io(operation):
+        try:
+            return await operation
+        except (ConnectionResetError, BrokenPipeError) as exc:
+            raise _DownstreamDisconnected(str(exc)) from exc
+
+    async def _settle_boundary_termination(
+        self,
+        execution: _TurnExecution,
+        terminalizer: GatewayTurnTerminalizer,
+        *,
+        termination_origin: HandleTerminationOrigin,
+    ) -> None:
+        await self._settle_turn_handle(
+            execution,
+            terminalizer,
+            termination_origin=termination_origin,
+        )
+        if execution.settlement_origin == "downstream_cancel":
+            terminalizer.mark_downstream_canceled()
+
+    async def _settle_turn_handle(
+        self,
+        execution: _TurnExecution,
+        terminalizer: GatewayTurnTerminalizer,
+        *,
+        termination_origin: HandleTerminationOrigin,
+    ) -> tuple[RawCallOutcome | None, HandleSettlement]:
+        if execution.settlement_task is None:
+            execution.settlement_origin = termination_origin
+            execution.settlement_task = asyncio.create_task(
+                self._settle_consumed_handle(
+                    execution.resolved,
+                    execution.handle,
+                    terminalizer,
+                    termination_origin=termination_origin,
+                )
+            )
+        return await asyncio.shield(execution.settlement_task)
 
     async def _settle_consumed_handle(
         self,
-        resolved: ResolvedInvocation,
-        handle: InvokeHandle,
+        resolved: ResolvedInvocation | None,
+        handle: InvokeHandle | None,
         terminalizer: GatewayTurnTerminalizer,
         *,
         termination_origin: HandleTerminationOrigin,
     ) -> tuple[RawCallOutcome | None, HandleSettlement]:
         """Route every handle terminal through the service settlement owner."""
 
-        await handle.close_stream()
-        outcome = await handle.outcome() if handle.outcome_available else None
+        if handle is not None:
+            await handle.close_stream()
+        outcome = (
+            await handle.outcome()
+            if handle is not None and handle.outcome_available
+            else None
+        )
         settlement = await self.service.settle_handle_outcome(
             resolved,
             outcome,
@@ -384,7 +466,6 @@ class ModelHubTurnGateway:
             ),
         )
         if termination_origin == "downstream_cancel":
-            terminalizer.mark_downstream_canceled()
             return settlement.outcome, settlement
         assert settlement.outcome is not None
         assert settlement.decision is not None

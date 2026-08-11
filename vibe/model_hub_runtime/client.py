@@ -51,6 +51,11 @@ _OFFICIAL_BASE_URLS = {
     "codex": "https://api.openai.com/v1",
 }
 _PROTOCOL_HEADERS = frozenset({"anthropic-beta", "anthropic-version", "openai-beta"})
+_ERROR_CODE_PATHS = (
+    ("error", "code"),
+    ("code",),
+    ("error", "type"),
+)
 
 
 class EngineClientError(RuntimeError):
@@ -199,6 +204,7 @@ class EngineClient:
         session = aiohttp.ClientSession(timeout=timeout, trust_env=False)
         response: aiohttp.ClientResponse | None = None
         first_received = False
+        ownership_transferred = False
         try:
             response = await asyncio.wait_for(
                 session.post(
@@ -282,6 +288,29 @@ class EngineClient:
                             stream_started=True,
                         )
                     )
+
+            loop = asyncio.get_running_loop()
+            outcome_future: asyncio.Future[RawCallOutcome] = loop.create_future()
+            response_stream = _response_stream(
+                response=response,
+                session=session,
+                first=first,
+                source=source,
+                model_id=model_id,
+                outcome_future=outcome_future,
+            )
+
+            async def close_response_stream() -> None:
+                response.close()
+                await session.close()
+
+            handle = EngineInvokeHandle(
+                stream=response_stream,
+                outcome=outcome_future,
+                stream_closer=close_response_stream,
+            )
+            ownership_transferred = True
+            return handle
         except asyncio.TimeoutError:
             if response is not None:
                 response.close()
@@ -310,27 +339,11 @@ class EngineClient:
                     stream_started=first_received,
                 )
             )
-
-        loop = asyncio.get_running_loop()
-        outcome_future: asyncio.Future[RawCallOutcome] = loop.create_future()
-        response_stream = _response_stream(
-            response=response,
-            session=session,
-            first=first,
-            source=source,
-            model_id=model_id,
-            outcome_future=outcome_future,
-        )
-
-        async def close_response_stream() -> None:
-            response.close()
-            await session.close()
-
-        return EngineInvokeHandle(
-            stream=response_stream,
-            outcome=outcome_future,
-            stream_closer=close_response_stream,
-        )
+        finally:
+            if not ownership_transferred:
+                if response is not None:
+                    response.close()
+                await session.close()
 
     def _request_json(
         self,
@@ -505,16 +518,7 @@ async def _response_stream(
     finally:
         response.close()
         await session.close()
-        if outcome is None:
-            outcome = _outcome(
-                kind=RawOutcomeKind.NETWORK_ERROR,
-                source=source,
-                model_id=model_id,
-                http_status=response.status,
-                message="upstream response stream was not fully consumed",
-                stream_started=True,
-            )
-        if not outcome_future.done():
+        if outcome is not None and not outcome_future.done():
             outcome_future.set_result(outcome)
 
 
@@ -562,14 +566,17 @@ def _error_code(payload: bytes) -> str | None:
         return None
     if not isinstance(decoded, dict):
         return None
-    error = decoded.get("error")
-    if isinstance(error, dict):
-        for value in (error.get("type"), error.get("code")):
-            safe_value = _safe_error_code(value)
-            if safe_value is not None:
-                return safe_value
-        return None
-    return _safe_error_code(decoded.get("code"))
+    for path in _ERROR_CODE_PATHS:
+        value: object = decoded
+        for component in path:
+            if not isinstance(value, dict) or component not in value:
+                value = None
+                break
+            value = value[component]
+        safe_value = _safe_error_code(value)
+        if safe_value is not None:
+            return safe_value
+    return None
 
 
 def _safe_error_code(value: object) -> str | None:
