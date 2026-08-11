@@ -6692,9 +6692,11 @@ class ScheduledTaskService:
             else None
         )
         is_watch = watch is not None or str(run.get("run_type") or "").strip().startswith("watch")
+        explicit_name = (task.name if task else None) or (
+            str((watch or {}).get("name") or "").strip() or None
+        )
         name = (
-            (task.name if task else None)
-            or (str((watch or {}).get("name") or "").strip() or None)
+            explicit_name
             or definition_id
             or str(run["id"])
         )
@@ -6709,6 +6711,14 @@ class ScheduledTaskService:
             )
         reason = str(notice.get("interrupt_reason") or "").strip()
         error = str(run.get("error") or "").strip() or self._t("harness.notice.unknownError")
+        if reason == SETTLED_BY_RESTARTED:
+            # A service restart is a lifecycle event, not a diagnosis. Keep its
+            # notification to one calm action and leave internal Run/definition
+            # details on the inspection surfaces. A deleted definition has no
+            # trustworthy display name, so never substitute its opaque id.
+            if explicit_name:
+                return self._t("harness.notice.restartStopped", name=explicit_name)
+            return self._t("harness.notice.restartStoppedUnnamed")
         if failure_notices.is_interruption(notice):
             # The reason is rendered INSIDE a translated sentence, so it is copy: the
             # wire value went through a closed label map, never interpolated raw. An

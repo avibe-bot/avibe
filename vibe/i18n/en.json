@@ -102,6 +102,8 @@
       "watchCircuitRepairFailed": "[Avibe Harness] Watch \"{name}\" remains paused because its circuit-repair Agent Run failed.",
       "watchFollowUpFailed": "[Avibe Harness] Watch \"{name}\" follow-up Agent processing failed.",
       "interrupted": "[Avibe Harness] Scheduled work \"{name}\" was interrupted ({reason}). Nothing is wrong with the definition itself.",
+      "restartStopped": "[Avibe Harness] Background task \"{name}\" stopped when Avibe restarted. To continue, send \"continue\" to the Agent.",
+      "restartStoppedUnnamed": "[Avibe Harness] A background task stopped when Avibe restarted. To continue, send \"continue\" to the Agent.",
       "commandLine": "Command: {command}",
       "error": "Error: {error}",
       "commandExit": "Exit code: {exitCode}",

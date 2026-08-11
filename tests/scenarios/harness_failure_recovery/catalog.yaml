@@ -4265,6 +4265,16 @@ scenarios:
     # per-Run restart notices into one Turn fallback. A notice already sent remains
     # authoritative and suppresses every pending sibling.
     test: tests/test_session_delivery_fsm.py::test_hfr_474_startup_collapses_legacy_restart_notices_by_durable_turn
+  - id: HFR-475
+    name: restart notices stay concise and hide opaque internal identities
+    status: covered
+    kind: failure_recovery
+    layer: contract
+    backend: shared
+    # A service restart renders one calm recovery action. Readable definition names
+    # remain visible, while deleted definitions never leak their opaque id or append
+    # internal error, origin, lifecycle, and inspection lines.
+    test: tests/test_harness_failure_visibility.py::test_hfr_475_restart_notice_is_one_calm_action_without_internal_details
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor

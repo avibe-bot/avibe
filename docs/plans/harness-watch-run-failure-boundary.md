@@ -198,6 +198,10 @@ does not claim that an event was detected.
   timestamp. If one legacy notice was already sent, that delivery evidence owns
   the Turn and all pending siblings stand down; otherwise one stable participant
   becomes the only fallback.
+- `HFR-475`: a service-restart notice is one calm recovery action rather than a
+  diagnostic dump. It names a readable definition when one still exists, never
+  substitutes an opaque deleted-definition id, and leaves error, origin,
+  lifecycle, Run, and Watch details on their inspection surfaces.
 
 Residual manual check: trigger two one-shot Watches into one failing Turn and
 confirm that the conversation contains one backend error, both Runs are failed,

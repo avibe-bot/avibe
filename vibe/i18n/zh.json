@@ -102,6 +102,8 @@
       "watchCircuitRepairFailed": "[Avibe Harness] Watch「{name}」的熔断修复 Agent Run 失败，Watch 将保持暂停。",
       "watchFollowUpFailed": "[Avibe Harness] Watch「{name}」的后续 Agent 处理失败。",
       "interrupted": "[Avibe Harness] 后台任务「{name}」被中断({reason}),任务本身没有问题。",
+      "restartStopped": "[Avibe Harness] 后台任务「{name}」已随 Avibe 重启停止。如需继续，请发送“继续”给 Agent。",
+      "restartStoppedUnnamed": "[Avibe Harness] 一项后台任务已随 Avibe 重启停止。如需继续，请发送“继续”给 Agent。",
       "commandLine": "命令:{command}",
       "error": "错误:{error}",
       "commandExit": "退出码:{exitCode}",
