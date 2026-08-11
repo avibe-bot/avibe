@@ -87,6 +87,8 @@ async def test_repair_runs_sync_beside_live_sidecar_and_projects_health(
     healthy: bool,
     expected_result: str,
 ) -> None:
+    """Scenarios: MEMORY-REPAIR-001, MEMORY-REPAIR-002, MEMORY-REPAIR-006."""
+
     runtime, sidecar = _runtime(
         memory_runtime_factory,
         tmp_path,
@@ -100,6 +102,7 @@ async def test_repair_runs_sync_beside_live_sidecar_and_projects_health(
 
         async def run(self) -> SyncProcessResult:
             assert sidecar.running
+            assert runtime.module._worker._claims_paused is False
             return SyncProcessResult.COMPLETED
 
     monkeypatch.setattr(memory_runtime, "EverOSSyncProcess", Sync)
@@ -121,6 +124,8 @@ async def test_repair_rejects_artifact_without_sync_capability(
     tmp_path: Path,
     memory_runtime_factory,
 ) -> None:
+    """Scenario: MEMORY-REPAIR-005."""
+
     runtime, sidecar = _runtime(
         memory_runtime_factory,
         tmp_path,
@@ -235,6 +240,8 @@ async def test_repair_maps_closed_child_results(
     child_result: SyncProcessResult,
     expected: dict[str, object],
 ) -> None:
+    """Scenario: MEMORY-REPAIR-004."""
+
     runtime, _sidecar = _runtime(memory_runtime_factory, tmp_path)
 
     class Sync:
@@ -253,6 +260,8 @@ async def test_repair_is_retained_joined_and_holds_lease_after_caller_cancel(
     tmp_path: Path,
     memory_runtime_factory,
 ) -> None:
+    """Scenario: MEMORY-REPAIR-003."""
+
     runtime, _sidecar = _runtime(memory_runtime_factory, tmp_path)
     started = asyncio.Event()
     finish = asyncio.Event()

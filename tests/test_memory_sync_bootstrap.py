@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import signal
 import subprocess
@@ -11,10 +12,11 @@ from types import SimpleNamespace
 
 import pytest
 
+from core.memory import secret_scrubber
+from core.memory.artifact import EVEROS_VERSION
+from core.memory.everos_insight.recorder import _scrub_text
 from scripts import memory_runtime_sitecustomize as bootstrap
 from scripts import memory_runtime_sync_scrubbers as scrubbers
-from core.memory import secret_scrubber
-from core.memory.everos_insight.recorder import _scrub_text
 
 
 def test_artifact_bootstrap_is_inert_without_explicit_gate(monkeypatch) -> None:
@@ -136,8 +138,8 @@ def test_artifact_scrubber_matches_existing_persistence_redaction(monkeypatch) -
         )
 
 
-def test_real_venv_pth_stop_and_artifact_install_order(tmp_path: Path) -> None:
-    """Exercise CPython's real ``-I -m`` argv and nonfatal .pth failure boundary."""
+def test_pinned_pathless_sync_acceptance_scans_and_drains(tmp_path: Path) -> None:
+    """Execute the admitted argv against a hermetic pinned-artifact behavioral fake."""
 
     venv_dir = tmp_path / "venv"
     subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(venv_dir)], check=True)
@@ -148,8 +150,24 @@ def test_real_venv_pth_stop_and_artifact_install_order(tmp_path: Path) -> None:
     (site / "avibe_memory_sync_bootstrap.pth").write_text(
         "import avibe_memory_sync_bootstrap\n", encoding="ascii"
     )
-    target = tmp_path / "target"
+    target = tmp_path / "sync-result.json"
     scrubbed = tmp_path / "scrubbed"
+    markdown_root = tmp_path / "markdown"
+    (markdown_root / "nested").mkdir(parents=True)
+    (markdown_root / "alpha.md").write_text("alpha", encoding="utf-8")
+    (markdown_root / "nested" / "beta.md").write_text("beta", encoding="utf-8")
+    (markdown_root / "ignored.txt").write_text("ignored", encoding="utf-8")
+    queue = tmp_path / "cascade-queue.json"
+    queue.write_text(
+        json.dumps(
+            [
+                {"path": "alpha.md", "state": "pending"},
+                {"path": "nested/beta.md", "state": "pending"},
+                {"path": "settled.md", "state": "completed"},
+            ]
+        ),
+        encoding="utf-8",
+    )
     infra = site / "everos" / "infra" / "ome" / "_stores"
     infra.mkdir(parents=True)
     for package in (site / "everos", site / "everos/infra", site / "everos/infra/ome", site / "everos/infra/ome/_stores"):
@@ -176,8 +194,35 @@ def test_real_venv_pth_stop_and_artifact_install_order(tmp_path: Path) -> None:
     (site / "everos/entrypoints/__init__.py").write_text("", encoding="ascii")
     (main / "cli").mkdir()
     (main / "cli/__init__.py").write_text("", encoding="ascii")
+    distribution = site / f"everos-{EVEROS_VERSION}.dist-info"
+    distribution.mkdir()
+    (distribution / "METADATA").write_text(
+        f"Metadata-Version: 2.1\nName: everos\nVersion: {EVEROS_VERSION}\n",
+        encoding="ascii",
+    )
     (main / "cli/main.py").write_text(
-        f"from pathlib import Path\nPath({str(target)!r}).write_text('target')\n",
+        "import json\n"
+        "import os\n"
+        "import sys\n"
+        "from importlib.metadata import version\n"
+        "from pathlib import Path\n"
+        "assert sys.argv[1:] == ['cascade', 'sync']\n"
+        "source = Path(os.environ['FAKE_MEMORY_MARKDOWN_ROOT'])\n"
+        "queue = Path(os.environ['FAKE_MEMORY_QUEUE'])\n"
+        "rows = json.loads(queue.read_text(encoding='utf-8'))\n"
+        "drained = 0\n"
+        "for row in rows:\n"
+        "    if row['state'] == 'pending':\n"
+        "        row['state'] = 'completed'\n"
+        "        drained += 1\n"
+        "queue.write_text(json.dumps(rows), encoding='utf-8')\n"
+        "result = {\n"
+        "    'argv': sys.argv[1:],\n"
+        "    'everos_version': version('everos'),\n"
+        "    'scanned': sorted(str(path.relative_to(source)) for path in source.rglob('*.md')),\n"
+        "    'drained': drained,\n"
+        "}\n"
+        "Path(os.environ['FAKE_MEMORY_RESULT']).write_text(json.dumps(result), encoding='utf-8')\n",
         encoding="ascii",
     )
     env = {
@@ -188,6 +233,9 @@ def test_real_venv_pth_stop_and_artifact_install_order(tmp_path: Path) -> None:
         "AVIBE_MEMORY_SYNC_PARENT_PID": str(os.getpid()),
         "AVIBE_MEMORY_SYNC_PARENT_CREATE_TIME": float(1.0).hex(),
         "AVIBE_MEMORY_SYNC_PARENT_UID": str(os.getuid()) if hasattr(os, "getuid") else "",
+        "FAKE_MEMORY_MARKDOWN_ROOT": str(markdown_root),
+        "FAKE_MEMORY_QUEUE": str(queue),
+        "FAKE_MEMORY_RESULT": str(target),
     }
     child = subprocess.Popen(
         [str(python), "-I", "-m", "everos.entrypoints.cli.main", "cascade", "sync"],
@@ -211,20 +259,37 @@ def test_real_venv_pth_stop_and_artifact_install_order(tmp_path: Path) -> None:
         assert child.wait(timeout=10) == 0
         assert scrubbed.exists() and target.exists()
         assert scrubbed.stat().st_mtime_ns <= target.stat().st_mtime_ns
+        assert json.loads(target.read_text(encoding="utf-8")) == {
+            "argv": ["cascade", "sync"],
+            "everos_version": EVEROS_VERSION,
+            "scanned": ["alpha.md", "nested/beta.md"],
+            "drained": 2,
+        }
+        assert [row["state"] for row in json.loads(queue.read_text(encoding="utf-8"))] == [
+            "completed",
+            "completed",
+            "completed",
+        ]
     finally:
         if child.poll() is None:
             child.kill()
             child.wait()
 
-    # A bad gated argv fails closed and never reaches the CLI target.
-    target.unlink()
-    bad = subprocess.run(
-        [str(python), "-I", "-m", "everos.entrypoints.cli.main", "cascade", "rebuild"],
-        cwd=tmp_path,
-        env=env,
-    )
-    assert bad.returncode != 0
-    assert not target.exists()
+    # The upstream live-safety contract covers pathless sync, not fix --apply.
+    # Prove the artifact bootstrap rejects both alternate commands before the
+    # fake CLI can mutate its queue; this is executable scope evidence, not a
+    # source-string assertion about EverOS internals.
+    settled_queue = queue.read_bytes()
+    for rejected_argv in (("cascade", "rebuild"), ("cascade", "fix", "--apply")):
+        target.unlink(missing_ok=True)
+        rejected = subprocess.run(
+            [str(python), "-I", "-m", "everos.entrypoints.cli.main", *rejected_argv],
+            cwd=tmp_path,
+            env=env,
+        )
+        assert rejected.returncode != 0
+        assert not target.exists()
+        assert queue.read_bytes() == settled_queue
 
     # Import/install failure after the ownership handshake also exits before
     # the EverOS CLI target can run.

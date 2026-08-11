@@ -4,10 +4,13 @@ capability:
   name: Live Memory index repair via admitted artifact sync
   canonical_tests:
     - tests/scenarios/memory_repair/test_memory_repair_scenarios.py
+    - tests/test_memory_repair.py
+    - tests/test_memory_sync_bootstrap.py
     - ui/src/components/settings/memory/MemoryStatusPanel.test.tsx
-  shared_harness: []
+  shared_harness:
+    - tests/conftest.py::memory_runtime_factory
 status_legend:
-  covered: frontend/service-boundary evidence exists
+  covered: executable backend evidence plus UI evidence where applicable
   partial: contract is represented but needs live backend coverage
   manual: requires a running Memory runtime
 scenarios:
@@ -15,37 +18,51 @@ scenarios:
     name: Admitted artifact repair completes with a healthy cascade projection
     status: covered
     kind: happy_path
-    layer: ui_contract
-    test: tests/scenarios/memory_repair/test_memory_repair_scenarios.py::test_memory_repair_001_uses_exact_post_contract
+    layer: runtime_contract
+    test: tests/test_memory_repair.py::test_repair_runs_sync_beside_live_sidecar_and_projects_health
     related_tests:
+      - tests/test_memory_sync_bootstrap.py::test_pinned_pathless_sync_acceptance_scans_and_drains
+      - tests/test_internal_server.py::test_memory_repair_maps_runtime_status
+      - tests/test_internal_client.py::test_memory_repair_signs_owner_and_posts_exact_confirmation
+      - tests/scenarios/memory_repair/test_memory_repair_scenarios.py::test_memory_repair_001_uses_exact_post_contract
       - ui/src/components/settings/memory/MemoryStatusPanel.test.tsx
   - id: MEMORY-REPAIR-002
     name: Repair completion with warnings remains truthful to unhealthy cascade health
     status: covered
     kind: health_projection
-    layer: ui
-    test: tests/scenarios/memory_repair/test_memory_repair_scenarios.py::test_memory_repair_002_renders_warning_health
+    layer: runtime_contract
+    test: tests/test_memory_repair.py::test_repair_runs_sync_beside_live_sidecar_and_projects_health
+    related_tests:
+      - tests/scenarios/memory_repair/test_memory_repair_scenarios.py::test_memory_repair_002_renders_warning_health
   - id: MEMORY-REPAIR-003
     name: A second Repair request is disabled while the first request is running
     status: covered
     kind: concurrency
-    layer: ui
-    test: tests/scenarios/memory_repair/test_memory_repair_scenarios.py::test_memory_repair_003_has_running_guard
+    layer: runtime
+    test: tests/test_memory_repair.py::test_repair_is_retained_joined_and_holds_lease_after_caller_cancel
+    related_tests:
+      - tests/scenarios/memory_repair/test_memory_repair_scenarios.py::test_memory_repair_003_has_running_guard
   - id: MEMORY-REPAIR-004
     name: A failed Repair is shown as a closed error and can be retried manually
     status: partial
     kind: recovery
     layer: ui_contract
-    test: tests/scenarios/memory_repair/test_memory_repair_scenarios.py::test_memory_repair_004_has_no_automatic_retry_or_polling
+    test: tests/test_memory_repair.py::test_repair_maps_closed_child_results
+    related_tests:
+      - tests/scenarios/memory_repair/test_memory_repair_scenarios.py::test_memory_repair_004_has_no_automatic_retry_or_polling
   - id: MEMORY-REPAIR-005
     name: Repair action is hidden when artifact sync capability is disabled
     status: covered
     kind: capability_gate
-    layer: ui
-    test: tests/scenarios/memory_repair/test_memory_repair_scenarios.py::test_memory_repair_005_fails_closed_on_capability
+    layer: runtime_contract
+    test: tests/test_memory_repair.py::test_repair_rejects_artifact_without_sync_capability
+    related_tests:
+      - tests/scenarios/memory_repair/test_memory_repair_scenarios.py::test_memory_repair_005_fails_closed_on_capability
   - id: MEMORY-REPAIR-006
     name: Repair leaves the live sidecar action path untouched
     status: covered
     kind: lifecycle
-    layer: ui_contract
-    test: tests/scenarios/memory_repair/test_memory_repair_scenarios.py::test_memory_repair_006_does_not_stop_sidecar
+    layer: runtime
+    test: tests/test_memory_repair.py::test_repair_runs_sync_beside_live_sidecar_and_projects_health
+    related_tests:
+      - tests/scenarios/memory_repair/test_memory_repair_scenarios.py::test_memory_repair_006_does_not_stop_sidecar
