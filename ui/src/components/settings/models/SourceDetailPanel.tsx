@@ -410,7 +410,7 @@ export const SourceDetailPanel: React.FC<{
         {models.length === 0 && !manualDraft ? <p className="px-5 py-12 text-center text-[12px] text-muted">{t(source.last_discovered_at ? 'settings.models.sourceDetail.empty' : 'settings.models.sourceDetail.emptyNeverFetched')}</p> : models.map((model) => (
           <div key={model.id} className="model-hub-source-table-row grid gap-3 border-b border-border last:border-b-0 md:items-center md:gap-y-0">
             <span className="flex min-w-0 items-center gap-2"><span className="model-hub-source-model truncate font-mono text-foreground" title={model.id}>{model.id}</span>{result?.added.includes(model.id) && <span className="model-hub-accent-pill--mint model-hub-source-pill rounded-full border px-2 py-0.5 font-semibold">{t('settings.models.sourceDetail.refetch.added')}</span>}</span>
-            <span className="model-hub-source-pill model-hub-source-entry-pill w-fit rounded-full border border-border font-semibold text-muted">{t(`settings.models.sourceDetail.entry.${model.provenance === 'discovered' ? 'auto' : 'manual'}`)}</span>
+            <span className="model-hub-source-pill model-hub-source-entry-pill w-fit rounded-full border border-border font-semibold text-muted">{t(`settings.models.sourceDetail.entry.${model.origin === 'discovered' ? 'auto' : 'manual'}`)}</span>
             <TierEditor source={source} model={model} onMutating={() => { setResult(null); setRefetchFailed(false); }} trackMutation={trackMutation} />
             <div className="flex items-center justify-end gap-2">
               {removeFailure?.modelId === model.id && <span className="model-hub-source-tier text-right text-destructive">{t('settings.models.sourceDetail.fail.removeModel')} <button type="button" disabled={busy} onClick={() => {
@@ -420,7 +420,7 @@ export const SourceDetailPanel: React.FC<{
                   try { await reconcileRemoval(model, settlement); } finally { setBusy(false); }
                 });
               }} className="font-semibold underline underline-offset-2">{t('settings.models.sourceDetail.retry')}</button></span>}
-              {model.provenance === 'manual' && <ManualModelMenu model={model} busy={busy} onRemove={() => void remove(model)} />}
+              {model.origin === 'manual' && <ManualModelMenu model={model} busy={busy} onRemove={() => void remove(model)} />}
             </div>
           </div>
         ))}
@@ -465,7 +465,7 @@ export const SourceDetailPanel: React.FC<{
             {guard && <div className="model-hub-guard-body">
               {guard.hops.length > 0 && <>
                 <div className="model-hub-guard-label"><p>{t('settings.models.guard.label')}</p><span>{t('settings.models.guard.count', { count: guard.hops.length })}</span></div>
-                <div className="model-hub-guard-list">{guard.hops.map((hop) => <div key={`${hop.backend}:${hop.menu_model}:${hop.source_id}:${hop.model_id}`} className="model-hub-guard-hop"><span className="min-w-0 flex-1"><strong>{t(`settings.models.backends.${hop.backend}`, { defaultValue: hop.backend })} · {hop.menu_model}</strong><span>{hop.model_id}</span></span></div>)}</div>
+                <div className="model-hub-guard-list">{guard.hops.map((hop) => <div key={`${hop.backend}:${hop.menu_model}:${hop.position}:${hop.source_id}:${hop.model_id}`} className="model-hub-guard-hop"><span className="min-w-0 flex-1"><strong>{t(`settings.models.backends.${hop.backend}`, { defaultValue: hop.backend })} · {hop.menu_model}</strong><span>{hop.model_id} · {t('settings.models.guard.hop.position', { n: hop.position })}</span></span></div>)}</div>
               </>}
               <GuardGapList gaps={guard.gaps} />
               <p className={cn('model-hub-guard-hint', guard.gaps.length > 0 && 'text-destructive')}><Info aria-hidden />{t(`settings.models.guard.hint.${guard.gaps.length > 0 ? 'interrupt' : 'safe'}`)}</p>

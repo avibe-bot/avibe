@@ -29,7 +29,7 @@ export type SupplyChannel = 'native_cli' | 'hub';
  *  error is an unclassified failure and equally a blocker. */
 export const SOURCE_STATUSES = ['active', 'standby', 'cooldown', 'needs_action', 'error'] as const;
 export type SourceStatus = (typeof SOURCE_STATUSES)[number];
-export type ModelProvenance = 'discovered' | 'manual';
+export type ModelOrigin = 'discovered' | 'manual';
 
 /** Optional cause of a self-healing cooldown. A closed vocabulary, not a
  *  prefix: the key is rendered through i18n, never as raw upstream text. */
@@ -80,8 +80,8 @@ export type SuppliedModel = {
   /** Bare model id (no provider prefix). */
   id: string;
   display_name?: string | null;
-  provenance: ModelProvenance;
-  reasoning_efforts?: string[];
+  origin: ModelOrigin;
+  reasoning_efforts: string[];
   discovered_at?: string | null;
 };
 
@@ -177,6 +177,8 @@ export type RouteHop = {
 export type RouteHopRef = RouteHop & {
   backend: AgentBackend;
   menu_model: string;
+  /** One-based position in the Route before the guarded mutation. */
+  position: number;
 };
 
 export type AgentRoute = {
@@ -204,10 +206,13 @@ export type NamedAgentSupply = {
 export type ModelSupply = {
   model_id: string;
   chain_length: number;
+  has_runnable_hop: boolean;
 };
 
 export type AgentSupply = {
   backend: AgentBackend;
+  /** Server-authoritative CLI installation fact for this backend. */
+  cli_present: boolean;
   mode: AgentMode;
   menu_kind: MenuKind;
   /** The named Agent whose explicit selection `selected_model_id` came from.

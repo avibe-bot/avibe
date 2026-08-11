@@ -5,6 +5,7 @@ import type { AgentSupply, RuntimeDependency } from './types';
 
 const agent = (mode: AgentSupply['mode']): AgentSupply => ({
   backend: 'claude',
+  cli_present: true,
   mode,
   menu_kind: 'fixed',
   sources: { order: [], eligibility: [] },

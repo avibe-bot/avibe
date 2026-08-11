@@ -18,6 +18,7 @@ const source = (id: string): Source => ({
 
 const agent = (order: string[]): AgentSupply => ({
   backend: 'claude',
+  cli_present: true,
   mode: 'hub',
   menu_kind: 'fixed',
   sources: { order, eligibility: order.map((sourceId) => ({ source_id: sourceId, eligible: true })) },

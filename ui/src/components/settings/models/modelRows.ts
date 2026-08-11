@@ -78,6 +78,16 @@ export type CollapsedModelRows = {
   hidden: string[];
 };
 
+export type ModelSupplyState = 'available' | 'paused' | 'unconfigured';
+
+/** Structural emptiness wins before live runnability, exactly as the contract specifies. */
+export function modelSupplyState(agent: AgentSupply, modelId: string): ModelSupplyState {
+  const supply = agent.model_supply?.find((row) => row.model_id === modelId);
+  if (!supply) return 'available';
+  if (supply.chain_length === 0) return 'unconfigured';
+  return supply.has_runnable_hop ? 'available' : 'paused';
+}
+
 /**
  * Keep every structurally unsupplied model plus a small nominal baseline.
  * This reads only AgentSupply, so late or failed per-model chain reads cannot
@@ -86,15 +96,11 @@ export type CollapsedModelRows = {
 export function collapsedModelRows(agent: AgentSupply, expanded = false): CollapsedModelRows {
   const models = listedModelIds(agent);
   if (expanded) return { visible: models, hidden: [] };
-  const emptyRoutes = new Set(
-    (agent.model_supply ?? [])
-      .filter((row) => row.chain_length === 0)
-      .map((row) => row.model_id),
-  );
+  const needsAttention = new Set(models.filter((modelId) => modelSupplyState(agent, modelId) !== 'available'));
   const baseline = new Set(
-    models.filter((modelId) => !emptyRoutes.has(modelId)).slice(0, NOMINAL_MODEL_BASELINE),
+    models.filter((modelId) => !needsAttention.has(modelId)).slice(0, NOMINAL_MODEL_BASELINE),
   );
-  const visible = models.filter((modelId) => emptyRoutes.has(modelId) || baseline.has(modelId));
+  const visible = models.filter((modelId) => needsAttention.has(modelId) || baseline.has(modelId));
   const visibleSet = new Set(visible);
   return { visible, hidden: models.filter((modelId) => !visibleSet.has(modelId)) };
 }

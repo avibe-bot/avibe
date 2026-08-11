@@ -68,4 +68,18 @@ describe('InstallGatewayDialog', () => {
     expect(onClose).not.toHaveBeenCalled();
     settleInstall?.(runtime('not_installed'));
   });
+
+  it('renders a persisted install failure immediately after reload', () => {
+    const failed = runtime('not_installed');
+    failed.status.error_key = 'settings.models.install.fail.detail';
+
+    render(
+      <I18nextProvider i18n={i18n}>
+        <InstallGatewayDialog runtime={failed} onClose={vi.fn()} onRuntime={vi.fn()} />
+      </I18nextProvider>,
+    );
+
+    expect(screen.getByRole('alert')).toBeTruthy();
+    expect(screen.getByRole('button', { name: /Try again|重试/i })).toBeTruthy();
+  });
 });

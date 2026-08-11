@@ -32,6 +32,7 @@ const source = (id: string, channel: Source['supply_channel'], status: Source['s
 
 const agent: AgentSupply = {
   backend: 'claude',
+  cli_present: true,
   mode: 'hub',
   menu_kind: 'fixed',
   selected_model_id: 'model-a',
@@ -39,7 +40,7 @@ const agent: AgentSupply = {
   sources: { order: ['native', 'relay', 'unused'], eligibility: [] },
   routes: { 'model-a': { hops: [{ source_id: 'native', model_id: 'model-a' }, { source_id: 'relay', model_id: 'model-a' }, { source_id: 'unused', model_id: 'model-a' }] } },
   supply_status: 'degraded',
-  model_supply: [{ model_id: 'model-a', chain_length: 3 }],
+  model_supply: [{ model_id: 'model-a', chain_length: 3, has_runnable_hop: true }],
   named_agents: [],
   builtin_models: ['model-a'],
   menu: null,

@@ -75,6 +75,12 @@ export const BACKEND_IDENTITY_ACCENT = {
   opencode: 'violet',
 } as const satisfies Record<AgentBackend, Accent>;
 
+export const BACKEND_ADOPTION_VENDOR_KEY = {
+  claude: 'claude',
+  codex: 'chatgpt',
+  opencode: 'chatgpt',
+} as const satisfies Record<AgentBackend, string>;
+
 const BACKEND_ICON: Record<AgentBackend, IconType> = {
   claude: Sparkles,
   codex: Bot,

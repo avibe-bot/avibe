@@ -11,7 +11,7 @@ import { RouteChainDialog } from './RouteChainDialog';
 import { readyRegion } from './regionRead';
 import type { AgentChain, AgentSupply, Source } from './types';
 
-const agent: AgentSupply = { backend: 'claude', mode: 'hub', menu_kind: 'fixed' };
+const agent: AgentSupply = { backend: 'claude', cli_present: true, mode: 'hub', menu_kind: 'fixed' };
 const sources: Source[] = [
   { id: 'src_a', last_discovered_at: null, kind: 'api_key', vendor: 'anthropic', display_name: 'aihub', protocol: 'anthropic', supply_channel: 'hub', billing: 'metered', state: { status: 'active', retry_at: null, detail_key: null }, models: [] },
   { id: 'src_b', last_discovered_at: null, kind: 'subscription', vendor: 'anthropic', display_name: 'Claude subscription', protocol: 'anthropic', supply_channel: 'native_cli', billing: 'monthly', state: { status: 'active', retry_at: null, detail_key: null }, models: [] },

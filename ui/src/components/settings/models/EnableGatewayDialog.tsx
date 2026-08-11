@@ -8,6 +8,7 @@ import { resumeGatewayAdoption, type GatewayAdoptionFailure } from './gatewayAdo
 import { modelsApi } from './modelsApi';
 import { runtimeHasInstallAsset } from './runtimeLifecycle';
 import type { AgentSupply, RuntimeDependency } from './types';
+import { BACKEND_ADOPTION_VENDOR_KEY } from './vendorMeta';
 
 const Bullet: React.FC<{ children: React.ReactNode }> = ({ children }) => (
   <p className="model-hub-adopt-bullet">
@@ -29,7 +30,7 @@ export const EnableGatewayDialog: React.FC<{
   const [runtimeView, setRuntimeView] = React.useState(runtime);
   const [failure, setFailure] = React.useState<GatewayAdoptionFailure | null>(null);
   const backend = t(`settings.models.backends.${agent.backend}`, { defaultValue: agent.backend });
-  const vendor = agent.backend === 'claude' ? 'Claude' : 'ChatGPT';
+  const vendor = t(`settings.models.adopt.vendor.${BACKEND_ADOPTION_VENDOR_KEY[agent.backend]}`);
   const needsInstall = runtimeView?.status.health === 'not_installed';
   const missing = Boolean(needsInstall && runtimeView && runtimeHasInstallAsset(runtimeView));
   const installUnsupported = Boolean(needsInstall && !missing);

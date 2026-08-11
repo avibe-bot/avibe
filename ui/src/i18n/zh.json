@@ -695,6 +695,10 @@
       "adopt": {
         "title": "把 {{backend}} 切换到网关",
         "subtitle": "只影响 {{backend}}，其余后端保持原样。",
+        "vendor": {
+          "claude": "Claude",
+          "chatgpt": "ChatGPT"
+        },
         "section": {
           "effects": "会发生什么",
           "undo": "可以撤回"

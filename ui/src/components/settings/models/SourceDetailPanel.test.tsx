@@ -26,7 +26,7 @@ const source: Source = {
   supply_channel: 'hub',
   billing: 'metered',
   state: { status: 'active', retry_at: null, detail_key: null },
-  models: [{ id: 'model-a', display_name: null, provenance: 'manual', reasoning_efforts: ['high'] }],
+  models: [{ id: 'model-a', display_name: null, origin: 'manual', reasoning_efforts: ['high'] }],
 };
 
 const deferred = <T,>() => {
@@ -152,7 +152,7 @@ describe('SourceDetailPanel', () => {
   it('applies the refetch Source echo before the collection refresh settles', async () => {
     const echoed = {
       ...source,
-      models: [...source.models, { id: 'model-b', display_name: null, provenance: 'discovered' as const, reasoning_efforts: [] }],
+      models: [...source.models, { id: 'model-b', display_name: null, origin: 'discovered' as const, reasoning_efforts: [] }],
     };
     const refresh = vi.spyOn(modelsApi, 'refreshSource').mockResolvedValueOnce({ source: echoed, discovered: echoed.models.length });
     const reconcile = vi.fn().mockResolvedValue(undefined);
@@ -170,7 +170,7 @@ describe('SourceDetailPanel', () => {
     const update = vi.spyOn(modelsApi, 'updateModelReasoningEfforts').mockReturnValueOnce(tierResponse.promise);
     const refreshed = {
       ...source,
-      models: [...source.models, { id: 'model-b', display_name: null, provenance: 'discovered' as const, reasoning_efforts: [] }],
+      models: [...source.models, { id: 'model-b', display_name: null, origin: 'discovered' as const, reasoning_efforts: [] }],
     };
     const refetch = vi.spyOn(modelsApi, 'refreshSource').mockResolvedValueOnce({ source: refreshed, discovered: refreshed.models.length });
     renderEchoPanel(vi.fn(), serializedTrack());
@@ -230,7 +230,7 @@ describe('SourceDetailPanel', () => {
   it('applies the manual-create Source echo without waiting for a collection read', async () => {
     const echoed = {
       ...source,
-      models: [...source.models, { id: 'model-b', display_name: null, provenance: 'manual' as const, reasoning_efforts: [] }],
+      models: [...source.models, { id: 'model-b', display_name: null, origin: 'manual' as const, reasoning_efforts: [] }],
     };
     vi.spyOn(modelsApi, 'addCustomModel').mockResolvedValueOnce(echoed);
     renderEchoPanel();
@@ -287,7 +287,7 @@ describe('SourceDetailPanel', () => {
   });
 
   it('echoes both arrays from a refetch refusal in the forced retry', async () => {
-    const hops = [{ backend: 'claude' as const, menu_model: 'claude-opus-4-6', source_id: source.id, model_id: 'model-a' }];
+    const hops = [{ backend: 'claude' as const, menu_model: 'claude-opus-4-6', position: 2, source_id: source.id, model_id: 'model-a' }];
     const gaps = [{ backend: 'claude' as const, model_id: 'claude-opus-4-6', agents: ['Release bot'] }];
     const bodies: unknown[] = [];
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -311,8 +311,8 @@ describe('SourceDetailPanel', () => {
   });
 
   it('requires confirmation again when a forced removal receives a new guard plan', async () => {
-    const firstHops = [{ backend: 'claude' as const, menu_model: 'menu-a', source_id: source.id, model_id: 'model-a' }];
-    const nextHops = [{ backend: 'codex' as const, menu_model: 'menu-b', source_id: source.id, model_id: 'model-a' }];
+    const firstHops = [{ backend: 'claude' as const, menu_model: 'menu-a', position: 1, source_id: source.id, model_id: 'model-a' }];
+    const nextHops = [{ backend: 'codex' as const, menu_model: 'menu-b', position: 3, source_id: source.id, model_id: 'model-a' }];
     const bodies: unknown[] = [];
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       if (String(input) === '/api/csrf-token') return Response.json({ csrf_token: 'csrf' });

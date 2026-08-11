@@ -41,9 +41,9 @@ export function buildMockSources(): Source[] {
       account_label: 'me@gmail.com',
       masked_credential: null,
       models: [
-        { id: 'claude-opus-4-6', display_name: 'Opus 4.6', provenance: 'discovered', discovered_at: iso(-3 * HOUR) },
-        { id: 'claude-sonnet-4-6', display_name: 'Sonnet 4.6', provenance: 'discovered', discovered_at: iso(-3 * HOUR) },
-        { id: 'claude-haiku-4-5', display_name: 'Haiku 4.5', provenance: 'discovered', discovered_at: iso(-3 * HOUR) },
+        { id: 'claude-opus-4-6', display_name: 'Opus 4.6', origin: 'discovered', reasoning_efforts: [], discovered_at: iso(-3 * HOUR) },
+        { id: 'claude-sonnet-4-6', display_name: 'Sonnet 4.6', origin: 'discovered', reasoning_efforts: [], discovered_at: iso(-3 * HOUR) },
+        { id: 'claude-haiku-4-5', display_name: 'Haiku 4.5', origin: 'discovered', reasoning_efforts: [], discovered_at: iso(-3 * HOUR) },
       ],
       credential_ref: null,
     },
@@ -63,8 +63,8 @@ export function buildMockSources(): Source[] {
       account_label: 'me@gmail.com',
       masked_credential: null,
       models: [
-        { id: 'gpt-5.6', display_name: 'GPT-5.6', provenance: 'discovered', discovered_at: iso(-3 * HOUR) },
-        { id: 'gpt-5.6-mini', display_name: 'GPT-5.6 mini', provenance: 'discovered', discovered_at: iso(-3 * HOUR) },
+        { id: 'gpt-5.6', display_name: 'GPT-5.6', origin: 'discovered', reasoning_efforts: [], discovered_at: iso(-3 * HOUR) },
+        { id: 'gpt-5.6-mini', display_name: 'GPT-5.6 mini', origin: 'discovered', reasoning_efforts: [], discovered_at: iso(-3 * HOUR) },
       ],
       credential_ref: null,
     },
@@ -84,9 +84,9 @@ export function buildMockSources(): Source[] {
       account_label: null,
       masked_credential: 'sk-ant-…8f2A',
       models: [
-        { id: 'claude-opus-4-6', display_name: 'Opus 4.6', provenance: 'discovered', discovered_at: iso(-6 * HOUR) },
-        { id: 'claude-sonnet-4-6', display_name: 'Sonnet 4.6', provenance: 'discovered', discovered_at: iso(-6 * HOUR) },
-        { id: 'claude-haiku-4-5', display_name: 'Haiku 4.5', provenance: 'discovered', discovered_at: iso(-6 * HOUR) },
+        { id: 'claude-opus-4-6', display_name: 'Opus 4.6', origin: 'discovered', reasoning_efforts: [], discovered_at: iso(-6 * HOUR) },
+        { id: 'claude-sonnet-4-6', display_name: 'Sonnet 4.6', origin: 'discovered', reasoning_efforts: [], discovered_at: iso(-6 * HOUR) },
+        { id: 'claude-haiku-4-5', display_name: 'Haiku 4.5', origin: 'discovered', reasoning_efforts: [], discovered_at: iso(-6 * HOUR) },
       ],
       credential_ref: 'cred_anth01',
     },
@@ -106,10 +106,10 @@ export function buildMockSources(): Source[] {
       account_label: null,
       masked_credential: 'glm-…c31b',
       models: [
-        { id: 'glm-5.2', display_name: 'GLM 5.2', provenance: 'discovered', discovered_at: iso(-6 * HOUR) },
-        { id: 'glm-5.2-air', display_name: 'GLM 5.2 Air', provenance: 'discovered', discovered_at: iso(-6 * HOUR) },
-        { id: 'glm-5-flash', display_name: 'GLM 5 Flash', provenance: 'discovered', discovered_at: iso(-6 * HOUR) },
-        { id: 'glm-5.2-pro', display_name: 'GLM 5.2 Pro', provenance: 'manual', discovered_at: null },
+        { id: 'glm-5.2', display_name: 'GLM 5.2', origin: 'discovered', reasoning_efforts: [], discovered_at: iso(-6 * HOUR) },
+        { id: 'glm-5.2-air', display_name: 'GLM 5.2 Air', origin: 'discovered', reasoning_efforts: [], discovered_at: iso(-6 * HOUR) },
+        { id: 'glm-5-flash', display_name: 'GLM 5 Flash', origin: 'discovered', reasoning_efforts: [], discovered_at: iso(-6 * HOUR) },
+        { id: 'glm-5.2-pro', display_name: 'GLM 5.2 Pro', origin: 'manual', reasoning_efforts: [], discovered_at: null },
       ],
       credential_ref: 'cred_zhipu01',
     },
@@ -132,7 +132,7 @@ export function buildMockSources(): Source[] {
       account_label: null,
       masked_credential: 'key …9c1',
       models: [
-        { id: 'glm-5.2-air', display_name: 'GLM 5.2 Air', provenance: 'manual', discovered_at: null },
+        { id: 'glm-5.2-air', display_name: 'GLM 5.2 Air', origin: 'manual', reasoning_efforts: [], discovered_at: null },
       ],
       credential_ref: 'cred_relay01',
     },
@@ -148,6 +148,7 @@ export function buildMockAgents(sources: Source[] = buildMockSources()): AgentSu
   return [
     {
       backend: 'claude',
+      cli_present: true,
       mode: 'hub',
       menu_kind: 'fixed',
       selected_by_agent: null,
@@ -167,9 +168,9 @@ export function buildMockAgents(sources: Source[] = buildMockSources()): AgentSu
       // 智谱 is 未启用 here. Depth 0 is the honest answer, and AC-9's Case A: a
       // menu-model gap that must NOT render any Agent as interrupted.
       model_supply: [
-        { model_id: 'claude-opus-4-6', chain_length: 2 },
-        { model_id: 'claude-sonnet-4-6', chain_length: 2 },
-        { model_id: 'claude-haiku-4-5', chain_length: 0 },
+        { model_id: 'claude-opus-4-6', chain_length: 2, has_runnable_hop: true },
+        { model_id: 'claude-sonnet-4-6', chain_length: 2, has_runnable_hop: true },
+        { model_id: 'claude-haiku-4-5', chain_length: 0, has_runnable_hop: false },
       ],
       named_agents: [
         { name: 'claude', effective_model_id: 'claude-opus-4-6', supply_status: 'ok' },
@@ -188,6 +189,7 @@ export function buildMockAgents(sources: Source[] = buildMockSources()): AgentSu
     },
     {
       backend: 'codex',
+      cli_present: true,
       mode: 'hub',
       menu_kind: 'fixed',
       selected_by_agent: 'codex',
@@ -199,8 +201,8 @@ export function buildMockAgents(sources: Source[] = buildMockSources()): AgentSu
       },
       supply_status: 'ok',
       model_supply: [
-        { model_id: 'gpt-5.6', chain_length: 1 },
-        { model_id: 'gpt-5.6-mini', chain_length: 1 },
+        { model_id: 'gpt-5.6', chain_length: 1, has_runnable_hop: true },
+        { model_id: 'gpt-5.6-mini', chain_length: 1, has_runnable_hop: true },
       ],
       named_agents: [{ name: 'codex', effective_model_id: 'gpt-5.6', supply_status: 'ok' }],
       routes: {
@@ -215,6 +217,7 @@ export function buildMockAgents(sources: Source[] = buildMockSources()): AgentSu
       // 直连: the CLI runs its own native config. Every hub-side projection is
       // null by contract — no order, no chain, no probe (AC-7's gate).
       backend: 'opencode',
+      cli_present: true,
       mode: 'direct',
       menu_kind: 'open',
       selected_by_agent: null,

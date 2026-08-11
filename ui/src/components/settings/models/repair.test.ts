@@ -326,6 +326,7 @@ describe('the copy each remedy names', () => {
 
 const agent = (over: Partial<AgentSupply> = {}): AgentSupply => ({
   backend: 'claude',
+  cli_present: true,
   mode: 'hub',
   menu_kind: 'fixed',
   sources: { order: ['src_a'] },

@@ -6,7 +6,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { ModelHubInfoHint } from './ModelHubInfoHint';
-import { collapsedModelRows, listedModelIds, modelChainKey, type ModelChainIndex, type ModelChainRead } from './modelRows';
+import { collapsedModelRows, listedModelIds, modelChainKey, modelSupplyState, type ModelChainIndex, type ModelChainRead } from './modelRows';
 import { freshRegionData } from './regionRead';
 import { agentHasLiveChainProjection, type FreshRuntimeProjection } from './runtimeLifecycle';
 import { currentChainLink, isTakeoverChain } from './takeover';
@@ -33,15 +33,18 @@ const ModelRow: React.FC<{
   const { t } = useTranslation();
   const current = currentLink(read);
   const takeover = isTakeoverRead(read);
+  const supplyState = modelSupplyState(agent, modelId);
   const resolved = read?.kind === 'ready' && current !== null;
   const mode = resolved
     ? current.channel === 'native_cli'
       ? t('settings.models.legend.native') as string
       : t('settings.models.gateway.group.mode.gateway') as string
     : '—';
-  const currentCopy = resolved
-    ? t(takeover ? 'settings.models.gateway.row.currentTakeover' : 'settings.models.gateway.row.current', { source: sourceName(sources, current.source_id) }) as string
-    : '—';
+  const currentCopy = supplyState === 'paused'
+    ? t('settings.models.legend.unavailable') as string
+    : resolved
+      ? t(takeover ? 'settings.models.gateway.row.currentTakeover' : 'settings.models.gateway.row.current', { source: sourceName(sources, current.source_id) }) as string
+      : '—';
   return (
     <button
       type="button"
@@ -51,7 +54,7 @@ const ModelRow: React.FC<{
     >
       <span className="flex min-w-0 flex-1 items-center justify-between gap-2.5">
         <span className="flex min-w-0 flex-1 items-center gap-[7px]"><span className="min-w-0 flex-1 truncate font-mono text-[12px] font-medium text-foreground" title={modelId}>{modelId}</span><span className="model-hub-model-mode-chip shrink-0 rounded-full border border-border px-2 py-[3px] text-[10.5px] font-semibold text-muted">{mode}</span></span>
-        <span className={cn('model-hub-model-current min-w-0 flex-1 truncate text-[10.5px]', takeover && 'model-hub-model-current--takeover')} title={currentCopy}>{currentCopy}</span>
+        <span className={cn('model-hub-model-current min-w-0 flex-1 truncate text-[10.5px]', supplyState === 'paused' ? 'model-hub-ink-gold' : takeover && 'model-hub-model-current--takeover')} title={currentCopy}>{currentCopy}</span>
       </span>
       <ChevronRight className="model-hub-overview-chevron size-[15px] shrink-0" aria-hidden="true" />
     </button>
@@ -100,7 +103,7 @@ const AgentModelCard: React.FC<{
   const retryChains = () => onProbeSettled(agent);
   const noUsableSource = agent.mode === 'hub'
     && Boolean(agent.model_supply?.length)
-    && agent.model_supply?.every((entry) => entry.chain_length === 0);
+    && agent.model_supply?.every((entry) => !entry.has_runnable_hop);
   const statusClass = switchFailed || health === 'interrupted'
     ? 'text-destructive'
     : hasTakeover || health === 'degraded' || health === 'waiting'

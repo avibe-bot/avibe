@@ -24,13 +24,13 @@ const AgentCard = (props: Omit<ComponentProps<typeof RuntimeAgentCard>, 'runtime
 const source = (id: string, name: string): Source => ({
   id, last_discovered_at: null, kind: 'api_key', vendor: 'anthropic', display_name: name,
   protocol: 'anthropic', supply_channel: 'hub', billing: 'metered', state: { status: 'active', retry_at: null, detail_key: null },
-  models: [{ id: 'claude-opus-4-6', provenance: 'discovered' }],
+  models: [{ id: 'claude-opus-4-6', origin: 'discovered', reasoning_efforts: [] }],
 });
 const hubAgent: AgentSupply = {
-  backend: 'claude', mode: 'hub', menu_kind: 'fixed', selected_model_id: 'claude-opus-4-6', selected_model_explicit: true,
+  backend: 'claude', cli_present: true, mode: 'hub', menu_kind: 'fixed', selected_model_id: 'claude-opus-4-6', selected_model_explicit: true,
   sources: { order: ['src_a', 'src_b'], eligibility: [{ source_id: 'src_a', eligible: true }, { source_id: 'src_b', eligible: true }] },
   routes: { 'claude-opus-4-6': { hops: [{ source_id: 'src_a', model_id: 'claude-opus-4-6' }, { source_id: 'src_b', model_id: 'claude-opus-4-6' }] } },
-  supply_status: 'degraded', model_supply: [{ model_id: 'claude-opus-4-6', chain_length: 2 }], named_agents: [], builtin_models: ['claude-opus-4-6'], menu: null,
+  supply_status: 'degraded', model_supply: [{ model_id: 'claude-opus-4-6', chain_length: 2, has_runnable_hop: true }], named_agents: [], builtin_models: ['claude-opus-4-6'], menu: null,
 };
 
 afterEach(cleanup);
@@ -75,7 +75,7 @@ describe('AgentCard', () => {
     render(<I18nextProvider i18n={i18n}><AgentCard agents={[{
       ...hubAgent,
       builtin_models: models,
-      model_supply: models.map((modelId) => ({ model_id: modelId, chain_length: 1 })),
+      model_supply: models.map((modelId) => ({ model_id: modelId, chain_length: 1, has_runnable_hop: true })),
       routes: {},
     }]} sources={[]} chains={{}} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={onProbeSettled} /></I18nextProvider>);
 
@@ -88,6 +88,24 @@ describe('AgentCard', () => {
     expect(onProbeSettled).toHaveBeenCalledTimes(2);
     expect(onProbeSettled).toHaveBeenNthCalledWith(1, expect.objectContaining({ backend: 'claude' }));
     expect(onProbeSettled).toHaveBeenNthCalledWith(2, expect.objectContaining({ backend: 'claude' }));
+  });
+
+  it('keeps a nonempty paused route visible beyond the nominal collapsed rows', () => {
+    const models = Array.from({ length: NOMINAL_MODEL_BASELINE + 2 }, (_, index) => `model-${index + 1}`);
+    const pausedModel = models.at(-1) as string;
+    render(<I18nextProvider i18n={i18n}><AgentCard agents={[{
+      ...hubAgent,
+      builtin_models: models,
+      routes: {},
+      model_supply: models.map((modelId) => ({
+        model_id: modelId,
+        chain_length: 1,
+        has_runnable_hop: modelId !== pausedModel,
+      })),
+    }]} sources={[]} chains={{}} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
+
+    expect(screen.getByText(pausedModel)).toBeTruthy();
+    expect(screen.getByText(/^Supply paused$|^供给已暂停$/i)).toBeTruthy();
   });
 
   it('keeps a chain reread reachable when a short group is unresolved', async () => {

@@ -6,6 +6,7 @@ import type { AgentSupply, Source } from './types';
 
 const directAgent = (backend: AgentSupply['backend']): AgentSupply => ({
   backend,
+  cli_present: true,
   mode: 'direct',
   menu_kind: backend === 'opencode' ? 'open' : 'fixed',
 });

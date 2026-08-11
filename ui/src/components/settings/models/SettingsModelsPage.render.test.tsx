@@ -12,6 +12,7 @@ import type { AgentBackend, AgentChain, AgentSupply, RuntimeDependency, Source }
 
 const directAgent = (backend: AgentBackend): AgentSupply => ({
   backend,
+  cli_present: true,
   mode: 'direct',
   menu_kind: backend === 'opencode' ? 'open' : 'fixed',
 });
@@ -39,6 +40,7 @@ const retainedSource: Source = {
 
 const takeoverAgent: AgentSupply = {
   backend: 'codex',
+  cli_present: true,
   mode: 'hub',
   menu_kind: 'fixed',
   selected_model_id: 'gpt-5.6-sol',
@@ -46,7 +48,7 @@ const takeoverAgent: AgentSupply = {
   sources: { order: ['src_head', 'src_relay'], eligibility: [] },
   routes: { 'gpt-5.6-sol': { hops: [{ source_id: 'src_head', model_id: 'gpt-5.6-sol' }, { source_id: 'src_relay', model_id: 'gpt-5.6-sol' }] } },
   supply_status: 'degraded',
-  model_supply: [{ model_id: 'gpt-5.6-sol', chain_length: 2 }],
+  model_supply: [{ model_id: 'gpt-5.6-sol', chain_length: 2, has_runnable_hop: true }],
   builtin_models: ['gpt-5.6-sol'],
   named_agents: [],
   menu: null,
@@ -103,6 +105,29 @@ describe('SettingsModelsPage surface branches', () => {
     expect(screen.getAllByRole('button', { name: /^Switch to Gateway$|^切换到网关$/i })).toHaveLength(3);
     expect(screen.getByText(/^Switch to the gateway and you gain three things$|^切换到网关，你会多出三件事$/i)).toBeTruthy();
     expect(screen.queryByRole('tab')).toBeNull();
+  });
+
+  it('renders the no-backend state when every authoritative CLI is absent', async () => {
+    vi.spyOn(modelsApi, 'listSources').mockResolvedValue([]);
+    vi.spyOn(modelsApi, 'listAgents').mockResolvedValue([
+      { ...directAgent('claude'), cli_present: false },
+      { ...directAgent('codex'), cli_present: false },
+      { ...directAgent('opencode'), cli_present: false },
+    ]);
+    vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
+    vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
+
+    render(
+      <ToastProvider>
+        <I18nextProvider i18n={i18n}>
+          <SettingsModelsPage />
+        </I18nextProvider>
+      </ToastProvider>,
+    );
+
+    expect(await screen.findByText(/No agent backend was found|没有找到 Agent 后端/i)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /^Switch to Gateway$|^切换到网关$/i })).toBeNull();
+    expect(screen.queryByText(/backends are direct|个后端均为直连/i)).toBeNull();
   });
 
   it('keeps an unread runtime visible on the direct-only surface', async () => {
@@ -274,7 +299,7 @@ describe('SettingsModelsPage surface branches', () => {
       selected_model_id: 'claude-opus-4-6',
       sources: { order: [retainedSource.id], eligibility: [{ source_id: retainedSource.id, eligible: true }] },
       routes: { 'claude-opus-4-6': { hops: [{ source_id: retainedSource.id, model_id: 'claude-opus-4-6' }] } },
-      model_supply: [{ model_id: 'claude-opus-4-6', chain_length: 1 }],
+      model_supply: [{ model_id: 'claude-opus-4-6', chain_length: 1, has_runnable_hop: true }],
       builtin_models: ['claude-opus-4-6'],
     };
     vi.spyOn(modelsApi, 'listSources').mockResolvedValue([retainedSource]);

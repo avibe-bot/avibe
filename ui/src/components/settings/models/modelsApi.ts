@@ -221,14 +221,7 @@ const supplyGaps = (raw: unknown): SupplyGap[] =>
 
 const routeHopRefs = (raw: unknown): RouteHopRef[] =>
   Array.isArray(raw)
-    ? raw
-        .filter((hop): hop is Record<string, unknown> => Boolean(hop) && typeof hop === 'object')
-        .map((hop) => ({
-          backend: hop.backend as RouteHopRef['backend'],
-          menu_model: String(hop.menu_model ?? ''),
-          source_id: String(hop.source_id ?? ''),
-          model_id: String(hop.model_id ?? ''),
-        }))
+    ? raw.filter((hop): hop is RouteHopRef => Boolean(hop) && typeof hop === 'object')
     : [];
 
 /**
@@ -484,11 +477,16 @@ class MockStore {
       return;
     }
     const byId = new Map(this.sources.map((s) => [s.id, s]));
-    const chainFor = (model: string) => (a.routes?.[model]?.hops ?? [])
+    const routeFor = (model: string) => a.routes?.[model]?.hops ?? [];
+    const chainFor = (model: string) => routeFor(model)
       .map((hop) => byId.get(hop.source_id))
       .filter((s): s is Source => Boolean(s));
     if (a.builtin_models) {
-      a.model_supply = a.builtin_models.map((m) => ({ model_id: m, chain_length: chainFor(m).length }));
+      a.model_supply = a.builtin_models.map((m) => ({
+        model_id: m,
+        chain_length: routeFor(m).length,
+        has_runnable_hop: chainFor(m).some(isRunnable),
+      }));
     }
     const selected = a.selected_model_id ?? null;
     if (!selected) {
@@ -581,7 +579,8 @@ class MockStore {
       models: Array.from({ length: count }, (_, i) => ({
         id: `${draft.vendor}-model-${i + 1}`,
         display_name: null,
-        provenance: 'discovered' as const,
+        origin: 'discovered' as const,
+        reasoning_efforts: [],
         discovered_at: new Date().toISOString(),
       })),
       credential_ref: rid('cred'),
@@ -906,13 +905,13 @@ class MockStore {
     const existing = source.models.find((m) => m.id === draft.model_id);
     if (existing) {
       existing.display_name = draft.display_name ?? existing.display_name;
-      existing.provenance = 'manual';
+      existing.origin = 'manual';
       existing.reasoning_efforts = [...draft.reasoning_efforts];
     } else {
       source.models.push({
         id: draft.model_id,
         display_name: draft.display_name ?? null,
-        provenance: 'manual',
+        origin: 'manual',
         reasoning_efforts: [...draft.reasoning_efforts],
         discovered_at: null,
       });
@@ -935,9 +934,9 @@ class MockStore {
     const references: RouteHopRef[] = [];
     for (const agent of this.agents) {
       for (const [menuModel, route] of Object.entries(agent.routes ?? {})) {
-        for (const hop of route.hops) {
+        for (const [index, hop] of route.hops.entries()) {
           if (hop.source_id === sourceId && hop.model_id === modelId) {
-            references.push({ backend: agent.backend, menu_model: menuModel, ...hop });
+            references.push({ backend: agent.backend, menu_model: menuModel, ...hop, position: index + 1 });
           }
         }
       }
@@ -948,7 +947,7 @@ class MockStore {
     if (references.length > 0 && !confirmed) {
       throw new ApiCallError('source_model_in_route_chain', undefined, true, [], [], references);
     }
-    source.models = source.models.filter((m) => !(m.id === modelId && m.provenance === 'manual'));
+    source.models = source.models.filter((m) => !(m.id === modelId && m.origin === 'manual'));
     if (confirmation) {
       for (const agent of this.agents) {
         agent.routes = Object.fromEntries(
@@ -994,7 +993,7 @@ class MockStore {
         usage: isKey ? { cycle_used_pct: null, month_spend_cents: 0, currency: 'USD' } : { cycle_used_pct: 0, month_spend_cents: null, currency: null },
         account_label: channel === 'native_cli' ? 'me@gmail.com' : null,
         masked_credential: isKey ? 'sk-…dd3c' : null,
-        models: [{ id: item.backend === 'opencode' ? 'glm-5.2' : item.backend === 'codex' ? 'gpt-5.6' : 'claude-opus-4-6', display_name: null, provenance: 'discovered', discovered_at: new Date().toISOString() }],
+        models: [{ id: item.backend === 'opencode' ? 'glm-5.2' : item.backend === 'codex' ? 'gpt-5.6' : 'claude-opus-4-6', display_name: null, origin: 'discovered', reasoning_efforts: [], discovered_at: new Date().toISOString() }],
         credential_ref: channel === 'hub' ? rid('cred') : null,
       });
     }
@@ -1121,7 +1120,8 @@ class MockStore {
           {
             id: isOpenai ? 'gpt-5.6' : 'claude-opus-4-6',
             display_name: isOpenai ? 'GPT-5.6' : 'Opus 4.6',
-            provenance: 'discovered',
+            origin: 'discovered',
+            reasoning_efforts: [],
             discovered_at: new Date().toISOString(),
           },
         ];
@@ -1149,8 +1149,8 @@ class MockStore {
       account_label: flow.channel === 'native_cli' ? 'me@gmail.com' : null,
       masked_credential: null,
       models: isOpenai
-        ? [{ id: 'gpt-5.6', display_name: 'GPT-5.6', provenance: 'discovered', discovered_at: new Date().toISOString() }]
-        : [{ id: 'claude-opus-4-6', display_name: 'Opus 4.6', provenance: 'discovered', discovered_at: new Date().toISOString() }],
+        ? [{ id: 'gpt-5.6', display_name: 'GPT-5.6', origin: 'discovered', reasoning_efforts: [], discovered_at: new Date().toISOString() }]
+        : [{ id: 'claude-opus-4-6', display_name: 'Opus 4.6', origin: 'discovered', reasoning_efforts: [], discovered_at: new Date().toISOString() }],
       credential_ref: flow.channel === 'hub' ? rid('cred') : null,
     };
     this.sources.push(source);

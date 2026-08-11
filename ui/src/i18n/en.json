@@ -695,6 +695,10 @@
       "adopt": {
         "title": "Switch {{backend}} to the gateway",
         "subtitle": "Affects {{backend}} only; the other backends are unchanged.",
+        "vendor": {
+          "claude": "Claude",
+          "chatgpt": "ChatGPT"
+        },
         "section": {
           "effects": "What will happen",
           "undo": "You can undo this"

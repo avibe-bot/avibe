@@ -8,7 +8,7 @@ const source = (status: Source['state']['status']): Source => ({
   supply_channel: 'hub', billing: 'metered', state: { status, retry_at: status === 'cooldown' ? '2099-01-01T00:00:00Z' : null, detail_key: status === 'needs_action' ? 'models.source.needs_action.oauth_expired' : null }, models: [],
 });
 const agent = (supply_status: AgentSupply['supply_status']): AgentSupply => ({
-  backend: 'claude', mode: 'hub', menu_kind: 'fixed', sources: { order: ['src_a'], eligibility: [{ source_id: 'src_a', eligible: true, in_current_model_chain: true, process_availability_reason: null }] },
+  backend: 'claude', cli_present: true, mode: 'hub', menu_kind: 'fixed', sources: { order: ['src_a'], eligibility: [{ source_id: 'src_a', eligible: true, in_current_model_chain: true, process_availability_reason: null }] },
   routes: {}, supply_status, model_supply: [], named_agents: [], builtin_models: [], menu: null,
 });
 

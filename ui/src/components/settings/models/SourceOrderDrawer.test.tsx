@@ -31,6 +31,7 @@ const deferred = <T,>() => {
 };
 const agent: AgentSupply = {
   backend: 'claude',
+  cli_present: true,
   mode: 'hub',
   menu_kind: 'fixed',
   sources: {

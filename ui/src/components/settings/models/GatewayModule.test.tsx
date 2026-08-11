@@ -11,6 +11,7 @@ import type { AgentSupply } from './types';
 
 const agent: AgentSupply = {
   backend: 'claude',
+  cli_present: true,
   mode: 'direct',
   menu_kind: 'fixed',
   sources: null,

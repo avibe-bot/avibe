@@ -16,10 +16,12 @@
 //   2. every `{{count}}` key under `settings.models` belongs to a complete
 //      `_one`/`_other` family. Both locale files carry both leaves; zh deliberately
 //      repeats the value so locale parity remains a plain set equality.
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 import en from '../../../i18n/en.json';
 import zh from '../../../i18n/zh.json';
+import { BACKEND_ADOPTION_VENDOR_KEY } from './vendorMeta';
 
 /** Placeholders a join can fill with more than one item. */
 const LIST_PLACEHOLDER = /\{\{(?:names|models|agents|sources|backends|list|skipped)\}\}/;
@@ -79,5 +81,17 @@ describe('English copy agrees with the number of things it interpolates', () => 
   it('uses real plural families instead of parenthesized English plurals', () => {
     const broken = models.filter((leaf) => PARENTHESIZED_PLURAL.test(leaf.text));
     expect(broken.map((leaf) => `${leaf.key}: ${leaf.text}`)).toEqual([]);
+  });
+
+  it('resolves gateway-adoption vendor interpolation through locale keys', () => {
+    const component = readFileSync(new URL('./EnableGatewayDialog.tsx', import.meta.url), 'utf8');
+    const vendorKeys = new Set(Object.values(BACKEND_ADOPTION_VENDOR_KEY));
+    expect(component).toContain('BACKEND_ADOPTION_VENDOR_KEY[agent.backend]');
+    expect(new Set(Object.keys(en.settings.models.adopt.vendor))).toEqual(vendorKeys);
+    expect(new Set(Object.keys(zh.settings.models.adopt.vendor))).toEqual(vendorKeys);
+    for (const key of vendorKeys) {
+      expect(en.settings.models.adopt.vendor[key]).toBeTruthy();
+      expect(zh.settings.models.adopt.vendor[key]).toBeTruthy();
+    }
   });
 });

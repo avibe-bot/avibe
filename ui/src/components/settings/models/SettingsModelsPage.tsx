@@ -566,6 +566,7 @@ export const SettingsModelsPage: React.FC = () => {
     && supplyRead.kind === 'loading'
     && runtimeRead.kind === 'loading';
   const directEmpty = modelsSurfaceKindFromReads(supplyRead, sourcesRead) === 'direct_empty';
+  const installedAgents = agents.filter((agent) => agent.cli_present);
   const selectSource = React.useCallback((sourceId: string | null) => {
     sourceIntentAuthority.commit(() => setSelectedSourceId(sourceId));
   }, [sourceIntentAuthority]);
@@ -602,7 +603,7 @@ export const SettingsModelsPage: React.FC = () => {
     <ModelHubShell
       detailBack={selectedSourceId ? () => selectSource(null) : undefined}
       actions={!landingLoading
-        ? directEmpty && agents.length === 0
+        ? directEmpty && installedAgents.length === 0
           ? undefined
           : <span className="flex items-center gap-2">
               <RuntimePill
@@ -610,7 +611,7 @@ export const SettingsModelsPage: React.FC = () => {
                 starting={startingRuntime}
                 onStart={() => void startRuntime()}
                 onInstall={() => setInstallOpen(true)}
-                directCount={directEmpty ? agents.length : undefined}
+                directCount={directEmpty ? installedAgents.length : undefined}
               />
               {!directEmpty && <TakeoverPill count={takeoverCount} />}
             </span>
@@ -621,7 +622,7 @@ export const SettingsModelsPage: React.FC = () => {
           ? selectedSource
             ? <SourceDetailPanel source={selectedSource} trackMutation={trackSourceMutation(selectedSource.id)} />
             : <section className="rounded-xl border border-border bg-surface px-5 py-12 text-center text-[12px] text-muted">{t('settings.models.sourceDetail.gone')}</section>
-          : directEmpty ? <DirectHome agents={agents} onSwitch={setAdoptAgent} />
+          : directEmpty ? <DirectHome agents={installedAgents} onSwitch={setAdoptAgent} />
             : <div className="space-y-[22px]">
                   <HubTabs tab={tab} onChange={setTab} />
                   {tab === 'sources' ? <div className="model-hub-overview">

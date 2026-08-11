@@ -11,6 +11,7 @@ import type { AgentSupply, RuntimeDependency } from './types';
 
 const direct: AgentSupply = {
   backend: 'claude',
+  cli_present: true,
   mode: 'direct',
   menu_kind: 'fixed',
   sources: { order: [], eligibility: [] },

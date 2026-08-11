@@ -50,6 +50,7 @@ const DEAD: SourceState = {
 
 const hubAgent = (over: Partial<AgentSupply> = {}): AgentSupply => ({
   backend: 'claude',
+  cli_present: true,
   mode: 'hub',
   menu_kind: 'fixed',
   selected_by_agent: 'claude',
@@ -157,8 +158,8 @@ describe('attribution (AC-9)', () => {
     const agent = hubAgent({
       named_agents: [{ name: 'claude', effective_model_id: 'claude-opus-4-6', supply_status: 'ok' }],
       model_supply: [
-        { model_id: 'claude-opus-4-6', chain_length: 2 },
-        { model_id: 'claude-haiku-4-5', chain_length: 0 },
+        { model_id: 'claude-opus-4-6', chain_length: 2, has_runnable_hop: true },
+        { model_id: 'claude-haiku-4-5', chain_length: 0, has_runnable_hop: false },
       ],
     });
     expect(attribution(agent)).toEqual({
@@ -171,7 +172,7 @@ describe('attribution (AC-9)', () => {
   it('never double-counts a model an Agent runs', () => {
     const agent = hubAgent({
       named_agents: [{ name: 'claude', effective_model_id: 'claude-haiku-4-5', supply_status: 'interrupted' }],
-      model_supply: [{ model_id: 'claude-haiku-4-5', chain_length: 0 }],
+      model_supply: [{ model_id: 'claude-haiku-4-5', chain_length: 0, has_runnable_hop: false }],
     });
     expect(attribution(agent)).toEqual({ interrupted: ['claude'], waiting: [], unassignedModels: [] });
   });
