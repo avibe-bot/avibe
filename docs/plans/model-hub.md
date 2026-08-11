@@ -954,7 +954,8 @@ Exact-hop referential integrity is a separate guard from the supply-gap calculat
 A non-forced Source DELETE refuses whenever any configured chain names that Source, even
 when a later hop still supplies the menu model, and returns `source_in_route_chain`
 plus ordered `would_remove_hops` entries naming each `(backend, menu_model,
-source_id, model_id)` reference. `force=true` is an explicit cascade confirmation:
+source_id, model_id)` reference. `force=true` with that refusal's exact guard token is
+an explicit cascade confirmation:
 the same transaction deletes the Source and every exact hop that names it across every
 backend route, while the identity and relative order of all surviving hops remain
 unchanged. An emptied route remains an explicit empty configuration.
@@ -977,28 +978,40 @@ with `source_model_in_route_chain` and ordered `would_remove_hops`; another Sour
 supplying the same menu model does not make that exact reference disposable. If no
 exact hop is lost but a protected route loses its last supplier, it is refused with
 `source_last_supplier`. When both apply, the exact-hop error leads and the response
-still carries both complete arrays. A confirmed `force=true` applies the inventory
+still carries both complete arrays. A confirmed `force=true` with the exact guard token applies the inventory
 change and removes only those invalidated hops in one transaction, preserving the
 identity and relative order of all survivors and keeping an empty route configured.
 It also reports every resulting supply gap; force is confirmation, not a claim that
 the mutation is interruption-free.
 
+**Shared confirmation binding (owner ruling 2026-08-11 18:32).** Every guarded `409`
+returns the complete `GuardRefusal` shape: the row's existing lead `error`,
+`refusal_reason: confirmation_required | plan_changed`, an opaque `guard_token`, and
+the ordered `would_remove_hops` / `would_interrupt` arrays. The token binds method,
+target, normalized substantive input, the exact staged mutation/guard plan, and all
+relevant persisted-state versions. `force=true` MUST echo that token in the row's
+request carrier. The shared guard layer recomputes under the commit boundary and
+commits only an exact binding match; any mismatch returns the same 409 shape with the
+current plan, a fresh token, and `plan_changed`. A missing token returns
+`confirmation_required`. Neither case mutates a Route. `plan_changed` is data, not a
+new top-level error code.
+
 **Source-mutation envelope matrix (authoritative and exhaustive; owner rulings
-2026-08-09).** These are all Source/inventory mutations, including writes that cannot
+2026-08-09, confirmation binding revised 2026-08-11).** These are all Source/inventory mutations, including writes that cannot
 remove supply. Prose may describe their guard rationale but cannot define a request or
 success envelope outside this table. Omitted `force` is false; every reported array is
 present even when empty.
 
 | Decision | Mutation | Request | Guarded `409` | Success |
 | --- | --- | --- | --- | --- |
-| `mutation.source_metadata` | change Source metadata/Base URL | `PATCH /api/models/sources/<id>` with `{display_name?, base_url?, force?: boolean}`; `force` matters only when `base_url` changes | `{error, would_remove_hops: RouteHopRef[], would_interrupt: SupplyGap[]}` | `{source: Source, removed_hops: RouteHopRef[], interrupted: SupplyGap[]}` |
-| `mutation.credential_replace` | replace API key | `PUT /api/models/sources/<id>/credential` with `{key, force?: boolean}` | same guarded `409` | same Source success envelope |
-| `mutation.source_refresh` | refresh/recover saved Source | `POST /api/models/sources/<id>/refresh` with `{force?: boolean}` | same guarded `409` | same Source success envelope |
+| `mutation.source_metadata` | change Source metadata/Base URL | `PATCH /api/models/sources/<id>` with `{display_name?, base_url?, force?: boolean, guard_token?: string}`; `force` matters only when `base_url` changes and requires the exact token | `{error, refusal_reason, guard_token, would_remove_hops: RouteHopRef[], would_interrupt: SupplyGap[]}` | `{source: Source, removed_hops: RouteHopRef[], interrupted: SupplyGap[]}` |
+| `mutation.credential_replace` | replace API key | `PUT /api/models/sources/<id>/credential` with `{key, force?: boolean, guard_token?: string}` | same guarded `409` | same Source success envelope |
+| `mutation.source_refresh` | refresh/recover saved Source | `POST /api/models/sources/<id>/refresh` with `{force?: boolean, guard_token?: string}` | same guarded `409` | same Source success envelope |
 | `mutation.model_create` | create a user-authored model entry | `POST /api/models/sources/<source_id>/models` with `{model_id, display_name?, reasoning_efforts}` | not guarded: it creates one new exact `id` with `origin: "manual"` and changes no existing `id`, `origin`, or Route | `{source: Source}` |
 | `mutation.model_efforts` | replace one model entry's capability list | `PATCH /api/models/sources/<source_id>/models/<model_id>` with `{reasoning_efforts}` | not guarded: it changes no `id`, `origin`, or Route | `{source: Source}` |
-| `mutation.model_delete` | retire a discovered model or delete a manual model | `DELETE /api/models/sources/<source_id>/models/<model_id>` with `{force?: boolean}` | same guarded `409`; discovered retirement is staged before evaluating exact-hop and protected-supply loss | same Source success envelope; discovered success preserves the row with `retired: true`, manual success removes it |
-| `mutation.source_delete` | delete Source | `DELETE /api/models/sources/<id>?force=<bool>` | same guarded `409` | `{removed_hops: RouteHopRef[], interrupted: SupplyGap[]}` after atomically pruning the Source from every backend Source order and every Route chain while preserving each survivor order; the deleted Source is not returned and legacy `{ok}` is invalid |
-| `mutation.route_replace` | replace one model's complete Route chain | `PUT /api/models/agents/<backend>/chain?model=<id>` with `{hops: RouteHop[], force?: boolean}` | same guarded `409` | `{chain: AgentChain, removed_hops: RouteHopRef[], interrupted: SupplyGap[]}`; the reporting fields are the same guarded-mutation family as Source success |
+| `mutation.model_delete` | retire a discovered model or delete a manual model | `DELETE /api/models/sources/<source_id>/models/<model_id>` with `{force?: boolean, guard_token?: string}` | same guarded `409`; discovered retirement is staged before evaluating exact-hop and protected-supply loss | same Source success envelope; discovered success preserves the row with `retired: true`, manual success removes it |
+| `mutation.source_delete` | delete Source | `DELETE /api/models/sources/<id>?force=<bool>&guard_token=<opaque>` | same guarded `409`; the token is required exactly when force is true | `{removed_hops: RouteHopRef[], interrupted: SupplyGap[]}` after atomically pruning the Source from every backend Source order and every Route chain while preserving each survivor order; the deleted Source is not returned and legacy `{ok}` is invalid |
+| `mutation.route_replace` | replace one model's complete Route chain | `PUT /api/models/agents/<backend>/chain?model=<id>` with `{hops: RouteHop[], force?: boolean, guard_token?: string}` | same guarded `409` | `{chain: AgentChain, removed_hops: RouteHopRef[], interrupted: SupplyGap[]}`; the reporting fields are the same guarded-mutation family as Source success |
 
 The request carrier shown in each row is the only one. The final `api.md`, server/client
 envelopes, confirmation UI, and route tests mirror this matrix row-for-row.

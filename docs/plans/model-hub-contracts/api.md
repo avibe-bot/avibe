@@ -6,6 +6,8 @@ Success envelope: `{ok: true, contract_version: 5, ...}`.
 Failure envelope:
 `{ok: false, contract_version: 5, error: <machine_code>, detail?: <i18n_key>}`.
 `detail` is always a string. Structured error data lives in a named sibling.
+Guarded mutation refusals specialize that envelope through
+`guard-refusal.schema.json`; its token, reason, and both report arrays are required.
 Authentication and CSRF rules are the existing UI-server rules.
 
 The shared envelope and every versioned nested contract use terminal version 5. Model
@@ -18,14 +20,14 @@ Hub has not shipped, so there is no internal contract migration or compatibility
 | GET `/api/models/sources` | → `{sources: Source[]}` | Unordered asset inventory. Every Source carries server-derived `adopted_by` and any persisted `client_nonce`; array order is never a spend order. |
 | POST `/api/models/sources/observe` | `{vendor, base_url?, key, protocol_order?}` → `{observation: SourceObservation}` | Non-persisting connectivity/authentication/protocol/inventory observation. `protocol_order` only orders the three probes; it never supplies a conclusion. No credential reference is returned. |
 | POST `/api/models/sources` | `source-create.schema.json` → `{source: Source, added_to: AddedTo[], adopted_by: AdoptedBy[]}` | The server assigns `id` and `created_at`; plaintext keys are transient. Add-time matching and placement are materialized before response. An optional `client_nonce` is persisted for lost-response reconciliation. |
-| PATCH `/api/models/sources/<id>` | `{display_name?, base_url?, force?: boolean}` → guarded Source-mutation envelope | Metadata/Base-URL mutation from the authoritative matrix in `model-hub.md` §4.5. |
-| PUT `/api/models/sources/<id>/credential` | `{key, force?: boolean}` → guarded Source-mutation envelope | API-key replacement. `force` is a JSON body field, never a query parameter. |
+| PATCH `/api/models/sources/<id>` | `{display_name?, base_url?, force?: boolean, guard_token?: string}` → guarded Source-mutation envelope | Metadata/Base-URL mutation from the authoritative matrix in `model-hub.md` §4.5. `guard_token` is required when `force` is true. |
+| PUT `/api/models/sources/<id>/credential` | `{key, force?: boolean, guard_token?: string}` → guarded Source-mutation envelope | API-key replacement. `force` and its token are JSON body fields, never query parameters. |
 | POST `/api/models/sources/<id>/reauth` | `{acknowledge_irreversible?: true}` → `{flow: OAuthFlow}` | A `native_cli` source requires the acknowledgement before OAuth starts. See repair rules. |
-| DELETE `/api/models/sources/<id>?force=<bool>` | → guarded `409` or `{removed_hops, interrupted}` | A confirmed delete removes the Source from every backend Source order and Route chain in one transaction. |
-| POST `/api/models/sources/<id>/refresh` | `{force?: boolean}` → guarded Source-mutation envelope | The sole saved connectivity/discovery/recovery mutation. |
+| DELETE `/api/models/sources/<id>?force=<bool>&guard_token=<opaque>` | → guarded `409` or `{removed_hops, interrupted}` | A confirmed delete removes the Source from every backend Source order and Route chain in one transaction. The token is required exactly when `force=true`. |
+| POST `/api/models/sources/<id>/refresh` | `{force?: boolean, guard_token?: string}` → guarded Source-mutation envelope | The sole saved connectivity/discovery/recovery mutation. |
 | POST `/api/models/sources/<source_id>/models` | `{model_id, display_name?, reasoning_efforts}` → `{source: Source}` | Creates one user-authored model entry. The Source identity comes only from the path. |
 | PATCH `/api/models/sources/<source_id>/models/<model_id>` | `{reasoning_efforts}` → `{source: Source}` | Replaces the complete capability list on either model origin without changing identity, origin, or Routes. |
-| DELETE `/api/models/sources/<source_id>/models/<model_id>` | `{force?: boolean}` → guarded `409` or Source-mutation success | Deletes a manual entry; for a discovered entry it persists `retired: true` without deleting the row. Both outcomes use the same exact-hop and supply guards. |
+| DELETE `/api/models/sources/<source_id>/models/<model_id>` | `{force?: boolean, guard_token?: string}` → guarded `409` or Source-mutation success | Deletes a manual entry; for a discovered entry it persists `retired: true` without deleting the row. Both outcomes use the same exact-hop and supply guards. |
 | GET `/api/models/agents` | → `{agents: AgentSupply[]}` | Backend records include server-authoritative `cli_present` and `named_agents`, the enabled named-Agent live projection. |
 | GET `/api/models/agents/<backend>/sources` | → `{agent: AgentSupply}` | Returns the authoritative effective order and eligibility. |
 | PUT `/api/models/agents/<backend>/sources` | `{order: string[]}` → `{agent: AgentSupply}` | Stores and re-echoes the complete canonical order; no policy state exists. This route never touches a Route chain and has no guarded `409` branch. |
@@ -33,7 +35,7 @@ Hub has not shipped, so there is no internal contract migration or compatibility
 | PATCH `/api/models/agents/<backend>/mode` | `{mode}` → `{agent: AgentSupply}` | Explicit `hub` / `direct` switch. A qualifying Direct → Gateway switch atomically adopts the recognized CLI login as the first native Source; other switches create nothing. |
 | PUT `/api/models/agents/opencode/menu` | `{menu}` → `{agent: AgentSupply}` | Open-menu configuration. |
 | GET `/api/models/agents/<backend>/chain?model=<id>` | → `{chain: AgentChain}` | Hub only. Direct returns the documented `direct_mode` error. |
-| PUT `/api/models/agents/<backend>/chain?model=<id>` | `{hops: RouteHop[], force?: boolean}` → guarded `409` or `{chain, removed_hops, interrupted}` | Replaces the exact Source/model pairs in submitted order after validating new or changed pairs; it is the `mutation.route_replace` row of the authoritative mutation matrix. |
+| PUT `/api/models/agents/<backend>/chain?model=<id>` | `{hops: RouteHop[], force?: boolean, guard_token?: string}` → guarded `409` or `{chain, removed_hops, interrupted}` | Replaces the exact Source/model pairs in submitted order after validating new or changed pairs; it is the `mutation.route_replace` row of the authoritative mutation matrix. |
 | POST `/api/models/agents/<backend>/probe` | `{model?}` → `{probe: ProbeResult}` | Hub only. Direct returns the same `direct_mode` error. |
 | GET `/api/models/events?limit=<n>&before=<id>` | → `{events: ResolutionEvent[]}` | Bounded source-resolution feed. |
 | POST `/api/models/oauth/start` | `{vendor, channel, client_nonce?}` → `{flow: OAuthFlow}` | Starts creation of a new subscription source. The optional nonce makes the exact `(client_nonce, vendor, channel)` start idempotent while its flow exists. |
@@ -174,6 +176,8 @@ route corrections; no existing field or enum meaning changes.
 | `RuntimeDependency.host_platform` | server host detector | unsupported-host runtime pill | Names the Avibe host, not the browser; exact membership in `manifest.assets[].platform` decides install support. |
 | `RuntimeDependency.status.error_key` | runtime installer | install-failed runtime state | Closed persisted i18n key: `settings.models.install.fail.detail` after installation fails; null after a new attempt begins and in every non-failure state. |
 | `RouteHopRef.position` | guarded mutation planner | guarded-change hop row | One-based position in the named Route before the attempted mutation. |
+| `GuardRefusal.refusal_reason` | shared guard planner | guarded-change confirmation flow | Closed data discriminator: `confirmation_required` for a fresh or uncredentialed refusal, `plan_changed` when an echoed token no longer binds the current plan. |
+| `GuardRefusal.guard_token` | shared guard planner | forced mutation retry | Opaque required echo for `force: true`; binds the exact request, staged plan, and relevant persisted-state versions and never contains plaintext input. |
 | `OAuthStart.client_nonce` | OAuth client before send | OAuth start idempotency | Optional client-generated correlation; the exact tuple with vendor and channel is the idempotency scope while the flow exists. |
 | `OAuthFlow.client_nonce` | OAuth start echo | lost-start reconciliation | When the request supplied the nonce, every flow response echoes it unchanged. |
 
@@ -359,10 +363,10 @@ does not satisfy the recognition predicate.
 Every menu model stores one `hops` array. Each hop is an exact
 `{source_id, model_id}` pair; a differing upstream id is the mapping itself, not a
 separate mapping object. A write validates only newly introduced or changed pairs.
-The whole-array PUT uses `force` in the JSON body and the same guarded refusal/reporting
+The whole-array PUT uses `force` and `guard_token` in the JSON body and the same guarded refusal/reporting
 family as Source mutations. A successful write returns `{chain, removed_hops,
 interrupted}`; a non-forced write that would empty protected supply returns the shared
-`409 {error, would_remove_hops, would_interrupt}` envelope.
+`GuardRefusal` envelope.
 An unchanged stale pair may be retained or reordered so a user can add a working
 fallback without discarding a temporarily unavailable configured hop. Runtime walks
 the stored array verbatim and annotates only live runnability.
@@ -460,13 +464,16 @@ state. It counts only runnable exact hops in that model's stored Route chain, ne
 eligible inventory or the backend Source order by itself. A pair with no runnable hop
 appears once in `would_interrupt` or `interrupted`.
 
-Every guarded Source/inventory mutation uses the §4.5 envelope matrix. A refusal is:
+Every guarded Source/inventory mutation uses the §4.5 envelope matrix and the complete
+`guard-refusal.schema.json` shape. The first refusal is:
 
 ```json
 {
   "ok": false,
   "contract_version": 5,
   "error": "source_last_supplier",
+  "refusal_reason": "confirmation_required",
+  "guard_token": "grd_01k4opaqueconfirmationtoken",
   "would_remove_hops": [],
   "would_interrupt": [
     {
@@ -478,8 +485,34 @@ Every guarded Source/inventory mutation uses the §4.5 envelope matrix. A refusa
 }
 ```
 
-DELETE uses the query `force=true`; the other guarded mutations use the JSON body
-`force: true`. Success returns the exact envelope selected by the authoritative matrix.
+The shared guard planner first canonicalizes the substantive mutation input, excluding
+only the `force` and `guard_token` confirmation metadata, then stages the complete
+post-mutation Source/Route result and its ordered guard-report arrays. The opaque token
+binds the HTTP method, normalized target, that canonical input, the exact staged result
+and guard report (including its lead `error`), and every persisted-state version read by
+the plan. Credential input is bound by a server-side collision-resistant digest; the
+token and logs never reveal the plaintext key.
+
+A forced request is only a retry of a returned plan. It MUST echo both `force=true` and
+that plan's `guard_token` in the same carrier used by the route: Source DELETE uses the
+query, while every other guarded mutation uses the JSON body. `force=true` without a
+token returns the current plan with `refusal_reason: confirmation_required` and a fresh
+token; it never commits. A token without `force=true` is invalid request input.
+
+Token validation, plan recomputation, and commit share one atomic guard boundary. The
+server commits only when method, target, canonical mutation input, exact staged result,
+ordered report arrays, lead error, and all relevant persisted-state versions are
+identical to the token binding. Any mismatch returns HTTP 409 with the same
+`GuardRefusal` envelope, the newly recomputed arrays, a fresh token, and
+`refusal_reason: plan_changed`; no hop is removed. When concurrent state makes both
+current arrays empty, that response retains the token's prior lead guard `error` because
+`refusal_reason` is the authoritative discriminator, and the fresh token confirms the
+now-current empty-impact plan. A subsequent exact retry may then commit. This rule
+prevents stale confirmation from authorizing a different mutation without adding a
+parallel top-level error code.
+
+Success returns the exact envelope selected by the authoritative matrix and the
+byte-identical `RouteHopRef` array from the accepted plan.
 
 ## Credential replacement and reauth
 
@@ -859,6 +892,10 @@ Boundary-only action-refusal values cover operations the UI already does not off
 a script or regression can call directly. `reauth_confirmation_required` is API/test-
 only truth: it has no product copy key or rendering slot.
 
+`confirmation_required` and `plan_changed` are `GuardRefusal.refusal_reason` data,
+not top-level error codes. The top-level guard vocabulary remains exactly
+`source_last_supplier | source_in_route_chain | source_model_in_route_chain`.
+
 Removed: `invalid_priority_order`.
 
 ## Mechanical guards
@@ -876,6 +913,8 @@ contract harness and API-boundary tests enforce:
 <!-- authority-consumer: runtime.health ok degraded down not_installed installing not_started -->
 <!-- authority-consumer: runtime.install_error runtime_platform_unsupported -->
 <!-- authority-consumer: source.create_nonce source_nonce_conflict -->
+<!-- authority-consumer: guard.refusal_reason confirmation_required plan_changed -->
+<!-- authority-consumer: guard.error source_last_supplier source_in_route_chain source_model_in_route_chain -->
 
 | Guard | Boundary |
 | --- | --- |
@@ -895,7 +934,7 @@ contract harness and API-boundary tests enforce:
 | every OAuthFlow started with `client_nonce` echoes it, and repeated start of the same nonce/vendor/channel tuple returns one `flow_id` | API payload test |
 | every RuntimeDependency API payload includes server-derived `host_platform` and `status.error_key`; only supported `not_installed` starts a download, installed states are state-preserving no-ops, page reload preserves a live `installing` job, and service bootstrap reconciles an orphan before serving runtime endpoints | API payload test |
 | Source create claims `client_nonce` before observation or credential work; a concurrent or committed duplicate returns `source_nonce_conflict` without repeating either, and failure/cancellation/restart releases the claim only after retained-material reconciliation | API payload and cancellation/restart test |
-| every `RouteHopRef` carries the one-based pre-mutation `position`; refusal and forced success report byte-identical references | API payload test |
+| every `GuardRefusal` validates against `guard-refusal.schema.json`; `force=true` never commits without the exact token; same-plan retry commits once with byte-identical `RouteHopRef` values, while changed input, plan, or relevant version returns `plan_changed` with a fresh token and removes no hop | API payload and concurrent-mutation test |
 | contract and in-repo adapter interface copies are byte-identical; the five retained-material enum members and ref-pairing predicates are mutation-tested | contract harness |
 
 Serializer completeness follows the issue #939 pattern. Persisted fields must

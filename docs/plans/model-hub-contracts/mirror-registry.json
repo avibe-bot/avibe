@@ -590,6 +590,38 @@
           "marker": "authority-consumer: source.create_nonce "
         }
       ]
+    },
+    {
+      "id": "D14",
+      "domain": "guard refusal reasons",
+      "authority": {
+        "kind": "schema_vocabulary",
+        "schema": "guard-refusal.schema.json",
+        "paths": ["/properties/refusal_reason"]
+      },
+      "consumers": [
+        {
+          "kind": "marker_tail",
+          "file": "docs/plans/model-hub-contracts/api.md",
+          "marker": "authority-consumer: guard.refusal_reason "
+        }
+      ]
+    },
+    {
+      "id": "D15",
+      "domain": "guard refusal error codes",
+      "authority": {
+        "kind": "schema_vocabulary",
+        "schema": "guard-refusal.schema.json",
+        "paths": ["/properties/error"]
+      },
+      "consumers": [
+        {
+          "kind": "marker_tail",
+          "file": "docs/plans/model-hub-contracts/api.md",
+          "marker": "authority-consumer: guard.error "
+        }
+      ]
     }
   ],
   "ownership_checks": [

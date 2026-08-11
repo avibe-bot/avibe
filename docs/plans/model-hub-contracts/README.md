@@ -88,6 +88,7 @@ The terminal value 5 must coexist in all registered version locations on the sam
 - `probe-result.schema.json`
 - `observation-result.schema.json`
 - `runtime-dependency.schema.json`
+- `guard-refusal.schema.json`
 - `turn-provenance.schema.json`
 - `core/handlers/model_hub/service.py`
 - `core/handlers/model_hub/provenance.py`
@@ -117,6 +118,7 @@ revision; the discovering lane does not reinterpret or edit the contract in plac
 | `oauth-flow.schema.json` | Subscription creation and re-auth presentation without secret material. |
 | `migration-scan.schema.json` | Copy-only import of existing native CLI/provider configuration; not an internal contract migration. |
 | `runtime-dependency.schema.json` | Managed local Gateway asset, lifecycle, and health. |
+| `guard-refusal.schema.json` | Shared guarded-mutation refusal, exact-plan confirmation token, and stale-plan discriminator. |
 | `api.md` | Routes, envelopes, exact Source order and Route-chain writes, guards, OAuth/import results, provenance, and runtime status. |
 | `opencode-overlay.md` | Stable OpenCode provider/model identifiers and exact configured-hop overlay behavior. |
 | `adapter-interface.py` | Adapter protocol, observation, credential, discovery, invocation, cleanup, and classification boundary. |

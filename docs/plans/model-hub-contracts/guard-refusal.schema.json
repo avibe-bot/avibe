@@ -1,0 +1,109 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "model-hub/guard-refusal.schema.json",
+  "title": "GuardRefusal",
+  "description": "The shared HTTP 409 envelope for a guarded Model Hub mutation. The opaque token authorizes only the exact refused mutation plan and persisted-state versions from which this envelope was computed.",
+  "type": "object",
+  "required": [
+    "ok",
+    "contract_version",
+    "error",
+    "refusal_reason",
+    "guard_token",
+    "would_remove_hops",
+    "would_interrupt"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "ok": { "const": false },
+    "contract_version": { "const": 5 },
+    "error": {
+      "enum": [
+        "source_last_supplier",
+        "source_in_route_chain",
+        "source_model_in_route_chain"
+      ],
+      "description": "Existing lead guard code selected by the Source-mutation matrix. plan_changed is carried by refusal_reason and never introduces a parallel top-level error code."
+    },
+    "refusal_reason": {
+      "enum": ["confirmation_required", "plan_changed"],
+      "description": "confirmation_required is the first refusal or a force request without its token. plan_changed means the echoed token did not bind the current request, plan, and persisted-state versions. Both require presenting the returned current plan and obtaining fresh confirmation."
+    },
+    "guard_token": {
+      "type": "string",
+      "minLength": 16,
+      "maxLength": 4096,
+      "description": "Opaque server-minted confirmation token. It binds method, target, normalized mutation input, the exact staged mutation and guard-report plan, and every relevant persisted-state version without exposing plaintext credentials."
+    },
+    "would_remove_hops": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/RouteHopRef" }
+    },
+    "would_interrupt": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/SupplyGap" }
+    }
+  },
+  "definitions": {
+    "RouteHopRef": {
+      "type": "object",
+      "required": ["backend", "menu_model", "source_id", "model_id", "position"],
+      "additionalProperties": false,
+      "properties": {
+        "backend": { "enum": ["claude", "codex", "opencode"] },
+        "menu_model": { "type": "string", "minLength": 1 },
+        "source_id": { "type": "string", "pattern": "^src_[a-z0-9]{8,}$" },
+        "model_id": { "type": "string", "minLength": 1 },
+        "position": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "SupplyGap": {
+      "type": "object",
+      "required": ["backend", "model_id", "agents"],
+      "additionalProperties": false,
+      "properties": {
+        "backend": { "enum": ["claude", "codex", "opencode"] },
+        "model_id": { "type": "string", "minLength": 1 },
+        "agents": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "ok": false,
+      "contract_version": 5,
+      "error": "source_model_in_route_chain",
+      "refusal_reason": "confirmation_required",
+      "guard_token": "grd_01k4opaqueconfirmationtoken",
+      "would_remove_hops": [
+        {
+          "backend": "claude",
+          "menu_model": "claude-opus-4-6",
+          "source_id": "src_anthkey01",
+          "model_id": "claude-opus-4-6",
+          "position": 2
+        }
+      ],
+      "would_interrupt": [
+        {
+          "backend": "claude",
+          "model_id": "claude-opus-4-6",
+          "agents": ["pm"]
+        }
+      ]
+    },
+    {
+      "ok": false,
+      "contract_version": 5,
+      "error": "source_model_in_route_chain",
+      "refusal_reason": "plan_changed",
+      "guard_token": "grd_01k4freshchangedplantoken",
+      "would_remove_hops": [],
+      "would_interrupt": []
+    }
+  ]
+}
