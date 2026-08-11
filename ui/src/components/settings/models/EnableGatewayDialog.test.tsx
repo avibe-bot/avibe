@@ -16,9 +16,25 @@ const direct: AgentSupply = {
   sources: { order: [], eligibility: [] },
 };
 
-const runtime = (health: RuntimeDependency['status']['health']): RuntimeDependency => ({
+const runtime = (
+  health: RuntimeDependency['status']['health'],
+  withAsset = false,
+  hostPlatform?: string,
+): RuntimeDependency => ({
   contract_version: 5,
-  manifest: { name: 'cliproxyapi', version: '1', source_sha: 'a'.repeat(40), assets: [] },
+  // #1326 runtime-dependency shape; host evidence is consumed only when present.
+  ...(hostPlatform === undefined ? {} : { host_platform: hostPlatform }),
+  manifest: {
+    name: 'cliproxyapi',
+    version: '1',
+    source_sha: 'a'.repeat(40),
+    assets: withAsset ? [{
+      platform: 'darwin-arm64',
+      url: 'https://example.invalid/runtime',
+      size_bytes: 1,
+      sha256: '0'.repeat(64),
+    }] : [],
+  },
   status: { installed_version: health === 'not_installed' ? null : '1', verified: health !== 'not_installed', health },
 });
 
@@ -43,10 +59,17 @@ afterEach(() => {
 
 describe('EnableGatewayDialog', () => {
   it('names the dependency and changes the primary when runtime is missing', () => {
-    renderDialog(runtime('not_installed'));
+    renderDialog(runtime('not_installed', true));
 
     expect(screen.getByText(/cliproxyapi/)).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Install and switch' })).toBeTruthy();
+  });
+
+  it('shares the server-host installability predicate with the runtime pill', () => {
+    renderDialog(runtime('not_installed', true, 'linux-amd64'));
+
+    expect(screen.queryByRole('button', { name: 'Install and switch' })).toBeNull();
+    expect((screen.getByRole('button', { name: 'Switch to gateway' }) as HTMLButtonElement).disabled).toBe(true);
   });
 
   it('keeps the dialog open with cause-neutral failure copy and a retryable primary', async () => {

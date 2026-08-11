@@ -10,6 +10,8 @@ const productFiles = (directory: string): string[] => readdirSync(directory, { w
     return /\.(?:ts|tsx)$/.test(entry.name) && !/\.test\.(?:ts|tsx)$/.test(entry.name) ? [path] : [];
   });
 
+const surfaceCss = readFileSync(join(__dirname, 'modelHubSurface.css'), 'utf8');
+
 describe('Model Hub visual token policy', () => {
   it('keeps approximate utility colors out of product surfaces', () => {
     const forbidden = /(?:text-(?:foreground|muted)\/\d+|bg-foreground\/\[[^\]]+\]|border-foreground\/\d+|\btext-(?:gold|violet|mint)\b)/g;
@@ -18,5 +20,13 @@ describe('Model Hub visual token policy', () => {
     ));
 
     expect(violations).toEqual([]);
+  });
+
+  it('routes accent-role colors through named tokens', () => {
+    const roleBodies = [...surfaceCss.matchAll(/\.model-hub-accent-(?:tile|pill)--[\w-]+\s*\{([^}]*)\}/g)]
+      .map((match) => match[1]);
+    const literals = roleBodies.flatMap((body) => body.match(/#[\da-f]{6,8}/gi) ?? []);
+
+    expect(literals).toEqual([]);
   });
 });

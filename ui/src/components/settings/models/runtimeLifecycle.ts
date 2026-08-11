@@ -13,7 +13,9 @@ export const runtimeIsRunning = (runtime: RuntimeDependency): boolean =>
   runtime.status.health === 'ok' || runtime.status.health === 'degraded';
 
 export const runtimeHasInstallAsset = (runtime: RuntimeDependency): boolean => {
-  const host = runtime.host_platform;
+  const host = 'host_platform' in runtime && typeof runtime.host_platform === 'string'
+    ? runtime.host_platform
+    : null;
   return runtime.manifest.assets.some((asset) => host == null || asset.platform === host);
 };
 

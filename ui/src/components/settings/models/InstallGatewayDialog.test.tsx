@@ -55,6 +55,7 @@ describe('InstallGatewayDialog', () => {
     );
     await userEvent.click(screen.getByRole('button', { name: /Install and start|安装并启动/i }));
     view.rerender(<I18nextProvider i18n={i18n}><InstallGatewayDialog runtime={runtime('installing')} onClose={onClose} onRuntime={vi.fn()} /></I18nextProvider>);
+    // #1326 runtime-dependency shape: the server supplies this optional failure key.
     view.rerender(<I18nextProvider i18n={i18n}><InstallGatewayDialog runtime={{ ...runtime('not_installed'), status: { ...runtime('not_installed').status, error_key: 'settings.models.install.fail.detail' } }} onClose={onClose} onRuntime={vi.fn()} /></I18nextProvider>);
 
     expect(await screen.findByRole('alert')).toBeTruthy();

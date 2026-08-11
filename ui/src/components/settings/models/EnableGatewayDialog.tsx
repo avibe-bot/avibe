@@ -6,6 +6,7 @@ import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
 import { resumeGatewayAdoption, type GatewayAdoptionFailure } from './gatewayAdoption';
 import { modelsApi } from './modelsApi';
+import { runtimeHasInstallAsset } from './runtimeLifecycle';
 import type { AgentSupply, RuntimeDependency } from './types';
 
 const Bullet: React.FC<{ children: React.ReactNode }> = ({ children }) => (
@@ -29,7 +30,9 @@ export const EnableGatewayDialog: React.FC<{
   const [failure, setFailure] = React.useState<GatewayAdoptionFailure | null>(null);
   const backend = t(`settings.models.backends.${agent.backend}`, { defaultValue: agent.backend });
   const vendor = agent.backend === 'claude' ? 'Claude' : 'ChatGPT';
-  const missing = runtimeView?.status.health === 'not_installed';
+  const needsInstall = runtimeView?.status.health === 'not_installed';
+  const missing = Boolean(needsInstall && runtimeView && runtimeHasInstallAsset(runtimeView));
+  const installUnsupported = Boolean(needsInstall && !missing);
   const effectKeys = agent.backend === 'opencode'
     ? ['1.opencode', '2.opencode', '3', '4'] as const
     : ['1', '2', '3', '4'] as const;
@@ -129,7 +132,7 @@ export const EnableGatewayDialog: React.FC<{
             <Button type="button" variant="outline" className="model-hub-adopt-action" onClick={onClose} disabled={busy}>
               {t('settings.models.adopt.cancel')}
             </Button>
-            <Button type="button" variant="brand" className="model-hub-adopt-action" onClick={commit} disabled={busy}>
+            <Button type="button" variant="brand" className="model-hub-adopt-action" onClick={commit} disabled={busy || installUnsupported}>
               {busy && <LoaderCircle className="animate-spin" />}
               {missing ? t('settings.models.adopt.confirm.install') : t('settings.models.adopt.confirm')}
             </Button>

@@ -21,7 +21,8 @@ const runtime = (
   hostPlatform?: string,
 ): RuntimeDependency => ({
   contract_version: 5,
-  host_platform: hostPlatform,
+  // #1326 runtime-dependency shape: absent host keeps any server asset installable.
+  ...(hostPlatform === undefined ? {} : { host_platform: hostPlatform }),
   manifest: {
     name: 'cliproxyapi',
     version: '1',
@@ -63,7 +64,7 @@ describe('Model Hub runtime pill', () => {
     expect(renderPill('not_started')).toContain('<button');
   });
 
-  it('only offers installation when the manifest carries a platform asset', () => {
+  it('uses server host evidence when present and keeps absent-host installation available', () => {
     expect(renderPill('not_installed', { withAsset: true })).toContain(zh.settings.models.shell.notInstalled);
     expect(renderPill('not_installed', { withAsset: true })).toContain('<button');
     expect(renderPill('not_installed')).toContain(zh.settings.models.shell.unsupported);

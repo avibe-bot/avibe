@@ -20,7 +20,7 @@ import { modelsSurfaceKind } from './modelHubSurfaceState';
 import { buildSupplyRelations } from './supplyRelations';
 import { SupplyGraph, SupplyLegend } from './SupplyGraph';
 import './modelHubSurface.css';
-import { agentsWithEcho, createLatestAsyncAuthority, createPendingWrites, mapWithConcurrency } from './asyncLifetime';
+import { agentsWithEcho, createLatestAsyncAuthority, createPendingWrites, mapWithConcurrency, sourcesWithEcho } from './asyncLifetime';
 import { emptyFeed, feedAfterHeadRead, feedAfterTailRead, feedTailCursor, type EventFeed } from './eventFeed';
 import { modelsApi, type SourceCreated } from './modelsApi';
 import { modelChainKey, modelChainRequests, type ModelChainIndex } from './modelRows';
@@ -356,6 +356,10 @@ export const SettingsModelsPage: React.FC = () => {
     setAgents((previous) => agentsWithEcho(previous, echoed));
     return refresh();
   }, [refresh]);
+  const sourceEchoed = React.useCallback((echoed: Source) => {
+    setSources((previous) => sourcesWithEcho(previous, echoed));
+    setSourcesState('ready');
+  }, []);
 
   const switchToDirect = (agent: AgentSupply) => {
     setSwitchFailures((previous) => {
@@ -449,7 +453,7 @@ export const SettingsModelsPage: React.FC = () => {
       {loading ? <div className="text-[13px] text-muted">{t('common.loading')}</div>
         : selectedSourceId
           ? selectedSource
-            ? <SourceDetailPanel source={selectedSource} adoptedBy={adoptionBySource[selectedSource.id]} onChanged={refresh} />
+            ? <SourceDetailPanel source={selectedSource} adoptedBy={adoptionBySource[selectedSource.id]} onSourceEcho={sourceEchoed} onChanged={refresh} />
             : <section className="rounded-xl border border-border bg-surface px-5 py-12 text-center text-[12px] text-muted">{t('settings.models.sourceDetail.gone')}</section>
           : directEmpty ? <DirectHome agents={agents} onSwitch={setAdoptAgent} />
             : <div className="space-y-[22px]">

@@ -15,7 +15,6 @@ const relationKind = (
   agent: AgentSupply,
   chains: ModelChainIndex,
 ): SupplyRelationKind => {
-  if (source.state.status === 'cooldown') return 'unavailable';
   let isCurrent = false;
   let isTakeover = false;
   for (const modelId of Object.keys(agent.routes ?? {})) {
@@ -27,8 +26,9 @@ const relationKind = (
     isTakeover ||= isTakeoverChain(read.chain);
   }
   if (isTakeover) return 'takeover';
-  if (!isCurrent) return 'connected_unused';
-  return source.supply_channel === 'native_cli' ? 'native' : 'gateway';
+  if (isCurrent) return source.supply_channel === 'native_cli' ? 'native' : 'gateway';
+  if (source.state.status === 'cooldown') return 'unavailable';
+  return 'connected_unused';
 };
 
 export function buildSupplyRelations(

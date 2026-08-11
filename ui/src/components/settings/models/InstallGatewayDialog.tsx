@@ -23,18 +23,19 @@ export const InstallGatewayDialog: React.FC<{
   const initiated = React.useRef(false);
   const previousHealth = React.useRef(runtime.status.health);
   const installing = requesting || runtime.status.health === 'installing';
+  const installErrorKey = 'error_key' in runtime.status ? runtime.status.error_key : null;
 
   React.useEffect(() => {
     const wasInstalling = previousHealth.current === 'installing';
     previousHealth.current = runtime.status.health;
     if (!initiated.current) return;
-    if (wasInstalling && runtime.status.health === 'not_installed' && runtime.status.error_key) {
+    if (wasInstalling && runtime.status.health === 'not_installed' && installErrorKey) {
       setRequesting(false);
       setFailed(true);
     } else if (runtime.status.health !== 'installing' && runtime.status.health !== 'not_installed') {
       onClose();
     }
-  }, [onClose, runtime.status.error_key, runtime.status.health]);
+  }, [installErrorKey, onClose, runtime.status.health]);
 
   const install = () => {
     if (installing) return;

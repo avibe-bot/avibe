@@ -68,6 +68,10 @@ describe('buildSupplyRelations', () => {
     expect(buildSupplyRelations([agent], sources, { [key]: { kind: 'ready', chain: chain('relay') } })[0]).toEqual(
       { sourceId: 'native', backend: 'claude', kind: 'connected_unused' },
     );
+    const staleCooldown = [source('native', 'native_cli'), source('relay', 'hub', 'cooldown'), source('unused', 'hub')];
+    expect(buildSupplyRelations([agent], staleCooldown, { [key]: { kind: 'ready', chain: chain('relay') } })[1]).toEqual(
+      { sourceId: 'relay', backend: 'claude', kind: 'gateway' },
+    );
   });
 
   it('renders cooling relations as unavailable and draws no relations for direct backends', () => {

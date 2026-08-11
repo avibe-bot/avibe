@@ -73,8 +73,9 @@ const TierEditor: React.FC<{
   source: Source;
   model: SuppliedModel;
   onMutating: () => void;
+  onSourceEcho: (source: Source) => void;
   onChanged: () => Promise<void> | void;
-}> = ({ source, model, onMutating, onChanged }) => {
+}> = ({ source, model, onMutating, onSourceEcho, onChanged }) => {
   const { t } = useTranslation();
   const [tiers, setTiers] = React.useState(model.reasoning_efforts ?? []);
   const [draft, setDraft] = React.useState('');
@@ -91,7 +92,8 @@ const TierEditor: React.FC<{
     setTiers(next);
     setSaving(true);
     try {
-      await modelsApi.updateModelReasoningEfforts(source.id, model.id, next);
+      const echoed = await modelsApi.updateModelReasoningEfforts(source.id, model.id, next);
+      onSourceEcho(echoed);
       await onChanged();
       return true;
     } catch (error) {
@@ -193,8 +195,9 @@ const DraftTiers: React.FC<{
 export const SourceDetailPanel: React.FC<{
   source: Source;
   adoptedBy?: readonly AdoptedBy[];
+  onSourceEcho: (source: Source) => void;
   onChanged: () => Promise<void> | void;
-}> = ({ source, adoptedBy, onChanged }) => {
+}> = ({ source, adoptedBy, onSourceEcho, onChanged }) => {
   const { t, i18n } = useTranslation();
   const now = useDeadlineClock(source.state.status === 'cooldown' ? source.state.retry_at : null);
   const { Icon, accent } = sourceVisual(source);
@@ -221,6 +224,7 @@ export const SourceDetailPanel: React.FC<{
       const after = new Set(answer.source.models.map((model) => model.id));
       const added = [...after].filter((id) => !before.has(id));
       const removed = [...before].filter((id) => !after.has(id));
+      onSourceEcho(answer.source);
       setResult({ added, removed });
       setGuard(null);
       await onChanged();
@@ -262,11 +266,12 @@ export const SourceDetailPanel: React.FC<{
       return;
     }
     try {
-      await modelsApi.addCustomModel(source.id, {
+      const echoed = await modelsApi.addCustomModel(source.id, {
         model_id: modelId,
         display_name: null,
         reasoning_efforts: manualDraft.tiers,
       });
+      onSourceEcho(echoed);
       setManualDraft(null);
       setResult(null);
       await onChanged();
@@ -312,7 +317,8 @@ export const SourceDetailPanel: React.FC<{
     setRemoveFailure(null);
     setBusy(true);
     try {
-      await modelsApi.deleteCustomModel(source.id, model.id, force);
+      const echoed = await modelsApi.deleteCustomModel(source.id, model.id, force);
+      onSourceEcho(echoed);
       setGuard(null);
       await onChanged();
     } catch (error) {
@@ -367,7 +373,7 @@ export const SourceDetailPanel: React.FC<{
           <div key={model.id} className="model-hub-source-table-row grid gap-3 border-b border-border last:border-b-0 md:items-center md:gap-y-0">
             <span className="flex min-w-0 items-center gap-2"><span className="model-hub-source-model truncate font-mono text-foreground" title={model.id}>{model.id}</span>{result?.added.includes(model.id) && <span className="model-hub-accent-pill--mint model-hub-source-pill rounded-full border px-2 py-0.5 font-semibold">{t('settings.models.sourceDetail.refetch.added')}</span>}</span>
             <span className="model-hub-source-pill model-hub-source-entry-pill w-fit rounded-full border border-border font-semibold text-muted">{t(`settings.models.sourceDetail.entry.${model.provenance === 'discovered' ? 'auto' : 'manual'}`)}</span>
-            <TierEditor source={source} model={model} onMutating={() => { setResult(null); setRefetchFailed(false); }} onChanged={onChanged} />
+            <TierEditor source={source} model={model} onMutating={() => { setResult(null); setRefetchFailed(false); }} onSourceEcho={onSourceEcho} onChanged={onChanged} />
             <div className="flex items-center justify-end gap-2">
               {removeFailure?.modelId === model.id && <span className="model-hub-source-tier text-right text-destructive">{t('settings.models.sourceDetail.fail.removeModel')} <button type="button" disabled={busy} onClick={() => void (async () => {
                 if (!removeFailure.retryRead) return remove(model);

@@ -3,14 +3,12 @@
 // (case included); the UI consumes these types and never edits the schemas.
 //
 // Contract versions are PER OBJECT, not per file. `_model_hub_success` stamps
-// the envelope and nests the payload, so one response carries both numbers: the
-// envelope is still v3 while the two payload schemas below moved to v4. Mirrored
-// under the backend's own constant names (`core/handlers/model_hub/service.py`
-// spells them CONTRACT_VERSION / AGENT_CHAIN_CONTRACT_VERSION /
-// PROBE_RESULT_CONTRACT_VERSION) so a bump is greppable across the boundary.
-// Never bump one of these to cover another: a shared constant would claim v4
-// for every route that did not move. This file changes in lockstep with the
-// schemas — never ahead of them.
+// the envelope and nests the payload, so one response carries both numbers.
+// Mirror the backend's own constant names so a bump is greppable across the
+// boundary; never bump one object to cover another. When a frozen contract PR
+// is staged ahead of this UI's merge base, optional members stay presence-gated
+// and the PR records the server implementation and feature-flag activation
+// edge. The client never synthesizes a fallback payload shape.
 
 export const CONTRACT_VERSION = 5 as const;
 export const AGENT_CHAIN_CONTRACT_VERSION = CONTRACT_VERSION;
