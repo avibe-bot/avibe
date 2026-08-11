@@ -325,6 +325,19 @@ def _legacy_source_order_setting_is_valid(value: object, *, required: bool = Fal
     )
 
 
+def _legacy_mapping_is_valid(value: object) -> bool:
+    """Match the pre-v5 mapping parser's required fields and types."""
+
+    return (
+        isinstance(value, dict)
+        and isinstance(value.get("builtin_id"), str)
+        and bool(value["builtin_id"])
+        and isinstance(value.get("target_model_id"), str)
+        and bool(value["target_model_id"])
+        and isinstance(value.get("enabled"), bool)
+    )
+
+
 def _legacy_claude_matching_model_id(source: dict, requested_model: str) -> str | None:
     """Resolve the pre-v5 Claude aliases against discovered native models.
 
@@ -464,6 +477,10 @@ def _migrate_legacy_model_hub_payload(payload: dict) -> tuple[dict, bool, tuple[
             return payload, False, ()
         mappings = agent.get("mappings")
         if "mappings" in agent and not isinstance(mappings, list):
+            return payload, False, ()
+        if isinstance(mappings, list) and any(
+            not _legacy_mapping_is_valid(mapping) for mapping in mappings
+        ):
             return payload, False, ()
         menu = agent.get("menu")
         if isinstance(menu, dict) and "checked" in menu and not isinstance(menu["checked"], list):
@@ -2256,7 +2273,10 @@ class V2Config:
         if mode not in {"self_host", "saas"}:
             raise ValueError("Config 'mode' must be 'self_host' or 'saas'")
 
-        platform = payload.get("platform") or "slack"
+        raw_platform = payload.get("platform")
+        if raw_platform is not None and not isinstance(raw_platform, str):
+            raise ValueError("Config 'platform' must be a string")
+        platform = raw_platform or "slack"
         try:
             get_platform_descriptor(platform)
         except ValueError as err:
@@ -2270,9 +2290,16 @@ class V2Config:
             enabled_payload = platforms_payload.get("enabled")
             if enabled_payload is not None and not isinstance(enabled_payload, list):
                 raise ValueError("Config 'platforms.enabled' must be an array")
+            if isinstance(enabled_payload, list) and any(
+                not isinstance(item, str) for item in enabled_payload
+            ):
+                raise ValueError("Config 'platforms.enabled' entries must be strings")
+            primary_payload = platforms_payload.get("primary")
+            if primary_payload is not None and not isinstance(primary_payload, str):
+                raise ValueError("Config 'platforms.primary' must be a string")
             platforms = PlatformsConfig(
                 enabled=list(enabled_payload or []),
-                primary=platforms_payload.get("primary") or platform,
+                primary=primary_payload or platform,
             )
         else:
             platforms = PlatformsConfig(enabled=[platform], primary=platform)

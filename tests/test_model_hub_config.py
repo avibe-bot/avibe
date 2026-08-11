@@ -879,7 +879,17 @@ def test_config_reload_recovers_malformed_legacy_collections(monkeypatch, tmp_pa
         assert config_path.read_text(encoding="utf-8") == original
 
 
-@pytest.mark.parametrize("invalid_platform", ["enabled", "enabled-type", "legacy"])
+@pytest.mark.parametrize(
+    "invalid_platform",
+    [
+        "enabled",
+        "enabled-type",
+        "enabled-entry-type",
+        "primary-type",
+        "legacy",
+        "legacy-type",
+    ],
+)
 def test_config_reload_recovers_invalid_platform_metadata_only(monkeypatch, tmp_path, invalid_platform):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     payload = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
@@ -889,9 +899,16 @@ def test_config_reload_recovers_invalid_platform_metadata_only(monkeypatch, tmp_
         payload["platforms"]["primary"] = "not-a-platform"
     elif invalid_platform == "enabled-type":
         payload["platforms"]["enabled"] = {"slack": True}
-    else:
+    elif invalid_platform == "enabled-entry-type":
+        payload["platforms"]["enabled"] = [{}]
+    elif invalid_platform == "primary-type":
+        payload["platforms"]["primary"] = {}
+    elif invalid_platform == "legacy":
         payload.pop("platforms", None)
         payload["platform"] = "not-a-platform"
+    else:
+        payload.pop("platforms", None)
+        payload["platform"] = {}
     config_path = tmp_path / f"{invalid_platform}-platform.json"
     original = json.dumps(payload)
     config_path.write_text(original, encoding="utf-8")
@@ -1258,8 +1275,42 @@ def test_config_reload_recovers_runtime_with_the_canonical_default(
             {"sources": {"policy": "custom", "order": "invalid"}}
         ),
         lambda hub: hub.update({"priority_order": {"invalid": True}}),
+        lambda hub: hub["agents"]["claude"].update({"mappings": ["invalid"]}),
+        lambda hub: hub["agents"]["claude"].update(
+            {
+                "mappings": [
+                    {
+                        "builtin_id": "",
+                        "target_model_id": "claude-opus-4-5",
+                        "enabled": True,
+                    }
+                ]
+            }
+        ),
+        lambda hub: hub["agents"]["claude"].update(
+            {"mappings": [{"builtin_id": "opus", "enabled": True}]}
+        ),
+        lambda hub: hub["agents"]["claude"].update(
+            {
+                "mappings": [
+                    {
+                        "builtin_id": "opus",
+                        "target_model_id": "claude-opus-4-5",
+                        "enabled": "yes",
+                    }
+                ]
+            }
+        ),
     ],
-    ids=["sources-not-object", "custom-order-not-array", "priority-order-not-array"],
+    ids=[
+        "sources-not-object",
+        "custom-order-not-array",
+        "priority-order-not-array",
+        "mapping-not-object",
+        "mapping-empty-builtin",
+        "mapping-missing-target",
+        "mapping-enabled-not-boolean",
+    ],
 )
 def test_config_reload_does_not_infer_malformed_legacy_source_order(
     monkeypatch,
