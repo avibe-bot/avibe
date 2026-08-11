@@ -4,7 +4,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
-import type { MemoryCascadeHealth, MemoryClearRecovery, MemoryFailureLogEntry, MemoryStatus } from '../../../context/ApiContext';
+import type { MemoryClearRecovery, MemoryFailureLogEntry, MemoryStatus } from '../../../context/ApiContext';
+import { memoryCascadeHealth } from '../../../test/memoryFixtures';
 import { MemoryStatusPanel } from './MemoryStatusPanel';
 
 vi.mock('react-i18next', () => ({
@@ -120,17 +121,14 @@ describe('MemoryStatusPanel', () => {
   });
 
   it('shows the structured final health projection and running lock', () => {
-    const health: MemoryCascadeHealth = {
+    const health = memoryCascadeHealth({
       healthy: false,
       reasons: ['drain_failures'],
       pending: 1,
-      failed_permanent: 0,
       failed_retryable: 1,
       drain_consecutive_failures: 2,
-      unrecoverable_total: 0,
-      optimize_failure_streak: 0,
       prune_stale_seconds: 60,
-    };
+    });
     render(
       <MemoryStatusPanel
         {...baseProps}

@@ -7,6 +7,7 @@ import { MemoryRouter } from 'react-router-dom';
 
 import { SettingsMemoryPage } from './SettingsMemoryPage';
 import type { MemoryProcessingRecordSummary } from '../../context/ApiContext';
+import { memoryCascadeHealth } from '../../test/memoryFixtures';
 
 const api = vi.hoisted(() => ({
   abortMemoryClear: vi.fn(),
@@ -165,17 +166,7 @@ beforeEach(() => {
   api.repairMemoryIndex.mockResolvedValue({
     ok: true,
     result: 'completed',
-    health: {
-      healthy: true,
-      reasons: [],
-      pending: 0,
-      failed_permanent: 0,
-      failed_retryable: 0,
-      drain_consecutive_failures: 0,
-      unrecoverable_total: 0,
-      optimize_failure_streak: 0,
-      prune_stale_seconds: 0,
-    },
+    health: memoryCascadeHealth(),
   });
 });
 
@@ -551,19 +542,69 @@ describe('SettingsMemoryPage Repair action', () => {
     finishRepair?.({
       ok: true,
       result: 'completed',
-      health: {
-        healthy: true,
-        reasons: [],
-        pending: 0,
-        failed_permanent: 0,
-        failed_retryable: 0,
-        drain_consecutive_failures: 0,
-        unrecoverable_total: 0,
-        optimize_failure_streak: 0,
-        prune_stale_seconds: 0,
-      },
+      health: memoryCascadeHealth(),
     });
     await waitFor(() => expect((screen.getByRole('button', { name: 'memory.status.restartEngine' }) as HTMLButtonElement).disabled).toBe(false));
+  });
+
+  it('renders an unhealthy Repair completion as warnings', async () => {
+    const warningHealth = memoryCascadeHealth({
+      healthy: false,
+      reasons: ['drain_failures'],
+      pending: 1,
+      failed_retryable: 1,
+      drain_consecutive_failures: 2,
+      prune_stale_seconds: 60,
+    });
+    api.getMemorySettings.mockResolvedValue({
+      status: 'ok',
+      enabled: true,
+      repair_available: true,
+      processing: { llm: endpoint, embedding: endpoint },
+    });
+    api.repairMemoryIndex.mockResolvedValue({
+      ok: true,
+      result: 'completed_with_warnings',
+      health: warningHealth,
+    });
+    const user = userEvent.setup();
+    renderPage();
+
+    await user.click(await screen.findByRole('button', { name: 'memory.processingRecord.repair.action' }));
+    await user.click(screen.getByRole('button', { name: 'confirm-clear' }));
+
+    await waitFor(() => expect(api.repairMemoryIndex).toHaveBeenCalledTimes(1));
+    expect(showToast).toHaveBeenCalledWith(
+      'memory.processingRecord.repair.completedWithWarnings',
+      'warning',
+    );
+    expect(await screen.findByText('memory.processingRecord.repair.completedWithWarnings')).toBeTruthy();
+  });
+
+  it('prevents a second Repair request while the first is pending', async () => {
+    let finishRepair: ((value: unknown) => void) | undefined;
+    api.getMemorySettings.mockResolvedValue({
+      status: 'ok',
+      enabled: true,
+      repair_available: true,
+      processing: { llm: endpoint, embedding: endpoint },
+    });
+    api.repairMemoryIndex.mockReturnValue(new Promise((resolve) => { finishRepair = resolve; }));
+    const user = userEvent.setup();
+    renderPage();
+
+    const repair = await screen.findByRole('button', { name: 'memory.processingRecord.repair.action' });
+    await user.click(repair);
+    await user.click(screen.getByRole('button', { name: 'confirm-clear' }));
+    await waitFor(() => expect(api.repairMemoryIndex).toHaveBeenCalledTimes(1));
+
+    const runningRepair = screen.getByRole('button', { name: 'memory.processingRecord.repair.running' });
+    expect((runningRepair as HTMLButtonElement).disabled).toBe(true);
+    await user.click(runningRepair);
+    expect(api.repairMemoryIndex).toHaveBeenCalledTimes(1);
+
+    finishRepair?.({ ok: true, result: 'completed', health: memoryCascadeHealth() });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'memory.processingRecord.repair.action' })).toBeTruthy());
   });
 
   it('blocks Repair during restart, rebuild, and clear confirmation', async () => {

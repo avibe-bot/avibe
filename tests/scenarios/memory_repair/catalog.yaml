@@ -12,8 +12,8 @@ capability:
   shared_harness:
     - tests/conftest.py::memory_runtime_factory
 status_legend:
-  covered: executable backend evidence plus UI evidence where applicable
-  partial: executable backend evidence exists but a named UI behavior remains source-inspected
+  covered: every named output has direct executable evidence at the declared layer
+  partial: executable evidence exists, but at least one named output layer remains unproved
   manual: requires a running Memory runtime
 scenarios:
   - id: MEMORY-REPAIR-001
@@ -22,6 +22,17 @@ scenarios:
     kind: happy_path
     layer: runtime_contract
     test: tests/test_memory_repair.py::test_repair_runs_sync_beside_live_sidecar_and_projects_health
+    actor: Memory Settings user
+    trigger: The user confirms Repair index while the advertised repair capability is available
+    conditions:
+      - Memory is enabled with a running sidecar and an admitted artifact sync executable
+      - The sync child completes and the final cascade health is healthy
+    given: A live Memory runtime can run admitted artifact sync beside its sidecar
+    when: The user confirms one Repair index request
+    then: The request closes as completed with the exact final healthy cascade projection
+    expected_outputs:
+      - One POST /api/memory/runtime/repair request with confirm set to true
+      - A completed result containing the frozen nine-field healthy projection
     related_tests:
       - tests/test_memory_sync_bootstrap.py::test_pinned_pathless_sync_acceptance_scans_and_drains
       - tests/test_internal_server.py::test_memory_repair_maps_runtime_status
@@ -33,19 +44,41 @@ scenarios:
     name: Repair completion with warnings remains truthful to unhealthy cascade health
     status: covered
     kind: health_projection
-    layer: runtime_contract
-    test: tests/test_memory_repair.py::test_repair_runs_sync_beside_live_sidecar_and_projects_health
+    layer: ui_scenario
+    test: tests/scenarios/memory_repair/test_memory_repair_scenarios.py::test_memory_repair_002_renders_warning_health
+    actor: Memory Settings user
+    trigger: The user confirms Repair index and the closed response reports unhealthy cascade health
+    conditions:
+      - The backend returns completed_with_warnings with health.healthy set to false
+      - The response satisfies the frozen Repair parser contract
+    given: Repair is available and the user is viewing the Processing Record tab
+    when: The user confirms Repair and the request settles with unhealthy cascade health
+    then: The page preserves the unhealthy projection and presents warning rather than success
+    expected_outputs:
+      - A warning toast for the closed Repair result
+      - A completed-with-warnings health badge in the Processing Record UI
     related_tests:
-      - tests/scenarios/memory_repair/test_memory_repair_scenarios.py::test_memory_repair_002_renders_warning_health
-      - ui/src/components/settings/memory/MemoryStatusPanel.test.tsx
+      - tests/test_memory_repair.py::test_repair_runs_sync_beside_live_sidecar_and_projects_health
+      - ui/src/components/settings/SettingsMemoryPage.test.tsx
   - id: MEMORY-REPAIR-003
     name: A second Repair request is disabled while the first request is running
     status: covered
     kind: concurrency
-    layer: runtime
-    test: tests/test_memory_repair.py::test_repair_is_retained_joined_and_holds_lease_after_caller_cancel
+    layer: ui_scenario
+    test: tests/scenarios/memory_repair/test_memory_repair_scenarios.py::test_memory_repair_003_has_running_guard
+    actor: Memory Settings user
+    trigger: The user starts Repair and attempts to invoke Repair again before settlement
+    conditions:
+      - The first Repair request remains pending
+      - The Repair capability remains advertised
+    given: No other Memory mutation owns the page when the first Repair starts
+    when: The user attempts a second Repair while the first request is still pending
+    then: The running Repair control stays disabled and only one backend request exists
+    expected_outputs:
+      - A disabled Repair-running button for the full request lifetime
+      - Exactly one repairMemoryIndex API invocation
     related_tests:
-      - tests/scenarios/memory_repair/test_memory_repair_scenarios.py::test_memory_repair_003_has_running_guard
+      - tests/test_memory_repair.py::test_repair_is_retained_joined_and_holds_lease_after_caller_cancel
       - ui/src/components/settings/SettingsMemoryPage.test.tsx
       - tests/test_memory_repair.py::test_repair_gates_other_runtime_mutations
   - id: MEMORY-REPAIR-004
@@ -54,24 +87,57 @@ scenarios:
     kind: recovery
     layer: runtime_contract
     test: tests/test_memory_repair.py::test_repair_maps_closed_child_results
+    actor: Memory Settings user
+    trigger: The confirmed Repair child closes as interrupted, timed out, failed, or already running
+    conditions:
+      - The backend maps the child terminal state into the frozen closed failure envelope
+      - No executable UI journey currently proves error presentation followed by a manual retry
+    given: A confirmed Repair request has reached a non-success terminal child result
+    when: The runtime maps and returns that closed result
+    then: The backend returns the declared error and terminal result without an open-ended operation
+    expected_outputs:
+      - A frozen failure envelope for every closed child result
+      - An error shown in Settings with Repair available for an explicit manual retry
+    coverage_gap: The backend result mapping and frontend parser are executable; the error-display and manual-retry UI journey is not yet executable
     related_tests:
-      - tests/scenarios/memory_repair/test_memory_repair_scenarios.py::test_memory_repair_004_has_no_automatic_retry_or_polling
       - ui/src/lib/memoryRepair.test.ts
   - id: MEMORY-REPAIR-005
     name: Repair action is hidden when artifact sync capability is disabled
     status: covered
     kind: capability_gate
-    layer: runtime_contract
-    test: tests/test_memory_repair.py::test_repair_rejects_artifact_without_sync_capability
+    layer: ui_contract
+    test: tests/scenarios/memory_repair/test_memory_repair_scenarios.py::test_memory_repair_005_fails_closed_on_capability
+    actor: Memory Settings user
+    trigger: The user opens Processing Record on an installation without admitted artifact sync
+    conditions:
+      - The backend settings projection does not advertise repair_available as exactly true
+    given: Memory can be inspected but the installed artifact has no sync capability
+    when: Settings renders the Processing Record actions
+    then: Repair index is absent and an unsupported artifact cannot launch sync
+    expected_outputs:
+      - No Repair index button unless repair_available is exactly true
+      - A memory_runtime_unsupported failure if the backend is called despite the capability gate
     related_tests:
-      - tests/scenarios/memory_repair/test_memory_repair_scenarios.py::test_memory_repair_005_fails_closed_on_capability
+      - tests/test_ui_memory_routes.py::test_memory_settings_are_direct_loopback_only_and_write_only
+      - tests/test_ui_memory_routes.py::test_memory_settings_projects_only_admitted_repair_capability
+      - tests/test_memory_repair.py::test_repair_rejects_artifact_without_sync_capability
       - ui/src/components/settings/memory/MemoryStatusPanel.test.tsx
   - id: MEMORY-REPAIR-006
     name: Repair leaves the live sidecar action path untouched
     status: covered
     kind: lifecycle
-    layer: runtime
+    layer: runtime_contract
     test: tests/test_memory_repair.py::test_repair_runs_sync_beside_live_sidecar_and_projects_health
+    actor: Memory Settings user
+    trigger: The user confirms Repair while the live Memory sidecar is running
+    conditions:
+      - The admitted sync child runs beside the live sidecar
+      - The runtime worker remains available and claim processing is not paused
+    given: The live sidecar and Memory worker are serving the current runtime
+    when: Repair runs the admitted artifact sync child to a closed result
+    then: The sidecar remains running and receives no stop request throughout Repair
+    expected_outputs:
+      - The sync child observes the sidecar still running and claims unpaused
+      - The sidecar stop count remains zero after Repair settles
     related_tests:
-      - tests/scenarios/memory_repair/test_memory_repair_scenarios.py::test_memory_repair_006_does_not_stop_sidecar
-      - ui/src/components/settings/SettingsMemoryPage.test.tsx
+      - tests/test_memory_repair.py::test_sync_orphan_reconciliation_does_not_stop_sidecar
