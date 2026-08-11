@@ -806,6 +806,132 @@ def test_model_hub_config_round_trip_and_serializer_completeness(monkeypatch, tm
     assert api.config_to_payload(updated)["model_hub"] == api_payload["model_hub"]
 
 
+def _legacy_model_hub_payload(current: dict) -> dict:
+    """Build the persisted v3.0.9 Model Hub shape from a current fixture."""
+
+    agents = {}
+    for backend, agent in current["agents"].items():
+        agents[backend] = {
+            "backend": agent["backend"],
+            "mode": agent["mode"],
+            "menu_kind": agent["menu_kind"],
+            "sources": {"policy": "follow", "order": []},
+            "mappings": [],
+            "menu": agent.get("menu"),
+        }
+    return {
+        "sources": [],
+        "priority_order": [],
+        "agents": agents,
+        "subscription_hub_experimental": False,
+    }
+
+
+def test_config_reload_migrates_v3_model_hub_shape_and_persists_backup(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    payload = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    payload["model_hub"] = _legacy_model_hub_payload(payload["model_hub"])
+    payload["migration_sentinel"] = {"keep": True}
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert loaded.load_warnings == ()
+    assert set(loaded.model_hub.agents["claude"].routes) == set(
+        ModelHubConfig().agents["claude"].routes
+    )
+    persisted = json.loads(config_path.read_text(encoding="utf-8"))
+    assert set(persisted["model_hub"]) == {"sources", "agents"}
+    assert persisted["migration_sentinel"] == {"keep": True}
+    assert list(config_path.parent.glob("config.json.bak-model-hub-migration-*"))
+
+
+def test_config_reload_migrates_legacy_mapping_to_exact_route_hop(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    source = copy.deepcopy(_schema("source.schema.json")["examples"][0])
+    source["supply_channel"] = "native_cli"
+    source["models"][0]["provenance"] = source["models"][0].pop("origin")
+    model_id = source["models"][0]["id"]
+    current = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    legacy = _legacy_model_hub_payload(current["model_hub"])
+    legacy["sources"] = [source]
+    legacy["agents"]["claude"]["mode"] = "hub"
+    legacy["agents"]["claude"]["sources"] = {
+        "policy": "custom",
+        "order": [source["id"]],
+    }
+    legacy["agents"]["claude"]["mappings"] = [
+        {
+            "builtin_id": model_id,
+            "target_model_id": model_id,
+            "enabled": True,
+        }
+    ]
+    current["model_hub"] = legacy
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(current), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    route = loaded.model_hub.agents["claude"].routes[model_id]
+    assert route.hops[0].source_id == source["id"]
+    assert route.hops[0].model_id == model_id
+    assert loaded.load_warnings == ()
+
+
+def test_config_reload_recovers_invalid_optional_section_without_overwriting_file(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    payload = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    payload["model_hub"] = {"sources": "invalid", "agents": {}}
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert loaded.model_hub.to_payload() == V2Config.default().model_hub.to_payload()
+    assert loaded.load_warnings and "model_hub" in loaded.load_warnings[0]
+    assert json.loads(config_path.read_text(encoding="utf-8"))["model_hub"]["sources"] == "invalid"
+    assert list(config_path.parent.glob("config.json.bak-recovery-*"))
+    V2Config.load(config_path=config_path)
+    assert len(list(config_path.parent.glob("config.json.bak-recovery-*"))) == 1
+
+    monkeypatch.setattr(api, "load_config", lambda: loaded)
+    with pytest.raises(ValueError, match="recovery warnings"):
+        api.save_config({"show_duration": True})
+    with pytest.raises(ValueError, match="recovery warnings"):
+        loaded.save(config_path)
+
+
+def test_config_reload_recovers_invalid_json_with_backup(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config_path = tmp_path / "config.json"
+    config_path.write_text('{"mode": ', encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert loaded.mode == "self_host"
+    assert loaded.load_warnings and "JSON" in loaded.load_warnings[0]
+    assert config_path.read_text(encoding="utf-8") == '{"mode": '
+    assert list(config_path.parent.glob("config.json.bak-invalid-json-*"))
+
+
+def test_config_reload_recovers_invalid_encoding_with_backup(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config_path = tmp_path / "config.json"
+    config_path.write_bytes(b"\xff\xfe")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert loaded.mode == "self_host"
+    assert loaded.load_warnings and "UTF-8" in loaded.load_warnings[0]
+    assert config_path.read_bytes() == b"\xff\xfe"
+    assert list(config_path.parent.glob("config.json.bak-invalid-encoding-*"))
+
+
 def test_legacy_and_fresh_configs_both_default_direct():
     payload = api.config_to_payload(default_config(), include_secrets=True)
     payload.pop("model_hub")

@@ -1,14 +1,16 @@
+import copy
 import ipaddress
 import json
 import logging
 import os
 import re
+import shutil
 import tempfile
 import threading
 from dataclasses import dataclass, field, fields
 from datetime import datetime
 from pathlib import Path
-from typing import List, Literal, Mapping, Optional, Union
+from typing import ClassVar, List, Literal, Mapping, Optional, Union
 from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
 from config import paths
@@ -210,6 +212,392 @@ def _migrate_fixed_menu_routes_on_load(payload: dict) -> dict:
     migrated_payload = dict(payload)
     migrated_payload["model_hub"] = migrated_model_hub
     return migrated_payload
+
+
+def _legacy_source_eligible_for_backend(source: object, backend: str) -> bool:
+    if not isinstance(source, dict):
+        return False
+    if source.get("supply_channel") == "hub":
+        return True
+    if source.get("kind") == "api_key":
+        return False
+    expected_backend = {"anthropic": "claude", "openai": "codex"}.get(source.get("vendor"))
+    return expected_backend == backend
+
+
+def _legacy_recommended_source_order(
+    sources: dict[str, dict],
+    backend: str,
+) -> list[str]:
+    def sort_key(source: dict) -> tuple[object, ...]:
+        if source.get("kind") == "subscription":
+            return (
+                0,
+                0 if source.get("supply_channel") == "native_cli" else 1,
+                str(source.get("id") or ""),
+            )
+        created_at = str(source.get("created_at") or MODEL_HUB_LEGACY_CREATED_AT)
+        try:
+            created_timestamp = datetime.fromisoformat(created_at.replace("Z", "+00:00")).timestamp()
+        except (TypeError, ValueError, OverflowError):
+            created_timestamp = 0
+        return (1, created_timestamp, str(source.get("id") or ""))
+
+    return [
+        str(source.get("id"))
+        for source in sorted(sources.values(), key=sort_key)
+        if _legacy_source_eligible_for_backend(source, backend)
+    ]
+
+
+def _legacy_source_order(
+    model_hub: dict,
+    sources: dict[str, dict],
+    agent: dict,
+    backend: str,
+) -> list[str]:
+    source_settings = agent.get("sources")
+    if isinstance(source_settings, dict):
+        policy = source_settings.get("policy")
+        order = source_settings.get("order")
+        if policy is None and isinstance(order, list):
+            return [
+                source_id
+                for source_id in order
+                if isinstance(source_id, str)
+                and source_id in sources
+                and _legacy_source_eligible_for_backend(sources[source_id], backend)
+            ]
+        if policy == "custom" and isinstance(order, list):
+            return [
+                source_id
+                for source_id in order
+                if isinstance(source_id, str)
+                and source_id in sources
+                and _legacy_source_eligible_for_backend(sources[source_id], backend)
+            ]
+        if policy == "follow":
+            return _legacy_recommended_source_order(sources, backend)
+
+    priority_order = model_hub.get("priority_order")
+    if isinstance(priority_order, list):
+        ordered = [
+            source_id
+            for source_id in priority_order
+            if isinstance(source_id, str)
+            and source_id in sources
+            and _legacy_source_eligible_for_backend(sources[source_id], backend)
+        ]
+        if ordered:
+            return ordered
+    return _legacy_recommended_source_order(sources, backend)
+
+
+def _legacy_route_hops(
+    sources: dict[str, dict],
+    source_order: list[str],
+    backend: str,
+    target_model_id: str,
+) -> list[dict[str, str]]:
+    provider: Optional[str] = None
+    if backend == "opencode":
+        try:
+            provider, target_model_id = canonical_opencode_menu_identity(target_model_id)
+        except ValueError:
+            return []
+    hops: list[dict[str, str]] = []
+    for source_id in source_order:
+        source = sources[source_id]
+        for model in source.get("models") or []:
+            if not isinstance(model, dict) or not isinstance(model.get("id"), str):
+                continue
+            model_id = model["id"]
+            if provider is not None:
+                try:
+                    source_provider, source_model_id = canonical_opencode_menu_identity(
+                        f"{source.get('vendor') or ''}/{model_id}"
+                    )
+                except ValueError:
+                    try:
+                        source_provider, source_model_id = canonical_opencode_menu_identity(
+                            f"custom/{model_id}"
+                        )
+                    except ValueError:
+                        continue
+                if (source_provider, source_model_id) != (provider, target_model_id):
+                    continue
+            elif model_id != target_model_id:
+                continue
+            hops.append({"source_id": source_id, "model_id": model_id})
+    return hops
+
+
+def _migrate_legacy_model_hub_payload(payload: dict) -> tuple[dict, bool, tuple[str, ...]]:
+    """Convert the pre-v5 Model Hub shape before the strict parser runs.
+
+    The final parser intentionally rejects retired fields. Disk loading is the
+    compatibility boundary, so old ``mappings`` are converted into exact route
+    hops when the old model inventory identifies their source unambiguously.
+    Unrepresentable mappings remain in the untouched backup and produce a load
+    warning instead of silently selecting a different source.
+    """
+
+    model_hub = payload.get("model_hub")
+    if not isinstance(model_hub, dict):
+        return payload, False, ()
+    agents = model_hub.get("agents")
+    if not isinstance(agents, dict):
+        return payload, False, ()
+    has_legacy_shape = bool(
+        {"priority_order", "subscription_hub_experimental"} & set(model_hub)
+        or any(isinstance(agent, dict) and "mappings" in agent for agent in agents.values())
+        or any(
+            isinstance(source, dict)
+            and any(
+                isinstance(model, dict) and "provenance" in model
+                for model in source.get("models") or []
+            )
+            for source in model_hub.get("sources") or []
+        )
+    )
+    if not has_legacy_shape:
+        return payload, False, ()
+
+    migrated_payload = copy.deepcopy(payload)
+    migrated_model_hub = migrated_payload["model_hub"]
+    migrated_model_hub.pop("priority_order", None)
+    migrated_model_hub.pop("subscription_hub_experimental", None)
+
+    raw_sources = migrated_model_hub.get("sources") or []
+    sources_by_id: dict[str, dict] = {}
+    for source in raw_sources:
+        if not isinstance(source, dict):
+            continue
+        source.pop("experimental_consent_at", None)
+        for model in source.get("models") or []:
+            if isinstance(model, dict) and "provenance" in model:
+                if "origin" not in model:
+                    model["origin"] = model["provenance"]
+                model.pop("provenance", None)
+        source_id = source.get("id")
+        if isinstance(source_id, str):
+            sources_by_id[source_id] = source
+
+    warnings: list[str] = []
+    migrated_agents: dict[str, object] = {}
+    for backend in MODEL_HUB_BACKENDS:
+        raw_agent = agents.get(backend)
+        if not isinstance(raw_agent, dict):
+            migrated_agents[backend] = raw_agent
+            continue
+
+        agent = copy.deepcopy(raw_agent)
+        source_order = _legacy_source_order(migrated_model_hub, sources_by_id, agent, backend)
+        source_settings = {"order": source_order}
+        route_ids: list[str]
+        if backend in {"claude", "codex"}:
+            route_ids = list(model_hub_fixed_menu_ids(backend))
+        else:
+            menu = agent.get("menu")
+            checked = menu.get("checked") if isinstance(menu, dict) else []
+            route_ids = [item for item in checked if isinstance(item, str)]
+
+        if isinstance(agent.get("routes"), dict):
+            routes = copy.deepcopy(agent["routes"])
+        else:
+            old_mappings = agent.get("mappings")
+            mappings = old_mappings if isinstance(old_mappings, list) else []
+            mapping_by_menu = {
+                item.get("builtin_id"): item
+                for item in mappings
+                if isinstance(item, dict) and isinstance(item.get("builtin_id"), str)
+            }
+            routes = {}
+            for model_id in route_ids:
+                mapping = mapping_by_menu.get(model_id)
+                target_model_id = model_id
+                if isinstance(mapping, dict) and mapping.get("enabled") is True:
+                    target = mapping.get("target_model_id")
+                    if isinstance(target, str) and target:
+                        target_model_id = target
+                hops = _legacy_route_hops(
+                    sources_by_id,
+                    source_order,
+                    backend,
+                    target_model_id,
+                )
+                if isinstance(mapping, dict) and mapping.get("enabled") is True and not hops:
+                    warnings.append(
+                        f"Model Hub route {backend}/{model_id} could not be mapped to a persisted source model"
+                    )
+                routes[model_id] = {"hops": hops}
+
+        allowed_agent = {
+            key: value
+            for key, value in agent.items()
+            if key in {"backend", "mode", "menu_kind", "menu"}
+        }
+        allowed_agent["backend"] = backend
+        allowed_agent["mode"] = agent.get("mode") if agent.get("mode") in {"hub", "direct"} else "direct"
+        allowed_agent["menu_kind"] = "open" if backend == "opencode" else "fixed"
+        allowed_agent["sources"] = source_settings
+        allowed_agent["routes"] = routes
+        migrated_agents[backend] = allowed_agent
+
+    migrated_model_hub["agents"] = migrated_agents
+    migrated_payload["model_hub"] = migrated_model_hub
+    return migrated_payload, True, tuple(warnings)
+
+
+def _migrate_config_payload_on_load(payload: dict) -> tuple[dict, bool, tuple[str, ...]]:
+    migrated, changed, warnings = _migrate_legacy_model_hub_payload(payload)
+    migrated = _migrate_fixed_menu_routes_on_load(migrated)
+    return migrated, changed, warnings
+
+
+def _recovery_section_for_error(error: BaseException) -> Optional[str]:
+    message = str(error)
+    match = re.search(r"Config '([^']+)'", message)
+    if match:
+        path = match.group(1)
+        if path.startswith("agents."):
+            backend = path.split(".", 2)[1]
+            if backend in MODEL_HUB_BACKENDS or backend == "avault":
+                return f"agents.{backend}"
+        return path.split(".", 1)[0]
+
+    lowered = message.lower()
+    for section in (
+        "model_hub",
+        "memory",
+        "remote_access",
+        "audio_asr",
+        "runtime",
+        "agents",
+        "platforms",
+        "update",
+        "ui",
+    ):
+        if section in lowered:
+            return section
+    return None
+
+
+def _reset_recoverable_config_section(payload: dict, section: str) -> bool:
+    """Replace one independently recoverable section with its safe default.
+
+    This is deliberately outside ``V2Config.from_payload``. Direct callers and
+    API writes still get strict validation; only disk loading may enter this
+    loss-avoiding recovery path, and the original file is backed up first.
+    """
+
+    if section in {
+        "model_hub",
+        "memory",
+        "runtime",
+        "agents",
+        "ui",
+        "remote_access",
+        "audio_asr",
+        "update",
+    }:
+        payload[section] = {}
+        return True
+    if section == "gateway":
+        payload[section] = None
+        return True
+    if section == "mode":
+        payload[section] = "self_host"
+        return True
+    if section == "platforms":
+        payload["platforms"] = {"enabled": [], "primary": WORKBENCH_PLATFORM_ID}
+        payload["platform"] = WORKBENCH_PLATFORM_ID
+        return True
+    if section in {"ack_mode", "language", "agent_progress_style"}:
+        payload[section] = {
+            "ack_mode": "typing",
+            "language": "en",
+            "agent_progress_style": DEFAULT_AGENT_PROGRESS_STYLE,
+        }[section]
+        return True
+    if section in {
+        "show_duration",
+        "include_time_info",
+        "include_user_info",
+        "reply_enhancements",
+        "show_pages_prompt",
+        "setup_completed",
+    }:
+        payload[section] = {
+            "show_duration": False,
+            "include_time_info": True,
+            "include_user_info": True,
+            "reply_enhancements": True,
+            "show_pages_prompt": True,
+            "setup_completed": False,
+        }[section]
+        return True
+    if section in {"agent_status_heartbeat_ms", "agent_status_no_output_ms"}:
+        payload.pop(section, None)
+        return True
+    if section.startswith("agents."):
+        payload.setdefault("agents", {})[section.split(".", 1)[1]] = {}
+        return True
+    if section in set(supported_platform_ids()) | {WORKBENCH_PLATFORM_ID}:
+        payload[section] = {}
+        platforms_payload = payload.get("platforms")
+        if not isinstance(platforms_payload, dict):
+            platforms_payload = {"enabled": [], "primary": WORKBENCH_PLATFORM_ID}
+        enabled = platforms_payload.get("enabled")
+        if not isinstance(enabled, list):
+            enabled = []
+        enabled = [item for item in enabled if item != section]
+        primary = platforms_payload.get("primary")
+        if primary == section or primary not in enabled:
+            primary = enabled[0] if enabled else WORKBENCH_PLATFORM_ID
+        payload["platforms"] = {"enabled": enabled, "primary": primary}
+        if payload.get("platform") == section:
+            payload["platform"] = primary
+        return True
+    return False
+
+
+def _backup_config_file(path: Path, label: str) -> Optional[Path]:
+    if not path.exists():
+        return None
+    try:
+        content = path.read_bytes()
+        existing = sorted(
+            path.parent.glob(f"{path.name}.bak-{label}-*"),
+            key=lambda candidate: candidate.stat().st_mtime,
+            reverse=True,
+        )
+        for candidate in existing:
+            if candidate.read_bytes() == content:
+                return candidate
+    except OSError:
+        pass
+
+    stamp = datetime.now().strftime("%Y%m%d%H%M%S%f")
+    backup = path.with_name(f"{path.name}.bak-{label}-{stamp}")
+    try:
+        shutil.copy2(path, backup)
+    except OSError as exc:
+        logger.warning("Could not back up config before recovery (%s): %s", path, exc)
+        return None
+    return backup
+
+
+def _write_config_payload(path: Path, payload: dict) -> None:
+    content = json.dumps(payload, indent=2)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with CONFIG_LOCK:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as tmp:
+            tmp.write(content)
+            tmp.flush()
+            os.fsync(tmp.fileno())
+            temp_name = tmp.name
+        os.replace(temp_name, path)
 
 
 _MODEL_HUB_CREDENTIAL_QUERY_KEYS = {
@@ -1548,6 +1936,27 @@ class V2Config:
     # into the wizard). Legacy configs that predate the flag have it derived in
     # ``from_payload`` from the old condition.
     setup_completed: bool = False
+    # Non-persisted diagnostics from disk migration/recovery. They let callers
+    # surface a repair notice without weakening the strict write validator.
+    load_warnings: ClassVar[tuple[str, ...]] = ()
+
+    @classmethod
+    def default(cls) -> "V2Config":
+        """Return the minimal safe config used for first-run and recovery."""
+
+        return cls(
+            mode="self_host",
+            version="v2",
+            slack=SlackConfig(bot_token="", app_token=""),
+            platforms=PlatformsConfig(enabled=[], primary=WORKBENCH_PLATFORM_ID),
+            runtime=RuntimeConfig(default_cwd=str(Path.home() / "work")),
+            agents=AgentsConfig(
+                opencode=OpenCodeConfig(enabled=True, cli_path="opencode"),
+                claude=ClaudeConfig(enabled=True, cli_path="claude"),
+                codex=CodexConfig(enabled=False, cli_path="codex"),
+            ),
+            model_hub=ModelHubConfig(),
+        )
 
     @classmethod
     def load(cls, config_path: Optional[Path] = None) -> "V2Config":
@@ -1556,8 +1965,79 @@ class V2Config:
         with CONFIG_LOCK:
             if not path.exists():
                 raise FileNotFoundError(f"Config not found: {path}")
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        return cls.from_payload(_migrate_fixed_menu_routes_on_load(payload))
+            try:
+                raw = path.read_text(encoding="utf-8")
+            except UnicodeDecodeError as exc:
+                backup = _backup_config_file(path, "invalid-encoding")
+                warning = f"Config is not valid UTF-8; using recovery defaults: {exc.reason}"
+                logger.error("%s (backup=%s)", warning, backup)
+                config = cls.default()
+                config.load_warnings = (warning,)
+                return config
+
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            backup = _backup_config_file(path, "invalid-json")
+            warning = f"Config JSON could not be parsed; using recovery defaults: {exc.msg}"
+            logger.error("%s (backup=%s)", warning, backup)
+            config = cls.default()
+            config.load_warnings = (warning,)
+            return config
+
+        if not isinstance(payload, dict):
+            backup = _backup_config_file(path, "invalid-root")
+            warning = "Config root is not an object; using recovery defaults"
+            logger.error("%s (backup=%s)", warning, backup)
+            config = cls.default()
+            config.load_warnings = (warning,)
+            return config
+
+        migrated_payload, migrated, migration_warnings = _migrate_config_payload_on_load(payload)
+        candidate = migrated_payload
+        recovery_warnings: list[str] = []
+        recovered_sections: set[str] = set()
+        while True:
+            try:
+                config = cls.from_payload(candidate)
+                break
+            except (TypeError, ValueError) as exc:
+                section = _recovery_section_for_error(exc)
+                if section is None or section in recovered_sections:
+                    warning = f"Config could not be loaded; using recovery defaults: {exc}"
+                    logger.error("%s", warning)
+                    config = cls.default()
+                    recovery_warnings.append(warning)
+                    break
+                if not _reset_recoverable_config_section(candidate, section):
+                    warning = f"Config section '{section}' could not be recovered; using recovery defaults: {exc}"
+                    logger.error("%s", warning)
+                    config = cls.default()
+                    recovery_warnings.append(warning)
+                    break
+                recovered_sections.add(section)
+                recovery_warnings.append(f"Recovered invalid config section '{section}': {exc}")
+
+        all_warnings = tuple(dict.fromkeys((*migration_warnings, *recovery_warnings)))
+        config.load_warnings = all_warnings
+        if migrated and not migration_warnings and not recovery_warnings:
+            backup = _backup_config_file(path, "model-hub-migration")
+            persisted_payload = copy.deepcopy(payload)
+            persisted_payload["model_hub"] = config.model_hub.to_payload()
+            try:
+                _write_config_payload(path, persisted_payload)
+            except OSError as exc:
+                logger.warning("Model Hub config migration loaded but could not persist (%s): %s", path, exc)
+            else:
+                logger.info("Migrated Model Hub config in place (backup=%s)", backup)
+        elif migration_warnings or recovery_warnings:
+            label = "model-hub-migration" if migration_warnings and not recovery_warnings else "recovery"
+            backup = _backup_config_file(path, label)
+            logger.warning(
+                "Started with a recovered config; original file preserved at %s",
+                backup,
+            )
+        return config
 
     @classmethod
     def from_payload(cls, payload: dict) -> "V2Config":
@@ -1920,6 +2400,11 @@ class V2Config:
         return config
 
     def save(self, config_path: Optional[Path] = None) -> None:
+        if self.load_warnings:
+            raise ValueError(
+                "Config was loaded with recovery warnings; repair the backed-up "
+                "config before saving changes"
+            )
         paths.ensure_data_dirs()
         path = config_path or paths.get_config_path()
         self.platforms.validate()
@@ -1985,15 +2470,7 @@ class V2Config:
             "agent_status_no_output_ms": self.agent_status_no_output_ms,
             "setup_completed": self.setup_completed,
         }
-        content = json.dumps(payload, indent=2)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with CONFIG_LOCK:
-            with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as tmp:
-                tmp.write(content)
-                tmp.flush()
-                os.fsync(tmp.fileno())
-                temp_name = tmp.name
-            os.replace(temp_name, path)
+        _write_config_payload(path, payload)
 
     def enabled_platforms(self) -> list[str]:
         return list(self.platforms.enabled)

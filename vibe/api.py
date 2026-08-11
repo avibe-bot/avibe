@@ -934,6 +934,11 @@ def save_config(
         base_config: Optional[V2Config] = None
         try:
             base_config = load_config()
+            if base_config.load_warnings:
+                raise ValueError(
+                    "Config was loaded with recovery warnings; repair the backed-up "
+                    "config before saving changes"
+                )
             base_payload = config_to_payload(base_config, include_secrets=True, include_internal=True)
         except FileNotFoundError:
             # Fresh install: no config file yet. Seed the same workbench-only

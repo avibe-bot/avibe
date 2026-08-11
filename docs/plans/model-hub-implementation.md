@@ -891,7 +891,7 @@ the implementing lane receives the evidence rather than a paraphrase.
 
 | Review thread | AC / disposition | Landing point | Responsible lane |
 | --- | --- | --- | --- |
-| `3742846987` | Owner ruling 2026-08-09: no internal v4-to-v5 data migration; the finding's upgraded-install premise is superseded and no compatibility loader is permitted | Final-contract handoff and `config/v2_config.py` absence proof | K1 ruling only; no implementation lane |
+| `3742846987` | Historical owner ruling 2026-08-09: no internal v4-to-v5 data migration. Superseded by the 3.0.10 upgraded-install incident: `V2Config.load` now performs a disk-boundary migration and preserves strict `from_payload` validation; unrecoverable sections start with safe defaults while the original file is backed up. | Final-contract handoff and `config/v2_config.py` load boundary | K1 ruling superseded; migration/recovery is owned by `config/v2_config.py` |
 | `3742846989` | AC-22; valid prelaunch consumer gap | Agent projection/write flow in `service.py` and Models route editor | I1 + I4 |
 | `3742846991` | AC-26; valid prelaunch consumer gap | Source serializer plus all Models `SuppliedModel` consumers and mocks | I1 + I4 |
 | `3742846992` | AC-30; valid prelaunch consumer gap | No-candidate provenance producer, runtime blocker propagation, and pull-surface rendering | I1 + I2 + I4 |
