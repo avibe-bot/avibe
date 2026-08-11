@@ -1,0 +1,50 @@
+version: 1
+capability:
+  id: memory_factory_reset
+  name: Memory factory reset recovery floor
+  canonical_tests:
+    - tests/scenarios/memory_factory_reset/test_memory_factory_reset_scenarios.py
+    - ui/src/components/settings/SettingsMemoryPage.test.tsx
+    - ui/src/components/settings/memory/MemorySettingsPanel.test.tsx
+status_legend:
+  covered: scenario coverage exists
+  partial: unit or contract coverage exists but the closed loop is incomplete
+  manual: currently validated only by human regression
+  gap: not covered yet
+scenarios:
+  - id: MEMORY-FACTORY-001
+    name: Factory reset confirmation names exact roots and retained artifact
+    status: covered
+    kind: destructive_confirmation
+    layer: scenario
+    test: tests/scenarios/memory_factory_reset/test_memory_factory_reset_scenarios.py::test_memory_factory_001_confirmation_contract
+    given: The Memory settings page can read a valid pinned memory-runtime artifact
+    when: The user opens Factory reset and waits through the destructive confirmation
+    then: The five-second confirmation names memory and state/memory as deleted and settings plus the artifact as retained
+  - id: MEMORY-FACTORY-002
+    name: Factory reset reports each mutable root after the awaited result
+    status: covered
+    kind: truthful_outcome
+    layer: scenario
+    test: tests/scenarios/memory_factory_reset/test_memory_factory_reset_scenarios.py::test_memory_factory_002_per_root_outcome_contract
+    given: The backend returns a final factory-reset result
+    when: The operation finishes with either complete or partial deletion
+    then: The UI preserves the per-root deletion report and does not collapse it into an unqualified success
+  - id: MEMORY-FACTORY-101
+    name: Invalid pinned artifact routes the user to Repair
+    status: covered
+    kind: validation
+    layer: scenario
+    test: tests/scenarios/memory_factory_reset/test_memory_factory_reset_scenarios.py::test_memory_factory_101_invalid_artifact_repair_contract
+    given: memory-runtime is missing, invalid, or not ready
+    when: The user reaches Memory destructive actions
+    then: Factory reset is disabled and the Dependencies Repair route is offered
+  - id: MEMORY-FACTORY-201
+    name: Durable factory reset recovery is retried without polling
+    status: covered
+    kind: recovery
+    layer: scenario
+    test: tests/scenarios/memory_factory_reset/test_memory_factory_reset_scenarios.py::test_memory_factory_201_retry_contract
+    given: A durable factory_reset intent remains after a crash during deletion
+    when: The user returns to Memory Settings
+    then: The action is labeled Retry factory reset, all Memory controls stay disabled during the request, and no polling loop is introduced

@@ -71,6 +71,12 @@ by this installation. It does not remove original Avibe chats, copies already
 sent to a provider, general logs, crash reports, backups, or data outside the
 dedicated Memory directory. It is not a secure wipe of the storage device.
 
+### Factory reset
+
+When Memory state is corrupt beyond rebuild, use **Factory reset** in Settings > Memory. The action is available only while the pinned `memory-runtime` artifact is installed and ready; repair that artifact from Settings > Dependencies first when it is invalid. The confirmation pauses for five seconds and names the exact two mutable roots that will be removed: `<effective_home>/memory` and `<effective_home>/state/memory`.
+
+Factory reset keeps Memory settings, credentials, and the installed artifact. The request waits for its final result and reports each root independently, so a partial deletion is shown as partial rather than claimed as a clean success. A durable `factory_reset` recovery intent makes Retry idempotent after a crash; while that intent is pending, other Memory controls remain disabled and the action is labeled **Retry factory reset**. Factory reset is not a secure wipe and does not remove original chats or copies already sent to remote endpoints.
+
 ## Capture delivery and flush coordination
 
 Each captured row stores the canonical provider session reference

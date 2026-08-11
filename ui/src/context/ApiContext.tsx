@@ -12,6 +12,8 @@ import {
 } from '../lib/workbenchEventConnection';
 import type { DockDoc } from './dockDoc';
 import { archivedConflictSessionId, selectApiErrorFields } from './apiErrorParse';
+import { parseMemoryFactoryResetResult } from '../lib/memoryFactoryReset';
+import type { MemoryFactoryResetResult } from '../lib/memoryFactoryReset';
 
 // The workbench Dock API response shape ({ ok, dock }); the Dock document type
 // itself lives with the DockProvider that owns reconciliation.
@@ -539,6 +541,7 @@ export type ApiContextType = {
   clearMemory: () => Promise<MemoryClearResult>;
   resumeMemoryClear: (operationId: string) => Promise<MemoryClearRecoveryResult>;
   abortMemoryClear: (operationId: string) => Promise<MemoryClearRecoveryResult>;
+  factoryResetMemory: () => Promise<MemoryFactoryResetResult>;
   restartMemoryRuntime: () => Promise<MemoryRuntimeRestartResult>;
   rebuildMemoryRuntime: () => Promise<MemoryRuntimeRebuildResult>;
   getBackendRuntime: (name: string) => Promise<BackendRuntimeInfo>;
@@ -1742,6 +1745,8 @@ export type MemorySettings = {
   enabled: boolean;
   processing: MemoryProcessingConfig;
   rebuild_required?: boolean;
+  /** Derived recovery state; raw durable intent never crosses the UI contract. */
+  factory_reset_required?: boolean;
 };
 
 // Omitting a field keeps its current value; an explicit `api_key: null` clears it
@@ -3014,6 +3019,9 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       postJson('/api/memory/clear/resume', { operation_id: operationId }, { handleError: false }),
     abortMemoryClear: (operationId) =>
       postJson('/api/memory/clear/abort', { operation_id: operationId }, { handleError: false }),
+    factoryResetMemory: async () => parseMemoryFactoryResetResult(
+      await postJson('/api/memory/runtime/factory-reset', { confirm: true }, { handleError: false }),
+    ),
     restartMemoryRuntime: () => postJson('/api/memory/runtime/restart', {}, { handleError: false }),
     rebuildMemoryRuntime: () =>
       postJson('/api/memory/runtime/rebuild', { confirm: true }, { handleError: false }),
