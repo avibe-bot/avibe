@@ -166,6 +166,10 @@ URL (api_key kind; prefilled for known vendors), a **model list** it can supply
 model entries), billing type (包月 | 按量 ¥), state (§4.5), and usage
 (subscription cycle % / monthly spend). Existing `last_discovered_at` records the last
 successful full inventory replacement; it is not a connectivity-check timestamp.
+Every Source read also carries the server-derived
+`adopted_by: [{backend, menu_model}]` projection of its persisted Route references.
+That unique projection is sorted by backend then menu model. It is reloadable Source-
+card data, not persisted Source state, and clients never reconstruct it from live chains.
 
 The Source workflow is complete at both entry points:
 
@@ -198,21 +202,28 @@ The Source workflow is complete at both entry points:
   Source gets the same discovery behavior only through the refresh operation above;
   there is no parallel saved discovery route. Discovery uses the observed protocol
   adapter, replaces only the discovered slice, preserves manual entries, and renders
-  added, removed, unchanged, and failed results. Rediscovering an unchanged model id preserves its edited
-  `reasoning_efforts`, `display_name`, and `discovered_at`; only an id absent from the
-  new upstream list leaves the discovered slice. Unsaved Add Source discovery applies
+  added, removed, unchanged, and failed results. Rediscovering an unchanged model id
+  preserves its edited `reasoning_efforts`, `display_name`, `discovered_at`, and
+  `retired` value. A non-retired discovered id absent from the new upstream list leaves
+  the discovered slice; a retired row is the exception and remains a persistent
+  tombstone whether the id is present or absent upstream. Unsaved Add Source discovery applies
   the same transient credential rule as connectivity observation: success, failure,
   timeout, and cancellation all revoke the provisioned ref, and a revoke failure enters
   durable pending-revocation reconciliation before the operation settles.
   The saved Source surface may render freshness only as “Model list updated at …” /
   「型号列表更新于…」 from `last_discovered_at`. It carries no latency or “last checked”
   field or copy.
-- **Model inventory and manual entries.** A `discovered` entry's existence is an
-  upstream fact, not a user decision; creating and deleting inventory entries therefore
-  applies only to entries the user wrote. Model `id` is unique within a Source. Every
+- **Model inventory and manual entries.** Model `id` is unique within a Source. Every
   model-list item has
-  `{id, origin: "discovered" | "manual", reasoning_efforts: string[]}`; discovery
+  `{id, origin: "discovered" | "manual", reasoning_efforts: string[], retired?:
+  boolean}`; discovery
   creates `origin: "discovered"`, while a user-created entry uses `origin: "manual"`.
+  Omitted `retired` means false, and only a discovered entry may carry true. A retired
+  row remains readable but is excluded from add-time matching, model-capability
+  eligibility, new Route validation, live runnability, and invocation. DELETE on a
+  discovered entry stages `retired: true`; DELETE on a manual entry removes the row.
+  Both use §4.5's exact-hop and protected-supply guards, and no refresh automatically
+  clears retirement.
   `reasoning_efforts` is required and may be empty. It declares the exact reasoning
   effort values that the upstream model supports; it does not select one value. An
   empty list declares none, and no entry receives a default, selected value, or
@@ -225,12 +236,26 @@ The Source workflow is complete at both entry points:
   `PATCH /api/models/sources/<source_id>/models/<model_id>` mutation with
   `{reasoning_efforts}`; the adapter validates the submitted list
   and re-echoes the canonical stored value as `{source: Source}`. Editing the list never
-  changes `id`, `origin`, or a route chain. Model creation and deletion use the same
-  Source-model subresource; deleting a discovered entry is rejected at the API boundary
-  with `source_model_managed_upstream`. This all-inventory editing scope is an
+  changes `id`, `origin`, or a route chain. Model creation, retirement, and manual
+  deletion use the same Source-model subresource. This all-inventory editing scope is an
   owner-vetoable orchestrator
   ruling dated 2026-08-08: discovery endpoints commonly return only ids, so a
   discovered-only immutable list would leave the capability permanently undeclarable.
+
+**Source-create boundary.** `source-create.schema.json` is the complete API-key create
+request: `vendor` and transient `key`, plus optional `display_name`, `base_url`, probe-
+only `protocol_order`, and client-generated `client_nonce`. Source identity, protocol
+evidence, discovered inventory, health, usage, custody metadata, and timestamps remain
+server-owned. When supplied, `client_nonce` is persisted unchanged and unique among
+Sources, so a client that loses the create response can identify the committed row on
+the next Source list read before deciding whether to retry. It is not identity or a
+routing input.
+
+OAuth start offers the equivalent optional client-generated correlation on
+`(client_nonce, vendor, channel)`. Repeating that exact tuple while its flow exists
+returns the same `flow_id` and current presentation rather than starting another
+provider flow. These two correlations implement the same rule: a client can reconcile
+a lost response only when it held the subject correlation before sending the request.
 
 **Protocol observation (owner ruling 2026-08-09, superseding AC-27's 2026-08-07
 manual-choice ruling).** Every stored `protocol` is traceable to a real response from
@@ -315,6 +340,12 @@ restart, health change, catalog change, or turn never repeats matching. Users ma
 the persisted chains directly: add or remove a hop, move it, or edit its explicit
 upstream `model_id` mapping.
 
+Cancellation of Source creation has one commit boundary. Before the durable Source
+commit, AC-26's transient-reference cleanup and pending-revocation accounting complete
+before cancellation settles. After the commit, cancellation only ends the caller's
+wait: Source creation and accepted placement finish atomically, remain readable after
+reload, and have no server-side abort or rollback branch.
+
 **Add-time Source placement policy (sole authority; owner 2026-08-09 S-1).** The Add
 Source service owns one write-time rule that chooses deterministic positions for the
 new Source and every accepted exact match. The same transaction writes those positions,
@@ -336,6 +367,20 @@ UI never uses position to distinguish new from old.
 No health score, latency, cost, usage, vendor label, creation timestamp, or later
 inventory result reorders existing configuration. `created_at` remains ordinary Source
 metadata for audit/display; routing and placement never read or mutate it.
+
+The explicit `POST /api/models/agents/<backend>/chains/reorder` operation is the sole
+post-creation consumer of the current Source-order sequence. It reorders existing hops
+only, preserves every exact `(source_id, model_id)` member and mapping, and never reruns
+matching. Its complete stable order is defined in §4.6. Because it cannot remove supply,
+it has no guarded `409`, `force`, or interruption branch even when the first hop changes.
+
+On `PATCH /api/models/agents/<backend>/mode`, a `direct` → `hub` transition also owns
+one bounded adoption transaction. If the backend has a sanctioned, recognized CLI
+login and no `native_cli` Source, that transaction creates the singleton native Source,
+applies `placement-v1`, commits every accepted exact match, changes mode, and only then
+assembles the returned AgentSupply. An existing native Source, an absent or
+unrecognized login, or another mode transition creates nothing. Repetition cannot
+create a second native Source.
 
 **Current matching value (`matching-v1`).** Add Source uses the same observed-inventory
 matching semantics that preceded the configured-chain freeze, then persists the concrete
@@ -574,6 +619,26 @@ Three classes, because the action owed by the user differs in each.
 row can offer **one tap to fix it** (re-auth, top up, replace key) instead of a
 dead-end error string.
 
+**Runtime dependency state matrix (authoritative and exhaustive; owner ruling
+2026-08-11).** `host_platform` is detected on the Avibe server, never from the browser,
+and installation is supported exactly when it equals one
+`manifest.assets[].platform`. The install route and status reads mirror this closed
+state set; prose cannot add another runtime health value.
+
+| Decision | Meaning | Entry and exit rule | `status.error_key` |
+| --- | --- | --- | --- |
+| `ok` | verified runtime is listening and healthy | successful start or health recovery; a demanded loss exits to `down` | null |
+| `degraded` | runtime is listening but its health check proves impaired service | current health evidence only; recovery exits to `ok`, loss exits to `down` | null |
+| `down` | an installed runtime was demanded and failed or stopped | failed start or demanded process loss; a successful later start exits to `ok` | null |
+| `not_installed` | no verified managed binary is installed | initial/unsupported state, or failed install; supported install enters `installing` | null initially/unsupported; safe non-null key after install failure |
+| `installing` | one server-owned installation job is in progress | persisted before work begins; reload/repeat stays here; verified success exits to `not_started`, failure to `not_installed` | null |
+| `not_started` | binary is installed and verified but intentionally idle | successful installation or pre-demand restart; explicit/runtime demand exits to `ok` or `down` | null |
+
+`POST /api/models/runtime/install` is idempotent and owns the
+`not_installed → installing → not_started | not_installed` transition. It fails before
+download on an unsupported `host_platform`; a reload never translates `installing`
+back to `not_installed`, and `/start` never performs installation.
+
 **`error` is a blocker, not a third class** (07-29, review round 6). This table
 first wrote its self-healing column as 「unknown」, and that word was the root of a
 real gap: `error` carries no `retry_at`, so nothing will clear it unattended, and the
@@ -631,6 +696,13 @@ surface invents a parallel prose status. `takeover` is a separate display term f
 §4.3's derived recoverable-fallback projection, not a fifth `supply_status` value or a
 persisted field. A mechanical mirror/locale guard keeps the four status labels and the
 takeover label synchronized across both locale sets.
+
+AgentSupply also carries two orthogonal read facts. `cli_present` is the server-
+authoritative per-backend executable-presence boolean; false on every backend is the
+complete zero-installed-backend state, and the field proves neither login nor process
+readiness. Every `model_supply` row carries `has_runnable_hop`, computed with §4.3's
+exact-chain live predicate. Thus `chain_length > 0 && !has_runnable_hop` is an all-stale
+Route, while `chain_length == 0 && !has_runnable_hop` is structurally empty.
 
 `interrupted` is the honest name for the state v1 could not express: the source
 list or configured chain can look populated, yet *this* Agent has nothing left to call. The UI shows
@@ -852,13 +924,17 @@ the same transaction deletes the Source and every exact hop that names it across
 backend route, while the identity and relative order of all surviving hops remain
 unchanged. An emptied route remains an explicit empty configuration.
 Any resulting protected-model gap is reported through the existing
-`would_interrupt` projection alongside `would_remove_hops`. This explicit cascade is
+`would_interrupt` projection alongside `would_remove_hops`. Each `RouteHopRef` also
+carries one-based `position` in that named Route before the attempted mutation;
+reporting sorts by backend, menu model, then that position, and a forced success repeats
+the same references and positions as its refusal. This explicit cascade is
 not the silent side effect prohibited by §2; without the confirmation, neither the
 Source nor any chain changes.
 
 The same invariant applies to **every Source-inventory mutation**, not only Source
 deletion. Reversible or transactional changes — API-key Base URL replacement, API-key
-credential replacement, explicit refresh/recovery, and manual-model deletion — first
+credential replacement, explicit refresh/recovery, discovered-model retirement, and
+manual-model deletion — first
 stage the resulting inventory and run **both** guards: compare it with every exact
 configured hop and recompute `would_interrupt` for every protected menu model. If an
 exact configured model would cease to be callable, the non-forced mutation is refused
@@ -885,12 +961,16 @@ present even when empty.
 | `mutation.source_refresh` | refresh/recover saved Source | `POST /api/models/sources/<id>/refresh` with `{force?: boolean}` | same guarded `409` | same Source success envelope |
 | `mutation.model_create` | create a user-authored model entry | `POST /api/models/sources/<source_id>/models` with `{model_id, display_name?, reasoning_efforts}` | not guarded: it creates one new exact `id` with `origin: "manual"` and changes no existing `id`, `origin`, or Route | `{source: Source}` |
 | `mutation.model_efforts` | replace one model entry's capability list | `PATCH /api/models/sources/<source_id>/models/<model_id>` with `{reasoning_efforts}` | not guarded: it changes no `id`, `origin`, or Route | `{source: Source}` |
-| `mutation.model_delete` | delete a user-authored model entry | `DELETE /api/models/sources/<source_id>/models/<model_id>` with `{force?: boolean}` | deleting `origin: "discovered"` returns `source_model_managed_upstream`; otherwise the same guarded `409` | same Source success envelope |
+| `mutation.model_delete` | retire a discovered model or delete a manual model | `DELETE /api/models/sources/<source_id>/models/<model_id>` with `{force?: boolean}` | same guarded `409`; discovered retirement is staged before evaluating exact-hop and protected-supply loss | same Source success envelope; discovered success preserves the row with `retired: true`, manual success removes it |
 | `mutation.source_delete` | delete Source | `DELETE /api/models/sources/<id>?force=<bool>` | same guarded `409` | `{removed_hops: RouteHopRef[], interrupted: SupplyGap[]}` after atomically pruning the Source from every backend Source order and every Route chain while preserving each survivor order; the deleted Source is not returned and legacy `{ok}` is invalid |
 | `mutation.route_replace` | replace one model's complete Route chain | `PUT /api/models/agents/<backend>/chain?model=<id>` with `{hops: RouteHop[], force?: boolean}` | same guarded `409` | `{chain: AgentChain, removed_hops: RouteHopRef[], interrupted: SupplyGap[]}`; the reporting fields are the same guarded-mutation family as Source success |
 
 The request carrier shown in each row is the only one. The final `api.md`, server/client
 envelopes, confirmation UI, and route tests mirror this matrix row-for-row.
+`PUT /api/models/agents/<backend>/sources` is intentionally outside the matrix: it
+changes only the Add-time Source-order sequence, never a Route chain or its members, and
+must not gain a guarded `409` branch. This is the G-9 behavioral tombstone; a guard here
+would imply the forbidden behavior of rewriting Routes during Source-order storage.
 Automatic background discovery never performs this cascade: when neither literal
 inventory nor sanctioned-alias evidence remains, it records the model as
 `model_unsupported`, keeps the configured hop visible and non-runnable, and waits for
@@ -1000,6 +1080,17 @@ configuration and Add-time placement input, contains only existing configuration
 eligible Source ids, and has no `follow | custom` or other policy discriminator. A
 Source deletion removes its id from every backend order in the same transaction and
 preserves the relative order of survivors. Serialization/reload rejects a dangling id.
+
+`POST /api/models/agents/<backend>/chains/reorder` applies that sequence to every
+existing Route without changing Route membership or mappings. For an original hop at
+index `i`, use stable key `(0, source_order_index, i)` when its Source appears in the
+current order and `(1, i, i)` otherwise, then sort lexicographically. Thus all listed
+Sources come first in configured order, hops sharing a listed Source retain their
+relative order, and all unlisted-Source hops follow while retaining their mutual
+relative order. The operation is idempotent, never runs matching, and never adds,
+removes, remaps, guards, or reports interruption. It is the only existing-chain
+consumer of `sources.order`; storing a new Source order alone leaves every Route byte-
+identical.
 
 `hops` may be empty and is always present. A newly introduced menu model starts with an
 empty route; catalog expansion and inventory refresh do not retroactively match it.

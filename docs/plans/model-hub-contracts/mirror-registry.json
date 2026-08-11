@@ -61,18 +61,6 @@
         "ui/src/i18n/*.json",
         "vibe/i18n/*.json"
       ]
-    },
-    {
-      "value": "source_model_managed_upstream",
-      "contract_file": "docs/plans/model-hub-contracts/api.md",
-      "negative_test_file": "tests/test_model_hub_api.py",
-      "negative_test": "test_discovered_source_model_delete_is_rejected_as_upstream_managed",
-      "forbidden_ui_globs": [
-        "ui/src/components/settings/models/**/*.ts",
-        "ui/src/components/settings/models/**/*.tsx",
-        "ui/src/i18n/*.json",
-        "vibe/i18n/*.json"
-      ]
     }
   ],
   "repo_absence_checks": [
@@ -222,6 +210,10 @@
         {
           "schema": "agent-chain.schema.json",
           "paths": ["/properties/backend"]
+        },
+        {
+          "schema": "source.schema.json",
+          "paths": ["/properties/adopted_by/items/properties/backend"]
         },
         {
           "schema": "probe-result.schema.json",
@@ -424,6 +416,11 @@
           "kind": "marker_tail",
           "file": "docs/plans/model-hub-contracts/api.md",
           "marker": "authority-consumer: protocol "
+        },
+        {
+          "kind": "schema_vocabulary",
+          "schema": "source-create.schema.json",
+          "paths": ["/properties/protocol_order/items"]
         }
       ]
     },
@@ -499,6 +496,40 @@
           "kind": "marker_tail",
           "file": "docs/plans/model-hub-contracts/api.md",
           "marker": "authority-consumer: observation.discovery "
+        }
+      ]
+    },
+    {
+      "id": "D9",
+      "domain": "runtime dependency health schema",
+      "authority": {
+        "kind": "markdown_table",
+        "file": "docs/plans/model-hub.md",
+        "heading": "Runtime dependency state matrix",
+        "column": "Decision"
+      },
+      "consumers": [
+        {
+          "kind": "schema_vocabulary",
+          "schema": "runtime-dependency.schema.json",
+          "paths": ["/properties/status/properties/health"]
+        }
+      ]
+    },
+    {
+      "id": "D10",
+      "domain": "runtime dependency health API",
+      "authority": {
+        "kind": "markdown_table",
+        "file": "docs/plans/model-hub.md",
+        "heading": "Runtime dependency state matrix",
+        "column": "Decision"
+      },
+      "consumers": [
+        {
+          "kind": "marker_tail",
+          "file": "docs/plans/model-hub-contracts/api.md",
+          "marker": "authority-consumer: runtime.health "
         }
       ]
     }

@@ -9,6 +9,11 @@
   "additionalProperties": false,
   "properties": {
     "flow_id": { "type": "string" },
+    "client_nonce": {
+      "type": "string",
+      "pattern": "^ofn_[a-z0-9]{16,64}$",
+      "description": "Optional client-generated OAuth-start correlation echoed from the start request. The server makes start idempotent for the exact (client_nonce, vendor, channel) tuple while its flow exists, so retrying a lost start response returns the same flow_id instead of opening another flow."
+    },
     "intent": {
       "enum": ["create", "reauth"],
       "description": "The flow intent determines its terminal response: create returns `{flow, source, added_to, adopted_by}`; reauth returns `{flow, source, recovered, interrupted_pairs}`. It is explicit because source_id cannot distinguish create from reauth and clients must not infer response shape from remembered UI state."
@@ -34,6 +39,7 @@
   "examples": [
     {
       "flow_id": "oaf_claude01",
+      "client_nonce": "ofn_01j5w8z7p4n6q2rt",
       "intent": "create",
       "source_id": "src_claudepro1",
       "vendor": "anthropic",

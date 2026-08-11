@@ -8,6 +8,10 @@
   "additionalProperties": false,
   "properties": {
     "backend": { "enum": ["claude", "codex", "opencode"] },
+    "cli_present": {
+      "type": "boolean",
+      "description": "Server-authoritative fact that this backend's configured CLI executable is present on the Avibe host. It does not prove login, process readiness, or Source health. OPTIONAL in the reusable schema and REQUIRED on AgentSupply API payloads."
+    },
     "mode": {
       "enum": ["hub", "direct"],
       "description": "Gateway or Direct. Existing installations start Direct until the user switches; fresh installations default Gateway. A native_cli Source is one configured Gateway hop and is distinct from Direct mode."
@@ -158,6 +162,10 @@
             "minimum": 0,
             "$comment": "Configuration visibility is not candidate availability. Every stored hop remains counted regardless of live runnability.",
             "description": "Length of the exact configured Route chain, including cooling and process-unavailable native CLI hops. It is not a count of currently runnable candidates. Zero marks a structurally empty Route; live blockers appear through supply_status."
+          },
+          "has_runnable_hop": {
+            "type": "boolean",
+            "description": "True exactly when at least one exact stored hop is runnable under the same source-health AND process-availability axiom as AgentChain. False distinguishes an all-stale or empty Route from a Route with live supply without changing chain_length. OPTIONAL in the reusable schema and REQUIRED on AgentSupply API payloads."
           }
         }
       }

@@ -1968,6 +1968,129 @@ whose only possible result is this refusal. The generated same-run closure also 
 the retired parallel route literal is absent repo-wide and that no Source-model request
 body repeats `source_id`; these are derived checks, not copied occurrence counts.
 
+### AC-35 — Preserve the G-9 Source-order tombstone
+
+**Acceptance.** For a fixture with at least two nonempty stored Routes, every successful
+`PUT /api/models/agents/<backend>/sources` changes and re-echoes only
+`sources.order`. Before/after Route documents are byte-identical, and the route exposes
+no `force`, guarded `409`, `would_remove_hops`, or `would_interrupt` branch. The API
+route table and §4.5 explicitly keep this write outside the exhaustive Source-mutation
+matrix.
+
+### AC-36 — Expose G-11 CLI installation presence per backend
+
+**Acceptance.** Every AgentSupply API row includes one server-produced boolean
+`cli_present`, including absent executables and Direct-mode backends. In a three-backend
+fixture, the zero-installed state is mechanically equivalent to
+`all(agent.cli_present is false)`. Changing login or process-readiness fixtures without
+changing executable presence cannot change the boolean.
+
+### AC-37 — Persist G-3 discovered-model retirement
+
+**Acceptance.** This criterion supersedes only AC-34's direct-discovered-DELETE refusal;
+manual delete and every previously successful inventory behavior remain unchanged.
+DELETE on a discovered model stages `retired: true`, applies the same exact-hop and
+protected-supply guards as manual deletion, and on confirmed success retains exactly
+one row with the same `id`, `origin`, and edited metadata. Refresh fixtures in which the
+upstream both includes and omits that id retain `retired: true`; matching, model-
+capability eligibility, new-Route validation, runnability, and invocation fixtures never
+consume the row.
+
+### AC-38 — Own the G-10 runtime installation state on the server
+
+**Acceptance.** Runtime health validates against exactly the six registered decisions.
+On a supported host, install persists `installing` before work; status reload and a
+concurrent repeated install return that same state and start one job. Verified success
+settles at `not_started` with null `error_key`; failure settles at `not_installed` with
+a safe non-null key. On an unsupported exact `host_platform`, the route performs no
+download and status remains `not_installed`. Install has the same authentication and
+CSRF negative fixtures as runtime start, while `/start` never installs.
+
+### AC-39 — Apply G-13 order to existing chains and close G-26
+
+**Acceptance.** Seed Routes containing repeated listed Sources and multiple unlisted
+Sources, invoke reorder, and sort the original hops by §4.6's exact stable key. The
+response equals that expected order for every Route; the multiset of exact
+`(source_id, model_id)` pairs and every explicit model mapping are unchanged. A second
+invocation is byte-identical. No matching, add/remove, guard, force, or interruption
+path runs. The route is the registered existing-chain consumer of `sources.order`.
+
+### AC-40 — Commit the G-14 native takeover transaction atomically
+
+**Acceptance.** For `direct` → `hub` with a sanctioned recognized CLI login and no
+native Source, one transaction creates exactly one backend-bound `native_cli` Source,
+applies `placement-v1`, commits all accepted exact matches, changes mode, and returns an
+AgentSupply that already contains those results. Injected failures at every commit seam
+leave both mode and Source/Route state unchanged. Existing-native, absent-login,
+unrecognized-login, non-transition, and repeated-request fixtures create zero Sources;
+`cli_present` alone never satisfies recognition.
+
+### AC-41 — Close the G-19 post-commit cancellation boundary
+
+**Acceptance.** AC-26 and I1 continue to own every pre-commit cancellation cleanup
+fixture. For cancellation after the durable Source commit, the server exposes no abort
+branch: the Source, accepted placements, and AgentSupply state complete normally and
+are coherent on the next read even when the response is never received. The fixture
+contains neither Source deletion nor committed-credential revocation after that point.
+
+### AC-42 — Reload G-20 Source adoption facts
+
+**Acceptance.** Every Source returned by list, detail/mutation, API-key create, and OAuth
+create carries `adopted_by` with the schema's exact item shape. After process restart,
+the Source list projection equals the complete set of persisted `(backend, menu_model)`
+references to that Source, uniquely sorted by backend then menu model, independent of
+hop health and without a client chain walk.
+In creation responses, top-level `adopted_by` is byte-equal to
+`source.adopted_by`.
+
+### AC-43 — Derive G-24 host support from the server platform
+
+**Acceptance.** Every runtime API payload includes the server-detected
+`host_platform`. Installation support is true if and only if that exact string appears
+in `manifest.assets[].platform`; changing only the browser user agent or client platform
+cannot change it. The unsupported-host install fixture performs no asset request.
+
+### AC-44 — Distinguish G-25 all-stale Routes from empty Routes
+
+**Acceptance.** Every `model_supply` row includes `has_runnable_hop`, and its value
+equals `any(hop.runnable for hop in the complete exact AgentChain)`. A nonempty fixture
+whose every hop is stale yields `{chain_length: N, has_runnable_hop: false}` with
+`N > 0`; an empty fixture yields `{chain_length: 0, has_runnable_hop: false}`. No
+consumer infers the boolean from length.
+
+### AC-45 — Define the complete G-27 SourceCreate request
+
+**Acceptance.** `source-create.schema.json` rejects every property outside its six
+registered fields, requires `vendor` and nonempty write-only `key`, and accepts optional
+display, endpoint, full three-value probe order, and client nonce. Contract examples
+validate. Create responses and logs contain no plaintext key, and request fixtures
+cannot submit server-owned identity, protocol conclusion, inventory, health, usage,
+custody, or timestamp fields.
+
+### AC-46 — Number every G-28 guarded hop reference
+
+**Acceptance.** Every `would_remove_hops` and `removed_hops` item includes one-based
+`position` in its named pre-mutation Route. Cross-Route output sorts by backend, menu
+model, then position. For the same planned mutation, refusal and confirmed success
+report byte-identical RouteHopRef arrays even though the latter commits the cascade.
+
+### AC-47 — Reconcile G-29 lost Source-create responses
+
+**Acceptance.** When SourceCreate supplies a valid `client_nonce`, the committed Source
+persists and re-echoes it unchanged, no second Source may carry it, and a post-restart
+Source list locates exactly one committed row by exact nonce. A lost-response client
+reads before retrying; a duplicate-nonce create fails before observation or credential
+provisioning. Omitting the nonce preserves existing create behavior and makes no false
+reconciliation promise.
+
+### AC-48 — Reconcile G-30 lost OAuth-start responses
+
+**Acceptance.** When OAuth start supplies `client_nonce`, every flow response echoes it.
+Repeated start with the exact `(client_nonce, vendor, channel)` tuple while the flow
+exists returns the same `flow_id`, state, and presentation and invokes the provider
+once. A different tuple cannot resolve to that flow. Omitting the nonce preserves the
+existing one-action/one-flow behavior.
+
 ### Post-consolidation review ledger — sealed 2026-08-08
 
 The orchestrator-authorized consolidation commit closes the constructive prose loop.

@@ -1,6 +1,6 @@
 # Model Hub — REST API contract
 
-Status: **FINAL v5 (2026-08-09)**. All endpoints live under `/api/models/`.
+Status: **FINAL v5 (2026-08-11 additive closure)**. All endpoints live under `/api/models/`.
 
 Success envelope: `{ok: true, contract_version: 5, ...}`.
 Failure envelope:
@@ -15,9 +15,9 @@ Hub has not shipped, so there is no internal contract migration or compatibility
 
 | Method and path | Request → response | Normative notes |
 | --- | --- | --- |
-| GET `/api/models/sources` | → `{sources: Source[]}` | Unordered asset inventory. Array order is never a spend order. |
+| GET `/api/models/sources` | → `{sources: Source[]}` | Unordered asset inventory. Every Source carries server-derived `adopted_by` and any persisted `client_nonce`; array order is never a spend order. |
 | POST `/api/models/sources/observe` | `{vendor, base_url?, key, protocol_order?}` → `{observation: SourceObservation}` | Non-persisting connectivity/authentication/protocol/inventory observation. `protocol_order` only orders the three probes; it never supplies a conclusion. No credential reference is returned. |
-| POST `/api/models/sources` | `SourceCreate` → `{source: Source, added_to: AddedTo[], adopted_by: AdoptedBy[]}` | The server assigns `id` and `created_at`; plaintext keys are transient. Add-time matching and placement are materialized before response. |
+| POST `/api/models/sources` | `source-create.schema.json` → `{source: Source, added_to: AddedTo[], adopted_by: AdoptedBy[]}` | The server assigns `id` and `created_at`; plaintext keys are transient. Add-time matching and placement are materialized before response. An optional `client_nonce` is persisted for lost-response reconciliation. |
 | PATCH `/api/models/sources/<id>` | `{display_name?, base_url?, force?: boolean}` → guarded Source-mutation envelope | Metadata/Base-URL mutation from the authoritative matrix in `model-hub.md` §4.5. |
 | PUT `/api/models/sources/<id>/credential` | `{key, force?: boolean}` → guarded Source-mutation envelope | API-key replacement. `force` is a JSON body field, never a query parameter. |
 | POST `/api/models/sources/<id>/reauth` | `{acknowledge_irreversible?: true}` → `{flow: OAuthFlow}` | A `native_cli` source requires the acknowledgement before OAuth starts. See repair rules. |
@@ -25,17 +25,18 @@ Hub has not shipped, so there is no internal contract migration or compatibility
 | POST `/api/models/sources/<id>/refresh` | `{force?: boolean}` → guarded Source-mutation envelope | The sole saved connectivity/discovery/recovery mutation. |
 | POST `/api/models/sources/<source_id>/models` | `{model_id, display_name?, reasoning_efforts}` → `{source: Source}` | Creates one user-authored model entry. The Source identity comes only from the path. |
 | PATCH `/api/models/sources/<source_id>/models/<model_id>` | `{reasoning_efforts}` → `{source: Source}` | Replaces the complete capability list on either model origin without changing identity, origin, or Routes. |
-| DELETE `/api/models/sources/<source_id>/models/<model_id>` | `{force?: boolean}` → API-boundary refusal, guarded `409`, or Source-mutation success | Deletes only a user-authored entry. A discovered entry returns `source_model_managed_upstream`. |
-| GET `/api/models/agents` | → `{agents: AgentSupply[]}` | Backend records include `named_agents`, the enabled named-Agent live projection. |
+| DELETE `/api/models/sources/<source_id>/models/<model_id>` | `{force?: boolean}` → guarded `409` or Source-mutation success | Deletes a manual entry; for a discovered entry it persists `retired: true` without deleting the row. Both outcomes use the same exact-hop and supply guards. |
+| GET `/api/models/agents` | → `{agents: AgentSupply[]}` | Backend records include server-authoritative `cli_present` and `named_agents`, the enabled named-Agent live projection. |
 | GET `/api/models/agents/<backend>/sources` | → `{agent: AgentSupply}` | Returns the authoritative effective order and eligibility. |
-| PUT `/api/models/agents/<backend>/sources` | `{order: string[]}` → `{agent: AgentSupply}` | Stores and re-echoes the complete canonical order; no policy state exists. |
-| PATCH `/api/models/agents/<backend>/mode` | `{mode}` → `{agent: AgentSupply}` | Explicit `hub` / `direct` switch. |
+| PUT `/api/models/agents/<backend>/sources` | `{order: string[]}` → `{agent: AgentSupply}` | Stores and re-echoes the complete canonical order; no policy state exists. This route never touches a Route chain and has no guarded `409` branch. |
+| POST `/api/models/agents/<backend>/chains/reorder` | → `{agent: AgentSupply}` | Idempotently reorders every stored Route by the current Source order without adding, removing, remapping, matching, or guarding. The total order is defined below. |
+| PATCH `/api/models/agents/<backend>/mode` | `{mode}` → `{agent: AgentSupply}` | Explicit `hub` / `direct` switch. A qualifying Direct → Gateway switch atomically adopts the recognized CLI login as the first native Source; other switches create nothing. |
 | PUT `/api/models/agents/opencode/menu` | `{menu}` → `{agent: AgentSupply}` | Open-menu configuration. |
 | GET `/api/models/agents/<backend>/chain?model=<id>` | → `{chain: AgentChain}` | Hub only. Direct returns the documented `direct_mode` error. |
 | PUT `/api/models/agents/<backend>/chain?model=<id>` | `{hops: RouteHop[], force?: boolean}` → guarded `409` or `{chain, removed_hops, interrupted}` | Replaces the exact Source/model pairs in submitted order after validating new or changed pairs; it is the `mutation.route_replace` row of the authoritative mutation matrix. |
 | POST `/api/models/agents/<backend>/probe` | `{model?}` → `{probe: ProbeResult}` | Hub only. Direct returns the same `direct_mode` error. |
 | GET `/api/models/events?limit=<n>&before=<id>` | → `{events: ResolutionEvent[]}` | Bounded source-resolution feed. |
-| POST `/api/models/oauth/start` | `{vendor, channel}` → `{flow: OAuthFlow}` | Starts creation of a new subscription source. |
+| POST `/api/models/oauth/start` | `{vendor, channel, client_nonce?}` → `{flow: OAuthFlow}` | Starts creation of a new subscription source. The optional nonce makes the exact `(client_nonce, vendor, channel)` start idempotent while its flow exists. |
 | GET `/api/models/oauth/status/<flow_id>` | → OAuth result | Terminal create and reauth shapes are below. |
 | POST `/api/models/oauth/submit` | `{flow_id, value}` → OAuth result | Same terminal shape as status. |
 | POST `/api/models/oauth/cancel` | `{flow_id}` → `{ok}` | Cancels and forgets the flow. |
@@ -43,6 +44,7 @@ Hub has not shipped, so there is no internal contract migration or compatibility
 | POST `/api/models/migration/apply` | `{item_ids: string[]}` → `{applied, sources, added_to}` | Each accepted import runs the same one-time matching and placement as Add Source; original files remain byte-identical. |
 | GET `/api/models/turns/<turn_id>/provenance` | → `{provenance: TurnProvenance}` or documented absence error | Debug read for exactly attributed Hub turns. |
 | GET `/api/models/runtime/status` | → `{runtime: RuntimeDependency}` | Read-only managed engine status. The nested object is contract v5; `not_started` is installed lazy-start idleness, not an alarm. |
+| POST `/api/models/runtime/install` | → `{runtime: RuntimeDependency}` | Idempotently starts server-owned installation. It returns and persists `installing`; reload reads the same state. Uses the existing mutation authentication and CSRF guards. |
 | POST `/api/models/runtime/start` | → `{runtime: RuntimeDependency}` | Explicitly starts the managed engine. Uses the existing mutation authentication and CSRF guards; status reads never start it. |
 
 The removed global route `PUT /api/models/priority` has no replacement. Backend Source
@@ -80,6 +82,36 @@ Source health reflecting that uncertainty. Subscription OAuth creation follows i
 vendor-specific observation flow before commit. Saved Sources use the stored
 protocol for every later operation.
 
+`source-create.schema.json` is the complete `SourceCreate` request. Its field table is
+authoritative; no Source response field may be inferred backwards into the request:
+
+| Field | Required | Producer → consumer | Rule |
+| --- | --- | --- | --- |
+| `vendor` | yes | Add Source client → observation adapter | Same normalized vendor id as the unsaved observation request. |
+| `display_name` | no | Add Source client → Source metadata | Omission uses the server's canonical vendor label; it never carries credential material. |
+| `base_url` | no | Add Source client → observation adapter | null or omission selects the official endpoint; a custom URL is validated before provisioning. |
+| `key` | yes | Add Source client → transient and committed credential provisioning | Plaintext is write-only and never appears in a response, Source record, event, or log. |
+| `protocol_order` | no | Add Source client → observation adapter | Contains all three protocols exactly once and only orders probes. |
+| `client_nonce` | no | Add Source client → persisted Source read projection | Client-generated before send, unique among Sources when present, and echoed unchanged so the list read can reconcile a lost response. |
+
+The request has no `id`, `created_at`, `state`, `usage`, `protocol`, discovered-model,
+credential-ref, billing, or supply-channel field. The server assigns or observes all of
+them. A successfully observed empty inventory is represented by the returned
+`source.models: []`; the client never submits a discovered inventory as authority.
+
+When `client_nonce` is present, a create whose nonce already belongs to a Source fails
+with the existing `discovery_failed` validation error before observation or credential
+provisioning. The client first re-reads `GET /api/models/sources` and identifies the
+single Source by exact nonce, so a response-lost create is not submitted twice.
+
+Cancellation has one commit boundary. Before the durable Source commit, AC-26 applies:
+the transient or uncommitted ref is revoked, or is named by the durable pending-
+revocation journal, before cancellation settles. After that commit, cancellation ends
+only the caller's wait. The transaction completes normally, the Source and all accepted
+placements remain committed, and the next Source/Agent read returns a coherent state
+even if no client received the create response. There is no server-side abort path after
+the commit point.
+
 The observation result has six terminal outcomes: `observed`, `ambiguous`,
 `unreachable`, `authentication_failed`, `adapter_error`, and `timeout`. Its
 `protocol` is non-null only when a real upstream response shape and positive
@@ -112,6 +144,24 @@ therefore reports `succeeded` or `failed`; every other terminal reports
 - Source event references are checked when emitted. Retained feed entries remain
   valid after a later legal source deletion.
 
+## Additive v5 fields
+
+These field rows are authoritative. They add read capabilities without changing any
+existing field, route, or enum meaning:
+
+| Field | Producer | First consumer | Invariant |
+| --- | --- | --- | --- |
+| `Source.client_nonce` | Source create commit | lost-create reconciliation | Exact optional echo of `SourceCreate.client_nonce`; unique among Sources and never used for routing. |
+| `Source.models[].retired` | discovered-model DELETE | Source detail inventory | Omission means false; only a discovered row may be true; true rows remain readable and never supply. |
+| `Source.adopted_by` | Source read assembler | Source cards and Source detail status | Complete unique persisted-reference projection sorted by backend then menu model; clients do not derive it from `hops`. |
+| `AgentSupply.cli_present` | backend CLI detector | zero-installed-backend state | Boolean installation fact only; it does not imply login or process readiness. |
+| `AgentSupply.model_supply[].has_runnable_hop` | exact-chain live annotator | backend-group collapse predicate | Uses the AgentChain runnability axiom; it is independent of configured `chain_length`. |
+| `RuntimeDependency.host_platform` | server host detector | unsupported-host runtime pill | Names the Avibe host, not the browser; exact membership in `manifest.assets[].platform` decides install support. |
+| `RuntimeDependency.status.error_key` | runtime installer | install-failed runtime state | Safe persisted i18n key for the latest failed install; null after a new attempt begins and in every non-failure state. |
+| `RouteHopRef.position` | guarded mutation planner | guarded-change hop row | One-based position in the named Route before the attempted mutation. |
+| `OAuthStart.client_nonce` | OAuth client before send | OAuth start idempotency | Optional client-generated correlation; the exact tuple with vendor and channel is the idempotency scope while the flow exists. |
+| `OAuthFlow.client_nonce` | OAuth start echo | lost-start reconciliation | When the request supplied the nonce, every flow response echoes it unchanged. |
+
 ## AgentSupply read projection
 
 Each backend entry on `GET /api/models/agents` carries the v5 API-boundary keys:
@@ -119,6 +169,7 @@ Each backend entry on `GET /api/models/agents` carries the v5 API-boundary keys:
 ```json
 {
   "backend": "claude",
+  "cli_present": true,
   "mode": "hub",
   "selected_by_agent": "pm",
   "selected_model_id": "claude-opus-4-6",
@@ -151,7 +202,7 @@ Each backend entry on `GET /api/models/agents` carries the v5 API-boundary keys:
   },
   "supply_status": "degraded",
   "model_supply": [
-    {"model_id": "claude-opus-4-6", "chain_length": 2}
+    {"model_id": "claude-opus-4-6", "chain_length": 2, "has_runnable_hop": true}
   ],
   "named_agents": [
     {
@@ -185,6 +236,18 @@ Agents payload stays at per-named-Agent selection and supply-status grain.
 Disabled Agents are absent. In Direct mode each named Agent may still have an
 effective model, but its Hub `supply_status` is null.
 
+Every backend record remains present even when its executable is absent.
+`cli_present` is server-authoritative, and the zero-installed-backend state is exactly
+the payload where every record carries false. Login recognition is a separate fact used
+only by the Direct → Gateway adoption transaction; neither login nor process readiness
+may be inferred from `cli_present`.
+
+Each `model_supply` row carries both configured `chain_length` and live
+`has_runnable_hop`. A nonzero length with false is an all-stale Route; zero with false is
+structurally empty. The boolean is computed from the complete exact chain with the same
+source-health AND process-availability rule as `AgentChain`, so the page never issues a
+chain read per row and never treats configured membership as live supply.
+
 The `sources.eligibility` inventory is also the one complete source-signal
 projection. Every existing source remains represented, including a source outside
 the selected model's capability chain. `in_current_model_chain` is true or false
@@ -198,7 +261,8 @@ source that does not supply the selected model is absent from that chain, so its
 process-availability fact vanishes at exactly the drawer grain that still renders
 the source. Evidence at master `05f72ae5`: `service.py:1843-1891` computes the
 per-backend unavailable set beside the complete eligibility inventory, while
-`model_supply` carries only `chain_length`.
+`model_supply` carries both configured `chain_length` and live
+`has_runnable_hop`; it still carries no Route body or serving head.
 
 ### Honest null selection
 
@@ -234,8 +298,46 @@ The request is total:
 - Add Source and native import invoke `placement-v1` once and persist its chosen
   position. Refresh, restart, health changes, and turns never recompute this order.
 
+The whole-order PUT is intentionally outside the §4.5 Source-mutation envelope matrix.
+It stores only `sources.order`, never reads or writes a Route chain, and therefore never
+returns a guarded `409`. This is the G-9 tombstone: adding a guard branch would imply an
+order save is allowed to mutate supply, which violates S-1.
+
+`POST /api/models/agents/<backend>/chains/reorder` is the only operation that applies
+the stored Source order to existing Routes. For each Route, give every hop its original
+zero-based index `i` and sort by this total key:
+
+```text
+source_id in sources.order  -> (0, sources.order.index(source_id), i)
+source_id not in the order  -> (1, i, i)
+```
+
+Thus ordered Sources come first in Source-order sequence; hops of the same Source keep
+their prior order; every unlisted hop follows and all unlisted hops keep their relative
+order. The operation changes only hop order. It preserves the multiset of exact
+`(source_id, model_id)` pairs byte-for-byte, never runs matching, and never adds,
+removes, or remaps a hop. It is idempotent and has no `force`, guarded refusal, removed-
+hop, or interruption branch: changing a preferred first hop is an explicit non-
+destructive configuration edit, not loss of supply. This route is the first consumer of
+the Source-order sequence under the current `placement-v1` policy.
+
 Eligibility is server-authoritative. An ineligible row carries exactly one closed
 `reason_key` from `agent-supply.schema.json`; an eligible row carries null.
+
+### Direct-to-Gateway native adoption
+
+For `PATCH /api/models/agents/<backend>/mode`, a transition from `direct` to `hub`
+reuses the same sanctioned native-login recognition and response-backed observation
+boundary as native import. If that backend has a recognized CLI login and has no
+`native_cli` Source, the mode change, creation of the backend's singleton native Source,
+`placement-v1` Source-order insertion, and every accepted add-time exact match commit in
+one transaction. The returned `AgentSupply` is assembled after that commit and exposes
+the resulting order, eligibility, Routes, and supply summaries.
+
+An existing native Source, an unrecognized or absent CLI login, or any transition other
+than `direct` → `hub` creates nothing. The mode switch itself remains legal in those
+cases. Repeating the request never creates a second native Source. `cli_present` alone
+does not satisfy the recognition predicate.
 
 ### Exact Route-chain configuration
 
@@ -275,7 +377,14 @@ The terminal result of both ordinary API-key creation and OAuth creation is:
 {
   "ok": true,
   "contract_version": 5,
-  "source": {"id": "src_anthkey01", "kind": "api_key"},
+  "source": {
+    "id": "src_anthkey01",
+    "kind": "api_key",
+    "client_nonce": "scn_01j5w8z7p4n6q2rt",
+    "adopted_by": [
+      {"backend": "claude", "menu_model": "claude-opus-4-6"}
+    ]
+  },
   "added_to": [
     {"backend": "claude", "menu_model": "claude-opus-4-6", "source_id": "src_anthkey01", "model_id": "claude-opus-4-6", "position": 2}
   ],
@@ -287,8 +396,30 @@ The terminal result of both ordinary API-key creation and OAuth creation is:
 
 The public HTTP wrapper, RPC layer, and client pass this shape through directly; no
 extra `source` or `flow` nesting is added.
+The top-level `adopted_by` remains the creation-result projection and is byte-equal to
+`source.adopted_by` in that response. Later `GET /api/models/sources` reads carry the
+same Source field recomputed from current persisted references; `client_nonce`, when
+present, is the exact persisted create correlation.
 
 ## Supply guard
+
+`RouteHopRef` is the immutable pre-mutation reference used by both
+`would_remove_hops` and `removed_hops`:
+
+```json
+{
+  "backend": "claude",
+  "menu_model": "claude-opus-4-6",
+  "source_id": "src_anthkey01",
+  "model_id": "claude-opus-4-6",
+  "position": 2
+}
+```
+
+`position` is one-based in the named persisted Route before the attempted mutation.
+It is not the entry's index in the cross-Route reporting array. Reporting order is
+backend id, then menu-model id, then this pre-mutation position; a forced success
+returns the same references and positions as the corresponding refusal.
 
 `SupplyGap` is:
 
@@ -433,7 +564,25 @@ state, preserves the last successful model list and timestamp, and returns the n
 safe error. This route is the only refresh/recovery operation; there is no parallel
 “test” or “recover” endpoint.
 
+Discovered-model retirement is a persistent exception to replacement. DELETE on a
+discovered model stages `retired: true` on that row instead of deleting it, then runs
+the same exact-hop and protected-supply guards. Forced success removes only invalidated
+Route references and keeps the retired inventory row. Every later refresh preserves
+that row, its edited metadata, and `retired: true` whether the upstream still advertises
+the id or no longer does. A retired row is excluded from add-time matching, model-
+capability eligibility, new Route validation, live runnability, and invocation. There is
+no automatic or refresh-driven unretire path. DELETE on a manual row retains its
+existing remove-row semantics.
+
 ## OAuth completion
+
+`POST /api/models/oauth/start` optionally accepts a client-generated `client_nonce`
+matching `^ofn_[a-z0-9]{16,64}$`. The server echoes it on `OAuthFlow` and makes the
+exact `(client_nonce, vendor, channel)` tuple idempotent while that flow exists. A retry
+after a lost start response returns the same `flow_id`, current state, and presentation;
+it does not invoke the provider or open a second flow. A new user action generates a
+new nonce. Reusing the nonce with a different vendor or channel is a different tuple and
+does not let one flow masquerade as another.
 
 `OAuthFlow.intent` makes the terminal shape a function of the flow:
 
@@ -449,11 +598,18 @@ Status and submit return the same terminal shape:
   "contract_version": 5,
   "flow": {
     "flow_id": "oaf_claude01",
+    "client_nonce": "ofn_01j5w8z7p4n6q2rt",
     "intent": "create",
     "state": "success",
     "source_id": "src_claudepro1"
   },
-  "source": {"id": "src_claudepro1", "kind": "subscription"},
+  "source": {
+    "id": "src_claudepro1",
+    "kind": "subscription",
+    "adopted_by": [
+      {"backend": "claude", "menu_model": "claude-opus-4-6"}
+    ]
+  },
   "added_to": [
     {"backend": "claude", "menu_model": "claude-opus-4-6", "source_id": "src_claudepro1", "model_id": "claude-opus-4-6", "position": 1}
   ],
@@ -633,6 +789,24 @@ Model-scoped kinds require a string. `agent: system` is invalid on backend-scope
 `supply_interrupted`. Source endpoints use canonical ids and are checked for existence
 when emitted.
 
+## Runtime installation and host support
+
+Every runtime response carries `host_platform`, and every status carries `error_key`.
+The server detects the Avibe host; clients never substitute the browser platform.
+Installation is supported exactly when one `manifest.assets[].platform` equals
+`host_platform`. An unsupported host leaves `health: "not_installed"`; the install
+route fails before download and returns the normal failure envelope while the next
+status read remains truthful.
+
+`POST /api/models/runtime/install` is idempotent. From `not_installed` on a supported
+host it clears the previous `error_key`, durably enters `installing`, starts the owned
+install job, and returns that state. A reload and concurrent repeat read/return the same
+`installing` state instead of starting another job. Successful verification settles at
+`not_started` with `error_key: null`; it does not start the runtime. Failure settles at
+`not_installed` with a safe non-null install `error_key`. The key is the contracted
+presentation carrier for the persisted failure; raw downloader or verifier text remains
+only in scrubbed logs. `/start` never performs installation.
+
 ## Error codes
 
 Minimum v5 set:
@@ -640,17 +814,16 @@ Minimum v5 set:
 `source_not_found`, `flow_not_found`, `flow_expired`, `discovery_failed`,
 `invalid_source_order`, `source_last_supplier`, `source_in_route_chain`,
 `source_model_in_route_chain`, `mode_switch_blocked`, `engine_down`,
-`reauth_confirmation_required`, `source_model_managed_upstream`,
-`native_source_already_exists`, `migration_item_conflict`, `turn_not_found`,
+`reauth_confirmation_required`, `native_source_already_exists`,
+`migration_item_conflict`, `turn_not_found`,
 `provenance_unavailable`, `probe_no_candidate`, `direct_mode`.
 
 `native_source_already_exists` is an API-boundary refusal for native OAuth start;
 its structured sibling is `{existing_source_id}` and the adapter is not invoked.
 
 Boundary-only action-refusal values cover operations the UI already does not offer but
-a script or regression can call directly. `reauth_confirmation_required` and
-`source_model_managed_upstream` are API/test-only truth: they have no product copy key
-or rendering slot.
+a script or regression can call directly. `reauth_confirmation_required` is API/test-
+only truth: it has no product copy key or rendering slot.
 
 Removed: `invalid_priority_order`.
 
@@ -666,6 +839,7 @@ contract harness and API-boundary tests enforce:
 <!-- authority-consumer: protocol anthropic openai_responses openai_chat -->
 <!-- authority-consumer: observation.outcome observed ambiguous unreachable authentication_failed adapter_error timeout -->
 <!-- authority-consumer: observation.discovery succeeded failed not_attempted -->
+<!-- authority-consumer: runtime.health ok degraded down not_installed installing not_started -->
 
 | Guard | Boundary |
 | --- | --- |
@@ -680,8 +854,11 @@ contract harness and API-boundary tests enforce:
 | probe `source_id` names an existing source | probe assembler |
 | non-null event endpoints name existing sources at emission time | event emitter |
 | `channel_switch.from_source == channel_switch.to_source` | event emitter |
-| API AgentSupply includes `selected_by_agent`, `selected_model_id`, `selected_model_explicit`, policy-free `sources.order`, `supply_status`, `model_supply`, and `named_agents`; every Source includes persisted `last_discovered_at`; source creation returns `added_to` and `adopted_by`; saved refresh uses the guarded Source envelope | API payload test |
+| API AgentSupply includes `cli_present`, `selected_by_agent`, `selected_model_id`, `selected_model_explicit`, policy-free `sources.order`, `supply_status`, `model_supply[].has_runnable_hop`, and `named_agents`; every Source includes persisted `last_discovered_at`, optional persisted `client_nonce`, derived `adopted_by`, and model retirement tombstones; source creation returns `added_to` and top-level `adopted_by` equal to `source.adopted_by`; saved refresh and discovered-model retirement use the guarded Source envelope | API payload test |
 | every OAuthFlow response includes `intent` | API payload test |
+| every OAuthFlow started with `client_nonce` echoes it, and repeated start of the same nonce/vendor/channel tuple returns one `flow_id` | API payload test |
+| every RuntimeDependency API payload includes server-derived `host_platform` and `status.error_key`; install transitions follow the registered health matrix and reload preserves `installing` | API payload test |
+| every `RouteHopRef` carries the one-based pre-mutation `position`; refusal and forced success report byte-identical references | API payload test |
 | contract and in-repo adapter interface copies are byte-identical; the five retained-material enum members and ref-pairing predicates are mutation-tested | contract harness |
 
 Serializer completeness follows the issue #939 pattern. Persisted fields must

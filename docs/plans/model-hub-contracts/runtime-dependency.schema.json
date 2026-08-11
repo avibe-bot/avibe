@@ -2,12 +2,17 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "model-hub/runtime-dependency.schema.json",
   "title": "RuntimeDependency",
-  "description": "v5 (2026-07-31 targeted amendment): managed engine dependency manifest + status. The installed lazy-start state is not a failure: not_started means no start has been demanded in this service lifetime; down means a demanded runtime failed or stopped. Pinned manifest values remain normative until the next explicit re-pin.",
+  "description": "v5 managed engine dependency manifest + server-owned installation and runtime status. not_installed -> installing -> not_started is the installation path; not_started is installed lazy-start idleness, and down means a demanded runtime failed or stopped. Pinned manifest values remain normative until the next explicit re-pin.",
   "type": "object",
   "required": ["contract_version", "manifest", "status"],
   "additionalProperties": false,
   "properties": {
     "contract_version": { "const": 5 },
+    "host_platform": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(?:-[a-z0-9_]+)+$",
+      "description": "Server-authoritative platform key for the Avibe host, never the browser device. Installation is supported exactly when manifest.assets contains an exact platform match. OPTIONAL in the reusable schema and REQUIRED on runtime API payloads."
+    },
     "manifest": {
       "type": "object",
       "required": ["name", "version", "source_sha", "assets"],
@@ -36,6 +41,24 @@
       "type": "object",
       "required": ["installed_version", "verified", "health"],
       "additionalProperties": false,
+      "allOf": [
+        {
+          "$comment": "Only not_installed may carry a persisted install-failure key. Initial absence and an unsupported host may still carry null.",
+          "if": {
+            "properties": {
+              "health": {
+                "not": { "const": "not_installed" }
+              }
+            },
+            "required": ["health"]
+          },
+          "then": {
+            "properties": {
+              "error_key": { "type": "null" }
+            }
+          }
+        }
+      ],
       "properties": {
         "installed_version": { "type": ["string", "null"] },
         "verified": { "type": "boolean", "description": "SHA256 of installed binary matches manifest" },
@@ -49,16 +72,21 @@
           }
         },
         "health": {
-          "enum": ["ok", "degraded", "down", "not_started", "not_installed"],
-          "description": "not_started is installed and intentionally idle until first demand; down is a runtime that was demanded and is no longer available."
+          "enum": ["ok", "degraded", "down", "not_installed", "installing", "not_started"],
+          "description": "not_installed is the stable absence state; installing is the server-owned transition after an install request; not_started is verified installation and intentional lazy-start idleness; down is a runtime that was demanded and is no longer available."
         },
-        "last_check": { "type": ["string", "null"], "format": "date-time" }
+        "last_check": { "type": ["string", "null"], "format": "date-time" },
+        "error_key": {
+          "type": ["string", "null"],
+          "description": "Persisted safe i18n key for the most recent install failure. A failed install settles at not_installed with a non-null key; a new install attempt clears it before entering installing, and every other health carries null. OPTIONAL in the reusable schema and REQUIRED on runtime API payloads."
+        }
       }
     }
   },
   "examples": [
     {
       "contract_version": 5,
+      "host_platform": "darwin-arm64",
       "manifest": {
         "name": "cliproxyapi",
         "version": "v7.2.95",
@@ -75,7 +103,8 @@
         "verified": true,
         "listening": { "host": "127.0.0.1", "port": 15220 },
         "health": "ok",
-        "last_check": "2026-07-23T03:40:00+08:00"
+        "last_check": "2026-07-23T03:40:00+08:00",
+        "error_key": null
       }
     }
   ]

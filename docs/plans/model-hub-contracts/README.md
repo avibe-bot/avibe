@@ -1,6 +1,6 @@
 # Model Hub contracts
 
-Status: **FINAL v5 shape, implementation-gated (2026-08-09)**.
+Status: **FINAL v5 shape, implementation-gated (2026-08-11 additive closure)**.
 
 These files describe the terminal contract for Model Hub before first release. There is
 no v4-to-v5 data migration, compatibility reader, conversion transaction, or version
@@ -56,8 +56,9 @@ Contract prose points to those authorities and does not add branches.
    across time, quota, and health changes. Live runnability and current execution
    position may change; Route membership and order may not.
 6. Every Source model id is unique within that Source. The final model item shape is
-   `{id, origin, reasoning_efforts, display_name?, discovered_at?}`; effort lists are
-   editable capability declarations, may be empty, and have no selected/default item.
+   `{id, origin, reasoning_efforts, retired?, display_name?, discovered_at?}`; effort
+   lists are editable capability declarations, may be empty, and have no selected/default
+   item. `retired: true` is a persistent discovered-model tombstone and never supplies.
 7. A backend has at most one `native_cli` Source. Additional accounts are Hub-held
    Sources.
 8. Direct mode and a Native hop are distinct. Direct bypasses Gateway for the backend;
@@ -106,6 +107,7 @@ revision; the discovering lane does not reinterpret or edit the contract in plac
 | File | Authority and consumer role |
 | --- | --- |
 | `source.schema.json` | Source identity, channel, three protocols, state, usage, inventory, credential reference, and audit metadata. |
+| `source-create.schema.json` | API-key Source creation request, transient credential boundary, probe-order hint, and lost-response correlation. |
 | `agent-supply.schema.json` | Backend mode, explicit policy-free Source order, configuration eligibility, model-supply and backend-health projections. |
 | `agent-chain.schema.json` | Read projection of exact stored hops plus current execution position, runnability, blockers, retry metadata, and model supply state. |
 | `probe-result.schema.json` | Saved recovery probes and route probes over exact configured hops. |
