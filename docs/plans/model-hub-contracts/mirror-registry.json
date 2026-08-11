@@ -532,6 +532,47 @@
           "marker": "authority-consumer: runtime.health "
         }
       ]
+    },
+    {
+      "id": "D11",
+      "domain": "runtime install failure presentation keys",
+      "authority": {
+        "kind": "schema_vocabulary",
+        "schema": "runtime-dependency.schema.json",
+        "paths": ["/properties/status/properties/error_key"],
+        "exclude": [null]
+      },
+      "consumers": [
+        {
+          "kind": "json_object_keys",
+          "file": "ui/src/i18n/en.json",
+          "path": "/settings/models/install/fail",
+          "prefix": "settings.models.install.fail."
+        },
+        {
+          "kind": "json_object_keys",
+          "file": "ui/src/i18n/zh.json",
+          "path": "/settings/models/install/fail",
+          "prefix": "settings.models.install.fail."
+        }
+      ]
+    },
+    {
+      "id": "D12",
+      "domain": "runtime install synchronous refusals",
+      "authority": {
+        "kind": "markdown_table",
+        "file": "docs/plans/model-hub.md",
+        "heading": "Runtime install refusal matrix",
+        "column": "Decision"
+      },
+      "consumers": [
+        {
+          "kind": "marker_tail",
+          "file": "docs/plans/model-hub-contracts/api.md",
+          "marker": "authority-consumer: runtime.install_error "
+        }
+      ]
     }
   ],
   "ownership_checks": [

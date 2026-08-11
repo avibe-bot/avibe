@@ -710,6 +710,11 @@
         "startNow": "立即启动",
         "starting": "正在启动"
       },
+      "install": {
+        "fail": {
+          "detail": "这次安装没有完成,组件可能处于未完成状态。重试会重新装一遍。"
+        }
+      },
       "experimental": "实验",
       "agents": {
         "title": "Agent",

@@ -77,8 +77,8 @@
         },
         "last_check": { "type": ["string", "null"], "format": "date-time" },
         "error_key": {
-          "type": ["string", "null"],
-          "description": "Persisted safe i18n key for the most recent install failure. A failed install settles at not_installed with a non-null key; a new install attempt clears it before entering installing, and every other health carries null. OPTIONAL in the reusable schema and REQUIRED on runtime API payloads."
+          "enum": [null, "settings.models.install.fail.detail"],
+          "description": "Persisted closed i18n key for the most recent install failure. A failed install settles at not_installed with settings.models.install.fail.detail; a new install attempt clears it before entering installing, and every other health carries null. OPTIONAL in the reusable schema and REQUIRED on runtime API payloads."
         }
       }
     }

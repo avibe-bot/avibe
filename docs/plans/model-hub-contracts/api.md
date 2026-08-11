@@ -144,10 +144,12 @@ therefore reports `succeeded` or `failed`; every other terminal reports
 - Source event references are checked when emitted. Retained feed entries remain
   valid after a later legal source deletion.
 
-## Additive v5 fields
+## K4 v5 field registry
 
-These field rows are authoritative. They add read capabilities without changing any
-existing field, route, or enum meaning:
+These rows are authoritative for the new payload members only. They do not classify
+every K4 route change as read-only or compatibility-neutral. G-3's discovered-model
+DELETE behavior and G-14's mode-switch transaction are separately specified pre-release
+route corrections; no existing field or enum meaning changes.
 
 | Field | Producer | First consumer | Invariant |
 | --- | --- | --- | --- |
@@ -157,7 +159,7 @@ existing field, route, or enum meaning:
 | `AgentSupply.cli_present` | backend CLI detector | zero-installed-backend state | Boolean installation fact only; it does not imply login or process readiness. |
 | `AgentSupply.model_supply[].has_runnable_hop` | exact-chain live annotator | backend-group collapse predicate | Uses the AgentChain runnability axiom; it is independent of configured `chain_length`. |
 | `RuntimeDependency.host_platform` | server host detector | unsupported-host runtime pill | Names the Avibe host, not the browser; exact membership in `manifest.assets[].platform` decides install support. |
-| `RuntimeDependency.status.error_key` | runtime installer | install-failed runtime state | Safe persisted i18n key for the latest failed install; null after a new attempt begins and in every non-failure state. |
+| `RuntimeDependency.status.error_key` | runtime installer | install-failed runtime state | Closed persisted i18n key: `settings.models.install.fail.detail` after installation fails; null after a new attempt begins and in every non-failure state. |
 | `RouteHopRef.position` | guarded mutation planner | guarded-change hop row | One-based position in the named Route before the attempted mutation. |
 | `OAuthStart.client_nonce` | OAuth client before send | OAuth start idempotency | Optional client-generated correlation; the exact tuple with vendor and channel is the idempotency scope while the flow exists. |
 | `OAuthFlow.client_nonce` | OAuth start echo | lost-start reconciliation | When the request supplied the nonce, every flow response echoes it unchanged. |
@@ -795,17 +797,27 @@ Every runtime response carries `host_platform`, and every status carries `error_
 The server detects the Avibe host; clients never substitute the browser platform.
 Installation is supported exactly when one `manifest.assets[].platform` equals
 `host_platform`. An unsupported host leaves `health: "not_installed"`; the install
-route fails before download and returns the normal failure envelope while the next
-status read remains truthful.
+route fails before download with HTTP 422 and
+`error: "runtime_platform_unsupported"`; the next status read remains truthful with
+`error_key: null`.
 
 `POST /api/models/runtime/install` is idempotent. From `not_installed` on a supported
 host it clears the previous `error_key`, durably enters `installing`, starts the owned
 install job, and returns that state. A reload and concurrent repeat read/return the same
 `installing` state instead of starting another job. Successful verification settles at
 `not_started` with `error_key: null`; it does not start the runtime. Failure settles at
-`not_installed` with a safe non-null install `error_key`. The key is the contracted
-presentation carrier for the persisted failure; raw downloader or verifier text remains
-only in scrubbed logs. `/start` never performs installation.
+`not_installed` with `error_key: "settings.models.install.fail.detail"`. The key is the
+closed presentation carrier for the persisted failure; raw downloader or verifier text
+remains only in scrubbed logs. `/start` never performs installation.
+
+On service bootstrap, persisted `installing` with no worker owned by the reconstructed
+process is an orphaned install, never a live-job proof. Before runtime endpoints become
+ready, the server first verifies the pinned target: a complete manifest-matching binary
+settles directly at `not_started`; otherwise it discards only uncommitted staging,
+atomically claims the singleton install lease, and restarts the pinned installation
+from scratch while retaining `installing`. Failure to claim or schedule that recovery
+settles at `not_installed` with the same closed `error_key`. Thus a page reload observes
+a live owned job, while a service restart cannot strand the state permanently.
 
 ## Error codes
 
@@ -814,7 +826,8 @@ Minimum v5 set:
 `source_not_found`, `flow_not_found`, `flow_expired`, `discovery_failed`,
 `invalid_source_order`, `source_last_supplier`, `source_in_route_chain`,
 `source_model_in_route_chain`, `mode_switch_blocked`, `engine_down`,
-`reauth_confirmation_required`, `native_source_already_exists`,
+`runtime_platform_unsupported`, `reauth_confirmation_required`,
+`native_source_already_exists`,
 `migration_item_conflict`, `turn_not_found`,
 `provenance_unavailable`, `probe_no_candidate`, `direct_mode`.
 
@@ -840,6 +853,7 @@ contract harness and API-boundary tests enforce:
 <!-- authority-consumer: observation.outcome observed ambiguous unreachable authentication_failed adapter_error timeout -->
 <!-- authority-consumer: observation.discovery succeeded failed not_attempted -->
 <!-- authority-consumer: runtime.health ok degraded down not_installed installing not_started -->
+<!-- authority-consumer: runtime.install_error runtime_platform_unsupported -->
 
 | Guard | Boundary |
 | --- | --- |
@@ -857,7 +871,7 @@ contract harness and API-boundary tests enforce:
 | API AgentSupply includes `cli_present`, `selected_by_agent`, `selected_model_id`, `selected_model_explicit`, policy-free `sources.order`, `supply_status`, `model_supply[].has_runnable_hop`, and `named_agents`; every Source includes persisted `last_discovered_at`, optional persisted `client_nonce`, derived `adopted_by`, and model retirement tombstones; source creation returns `added_to` and top-level `adopted_by` equal to `source.adopted_by`; saved refresh and discovered-model retirement use the guarded Source envelope | API payload test |
 | every OAuthFlow response includes `intent` | API payload test |
 | every OAuthFlow started with `client_nonce` echoes it, and repeated start of the same nonce/vendor/channel tuple returns one `flow_id` | API payload test |
-| every RuntimeDependency API payload includes server-derived `host_platform` and `status.error_key`; install transitions follow the registered health matrix and reload preserves `installing` | API payload test |
+| every RuntimeDependency API payload includes server-derived `host_platform` and `status.error_key`; install transitions follow the registered health matrix, page reload preserves a live `installing` job, and service bootstrap reconciles an orphan before serving runtime endpoints | API payload test |
 | every `RouteHopRef` carries the one-based pre-mutation `position`; refusal and forced success report byte-identical references | API payload test |
 | contract and in-repo adapter interface copies are byte-identical; the five retained-material enum members and ref-pairing predicates are mutation-tested | contract harness |
 

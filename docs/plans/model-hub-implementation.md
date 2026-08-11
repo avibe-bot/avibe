@@ -1977,6 +1977,9 @@ no `force`, guarded `409`, `would_remove_hops`, or `would_interrupt` branch. The
 route table and §4.5 explicitly keep this write outside the exhaustive Source-mutation
 matrix.
 
+**Binding handoff.** `K4-B` owns the backend producer and API regression for this AC;
+there is no `K4-U` consumer write. Its handoff is the byte-before/after Route fixture.
+
 ### AC-36 — Expose G-11 CLI installation presence per backend
 
 **Acceptance.** Every AgentSupply API row includes one server-produced boolean
@@ -1984,6 +1987,10 @@ matrix.
 fixture, the zero-installed state is mechanically equivalent to
 `all(agent.cli_present is false)`. Changing login or process-readiness fixtures without
 changing executable presence cannot change the boolean.
+
+**Binding handoff.** `K4-B` owns CLI detection, AgentSupply assembly, and API tests;
+`K4-U` owns types, the zero-backend state, and UI tests after receiving the three-row
+AgentSupply fixture.
 
 ### AC-37 — Persist G-3 discovered-model retirement
 
@@ -1996,15 +2003,27 @@ upstream both includes and omits that id retain `retired: true`; matching, model
 capability eligibility, new-Route validation, runnability, and invocation fixtures never
 consume the row.
 
+**Binding handoff.** `K4-B` owns config persistence, refresh/DELETE/guard behavior, and
+backend tests; `K4-U` owns retirement controls/rendering and UI tests after receiving
+the guarded Source fixtures.
+
 ### AC-38 — Own the G-10 runtime installation state on the server
 
 **Acceptance.** Runtime health validates against exactly the six registered decisions.
 On a supported host, install persists `installing` before work; status reload and a
 concurrent repeated install return that same state and start one job. Verified success
 settles at `not_started` with null `error_key`; failure settles at `not_installed` with
-a safe non-null key. On an unsupported exact `host_platform`, the route performs no
-download and status remains `not_installed`. Install has the same authentication and
-CSRF negative fixtures as runtime start, while `/start` never installs.
+`settings.models.install.fail.detail`. On process reconstruction, an orphaned
+`installing` fixture either verifies an already-complete target to `not_started`, claims
+one fresh job while staying `installing`, or settles at `not_installed` with that key;
+it never remains ownerless. On an unsupported exact `host_platform`, the route performs
+no download, returns `runtime_platform_unsupported`, and status remains
+`not_installed`. Install has the same authentication and CSRF negative fixtures as
+runtime start, while `/start` never installs.
+
+**Binding handoff.** `K4-B` owns installer lifecycle, persistence, API/CSRF routes, and
+backend tests; `K4-U` owns the mirrored locale copy, runtime states/actions, and UI
+tests after receiving success, failure, unsupported, concurrent, and restart fixtures.
 
 ### AC-39 — Apply G-13 order to existing chains and close G-26
 
@@ -2014,6 +2033,10 @@ response equals that expected order for every Route; the multiset of exact
 `(source_id, model_id)` pairs and every explicit model mapping are unchanged. A second
 invocation is byte-identical. No matching, add/remove, guard, force, or interruption
 path runs. The route is the registered existing-chain consumer of `sources.order`.
+
+**Binding handoff.** `K4-B` owns the reorder service/route and property tests; `K4-U`
+owns the explicit reorder action and UI tests after receiving the before/after Route
+fixture.
 
 ### AC-40 — Commit the G-14 native takeover transaction atomically
 
@@ -2025,6 +2048,10 @@ leave both mode and Source/Route state unchanged. Existing-native, absent-login,
 unrecognized-login, non-transition, and repeated-request fixtures create zero Sources;
 `cli_present` alone never satisfies recognition.
 
+**Binding handoff.** `K4-B` owns recognition reuse, the atomic mode transaction, and
+backend tests; `K4-U` owns the adoption confirm flow and UI tests after receiving all
+five transition-result fixtures.
+
 ### AC-41 — Close the G-19 post-commit cancellation boundary
 
 **Acceptance.** AC-26 and I1 continue to own every pre-commit cancellation cleanup
@@ -2032,6 +2059,10 @@ fixture. For cancellation after the durable Source commit, the server exposes no
 branch: the Source, accepted placements, and AgentSupply state complete normally and
 are coherent on the next read even when the response is never received. The fixture
 contains neither Source deletion nor committed-credential revocation after that point.
+
+**Binding handoff.** `K4-B` owns cancellation ownership, commit-boundary fault tests,
+and coherent readback; `K4-U` owns wait cancellation/retry behavior after receiving the
+pre-commit and post-commit fixtures.
 
 ### AC-42 — Reload G-20 Source adoption facts
 
@@ -2043,12 +2074,20 @@ hop health and without a client chain walk.
 In creation responses, top-level `adopted_by` is byte-equal to
 `source.adopted_by`.
 
+**Binding handoff.** `K4-B` owns Source read assembly and API serializer tests; `K4-U`
+owns Source-card/detail consumers and reload tests after receiving sorted projection
+fixtures.
+
 ### AC-43 — Derive G-24 host support from the server platform
 
 **Acceptance.** Every runtime API payload includes the server-detected
 `host_platform`. Installation support is true if and only if that exact string appears
 in `manifest.assets[].platform`; changing only the browser user agent or client platform
 cannot change it. The unsupported-host install fixture performs no asset request.
+
+**Binding handoff.** `K4-B` owns host detection, manifest matching, the exact 422 error,
+and backend tests; `K4-U` owns the unsupported-host state and UI tests after receiving
+supported and unsupported RuntimeDependency fixtures.
 
 ### AC-44 — Distinguish G-25 all-stale Routes from empty Routes
 
@@ -2057,6 +2096,10 @@ equals `any(hop.runnable for hop in the complete exact AgentChain)`. A nonempty 
 whose every hop is stale yields `{chain_length: N, has_runnable_hop: false}` with
 `N > 0`; an empty fixture yields `{chain_length: 0, has_runnable_hop: false}`. No
 consumer infers the boolean from length.
+
+**Binding handoff.** `K4-B` owns exact-chain annotation and AgentSupply tests; `K4-U`
+owns the page-grain collapse predicate and UI tests after receiving live, all-stale, and
+empty model-supply fixtures.
 
 ### AC-45 — Define the complete G-27 SourceCreate request
 
@@ -2067,12 +2110,20 @@ validate. Create responses and logs contain no plaintext key, and request fixtur
 cannot submit server-owned identity, protocol conclusion, inventory, health, usage,
 custody, or timestamp fields.
 
+**Binding handoff.** `K4-B` owns request validation, provisioning boundaries, and API
+tests; `K4-U` owns request construction and UI tests after receiving valid, empty-
+inventory, and rejected-body fixtures.
+
 ### AC-46 — Number every G-28 guarded hop reference
 
 **Acceptance.** Every `would_remove_hops` and `removed_hops` item includes one-based
 `position` in its named pre-mutation Route. Cross-Route output sorts by backend, menu
 model, then position. For the same planned mutation, refusal and confirmed success
 report byte-identical RouteHopRef arrays even though the latter commits the cascade.
+
+**Binding handoff.** `K4-B` owns guarded planning/serialization and backend tests;
+`K4-U` owns numbered confirm rows and UI tests after receiving refusal/success fixture
+pairs.
 
 ### AC-47 — Reconcile G-29 lost Source-create responses
 
@@ -2083,6 +2134,10 @@ reads before retrying; a duplicate-nonce create fails before observation or cred
 provisioning. Omitting the nonce preserves existing create behavior and makes no false
 reconciliation promise.
 
+**Binding handoff.** `K4-B` owns nonce persistence/uniqueness and API tests; `K4-U` owns
+read-before-retry reconciliation and UI tests after receiving committed-response,
+lost-response, and duplicate fixtures.
+
 ### AC-48 — Reconcile G-30 lost OAuth-start responses
 
 **Acceptance.** When OAuth start supplies `client_nonce`, every flow response echoes it.
@@ -2090,6 +2145,11 @@ Repeated start with the exact `(client_nonce, vendor, channel)` tuple while the 
 exists returns the same `flow_id`, state, and presentation and invokes the provider
 once. A different tuple cannot resolve to that flow. Omitting the nonce preserves the
 existing one-action/one-flow behavior.
+
+**Binding handoff.** `K4-B` owns OAuth tuple idempotency/echo and API tests; `K4-U` owns
+start retry/reconciliation and UI tests after receiving same-tuple, different-tuple,
+and omitted-nonce fixtures. `K4-U` begins only after all `K4-B` payload fixtures for
+AC-35–AC-48 are frozen, so the two lanes share no implementation file ownership.
 
 ### Post-consolidation review ledger — sealed 2026-08-08
 

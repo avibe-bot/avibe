@@ -630,7 +630,7 @@ state set; prose cannot add another runtime health value.
 | `ok` | verified runtime is listening and healthy | successful start or health recovery; a demanded loss exits to `down` | null |
 | `degraded` | runtime is listening but its health check proves impaired service | current health evidence only; recovery exits to `ok`, loss exits to `down` | null |
 | `down` | an installed runtime was demanded and failed or stopped | failed start or demanded process loss; a successful later start exits to `ok` | null |
-| `not_installed` | no verified managed binary is installed | initial/unsupported state, or failed install; supported install enters `installing` | null initially/unsupported; safe non-null key after install failure |
+| `not_installed` | no verified managed binary is installed | initial/unsupported state, or failed install; supported install enters `installing` | null initially/unsupported; `settings.models.install.fail.detail` after install failure |
 | `installing` | one server-owned installation job is in progress | persisted before work begins; reload/repeat stays here; verified success exits to `not_started`, failure to `not_installed` | null |
 | `not_started` | binary is installed and verified but intentionally idle | successful installation or pre-demand restart; explicit/runtime demand exits to `ok` or `down` | null |
 
@@ -638,6 +638,23 @@ state set; prose cannot add another runtime health value.
 `not_installed → installing → not_started | not_installed` transition. It fails before
 download on an unsupported `host_platform`; a reload never translates `installing`
 back to `not_installed`, and `/start` never performs installation.
+
+A service restart distinguishes persisted state from a live worker. Before runtime
+endpoints become ready, an `installing` row with no worker in the reconstructed process
+is reconciled atomically: a complete binary that verifies against the pinned manifest
+settles at `not_started`; otherwise uncommitted staging is discarded and exactly one
+fresh install job is claimed while health remains `installing`. If that recovery cannot
+be claimed or scheduled, it settles at `not_installed` with
+`settings.models.install.fail.detail`. A page reload therefore retains the live job,
+while a process restart cannot preserve an ownerless transition forever.
+
+**Runtime install refusal matrix (authoritative and exhaustive; owner ruling
+2026-08-11).** Authentication and CSRF failures retain their shared HTTP contract; this
+table owns the runtime-specific synchronous refusal branch.
+
+| Decision | Entry condition | HTTP/API result | First consumer |
+| --- | --- | --- | --- |
+| `runtime_platform_unsupported` | exact `host_platform` has no equal `manifest.assets[].platform` | HTTP 422 normal failure envelope; no download; runtime remains `not_installed` with null `error_key` | install API client and boundary test |
 
 **`error` is a blocker, not a third class** (07-29, review round 6). This table
 first wrote its self-healing column as 「unknown」, and that word was the root of a
