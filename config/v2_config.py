@@ -118,6 +118,16 @@ DEFAULT_AGENT_PROGRESS_STYLE = "off"
 MODEL_HUB_ENABLED_ENV = "VIBE_MODEL_HUB_ENABLED"
 MODEL_HUB_BACKENDS = ("claude", "codex", "opencode")
 MODEL_HUB_LEGACY_CREATED_AT = "1970-01-01T00:00:00Z"
+_LEGACY_CLAUDE_FAMILY_ALIASES = {
+    "opus": "opus",
+    "opus[1m]": "opus",
+    "sonnet": "sonnet",
+    "sonnet[1m]": "sonnet",
+    "haiku": "haiku",
+}
+_LEGACY_CLAUDE_MODEL_ID = re.compile(
+    r"^claude-(?P<family>opus|sonnet|haiku|fable)-(?P<version>\d+(?:-\d+)*?)(?:-(?P<date>\d{8}))?$"
+)
 
 
 def normalize_model_hub_vendor_id(value: object) -> str:
@@ -293,6 +303,62 @@ def _legacy_source_order(
     return _legacy_recommended_source_order(sources, backend)
 
 
+def _legacy_claude_matching_model_id(source: dict, requested_model: str) -> str | None:
+    """Resolve the pre-v5 Claude aliases against discovered native models.
+
+    Claude's old native CLI resolver treated ``opus``/``sonnet``/``haiku`` as
+    family selectors and persisted the newest concrete model it observed. Keep
+    that behavior at the disk migration boundary; the current runtime resolver
+    intentionally only follows persisted exact hops.
+    """
+
+    if (
+        source.get("vendor") != "anthropic"
+        or source.get("supply_channel") != "native_cli"
+    ):
+        return None
+    observed_models = [
+        model
+        for model in source.get("models") or []
+        if isinstance(model, dict)
+        and model.get("origin", model.get("provenance")) == "discovered"
+    ]
+    family = _LEGACY_CLAUDE_FAMILY_ALIASES.get(requested_model)
+    requested_version: tuple[int, ...] | None = None
+    match = _LEGACY_CLAUDE_MODEL_ID.fullmatch(requested_model)
+    requested_date: int | None = None
+    if family is None and match is not None:
+        family = match.group("family")
+        requested_version = tuple(int(part) for part in match.group("version").split("-"))
+        requested_date = int(match.group("date")) if match.group("date") else None
+    if family is None:
+        return None
+    if requested_date is not None:
+        return next(
+            (
+                model.get("id")
+                for model in observed_models
+                if model.get("id") == requested_model
+            ),
+            None,
+        )
+
+    matches: list[tuple[tuple[int, ...], int, str]] = []
+    for model in observed_models:
+        model_id = model.get("id")
+        if not isinstance(model_id, str):
+            continue
+        parsed = _LEGACY_CLAUDE_MODEL_ID.fullmatch(model_id)
+        if parsed is None or parsed.group("family") != family:
+            continue
+        version = tuple(int(part) for part in parsed.group("version").split("-"))
+        if requested_version is not None and version != requested_version:
+            continue
+        date = int(parsed.group("date")) if parsed.group("date") else 0
+        matches.append((version, date, model_id))
+    return max(matches)[2] if matches else None
+
+
 def _legacy_route_hops(
     sources: dict[str, dict],
     source_order: list[str],
@@ -308,6 +374,14 @@ def _legacy_route_hops(
     hops: list[dict[str, str]] = []
     for source_id in source_order:
         source = sources[source_id]
+        legacy_claude_model_id = (
+            _legacy_claude_matching_model_id(source, target_model_id)
+            if backend == "claude"
+            else None
+        )
+        if legacy_claude_model_id is not None:
+            hops.append({"source_id": source_id, "model_id": legacy_claude_model_id})
+            continue
         for model in source.get("models") or []:
             if not isinstance(model, dict) or not isinstance(model.get("id"), str):
                 continue
@@ -407,11 +481,15 @@ def _migrate_legacy_model_hub_payload(payload: dict) -> tuple[dict, bool, tuple[
         else:
             old_mappings = agent.get("mappings")
             mappings = old_mappings if isinstance(old_mappings, list) else []
-            mapping_by_menu = {
-                item.get("builtin_id"): item
-                for item in mappings
-                if isinstance(item, dict) and isinstance(item.get("builtin_id"), str)
-            }
+            # The legacy resolver selected the first enabled mapping in list
+            # order. Disabled duplicates must not shadow an earlier active one.
+            mapping_by_menu: dict[str, dict] = {}
+            for item in mappings:
+                if not isinstance(item, dict) or item.get("enabled") is not True:
+                    continue
+                builtin_id = item.get("builtin_id")
+                if isinstance(builtin_id, str) and builtin_id not in mapping_by_menu:
+                    mapping_by_menu[builtin_id] = item
             routes = {}
             for model_id in route_ids:
                 mapping = mapping_by_menu.get(model_id)
@@ -467,6 +545,17 @@ def _recovery_section_for_error(error: BaseException) -> Optional[str]:
         return path.split(".", 1)[0]
 
     lowered = message.lower()
+    if any(
+        marker in lowered
+        for marker in (
+            "source state",
+            "hub sources",
+            "engine credential ref",
+            "native source",
+            "api-key source",
+        )
+    ):
+        return "model_hub"
     for section in (
         "model_hub",
         "memory",
@@ -598,6 +687,25 @@ def _write_config_payload(path: Path, payload: dict) -> None:
             os.fsync(tmp.fileno())
             temp_name = tmp.name
         os.replace(temp_name, path)
+
+
+def _persist_migrated_config_payload(
+    path: Path,
+    expected_raw: str,
+    payload: dict,
+) -> tuple[Optional[Path], Optional[str]]:
+    """Persist a migration only when the snapshot read at load is unchanged."""
+
+    with CONFIG_LOCK:
+        try:
+            current_raw = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            return None, f"Could not verify config before migration persistence: {exc}"
+        if current_raw != expected_raw:
+            return None, "Skipped config migration because the file changed during load"
+        backup = _backup_config_file(path, "model-hub-migration")
+        _write_config_payload(path, payload)
+        return backup, None
 
 
 _MODEL_HUB_CREDENTIAL_QUERY_KEYS = {
@@ -2019,15 +2127,20 @@ class V2Config:
                 recovery_warnings.append(f"Recovered invalid config section '{section}': {exc}")
 
         all_warnings = tuple(dict.fromkeys((*migration_warnings, *recovery_warnings)))
-        config.load_warnings = all_warnings
         if migrated and not migration_warnings and not recovery_warnings:
-            backup = _backup_config_file(path, "model-hub-migration")
             persisted_payload = copy.deepcopy(payload)
             persisted_payload["model_hub"] = config.model_hub.to_payload()
             try:
-                _write_config_payload(path, persisted_payload)
+                backup, persistence_warning = _persist_migrated_config_payload(
+                    path,
+                    raw,
+                    persisted_payload,
+                )
             except OSError as exc:
-                logger.warning("Model Hub config migration loaded but could not persist (%s): %s", path, exc)
+                persistence_warning = f"Model Hub config migration could not be persisted: {exc}"
+            if persistence_warning:
+                all_warnings = tuple(dict.fromkeys((*all_warnings, persistence_warning)))
+                logger.warning("%s (%s)", persistence_warning, path)
             else:
                 logger.info("Migrated Model Hub config in place (backup=%s)", backup)
         elif migration_warnings or recovery_warnings:
@@ -2037,6 +2150,7 @@ class V2Config:
                 "Started with a recovered config; original file preserved at %s",
                 backup,
             )
+        config.load_warnings = all_warnings
         return config
 
     @classmethod

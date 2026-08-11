@@ -917,6 +917,9 @@ def save_config(
     if not isinstance(payload, dict):
         raise ValueError("Config payload must be an object")
 
+    # This read-only projection is returned by GET /api/config so the browser
+    # can explain a recovered load; it must never become persisted config data.
+    payload = {key: value for key, value in payload.items() if key != "config_recovery"}
     if not allow_memory:
         payload = {key: value for key, value in payload.items() if key != "memory"}
     # Model Hub mutations must pass through ModelHubService so runtime source
@@ -1232,6 +1235,10 @@ def client_config_payload(config: V2Config) -> dict:
 
     payload = config_to_payload(config)
     payload.pop("memory", None)
+    payload["config_recovery"] = {
+        "required": bool(config.load_warnings),
+        "warnings": list(config.load_warnings),
+    }
     return payload
 
 

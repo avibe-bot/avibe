@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 from jsonschema import Draft7Validator, FormatChecker, ValidationError
 
+import config.v2_config as v2_config
 from config.v2_config import (
     MODEL_HUB_ENABLED_ENV,
     MODEL_HUB_LEGACY_CREATED_AT,
@@ -880,6 +881,135 @@ def test_config_reload_migrates_legacy_mapping_to_exact_route_hop(monkeypatch, t
     assert loaded.load_warnings == ()
 
 
+def test_config_reload_preserves_legacy_claude_alias_resolution(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    source = copy.deepcopy(_schema("source.schema.json")["examples"][0])
+    older = source["models"][0]
+    newer = {
+        **older,
+        "id": "claude-opus-5-20260724",
+        "display_name": "Opus 5",
+    }
+    source["models"] = [older, newer]
+    for model in source["models"]:
+        model["provenance"] = model.pop("origin")
+    current = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    legacy = _legacy_model_hub_payload(current["model_hub"])
+    legacy["sources"] = [source]
+    legacy["agents"]["claude"]["mode"] = "hub"
+    legacy["agents"]["claude"]["sources"] = {
+        "policy": "custom",
+        "order": [source["id"]],
+    }
+    current["model_hub"] = legacy
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(current), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    route = loaded.model_hub.agents["claude"].routes["opus"]
+    assert [(hop.source_id, hop.model_id) for hop in route.hops] == [
+        (source["id"], newer["id"]),
+    ]
+    assert loaded.load_warnings == ()
+
+
+def test_config_reload_uses_first_enabled_duplicate_legacy_mapping(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    source = copy.deepcopy(_schema("source.schema.json")["examples"][0])
+    first_target = source["models"][0]["id"]
+    later_target = "claude-opus-5-20260724"
+    source["models"].append(
+        {
+            **source["models"][0],
+            "id": later_target,
+            "display_name": "Opus 5",
+        }
+    )
+    for model in source["models"]:
+        model["provenance"] = model.pop("origin")
+    current = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    legacy = _legacy_model_hub_payload(current["model_hub"])
+    legacy["sources"] = [source]
+    legacy["agents"]["claude"]["mode"] = "hub"
+    legacy["agents"]["claude"]["sources"] = {
+        "policy": "custom",
+        "order": [source["id"]],
+    }
+    legacy["agents"]["claude"]["mappings"] = [
+        {"builtin_id": "opus", "target_model_id": later_target, "enabled": False},
+        {"builtin_id": "opus", "target_model_id": first_target, "enabled": True},
+        {"builtin_id": "opus", "target_model_id": later_target, "enabled": True},
+    ]
+    current["model_hub"] = legacy
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(current), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    route = loaded.model_hub.agents["claude"].routes["opus"]
+    assert [(hop.source_id, hop.model_id) for hop in route.hops] == [
+        (source["id"], first_target),
+    ]
+
+
+@pytest.mark.parametrize("invalid_invariant", ["healthy-detail", "hub-credential"])
+def test_config_reload_recovers_inner_model_hub_invariant_only(
+    monkeypatch,
+    tmp_path,
+    invalid_invariant,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    payload = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    payload["show_duration"] = True
+    source = copy.deepcopy(_schema("source.schema.json")["examples"][0])
+    if invalid_invariant == "healthy-detail":
+        source["state"]["detail_key"] = "models.source.invalid"
+    else:
+        source["supply_channel"] = "hub"
+        source["credential_ref"] = None
+    payload["model_hub"]["sources"] = [source]
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert loaded.show_duration is True
+    assert loaded.model_hub.to_payload() == V2Config.default().model_hub.to_payload()
+    assert loaded.load_warnings and "model_hub" in loaded.load_warnings[0]
+    assert json.loads(config_path.read_text(encoding="utf-8"))["model_hub"]["sources"] == [source]
+
+
+def test_config_reload_does_not_overwrite_config_changed_during_migration(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    payload = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    payload["model_hub"] = _legacy_model_hub_payload(payload["model_hub"])
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+    concurrent_payload = {**payload, "show_duration": True}
+    original_persist = v2_config._persist_migrated_config_payload
+
+    def persist_after_concurrent_save(path, expected_raw, migrated_payload):
+        path.write_text(json.dumps(concurrent_payload), encoding="utf-8")
+        return original_persist(path, expected_raw, migrated_payload)
+
+    monkeypatch.setattr(
+        v2_config,
+        "_persist_migrated_config_payload",
+        persist_after_concurrent_save,
+    )
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert json.loads(config_path.read_text(encoding="utf-8")) == json.loads(
+        json.dumps(concurrent_payload)
+    )
+    assert loaded.load_warnings and "changed during load" in loaded.load_warnings[0]
+
+
 def test_config_reload_recovers_invalid_optional_section_without_overwriting_file(
     monkeypatch,
     tmp_path,
@@ -894,6 +1024,10 @@ def test_config_reload_recovers_invalid_optional_section_without_overwriting_fil
 
     assert loaded.model_hub.to_payload() == V2Config.default().model_hub.to_payload()
     assert loaded.load_warnings and "model_hub" in loaded.load_warnings[0]
+    assert api.client_config_payload(loaded)["config_recovery"] == {
+        "required": True,
+        "warnings": list(loaded.load_warnings),
+    }
     assert json.loads(config_path.read_text(encoding="utf-8"))["model_hub"]["sources"] == "invalid"
     assert list(config_path.parent.glob("config.json.bak-recovery-*"))
     V2Config.load(config_path=config_path)
