@@ -886,6 +886,129 @@ describe('Workbench session read ownership', () => {
     expect(inbox?.unreadBySession).toEqual({});
   });
 
+  it('does not treat targeted unread data as a complete account snapshot', async () => {
+    const staleInitialRead = deferred({
+      sessions: [],
+      next_cursor: null,
+      unread_by_session: { [sessionB.id]: 5 },
+    });
+    const replacementFailure = new Error('replacement refresh failed');
+    const listInbox = vi.fn()
+      .mockReturnValueOnce(staleInitialRead.promise)
+      .mockResolvedValueOnce({
+        sessions: [inboxRow],
+        next_cursor: null,
+        unread_by_session: { [session.id]: 3 },
+      })
+      .mockRejectedValueOnce(replacementFailure);
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    let handlers: WorkbenchEventHandlers | null = null;
+    apiRef.current = {
+      listInbox,
+      connectWorkbenchEvents: vi.fn((next) => {
+        handlers = next;
+        return vi.fn();
+      }),
+    };
+    const favicon = document.createElement('link');
+    favicon.rel = 'icon';
+    favicon.href = '/logo.png';
+    document.head.appendChild(favicon);
+    let inbox: ReturnType<typeof useWorkbenchInbox> | null = null;
+    const Probe = () => {
+      const value = useWorkbenchInbox();
+      useEffect(() => {
+        inbox = value;
+      }, [value]);
+      return null;
+    };
+
+    render(
+      <WorkbenchInboxProvider>
+        <Probe />
+      </WorkbenchInboxProvider>,
+    );
+    await settle();
+    act(() => {
+      handlers?.onSessionActivity?.({
+        session_id: session.id,
+        scope_id: session.scope_id,
+        event: 'updated',
+        visibility: 'foreground',
+      });
+    });
+    await settle();
+    expect(inbox?.unreadBySession).toEqual({ [session.id]: 3 });
+    await act(async () => {
+      staleInitialRead.resolve({
+        sessions: [],
+        next_cursor: null,
+        unread_by_session: { [sessionB.id]: 5 },
+      });
+      await staleInitialRead.promise;
+    });
+    await settle();
+
+    expect(listInbox).toHaveBeenCalledTimes(3);
+    expect(inbox?.unreadBySession).toEqual({ [session.id]: 3 });
+    expect(favicon.getAttribute('href')).toBe('/logo.png');
+    expect(consoleError).toHaveBeenCalledWith('[inbox] refresh failed', replacementFailure);
+    favicon.remove();
+    consoleError.mockRestore();
+  });
+
+  it('keeps a mark-read result across an unrelated unread event', async () => {
+    const markReadResult = deferred({ unread_by_session: { [sessionB.id]: 4 } });
+    let handlers: WorkbenchEventHandlers | null = null;
+    apiRef.current = {
+      listInbox: vi.fn().mockResolvedValue({
+        sessions: [inboxRow],
+        next_cursor: null,
+        unread_by_session: { [session.id]: 3, [sessionB.id]: 5 },
+      }),
+      markSessionRead: vi.fn().mockReturnValue(markReadResult.promise),
+      connectWorkbenchEvents: vi.fn((next) => {
+        handlers = next;
+        return vi.fn();
+      }),
+    };
+    let inbox: ReturnType<typeof useWorkbenchInbox> | null = null;
+    const Probe = () => {
+      const value = useWorkbenchInbox();
+      useEffect(() => {
+        inbox = value;
+      }, [value]);
+      return null;
+    };
+
+    render(
+      <WorkbenchInboxProvider>
+        <Probe />
+      </WorkbenchInboxProvider>,
+    );
+    await settle();
+    act(() => {
+      void inbox?.markRead(session.id);
+    });
+    await settle();
+    act(() => {
+      handlers?.onInboxUnreadChanged?.({
+        session_id: sessionB.id,
+        scope_id: sessionB.scope_id,
+        delta: -1,
+        unread_counts: { agent: 7 },
+        unread_by_session: { [session.id]: 3, [sessionB.id]: 4 },
+      });
+    });
+    await act(async () => {
+      markReadResult.resolve({ unread_by_session: { [sessionB.id]: 4 } });
+      await markReadResult.promise;
+    });
+    await settle();
+
+    expect(inbox?.unreadBySession).toEqual({ [sessionB.id]: 4 });
+  });
+
   it('keeps a successful mark-read result when an older unread snapshot finishes last', async () => {
     const markReadResult = deferred({ unread_by_session: { [sessionB.id]: 5 } });
     const staleRefresh = deferred({

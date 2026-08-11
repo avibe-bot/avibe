@@ -166,7 +166,8 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
 
   // One home for "an authoritative unread map arrived": set the map and flip
   // ``unreadLoaded`` together so the two can never drift apart. Every whole-account
-  // write (refresh / reconcile / markRead / unread.changed) goes through here;
+  // write (refresh / reconcile / unread.changed) goes through here; targeted
+  // reads and mark-read responses merge one session without claiming completeness.
   // stable identity, so it never churns the memoized context value.
   const applyUnreadMap = useCallback((map: Record<string, number>) => {
     setUnreadBySession(map);
@@ -191,7 +192,6 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
       else delete next[sessionId];
       return next;
     });
-    setUnreadLoaded(true);
   }, []);
 
   const mergeTargetedSnapshots = useCallback((rows: InboxSession[]): InboxSession[] => {
@@ -330,10 +330,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
       const operation = readOwnershipRef.current.beginRead(`inbox-mark-read:${sessionId}`);
       const result = await api.markSessionRead(sessionId, untilMessageId);
       if (
-        !readOwnershipRef.current.isMutationCurrent(operation, [
-          `inbox-session:${sessionId}`,
-          'inbox-unread-all',
-        ])
+        !readOwnershipRef.current.isMutationCurrent(operation, `inbox-session:${sessionId}`)
       ) {
         return;
       }
