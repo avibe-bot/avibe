@@ -64,6 +64,29 @@ describe('Memory UI copy contracts', () => {
     expect(zh.memory.log.callStage.cascade).not.toContain('队列');
   });
 
+  it.each(['en', 'zh'] as const)('keeps operational guidance scoped to runtime behavior in %s', (language) => {
+    const bundle = BUNDLES[language];
+    const disclosure = bundle.memory.settings.disclosure.join('\n');
+
+    if (language === 'en') {
+      expect(bundle.memory.processingRecord.runtime.noneDisabled).toBe('No separately disabled features reported.');
+      expect(bundle.memory.processingRecord.anomalies.help).toContain("won't recover automatically");
+      expect(bundle.memory.processingRecord.anomalies.help).toContain('Manual review required');
+      expect(disclosure).toContain('raw messages and attachment copies');
+      expect(disclosure).toContain('every user and project');
+      expect(bundle.memory.clear.confirmDescription).toContain('every user and project');
+      expect(bundle.memory.clear.removes[0]).toContain('every user and project');
+    } else {
+      expect(bundle.memory.processingRecord.runtime.noneDisabled).toBe('未报告单独禁用的功能。');
+      expect(bundle.memory.processingRecord.anomalies.help).toContain('不会自动恢复');
+      expect(bundle.memory.processingRecord.anomalies.help).toContain('需要人工检查');
+      expect(disclosure).toContain('原始消息和附件副本');
+      expect(disclosure).toContain('所有用户和项目');
+      expect(bundle.memory.clear.confirmDescription).toContain('所有用户和项目');
+      expect(bundle.memory.clear.removes[0]).toContain('所有用户和项目');
+    }
+  });
+
   it.each(['en', 'zh'] as const)('keeps Search, source timestamps, and processing-log scope accurate in %s', (language) => {
     if (language === 'en') {
       expect(en.memory.search.description).toBe('Search your profile, episodes, and facts.');
