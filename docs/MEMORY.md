@@ -58,8 +58,8 @@ finish before starting another one.
    **Clear all** before escalating further.
 2. **Repair index**: Use it when restarting does not clear index health
    warnings or pending work. The **Repair index** action is shown only when
-   Memory is enabled and `repair_available` is true (the installed, live Memory
-   Runtime must advertise repair capability and no rebuild or factory-reset
+   Memory is enabled and `repair_available` is true (the installed Memory
+   artifact must advertise repair capability and no rebuild or factory-reset
    marker may be pending). With a loaded health snapshot it appears beside
    **Processing queue**; an unavailable snapshot moves it beside **Engine
    status** rather than hiding it. Running Repair also requires the live Memory
