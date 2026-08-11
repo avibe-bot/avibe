@@ -51,6 +51,7 @@ METADATA_DIR = "/var/lib/avibe-regression"
 METADATA_PATH = f"{METADATA_DIR}/metadata.json"
 FINGERPRINT_PATH = f"{METADATA_DIR}/fingerprints.json"
 SERVICE_NAME = "avibe-regression.service"
+INTERNAL_DISPATCH_SOCKET = "/tmp/vibe_remote/dispatch.sock"
 DEFAULT_IMAGE = "avibe-regression-base-current"
 DEFAULT_BASE_SOURCE_IMAGE = "images:ubuntu/24.04/cloud"
 DEFAULT_NETWORK = "incusbr0"
@@ -508,7 +509,7 @@ def regression_service_unit() -> str:
         Environment=VIBE_DEPLOYMENT_ENV=regression
         Environment=VIBE_BUILD_METADATA_PATH={METADATA_PATH}
         Environment=AVIBE_ALLOW_DEV_STATE_MIGRATION=1
-        Environment=VIBE_INTERNAL_DISPATCH_SOCKET=/tmp/vibe_remote/dispatch.sock
+        Environment=VIBE_INTERNAL_DISPATCH_SOCKET={INTERNAL_DISPATCH_SOCKET}
         Environment=PYTHONUNBUFFERED=1
         Environment=PATH={VENV_DIR}/bin:{SERVICE_HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin
         EnvironmentFile=-/etc/avibe-regression.env
@@ -669,6 +670,7 @@ def tenant_exec(target: RegressionTarget, command: str, *args: str, remote: str 
     bash_command = (
         "set -a; [ ! -f /etc/avibe-regression.env ] || . /etc/avibe-regression.env; "
         "VIBE_DEPLOYMENT_ENV=regression; AVIBE_ALLOW_DEV_STATE_MIGRATION=1; "
+        f"VIBE_INTERNAL_DISPATCH_SOCKET={shlex.quote(INTERNAL_DISPATCH_SOCKET)}; "
         f"set +a; cd {shlex.quote(SOURCE_DIR)} && {command}"
     )
     return incus(
