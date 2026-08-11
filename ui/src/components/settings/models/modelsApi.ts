@@ -54,6 +54,11 @@ import { AGENT_CHAIN_CONTRACT_VERSION, CONTRACT_VERSION, PROBE_RESULT_CONTRACT_V
 export type Adoption = { added_to: AddedTo[]; adopted_by: AdoptedBy[] };
 export type SourceCreated = { source: Source } & Adoption;
 export type SourceRefresh = { source: Source; discovered: number };
+export type GuardConfirmation = {
+  force: true;
+  would_remove_hops: RouteHopRef[];
+  would_interrupt: SupplyGap[];
+};
 
 /**
  * The response of BOTH oauth status and submit (api.md → OAuth completion): the
@@ -91,7 +96,7 @@ export type ModelsApi = {
    *  Contractually ALSO the recovery test: run on a needs_action / error source
    *  it clears the blocker and returns the source to standby. v3 adds no second
    *  「recover」 endpoint, so this is the whole retry affordance. */
-  refreshSource(id: string, force?: boolean): Promise<SourceRefresh>;
+  refreshSource(id: string, confirmation?: GuardConfirmation): Promise<SourceRefresh>;
   /** Delete a source. `force` overrides the only-supplier guard. */
   deleteSource(id: string, force?: boolean): Promise<void>;
   /** Replace the credential of a hub-channel api_key source. Refuses with
@@ -117,7 +122,7 @@ export type ModelsApi = {
   putMenu(menu: AgentMenu): Promise<AgentSupply>;
   addCustomModel(sourceId: string, draft: CustomModelCreate): Promise<Source>;
   updateModelReasoningEfforts(sourceId: string, modelId: string, reasoningEfforts: string[]): Promise<Source>;
-  deleteCustomModel(sourceId: string, modelId: string, force?: boolean): Promise<Source>;
+  deleteCustomModel(sourceId: string, modelId: string, confirmation?: GuardConfirmation): Promise<Source>;
   scanMigration(): Promise<MigrationScan>;
   applyMigration(itemIds: string[]): Promise<MigrationApplyResult>;
   /** `before` is an event id cursor (「查看全部」 pagination). */
@@ -368,7 +373,7 @@ const liveApi: ModelsApi = {
   // of them this commit changed.
   createApiKeySource: (draft) => call<SourceCreatedResponse>('/api/models/sources', jsonInit('POST', draft)).then(created),
   patchSource: (id, patch) => call<{ source?: Source } & Source>(`/api/models/sources/${encodeURIComponent(id)}`, jsonInit('PATCH', patch)).then((r) => (r.source ?? r) as Source),
-  refreshSource: (id, force) => call<SourceRefresh>(`/api/models/sources/${encodeURIComponent(id)}/refresh`, jsonInit('POST', force ? { force: true } : {})),
+  refreshSource: (id, confirmation) => call<SourceRefresh>(`/api/models/sources/${encodeURIComponent(id)}/refresh`, jsonInit('POST', confirmation ?? {})),
   deleteSource: (id, force) => call(`/api/models/sources/${encodeURIComponent(id)}${force ? '?force=true' : ''}`, jsonInit('DELETE')).then(() => undefined),
   // Both repair routes reject unknown body keys outright (`discovery_failed` /
   // `reauth_confirmation_required`), so these bodies are exactly the contract's
@@ -390,7 +395,7 @@ const liveApi: ModelsApi = {
   putMenu: (menu) => call<{ agent?: AgentSupply } & AgentSupply>('/api/models/agents/opencode/menu', jsonInit('PUT', { menu })).then((r) => (r.agent ?? r) as AgentSupply),
   addCustomModel: (sourceId, draft) => call<{ source?: Source } & Source>(`/api/models/sources/${encodeURIComponent(sourceId)}/models`, jsonInit('POST', draft)).then((r) => (r.source ?? r) as Source),
   updateModelReasoningEfforts: (sourceId, modelId, reasoningEfforts) => call<{ source?: Source } & Source>(`/api/models/sources/${encodeURIComponent(sourceId)}/models/${encodeURIComponent(modelId)}`, jsonInit('PATCH', { reasoning_efforts: reasoningEfforts })).then((r) => (r.source ?? r) as Source),
-  deleteCustomModel: (sourceId, modelId, force) => call<{ source?: Source } & Source>(`/api/models/sources/${encodeURIComponent(sourceId)}/models/${encodeURIComponent(modelId)}`, jsonInit('DELETE', force ? { force: true } : {})).then((r) => (r.source ?? r) as Source),
+  deleteCustomModel: (sourceId, modelId, confirmation) => call<{ source?: Source } & Source>(`/api/models/sources/${encodeURIComponent(sourceId)}/models/${encodeURIComponent(modelId)}`, jsonInit('DELETE', confirmation ?? {})).then((r) => (r.source ?? r) as Source),
   scanMigration: () => call<{ scan?: MigrationScan } & MigrationScan>('/api/models/migration/scan', jsonInit('POST')).then((r) => (r.scan ?? r) as MigrationScan),
   applyMigration: (itemIds) => call<MigrationApplyResult>('/api/models/migration/apply', jsonInit('POST', { item_ids: itemIds })),
   listEvents: (limit = 20, before) =>
@@ -924,7 +929,7 @@ class MockStore {
     return delay(structuredClone(source));
   }
 
-  deleteCustomModel(sourceId: string, modelId: string, force = false) {
+  deleteCustomModel(sourceId: string, modelId: string, confirmation?: GuardConfirmation) {
     const source = this.sources.find((s) => s.id === sourceId);
     if (!source) throw new ApiCallError('source_not_found');
     const references: RouteHopRef[] = [];
@@ -937,11 +942,14 @@ class MockStore {
         }
       }
     }
-    if (references.length > 0 && !force) {
+    const confirmed = confirmation !== undefined
+      && JSON.stringify(confirmation.would_remove_hops) === JSON.stringify(references)
+      && JSON.stringify(confirmation.would_interrupt) === JSON.stringify([]);
+    if (references.length > 0 && !confirmed) {
       throw new ApiCallError('source_model_in_route_chain', undefined, true, [], [], references);
     }
     source.models = source.models.filter((m) => !(m.id === modelId && m.provenance === 'manual'));
-    if (force) {
+    if (confirmation) {
       for (const agent of this.agents) {
         agent.routes = Object.fromEntries(
           Object.entries(agent.routes ?? {}).map(([menuModel, route]) => [
@@ -1192,7 +1200,7 @@ class MockStore {
     return delay(structuredClone(source), 300);
   }
 
-  refreshSource(id: string, _force = false) {
+  refreshSource(id: string, _confirmation?: GuardConfirmation) {
     const source = this.sources.find((s) => s.id === id);
     if (!source) throw new ApiCallError('source_not_found');
     // Native-CLI subscriptions can't be re-discovered (server rejects them);
@@ -1250,7 +1258,7 @@ const mockApi: ModelsApi = {
   observeApiKeySource: (draft, signal) => mockStore.observeApiKeySource(draft, signal),
   createApiKeySource: (draft) => mockStore.createApiKeySource(draft),
   patchSource: (id, patch) => mockStore.patchSource(id, patch),
-  refreshSource: (id, force) => mockStore.refreshSource(id, force),
+  refreshSource: (id, confirmation) => mockStore.refreshSource(id, confirmation),
   deleteSource: (id, force) => mockStore.deleteSource(id, force),
   replaceCredential: (id, body) => mockStore.replaceCredential(id, body),
   reauthSource: (id) => mockStore.reauthSource(id),
@@ -1263,7 +1271,7 @@ const mockApi: ModelsApi = {
   putMenu: (menu) => mockStore.putMenu(menu),
   addCustomModel: (sourceId, draft) => mockStore.addCustomModel(sourceId, draft),
   updateModelReasoningEfforts: (sourceId, modelId, reasoningEfforts) => mockStore.updateModelReasoningEfforts(sourceId, modelId, reasoningEfforts),
-  deleteCustomModel: (sourceId, modelId, force) => mockStore.deleteCustomModel(sourceId, modelId, force),
+  deleteCustomModel: (sourceId, modelId, confirmation) => mockStore.deleteCustomModel(sourceId, modelId, confirmation),
   scanMigration: () => mockStore.scanMigration(),
   applyMigration: (itemIds) => mockStore.applyMigration(itemIds),
   listEvents: (limit, before) => mockStore.listEvents(limit, before),

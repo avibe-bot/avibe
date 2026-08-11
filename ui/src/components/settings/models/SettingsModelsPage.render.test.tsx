@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { I18nextProvider } from 'react-i18next';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -111,6 +111,33 @@ describe('SettingsModelsPage surface branches', () => {
     expect(await screen.findByText('Retained source')).toBeTruthy();
     expect(screen.getAllByRole('tab')).toHaveLength(2);
     expect(screen.queryByText(/^Switch to the gateway and you gain three things$|^切换到网关，你会多出三件事$/i)).toBeNull();
+  });
+
+  it('lands the operational overview without waiting for event history', async () => {
+    const pendingEvents = deferred<[]>();
+    vi.spyOn(modelsApi, 'listSources').mockResolvedValue([]);
+    vi.spyOn(modelsApi, 'listAgents').mockResolvedValue([
+      directAgent('claude'),
+      directAgent('codex'),
+      directAgent('opencode'),
+    ]);
+    vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
+    vi.spyOn(modelsApi, 'listEvents').mockReturnValue(pendingEvents.promise);
+
+    render(
+      <ToastProvider>
+        <I18nextProvider i18n={i18n}>
+          <SettingsModelsPage />
+        </I18nextProvider>
+      </ToastProvider>,
+    );
+
+    expect(await screen.findByText(/^Currently: direct$|^当前:直连$/i)).toBeTruthy();
+    expect(screen.getAllByRole('button', { name: /^Switch to Gateway$|^切换到网关$/i })).toHaveLength(3);
+    await act(async () => {
+      pendingEvents.resolve([]);
+      await pendingEvents.promise;
+    });
   });
 
   it('counts a recoverable reroute once per backend in Frame 08', async () => {
@@ -233,10 +260,9 @@ describe('SettingsModelsPage surface branches', () => {
     const agentRead = vi.spyOn(modelsApi, 'listAgents')
       .mockResolvedValueOnce([takeoverAgent])
       .mockResolvedValueOnce([direct]);
+    vi.spyOn(modelsApi, 'setAgentMode').mockResolvedValueOnce(direct);
     vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
-    vi.spyOn(modelsApi, 'listEvents')
-      .mockRejectedValueOnce(new TypeError('events unread'))
-      .mockResolvedValueOnce([]);
+    vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
     const chainRead = vi.spyOn(modelsApi, 'getAgentChain').mockImplementation(() => pendingChain.promise);
 
     render(
@@ -248,8 +274,7 @@ describe('SettingsModelsPage surface branches', () => {
     );
 
     await waitFor(() => expect(chainRead).toHaveBeenCalledOnce());
-    const history = screen.getByText(/^Recent switches$|^最近切换$/i).closest('section');
-    await userEvent.click(within(history as HTMLElement).getByRole('button', { name: /^Retry$|^重试$/i }));
+    await userEvent.click(screen.getByRole('button', { name: /^Switch to direct$|^切换到直连$/i }));
     await waitFor(() => expect(agentRead).toHaveBeenCalledTimes(2));
     expect(await screen.findByRole('button', { name: /^Switch to Gateway$|^切换到网关$/i })).toBeTruthy();
 
@@ -270,10 +295,9 @@ describe('SettingsModelsPage surface branches', () => {
     const agentRead = vi.spyOn(modelsApi, 'listAgents')
       .mockResolvedValueOnce([takeoverAgent])
       .mockRejectedValueOnce(new TypeError('supply unread'));
+    vi.spyOn(modelsApi, 'refreshSource').mockResolvedValueOnce({ source: head, discovered: head.models.length });
     vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
-    vi.spyOn(modelsApi, 'listEvents')
-      .mockRejectedValueOnce(new TypeError('events unread'))
-      .mockResolvedValueOnce([]);
+    vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
     vi.spyOn(modelsApi, 'getAgentChain').mockResolvedValue(takeoverChain);
 
     render(
@@ -285,10 +309,11 @@ describe('SettingsModelsPage surface branches', () => {
     );
 
     expect(await screen.findByText(/Now: Replacement source \(takeover\)|当前 Replacement source（接管）/i)).toBeTruthy();
-    const history = screen.getByText(/^Recent switches$|^最近切换$/i).closest('section');
-    await userEvent.click(within(history as HTMLElement).getByRole('button', { name: /^Retry$|^重试$/i }));
+    await userEvent.click(screen.getByText('Paused source').closest('button') as HTMLButtonElement);
+    await userEvent.click(await screen.findByRole('button', { name: /^Refetch$|^重新拉取$/i }));
 
     await waitFor(() => expect(agentRead).toHaveBeenCalledTimes(2));
+    await userEvent.click(screen.getByRole('button', { name: /^Back to sources$|^返回来源$/i }));
     expect(await screen.findByText(/Could not read this backend's supply|没有读到后端列表/i)).toBeTruthy();
     expect(screen.getByText(/Now: Replacement source \(takeover\)|当前 Replacement source（接管）/i)).toBeTruthy();
   });

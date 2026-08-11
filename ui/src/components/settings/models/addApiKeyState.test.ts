@@ -47,5 +47,13 @@ describe('Add API key observation state', () => {
       discovery: 'not_attempted',
       models: [],
     }))).toEqual({ kind: 'failure', cause: 'network' });
+    expect(classifyObservation(observation({
+      outcome: 'unreachable',
+      reachable: false,
+      authenticated: 'unknown',
+      protocol: null,
+      discovery: 'not_attempted',
+      models: [],
+    }))).toEqual({ kind: 'failure', cause: 'network' });
   });
 });

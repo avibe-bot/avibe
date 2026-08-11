@@ -1037,7 +1037,7 @@
           "auth": "鉴权失败:401 Unauthorized",
           "auth.detail": "检查 API Key 是否有效",
           "address": "地址不对:404 Not Found",
-          "network": "网络不通:连接超时",
+          "network": "无法连接到该地址(不可达或超时)",
           "unclassified": "没连成,原因认不出来",
           "engineDown": "网关没有响应,请重试",
           "save": "没能确认这个来源已经保存"

@@ -11,6 +11,7 @@ import {
   regionData,
   settleRegionRead,
 } from './regionRead';
+import { FIRST_PAINT_REGION_WHITELIST, readFirstPaintRegions, type FirstPaintRegionReaders } from './firstPaintRegions';
 
 const productFiles = (directory: string): string[] => readdirSync(directory, { withFileTypes: true })
   .flatMap((entry) => {
@@ -44,13 +45,27 @@ describe('RegionRead', () => {
 
   it('keeps every landing region tagged instead of pairing nullable data with flags', () => {
     const page = readFileSync(join(__dirname, 'SettingsModelsPage.tsx'), 'utf8');
-    const body = page.match(/type SurfaceLanding = \{(?<body>[\s\S]*?)\n\};/)?.groups?.body;
-    const memberTypes = [...(body ?? '').matchAll(/^\s+\w+:\s+([^;]+);$/gm)]
-      .map((match) => match[1]);
+    const policy = readFileSync(join(__dirname, 'firstPaintRegions.ts'), 'utf8');
 
-    expect(memberTypes.length).toBeGreaterThan(0);
-    expect(memberTypes.every((type) => type.startsWith('RegionRead<'))).toBe(true);
+    expect(policy).toMatch(/export type SurfaceLanding = \{\s*\[K in keyof FirstPaintRegionValues\]: RegionRead<FirstPaintRegionValues\[K\]>;\s*\}/);
     expect(page).not.toMatch(/(?:sources|supply|runtime|events|chains)(?:State|Unread|Failed)\b/);
+  });
+
+  it('runs the first-paint barrier from its reasoned core-region whitelist only', async () => {
+    const keys = Object.keys(FIRST_PAINT_REGION_WHITELIST);
+    const called: string[] = [];
+    const readers = Object.fromEntries(keys.map((key) => [key, async () => {
+      called.push(key);
+      return key;
+    }])) as unknown as FirstPaintRegionReaders;
+
+    const landing = await readFirstPaintRegions(readers);
+
+    expect(called).toEqual(keys);
+    expect(Object.keys(landing)).toEqual(keys);
+    const page = readFileSync(join(__dirname, 'SettingsModelsPage.tsx'), 'utf8');
+    const barrier = page.slice(page.indexOf('const readSurfaceLanding'), page.indexOf('\n\nconst surfaceLandingFailed'));
+    expect(barrier).not.toMatch(/listEvents|events/);
   });
 
   it('requires every product file that projects RegionRead data to name its read-state branch', () => {

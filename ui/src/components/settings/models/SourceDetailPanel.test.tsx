@@ -78,6 +78,7 @@ const renderEchoPanel = (reconcile = vi.fn(), trackMutation = immediateTrack) =>
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe('SourceDetailPanel', () => {
@@ -184,9 +185,9 @@ describe('SourceDetailPanel', () => {
 
   it('routes every full-Source mutation family through the shared per-Source queue', () => {
     const detail = readFileSync(join(process.cwd(), 'src/components/settings/models/SourceDetailPanel.tsx'), 'utf8');
-    expect(detail).toMatch(/const refetch = \(force = false\) => trackMutation/);
+    expect(detail).toMatch(/const refetch = \(confirmation\?: GuardConfirmation\) => trackMutation/);
     expect(detail).toMatch(/const addManualModel = \(\) => trackMutation/);
-    expect(detail).toMatch(/const remove = \(model: SuppliedModel, force = false\) => trackMutation/);
+    expect(detail).toMatch(/const remove = \(model: SuppliedModel, confirmation\?: GuardConfirmation\) => trackMutation/);
     expect(detail).toMatch(/const commit = async[\s\S]*return trackMutation\(async \(\) =>/);
   });
 
@@ -256,8 +257,59 @@ describe('SourceDetailPanel', () => {
     renderPanel();
     await userEvent.click(screen.getByRole('button', { name: /Remove model-a|移除 model-a/i }));
     await userEvent.click(screen.getByRole('menuitem', { name: /^Remove$|^移除$/i }));
-    await waitFor(() => expect(remove).toHaveBeenCalledWith(source.id, 'model-a', false));
+    await waitFor(() => expect(remove).toHaveBeenCalledWith(source.id, 'model-a', undefined));
     expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('echoes both arrays from a refetch refusal in the forced retry', async () => {
+    const hops = [{ backend: 'claude' as const, menu_model: 'claude-opus-4-6', source_id: source.id, model_id: 'model-a' }];
+    const gaps = [{ backend: 'claude' as const, model_id: 'claude-opus-4-6', agents: ['Release bot'] }];
+    const bodies: unknown[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === '/api/csrf-token') return Response.json({ csrf_token: 'csrf' });
+      if (String(input).endsWith(`/api/models/sources/${source.id}/refresh`)) {
+        bodies.push(JSON.parse(String(init?.body)));
+        if (bodies.length === 1) {
+          return Response.json({ error: 'source_in_route_chain', would_remove_hops: hops, would_interrupt: gaps }, { status: 409 });
+        }
+        return Response.json({ source, discovered: source.models.length });
+      }
+      throw new Error(`unexpected request: ${String(input)}`);
+    }));
+    renderPanel();
+
+    await userEvent.click(screen.getByRole('button', { name: /^Refetch$|^重新拉取$/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /^Refetch anyway$|^仍要拉取$/i }));
+
+    await waitFor(() => expect(bodies).toHaveLength(2));
+    expect(bodies[1]).toEqual({ force: true, would_remove_hops: hops, would_interrupt: gaps });
+  });
+
+  it('requires confirmation again when a forced removal receives a new guard plan', async () => {
+    const firstHops = [{ backend: 'claude' as const, menu_model: 'menu-a', source_id: source.id, model_id: 'model-a' }];
+    const nextHops = [{ backend: 'codex' as const, menu_model: 'menu-b', source_id: source.id, model_id: 'model-a' }];
+    const bodies: unknown[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === '/api/csrf-token') return Response.json({ csrf_token: 'csrf' });
+      if (String(input).includes(`/api/models/sources/${source.id}/models/model-a`)) {
+        bodies.push(JSON.parse(String(init?.body)));
+        if (bodies.length === 1) return Response.json({ error: 'source_model_in_route_chain', would_remove_hops: firstHops, would_interrupt: [] }, { status: 409 });
+        if (bodies.length === 2) return Response.json({ error: 'source_model_in_route_chain', would_remove_hops: nextHops, would_interrupt: [] }, { status: 409 });
+        return Response.json({ source: { ...source, models: [] } });
+      }
+      throw new Error(`unexpected request: ${String(input)}`);
+    }));
+    renderPanel();
+
+    await userEvent.click(screen.getByRole('button', { name: /Remove model-a|移除 model-a/i }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /^Remove$|^移除$/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /^Remove anyway$|^仍要移除$/i }));
+
+    expect(await screen.findByText(/menu-b/)).toBeTruthy();
+    expect(bodies[1]).toEqual({ force: true, would_remove_hops: firstHops, would_interrupt: [] });
+    await userEvent.click(screen.getByRole('button', { name: /^Remove anyway$|^仍要移除$/i }));
+    await waitFor(() => expect(bodies).toHaveLength(3));
+    expect(bodies[2]).toEqual({ force: true, would_remove_hops: nextHops, would_interrupt: [] });
   });
 
   it('names every model and Agent that a guarded change would interrupt', () => {

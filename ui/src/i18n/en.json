@@ -1037,7 +1037,7 @@
           "auth": "Authentication failed: 401 Unauthorized",
           "auth.detail": "Check whether the API key is valid",
           "address": "Wrong address: 404 Not Found",
-          "network": "Network unreachable: connection timed out",
+          "network": "Could not connect to this address (unreachable or timed out)",
           "unclassified": "It did not connect, and the cause could not be identified",
           "engineDown": "The gateway is not responding — try again",
           "save": "The source is not confirmed saved"

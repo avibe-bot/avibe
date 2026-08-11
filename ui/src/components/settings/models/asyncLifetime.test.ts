@@ -291,7 +291,7 @@ describe('Source entity landing through the shared authority', () => {
     const sourceRetry = page.slice(page.indexOf('const retrySources'), page.indexOf('const retrySupply'));
     const supplyRetry = page.slice(page.indexOf('const retrySupply'), page.indexOf('const retryEvents'));
 
-    expect(detail).toMatch(/modelsApi\.refreshSource\(source\.id, force\)/);
+    expect(detail).toMatch(/modelsApi\.refreshSource\(source\.id, confirmation\)/);
     expect(detail).toMatch(/await onMutation\(answer\.source\)/);
     expect(page).toMatch(/const sourceMutation[\s\S]*?convergeMutation\(\{/);
     expect(page).toMatch(/await refreshAuthority\.run/);

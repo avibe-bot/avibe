@@ -8,7 +8,7 @@ import { Input } from '@/components/ui/input';
 import { ResponsiveMenu } from '@/components/ui/responsive-menu';
 import { cn } from '@/lib/utils';
 import { formatRelativeTime } from '@/lib/relativeTime';
-import { apiFailure, modelsApi } from './modelsApi';
+import { apiFailure, modelsApi, type GuardConfirmation } from './modelsApi';
 import { reconcileUnknownWrite } from './reconcileUnknownWrite';
 import { sourceStatePresentation } from './sourceStatePresentation';
 import { useDeadlineClock } from './useDeadlineClock';
@@ -41,6 +41,12 @@ const ManualModelMenu: React.FC<{
 type GuardedAction =
   | { kind: 'refetch'; hops: RouteHopRef[]; gaps: SupplyGap[] }
   | { kind: 'remove'; model: SuppliedModel; hops: RouteHopRef[]; gaps: SupplyGap[] };
+
+const confirmGuardPlan = (guard: Pick<GuardedAction, 'hops' | 'gaps'>): GuardConfirmation => ({
+  force: true,
+  would_remove_hops: guard.hops,
+  would_interrupt: guard.gaps,
+});
 
 type SourceReconciliation =
   | { kind: 'source'; source: Source }
@@ -222,13 +228,13 @@ export const SourceDetailPanel: React.FC<{
     if (!failure || (failure.wouldRemoveHops.length === 0 && failure.wouldInterrupt.length === 0)) return null;
     return { hops: failure.wouldRemoveHops, gaps: failure.wouldInterrupt };
   };
-  const refetch = (force = false) => trackMutation(async () => {
+  const refetch = (confirmation?: GuardConfirmation) => trackMutation(async () => {
     setResult(null);
     setRefetchFailed(false);
     setBusy(true);
     const before = new Set(source.models.map((model) => model.id));
     try {
-      const answer = await modelsApi.refreshSource(source.id, force);
+      const answer = await modelsApi.refreshSource(source.id, confirmation);
       const after = new Set(answer.source.models.map((model) => model.id));
       const added = [...after].filter((id) => !before.has(id));
       const removed = [...before].filter((id) => !after.has(id));
@@ -239,7 +245,7 @@ export const SourceDetailPanel: React.FC<{
       if (apiFailure(error)?.code === 'source_not_found') await onGone(source.id);
       else {
         const refusal = guardedFailure(error);
-        if (refusal && !force) setGuard({ kind: 'refetch', ...refusal });
+        if (refusal) setGuard({ kind: 'refetch', ...refusal });
         else {
           setRefetchFailed(true);
           await onMutation();
@@ -333,20 +339,20 @@ export const SourceDetailPanel: React.FC<{
     }
     setRemoveFailure({ modelId: model.id, retryRead: reconciliation.kind === 'unread' });
   };
-  const remove = (model: SuppliedModel, force = false) => trackMutation(async () => {
+  const remove = (model: SuppliedModel, confirmation?: GuardConfirmation) => trackMutation(async () => {
     setResult(null);
     setRefetchFailed(false);
     setRemoveFailure(null);
     setBusy(true);
     try {
-      const echoed = await modelsApi.deleteCustomModel(source.id, model.id, force);
+      const echoed = await modelsApi.deleteCustomModel(source.id, model.id, confirmation);
       setGuard(null);
       await onMutation(echoed);
     } catch (error) {
       if (apiFailure(error)?.code === 'source_not_found') await onGone(source.id);
       else {
         const refusal = guardedFailure(error);
-        if (refusal && !force) setGuard({ kind: 'remove', model, ...refusal });
+        if (refusal) setGuard({ kind: 'remove', model, ...refusal });
         else await reconcileRemoval(model);
       }
     } finally {
@@ -355,8 +361,9 @@ export const SourceDetailPanel: React.FC<{
   });
   const confirmGuard = () => {
     if (!guard) return;
-    if (guard.kind === 'refetch') void refetch(true);
-    else void remove(guard.model, guard.hops.length > 0 || guard.gaps.length > 0);
+    const confirmation = confirmGuardPlan(guard);
+    if (guard.kind === 'refetch') void refetch(confirmation);
+    else void remove(guard.model, confirmation);
   };
   const adoptedBackends = [...new Set((source.adopted_by ?? []).map(({ backend }) => t(`settings.models.backends.${backend}`, { defaultValue: backend }) as string))];
   const state = sourceStatePresentation(source.state, 'detail', i18n.language, now, {

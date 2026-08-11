@@ -22,6 +22,7 @@ import { SupplyGraph, SupplyLegend } from './SupplyGraph';
 import './modelHubSurface.css';
 import { agentsWithEcho, createLatestAsyncAuthority, createLatestAsyncAuthorityByKey, createLatestEntityAuthorityByKey, createPendingWrites, mapWithConcurrency, type EntityGeneration } from './asyncLifetime';
 import { emptyFeed, feedAfterHeadRead, feedAfterTailRead, feedTailCursor, type EventFeed } from './eventFeed';
+import { readFirstPaintRegions, type SurfaceLanding } from './firstPaintRegions';
 import { modelsApi, type SourceCreated } from './modelsApi';
 import { convergeMutation, createIntentAuthority } from './mutationConvergence';
 import { modelChainKey, modelChainRequests, type ModelChainIndex } from './modelRows';
@@ -29,7 +30,6 @@ import {
   beginRegionRead,
   failRegionRead,
   loadingRegion,
-  readRegion,
   readyRegion,
   regionData,
   regionFailed,
@@ -85,32 +85,16 @@ const beginAgentChainIndex = (
   return next;
 };
 
-type SurfaceLanding = {
-  sources: RegionRead<Source[]>;
-  supply: RegionRead<AgentSupply[]>;
-  runtime: RegionRead<RuntimeDependency>;
-  events: RegionRead<ResolutionEvent[]>;
-};
-
 type AuthorizedSurfaceLanding = {
   landing: SurfaceLanding;
   sourceSnapshot: number;
 };
 
-const readSurfaceLanding = async (): Promise<SurfaceLanding> => {
-  const [sources, supply, runtime, events] = await Promise.all([
-    readRegion(() => modelsApi.listSources()),
-    readRegion(() => modelsApi.listAgents()),
-    readRegion(() => modelsApi.getRuntimeStatus()),
-    readRegion(() => modelsApi.listEvents(EVENT_PAGE)),
-  ]);
-  return {
-    sources,
-    supply,
-    runtime,
-    events,
-  };
-};
+const readSurfaceLanding = (): Promise<SurfaceLanding> => readFirstPaintRegions({
+  sources: () => modelsApi.listSources(),
+  supply: () => modelsApi.listAgents(),
+  runtime: () => modelsApi.getRuntimeStatus(),
+});
 
 const surfaceLandingFailed = (landing: SurfaceLanding): boolean =>
   Object.values(landing).some(regionFailed);
@@ -352,6 +336,28 @@ export const SettingsModelsPage: React.FC = () => {
     if (supplyRead.kind === 'ready') refreshAllAgentChains(supplyRead.data);
   }, [refreshAllAgentChains, supplyRead]);
 
+  const [eventReadAuthority] = React.useState(() => createLatestAsyncAuthority<RegionRead<ResolutionEvent[]>>((incoming) => {
+    if (!aliveRef.current) return;
+    setEventsRead((previous) => {
+      if (incoming.kind !== 'ready') return failRegionRead(previous);
+      const previousFeed = regionData(previous);
+      return readyRegion(previousFeed
+        ? feedAfterHeadRead(previousFeed, incoming.data)
+        : feedAfterTailRead(emptyFeed, incoming.data, EVENT_PAGE, null));
+    });
+  }));
+
+  const refreshEventHead = React.useCallback(async () => {
+    setEventsRead(beginRegionRead);
+    await eventReadAuthority.run(async () => {
+      try {
+        return readyRegion(await modelsApi.listEvents(EVENT_PAGE));
+      } catch {
+        return unreadRegion<ResolutionEvent[]>();
+      }
+    });
+  }, [eventReadAuthority]);
+
   const [refreshAuthority] = React.useState(() => createLatestAsyncAuthority<AuthorizedSurfaceLanding>(({ landing, sourceSnapshot }) => {
     if (!aliveRef.current) return;
     if (landing.sources.kind === 'ready') sourceEntityAuthority.settleSnapshot(sourceSnapshot, landing.sources.data);
@@ -363,16 +369,10 @@ export const SettingsModelsPage: React.FC = () => {
       return next;
     });
     if (landing.supply.kind !== 'ready') setChainsRead(failRegionRead);
-    setEventsRead((previous) => {
-      if (landing.events.kind !== 'ready') return failRegionRead(previous);
-      const previousFeed = regionData(previous);
-      return readyRegion(previousFeed
-        ? feedAfterHeadRead(previousFeed, landing.events.data)
-        : feedAfterTailRead(emptyFeed, landing.events.data, EVENT_PAGE, null));
-    });
   }));
 
   const refresh = React.useCallback(async () => {
+    void refreshEventHead();
     const outcome: { landing: SurfaceLanding | null } = { landing: null };
     const result = await refreshAuthority.run(async () => {
       const sourceSnapshot = sourceEntityAuthority.beginSnapshot();
@@ -382,7 +382,7 @@ export const SettingsModelsPage: React.FC = () => {
     if (aliveRef.current && result === 'landed' && outcome.landing && surfaceLandingFailed(outcome.landing)) {
       showToast(t('settings.models.toast.refreshFailed') as string, 'error');
     }
-  }, [refreshAuthority, showToast, sourceEntityAuthority, t]);
+  }, [refreshAuthority, refreshEventHead, showToast, sourceEntityAuthority, t]);
   React.useEffect(() => {
     void refresh();
   }, [refresh]);
@@ -398,9 +398,8 @@ export const SettingsModelsPage: React.FC = () => {
   }, [refresh]);
 
   const retryEvents = React.useCallback(async () => {
-    setEventsRead(beginRegionRead);
-    await refresh();
-  }, [refresh]);
+    await refreshEventHead();
+  }, [refreshEventHead]);
 
   const applyAgentEcho = React.useCallback((echoed: AgentSupply) => {
     setSupplyRead((previous) => readyRegion(agentsWithEcho(regionData(previous) ?? [], echoed)));
@@ -490,8 +489,7 @@ export const SettingsModelsPage: React.FC = () => {
   };
   const landingLoading = sourcesRead.kind === 'loading' && regionData(sourcesRead) === undefined
     && supplyRead.kind === 'loading' && regionData(supplyRead) === undefined
-    && runtimeRead.kind === 'loading' && regionData(runtimeRead) === undefined
-    && eventsRead.kind === 'loading' && regionData(eventsRead) === undefined;
+    && runtimeRead.kind === 'loading' && regionData(runtimeRead) === undefined;
   const directEmpty = regionData(sourcesRead) !== undefined
     && regionData(supplyRead) !== undefined
     && modelsSurfaceKind(agents, sources) === 'direct_empty';
