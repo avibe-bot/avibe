@@ -8,14 +8,14 @@ from vibe.authorization import (
     REMOTE_HTTP_LOCAL_ONLY,
     can_receive_workbench_event,
     context_from_session_payload,
-    has_temporary_unrestricted_org_app_access,
+    has_temporary_unrestricted_org_access,
     http_authorization_policy,
     require_instance_role,
     trusted_local_context,
 )
 
 
-def _remote_context(role: str) -> AuthorizationContext:
+def _active_org_context(role: str) -> AuthorizationContext:
     return AuthorizationContext(
         instance_role=role,
         subject=f"{role}-subject",
@@ -35,10 +35,10 @@ def _non_member_context(role: str = "owner") -> AuthorizationContext:
     )
 
 
-def test_remote_roles_allow_chat_without_enabling_local_machine_capabilities() -> None:
-    viewer = _remote_context("viewer")
-    editor = _remote_context("editor")
-    owner = _remote_context("owner")
+def test_non_member_remote_roles_keep_rank_without_local_machine_capabilities() -> None:
+    viewer = _non_member_context("viewer")
+    editor = _non_member_context("editor")
+    owner = _non_member_context("owner")
 
     assert viewer.can_read_instance is True
     assert viewer.can_chat is False
@@ -59,7 +59,7 @@ def test_remote_roles_allow_chat_without_enabling_local_machine_capabilities() -
     assert trusted_local_context().can_use_cloud_asr is False
 
 
-def test_temporary_org_app_access_is_not_projected_as_a_capability() -> None:
+def test_temporary_org_access_projects_runtime_rights_without_fake_local_capabilities() -> None:
     member = AuthorizationContext(
         instance_role="viewer",
         subject="member-1",
@@ -70,24 +70,24 @@ def test_temporary_org_app_access_is_not_projected_as_a_capability() -> None:
         is_remote=True,
     )
 
-    assert has_temporary_unrestricted_org_app_access(member) is True
+    assert has_temporary_unrestricted_org_access(member) is True
     assert member.capability_projection() == {
         "is_instance_owner": False,
         "can_read_instance": True,
-        "can_chat": False,
-        "can_manage_projects": False,
-        "can_manage_agents": False,
-        "can_manage_instance": False,
-        "can_use_agents": False,
-        "can_use_skills": False,
-        "can_use_vault_secrets": False,
+        "can_chat": True,
+        "can_manage_projects": True,
+        "can_manage_agents": True,
+        "can_manage_instance": True,
+        "can_use_agents": True,
+        "can_use_skills": True,
+        "can_use_vault_secrets": True,
         "can_use_show_pages": True,
         "can_use_terminal_files": False,
         "can_use_terminal": False,
         "can_use_files": False,
         "can_use_system": False,
     }
-    assert has_temporary_unrestricted_org_app_access(
+    assert has_temporary_unrestricted_org_access(
         AuthorizationContext(
             **{
                 **member.__dict__,
@@ -95,7 +95,7 @@ def test_temporary_org_app_access_is_not_projected_as_a_capability() -> None:
             }
         )
     ) is False
-    assert has_temporary_unrestricted_org_app_access(
+    assert has_temporary_unrestricted_org_access(
         AuthorizationContext(
             **{
                 **member.__dict__,
@@ -124,28 +124,13 @@ def test_temporary_org_members_receive_show_events_at_viewer_instance_role() -> 
     assert can_receive_workbench_event(non_member, "show.event") is False
 
 
-@pytest.mark.parametrize(
-    ("role", "expected"),
-    [
-        (
-            "viewer",
-            {"agent": False, "skill": False, "vault_secret": False, "show_page": True},
-        ),
-        (
-            "editor",
-            {"agent": True, "skill": True, "vault_secret": True, "show_page": True},
-        ),
-        (
-            "owner",
-            {"agent": True, "skill": True, "vault_secret": True, "show_page": True},
-        ),
-    ],
-)
-def test_resource_use_capability_is_distinct_from_owner_management(role, expected) -> None:
-    context = _remote_context(role)
+@pytest.mark.parametrize("role", ["viewer", "editor", "owner"])
+def test_active_org_members_bypass_role_splits_for_known_runtime_resources(role) -> None:
+    context = _active_org_context(role)
+    expected = {"agent": True, "skill": True, "vault_secret": True, "show_page": True}
 
     assert {kind: context.can_use_resource(kind) for kind in expected} == expected
-    assert context.can_manage_instance is (role == "owner")
+    assert context.can_manage_instance is True
     assert context.can_use_resource("future_resource") is False
 
 
@@ -166,7 +151,7 @@ def test_context_uses_role_not_diagnostic_source_for_owner() -> None:
 
     assert context.is_instance_owner is False
     assert context.can_chat is True
-    assert context.can_manage_instance is False
+    assert context.can_manage_instance is True
     assert context.authorization_revision == 0
 
 
@@ -295,7 +280,7 @@ def test_http_policy_preserves_safe_remote_reads_and_show_routes() -> None:
     assert http_authorization_policy("POST", "/show/ses-1/__show/events").remote_access == REMOTE_HTTP_ALLOWED
 
 
-def test_temporary_runtime_admission_requires_active_organization_membership() -> None:
+def test_temporary_runtime_signal_requires_membership_while_role_guard_uses_rank() -> None:
     member = AuthorizationContext(
         instance_role="viewer",
         subject="member-1",
@@ -311,9 +296,10 @@ def test_temporary_runtime_admission_requires_active_organization_membership() -
         instance_access_source="owner",
         is_remote=True,
     )
+    assert has_temporary_unrestricted_org_access(member) is True
+    assert has_temporary_unrestricted_org_access(non_member) is False
     assert require_instance_role(member, "owner") is member
-    with pytest.raises(InstanceAuthorizationError):
-        require_instance_role(non_member, "owner")
+    assert require_instance_role(non_member, "owner") is non_member
 
 
 def test_temporary_runtime_route_matrix_is_not_a_capability_projection() -> None:
@@ -331,9 +317,9 @@ def test_temporary_runtime_route_matrix_is_not_a_capability_projection() -> None
 
 
 def test_workbench_event_policy_filters_privileged_and_unknown_events() -> None:
-    viewer = _remote_context("viewer")
-    editor = _remote_context("editor")
-    owner = _remote_context("owner")
+    viewer = _active_org_context("viewer")
+    editor = _active_org_context("editor")
+    owner = _active_org_context("owner")
     non_member = _non_member_context()
     local = trusted_local_context()
 

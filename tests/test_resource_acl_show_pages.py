@@ -152,7 +152,7 @@ def test_show_page_email_context_bypasses_audience_only_for_its_signed_page(
         store.close()
 
 
-def test_non_org_remote_context_keeps_only_signed_show_page_entitlement(
+def test_non_org_email_context_keeps_exact_page_entitlement_separate_from_role_rank(
     monkeypatch, tmp_path
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
@@ -179,8 +179,8 @@ def test_non_org_remote_context_keeps_only_signed_show_page_entitlement(
                 "ses-scope",
                 connection=connection,
             )
-            assert not context.can_chat
-            assert not context.can_use_resource("agent")
+            assert context.can_chat
+            assert context.can_use_resource("agent")
     finally:
         store.close()
 

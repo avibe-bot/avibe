@@ -153,7 +153,7 @@ def test_active_org_members_can_use_legacy_resources_without_forging_local_ident
         engine.dispose()
 
 
-def test_inactive_remote_identity_cannot_use_resources_even_with_owner_claim(tmp_path) -> None:
+def test_non_member_role_rank_does_not_bypass_organization_resource_acl(tmp_path) -> None:
     db = tmp_path / "vibe.sqlite"
     run_migrations(db)
     engine = create_sqlite_engine(db)
@@ -188,10 +188,13 @@ def test_inactive_remote_identity_cannot_use_resources_even_with_owner_claim(tmp
                 "private-agent",
                 connection=connection,
             )
-            assert not resource_access_service.can_use_resource(
+            # Direct service calls retain ordinary role plus resource-policy
+            # semantics; HTTP admission rejects this non-member before runtime
+            # APIs can reach the service.
+            assert resource_access_service.can_use_resource(
                 removed_owner, "agent", "personal-agent", connection=connection
             )
-            assert not resource_access_service.can_manage_resource_acl(
+            assert resource_access_service.can_manage_resource_acl(
                 removed_owner, "agent", "personal-agent", connection=connection
             )
     finally:

@@ -103,26 +103,31 @@ class AuthorizationContext:
         )
 
     def _has_admitted_remote_identity(self) -> bool:
-        """Return whether this context carries an identity accepted for runtime use.
+        """Return whether identity-sensitive projections may trust this subject.
 
-        HTTP admission validates the signed session before a request reaches a
-        service. Services are also callable directly, so they must not infer
-        authority from a caller-constructed ``owner`` role alone. Show Page
-        email grants are the one non-Organization remote identity and retain
-        their signed viewer/page scope.
+        Runtime HTTP admission and ordinary role rank are evaluated separately.
+        This predicate is reserved for projections such as ``is_instance_owner``
+        that must not infer identity from a caller-constructed role alone. Show
+        Page email grants retain their signed viewer/page scope.
         """
 
         if not self.is_remote:
             return True
         if self.instance_access_source == "show_page_email":
             return self.instance_role == "viewer" and bool(self.show_page_id)
+        if self.instance_access_source == "email":
+            # Email-grant sessions are scoped by the Show Page email access
+            # boundary; their instance role rank governs non-page surfaces.
+            return True
         return self.is_active_organization_member
 
     def has_role(self, minimum_role: str) -> bool:
         if self.is_trusted_local:
             return True
-        if not self._has_admitted_remote_identity():
-            return False
+        # The temporary Organization rollout intentionally has no per-surface
+        # role split: an admitted active member may use any runtime surface.
+        if has_temporary_unrestricted_org_access(self):
+            return True
         return _ROLE_RANK.get(self.instance_role or "", 0) >= _ROLE_RANK[minimum_role]
 
     @property
@@ -373,15 +378,6 @@ def require_instance_role(
         if isinstance(context, AuthorizationContext)
         else context_from_session_payload(context)
     )
-    # The temporary rollout intentionally has no per-surface role split for an
-    # active Organization member, but it does not turn an arbitrary remote
-    # Instance owner into an Organization member. Keep exact Show Page email
-    # grants on their signed viewer role; the HTTP/page boundary scopes them to
-    # the one page separately.
-    if resolved.is_remote and resolved.instance_access_source != "show_page_email":
-        if not has_temporary_unrestricted_org_access(resolved):
-            raise InstanceAuthorizationError(minimum_role)
-        return resolved
     if not resolved.has_role(minimum_role):
         raise InstanceAuthorizationError(minimum_role)
     return resolved

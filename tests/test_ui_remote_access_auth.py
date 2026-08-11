@@ -1253,10 +1253,10 @@ def test_remote_session_info_projects_active_org_signal_without_fake_capabilitie
     assert payload["instance_role"] == "viewer"
     assert payload["temporary_unrestricted_org_access"] is True
     assert payload["temporary_unrestricted_org_app_access"] is True
-    # The temporary signal admits runtime routes; it never fabricates owner or
-    # trusted-local capability bits in the browser projection.
+    # The temporary signal grants runtime management without fabricating owner
+    # identity or trusted-local machine capability bits.
     assert payload["capabilities"]["is_instance_owner"] is False
-    assert payload["capabilities"]["can_manage_instance"] is False
+    assert payload["capabilities"]["can_manage_instance"] is True
     assert payload["capabilities"]["can_use_system"] is False
 
 
@@ -3190,7 +3190,9 @@ def test_remote_show_runtime_write_is_rejected_before_runtime_invocation(
     )
 
     assert response.status_code == 403
-    assert response.get_json()["error"] == "instance_access_forbidden"
+    payload = response.get_json()
+    assert payload["code"] == "remote_execution_disabled"
+    assert payload["error"]["code"] == "remote_execution_disabled"
 
 
 def test_active_org_member_can_read_session_history_without_resource_acl(
@@ -3355,12 +3357,14 @@ def test_non_org_remote_identity_cannot_use_runtime_apis(monkeypatch, tmp_path):
     session_response = client.get("/api/session", base_url="https://alex.avibe.bot")
 
     assert read_response.status_code == 403
+    assert read_response.get_json()["error"] == "instance_access_forbidden"
     assert manage_response.status_code == 403
     assert manage_response.get_json()["error"] == "instance_access_forbidden"
     assert session_response.status_code == 200
     session_payload = session_response.get_json()
     assert session_payload["temporary_unrestricted_org_access"] is False
-    assert session_payload["capabilities"]["can_read_instance"] is False
+    assert session_payload["capabilities"]["can_read_instance"] is True
+    assert session_payload["capabilities"]["can_chat"] is False
     assert session_payload["capabilities"]["can_use_system"] is False
 
 

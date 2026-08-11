@@ -2423,6 +2423,7 @@ def enforce_instance_role_capabilities():
     from vibe.authorization import (
         InstanceAuthorizationError,
         REMOTE_HTTP_ACTIVE_ORGANIZATION_MEMBER,
+        REMOTE_HTTP_LOCAL_ONLY,
         has_temporary_unrestricted_org_access,
         http_authorization_policy,
         require_instance_role,
@@ -2441,26 +2442,30 @@ def enforce_instance_role_capabilities():
     except (LookupError, RuntimeError):
         # This helper is also exercised by pure policy tests outside a request.
         context = None
-    if context is None:
-        return jsonify(
-            {
-                "ok": False,
-                "error": "instance_access_forbidden",
-                "required_role": minimum_role,
-            }
-        ), 403
-    # Known temporary runtime routes are admitted only for an active
-    # Organization member. Preserve the established remote-disabled response
-    # for other authenticated remote principals instead of leaking a role-only
-    # failure before the remote execution boundary can classify the request.
-    if (
-        context.is_remote
-        and policy.remote_access == REMOTE_HTTP_ACTIVE_ORGANIZATION_MEMBER
-        and request.path.startswith("/api/")
-        and not has_temporary_unrestricted_org_access(context)
-    ):
-        return _remote_execution_disabled_response()
+    # Cloud-management routes re-establish identity themselves (OAuth handshake,
+    # silent reauthorization). They must admit an authenticated remote principal
+    # who is not yet an active Organization member, so they bypass the
+    # Organization-admitted-identity role gate; each handler re-validates cloud
+    # identity before acting.
+    is_identity_bootstrap_path = request.path.startswith("/api/cloud-management/")
+    if is_identity_bootstrap_path:
+        return None
     try:
+        if context is None:
+            raise InstanceAuthorizationError(minimum_role)
+        if (
+            context.is_remote
+            and request.path.startswith("/api/")
+            and not has_temporary_unrestricted_org_access(context)
+        ):
+            # Routes classified for the temporary rollout and existing
+            # trusted-local routes retain the remote-execution error contract.
+            # Ordinary remotely exposed runtime APIs instead fail the active
+            # Organization membership admission check here, before role rank.
+            if policy.remote_access == REMOTE_HTTP_ACTIVE_ORGANIZATION_MEMBER:
+                return _remote_execution_disabled_response()
+            if policy.remote_access != REMOTE_HTTP_LOCAL_ONLY:
+                raise InstanceAuthorizationError(minimum_role)
         require_instance_role(context, minimum_role)
     except InstanceAuthorizationError:
         return jsonify(
