@@ -184,4 +184,73 @@ describe('MemorySettingsPanel', () => {
     expect(onClearAll).not.toHaveBeenCalled();
   });
 
+  it('does not announce rebuild completion for ordinary reconcile results', async () => {
+    api.saveMemorySettings.mockResolvedValue({
+      ...legacySettings,
+      processing: {
+        ...legacySettings.processing,
+        llm: endpoint('https://new.example.test/v1'),
+      },
+      runtime: { ok: true, state: 'ready' },
+    });
+    const user = userEvent.setup();
+    render(
+      <MemorySettingsPanel
+        settings={legacySettings}
+        maintenance={null}
+        maintenanceError={null}
+        dependencyReady
+        onSaved={() => undefined}
+        onReloadSettings={() => undefined}
+        onReloadMaintenance={() => undefined}
+        onClearAll={() => undefined}
+        clearing={false}
+      />,
+    );
+
+    const llmBaseUrl = screen.getAllByPlaceholderText('memory.settings.baseUrlPlaceholder')[0];
+    await user.clear(llmBaseUrl);
+    await user.type(llmBaseUrl, 'https://new.example.test/v1');
+    await user.click(screen.getByRole('button', { name: 'memory.settings.save' }));
+
+    await waitFor(() => expect(showToast).toHaveBeenCalledWith('memory.settings.saved', 'success'));
+    expect(showToast).not.toHaveBeenCalledWith('memory.settings.rebuildCompleted', 'success');
+  });
+
+  it('announces rebuild completion only for confirmed rebuild saves', async () => {
+    api.saveMemorySettings.mockResolvedValue({
+      ...legacySettings,
+      rebuild_required: false,
+      processing: {
+        ...legacySettings.processing,
+        embedding: endpoint('https://new-embedding.example.test/v1'),
+      },
+      runtime: { ok: true, result: 'completed' },
+    });
+    const user = userEvent.setup();
+    render(
+      <MemorySettingsPanel
+        settings={legacySettings}
+        maintenance={{ status: 'ok', data_exists: true, can_clear: true, clear_recovery: null }}
+        maintenanceError={null}
+        dependencyReady
+        onSaved={() => undefined}
+        onReloadSettings={() => undefined}
+        onReloadMaintenance={() => undefined}
+        onClearAll={() => undefined}
+        clearing={false}
+      />,
+    );
+
+    const embeddingBaseUrl = screen.getAllByPlaceholderText('memory.settings.baseUrlPlaceholder')[1];
+    await user.clear(embeddingBaseUrl);
+    await user.type(embeddingBaseUrl, 'https://new-embedding.example.test/v1');
+    await user.click(screen.getByRole('button', { name: 'memory.settings.save' }));
+    await user.click(await screen.findByRole('button', { name: 'confirm-rebuild' }));
+
+    await waitFor(() =>
+      expect(showToast).toHaveBeenCalledWith('memory.settings.rebuildCompleted', 'success'),
+    );
+  });
+
 });

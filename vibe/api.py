@@ -1011,7 +1011,9 @@ def save_config(
                 existing_update = _discord_guild_scope_from_config(base_config)
                 if existing_update is not None:
                     _save_discord_guild_scope_update(*existing_update, store=store)
-        config.save()
+        # Memory-owning path: candidate/marker already resolved under the shared
+        # transaction above; do not re-read Memory on the final write.
+        config.save(persist_memory=True)
         # The activity-streaming gate (ui.show_agent_activity) is cached in-process
         # by the message mirror; a save that flips it must take effect immediately,
         # not after the cache TTL. Reset it here (same process) — best-effort.
@@ -1036,6 +1038,26 @@ def _memory_transaction_unit(memory) -> tuple:
     return (
         bool(memory.enabled),
         bool(memory.embedding_change_pending),
+        processing.llm.base_url,
+        processing.llm.model,
+        processing.llm.api_key,
+        processing.embedding.base_url,
+        processing.embedding.model,
+        processing.embedding.api_key,
+        bool(memory.diagnostics.log_provider_calls),
+    )
+
+
+def memory_operational_unit(memory) -> tuple:
+    """Project operational Memory fields, ignoring the rebuild marker.
+
+    Used when a concurrent rebuild settles the marker while another tab's
+    enabled/settings save still holds the requested operational values.
+    """
+
+    processing = memory.processing
+    return (
+        bool(memory.enabled),
         processing.llm.base_url,
         processing.llm.model,
         processing.llm.api_key,

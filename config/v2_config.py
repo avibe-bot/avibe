@@ -1676,81 +1676,105 @@ class V2Config:
 
         return config
 
-    def save(self, config_path: Optional[Path] = None) -> None:
+    def save(
+        self,
+        config_path: Optional[Path] = None,
+        *,
+        persist_memory: bool = False,
+    ) -> None:
+        """Persist this config.
+
+        Direct writers (language, Model Hub, agent auth, remote access, …) must
+        not re-arm or clobber a Memory candidate/marker settled by another
+        process. Every save therefore takes the Memory config transaction; when
+        *persist_memory* is false the on-disk Memory unit is re-read under that
+        lock so a stale in-memory snapshot cannot overwrite it. Memory-owning
+        writers (``save_config(allow_memory=True)``, Controller settlement) pass
+        ``persist_memory=True``.
+        """
+
         paths.ensure_data_dirs()
         path = config_path or paths.get_config_path()
-        self.platforms.validate()
-        self.memory.validate()
-        self.platform = self.platforms.primary
-        platform_payload = {}
-        for descriptor in platform_descriptors():
-            descriptor_config = descriptor.get_config(self)
-            config_payload = descriptor_config.__dict__.copy() if descriptor_config else None
-            if descriptor.id == "discord" and isinstance(config_payload, dict):
-                if not config_payload.get("guild_allowlist") and not config_payload.get("guild_denylist"):
-                    config_payload.pop("guild_allowlist", None)
-                    config_payload.pop("guild_denylist", None)
-            platform_payload[descriptor.config_key] = config_payload
-        payload = {
-            "platform": self.platform,
-            "platforms": {
-                "enabled": self.platforms.enabled,
-                "primary": self.platforms.primary,
-            },
-            "mode": self.mode,
-            "version": self.version,
-            **platform_payload,
-            "runtime": {
-                "default_cwd": self.runtime.default_cwd,
-                "log_level": self.runtime.log_level,
-                "resource_governance": self.runtime.resource_governance,
-                "harness_run_sweep_interval_seconds": self.runtime.harness_run_sweep_interval_seconds,
-                "harness_run_orphan_grace_seconds": self.runtime.harness_run_orphan_grace_seconds,
-                "harness_run_queued_ttl_seconds": self.runtime.harness_run_queued_ttl_seconds,
-                "harness_run_hold_ttl_seconds": self.runtime.harness_run_hold_ttl_seconds,
-                "harness_prompt_echo": self.runtime.harness_prompt_echo,
-            },
-            "agents": {
-                "opencode": self.agents.opencode.__dict__,
-                "claude": self.agents.claude.__dict__,
-                "codex": self.agents.codex.__dict__,
-                "avault": self.agents.avault.__dict__,
-            },
-            "memory": memory_config_to_payload(
-                self.memory,
-                include_secrets=True,
-                include_internal=True,
-            ),
-            "model_hub": self.model_hub.to_payload(),
-            "gateway": self.gateway.__dict__ if self.gateway else None,
-            "ui": self.ui.__dict__,
-            "remote_access": {
-                "provider": self.remote_access.provider,
-                "vibe_cloud": self.remote_access.vibe_cloud.__dict__,
-            },
-            "audio_asr": self.audio_asr.__dict__,
-            "update": self.update.__dict__,
-            "ack_mode": self.ack_mode,
-            "show_duration": self.show_duration,
-            "include_time_info": self.include_time_info,
-            "include_user_info": self.include_user_info,
-            "reply_enhancements": self.reply_enhancements,
-            "show_pages_prompt": self.show_pages_prompt,
-            "language": self.language,
-            "agent_progress_style": self.agent_progress_style,
-            "agent_status_heartbeat_ms": self.agent_status_heartbeat_ms,
-            "agent_status_no_output_ms": self.agent_status_no_output_ms,
-            "setup_completed": self.setup_completed,
-        }
-        content = json.dumps(payload, indent=2)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with CONFIG_LOCK:
-            with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as tmp:
-                tmp.write(content)
-                tmp.flush()
-                os.fsync(tmp.fileno())
-                temp_name = tmp.name
-            os.replace(temp_name, path)
+        with memory_config_transaction():
+            if not persist_memory:
+                try:
+                    # Re-read under the shared lock so a concurrent settlement
+                    # that cleared the marker is the value this write keeps.
+                    self.memory = type(self).load(path).memory
+                except FileNotFoundError:
+                    pass
+            self.platforms.validate()
+            self.memory.validate()
+            self.platform = self.platforms.primary
+            platform_payload = {}
+            for descriptor in platform_descriptors():
+                descriptor_config = descriptor.get_config(self)
+                config_payload = descriptor_config.__dict__.copy() if descriptor_config else None
+                if descriptor.id == "discord" and isinstance(config_payload, dict):
+                    if not config_payload.get("guild_allowlist") and not config_payload.get("guild_denylist"):
+                        config_payload.pop("guild_allowlist", None)
+                        config_payload.pop("guild_denylist", None)
+                platform_payload[descriptor.config_key] = config_payload
+            payload = {
+                "platform": self.platform,
+                "platforms": {
+                    "enabled": self.platforms.enabled,
+                    "primary": self.platforms.primary,
+                },
+                "mode": self.mode,
+                "version": self.version,
+                **platform_payload,
+                "runtime": {
+                    "default_cwd": self.runtime.default_cwd,
+                    "log_level": self.runtime.log_level,
+                    "resource_governance": self.runtime.resource_governance,
+                    "harness_run_sweep_interval_seconds": self.runtime.harness_run_sweep_interval_seconds,
+                    "harness_run_orphan_grace_seconds": self.runtime.harness_run_orphan_grace_seconds,
+                    "harness_run_queued_ttl_seconds": self.runtime.harness_run_queued_ttl_seconds,
+                    "harness_run_hold_ttl_seconds": self.runtime.harness_run_hold_ttl_seconds,
+                    "harness_prompt_echo": self.runtime.harness_prompt_echo,
+                },
+                "agents": {
+                    "opencode": self.agents.opencode.__dict__,
+                    "claude": self.agents.claude.__dict__,
+                    "codex": self.agents.codex.__dict__,
+                    "avault": self.agents.avault.__dict__,
+                },
+                "memory": memory_config_to_payload(
+                    self.memory,
+                    include_secrets=True,
+                    include_internal=True,
+                ),
+                "model_hub": self.model_hub.to_payload(),
+                "gateway": self.gateway.__dict__ if self.gateway else None,
+                "ui": self.ui.__dict__,
+                "remote_access": {
+                    "provider": self.remote_access.provider,
+                    "vibe_cloud": self.remote_access.vibe_cloud.__dict__,
+                },
+                "audio_asr": self.audio_asr.__dict__,
+                "update": self.update.__dict__,
+                "ack_mode": self.ack_mode,
+                "show_duration": self.show_duration,
+                "include_time_info": self.include_time_info,
+                "include_user_info": self.include_user_info,
+                "reply_enhancements": self.reply_enhancements,
+                "show_pages_prompt": self.show_pages_prompt,
+                "language": self.language,
+                "agent_progress_style": self.agent_progress_style,
+                "agent_status_heartbeat_ms": self.agent_status_heartbeat_ms,
+                "agent_status_no_output_ms": self.agent_status_no_output_ms,
+                "setup_completed": self.setup_completed,
+            }
+            content = json.dumps(payload, indent=2)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with CONFIG_LOCK:
+                with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as tmp:
+                    tmp.write(content)
+                    tmp.flush()
+                    os.fsync(tmp.fileno())
+                    temp_name = tmp.name
+                os.replace(temp_name, path)
 
     def enabled_platforms(self) -> list[str]:
         return list(self.platforms.enabled)

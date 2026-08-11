@@ -2340,7 +2340,8 @@ class MemoryRuntime:
                     return False
                 if persisted.memory.embedding_change_pending:
                     persisted.memory.embedding_change_pending = False
-                    persisted.save()
+                    # Settlement owns the Memory unit; do not re-read it.
+                    persisted.save(persist_memory=True)
                 config.embedding_change_pending = False
             return True
         except Exception:

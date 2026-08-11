@@ -38,7 +38,7 @@ def test_memory_config_round_trips_and_hides_keys(tmp_path) -> None:
             }
         )
     )
-    config.save(tmp_path / "config.json")
+    config.save(tmp_path / "config.json", persist_memory=True)
 
     stored = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
     projected = config_to_payload(config)
@@ -69,7 +69,7 @@ def test_memory_config_drops_retired_proactive_capture_flag(tmp_path) -> None:
             }
         )
     )
-    upgraded.save(tmp_path / "config.json")
+    upgraded.save(tmp_path / "config.json", persist_memory=True)
 
     stored = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
     assert "proactive_capture" not in stored["memory"]
@@ -178,7 +178,7 @@ def test_generic_config_save_preserves_memory_keys(monkeypatch, tmp_path) -> Non
             }
         )
     )
-    original.save()
+    original.save(persist_memory=True)
 
     saved = api.save_config({"runtime": {"log_level": "DEBUG"}})
 
@@ -190,9 +190,45 @@ def test_generic_config_save_preserves_memory_keys(monkeypatch, tmp_path) -> Non
 
 def test_memory_save_uses_dedicated_config_writer(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    V2Config.from_payload(_payload({"enabled": False, "processing": {}})).save()
+    V2Config.from_payload(_payload({"enabled": False, "processing": {}})).save(
+        persist_memory=True
+    )
 
     saved = api.save_memory_config({"enabled": True, "processing": _complete_processing()})
 
     assert saved.memory.enabled is True
     assert saved.memory.processing.llm.api_key == "llm-key"
+
+
+def test_direct_v2config_writer_preserves_settled_memory_marker(monkeypatch, tmp_path) -> None:
+    """Language/Model Hub style writers must not re-arm a cleared rebuild marker."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    original = V2Config.from_payload(
+        _payload(
+            {
+                "enabled": True,
+                "processing": _complete_processing(),
+                "embedding_change_pending": True,
+            }
+        )
+    )
+    original.save(persist_memory=True)
+
+    # Stale writer loaded while the marker was still set.
+    stale = V2Config.load()
+    assert stale.memory.embedding_change_pending is True
+
+    # Controller settlement clears the marker under the shared transaction.
+    settled = V2Config.load()
+    settled.memory.embedding_change_pending = False
+    settled.save(persist_memory=True)
+
+    # Direct non-Memory writer (language/model-hub pattern) must keep settlement.
+    stale.language = "zh"
+    stale.save()
+
+    persisted = V2Config.load()
+    assert persisted.language == "zh"
+    assert persisted.memory.embedding_change_pending is False
+    assert persisted.memory.processing.embedding.api_key == "embed-key"

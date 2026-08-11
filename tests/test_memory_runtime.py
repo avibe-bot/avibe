@@ -2493,7 +2493,7 @@ async def test_runtime_restart_rechecks_persisted_embedding_candidate(
             processing=processing,
             embedding_change_pending=True,
         ),
-    ).save()
+    ).save(persist_memory=True)
     restarted = V2Config.load().memory
     inspected: list[bool] = []
     factory = FakeEverOSProcessFactory()
@@ -2565,7 +2565,7 @@ async def test_runtime_settles_embedding_candidate_before_resuming_claims(
             processing=processing,
             embedding_change_pending=True,
         ),
-    ).save()
+    ).save(persist_memory=True)
     restarted = V2Config.load().memory
 
     runtime = memory_runtime_factory(
@@ -3934,7 +3934,7 @@ async def test_marker_settlement_updates_only_replay_marker_after_candidate_fail
         runtime=RuntimeConfig(default_cwd="."),
         agents=AgentsConfig(),
         memory=candidate,
-    ).save()
+    ).save(persist_memory=True)
     factory = FakeEverOSProcessFactory(template=ConfigAwareProcess)
     runtime = memory_runtime_factory(
         startup,
@@ -4590,7 +4590,7 @@ async def test_runtime_rebuild_validates_before_destructive_stop(
             processing=processing,
             embedding_change_pending=True,
         ),
-    ).save()
+    ).save(persist_memory=True)
     factory = FakeEverOSProcessFactory()
     runtime = memory_runtime_factory(
         V2Config.load().memory,
@@ -4630,7 +4630,7 @@ async def test_runtime_rebuild_empty_root_settles_without_child(
             processing=processing,
             embedding_change_pending=True,
         ),
-    ).save()
+    ).save(persist_memory=True)
     factory = FakeEverOSProcessFactory()
     runtime = memory_runtime_factory(
         V2Config.load().memory,
@@ -4675,7 +4675,7 @@ async def test_runtime_rebuild_maps_root_busy_without_settling(
             processing=processing,
             embedding_change_pending=True,
         ),
-    ).save()
+    ).save(persist_memory=True)
     factory = FakeEverOSProcessFactory()
     runtime = memory_runtime_factory(
         V2Config.load().memory,
@@ -4718,7 +4718,7 @@ async def test_runtime_rebuild_refreshes_restart_snapshot_before_activation(
             processing=processing,
             embedding_change_pending=True,
         ),
-    ).save()
+    ).save(persist_memory=True)
     observed = []
 
     class _CompletedRebuild:

@@ -418,6 +418,7 @@ async def _apply_memory_settings_patch(
                 return _memory_response(payload)
             # Ordinary non-identity saves must not outrun the controller's closed
             # compatibility decision, including while memory is disabled.
+            rollback_stale = False
             try:
                 rollback_payload = memory_config_to_payload(
                     current.memory,
@@ -430,8 +431,24 @@ async def _apply_memory_settings_patch(
                     expected=saved.memory,
                 )
                 await _memory_internal_response(internal_client.reconcile_memory)
+            except api.MemoryConfigStaleWrite:
+                # Concurrent settlement cleared the marker or advanced the
+                # candidate; the requested operational change may already be
+                # the durable unit.
+                rollback_stale = True
             except Exception:
                 pass
+            if rollback_stale or closed_error == "memory_operation_in_progress":
+                try:
+                    latest = await asyncio.to_thread(V2Config.load)
+                    if api.memory_operational_unit(latest.memory) == api.memory_operational_unit(
+                        saved.memory
+                    ):
+                        return _memory_response(
+                            _settings_ok_payload(latest.memory, runtime_payload)
+                        )
+                except Exception:
+                    pass
             return _memory_response(
                 {
                     "status": "failed",

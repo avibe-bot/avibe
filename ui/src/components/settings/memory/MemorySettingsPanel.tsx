@@ -197,8 +197,9 @@ export const MemorySettingsPanel: React.FC<{
       if (isMemoryOk(res)) {
         onSaved(res);
         const runtime = res.runtime as { ok?: boolean } | undefined;
-        if (runtime && typeof runtime.ok === 'boolean') {
-          // Only announce rebuild outcomes when the backend actually ran rebuild.
+        // Ordinary reconcile also returns runtime.ok; only a confirmed rebuild
+        // (needsRebuild) or Retry path should announce rebuild outcomes.
+        if (needsRebuild && runtime && typeof runtime.ok === 'boolean') {
           showToast(
             runtime.ok ? t('memory.settings.rebuildCompleted') : t('memory.settings.rebuildFailed'),
             runtime.ok ? 'success' : 'error',

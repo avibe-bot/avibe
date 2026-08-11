@@ -736,7 +736,7 @@ def test_memory_embedding_identity_change_requires_confirm_and_saves_nothing(
             embedding=MemoryEndpointConfig("https://embed.example.test/v1", "embed-v1", "embed-key"),
         ),
     )
-    current.save()
+    current.save(persist_memory=True)
     calls: list[bool] = []
 
     async def rebuild():
@@ -777,7 +777,7 @@ def test_memory_confirmed_embedding_change_persists_marker_and_awaits_rebuild(
             embedding=MemoryEndpointConfig("https://embed.example.test/v1", "embed-v1", "embed-key"),
         ),
     )
-    current.save()
+    current.save(persist_memory=True)
     observed: list[tuple[str | None, bool]] = []
 
     async def rebuild():
@@ -786,7 +786,7 @@ def test_memory_confirmed_embedding_change_persists_marker_and_awaits_rebuild(
         persisted.embedding_change_pending = False
         controller_config = V2Config.load()
         controller_config.memory = persisted
-        controller_config.save()
+        controller_config.save(persist_memory=True)
         return {
             "status_code": 200,
             "body": {"ok": True, "result": "completed_empty", "state": "disabled"},
@@ -826,7 +826,7 @@ def test_memory_confirmed_rebuild_failure_keeps_candidate(monkeypatch, tmp_path)
             embedding=MemoryEndpointConfig("https://embed.example.test/v1", "embed-v1", "embed-key"),
         ),
     )
-    current.save()
+    current.save(persist_memory=True)
 
     async def rebuild():
         return {
@@ -875,7 +875,7 @@ def test_memory_api_key_only_under_pending_marker_does_not_reconcile(
             embedding=MemoryEndpointConfig("https://embed.example.test/v1", "embed-v1", "embed-key"),
         ),
     )
-    current.save()
+    current.save(persist_memory=True)
     rebuild_calls: list[bool] = []
     reconcile_calls: list[bool] = []
 
@@ -960,7 +960,7 @@ def test_memory_config_stale_controller_settlement_cannot_clobber_newer_candidat
             embedding=MemoryEndpointConfig("https://embed.example.test/v1", "embed-v1", "embed-key"),
         ),
     )
-    baseline.save()
+    baseline.save(persist_memory=True)
 
     # UI confirms a new candidate+marker.
     from config.v2_config import memory_config_to_payload
@@ -1005,7 +1005,7 @@ def test_overlapping_memory_settings_patches_never_interleave_save_and_rollback(
             embedding=MemoryEndpointConfig("https://embed.example.test/v1", "embed-v1", "embed-key"),
         ),
     )
-    baseline.save()
+    baseline.save(persist_memory=True)
     observed: list[str] = []
     first_reconcile_entered = asyncio.Event()
     release_first_reconcile = asyncio.Event()
@@ -1411,7 +1411,7 @@ def test_memory_disable_under_pending_marker_still_reconciles(monkeypatch, tmp_p
             embedding=MemoryEndpointConfig("https://embed.example.test/v1", "embed-v1", "embed-key"),
         ),
     )
-    current.save()
+    current.save(persist_memory=True)
     reconcile_calls = []
 
     async def reconcile():
@@ -1433,3 +1433,51 @@ def test_memory_disable_under_pending_marker_still_reconciles(monkeypatch, tmp_p
     persisted = V2Config.load().memory
     assert persisted.enabled is False
     assert persisted.embedding_change_pending is True
+
+
+def test_memory_enabled_save_succeeds_when_settlement_clears_marker(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """Concurrent Retry settlement must not report a successful enable as 409."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    current = V2Config.load()
+    current.memory = MemoryConfig(
+        enabled=False,
+        embedding_change_pending=True,
+        processing=MemoryProcessingConfig(
+            llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-key"),
+            embedding=MemoryEndpointConfig("https://embed.example.test/v1", "embed-v1", "embed-key"),
+        ),
+    )
+    current.save(persist_memory=True)
+
+    async def reconcile():
+        # Another tab's Retry settles the marker after this save persisted enabled.
+        settled = V2Config.load()
+        settled.memory.embedding_change_pending = False
+        settled.save(persist_memory=True)
+        return {
+            "status_code": 409,
+            "body": {"ok": False, "error": "memory_operation_in_progress"},
+        }
+
+    monkeypatch.setattr(internal_client, "reconcile_memory", reconcile)
+    client = app.test_client()
+    response = client.patch(
+        "/api/memory/settings",
+        json={"enabled": True},
+        headers=csrf_headers(client, "http://127.0.0.1:15131"),
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["status"] == "ok"
+    assert body["enabled"] is True
+    persisted = V2Config.load().memory
+    assert persisted.enabled is True
+    assert persisted.embedding_change_pending is False
