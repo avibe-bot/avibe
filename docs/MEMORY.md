@@ -55,10 +55,10 @@ finish before starting another one.
    Memory must be enabled. This restarts the Memory engine without changing
    settings, rebuilding indexes, or deleting retained data.
 2. **Repair index**: Use it when restarting does not clear index health
-   warnings or pending work. Its appearance under **Processing Record > Runtime
-   and capabilities** is controlled by `repair_available`; an unavailable
-   health snapshot alone does not hide it. Running Repair also requires Memory
-   to be enabled and the live Memory Runtime and sidecar to be available.
+   warnings or pending work. Its appearance under **Engine status > Available capabilities**
+   is controlled by `repair_available`; an unavailable health snapshot alone does
+   not hide it. Running Repair also requires Memory to be enabled and the live
+   Memory Runtime and sidecar to be available.
    Requests while Memory is disabled are refused, and an unavailable runtime or
    sidecar causes Repair to fail. Repair rescans Markdown memory and drains
    pending work while keeping the engine available; it preserves the existing
@@ -82,10 +82,11 @@ finish before starting another one.
    the installed Memory root (`memory`) and the mutable Memory state root
    (`state/memory`). Only a successful cutover starts fresh, usable Memory. It
    preserves Memory settings and credentials, the pinned, installed Memory
-   artifact, original Avibe chats, and data outside those two roots. If both
-   roots are deleted but later engine or sidecar activation fails, deletion is
-   not rolled back: both roots remain deleted while Memory stays fenced and
-   unavailable. Fix the runtime problem, then select **Retry factory reset**.
+   artifact, original Avibe chats, and data outside those two roots. If engine
+   or sidecar activation fails after deletion, the old contents under `memory`
+   and `state/memory` stay deleted, but construction of the fresh runtime may
+   have recreated empty or partial roots. Memory stays fenced and unavailable.
+   Fix the runtime problem, then select **Retry factory reset**.
 
 ### Factory reset
 
