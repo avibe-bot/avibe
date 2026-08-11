@@ -1144,10 +1144,10 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
     GateCase(
         "C", "frames", "arm",
         "prose attributes the guarded refusal to a frame §0.8 does not file it under",
-        "exactly as §0.9 and §1.6 rule the same hole",
-        "exactly as §0.9 and §1.3 rule the same hole",
+        "the two §1.6 sends are",
+        "the two §1.3 sends are",
         "reaches the guarded refusal",
-        within="1.1",
+        within="1.6",
     ),
     # The same misattribution in the document's other habit. A frame heading
     # gives the frame three names, and §1 prose uses all of them — "Frames 09
@@ -1157,10 +1157,10 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
     GateCase(
         "C", "frames", "arm",
         "the same misattribution, written with the frame's display number",
-        "exactly as §0.9 and §1.6 rule the same hole",
-        "exactly as §0.9 and 03 rule the same hole",
+        "the two §1.6 sends are",
+        "the two 03 sends are",
         "reaches the guarded refusal",
-        within="1.1",
+        within="1.6",
     ),
     # --- D: copy ------------------------------------------------------------
     # Condition keys are stored bare and cited namespace-qualified, so the
@@ -1500,9 +1500,25 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
     GateCase(
         "E", None, "arm",
         "api authority line is outside the file",
-        "`api.md:212`",
+        "`api.md:261`",
         "`api.md:9999`",
         "is outside `docs/plans/model-hub-contracts/api.md`",
+        within="0.5",
+    ),
+    GateCase(
+        "E", None, "arm",
+        "api authority line points at unrelated content",
+        "`api.md:261`",
+        "`api.md:212`",
+        "does not support this claim",
+        within="0.5",
+    ),
+    GateCase(
+        "E", None, "arm",
+        "api authority line has a malformed suffix",
+        "`api.md:261`",
+        "`api.md:261x`",
+        "has a malformed line number",
         within="0.5",
     ),
     GateCase(
@@ -1532,6 +1548,90 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "and sends `{agent: AgentSupply}`",
         "not contracted for",
         within="1.3",
+    ),
+    # Round 19's breaker inventory: every spelling below is still visibly a
+    # candidate of the grammar it is trying to use. Extraction must therefore
+    # hand it to the relevant universe or structural validator, never make
+    # validity a prerequisite for being seen.
+    GateCase(
+        "C", "states", "arm",
+        "a multiword success exit is truncated to one ambiguous word",
+        "Component present → Not started",
+        "Component present → Not",
+        "exits to 「Not」, which opens with no state §1.0 files",
+        within="0.8",
+    ),
+    GateCase(
+        "E", "routes", "arm",
+        "a body carries a leading-digit candidate member",
+        "`{order: string[]}` `[contract]`",
+        "`{order: string[], 1bogus: integer}` `[contract]`",
+        "names 1bogus — not contracted for",
+        within="0.8",
+    ),
+    GateCase(
+        "B", "copy", "arm",
+        "a copy definition loses its key backticks",
+        "| `shell.title` | 模型 | Models |",
+        "| shell.title | 模型 | Models |",
+        "copy row `shell.title` is not backticked",
+        within="1.0",
+    ),
+    GateCase(
+        "E", "schema files", "arm",
+        "a schema citation starts with an underscore",
+        "`runtime-dependency.schema.json` → `status.health`",
+        "`_runtime-dependency.schema.json` → `status.health`",
+        "`_runtime-dependency.schema.json` is not a file in",
+        within="1.0",
+    ),
+    GateCase(
+        "E", "routes", "arm",
+        "a route method is misspelt",
+        "`GET /api/models/sources` fails while",
+        "`GTE /api/models/sources` fails while",
+        "`GTE /api/models/sources` is contracted by no `api.md` route row",
+        within="0.8",
+    ),
+    GateCase(
+        "E", "routes", "arm",
+        "a guarded response borrows a nested gap field",
+        "on success it returns `{chain, removed_hops, interrupted}`",
+        "on success it returns `{chain, removed_hops, interrupted, backend}`",
+        "names backend — not contracted for",
+        within="0.5",
+    ),
+    GateCase(
+        "A", "states", "arm",
+        "a cross-frame destination starts lowercase",
+        "| §1.1 | Loading | First paint | → §1.0 Unreachable / §1.0 Sources unread / §1.0 Partial",
+        "| §1.1 | Loading | First paint | → §1.0 unreachable / §1.0 Sources unread / §1.0 Partial",
+        "defers to 「unreachable」 in §1.0, which files no such state",
+        within="0.8",
+    ),
+    GateCase(
+        "A", "treatments", "arm",
+        "a failure treatment uses an underscore",
+        "| F1 → Install failed |",
+        "| F_1 → Install failed |",
+        "names F_1, which §0.8's closed set does not define",
+        within="0.8",
+    ),
+    GateCase(
+        "E", "gaps", "arm",
+        "a surface cites a withdrawn gap",
+        "An install confirm was accepted `[contract-gap]` G-10",
+        "An install confirm was accepted `[contract-gap]` G-9",
+        "`[contract-gap] G-9` cites a withdrawn §0.5 row",
+        within="0.8",
+    ),
+    GateCase(
+        "E", "routes", "arm",
+        "a route claim changes a contracted query name",
+        "`GET /api/models/agents/<backend>/chain?model=<id>`",
+        "`GET /api/models/agents/<backend>/chain?mode=<id>`",
+        "uses query `mode=<id>`; `api.md` contracts `model=<id>`",
+        within="0.8",
     ),
     # --- the four defects that spent the exit clause -----------------------
     #
@@ -1644,7 +1744,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "`agent-supply.schema.json`'s `model_supply` rows require exactly",
         "`agent-supply.schema.json` has 16 properties, and its `model_supply` rows "
         "require exactly",
-        "has 13 properties, not 16",
+        "has 14 properties, not 16",
         within="0.5",
     ),
     GateCase(
@@ -1653,7 +1753,7 @@ GATE_MUTATIONS: tuple[GateCase, ...] = (
         "`agent-supply.schema.json`'s `model_supply` rows require exactly",
         "`agent-supply.schema.json` has sixteen properties, and its `model_supply` rows "
         "require exactly",
-        "has 13 properties, not 16",
+        "has 14 properties, not 16",
         within="0.5",
     ),
     # §0.9 declares which keys interpolate each slot; §1.0 enumerates the same
@@ -2161,13 +2261,13 @@ GATE_INNOCENT: tuple[InnocentCase, ...] = (
     # reader sent to the wrong file. Both halves are pinned here at once: the
     # count binds to the file it is written next to, and the property names the
     # row goes on to cite are citations rather than a botched enumeration of the
-    # thirteen. Widen either reading back and this goes red while every red case
+    # fourteen. Widen either reading back and this goes red while every red case
     # above stays red.
     InnocentCase(
         "a counted claim in a row that names a second schema too",
         "class E binds a count to its own subject and reads a cited property as a citation",
         "`agent-supply.schema.json` declares no `adopted_by`",
-        "`agent-supply.schema.json`'s 13 properties do not include `adopted_by`",
+        "`agent-supply.schema.json`'s 14 properties do not include `adopted_by`",
         within="0.5",
     ),
     InnocentCase(

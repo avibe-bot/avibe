@@ -260,6 +260,10 @@ def resolve_inputs(
 
 ROUTE_RE = re.compile(r"`(POST|PUT|PATCH|DELETE) (/api/[^`]*)`")
 ANY_ROUTE_RE = re.compile(r"`(GET|POST|PUT|PATCH|DELETE) (/api/[^`]*)`")
+# Candidate first, validity second. A method typo still has the unmistakable
+# shape of a route claim and must reach the route universe instead of vanishing
+# before it can be rejected.
+ROUTE_CANDIDATE_RE = re.compile(r"`([A-Za-z][A-Za-z0-9_-]*) (/api/[^`]*)`")
 
 # A method word on its own, with no path after it. `ANY_ROUTE_RE` is what the
 # route arms resolve; this is what they cannot, and the two together are how many
@@ -280,7 +284,9 @@ FRAME_NAME_RE = re.compile(r"Frame\s+(\d+)\s+`(\w+)`")
 FRAME_ALIAS_RE = re.compile(r"`(\w+)`|(?<![\w.\-])(\d{2})(?![\w.\-])")
 # A reference to another frame, and the state in it this cell names — the two
 # halves of 「→ §1.0 Unreachable」, both of which have to resolve.
-CROSS_FRAME_RE = re.compile(r"§(\d+\.\d+)(?:\s+\*?([A-Z][^/|—;.,*]*))?")
+CROSS_FRAME_RE = re.compile(
+    r"(?:As\s+|→\s*)§(\d+\.\d+)(?:\s+\*?([^/|—;.,*]+))?"
+)
 # The document's own marker for a normative claim, and the reason this file can
 # tell one apart from the narration around it. See the class C attribution arm.
 BOLD_RUN_RE = re.compile(r"\*\*(.+?)\*\*", re.S)
@@ -314,6 +320,26 @@ def normalize_route(method: str, path: str) -> str:
     """
     path = re.sub(r"<[^>/]+>", "<>", path.split("?")[0].rstrip("/"))
     return f"{method} {path}"
+
+
+def route_query(path: str) -> tuple[tuple[str, str], ...]:
+    """Return exact query claims while route coverage remains path-grained.
+
+    A route mention may omit its query when discussing the endpoint as a whole.
+    Once it spells a query, however, the names and values are a contract claim
+    and must not disappear through `normalize_route`.
+    """
+    _path, marker, query = path.partition("?")
+    if not marker:
+        return ()
+    return tuple(
+        sorted(
+            (name.strip(), value.strip())
+            for part in query.split("&")
+            for name, separator, value in (part.partition("="),)
+            if separator and name.strip() and value.strip()
+        )
+    )
 
 
 # --- the gate's one comparison ---------------------------------------------
@@ -675,6 +701,9 @@ SHAPE_RE = re.compile(r"\{\{\w+\}\}(?:[^|`\n]*?·[^|`\n]*?\{\{\w+\}\})+")
 # so splitting on them would tear members apart and read the pieces as a list.
 LIST_COMMA_RE = re.compile(r"[,、]")
 TREAT_RE = re.compile(r"\bF([1-5])\b")
+TREAT_CANDIDATE_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(F(?=[A-Za-z0-9_.-]*\d)[A-Za-z0-9_.-]+)"
+)
 GOTO_RE = re.compile(r"→\s*([^,;.]+)")
 # What an exit cell says after an arrow, up to the next arrow or the end of the
 # cell. Not a destination — a segment, handed whole to a lookup, because this
@@ -754,7 +783,7 @@ GUARD_ENVELOPE_RE = re.compile(r"every guarded [^\n]*envelope", re.I)
 # together — a misspelling reading as agreement. The shape says "this sentence
 # is citing a schema file"; whether that file exists is the universe's answer,
 # and `empty` is a finding. Spelled once because three extractors ask it.
-SCHEMA_FILE = r"[A-Za-z0-9][A-Za-z0-9._-]*\.schema\.json"
+SCHEMA_FILE = r"[^`\s/]+\.schema\.json"
 SCHEMA_CITE_RE = re.compile(rf"`({SCHEMA_FILE})`")
 DOTTED_TOKEN_RE = re.compile(r"`([a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*)`")
 # The symbol half accepts a dotted name because `defined_symbols` produces one:
@@ -764,7 +793,12 @@ DOTTED_TOKEN_RE = re.compile(r"`([a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*)`")
 # bare file citation with no symbol at all. The document's most careful way of
 # pointing at a method was the one form the reader skipped.
 PY_CITE_RE = re.compile(r"`([A-Za-z0-9_./-]+\.py)(?::([^`\s]+))?`")
-AUTHORITY_LINE_RE = re.compile(r"`(api\.md|[0-9a-f]{7,40}):(\d+)`")
+AUTHORITY_LINE_RE = re.compile(r"`(api\.md|[0-9a-f]{7,40}):([^`\s]+)`")
+AUTHORITY_SUBJECT_RE = re.compile(r"\b(?:[A-Z][A-Za-z0-9]+|[a-z][a-z0-9]*_[a-z0-9_]+)\b")
+AUTHORITY_SUBJECT_STOP = {
+    "API", "CI", "DELETE", "FC", "GET", "Hub", "Model", "OAuth", "PATCH", "POST",
+    "PUT", "Source",
+}
 STATUS_RE = re.compile(r"\b(4\d\d|5\d\d)\b")
 COUNT_WORDS = {
     "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
@@ -862,32 +896,22 @@ def nearest_subject(mentions: list[tuple[int, int, str]], start: int, end: int) 
 
 
 def json_keys(text: str) -> set[str]:
-    """Every key name the fenced ```json blocks in `text` declare, at any depth.
+    """Top-level key names the fenced ```json blocks in `text` declare.
 
     `literal_keys` reads a body the way this document usually writes one — one
-    line, no nesting — and `\\{[^{}]*\\}` is exactly that reading. A real example
-    block nests, and on a nested one the innermost braces are what it returns:
-    api.md's refusal envelope came back as the `SupplyGap` inside
-    `would_interrupt`, with `ok`, `error` and both report arrays dropped. A
-    parser is the shorter answer than a cleverer regex, and it is also the one
-    that says so when the block is not JSON at all.
+    line, no nesting. A real example block can nest, so the refusal-envelope
+    reader uses this structured parser and deliberately keeps only the root
+    object. That preserves the response contract without promoting nested
+    `SupplyGap` fields into top-level members.
     """
     found: set[str] = set()
-
-    def walk(node: Any) -> None:
-        if isinstance(node, dict):
-            found.update(k for k in node if isinstance(k, str))
-            for child in node.values():
-                walk(child)
-        elif isinstance(node, list):
-            for child in node:
-                walk(child)
-
     for block in FENCED_JSON_RE.findall(text):
         try:
-            walk(json.loads(block))
+            node = json.loads(block)
         except json.JSONDecodeError:
             continue
+        if isinstance(node, dict):
+            found.update(k for k in node if isinstance(k, str))
     return found
 
 
@@ -901,13 +925,10 @@ class LiteralMember(NamedTuple):
 def literal_members(text: str) -> dict[str, LiteralMember]:
     """The members a `{...}` literal declares, including requiredness and type.
 
-    The name test is deliberately wider than any name the contract actually has.
-    It used to be `[a-z_][A-Za-z0-9_]*` — the shape of a *correct* key — which
-    made it an admissibility test as well as an extractor, so `{order-id: ...}`
-    declared no key at all and the body passed for naming nothing. The judge
-    downstream is `keys - allowed`: it reports every key the contract does not
-    have, and `order-id` is exactly such a key. Handing it a wrong name is how
-    the wrong name gets reported; withholding it is how the wrong name ships.
+    Every nonempty comma-delimited member is retained as a candidate. The old
+    extractor admitted only the shape of a correct key, so malformed members
+    vanished before validation. The downstream comparison owns admissibility:
+    handing it the malformed name is how the malformed name gets reported.
 
     The trailing `?` is the contract's own optionality marker, and it was
     stripped and discarded — which made every member look alike and left the
@@ -923,13 +944,14 @@ def literal_members(text: str) -> dict[str, LiteralMember]:
             declared, separator, member_type = part.partition(":")
             declared = declared.strip().strip('"').strip()
             name = declared.rstrip("?").strip()
-            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]*", name):
-                previous = members.get(name)
-                types = frozenset({re.sub(r"\s+", "", member_type)}) if separator else frozenset()
-                members[name] = LiteralMember(
-                    required=(previous.required if previous else True) and not declared.endswith("?"),
-                    types=(previous.types if previous else frozenset()) | types,
-                )
+            if not name:
+                continue
+            previous = members.get(name)
+            types = frozenset({re.sub(r"\s+", "", member_type)}) if separator else frozenset()
+            members[name] = LiteralMember(
+                required=(previous.required if previous else True) and not declared.endswith("?"),
+                types=(previous.types if previous else frozenset()) | types,
+            )
     return members
 
 
@@ -1144,6 +1166,7 @@ def load_authorities(origin: Origin) -> dict[str, Any]:
                 "response_readings": {},
                 "named_answer": "",
                 "guarded": "guarded" in cells[1].lower() or "force" in cells[1],
+                "query": route_query(m.group(2)),
                 "cell": cells[1],
             },
             content=cells[1],
@@ -1166,8 +1189,13 @@ def load_authorities(origin: Origin) -> dict[str, Any]:
     envelope: set[str] = set()
     for block in re.split(r"^## ", api_text, flags=re.M)[1:]:
         _heading, _, body = block.partition("\n")
-        if GUARD_ENVELOPE_RE.search(body):
-            envelope |= json_keys(body) | literal_keys(body)
+        cue = GUARD_ENVELOPE_RE.search(body)
+        example = FENCED_JSON_RE.search(body, cue.end()) if cue else None
+        if example:
+            # The section later spells the nested SupplyGap object separately.
+            # Only the first example after the envelope definition is the
+            # top-level response contract.
+            envelope |= json_keys(example.group(0))
 
     # A route that answers a named shape is contracted as exactly as one that
     # spells its body — the spelling is just somewhere else. Left unread, both
@@ -1669,6 +1697,8 @@ def parse(doc: Document) -> dict[str, Any]:
             continue
         if not in_table:
             continue
+        if SEPARATOR_RE.match(line.strip()):
+            continue
         m = KEY_DEF_RE.match(line)
         if not m:
             # `KEY_DEF_RE` is a key *and* three cells, so a row that opens with a
@@ -1677,14 +1707,17 @@ def parse(doc: Document) -> dict[str, Any]:
             # missing」 is supposed to be reported. Class B's whole first rule
             # was unreachable for the one row shape that breaks it.
             #
-            # Which rows are the family: a table row whose first cell is a
-            # backticked token. Everything else inside a copy table — the
-            # divider, a note, a continuation — is not claiming to define a key.
-            opener = KEY_ROW_OPEN_RE.match(line)
-            if opener:
+            # Inside a known copy table, every non-separator Markdown row is a
+            # candidate definition. Requiring the key cell's backticks before
+            # recognizing the row made deleting those delimiters delete the
+            # definition from every check at once.
+            if line.startswith("|"):
                 cells = [c.strip() for c in line.strip().strip("|").split("|")]
-                key = opener.group(1).strip()
+                opener = KEY_ROW_OPEN_RE.match(line)
+                key = opener.group(1).strip() if opener else (cells[0] if cells else "")
                 problems: list[str] = []
+                if not opener:
+                    problems.append("is not backticked")
                 if not COPY_KEY_RE.fullmatch(key):
                     problems.append(f"has malformed key `{key}`")
                 if len(cells) != 3:
@@ -1701,10 +1734,13 @@ def parse(doc: Document) -> dict[str, Any]:
                 # texts were not read, which is a different claim from a row
                 # whose English cell is empty, and every rule that reads a text
                 # declines on `None` rather than judging one nobody read.
-                collected.append(
-                    {"key": key, "zh": None, "en": None, "line": n, "ns": ns,
-                     "qualified": f"{ns}.{key}" if ns else key}
-                )
+                zh = cells[1] if len(cells) == 3 else None
+                en = cells[2] if len(cells) == 3 else None
+                if key:
+                    collected.append(
+                        {"key": key, "zh": zh, "en": en, "line": n, "ns": ns,
+                         "qualified": f"{ns}.{key}" if ns else key}
+                    )
             continue
         key, zh, en = m.group(1), m.group(3).strip(), m.group(4).strip()
         rows += 1
@@ -2477,22 +2513,47 @@ def authority_claims(doc: Document, auth: dict[str, Any], origin: Origin, regist
         # contract, so a citation of one that is not there is a claim with no
         # authority behind it.
         for m_gap in GAP_REF_RE.finditer(scope):
-            if gaps.resolve(m_gap.group(1)).empty:
+            hit = gaps.resolve(m_gap.group(1))
+            if hit.empty:
                 add(f"L{line_no}", f"`[contract-gap] {m_gap.group(1)}` names no §0.5 row")
+            elif not hit.one.registers and line_no != hit.one.line:
+                add(
+                    f"L{line_no}",
+                    f"`[contract-gap] {m_gap.group(1)}` cites a withdrawn §0.5 row",
+                )
         exempt = line_no in registrations or cites_a_registered_gap(gaps, scope)
         # Where each route is written, not just which routes appear: a body
         # literal is bound to one route, and binding needs positions.
-        mentions = [
-            (m.start(), m.end(), normalize_route(m.group(1), m.group(2)))
-            for m in ANY_ROUTE_RE.finditer(scope)
+        route_claims = [
+            (
+                m.start(),
+                m.end(),
+                normalize_route(m.group(1), m.group(2)),
+                route_query(m.group(2)),
+            )
+            for m in ROUTE_CANDIDATE_RE.finditer(scope)
         ]
+        mentions = [(start, end, route) for start, end, route, _query in route_claims]
         named = {route for _s, _e, route in mentions}
-        for route in sorted(named):
+        checked_claims: set[tuple[str, tuple[tuple[str, str], ...]]] = set()
+        for _start, _end, route, query in route_claims:
+            if (route, query) in checked_claims:
+                continue
+            checked_claims.add((route, query))
             scale["routes"] += 1
             hit = auth["routes"].resolve(route)
             if hit.empty:
                 add(f"L{line_no}", f"`{route}` is contracted by no `api.md` route row")
-            elif hit.one["guarded"]:
+                continue
+            if query and query != hit.one["query"]:
+                claimed = "&".join(f"{name}={value}" for name, value in query)
+                contracted = "&".join(f"{name}={value}" for name, value in hit.one["query"])
+                add(
+                    f"L{line_no}",
+                    f"`{route}` uses query `{claimed}`; `api.md` contracts "
+                    f"`{contracted or '(none)'}`",
+                )
+            if hit.one["guarded"]:
                 guarded_named.setdefault(route, line_no)
 
         for m_body in BODY_RE.finditer(scope):
@@ -2800,8 +2861,14 @@ def authority_claims(doc: Document, auth: dict[str, Any], origin: Origin, regist
         python_citations = list(PY_CITE_RE.finditer(scope))
         for cited_line in AUTHORITY_LINE_RE.finditer(scope):
             reference, number_text = cited_line.groups()
-            number = int(number_text)
             scale["authority lines"] += 1
+            if not number_text.isdigit():
+                add(
+                    f"L{line_no}",
+                    f"`{reference}:{number_text}` has a malformed line number",
+                )
+                continue
+            number = int(number_text)
             symbol = ""
             if reference == "api.md":
                 rel = str(API_CONTRACT)
@@ -2831,6 +2898,32 @@ def authority_claims(doc: Document, auth: dict[str, Any], origin: Origin, regist
                     f"`{reference}:{number}` is outside `{rel}`'s {line_count} lines",
                 )
                 continue
+            source_line = source.splitlines()[number - 1]
+            if reference == "api.md":
+                # A line number inside the file is not enough: after api.md
+                # grows, an old citation can remain in range while pointing at
+                # unrelated authority. The claim immediately following the
+                # citation names the contract concept it is using; require the
+                # cited line to carry at least one of those distinctive names.
+                clause = re.split(r"[.!?;|\n]", scope[cited_line.end():], maxsplit=1)[0]
+                claimed_subjects = {
+                    token
+                    for token in AUTHORITY_SUBJECT_RE.findall(clause)
+                    if token not in AUTHORITY_SUBJECT_STOP
+                }
+                line_subjects = {
+                    token
+                    for token in AUTHORITY_SUBJECT_RE.findall(source_line)
+                    if token not in AUTHORITY_SUBJECT_STOP
+                }
+                if not claimed_subjects or claimed_subjects.isdisjoint(line_subjects):
+                    expected = ", ".join(f"`{token}`" for token in sorted(claimed_subjects))
+                    add(
+                        f"L{line_no}",
+                        f"`{reference}:{number}` does not support this claim"
+                        + (f" (expected one of {expected})" if expected else ""),
+                    )
+                    continue
             if symbol:
                 symbols_at_revision = defined_symbols(source)
                 definitions = {qualified: at for qualified, _bare, at in symbols_at_revision}
@@ -3006,7 +3099,7 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
         # and the cell fell through to the *next* branch, where a `→ State` or
         # nothing at all decided the verdict. A sixth treatment is the one thing
         # §0.8 says is closed, and it was the one thing the check could not say.
-        cited_treatments = sorted(set(re.findall(r"\bF\d+\b", cell)))
+        cited_treatments = sorted(set(TREAT_CANDIDATE_RE.findall(cell)))
         for t in cited_treatments:
             if treatment_u.resolve(t).empty:
                 add("A", f"L{r['line']}", f"「{r['state']}」 names {t}, which §0.8's closed set does not define")
@@ -3585,7 +3678,15 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
                 # (「Dirty」 for 「Dirty (uncommitted moves)」). Both are the
                 # name plus or minus what the row says about the occasion; a
                 # landing this frame does not file is neither.
-                if any(said.startswith(f"{n} ") or said == n or n.startswith(f"{said} ") for n in known):
+                matches: list[str] = []
+                for name in known:
+                    canonical = re.split(r"\s+`?\[", name, maxsplit=1)[0]
+                    aliases = {canonical}
+                    if " (" in canonical:
+                        aliases.add(canonical.split(" (", 1)[0])
+                    if any(said == alias or said.startswith(f"{alias} ") for alias in aliases):
+                        matches.append(name)
+                if len(matches) == 1:
                     continue
                 add(
                     "C",
