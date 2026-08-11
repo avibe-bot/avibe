@@ -902,6 +902,83 @@ describe('Workbench session read ownership', () => {
     expect(inbox?.nextCursor).toBe('cursor_after_refresh');
   });
 
+  it('defers a later Inbox refresh until an in-flight load-more completes', async () => {
+    const pageRow = {
+      ...inboxRow,
+      session_id: sessionB.id,
+      scope_id: sessionB.scope_id,
+      title: sessionB.title,
+      preview_message_id: 'msg_b',
+      last_activity_at: '2026-08-10T23:00:00Z',
+    };
+    const loadMoreRead = deferred({
+      sessions: [pageRow],
+      next_cursor: 'cursor_after_load_more',
+      unread_by_session: { [session.id]: 3 },
+    });
+    const refreshedRow = { ...inboxRow, title: 'Fresh after deferred refresh' };
+    const refreshRead = deferred({
+      sessions: [refreshedRow],
+      next_cursor: 'cursor_after_refresh',
+      unread_by_session: { [session.id]: 3 },
+    });
+    const listInbox = vi.fn()
+      .mockResolvedValueOnce({
+        sessions: [inboxRow],
+        next_cursor: 'cursor_a',
+        unread_by_session: { [session.id]: 3 },
+      })
+      .mockReturnValueOnce(loadMoreRead.promise)
+      .mockReturnValueOnce(refreshRead.promise);
+    apiRef.current = {
+      listInbox,
+      connectWorkbenchEvents: vi.fn(() => vi.fn()),
+    };
+    let inbox: ReturnType<typeof useWorkbenchInbox> | null = null;
+    const Probe = () => {
+      const value = useWorkbenchInbox();
+      useEffect(() => {
+        inbox = value;
+      }, [value]);
+      return null;
+    };
+
+    render(
+      <WorkbenchInboxProvider>
+        <Probe />
+      </WorkbenchInboxProvider>,
+    );
+    await settle();
+    act(() => {
+      void inbox?.loadMore();
+      void inbox?.refresh();
+    });
+    await settle();
+    expect(listInbox).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      loadMoreRead.resolve({
+        sessions: [pageRow],
+        next_cursor: 'cursor_after_load_more',
+        unread_by_session: { [session.id]: 3 },
+      });
+      await loadMoreRead.promise;
+    });
+    await settle();
+    expect(listInbox).toHaveBeenCalledTimes(3);
+    await act(async () => {
+      refreshRead.resolve({
+        sessions: [refreshedRow],
+        next_cursor: 'cursor_after_refresh',
+        unread_by_session: { [session.id]: 3 },
+      });
+      await refreshRead.promise;
+    });
+    await settle();
+
+    expect(inbox?.inboxSessions).toEqual([refreshedRow]);
+    expect(inbox?.nextCursor).toBe('cursor_after_refresh');
+  });
+
   it('retries a resume reconcile invalidated by activity', async () => {
     const staleReconcile = deferred({ sessions: [inboxRow], next_cursor: 'stale_cursor', unread_by_session: { [session.id]: 3 } });
     const listInbox = vi.fn()
@@ -1097,6 +1174,85 @@ describe('Workbench session read ownership', () => {
         unread_by_session: { [session.id]: 3 },
       });
       await retryReconcile.promise;
+    });
+    await settle();
+
+    expect(inbox?.inboxSessions.map((row) => row.session_id).sort()).toEqual([
+      session.id,
+      sessionB.id,
+    ]);
+    expect(inbox?.nextCursor).toBe('cursor_after_load_more');
+  });
+
+  it('defers a later resume reconcile until an in-flight load-more completes', async () => {
+    const pageRow = {
+      ...inboxRow,
+      session_id: sessionB.id,
+      scope_id: sessionB.scope_id,
+      title: sessionB.title,
+      preview_message_id: 'msg_b',
+      last_activity_at: '2026-08-10T23:00:00Z',
+    };
+    const loadMoreRead = deferred({
+      sessions: [pageRow],
+      next_cursor: 'cursor_after_load_more',
+      unread_by_session: { [session.id]: 3 },
+    });
+    const reconcileRead = deferred({
+      sessions: [inboxRow],
+      next_cursor: 'cursor_after_reconcile',
+      unread_by_session: { [session.id]: 3 },
+    });
+    const listInbox = vi.fn()
+      .mockResolvedValueOnce({
+        sessions: [inboxRow],
+        next_cursor: 'cursor_a',
+        unread_by_session: { [session.id]: 3 },
+      })
+      .mockReturnValueOnce(loadMoreRead.promise)
+      .mockReturnValueOnce(reconcileRead.promise);
+    apiRef.current = {
+      listInbox,
+      connectWorkbenchEvents: vi.fn(() => vi.fn()),
+    };
+    let inbox: ReturnType<typeof useWorkbenchInbox> | null = null;
+    const Probe = () => {
+      const value = useWorkbenchInbox();
+      useEffect(() => {
+        inbox = value;
+      }, [value]);
+      return null;
+    };
+
+    render(
+      <WorkbenchInboxProvider>
+        <Probe />
+      </WorkbenchInboxProvider>,
+    );
+    await settle();
+    act(() => {
+      void inbox?.loadMore();
+      window.dispatchEvent(new Event('focus'));
+    });
+    await settle();
+    expect(listInbox).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      loadMoreRead.resolve({
+        sessions: [pageRow],
+        next_cursor: 'cursor_after_load_more',
+        unread_by_session: { [session.id]: 3 },
+      });
+      await loadMoreRead.promise;
+    });
+    await settle();
+    expect(listInbox).toHaveBeenCalledTimes(3);
+    await act(async () => {
+      reconcileRead.resolve({
+        sessions: [inboxRow],
+        next_cursor: 'cursor_after_reconcile',
+        unread_by_session: { [session.id]: 3 },
+      });
+      await reconcileRead.promise;
     });
     await settle();
 

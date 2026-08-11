@@ -83,13 +83,14 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   // Every Inbox read shares one ordering fence. This covers page-one refresh,
   // cursor reads, resume reconcile, and the targeted foreground-restore read.
   const readOwnershipRef = useRef(createWorkbenchSessionReadOwnership());
-  // A stale refresh cannot be replaced by an event patch or cursor page alone:
-  // neither operation owns the full top-of-feed snapshot requested by refresh.
-  const refreshRetryPendingRef = useRef(false);
-  const reconcileRetryPendingRef = useRef(false);
+  // Broad reads and cursor reads both own the feed. Preserve broad intents while
+  // a cursor request is active so either start order commits the requested page
+  // before the broad refresh/reconcile runs.
+  const refreshPendingRef = useRef(false);
+  const reconcilePendingRef = useRef(false);
   const cursorReadsInFlightRef = useRef(0);
-  const refreshRetryRunnerRef = useRef<() => void>(() => {});
-  const reconcileRetryRunnerRef = useRef<() => void>(() => {});
+  const refreshRunnerRef = useRef<() => void>(() => {});
+  const reconcileRunnerRef = useRef<() => void>(() => {});
   const reconcileSessionRef = useRef<(sessionId: string) => void>(() => {});
   const refreshLoadingGenerationRef = useRef(0);
   const loadMoreLoadingGenerationRef = useRef(0);
@@ -99,31 +100,31 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   // outside the page; a later broad omission revalidates them by exact id.
   const targetedSnapshotsRef = useRef<Map<string, TargetedInboxSnapshot>>(new Map());
 
-  const flushBroadReadRetry = useCallback(() => {
+  const flushBroadReadIntent = useCallback(() => {
     if (cursorReadsInFlightRef.current > 0) return;
-    if (refreshRetryPendingRef.current) {
-      refreshRetryPendingRef.current = false;
+    if (refreshPendingRef.current) {
+      refreshPendingRef.current = false;
       // A replacement refresh owns the same top-of-feed recovery as a pending
       // reconcile, so one authoritative read satisfies both intents.
-      reconcileRetryPendingRef.current = false;
-      refreshRetryRunnerRef.current();
+      reconcilePendingRef.current = false;
+      refreshRunnerRef.current();
       return;
     }
-    if (reconcileRetryPendingRef.current) {
-      reconcileRetryPendingRef.current = false;
-      reconcileRetryRunnerRef.current();
+    if (reconcilePendingRef.current) {
+      reconcilePendingRef.current = false;
+      reconcileRunnerRef.current();
     }
   }, []);
 
-  const queueRefreshRetry = useCallback(() => {
-    refreshRetryPendingRef.current = true;
-    queueMicrotask(flushBroadReadRetry);
-  }, [flushBroadReadRetry]);
+  const queueRefreshIntent = useCallback(() => {
+    refreshPendingRef.current = true;
+    queueMicrotask(flushBroadReadIntent);
+  }, [flushBroadReadIntent]);
 
-  const queueReconcileRetry = useCallback(() => {
-    reconcileRetryPendingRef.current = true;
-    queueMicrotask(flushBroadReadRetry);
-  }, [flushBroadReadRetry]);
+  const queueReconcileIntent = useCallback(() => {
+    reconcilePendingRef.current = true;
+    queueMicrotask(flushBroadReadIntent);
+  }, [flushBroadReadIntent]);
 
   const acceptSessionMutation = useCallback((sessionId: string) => {
     readOwnershipRef.current.acceptMutation([
@@ -182,8 +183,12 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   }, []);
 
   const refresh = useCallback(async function refresh() {
-    refreshRetryPendingRef.current = false;
-    reconcileRetryPendingRef.current = false;
+    if (cursorReadsInFlightRef.current > 0) {
+      queueRefreshIntent();
+      return;
+    }
+    refreshPendingRef.current = false;
+    reconcilePendingRef.current = false;
     const read = readOwnershipRef.current.beginRead(['inbox-feed', 'inbox-unread', 'inbox-feed-refresh']);
     const loadingGeneration = ++refreshLoadingGenerationRef.current;
     const retryAfterInvalidation = () => {
@@ -198,11 +203,11 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
         (!invalidatedByMutation && !supersededByCursorRead) ||
         supersededByRefresh ||
         supersededByReconcile ||
-        refreshRetryPendingRef.current
+        refreshPendingRef.current
       ) {
         return false;
       }
-      queueRefreshRetry();
+      queueRefreshIntent();
       return true;
     };
     setLoading(true);
@@ -225,7 +230,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
     } finally {
       if (refreshLoadingGenerationRef.current === loadingGeneration) setLoading(false);
     }
-  }, [acceptFeedRows, api, applyUnreadMap, mergeTargetedSnapshots, queueRefreshRetry]);
+  }, [acceptFeedRows, api, applyUnreadMap, mergeTargetedSnapshots, queueRefreshIntent]);
 
   const loadMore = useCallback(async function loadMore() {
     const cursor = cursorRef.current;
@@ -252,9 +257,9 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
       cursorReadsInFlightRef.current -= 1;
       if (loadMoreLoadingGenerationRef.current === loadingGeneration) setLoadingMore(false);
       if (retryAfterInvalidation) queueMicrotask(() => void loadMore());
-      else flushBroadReadRetry();
+      else flushBroadReadIntent();
     }
-  }, [api, flushBroadReadRetry]);
+  }, [api, flushBroadReadIntent]);
 
   const markRead = useCallback(
     async (sessionId: string, untilMessageId?: string) => {
@@ -292,7 +297,11 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   // that arrived during the gap surface at top. No loading flag — the user
   // already has content; this is a silent catch-up.
   const reconcile = useCallback(async () => {
-    reconcileRetryPendingRef.current = false;
+    if (cursorReadsInFlightRef.current > 0) {
+      queueReconcileIntent();
+      return;
+    }
+    reconcilePendingRef.current = false;
     const read = readOwnershipRef.current.beginRead(['inbox-feed', 'inbox-unread', 'inbox-feed-reconcile']);
     const retryAfterInvalidation = () => {
       const invalidatedByMutation = !readOwnershipRef.current.isMutationCurrent(read, 'inbox-feed');
@@ -306,11 +315,11 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
         (!invalidatedByMutation && !supersededByCursorRead) ||
         supersededByRefresh ||
         supersededByReconcileRead ||
-        reconcileRetryPendingRef.current
+        reconcilePendingRef.current
       ) {
         return false;
       }
-      queueReconcileRetry();
+      queueReconcileIntent();
       return true;
     };
     // Snapshot loaded ids up front: sizes the re-read window, and lets us tell
@@ -360,7 +369,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
     } catch (err) {
       if (!retryAfterInvalidation()) console.error('[inbox] reconcile failed', err);
     }
-  }, [acceptFeedRows, api, applyUnreadMap, mergeTargetedSnapshots, queueReconcileRetry]);
+  }, [acceptFeedRows, api, applyUnreadMap, mergeTargetedSnapshots, queueReconcileIntent]);
 
   // Targeted reconcile for one session (contract A6 foreground restore): fetch
   // that exact session by id and upsert its card, so a restored session
@@ -409,8 +418,8 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
     },
     [api],
   );
-  refreshRetryRunnerRef.current = () => void refresh();
-  reconcileRetryRunnerRef.current = () => void reconcile();
+  refreshRunnerRef.current = () => void refresh();
+  reconcileRunnerRef.current = () => void reconcile();
   reconcileSessionRef.current = (sessionId) => void reconcileSession(sessionId);
 
   useEffect(() => {
