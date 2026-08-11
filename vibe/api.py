@@ -10570,6 +10570,14 @@ async def delete_opencode_custom_provider_async(provider_id: str) -> dict:
     if not isinstance(provider_id, str) or not provider_id.strip():
         return {"ok": False, "message": "provider_id is required"}
     pid = provider_id.strip().lower()
+    recovery_message = _config_recovery_message()
+    if recovery_message:
+        return {
+            "ok": False,
+            "error": "config_recovery",
+            "provider_id": pid,
+            "message": recovery_message,
+        }
     try:
         from vibe.opencode_config import (
             is_opencode_custom_provider,

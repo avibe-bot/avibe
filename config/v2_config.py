@@ -2371,7 +2371,7 @@ class V2Config:
             raise ValueError("Config payload must be an object")
 
         mode = payload.get("mode")
-        if mode not in {"self_host", "saas"}:
+        if not isinstance(mode, str) or mode not in {"self_host", "saas"}:
             raise ValueError("Config 'mode' must be 'self_host' or 'saas'")
 
         raw_platform = payload.get("platform")
@@ -2434,7 +2434,16 @@ class V2Config:
                         f"Config '{descriptor.config_key}.{credential_field}' must be a string"
                     )
 
-            platform_configs[descriptor.id] = descriptor.create_config(platform_payload)
+            try:
+                platform_configs[descriptor.id] = descriptor.create_config(platform_payload)
+            except (AttributeError, TypeError) as exc:
+                # Platform validators may call string methods or compare enum
+                # values before the dataclass layer can validate their types.
+                # Convert those payload errors into a qualified config error so
+                # disk loading can recover only the affected platform section.
+                raise ValueError(
+                    f"Config '{descriptor.config_key}' contains invalid field types"
+                ) from exc
 
         # Avibe runs in-process with no credentials — auto-populate its
         # config when missing so legacy ``platforms.enabled`` lists that
@@ -2654,7 +2663,7 @@ class V2Config:
         update = UpdateConfig(**_filter_dataclass_fields(UpdateConfig, update_payload))
 
         ack_mode = payload.get("ack_mode", "typing")
-        if ack_mode not in {"reaction", "message", "typing"}:
+        if not isinstance(ack_mode, str) or ack_mode not in {"reaction", "message", "typing"}:
             raise ValueError("Config 'ack_mode' must be 'reaction', 'message', or 'typing'")
 
         show_duration = payload.get("show_duration", False)

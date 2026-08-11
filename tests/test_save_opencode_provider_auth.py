@@ -418,6 +418,32 @@ def test_delete_provider_auth_blocks_recovery_before_external_mutation(fake_save
     assert server.remove_calls == []
 
 
+def test_delete_custom_provider_blocks_recovery_before_external_mutation(fake_save_env, monkeypatch) -> None:
+    from vibe.opencode_config import read_opencode_custom_providers
+
+    server, home = fake_save_env
+    assert _save_custom(
+        {
+            "provider_id": "my-relay",
+            "name": "My Relay",
+            "adapter": "openai-compatible",
+            "base_url": "https://relay.example/v1",
+        }
+    )["ok"] is True
+    monkeypatch.setattr(
+        api,
+        "load_config",
+        lambda: type("Config", (), {"load_warnings": ("recovery required",)})(),
+    )
+
+    result = _delete_custom("my-relay")
+
+    assert result["ok"] is False
+    assert result["error"] == "config_recovery"
+    assert "my-relay" in read_opencode_custom_providers(home=home)
+    assert server.remove_calls == []
+
+
 def test_delete_provider_auth_clears_options_cache(fake_save_env) -> None:
     from vibe.opencode_config import upsert_opencode_provider_api_key
 

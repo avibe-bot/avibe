@@ -10657,11 +10657,12 @@ def _doctor(*, deep: bool = False):
         if config.load_warnings:
             recovery_notice = api.config_recovery_notice(config)
             if recovery_notice:
+                recovery_language = getattr(config, "language", "en") or "en"
                 _add_doctor_item(
                     config_items,
                     "warn",
                     recovery_notice,
-                    "Review the preserved config backup and repair it before changing settings.",
+                    i18n_t("error.configRecovery.action", recovery_language),
                     code="config.recovery",
                 )
                 summary["warn"] += 1

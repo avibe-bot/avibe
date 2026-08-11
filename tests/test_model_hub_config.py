@@ -927,6 +927,7 @@ def test_config_reload_recovers_invalid_platform_metadata_only(monkeypatch, tmp_
     [
         ("slack", {"bot_token": "invalid"}),
         ("slack", {"bot_token": 123}),
+        ("slack", {"app_token": 123}),
         ("discord", {"thread_auto_archive_minutes": 1}),
         ("discord", {"bot_token": {}}),
         ("telegram", {"bot_token": "invalid"}),
@@ -958,6 +959,30 @@ def test_config_reload_recovers_invalid_platform_adapter_only(
     assert loaded.platforms.enabled == []
     assert loaded.platform == "avibe"
     assert loaded.load_warnings and platform in loaded.load_warnings[0]
+    assert config_path.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("mode", {}),
+        ("ack_mode", []),
+    ],
+)
+def test_config_reload_recovers_invalid_scalar_enum_only(monkeypatch, tmp_path, field, value):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    payload = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    payload["show_duration"] = True
+    payload[field] = value
+    config_path = tmp_path / f"{field}-scalar.json"
+    original = json.dumps(payload)
+    config_path.write_text(original, encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert loaded.show_duration is True
+    assert loaded.platform == payload["platform"]
+    assert loaded.load_warnings and field in loaded.load_warnings[0]
     assert config_path.read_text(encoding="utf-8") == original
 
 

@@ -215,7 +215,8 @@
       "hint": "请重新加载设置后再次修改。"
     },
     "configRecovery": {
-      "beforeAuth": "配置加载时发生了恢复；请先修复备份的配置，再修改 backend 凭据。"
+      "beforeAuth": "配置加载时发生了恢复；请先修复备份的配置，再修改 backend 凭据。",
+      "action": "请检查保留的配置备份并修复后，再修改设置。"
     },
     "scopeAgentUnavailable": {
       "message": "Agent `{agent}` 无法用于此路由。",

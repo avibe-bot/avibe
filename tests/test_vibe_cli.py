@@ -290,6 +290,7 @@ def test_doctor_surfaces_configuration_recovery_warnings(monkeypatch, tmp_path):
     doctor_path = tmp_path / "doctor.json"
     warning = "Recovered invalid config section 'platforms': sk-leaked-platform-token"
     config = cli.V2Config.default()
+    config.language = "zh"
     config.load_warnings = (warning,)
 
     monkeypatch.setattr(paths, "get_config_path", lambda: config_path)
@@ -313,6 +314,7 @@ def test_doctor_surfaces_configuration_recovery_warnings(monkeypatch, tmp_path):
     assert recovery_item["status"] == "warn"
     assert recovery_item["code"] == "config.recovery"
     assert recovery_item["message"] != warning
+    assert recovery_item["action"] == cli.i18n_t("error.configRecovery.action", "zh")
     assert "sk-leaked-platform-token" not in json.dumps(result)
     assert result["summary"]["warn"] >= 1
 
