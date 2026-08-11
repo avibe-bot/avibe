@@ -478,6 +478,8 @@ def _migrate_legacy_model_hub_payload(payload: dict) -> tuple[dict, bool, tuple[
     for agent in agents.values():
         if not isinstance(agent, dict):
             return payload, False, ()
+        if "mode" in agent and agent["mode"] not in {"hub", "direct"}:
+            return payload, False, ()
         mappings = agent.get("mappings")
         if "mappings" in agent and not isinstance(mappings, list):
             return payload, False, ()
@@ -718,7 +720,15 @@ def _reset_recoverable_config_section(payload: dict, section: str) -> bool:
         payload.pop(section, None)
         return True
     if section.startswith("agents."):
-        payload.setdefault("agents", {})[section.split(".", 1)[1]] = {}
+        agent_name = section.split(".", 1)[1]
+        agents_payload = payload.get("agents")
+        if not isinstance(agents_payload, dict):
+            return False
+        if agent_name == "codex":
+            # Codex is opt-in in the canonical first-run/recovery config.
+            agents_payload[agent_name] = dict(V2Config.default().agents.codex.__dict__)
+        else:
+            agents_payload[agent_name] = {}
         return True
     if section in set(supported_platform_ids()) | {WORKBENCH_PLATFORM_ID}:
         payload[section] = {}

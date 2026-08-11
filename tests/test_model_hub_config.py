@@ -1322,6 +1322,7 @@ def test_config_reload_recovers_runtime_with_the_canonical_default(
                 ]
             }
         ),
+        lambda hub: hub["agents"]["claude"].update({"mode": "hbu"}),
         lambda hub: hub["agents"]["claude"].update(
             {"mappings": [{"builtin_id": "opus", "enabled": True}]}
         ),
@@ -1345,6 +1346,7 @@ def test_config_reload_recovers_runtime_with_the_canonical_default(
         "mapping-empty-builtin",
         "mapping-missing-target",
         "mapping-enabled-not-boolean",
+        "agent-invalid-mode",
     ],
 )
 def test_config_reload_does_not_infer_malformed_legacy_source_order(
@@ -1367,6 +1369,24 @@ def test_config_reload_does_not_infer_malformed_legacy_source_order(
     assert loaded.load_warnings and "model_hub" in " ".join(loaded.load_warnings)
     assert config_path.read_text(encoding="utf-8") == original
     assert list(config_path.parent.glob("config.json.bak-recovery-*"))
+
+
+def test_config_reload_recovers_invalid_codex_agent_with_disabled_default(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    payload = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    payload["show_duration"] = True
+    payload["agents"]["codex"] = "invalid"
+    config_path = tmp_path / "config.json"
+    original = json.dumps(payload)
+    config_path.write_text(original, encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert loaded.show_duration is True
+    assert loaded.agents.codex.enabled is False
+    assert loaded.agents.claude.enabled is True
+    assert loaded.load_warnings and "agents.codex" in loaded.load_warnings[0]
+    assert config_path.read_text(encoding="utf-8") == original
 
 
 def test_config_reload_recovers_invalid_json_with_backup(monkeypatch, tmp_path):

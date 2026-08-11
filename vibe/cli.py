@@ -10654,13 +10654,24 @@ def _doctor(*, deep: bool = False):
     config = None
     try:
         config = V2Config.load(config_path)
-        config_items.append(
-            {
-                "status": "pass",
-                "message": "Configuration loaded successfully",
-            }
-        )
-        summary["pass"] += 1
+        if config.load_warnings:
+            for warning in config.load_warnings:
+                _add_doctor_item(
+                    config_items,
+                    "warn",
+                    warning,
+                    "Review the preserved config backup and repair it before changing settings.",
+                    code="config.recovery",
+                )
+                summary["warn"] += 1
+        else:
+            config_items.append(
+                {
+                    "status": "pass",
+                    "message": "Configuration loaded successfully",
+                }
+            )
+            summary["pass"] += 1
     except Exception as exc:
         config_items.append(
             {
