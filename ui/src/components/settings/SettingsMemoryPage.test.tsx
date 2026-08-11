@@ -62,13 +62,21 @@ vi.mock('./memory/MemorySettingsPanel', () => ({
   MemorySettingsPanel: ({
     maintenance,
     onClearAll,
+    onRebuildBusyChange,
   }: {
     maintenance: { can_clear: boolean } | null;
     onClearAll: () => void;
+    onRebuildBusyChange: (busy: boolean) => void;
   }) => (
     <div>
       <span>{maintenance?.can_clear ? 'maintenance-ready' : 'maintenance-unknown'}</span>
       <button type="button" onClick={onClearAll}>open-clear</button>
+      <button type="button" onClick={() => onRebuildBusyChange(true)}>
+        begin-rebuild
+      </button>
+      <button type="button" onClick={() => onRebuildBusyChange(false)}>
+        end-rebuild
+      </button>
     </div>
   ),
 }));
@@ -312,5 +320,31 @@ describe('SettingsMemoryPage restart action', () => {
     expect((action as HTMLButtonElement).disabled).toBe(true);
     finishRestart?.({ ok: true, state: 'ready' });
     await waitFor(() => expect((action as HTMLButtonElement).disabled).toBe(false));
+  });
+
+  it('is disabled while an embedding rebuild is required', async () => {
+    api.getMemorySettings.mockResolvedValue({
+      status: 'ok',
+      enabled: true,
+      rebuild_required: true,
+      processing: { llm: endpoint, embedding: endpoint },
+    });
+    renderPage();
+
+    const action = await screen.findByRole('button', { name: 'memory.status.restartEngine' });
+    expect((action as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('is disabled while the settings panel is running a rebuild', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    const action = await screen.findByRole('button', { name: 'memory.status.restartEngine' });
+
+    await user.click(await screen.findByRole('radio', { name: 'memory.tabs.settings' }));
+    await user.click(await screen.findByRole('button', { name: 'begin-rebuild' }));
+    expect((action as HTMLButtonElement).disabled).toBe(true);
+
+    await user.click(screen.getByRole('button', { name: 'end-rebuild' }));
+    expect((action as HTMLButtonElement).disabled).toBe(false);
   });
 });

@@ -31,9 +31,19 @@ const EndpointFields: React.FC<{
   original: MemoryEndpointConfig;
   onChange: (next: EndpointDraft) => void;
   disabled: boolean;
+  identityDisabled?: boolean;
   identityHint?: string;
   canClearKey: boolean;
-}> = ({ title, draft, original, onChange, disabled, identityHint, canClearKey }) => {
+}> = ({
+  title,
+  draft,
+  original,
+  onChange,
+  disabled,
+  identityDisabled = false,
+  identityHint,
+  canClearKey,
+}) => {
   const { t } = useTranslation();
   return (
     <div className="flex flex-col gap-3 rounded-xl border border-border bg-surface p-4">
@@ -51,7 +61,7 @@ const EndpointFields: React.FC<{
           <Label className="text-[12px] text-muted">{t('memory.settings.baseUrl')}</Label>
           <Input
             value={draft.baseUrl}
-            disabled={disabled}
+            disabled={disabled || identityDisabled}
             placeholder={t('memory.settings.baseUrlPlaceholder')}
             onChange={(e) => onChange({ ...draft, baseUrl: e.target.value })}
             className="text-[13px]"
@@ -61,7 +71,7 @@ const EndpointFields: React.FC<{
           <Label className="text-[12px] text-muted">{t('memory.settings.model')}</Label>
           <Input
             value={draft.model}
-            disabled={disabled}
+            disabled={disabled || identityDisabled}
             placeholder={t('memory.settings.modelPlaceholder')}
             onChange={(e) => onChange({ ...draft, model: e.target.value })}
             className="text-[13px]"
@@ -105,16 +115,11 @@ const EndpointFields: React.FC<{
 };
 
 const identityChanged = (draft: EndpointDraft, original: MemoryEndpointConfig): boolean => {
-  // Match the backend: first-time setup from empty identity is ordinary save,
-  // not a rebuild-confirming identity change.
-  const originalBase = (original.base_url ?? '').trim();
-  const originalModel = (original.model ?? '').trim();
-  if (!originalBase && !originalModel) {
-    return false;
-  }
-  const baseUrl = draft.baseUrl.trim() || null;
-  const model = draft.model.trim() || null;
-  return baseUrl !== (original.base_url ?? null) || model !== (original.model ?? null);
+  const normalize = (value: string | null | undefined): string | null => value?.trim() || null;
+  return (
+    normalize(draft.baseUrl) !== normalize(original.base_url)
+    || normalize(draft.model) !== normalize(original.model)
+  );
 };
 
 export const MemorySettingsPanel: React.FC<{
@@ -196,12 +201,14 @@ export const MemorySettingsPanel: React.FC<{
       const res = await api.saveMemorySettings(patch);
       if (isMemoryOk(res)) {
         onSaved(res);
-        const runtime = res.runtime as { ok?: boolean } | undefined;
+        const runtime = res.runtime as { ok?: boolean; error?: string } | undefined;
         // Ordinary reconcile also returns runtime.ok; only a confirmed rebuild
         // (needsRebuild) or Retry path should announce rebuild outcomes.
         if (needsRebuild && runtime && typeof runtime.ok === 'boolean') {
           showToast(
-            runtime.ok ? t('memory.settings.rebuildCompleted') : t('memory.settings.rebuildFailed'),
+            runtime.ok
+              ? t('memory.settings.rebuildCompleted')
+              : memoryErrorMessage(t, runtime.error || 'memory_rebuild_failed'),
             runtime.ok ? 'success' : 'error',
           );
         } else {
@@ -304,7 +311,7 @@ export const MemorySettingsPanel: React.FC<{
         <Switch
           checked={enabledDraft}
           onCheckedChange={setEnabledDraft}
-          disabled={busy || (!enabledDraft && !dependencyReady)}
+          disabled={busy || rebuildRequired || (!enabledDraft && !dependencyReady)}
           label={t('memory.settings.enableLabel')}
         />
       </div>
@@ -315,6 +322,7 @@ export const MemorySettingsPanel: React.FC<{
         original={settings.processing.llm}
         onChange={setLlmDraft}
         disabled={busy}
+        identityDisabled={rebuildRequired}
         canClearKey={canClearKeys}
       />
 
@@ -324,6 +332,7 @@ export const MemorySettingsPanel: React.FC<{
         original={settings.processing.embedding}
         onChange={setEmbeddingDraft}
         disabled={busy}
+        identityDisabled={rebuildRequired}
         identityHint={t('memory.settings.embeddingIdentityHint')}
         canClearKey={canClearKeys}
       />

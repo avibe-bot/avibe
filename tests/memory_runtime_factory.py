@@ -6,7 +6,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import AsyncIterator
+from typing import AsyncIterator, Callable
 
 from config.v2_config import MemoryConfig
 from core.memory.artifact import MemoryArtifactPort
@@ -40,6 +40,7 @@ class MemoryRuntimeFactory:
         effective_home: Path | None = None,
         processing_event: ProcessingEvent | None = None,
         insight_reader: MemoryInsightReader | None = None,
+        on_config_settled: Callable[[MemoryConfig], None] | None = None,
     ) -> MemoryRuntime:
         runtime = MemoryRuntime(
             config,
@@ -49,6 +50,7 @@ class MemoryRuntimeFactory:
             effective_home=effective_home,
             processing_event=processing_event,
             insight_reader=insight_reader,
+            on_config_settled=on_config_settled,
         )
         self._runtimes.append(_OwnedRuntime(runtime))
         return runtime

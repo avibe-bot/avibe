@@ -1062,11 +1062,12 @@ def _memory_config(
     *,
     enabled: bool = True,
     llm_model: str = "chat",
-    embedding_change_pending: bool = False,
+    embedding_model: str = "embed",
+    recovery_intent: str | None = None,
 ) -> MemoryConfig:
     return MemoryConfig(
         enabled=enabled,
-        embedding_change_pending=embedding_change_pending,
+        recovery_intent=recovery_intent,
         processing=MemoryProcessingConfig(
             llm=MemoryEndpointConfig(
                 base_url="https://llm.example.test/v1",
@@ -1075,7 +1076,7 @@ def _memory_config(
             ),
             embedding=MemoryEndpointConfig(
                 base_url="https://embed.example.test/v1",
-                model="embed",
+                model=embedding_model,
                 api_key="embed-key",
             ),
         ),
@@ -1112,17 +1113,28 @@ def test_a_failed_memory_reconciliation_does_not_adopt_the_candidate_config() ->
     assert controller.config.memory.enabled is True
 
 
-def test_settling_a_pending_embedding_change_ignores_the_marker_itself():
-    """`_settle_embedding_change_pending` clears the persisted marker only when
-    the candidate still matches what is on disk, so the marker being set cannot
-    itself make the candidate look like a different configuration."""
+def test_controller_adopts_an_independent_settled_memory_snapshot() -> None:
+    controller = Controller.__new__(Controller)
+    controller.config = SimpleNamespace(memory=_memory_config(recovery_intent="rebuild"))
+    settled = _memory_config(enabled=False)
 
-    from core.memory.runtime import _same_memory_configuration
+    controller._adopt_settled_memory_config(settled)
 
-    persisted = _memory_config(embedding_change_pending=True)
+    assert controller.config.memory == settled
+    assert controller.config.memory is not settled
+
+
+def test_settling_a_pending_embedding_change_compares_embedding_identity():
+    """Settlement ignores its marker but never a vector-space identity change."""
+
+    from core.memory.runtime import _same_embedding_identity
+
+    persisted = _memory_config(recovery_intent="rebuild")
     candidate = _memory_config()
 
-    assert _same_memory_configuration(persisted, candidate) is True
-    assert (
-        _same_memory_configuration(persisted, _memory_config(llm_model="chat-2")) is False
-    )
+    assert _same_embedding_identity(persisted, candidate) is True
+    assert _same_embedding_identity(persisted, _memory_config(llm_model="chat-2")) is True
+    assert _same_embedding_identity(
+        persisted,
+        _memory_config(embedding_model="embed-v2"),
+    ) is False

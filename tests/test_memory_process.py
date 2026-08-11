@@ -20,12 +20,20 @@ from types import SimpleNamespace
 import psutil
 import pytest
 
+from config.v2_config import (
+    MemoryConfig,
+    MemoryEndpointConfig,
+    MemoryProcessingConfig,
+)
+from core.memory.artifact import FakeMemoryArtifactManager
 from core.memory.attachments import AttachmentPinStore, attachment_pin_root
 from core.memory.everos import (
     EverOSPort,
     ProviderCapture,
 )
 import core.memory.process as memory_process
+import core.memory.runtime as memory_runtime
+from core.memory.operation_lock import MemoryOperationBusy, MemoryOperationLease
 from core.memory.process import (
     _SIDECAR_ENTRYPOINT_MODULE,
     _ProcessHost,
@@ -34,6 +42,7 @@ from core.memory.process import (
     EverOSProcessSettings,
     EverOSRebuildProcess,
     FakeEverOSProcess,
+    FakeEverOSProcessFactory,
     RebuildProcessResult,
     _MemoryChildRole,
     _ProcessKind,
@@ -2204,6 +2213,175 @@ def _rebuild_process(
         stop_timeout_seconds=0.1,
         _host=host,
     )
+
+
+def _runtime_rebuild_candidate() -> MemoryConfig:
+    return MemoryConfig(
+        enabled=True,
+        recovery_intent="rebuild",
+        processing=MemoryProcessingConfig(
+            llm=MemoryEndpointConfig(
+                base_url="https://llm.example.test/v1",
+                model="chat",
+                api_key="llm-secret",
+            ),
+            embedding=MemoryEndpointConfig(
+                base_url="https://embed.example.test/v1",
+                model="embed",
+                api_key="embedding-secret",
+            ),
+        ),
+    )
+
+
+def _runtime_artifact() -> FakeMemoryArtifactManager:
+    return FakeMemoryArtifactManager(
+        python=Path(sys.executable),
+        root_format="everos-1.2.3",
+        fingerprint="test-artifact",
+        status_payload={"reason": None},
+    )
+
+
+def _inject_real_rebuild_process(
+    monkeypatch: pytest.MonkeyPatch,
+    host: _FakeProcessHost,
+) -> None:
+    def rebuild_process(
+        python,
+        *,
+        effective_home,
+        provider_root,
+        settings,
+    ) -> EverOSRebuildProcess:
+        return EverOSRebuildProcess(
+            python,
+            effective_home=effective_home,
+            provider_root=provider_root,
+            settings=settings,
+            timeout_seconds=30 * 60,
+            stop_timeout_seconds=0.1,
+            _host=host,
+        )
+
+    monkeypatch.setattr(memory_runtime, "EverOSRebuildProcess", rebuild_process)
+
+
+async def test_runtime_close_interrupts_rebuild_and_releases_owned_tree_and_lease(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    memory_runtime_factory,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    candidate = _runtime_rebuild_candidate()
+    child = _RebuildChild(None)
+    identities = {child.pid: _ORPHAN_CREATE_TIME}
+    host = _FakeProcessHost(
+        spawns=deque([child]),
+        process_groups={child.pid: child.pid},
+        trees={(child.pid, child.pid): identities},
+        live_processes=dict(identities),
+    )
+    _inject_real_rebuild_process(monkeypatch, host)
+    monkeypatch.setattr(
+        memory_runtime.V2Config,
+        "load",
+        classmethod(lambda cls, config_path=None: SimpleNamespace(memory=candidate)),
+    )
+    runtime = memory_runtime_factory(
+        candidate,
+        artifact_manager=_runtime_artifact(),
+        process_factory=FakeEverOSProcessFactory(),
+        effective_home=tmp_path,
+    )
+    monkeypatch.setattr(runtime, "_provider_data_exists_strict", lambda: True)
+    rebuilding = asyncio.create_task(runtime.rebuild())
+    await child.waiting.wait()
+    record_path = memory_process.sidecar_record_path(tmp_path / "memory")
+    assert record_path.exists()
+
+    await asyncio.wait_for(memory_runtime_factory.close(runtime), timeout=1)
+
+    assert await rebuilding == {
+        "ok": False,
+        "error": "memory_rebuild_failed",
+        "result": "interrupted",
+    }
+    assert not host.live_processes
+    assert host.signal_calls
+    assert not record_path.exists()
+    competing = MemoryOperationLease(tmp_path)
+    competing.acquire()
+    competing.release()
+
+
+async def test_cancelled_runtime_close_waits_for_rebuild_cleanup_and_lease_release(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    memory_runtime_factory,
+) -> None:
+    class _BlockingCleanupHost(_FakeProcessHost):
+        def __init__(self, **kwargs) -> None:
+            super().__init__(**kwargs)
+            self.cleanup_started = asyncio.Event()
+            self.release_cleanup = asyncio.Event()
+
+        async def wait_for_exit(self, *args, **kwargs) -> bool:
+            self.cleanup_started.set()
+            await self.release_cleanup.wait()
+            return await super().wait_for_exit(*args, **kwargs)
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    candidate = _runtime_rebuild_candidate()
+    child = _RebuildChild(None)
+    identities = {child.pid: _ORPHAN_CREATE_TIME}
+    host = _BlockingCleanupHost(
+        spawns=deque([child]),
+        process_groups={child.pid: child.pid},
+        trees={(child.pid, child.pid): identities},
+        live_processes=dict(identities),
+    )
+    _inject_real_rebuild_process(monkeypatch, host)
+    monkeypatch.setattr(
+        memory_runtime.V2Config,
+        "load",
+        classmethod(lambda cls, config_path=None: SimpleNamespace(memory=candidate)),
+    )
+    runtime = memory_runtime_factory(
+        candidate,
+        artifact_manager=_runtime_artifact(),
+        process_factory=FakeEverOSProcessFactory(),
+        effective_home=tmp_path,
+    )
+    monkeypatch.setattr(runtime, "_provider_data_exists_strict", lambda: True)
+    rebuilding = asyncio.create_task(runtime.rebuild())
+    await child.waiting.wait()
+    record_path = memory_process.sidecar_record_path(tmp_path / "memory")
+    closing = asyncio.create_task(runtime.close())
+    await host.cleanup_started.wait()
+
+    closing.cancel()
+    await asyncio.sleep(0)
+    assert closing.done() is False
+    assert record_path.exists()
+    competing = MemoryOperationLease(tmp_path)
+    with pytest.raises(MemoryOperationBusy):
+        competing.acquire()
+
+    host.release_cleanup.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(closing, timeout=1)
+
+    assert await rebuilding == {
+        "ok": False,
+        "error": "memory_rebuild_failed",
+        "result": "interrupted",
+    }
+    assert not host.live_processes
+    assert not record_path.exists()
+    competing.acquire()
+    competing.release()
+    await memory_runtime_factory.close(runtime)
 
 
 async def test_rebuild_requires_only_complete_embedding_settings(tmp_path: Path) -> None:

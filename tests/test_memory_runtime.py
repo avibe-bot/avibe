@@ -56,6 +56,7 @@ from core.memory.runtime import (
     create_memory_runtime,
 )
 from core.memory.everos_insight.recorder import initialize_call_log
+from core.memory.operation_lock import MemoryOperationBusy, MemoryOperationLease
 from core.memory.store import MemoryStore
 from core.memory.types import (
     CaptureAccepted,
@@ -76,6 +77,7 @@ from config.v2_config import (
     RuntimeConfig,
     SlackConfig,
     V2Config,
+    atomic_update_memory,
 )
 
 
@@ -2491,9 +2493,9 @@ async def test_runtime_restart_rechecks_persisted_embedding_candidate(
         memory=MemoryConfig(
             enabled=False,
             processing=processing,
-            embedding_change_pending=True,
+            recovery_intent="rebuild",
         ),
-    ).save(persist_memory=True)
+    ).save()
     restarted = V2Config.load().memory
     inspected: list[bool] = []
     factory = FakeEverOSProcessFactory()
@@ -2514,15 +2516,15 @@ async def test_runtime_restart_rechecks_persisted_embedding_candidate(
         "ok": False,
         "error": "memory_embedding_rebuild_required",
     }
-    assert runtime._config is restarted
+    assert runtime._config == restarted
     assert runtime.module._worker._claims_paused is True
     await memory_runtime_factory.close(runtime)
-    assert inspected == [True]
+    assert inspected == []
     # The pending marker must fence without launching any child.
     assert factory.created == []
 
 
-async def test_runtime_settles_embedding_candidate_before_resuming_claims(
+async def test_runtime_boot_with_pending_empty_candidate_stays_fenced_and_down(
     monkeypatch,
     tmp_path: Path,
     memory_runtime_factory,
@@ -2532,23 +2534,7 @@ async def test_runtime_settles_embedding_candidate_before_resuming_claims(
     def _Artifact() -> FakeMemoryArtifactManager:
         return _installed_artifact()
 
-    observed_before_ready: list[tuple[bool, bool]] = []
-    runtime: MemoryRuntime | None = None
-
-    class _Process(FakeEverOSProcess):
-        """Snapshot persisted candidate state and claim fencing before readiness."""
-
-        async def start(self) -> bool:
-            assert runtime is not None
-            observed_before_ready.append(
-                (
-                    V2Config.load().memory.embedding_change_pending,
-                    runtime.module._worker._claims_paused,
-                )
-            )
-            return await super().start()
-
-    factory = FakeEverOSProcessFactory(template=_Process)
+    factory = FakeEverOSProcessFactory()
 
     processing = MemoryProcessingConfig(
         llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-key"),
@@ -2563,9 +2549,9 @@ async def test_runtime_settles_embedding_candidate_before_resuming_claims(
         memory=MemoryConfig(
             enabled=True,
             processing=processing,
-            embedding_change_pending=True,
+            recovery_intent="rebuild",
         ),
-    ).save(persist_memory=True)
+    ).save()
     restarted = V2Config.load().memory
 
     runtime = memory_runtime_factory(
@@ -2574,13 +2560,61 @@ async def test_runtime_settles_embedding_candidate_before_resuming_claims(
         process_factory=factory,
         effective_home=tmp_path,
     )
+    old = FakeEverOSProcess(settings=_settings())
+    runtime._process = old
     monkeypatch.setattr(runtime, "_provider_data_exists_strict", lambda: False, raising=False)
-    assert (await runtime.reconcile(restarted))["ok"] is True
-    assert runtime._config.embedding_change_pending is False
-    assert runtime.module._worker._claims_paused is False
+    assert await runtime.reconcile(restarted) == {
+        "ok": False,
+        "error": "memory_embedding_rebuild_required",
+    }
+    assert runtime._config.recovery_intent == "rebuild"
+    assert runtime._restart_config.recovery_intent == "rebuild"
+    assert runtime.module._worker._claims_paused is True
+    assert old.stopped is True
+    assert factory.created == []
+    assert V2Config.load().memory.recovery_intent == "rebuild"
     await memory_runtime_factory.close(runtime)
-    assert observed_before_ready == [(False, True)]
-    assert V2Config.load().memory.embedding_change_pending is False
+
+
+@pytest.mark.parametrize("durable_pending", [False, True])
+async def test_runtime_reconcile_prefers_durable_marker_only_change(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    memory_runtime_factory,
+    durable_pending: bool,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    settled = MemoryConfig(enabled=False, processing=_processing_config())
+    pending = replace(settled, recovery_intent="rebuild")
+    durable = pending if durable_pending else settled
+    stale = settled if durable_pending else pending
+    V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+        memory=durable,
+    ).save()
+    runtime = memory_runtime_factory(
+        stale,
+        artifact_manager=_installed_artifact(),
+        effective_home=tmp_path,
+    )
+
+    result = await runtime.reconcile(stale)
+
+    if durable_pending:
+        assert result == {
+            "ok": False,
+            "error": "memory_embedding_rebuild_required",
+        }
+        assert runtime.module._worker._claims_paused is True
+    else:
+        assert result == {"ok": True, "state": "disabled"}
+    assert runtime._config.recovery_intent == durable.recovery_intent
+    assert runtime._restart_config.recovery_intent == durable.recovery_intent
+    await memory_runtime_factory.close(runtime)
 
 
 async def test_runtime_artifact_activation_rolls_back_root_and_sidecar(
@@ -3903,21 +3937,17 @@ async def test_runtime_restart_replays_last_success_after_failed_candidate(
     await memory_runtime_factory.close(runtime)
 
 
-async def test_marker_settlement_updates_only_replay_marker_after_candidate_failure(
+async def test_rebuild_settlement_survives_candidate_activation_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     memory_runtime_factory,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
-    class ConfigAwareProcess(FakeEverOSProcess):
-        async def processing_healthy(self) -> bool:
-            return self.settings is not None and self.settings.llm_model != "rejected"
-
     startup = MemoryConfig(
         enabled=True,
         processing=_processing_config(),
-        embedding_change_pending=True,
+        recovery_intent="rebuild",
     )
     candidate = replace(
         startup,
@@ -3934,33 +3964,28 @@ async def test_marker_settlement_updates_only_replay_marker_after_candidate_fail
         runtime=RuntimeConfig(default_cwd="."),
         agents=AgentsConfig(),
         memory=candidate,
-    ).save(persist_memory=True)
-    factory = FakeEverOSProcessFactory(template=ConfigAwareProcess)
+    ).save()
+    factory = FakeEverOSProcessFactory(
+        template=lambda: FakeEverOSProcess(start_results=deque((False,)))
+    )
     runtime = memory_runtime_factory(
         startup,
         artifact_manager=_installed_artifact(),
         process_factory=factory,
         effective_home=tmp_path,
     )
-    old = FakeEverOSProcess(settings=_settings())
-    runtime._process = old
     monkeypatch.setattr(runtime, "_provider_data_exists_strict", lambda: False)
 
-    assert await runtime.reconcile(candidate) == {
+    assert await runtime.rebuild() == {
         "ok": False,
-        "error": "memory_processing_failed",
+        "error": "memory_sidecar_unavailable",
+        "result": "completed_empty",
     }
     settled = V2Config.load().memory
-    assert settled.embedding_change_pending is False
+    assert settled.recovery_intent is None
     assert settled.processing.llm.model == "rejected"
-    persisted_after_failure = (tmp_path / "config" / "config.json").read_bytes()
-
-    assert await runtime.restart() == {"ok": True, "state": "ready"}
-    replacement = factory.supervised[-1]
-    assert replacement.settings is not None
-    assert replacement.settings.llm_model == "chat"
-    assert replacement.settings.embedding_model == "embed"
-    assert (tmp_path / "config" / "config.json").read_bytes() == persisted_after_failure
+    assert runtime._restart_config == settled
+    assert runtime.module._worker._claims_paused is True
     await memory_runtime_factory.close(runtime)
 
 
@@ -3998,7 +4023,7 @@ async def test_runtime_restart_fails_closed_before_launch_for_marker_or_clear_re
         MemoryConfig(
             enabled=True,
             processing=_processing_config(),
-            embedding_change_pending=True,
+            recovery_intent="rebuild",
         ),
         artifact_manager=_installed_artifact(),
         process_factory=marked_factory,
@@ -4588,9 +4613,9 @@ async def test_runtime_rebuild_validates_before_destructive_stop(
         memory=MemoryConfig(
             enabled=True,
             processing=processing,
-            embedding_change_pending=True,
+            recovery_intent="rebuild",
         ),
-    ).save(persist_memory=True)
+    ).save()
     factory = FakeEverOSProcessFactory()
     runtime = memory_runtime_factory(
         V2Config.load().memory,
@@ -4609,13 +4634,249 @@ async def test_runtime_rebuild_validates_before_destructive_stop(
     assert result["result"] == "failed"
     assert old.stopped is False
     assert factory.created == []
-    assert V2Config.load().memory.embedding_change_pending is True
+    assert V2Config.load().memory.recovery_intent == "rebuild"
+    assert runtime.module._worker._claims_paused is True
+    assert await runtime.restart() == {
+        "ok": False,
+        "error": "memory_embedding_rebuild_required",
+    }
     await memory_runtime_factory.close(runtime)
 
+
+async def test_runtime_rebuild_durable_candidate_load_failure_never_uses_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    memory_runtime_factory,
+) -> None:
+    candidate = MemoryConfig(
+        enabled=True,
+        processing=_processing_config(),
+        recovery_intent="rebuild",
+    )
+    runtime = memory_runtime_factory(
+        candidate,
+        artifact_manager=_installed_artifact(),
+        process_factory=FakeEverOSProcessFactory(),
+        effective_home=tmp_path,
+    )
+    old = FakeEverOSProcess(settings=_settings())
+    runtime._process = old
+    monkeypatch.setattr(
+        V2Config,
+        "load",
+        classmethod(
+            lambda cls, config_path=None: (_ for _ in ()).throw(
+                ValueError("durable config unavailable")
+            )
+        ),
+    )
+
+    assert await runtime.rebuild() == {
+        "ok": False,
+        "error": "memory_rebuild_failed",
+        "result": "failed",
+    }
+    assert old.stopped is False
+    assert runtime._process is old
+    assert runtime.module._worker._claims_paused is True
+    assert runtime._restart_config.recovery_intent == "rebuild"
+    assert await runtime.restart() == {
+        "ok": False,
+        "error": "memory_embedding_rebuild_required",
+    }
+    await memory_runtime_factory.close(runtime)
+
+
+@pytest.mark.parametrize("failure", [False, RuntimeError("quiesce failed")])
+async def test_runtime_rebuild_quiesce_failure_does_not_stop_sidecar(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    memory_runtime_factory,
+    failure: bool | RuntimeError,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    candidate = MemoryConfig(
+        enabled=True,
+        processing=_processing_config(),
+        recovery_intent="rebuild",
+    )
+    V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+        memory=candidate,
+    ).save()
+    runtime = memory_runtime_factory(
+        candidate,
+        artifact_manager=_installed_artifact(),
+        effective_home=tmp_path,
+    )
+    old = FakeEverOSProcess(settings=_settings())
+    runtime._process = old
+
+    async def fail_quiesce(*_args, **_kwargs) -> bool:
+        if isinstance(failure, BaseException):
+            raise failure
+        return failure
+
+    monkeypatch.setattr(runtime.module, "quiesce_claims", fail_quiesce)
+
+    assert await runtime.rebuild() == {
+        "ok": False,
+        "error": "memory_rebuild_failed",
+        "result": "failed",
+    }
+    assert old.stopped is False
+    assert runtime._process is old
+    assert V2Config.load().memory.recovery_intent == "rebuild"
+    assert runtime.module._worker._claims_paused is True
+    assert await runtime.restart() == {
+        "ok": False,
+        "error": "memory_embedding_rebuild_required",
+    }
+    await memory_runtime_factory.close(runtime)
+
+
+@pytest.mark.parametrize("preflight", ["indeterminate", "incomplete_endpoint"])
+async def test_runtime_rebuild_data_preflight_fails_before_destructive_stop(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    memory_runtime_factory,
+    preflight: str,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    processing = _processing_config()
+    persisted_candidate = MemoryConfig(
+        enabled=True,
+        processing=processing,
+        recovery_intent="rebuild",
+    )
+    V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+        memory=persisted_candidate,
+    ).save()
+    if preflight == "incomplete_endpoint":
+        processing = replace(
+            processing,
+            embedding=replace(processing.embedding, api_key=None),
+        )
+    candidate = MemoryConfig(
+        enabled=True,
+        processing=processing,
+        recovery_intent="rebuild",
+    )
+    if preflight == "incomplete_endpoint":
+        monkeypatch.setattr(V2Config, "load", lambda: SimpleNamespace(memory=candidate))
+    runtime = memory_runtime_factory(
+        candidate,
+        artifact_manager=_installed_artifact(),
+        effective_home=tmp_path,
+    )
+    old = FakeEverOSProcess(settings=_settings())
+    runtime._process = old
+
+    def inspect_data() -> bool:
+        if preflight == "indeterminate":
+            raise RuntimeError("root state unavailable")
+        return True
+
+    monkeypatch.setattr(runtime, "_provider_data_exists_strict", inspect_data)
+
+    assert await runtime.rebuild() == {
+        "ok": False,
+        "error": "memory_rebuild_failed",
+        "result": "failed",
+    }
+    assert old.stopped is False
+    assert runtime._process is old
+    assert V2Config.load().memory.recovery_intent == "rebuild"
+    assert runtime.module._worker._claims_paused is True
+    assert await runtime.restart() == {
+        "ok": False,
+        "error": "memory_embedding_rebuild_required",
+    }
+    await memory_runtime_factory.close(runtime)
+
+
+@pytest.mark.parametrize(
+    ("inspections", "expected_result", "expected_child_calls"),
+    [
+        ((False, True), "completed", 1),
+        ((True, False), "completed_empty", 0),
+    ],
+)
+async def test_runtime_rebuild_reinspects_after_proven_sidecar_stop(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    memory_runtime_factory,
+    inspections: tuple[bool, bool],
+    expected_result: str,
+    expected_child_calls: int,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    candidate = MemoryConfig(
+        enabled=True,
+        processing=_processing_config(),
+        recovery_intent="rebuild",
+    )
+    V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+        memory=candidate,
+    ).save()
+    runtime = memory_runtime_factory(
+        candidate,
+        artifact_manager=_installed_artifact(),
+        process_factory=FakeEverOSProcessFactory(),
+        effective_home=tmp_path,
+    )
+    old = FakeEverOSProcess(settings=_settings())
+    runtime._process = old
+    remaining = deque(inspections)
+    stop_observations: list[bool] = []
+    child_calls = 0
+
+    def inspect_data() -> bool:
+        stop_observations.append(old.stopped)
+        return remaining.popleft()
+
+    class _CompletedRebuild:
+        def __init__(self, *_args, **_kwargs):
+            nonlocal child_calls
+            child_calls += 1
+
+        async def run(self) -> RebuildProcessResult:
+            return RebuildProcessResult.COMPLETED
+
+    monkeypatch.setattr(runtime, "_provider_data_exists_strict", inspect_data)
+    monkeypatch.setattr("core.memory.runtime.EverOSRebuildProcess", _CompletedRebuild)
+
+    assert await runtime.rebuild() == {
+        "ok": True,
+        "result": expected_result,
+        "state": "ready",
+    }
+    assert stop_observations == [False, True]
+    assert child_calls == expected_child_calls
+    await memory_runtime_factory.close(runtime)
+
+
+@pytest.mark.parametrize(("enabled", "state"), [(True, "ready"), (False, "disabled")])
 async def test_runtime_rebuild_empty_root_settles_without_child(
     monkeypatch,
     tmp_path,
     memory_runtime_factory,
+    enabled: bool,
+    state: str,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     processing = _processing_config()
@@ -4626,11 +4887,11 @@ async def test_runtime_rebuild_empty_root_settles_without_child(
         runtime=RuntimeConfig(default_cwd="."),
         agents=AgentsConfig(),
         memory=MemoryConfig(
-            enabled=True,
+            enabled=enabled,
             processing=processing,
-            embedding_change_pending=True,
+            recovery_intent="rebuild",
         ),
-    ).save(persist_memory=True)
+    ).save()
     factory = FakeEverOSProcessFactory()
     runtime = memory_runtime_factory(
         V2Config.load().memory,
@@ -4638,6 +4899,8 @@ async def test_runtime_rebuild_empty_root_settles_without_child(
         process_factory=factory,
         effective_home=tmp_path,
     )
+    if not enabled:
+        runtime._recorder_health = {"state": "degraded", "reason": "writer_failures"}
     monkeypatch.setattr(runtime, "_provider_data_exists_strict", lambda: False, raising=False)
     rebuild_calls = []
 
@@ -4650,10 +4913,84 @@ async def test_runtime_rebuild_empty_root_settles_without_child(
 
     monkeypatch.setattr("core.memory.runtime.EverOSRebuildProcess", _NoChild)
     result = await runtime.rebuild()
-    assert result == {"ok": True, "result": "completed_empty", "state": "ready"}
+    assert result == {"ok": True, "result": "completed_empty", "state": state}
     assert rebuild_calls == []
-    assert V2Config.load().memory.embedding_change_pending is False
-    assert runtime._restart_config.embedding_change_pending is False
+    assert len(factory.supervised) == int(enabled)
+    if not enabled:
+        assert runtime._recorder_health == {"state": "disabled", "reason": None}
+    assert V2Config.load().memory.recovery_intent is None
+    assert runtime._restart_config.recovery_intent is None
+    await memory_runtime_factory.close(runtime)
+
+
+async def test_runtime_rebuild_reads_key_correction_after_admission_gap(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    memory_runtime_factory,
+) -> None:
+    from config.v2_config import memory_config_to_payload
+    from vibe import api
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    candidate = MemoryConfig(
+        enabled=True,
+        processing=_processing_config(),
+        recovery_intent="rebuild",
+    )
+    V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+        memory=candidate,
+    ).save()
+    runtime = memory_runtime_factory(
+        candidate,
+        artifact_manager=_installed_artifact(),
+        process_factory=FakeEverOSProcessFactory(),
+        effective_home=tmp_path,
+    )
+    monkeypatch.setattr(runtime, "_provider_data_exists_strict", lambda: True)
+    acquire_entered = threading.Event()
+    allow_acquire = threading.Event()
+    observed_keys: list[str | None] = []
+
+    class _GatedLease(MemoryOperationLease):
+        def acquire(self) -> None:
+            acquire_entered.set()
+            assert allow_acquire.wait(10)
+            super().acquire()
+
+    class _CompletedRebuild:
+        def __init__(self, *_args, settings, **_kwargs):
+            observed_keys.append(settings.embedding_api_key)
+
+        async def run(self) -> RebuildProcessResult:
+            return RebuildProcessResult.COMPLETED
+
+    monkeypatch.setattr(memory_runtime, "MemoryOperationLease", _GatedLease)
+    monkeypatch.setattr(memory_runtime, "EverOSRebuildProcess", _CompletedRebuild)
+    rebuilding = asyncio.create_task(runtime.rebuild())
+    assert await asyncio.to_thread(acquire_entered.wait, 10)
+
+    current = V2Config.load().memory
+    payload = memory_config_to_payload(current, include_secrets=True)
+    payload["processing"]["embedding"]["api_key"] = "corrected-key"
+    api.save_memory_config(
+        payload,
+        recovery_intent="rebuild",
+        expected=current,
+    )
+    allow_acquire.set()
+
+    assert await rebuilding == {
+        "ok": True,
+        "result": "completed",
+        "state": "ready",
+    }
+    assert observed_keys == ["corrected-key"]
+    assert runtime._restart_config.processing.embedding.api_key == "corrected-key"
     await memory_runtime_factory.close(runtime)
 
 
@@ -4673,9 +5010,9 @@ async def test_runtime_rebuild_maps_root_busy_without_settling(
         memory=MemoryConfig(
             enabled=True,
             processing=processing,
-            embedding_change_pending=True,
+            recovery_intent="rebuild",
         ),
-    ).save(persist_memory=True)
+    ).save()
     factory = FakeEverOSProcessFactory()
     runtime = memory_runtime_factory(
         V2Config.load().memory,
@@ -4696,7 +5033,120 @@ async def test_runtime_rebuild_maps_root_busy_without_settling(
     result = await runtime.rebuild()
     assert result == {"ok": False, "error": "memory_rebuild_root_busy", "result": "root_busy"}
     assert "factory" not in str(result).lower()
-    assert V2Config.load().memory.embedding_change_pending is True
+    assert V2Config.load().memory.recovery_intent == "rebuild"
+    assert runtime._restart_config.recovery_intent == "rebuild"
+    assert runtime.module._worker._claims_paused is True
+    await memory_runtime_factory.close(runtime)
+
+
+@pytest.mark.parametrize(
+    ("child_result", "public_result"),
+    [
+        (RebuildProcessResult.INTERRUPTED, "interrupted"),
+        (RebuildProcessResult.TIMED_OUT, "timed_out"),
+        (RebuildProcessResult.FAILED, "failed"),
+    ],
+)
+async def test_runtime_rebuild_maps_failed_child_without_settling(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    memory_runtime_factory,
+    child_result: RebuildProcessResult,
+    public_result: str,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    candidate = MemoryConfig(
+        enabled=True,
+        processing=_processing_config(),
+        recovery_intent="rebuild",
+    )
+    V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+        memory=candidate,
+    ).save()
+    runtime = memory_runtime_factory(
+        candidate,
+        artifact_manager=_installed_artifact(),
+        effective_home=tmp_path,
+    )
+    monkeypatch.setattr(runtime, "_provider_data_exists_strict", lambda: True)
+
+    class _FailedRebuild:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def run(self) -> RebuildProcessResult:
+            return child_result
+
+    monkeypatch.setattr("core.memory.runtime.EverOSRebuildProcess", _FailedRebuild)
+
+    assert await runtime.rebuild() == {
+        "ok": False,
+        "error": "memory_rebuild_failed",
+        "result": public_result,
+    }
+    assert V2Config.load().memory.recovery_intent == "rebuild"
+    assert runtime._restart_config.recovery_intent == "rebuild"
+    assert runtime.module._worker._claims_paused is True
+    await memory_runtime_factory.close(runtime)
+
+
+async def test_runtime_rebuild_rejects_stale_settlement_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    memory_runtime_factory,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    candidate = MemoryConfig(
+        enabled=True,
+        processing=_processing_config(),
+        recovery_intent="rebuild",
+    )
+    V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+        memory=candidate,
+    ).save()
+    runtime = memory_runtime_factory(
+        candidate,
+        artifact_manager=_installed_artifact(),
+        effective_home=tmp_path,
+    )
+    monkeypatch.setattr(runtime, "_provider_data_exists_strict", lambda: True)
+
+    class _SupersededRebuild:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def run(self) -> RebuildProcessResult:
+            atomic_update_memory(
+                lambda current: replace(
+                    current,
+                    processing=replace(
+                        current.processing,
+                        embedding=replace(current.processing.embedding, model="embed-v3"),
+                    ),
+                )
+            )
+            return RebuildProcessResult.COMPLETED
+
+    monkeypatch.setattr("core.memory.runtime.EverOSRebuildProcess", _SupersededRebuild)
+
+    assert await runtime.rebuild() == {
+        "ok": False,
+        "error": "memory_rebuild_failed",
+        "result": "failed",
+    }
+    persisted = V2Config.load().memory
+    assert persisted.recovery_intent == "rebuild"
+    assert persisted.processing.embedding.model == "embed-v3"
     assert runtime.module._worker._claims_paused is True
     await memory_runtime_factory.close(runtime)
 
@@ -4716,9 +5166,9 @@ async def test_runtime_rebuild_refreshes_restart_snapshot_before_activation(
         memory=MemoryConfig(
             enabled=True,
             processing=processing,
-            embedding_change_pending=True,
+            recovery_intent="rebuild",
         ),
-    ).save(persist_memory=True)
+    ).save()
     observed = []
 
     class _CompletedRebuild:
@@ -4732,23 +5182,384 @@ async def test_runtime_rebuild_refreshes_restart_snapshot_before_activation(
         async def start(self) -> bool:
             observed.append(
                 (
-                    runtime._restart_config.embedding_change_pending,
-                    V2Config.load().memory.embedding_change_pending,
+                    runtime._restart_config.recovery_intent,
+                    V2Config.load().memory.recovery_intent,
                 )
             )
             return await super().start()
 
     factory = FakeEverOSProcessFactory(template=_Process)
+    settled_callbacks: list[MemoryConfig] = []
+
+    def on_config_settled(settled: MemoryConfig) -> None:
+        assert runtime._config == settled
+        assert runtime._restart_config == settled
+        settled_callbacks.append(settled)
+
     runtime = memory_runtime_factory(
         V2Config.load().memory,
         artifact_manager=_installed_artifact(),
         process_factory=factory,
         effective_home=tmp_path,
+        on_config_settled=on_config_settled,
     )
     monkeypatch.setattr(runtime, "_provider_data_exists_strict", lambda: True, raising=False)
     monkeypatch.setattr("core.memory.runtime.EverOSRebuildProcess", _CompletedRebuild)
     result = await runtime.rebuild()
     assert result == {"ok": True, "result": "completed", "state": "ready"}
-    assert observed == [(False, False)]
-    assert runtime._restart_config.embedding_change_pending is False
+    assert observed == [(None, None)]
+    assert settled_callbacks == [V2Config.load().memory]
+    assert runtime._restart_config.recovery_intent is None
     await memory_runtime_factory.close(runtime)
+
+
+async def test_runtime_rebuild_callback_failure_blocks_activation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    memory_runtime_factory,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    candidate = MemoryConfig(
+        enabled=True,
+        processing=_processing_config(),
+        recovery_intent="rebuild",
+    )
+    V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+        memory=candidate,
+    ).save()
+    factory = FakeEverOSProcessFactory()
+    runtime = memory_runtime_factory(
+        candidate,
+        artifact_manager=_installed_artifact(),
+        process_factory=factory,
+        effective_home=tmp_path,
+        on_config_settled=lambda _settled: (_ for _ in ()).throw(
+            RuntimeError("controller snapshot unavailable")
+        ),
+    )
+    monkeypatch.setattr(runtime, "_provider_data_exists_strict", lambda: False)
+
+    assert await runtime.rebuild() == {
+        "ok": False,
+        "error": "memory_restart_failed",
+        "result": "completed_empty",
+    }
+    assert V2Config.load().memory.recovery_intent is None
+    assert runtime._restart_config.recovery_intent is None
+    assert factory.supervised == []
+    assert runtime.module._worker._claims_paused is True
+    await memory_runtime_factory.close(runtime)
+
+
+async def test_cancelled_rebuild_caller_still_refreshes_settled_config(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    memory_runtime_factory,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    candidate = MemoryConfig(
+        enabled=True,
+        processing=_processing_config(),
+        recovery_intent="rebuild",
+    )
+    V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+        memory=candidate,
+    ).save()
+    child_entered = asyncio.Event()
+    child_release = asyncio.Event()
+    settled_seen = asyncio.Event()
+    callbacks: list[MemoryConfig] = []
+
+    class _BlockingRebuild:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def run(self) -> RebuildProcessResult:
+            child_entered.set()
+            await child_release.wait()
+            return RebuildProcessResult.COMPLETED
+
+    def on_config_settled(settled: MemoryConfig) -> None:
+        callbacks.append(settled)
+        settled_seen.set()
+
+    runtime = memory_runtime_factory(
+        candidate,
+        artifact_manager=_installed_artifact(),
+        process_factory=FakeEverOSProcessFactory(),
+        effective_home=tmp_path,
+        on_config_settled=on_config_settled,
+    )
+    monkeypatch.setattr(runtime, "_provider_data_exists_strict", lambda: True)
+    monkeypatch.setattr("core.memory.runtime.EverOSRebuildProcess", _BlockingRebuild)
+    caller = asyncio.create_task(runtime.rebuild())
+    await child_entered.wait()
+    retained = runtime._rebuild_task
+    assert retained is not None
+
+    caller.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+    child_release.set()
+    await settled_seen.wait()
+
+    assert await retained == {"ok": True, "result": "completed", "state": "ready"}
+    assert callbacks == [V2Config.load().memory]
+    assert callbacks[0].recovery_intent is None
+    await memory_runtime_factory.close(runtime)
+
+
+async def test_runtime_rebuild_keeps_completed_result_when_root_activation_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    memory_runtime_factory,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    candidate = MemoryConfig(
+        enabled=True,
+        processing=_processing_config(),
+        recovery_intent="rebuild",
+    )
+    V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+        memory=candidate,
+    ).save()
+    runtime = memory_runtime_factory(
+        candidate,
+        artifact_manager=_installed_artifact(),
+        effective_home=tmp_path,
+    )
+    monkeypatch.setattr(runtime, "_provider_data_exists_strict", lambda: False)
+    monkeypatch.setattr(
+        runtime._store,
+        "ensure_meta",
+        lambda: (_ for _ in ()).throw(RuntimeError("meta unavailable")),
+    )
+
+    assert await runtime.rebuild() == {
+        "ok": False,
+        "error": "memory_restart_failed",
+        "result": "completed_empty",
+    }
+    assert V2Config.load().memory.recovery_intent is None
+    assert runtime._restart_config.recovery_intent is None
+    assert runtime.module._worker._claims_paused is True
+    await memory_runtime_factory.close(runtime)
+
+
+async def test_runtime_rebuild_is_retained_joined_and_gates_other_mutations(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    memory_runtime_factory,
+) -> None:
+    runtime = memory_runtime_factory(
+        MemoryConfig(enabled=True, processing=_processing_config()),
+        artifact_manager=_installed_artifact(),
+        effective_home=tmp_path,
+    )
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    calls = 0
+
+    async def blocked_rebuild() -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        entered.set()
+        await release.wait()
+        return {"ok": False, "error": "memory_rebuild_failed", "result": "failed"}
+
+    monkeypatch.setattr(runtime, "_rebuild_locked", blocked_rebuild)
+    detached = asyncio.create_task(runtime.rebuild())
+    await entered.wait()
+    joined = asyncio.create_task(runtime.rebuild())
+    await asyncio.sleep(0)
+    detached.cancel()
+
+    assert await runtime.restart() == {
+        "ok": False,
+        "error": "memory_operation_in_progress",
+    }
+    assert await runtime.reconcile(runtime._config) == {
+        "ok": False,
+        "error": "memory_operation_in_progress",
+    }
+    assert await runtime.clear(operator_ref="user:owner") == {
+        "status": "failed",
+        "error": "memory_operation_in_progress",
+    }
+    assert await runtime.install_artifact() == {
+        "ok": False,
+        "reason": "memory_operation_in_progress",
+        "download_error": None,
+    }
+
+    release.set()
+    results = await asyncio.gather(detached, joined, return_exceptions=True)
+    assert isinstance(results[0], asyncio.CancelledError)
+    assert results[1] == {
+        "ok": False,
+        "error": "memory_rebuild_failed",
+        "result": "failed",
+    }
+    assert calls == 1
+    await memory_runtime_factory.close(runtime)
+
+
+async def test_runtime_rebuild_lease_rejects_a_second_controller(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    memory_runtime_factory,
+) -> None:
+    first = memory_runtime_factory(
+        MemoryConfig(enabled=True, processing=_processing_config()),
+        artifact_manager=_installed_artifact(),
+        effective_home=tmp_path,
+    )
+    second = memory_runtime_factory(
+        MemoryConfig(enabled=True, processing=_processing_config()),
+        artifact_manager=_installed_artifact(),
+        effective_home=tmp_path,
+    )
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocked_rebuild() -> dict[str, object]:
+        entered.set()
+        await release.wait()
+        return {"ok": False, "error": "memory_rebuild_failed", "result": "failed"}
+
+    async def unexpected_rebuild() -> dict[str, object]:
+        raise AssertionError("busy controller must not enter rebuild")
+
+    monkeypatch.setattr(first, "_rebuild_locked", blocked_rebuild)
+    monkeypatch.setattr(second, "_rebuild_locked", unexpected_rebuild)
+    rebuilding = asyncio.create_task(first.rebuild())
+    await entered.wait()
+
+    assert await second.rebuild() == {
+        "ok": False,
+        "error": "memory_operation_in_progress",
+        "result": "failed",
+    }
+
+    release.set()
+    assert await rebuilding == {
+        "ok": False,
+        "error": "memory_rebuild_failed",
+        "result": "failed",
+    }
+    await memory_runtime_factory.close(first)
+    await memory_runtime_factory.close(second)
+
+
+async def test_cancelled_rebuild_keeps_lease_until_blocking_work_settles(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    memory_runtime_factory,
+) -> None:
+    runtime = memory_runtime_factory(
+        MemoryConfig(enabled=True, processing=_processing_config()),
+        artifact_manager=_installed_artifact(),
+        effective_home=tmp_path,
+    )
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocking_work() -> None:
+        entered.set()
+        assert release.wait(10)
+
+    async def blocked_rebuild() -> dict[str, object]:
+        await memory_runtime.run_blocking(blocking_work)
+        return {"ok": False, "error": "memory_rebuild_failed", "result": "failed"}
+
+    monkeypatch.setattr(runtime, "_rebuild_locked", blocked_rebuild)
+    caller = asyncio.create_task(runtime.rebuild())
+    assert await asyncio.to_thread(entered.wait, 10)
+    retained = runtime._rebuild_task
+    assert retained is not None
+    retained.cancel()
+    await asyncio.sleep(0)
+
+    competing = MemoryOperationLease(tmp_path)
+    with pytest.raises(MemoryOperationBusy):
+        competing.acquire()
+
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+
+    competing.acquire()
+    competing.release()
+    await memory_runtime_factory.close(runtime)
+
+
+async def test_runtime_close_cancels_and_joins_retained_rebuild(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    memory_runtime_factory,
+) -> None:
+    runtime = memory_runtime_factory(
+        MemoryConfig(enabled=True, processing=_processing_config()),
+        artifact_manager=_installed_artifact(),
+        effective_home=tmp_path,
+    )
+    entered = asyncio.Event()
+    interrupted = asyncio.Event()
+
+    async def blocked_rebuild() -> dict[str, object]:
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            interrupted.set()
+            return {
+                "ok": False,
+                "error": "memory_rebuild_failed",
+                "result": "interrupted",
+            }
+
+    monkeypatch.setattr(runtime, "_rebuild_locked", blocked_rebuild)
+    rebuilding = asyncio.create_task(runtime.rebuild())
+    await entered.wait()
+    closing = asyncio.create_task(memory_runtime_factory.close(runtime))
+    await interrupted.wait()
+    assert await rebuilding == {
+        "ok": False,
+        "error": "memory_rebuild_failed",
+        "result": "interrupted",
+    }
+    await closing
+
+
+async def test_runtime_rebuild_rejects_admission_after_close(
+    tmp_path: Path,
+    memory_runtime_factory,
+) -> None:
+    runtime = memory_runtime_factory(
+        MemoryConfig(enabled=True, processing=_processing_config()),
+        artifact_manager=_installed_artifact(),
+        effective_home=tmp_path,
+    )
+    await memory_runtime_factory.close(runtime)
+
+    assert await runtime.rebuild() == {
+        "ok": False,
+        "error": "memory_operation_in_progress",
+        "result": "failed",
+    }
+    assert runtime._rebuild_task is None
