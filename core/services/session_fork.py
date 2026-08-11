@@ -16,7 +16,11 @@ from typing import Any, Mapping, Optional
 
 from config import paths
 from core.backend_failure import BACKEND_FAILURE_EVENT, is_backend_failure_notification
-from vibe.authorization import AuthorizationContext, require_instance_role
+from vibe.authorization import (
+    AuthorizationContext,
+    has_temporary_unrestricted_runtime_access,
+    require_instance_role,
+)
 from vibe.i18n import t
 from vibe.message_identity import INPUT_TURN_AUTHOR_TYPES, is_input_turn
 from vibe.message_types import spec_for, types_with
@@ -187,7 +191,10 @@ def reserve_forked_session(
     try:
         with engine.begin() as conn:
             reserve_write_lock(conn)
-            if not context.is_instance_owner:
+            if not (
+                context.is_instance_owner
+                or has_temporary_unrestricted_runtime_access(context)
+            ):
                 from storage import project_access_service
 
                 if not project_access_service.role_allows(

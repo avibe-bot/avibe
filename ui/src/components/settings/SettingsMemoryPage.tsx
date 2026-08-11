@@ -43,10 +43,11 @@ export const SettingsMemoryPage: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
   const { showToast } = useToast();
-  const { remote } = useInstanceAuthorization();
-  // The admin log, the settings save and clear / runtime-restart are local-only
-  // in the remote HTTP policy; status, profile and search stay remote-permitted.
-  const canAdminister = canAdministerMemory({ remote });
+  const { remote, hasTemporaryUnrestrictedOrgAccess } = useInstanceAuthorization();
+  const canAdminister = canAdministerMemory({
+    remote,
+    temporaryUnrestrictedOrgAccess: hasTemporaryUnrestrictedOrgAccess,
+  });
 
   const [tab, setTab] = useState<MemoryTab>('status');
   const [clearOpen, setClearOpen] = useState(false);
@@ -75,12 +76,13 @@ export const SettingsMemoryPage: React.FC = () => {
   const { reload: loadFailures, reloadIfIdle: pollFailures } = failuresRead;
   const settings = settingsRead.data;
   const status = statusRead.data;
-  // Forbidden is the backend's "this is not a direct-loopback browser" verdict, and it is
-  // sticky per resource, so the static state never flickers away on a later request.
+  // Forbidden means the current identity is outside the admitted runtime
+  // policy. It is sticky per resource, so the static state never flickers away
+  // on a later request.
   const remoteUnavailable = settingsRead.forbidden || statusRead.forbidden || failuresRead.forbidden;
-  // `settings` is local-only, so remote owners derive the broad enablement bit
-  // from the permitted status read instead of letting profile/search stay
-  // permanently "disabled" just because the settings payload is absent.
+  // A remote identity outside the temporary active-member rollout may still
+  // receive the permitted status read, so derive broad enablement from it when
+  // the settings payload is absent.
   const memoryEnabled = settings?.enabled ?? (statusRead.loaded && status ? status.state !== 'disabled' : false);
 
   // Dependency readiness comes from the authoritative Dependencies source (plan §5), NOT the

@@ -97,7 +97,7 @@ def _seed_show_pages_with_policies() -> ShowPageStore:
     return store
 
 
-def test_show_page_list_filters_private_public_scope_and_missing_group_context(monkeypatch, tmp_path) -> None:
+def test_active_org_members_see_all_show_pages_during_temporary_bypass(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     store = _seed_show_pages_with_policies()
     try:
@@ -111,8 +111,8 @@ def test_show_page_list_filters_private_public_scope_and_missing_group_context(m
         store.close()
 
     assert owner_ids == {"ses-private", "ses-public", "ses-scope"}
-    assert member_ids == {"ses-public", "ses-scope"}
-    assert no_group_ids == {"ses-public"}
+    assert member_ids == {"ses-private", "ses-public", "ses-scope"}
+    assert no_group_ids == {"ses-private", "ses-public", "ses-scope"}
 
 
 def test_show_page_email_context_bypasses_audience_only_for_its_signed_page(
@@ -152,7 +152,7 @@ def test_show_page_email_context_bypasses_audience_only_for_its_signed_page(
         store.close()
 
 
-def test_broader_instance_context_unions_its_signed_show_page_entitlement(
+def test_non_org_remote_context_keeps_only_signed_show_page_entitlement(
     monkeypatch, tmp_path
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
@@ -179,8 +179,8 @@ def test_broader_instance_context_unions_its_signed_show_page_entitlement(
                 "ses-scope",
                 connection=connection,
             )
-            assert context.can_chat
-            assert context.can_use_resource("agent")
+            assert not context.can_chat
+            assert not context.can_use_resource("agent")
     finally:
         store.close()
 
@@ -247,22 +247,30 @@ def test_remote_org_members_can_open_all_show_pages_temporarily(
         "ses-public",
         "ses-scope",
     }
-    assert all("path" not in item for item in catalog.get_json()["pages"])
+    assert all(item.get("path") for item in catalog.get_json()["pages"])
     assert mutation.status_code == 200
     assert mutation.get_json()["visibility"] == "offline"
     assert page.status_code == 200
 
 
-def test_remote_show_page_creation_defaults_private_and_org_public_does_not_share(monkeypatch, tmp_path) -> None:
+def test_remote_show_page_creation_persists_real_org_identity(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     owner_context = _organization_context("owner-1", instance_role="owner")
     store = ShowPageStore()
     try:
-        with pytest.raises(ShowPageError, match="Show Page access is not permitted"):
-            store.ensure(
-                "ses-editor-denied",
-                user_context=_organization_context("member-1", instance_role="editor"),
+        created = store.ensure(
+            "ses-editor-created",
+            user_context=_organization_context("member-1", instance_role="editor"),
+        )
+        assert created.session_id == "ses-editor-created"
+        with store.engine.connect() as connection:
+            created_policy = resource_access_service.get_resource_policy(
+                "show_page", created.session_id, connection=connection
             )
+        assert created_policy is not None
+        assert created_policy["organization_id"] == "org-1"
+        assert created_policy["owner_user_id"] == "member-1"
+        assert "is_trusted_local" not in created_policy
         page = store.ensure("ses-org-public", user_context=owner_context)
         with store.engine.begin() as connection:
             policy = resource_access_service.get_resource_policy(
@@ -292,19 +300,18 @@ def test_remote_show_page_creation_defaults_private_and_org_public_does_not_shar
         store.close()
 
 
-def test_show_page_scope_without_group_context_fails_closed(monkeypatch, tmp_path) -> None:
+def test_show_page_scope_without_group_context_is_open_during_temporary_bypass(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     store = _seed_show_pages_with_policies()
     try:
-        with pytest.raises(ShowPageError, match="Show Page access is not permitted") as excinfo:
-            store.require_access("ses-scope", user_context=_organization_context("member-1", group_ids=None))
+        page = store.require_access("ses-scope", user_context=_organization_context("member-1", group_ids=None))
     finally:
         store.close()
 
-    assert excinfo.value.code == "resource_access_forbidden"
+    assert page.session_id == "ses-scope"
 
 
-def test_remote_organization_admin_can_restrict_pages_without_use_access(monkeypatch, tmp_path) -> None:
+def test_active_organization_admin_can_manage_all_pages_temporarily(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     store = _seed_show_pages_with_policies()
     admin = _organization_context(
@@ -315,17 +322,16 @@ def test_remote_organization_admin_can_restrict_pages_without_use_access(monkeyp
     )
     owner = _organization_context("owner-1", instance_role="owner")
     try:
-        with pytest.raises(ShowPageError, match="Show Page access is not permitted"):
-            store.require_access("ses-private", user_context=admin)
-        with pytest.raises(ShowPageError, match="Show Page access is not permitted"):
-            store.update_visibility("ses-private", "public", user_context=admin)
-
         public_page = store.update_visibility("ses-private", "public", user_context=owner)
-        with pytest.raises(ShowPageError, match="Show Page access is not permitted"):
-            store.rotate_share("ses-private", user_context=admin)
-        with pytest.raises(ShowPageError, match="Show Page access is not permitted"):
-            store.set_share_id("ses-private", "admin-link", user_context=admin)
+        assert store.require_access("ses-private", user_context=admin).session_id == "ses-private"
         assert store.update_visibility("ses-private", "private", user_context=admin).visibility == "private"
+        # Share-id operations retain their existing public-page invariant even
+        # though the temporary Org policy admits the caller to the resource.
+        assert store.update_visibility("ses-private", "public", user_context=admin).visibility == "public"
+        admin_rotated, _ = store.rotate_share("ses-private", user_context=admin)
+        admin_custom, _ = store.set_share_id("ses-private", "admin-link", user_context=admin)
+        assert admin_rotated.share_id
+        assert admin_custom.share_id == "admin-link"
 
         republished = store.update_visibility("ses-private", "public", user_context=owner)
         rotated, previous_share_id = store.rotate_share("ses-private", user_context=owner)
@@ -337,16 +343,9 @@ def test_remote_organization_admin_can_restrict_pages_without_use_access(monkeyp
         assert rotated_share_id == rotated.share_id
         assert custom.share_id == "owner-link"
 
-        with pytest.raises(ShowPageError, match="Show Page access is not permitted"):
-            store.require_access("ses-scope", user_context=admin)
+        assert store.require_access("ses-scope", user_context=admin).session_id == "ses-scope"
         assert store.update_visibility("ses-scope", "offline", user_context=admin).visibility == "offline"
-        with pytest.raises(ShowPageError, match="Show Page access is not permitted"):
-            store.update_visibility("ses-scope", "private", user_context=admin)
-        restored = store.update_visibility(
-            "ses-scope",
-            "private",
-            user_context=_organization_context("owner-1", instance_role="viewer"),
-        )
+        restored = store.update_visibility("ses-scope", "private", user_context=admin)
         assert restored.visibility == "private"
     finally:
         store.close()
@@ -378,7 +377,9 @@ def test_access_only_manager_visibility_response_does_not_expose_page_payload(mo
 
     result = api.set_show_page_visibility("ses-private", "private")
 
-    assert result == {"ok": True, "public_link_enabled": False}
+    assert result["ok"] is True
+    assert result["session_id"] == "ses-private"
+    assert result["visibility"] == "private"
 
 
 def test_excluded_scoped_owner_share_mutations_do_not_expose_page_payload(monkeypatch, tmp_path) -> None:
@@ -403,8 +404,12 @@ def test_excluded_scoped_owner_share_mutations_do_not_expose_page_payload(monkey
     rotated = api.rotate_show_page_share("ses-scope")
     customized = api.set_show_page_share_id("ses-scope", "excluded-owner-link")
 
-    assert rotated == {"ok": True, "public_link_enabled": True}
-    assert customized == {"ok": True, "public_link_enabled": True}
+    assert rotated["ok"] is True
+    assert rotated["session_id"] == "ses-scope"
+    assert rotated["visibility"] == "public"
+    assert customized["ok"] is True
+    assert customized["session_id"] == "ses-scope"
+    assert customized["visibility"] == "public"
 
 
 def test_remote_show_page_owner_can_control_sharing_without_instance_owner_role(monkeypatch, tmp_path) -> None:
@@ -514,12 +519,12 @@ def test_organization_admin_can_read_show_page_access_metadata_without_use_acces
 
     assert payload["access_level"] == "scope"
     assert payload["instance_id"] is None
-    assert payload["can_use"] is False
+    assert payload["can_use"] is True
     assert payload["can_manage"] is True
-    assert payload["can_publish_public"] is False
+    assert payload["can_publish_public"] is True
 
 
-def test_existing_organization_page_is_registered_privately_by_the_instance_owner(monkeypatch, tmp_path) -> None:
+def test_opening_existing_organization_page_does_not_register_new_policy(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     store = ShowPageStore()
     try:
@@ -534,10 +539,7 @@ def test_existing_organization_page_is_registered_privately_by_the_instance_owne
                 page.session_id,
                 connection=connection,
             )
-        assert policy is not None
-        assert policy["organization_id"] == "org-1"
-        assert policy["owner_user_id"] == "owner-1"
-        assert policy["access_level"] == "private"
+        assert policy is None
     finally:
         store.close()
 
@@ -689,15 +691,18 @@ def test_show_page_email_grants_reject_non_owner_without_contacting_backend(
     instance_role: str,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
     store = _seed_show_pages_with_policies()
     store.close()
     monkeypatch.setattr(
         resource_access_service,
         "resolve_resource_access_context",
-        lambda _value=None: _organization_context(
-            subject,
-            organization_role=organization_role,
+        lambda _value=None: resource_access_service.ResourceUserContext(
+            subject=subject,
+            email=f"{subject}@example.com",
             instance_role=instance_role,
+            instance_access_source="email",
+            is_remote=True,
         ),
     )
     monkeypatch.setattr(
@@ -842,22 +847,18 @@ def test_remote_org_dock_temporarily_bypasses_show_page_acl(monkeypatch, tmp_pat
         organization_role="admin",
         instance_role="owner",
     )
-    with pytest.raises(ShowPageError, match="Show Page access is not permitted"):
-        api.pin_dock_show_page("ses-public", user_context=member)
+    api.pin_dock_show_page("ses-public", user_context=member)
     api.pin_dock_show_page("ses-scope", user_context=admin)
     for session_id in ("ses-private", "ses-public", "ses-scope"):
         api.pin_dock_show_page(session_id, user_context=owner)
 
     dock = api.get_dock(user_context=member)["dock"]
     visible_ids = {pin["session_id"] for pin in dock["pins"]}
-    assert visible_ids == {"ses-public", "ses-scope"}
-    assert "show:ses-private" not in dock["order"]
-    with pytest.raises(ShowPageError, match="Show Page access is not permitted"):
-        api.pin_dock_show_page("ses-private", user_context=member)
-    with pytest.raises(ShowPageError, match="Show Page access is not permitted"):
-        api.unpin_dock_show_page("ses-public", user_context=member)
-    with pytest.raises(ShowPageError, match="Show Page access is not permitted"):
-        api.set_dock_order([], user_context=member)
+    assert visible_ids == {"ses-private", "ses-public", "ses-scope"}
+    assert "show:ses-private" in dock["order"]
+    api.pin_dock_show_page("ses-private", user_context=member)
+    api.unpin_dock_show_page("ses-public", user_context=member)
+    api.set_dock_order([], user_context=member)
 
     client = app.test_client()
     client.set_cookie(
@@ -906,8 +907,8 @@ def test_remote_admin_dock_order_preserves_hidden_private_pins(monkeypatch, tmp_
 
     assert updated["order"] == submitted
     owner_dock = api.get_dock(user_context=owner)["dock"]
-    assert "show:ses-private" in owner_dock["order"]
-    assert [item for item in owner_dock["order"] if item != "show:ses-private"] == submitted
+    assert "show:ses-private" not in owner_dock["order"]
+    assert owner_dock["order"] == submitted
 
 
 def test_untrusted_dock_context_fails_closed(monkeypatch, tmp_path) -> None:
@@ -932,7 +933,7 @@ def test_untrusted_dock_context_fails_closed(monkeypatch, tmp_path) -> None:
         )
 
 
-def test_remote_member_cannot_archive_session_with_another_owners_page(monkeypatch, tmp_path) -> None:
+def test_remote_member_can_archive_session_with_another_owners_page_temporarily(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
     project_dir = tmp_path / "project"
@@ -981,15 +982,14 @@ def test_remote_member_cannot_archive_session_with_another_owners_page(monkeypat
             environ_base=_remote_peer(),
         )
 
-        assert response.status_code == 403
-        assert response.get_json()["code"] == "remote_execution_disabled"
+        assert response.status_code in {200, 204}
         with engine.connect() as connection:
             assert connection.execute(
                 select(agent_sessions.c.status).where(agent_sessions.c.id == session_id)
-            ).scalar_one() == "active"
+            ).scalar_one() == "archived"
             assert connection.execute(
                 select(show_pages.c.visibility).where(show_pages.c.session_id == session_id)
-            ).scalar_one() == "private"
+            ).scalar_one() == "offline"
     finally:
         engine.dispose()
 
@@ -1093,8 +1093,9 @@ def test_remote_org_show_annotation_media_temporarily_follows_open_page_policy(
         assert _media(tokens["show_annotation:public"]).status_code == 200
         # An annotation with no page to check against cannot be authorized.
         assert _media(orphan_token).status_code == 404
-        # Unrelated media keeps Project/session authorization as its gate.
-        assert _media(tokens["agent_reply:private"]).status_code == 404
-        assert _media(tokens["agent_reply:public"]).status_code == 404
+        # Active Organization members have the temporary runtime bypass for
+        # project/session media as well.
+        assert _media(tokens["agent_reply:private"]).status_code == 200
+        assert _media(tokens["agent_reply:public"]).status_code == 200
     finally:
         engine.dispose()

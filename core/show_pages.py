@@ -463,19 +463,25 @@ class ShowPageStore:
 
     @staticmethod
     def _require_create_access(user_context: Any) -> None:
-        if user_context.can_manage_instance:
+        from vibe.authorization import has_temporary_unrestricted_org_access
+
+        if user_context.can_manage_instance or has_temporary_unrestricted_org_access(user_context):
             return
         raise ShowPageError("Show Page access is not permitted.", code="resource_access_forbidden")
 
     @staticmethod
     def _register_created_resource_policy(connection, session_id: str, user_context: Any) -> None:
         from storage import resource_access_service
+        from vibe.authorization import has_temporary_unrestricted_org_access
 
         if not (
             user_context.is_remote
-            and user_context.can_manage_instance
             and user_context.is_active_organization_member
             and user_context.subject
+            and (
+                user_context.can_manage_instance
+                or has_temporary_unrestricted_org_access(user_context)
+            )
         ):
             return
         resource_access_service.ensure_resource_policy(
@@ -509,7 +515,6 @@ class ShowPageStore:
                 .first()
             )
             if existing is not None:
-                self._register_created_resource_policy(conn, session_id, context)
                 self._require_resource_access(conn, session_id, context)
                 return _page_from_row(existing)
             self._require_create_access(context)
@@ -546,7 +551,6 @@ class ShowPageStore:
                 .first()
             )
             if existing is not None:
-                self._register_created_resource_policy(conn, session_id, context)
                 self._require_resource_access(conn, session_id, context)
                 return _page_from_row(existing), False
             self._require_create_access(context)

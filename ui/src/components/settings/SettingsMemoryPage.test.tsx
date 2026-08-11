@@ -259,8 +259,8 @@ describe('SettingsMemoryPage disabled recorder health', () => {
 });
 
 describe('SettingsMemoryPage remote administration gate', () => {
-  // A remote Instance owner keeps `can_manage_instance`, so only the locality
-  // half of the gate can keep the local-only administration routes off screen.
+  // A legacy remote Instance owner without active Organization membership is
+  // outside the temporary runtime rollout even when its owner capability is set.
   const renderRemoteOwner = () =>
     render(
       <MemoryRouter>
@@ -276,7 +276,23 @@ describe('SettingsMemoryPage remote administration gate', () => {
       </MemoryRouter>,
     );
 
-  it('hides the admin log, the settings tab and the engine restart from a remote owner', async () => {
+  const renderActiveOrgMember = () =>
+    render(
+      <MemoryRouter>
+        <InstanceAuthorizationContext.Provider
+          value={{
+            remote: true,
+            instanceRole: 'viewer',
+            hasTemporaryUnrestrictedOrgAccess: true,
+            capabilities: DENIED_INSTANCE_CAPABILITIES,
+          }}
+        >
+          <SettingsMemoryPage />
+        </InstanceAuthorizationContext.Provider>
+      </MemoryRouter>,
+    );
+
+  it('hides runtime administration from a remote non-member', async () => {
     renderRemoteOwner();
 
     expect(await screen.findByRole('radio', { name: 'memory.tabs.status' })).toBeTruthy();
@@ -284,6 +300,16 @@ describe('SettingsMemoryPage remote administration gate', () => {
     expect(screen.queryByRole('radio', { name: 'memory.tabs.log' })).toBeNull();
     expect(screen.queryByRole('radio', { name: 'memory.tabs.settings' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'memory.status.restartEngine' })).toBeNull();
+  });
+
+  it('shows all Memory administration controls to an active Organization member', async () => {
+    api.getMemoryStatus.mockResolvedValue(readyStatus());
+
+    renderActiveOrgMember();
+
+    expect(await screen.findByRole('radio', { name: 'memory.tabs.log' })).toBeTruthy();
+    expect(screen.getByRole('radio', { name: 'memory.tabs.settings' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'memory.status.restartEngine' })).toBeTruthy();
   });
 
   it('replaces the remote setup flow with the unavailable notice', async () => {
@@ -299,7 +325,7 @@ describe('SettingsMemoryPage remote administration gate', () => {
     expect(screen.queryByRole('radio', { name: 'memory.tabs.status' })).toBeNull();
   });
 
-  it('derives profile/search enablement from the permitted status read when settings stay local-only', async () => {
+  it('derives profile/search enablement from the permitted status read for a remote non-member', async () => {
     api.getMemorySettings.mockResolvedValue({
       status: 'failed',
       error: 'remote_execution_disabled',

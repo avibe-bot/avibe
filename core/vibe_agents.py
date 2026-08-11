@@ -31,7 +31,10 @@ from storage.models import (
     state_meta,
 )
 from storage.session_reclaim import DEFINITION_AGENT_BINDING_REVISION_KEY
-from vibe.authorization import trusted_local_context
+from vibe.authorization import (
+    has_temporary_unrestricted_runtime_access,
+    trusted_local_context,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -287,7 +290,8 @@ def ensure_agent_name_access(
 
 
 def _require_agent_create_access(user_context: Any) -> None:
-    if user_context.can_manage_agents:
+    context = resolve_resource_access_context(user_context)
+    if context.can_manage_agents or has_temporary_unrestricted_runtime_access(context):
         return
     raise VibeAgentAccessError("Agent access is not permitted.")
 
@@ -296,7 +300,11 @@ def _require_agent_onboarding_access(user_context: Any):
     """Require owner-equivalent access for Organization Agent publication."""
 
     context = resolve_resource_access_context(user_context)
-    if context.is_trusted_local or context.is_instance_owner:
+    if (
+        context.is_trusted_local
+        or context.is_instance_owner
+        or has_temporary_unrestricted_runtime_access(context)
+    ):
         return context
     raise VibeAgentAccessError("Agent access is not permitted.")
 
@@ -546,7 +554,7 @@ def ensure_session_agent_access(
         )
     if not session.get("agent_backend"):
         return ensure_default_agent_access(connection, user_context=context)
-    if context.is_remote:
+    if context.is_remote and not has_temporary_unrestricted_runtime_access(context):
         raise VibeAgentAccessError("Agent access is not permitted.")
     return None
 

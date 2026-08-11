@@ -49,8 +49,8 @@ export const MemoryStatusPanel: React.FC<{
   loading: boolean;
   error: string | null;
   onRefresh: () => void;
-  /** Absent when the viewer cannot administer Memory (remote), which hides the
-   *  credential fault's settings shortcut. */
+  /** Absent when the current runtime policy cannot administer Memory, which
+   *  hides the credential fault's settings shortcut. */
   onOpenSettings?: () => void;
 }> = ({
   status,

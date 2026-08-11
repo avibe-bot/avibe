@@ -182,7 +182,9 @@ def _filter_dock_for_access(
     user_context: Any,
     db_path: Path | None,
 ) -> dict[str, Any]:
-    if user_context.is_trusted_local:
+    from vibe.authorization import has_temporary_unrestricted_org_access
+
+    if user_context.is_trusted_local or has_temporary_unrestricted_org_access(user_context):
         return doc
     store = ShowPageStore(db_path)
     try:
@@ -204,7 +206,13 @@ def _require_show_page_management(
     user_context: Any,
     db_path: Path | None,
 ) -> None:
-    if user_context.is_trusted_local or not session_ids:
+    from vibe.authorization import has_temporary_unrestricted_org_access
+
+    if (
+        user_context.is_trusted_local
+        or has_temporary_unrestricted_org_access(user_context)
+        or not session_ids
+    ):
         return
     store = ShowPageStore(db_path)
     try:
@@ -358,10 +366,15 @@ def set_dock_order(
         raise DockError("Dock order has duplicate ids.", code="invalid_order")
 
     context = _resource_context(user_context)
+    from vibe.authorization import has_temporary_unrestricted_org_access
+
+    has_full_runtime_access = (
+        context.is_trusted_local or has_temporary_unrestricted_org_access(context)
+    )
     with _DOCK_MUTATION_LOCK:
         doc = _load(db_path)
         visible_doc = _filter_dock_for_access(doc, user_context=context, db_path=db_path)
-        known_doc = doc if context.is_trusted_local else visible_doc
+        known_doc = doc if has_full_runtime_access else visible_doc
         server_known = set(BUILTIN_DOCK_IDS) | {_show_id(pin["session_id"]) for pin in known_doc["pins"]}
         if known is not None:
             if not isinstance(known, list) or not all(isinstance(item, str) for item in known):
@@ -380,7 +393,7 @@ def set_dock_order(
 
         merged_order = (
             _merge_visible_order(doc["order"], order, server_known)
-            if not context.is_trusted_local
+            if not has_full_runtime_access
             else list(order)
         )
         doc = {"order": merged_order, "pins": doc["pins"]}

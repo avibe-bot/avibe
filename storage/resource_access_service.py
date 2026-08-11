@@ -22,6 +22,8 @@ from storage.models import resource_access_groups, resource_access_policies, sta
 from vibe.authorization import (
     AuthorizationContext,
     context_from_session_payload,
+    has_temporary_unrestricted_org_access,
+    has_temporary_unrestricted_runtime_access,
     trusted_local_context,
 )
 
@@ -205,10 +207,14 @@ def resolve_resource_access_context(
 def ensure_local_harness_definition_write(
     user_context: ResourceUserContext | Mapping[str, Any] | None = None,
 ) -> ResourceUserContext:
-    """Keep executable Harness definitions on the trusted-local side."""
+    """Allow the temporary active-Organization runtime rollout to write Harness data.
+
+    The caller's real remote identity is retained in all persisted metadata;
+    this helper only decides whether the operation is admitted.
+    """
 
     context = resolve_resource_access_context(user_context)
-    if context.is_remote:
+    if context.is_remote and not has_temporary_unrestricted_org_access(context):
         raise ResourceAccessError(REMOTE_AUTONOMOUS_HARNESS_DISABLED_CODE)
     return context
 
@@ -219,6 +225,29 @@ def metadata_has_remote_resource_context(metadata: Mapping[str, Any] | None) -> 
     return isinstance(metadata, Mapping) and isinstance(
         metadata.get(RESOURCE_USER_CONTEXT_METADATA_KEY),
         Mapping,
+    )
+
+
+def metadata_allows_temporary_unrestricted_runtime(
+    metadata: Mapping[str, Any] | None,
+) -> bool:
+    """Return whether persisted remote provenance may execute runtime work.
+
+    Remote Harness definitions retain signed claims instead of becoming local
+    owners. Rehydrate those claims and require the same active-Organization
+    rollout signal at execution time; malformed, expired, or non-member
+    metadata remains denied.
+    """
+
+    if not metadata_has_remote_resource_context(metadata):
+        return True
+    try:
+        context = resource_user_context_from_metadata(metadata)
+    except ResourceAccessError:
+        return False
+    return bool(
+        context is not None
+        and has_temporary_unrestricted_runtime_access(context)
     )
 
 
@@ -263,10 +292,11 @@ def resource_user_context_from_metadata(
     *,
     now: int | None = None,
 ) -> ResourceUserContext | None:
-    """Restore remote provenance for non-executable compatibility callers.
+    """Restore unexpired remote provenance for deferred authorization checks.
 
-    The returned object is not autonomous execution authority. Task and Watch
-    executors reject metadata carrying this provenance before calling here.
+    The returned context retains the real signed Organization identity. Deferred
+    runtime executors still apply ``metadata_allows_temporary_unrestricted_runtime``
+    before doing work, so malformed, expired, and non-member snapshots fail closed.
     """
 
     if not isinstance(metadata, Mapping):
@@ -286,6 +316,28 @@ def _as_context(user_context: ResourceUserContext | Mapping[str, Any] | None) ->
     if isinstance(user_context, Mapping):
         return _context_from_mapping(user_context, is_remote=True, is_trusted_local=False)
     return ResourceUserContext()
+
+
+def _temporary_unrestricted_resource_bypass(
+    context: ResourceUserContext,
+    resource_kind: str,
+) -> bool:
+    """Apply the temporary rollout to known runtime resource kinds.
+
+    This is still an explicit resource-kind allowlist. It does not change the
+    caller into a trusted-local principal and unknown resource kinds fail closed.
+    """
+
+    return resource_kind in RESOURCE_KINDS and has_temporary_unrestricted_org_access(context)
+
+
+def _temporary_show_page_bypass(
+    context: ResourceUserContext,
+    resource_kind: str,
+) -> bool:
+    """Compatibility predicate for callers that specifically handle Show Pages."""
+
+    return resource_kind == "show_page" and has_temporary_unrestricted_org_access(context)
 
 
 @contextmanager
@@ -549,6 +601,8 @@ def _policy_allows(
 ) -> bool:
     if context.is_trusted_local:
         return True
+    if _temporary_unrestricted_resource_bypass(context, resource_kind):
+        return True
     if resource_kind == "show_page" and context.can_use_show_page(resource_id):
         return True
     if context.instance_access_source == "show_page_email":
@@ -586,6 +640,11 @@ def _policy_allows(
 def _policy_allows_management(context: ResourceUserContext, policy: Mapping[str, Any] | None) -> bool:
     if context.is_trusted_local:
         return True
+    if isinstance(policy, Mapping) and _temporary_unrestricted_resource_bypass(
+        context,
+        str(policy.get("resource_kind") or ""),
+    ):
+        return True
     if not context.has_role("owner"):
         return False
     if policy is None:
@@ -613,6 +672,11 @@ def _policy_allows_owner_control(
 
     if context.is_trusted_local:
         return True
+    if isinstance(policy, Mapping) and _temporary_unrestricted_resource_bypass(
+        context,
+        str(policy.get("resource_kind") or ""),
+    ):
+        return True
     if policy is None:
         return context.is_instance_owner
     if not context.can_use_resource(str(policy.get("resource_kind") or "")):
@@ -634,6 +698,11 @@ def _policy_allows_show_page_access_management(
 ) -> bool:
     """Allow Show Page owners and Organization managers to narrow access."""
 
+    if (
+        isinstance(policy, Mapping)
+        and _temporary_show_page_bypass(context, str(policy.get("resource_kind") or ""))
+    ):
+        return True
     if _policy_allows_owner_control(context, policy):
         return True
     if policy is None or policy.get("resource_kind") != "show_page":
@@ -709,7 +778,7 @@ def can_manage_resource_acl(
     context = _as_context(user_context)
     kind = _validate_resource_kind(resource_kind)
     identifier = _required_identifier(resource_id, code="invalid_resource_id")
-    if context.is_trusted_local:
+    if context.is_trusted_local or _temporary_unrestricted_resource_bypass(context, kind):
         return True
     with _connection(connection) as conn:
         policy = _policy_row(conn, kind, identifier)
@@ -726,6 +795,8 @@ def can_manage_show_page_access(
 
     context = _as_context(user_context)
     identifier = _required_identifier(resource_id, code="invalid_resource_id")
+    if _temporary_show_page_bypass(context, "show_page"):
+        return True
     with _connection(connection) as conn:
         policy = _policy_row(conn, "show_page", identifier)
     return _policy_allows_show_page_access_management(context, policy)
@@ -743,6 +814,8 @@ def can_control_resource_sharing(
     context = _as_context(user_context)
     kind = _validate_resource_kind(resource_kind)
     identifier = _required_identifier(resource_id, code="invalid_resource_id")
+    if _temporary_unrestricted_resource_bypass(context, kind):
+        return True
     with _connection(connection) as conn:
         policy = _policy_row(conn, kind, identifier)
     return _policy_allows_owner_control(context, policy)

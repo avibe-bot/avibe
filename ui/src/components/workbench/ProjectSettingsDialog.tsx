@@ -5,7 +5,10 @@ import { FileText } from 'lucide-react';
 
 import { useApi } from '../../context/ApiContext';
 import type { ProjectDefaultAgent, VibeAgentBrief, WorkbenchProject } from '../../context/ApiContext';
-import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
+import {
+  canUseRuntimeSurfaces,
+  useInstanceAuthorization,
+} from '../../context/InstanceAuthorizationContext';
 import { useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
 import { Button } from '../ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../ui/dialog';
@@ -31,14 +34,17 @@ export const ProjectSettingsDialog: React.FC<{
   const { t } = useTranslation();
   const api = useApi();
   const { setProjectDefaultAgent } = useWorkbenchProjectsTree();
-  const { capabilities, remote } = useInstanceAuthorization();
-  // Reading and saving AGENTS.md are both local-only, so the shortcut is only
-  // offered where the editor can actually load the file.
-  const canEditAgentsMd = capabilities.can_manage_projects && canEditProjectInstructions({ remote });
-  // The remote project PATCH filter keeps only `display_name`, so every pick the
-  // route picker persists would dead-end in `remote_execution_disabled`; the
-  // section is offered only where it can actually save.
-  const canEditDefaultAgent = capabilities.can_manage_projects && canEditProjectDefaultAgent({ remote });
+  const { capabilities, remote, hasTemporaryUnrestrictedOrgAccess } = useInstanceAuthorization();
+  const canUseRuntime = canUseRuntimeSurfaces(remote, hasTemporaryUnrestrictedOrgAccess);
+  const canManageProjects = capabilities.can_manage_projects || canUseRuntime;
+  const canEditAgentsMd = canManageProjects && canEditProjectInstructions({
+    remote,
+    temporaryUnrestrictedOrgAccess: hasTemporaryUnrestrictedOrgAccess,
+  });
+  const canEditDefaultAgent = canManageProjects && canEditProjectDefaultAgent({
+    remote,
+    temporaryUnrestrictedOrgAccess: hasTemporaryUnrestrictedOrgAccess,
+  });
   const [agents, setAgents] = useState<VibeAgentBrief[]>([]);
   const [agentsMdOpen, setAgentsMdOpen] = useState(false);
 

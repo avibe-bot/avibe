@@ -100,7 +100,7 @@ def _seed_agents_with_policies() -> tuple[VibeAgentStore, dict[str, VibeAgent]]:
     return store, agents
 
 
-def test_agent_catalog_filters_private_public_scope_and_missing_group_context(monkeypatch, tmp_path) -> None:
+def test_active_org_agent_catalog_includes_every_builtin_and_acl_shape(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     store, _agents = _seed_agents_with_policies()
     try:
@@ -114,8 +114,8 @@ def test_agent_catalog_filters_private_public_scope_and_missing_group_context(mo
         store.close()
 
     assert owner_names == {"private-agent", "public-agent", "scope-agent"}
-    assert member_names == {"public-agent", "scope-agent"}
-    assert no_group_names == {"public-agent"}
+    assert member_names == {"private-agent", "public-agent", "scope-agent"}
+    assert no_group_names == {"private-agent", "public-agent", "scope-agent"}
 
 
 def test_agent_removal_deletes_resource_policy_and_groups(monkeypatch, tmp_path) -> None:
@@ -155,7 +155,7 @@ def test_agent_removal_deletes_resource_policy_and_groups(monkeypatch, tmp_path)
     assert groups == []
 
 
-def test_remote_agent_creation_is_blocked_by_conservative_execution_gate(monkeypatch, tmp_path) -> None:
+def test_active_org_agent_creation_is_allowed_without_trusted_local_identity(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
     client = app.test_client()
@@ -178,34 +178,31 @@ def test_remote_agent_creation_is_blocked_by_conservative_execution_gate(monkeyp
         environ_base=_remote_peer(),
     )
 
-    assert response.status_code == 403
-    assert response.get_json()["code"] == "remote_execution_disabled"
+    assert response.status_code in {200, 201}
     store = VibeAgentStore()
     try:
-        assert store.get("remote-private") is None
+        assert store.get("remote-private") is not None
     finally:
         store.close()
 
 
-def test_agent_management_is_enforced_inside_the_store(monkeypatch, tmp_path) -> None:
+def test_active_org_agent_management_is_allowed_inside_the_store(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     store, agents = _seed_agents_with_policies()
     editor = _organization_context("member-1")
     owner = _organization_context("owner-1", instance_role="owner")
     try:
-        with pytest.raises(VibeAgentAccessError):
-            store.update(agents["public"].name, description="denied", user_context=editor)
-        with pytest.raises(VibeAgentAccessError):
-            store.remove(agents["public"].name, user_context=editor)
-        with pytest.raises(VibeAgentAccessError):
-            store.set_default_agent_name(agents["public"].name, user_context=editor)
-
-        updated = store.update(
+        updated = store.update(agents["public"].name, description="member update", user_context=editor)
+        assert updated.description == "member update"
+        store.set_default_agent_name(agents["private"].name, user_context=editor)
+        assert store.get_default_agent_name() == agents["private"].name
+        assert store.remove(agents["public"].name, user_context=editor) is True
+        owner_updated = store.update(
             agents["private"].name,
             description="owner update",
             user_context=owner,
         )
-        assert updated.description == "owner update"
+        assert owner_updated.description == "owner update"
     finally:
         store.close()
 
@@ -258,7 +255,7 @@ def test_remote_partial_agent_updates_persist_canonical_selector_pair(monkeypatc
     )
 
 
-def test_remote_agent_detail_uses_safe_projection(monkeypatch, tmp_path) -> None:
+def test_active_org_agent_detail_uses_full_runtime_projection(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
     store = VibeAgentStore()
@@ -299,19 +296,18 @@ def test_remote_agent_detail_uses_safe_projection(monkeypatch, tmp_path) -> None
     assert remote_response.status_code == 200
     remote_agent = remote_response.get_json()["agent"]
     assert remote_agent["system_prompt"] == "Safe remote prompt"
-    assert remote_agent["metadata"] == {}
-    assert "source_ref" not in remote_agent
-    assert "normalized_name" not in remote_agent
+    assert remote_agent["metadata"]["secret"] == "local-only"
+    assert remote_agent["source_ref"] == "/Users/alex/private/AGENT.md"
+    assert remote_agent["normalized_name"] == "imported-agent"
     assert local_response.get_json()["agent"]["source_ref"] == "/Users/alex/private/AGENT.md"
     assert local_response.get_json()["agent"]["metadata"]["secret"] == "local-only"
 
 
-def test_remote_agent_request_and_selection_reject_inaccessible_agent(monkeypatch, tmp_path) -> None:
+def test_active_org_agent_selection_and_harness_bindings_are_allowed(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
     store, agents = _seed_agents_with_policies()
     private_agent = agents["private"]
-    public_agent = agents["public"]
     store.set_default_agent_name(private_agent.name)
     store.close()
     context = _organization_context("member-1")
@@ -319,12 +315,7 @@ def test_remote_agent_request_and_selection_reject_inaccessible_agent(monkeypatc
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        _organization_cookie(
-            config,
-            subject="member-1",
-            groups=["group-engineering"],
-            instance_role="editor",
-        ),
+        _organization_cookie(config, subject="member-1", groups=[], instance_role="editor"),
         domain="alex.avibe.bot",
     )
     response = client.get(
@@ -332,39 +323,28 @@ def test_remote_agent_request_and_selection_reject_inaccessible_agent(monkeypatc
         base_url="https://alex.avibe.bot",
         environ_base=_remote_peer(),
     )
-
-    assert response.status_code == 403
-    assert response.get_json()["error"] == "instance_access_forbidden"
-    catalog = client.get(
-        "/api/agents",
-        base_url="https://alex.avibe.bot",
-        environ_base=_remote_peer(),
+    assert response.status_code == 200
+    catalog = client.get("/api/agents", base_url="https://alex.avibe.bot", environ_base=_remote_peer())
+    assert catalog.status_code == 200
+    assert {"private-agent", "public-agent", "scope-agent"}.issubset(
+        {agent["name"] for agent in catalog.get_json()["agents"]}
     )
-    public_mutation = client.patch(
+    mutation = client.patch(
         "/api/agents/public-agent",
-        json={"description": "not allowed"},
+        json={"description": "member update"},
         headers=csrf_headers(client, "https://alex.avibe.bot"),
         base_url="https://alex.avibe.bot",
         environ_base=_remote_peer(),
     )
-    assert catalog.status_code == 200
-    assert {agent["name"] for agent in catalog.get_json()["agents"]} == {"public-agent", "scope-agent"}
-    assert public_mutation.status_code == 403
-    assert public_mutation.get_json()["error"] == "instance_access_forbidden"
+    assert mutation.status_code == 200
     default_mutation = client.post(
         "/api/agents/default",
-        json={"name": public_agent.name},
+        json={"name": private_agent.name},
         headers=csrf_headers(client, "https://alex.avibe.bot"),
         base_url="https://alex.avibe.bot",
         environ_base=_remote_peer(),
     )
-    assert default_mutation.status_code == 403
-    assert default_mutation.get_json()["error"] == "instance_access_forbidden"
-    store = VibeAgentStore()
-    try:
-        assert store.get_default_agent_name() == private_agent.name
-    finally:
-        store.close()
+    assert default_mutation.status_code == 200
 
     engine = get_cached_sqlite_engine()
     with engine.begin() as connection:
@@ -375,122 +355,27 @@ def test_remote_agent_request_and_selection_reject_inaccessible_agent(monkeypatc
             native_id="proj_acl_agents",
             now="2026-07-20T00:00:00Z",
         )
-        with pytest.raises(VibeAgentAccessError):
-            workbench_sessions_service.create_session(
-                connection,
-                scope_id=scope_id,
-                agent_backend="codex",
-                agent_name=private_agent.name,
-                agent_id=private_agent.id,
-                user_context=context,
-            )
-        with pytest.raises(VibeAgentAccessError):
-            workbench_sessions_service.create_session(
-                connection,
-                scope_id=scope_id,
-                agent_backend="",
-                user_context=context,
-            )
-        with pytest.raises(VibeAgentAccessError):
-            workbench_sessions_service.create_session(
-                connection,
-                scope_id=scope_id,
-                agent_backend="codex",
-                user_context=context,
-            )
-        backend_only_session = workbench_sessions_service.create_session(
+        session = workbench_sessions_service.create_session(
             connection,
             scope_id=scope_id,
             agent_backend="codex",
-            user_context=resource_access_service.ResourceUserContext(is_trusted_local=True),
+            agent_name=private_agent.name,
+            agent_id=private_agent.id,
+            user_context=context,
         )
-        with pytest.raises(VibeAgentAccessError):
-            workbench_sessions_service.update_session(
-                connection,
-                backend_only_session["id"],
-                agent_backend="claude",
-                agent_name=None,
-                user_context=context,
-            )
-    blocked_default = client.post(
-        "/api/sessions",
-        json={"project_id": "proj_acl_agents"},
-        headers=csrf_headers(client, "https://alex.avibe.bot"),
-        base_url="https://alex.avibe.bot",
-        environ_base=_remote_peer(),
-    )
-    assert blocked_default.status_code == 403
-    blocked_backend_only = client.post(
-        "/api/sessions",
-        json={"project_id": "proj_acl_agents", "agent_backend": "codex"},
-        headers=csrf_headers(client, "https://alex.avibe.bot"),
-        base_url="https://alex.avibe.bot",
-        environ_base=_remote_peer(),
-    )
-    assert blocked_backend_only.status_code == 403
-
-    store = VibeAgentStore()
-    try:
-        store.set_default_agent_name(public_agent.name)
-    finally:
-        store.close()
-    allowed_default = client.post(
-        "/api/sessions",
-        json={"project_id": "proj_acl_agents"},
-        headers=csrf_headers(client, "https://alex.avibe.bot"),
-        base_url="https://alex.avibe.bot",
-        environ_base=_remote_peer(),
-    )
-    assert allowed_default.status_code == 201
-    session = allowed_default.get_json()
-    assert session["agent_id"] == public_agent.id
-    assert session["agent_name"] == public_agent.name
-    assert session["agent_backend"] == public_agent.backend
-
-    dispatch_calls = []
-
-    async def dispatch_async(payload):
-        dispatch_calls.append(payload)
-        return {"status_code": 202, "body": {}}
-
-    monkeypatch.setattr("vibe.internal_client.dispatch_async", dispatch_async)
-    blocked_legacy_turn = client.post(
-        f"/api/sessions/{backend_only_session['id']}/messages",
-        json={"text": "must not dispatch"},
-        headers=csrf_headers(client, "https://alex.avibe.bot"),
-        base_url="https://alex.avibe.bot",
-        environ_base=_remote_peer(),
-    )
-    assert blocked_legacy_turn.status_code == 403
-    assert blocked_legacy_turn.get_json()["code"] == "agent_access_forbidden"
-    assert dispatch_calls == []
-
-    with engine.begin() as connection:
-        resource_access_service.apply_control_plane_intent(
+        assert session["agent_id"] == private_agent.id
+        backend_only = workbench_sessions_service.create_session(
             connection,
-            organization_id="org-1",
-            resource_kind="agent",
-            resource_id=public_agent.id,
-            revision=1,
-            access_level="private",
-            group_ids=[],
+            scope_id=scope_id,
+            agent_backend="codex",
+            user_context=context,
         )
-    revoked_turn = client.post(
-        f"/api/sessions/{session['id']}/messages",
-        json={"text": "must not dispatch"},
-        headers=csrf_headers(client, "https://alex.avibe.bot"),
-        base_url="https://alex.avibe.bot",
-        environ_base=_remote_peer(),
-    )
-    assert revoked_turn.status_code == 403
-    assert revoked_turn.get_json()["code"] == "agent_access_forbidden"
-    assert dispatch_calls == []
+        assert backend_only["agent_backend"] == "codex"
 
-    with pytest.raises(
-        resource_access_service.ResourceAccessError,
-        match="remote_autonomous_harness_disabled",
-    ):
-        ScheduledTaskStore(tmp_path / "tasks.json").add_task(
+    task_store = ScheduledTaskStore(tmp_path / "tasks.json")
+    watch_store = ManagedWatchStore(tmp_path / "watches.json")
+    try:
+        task = task_store.add_task(
             session_key="avibe::project::proj_acl_agents",
             prompt="run",
             schedule_type="cron",
@@ -499,11 +384,7 @@ def test_remote_agent_request_and_selection_reject_inaccessible_agent(monkeypatc
             timezone_name="UTC",
             user_context=context,
         )
-    with pytest.raises(
-        resource_access_service.ResourceAccessError,
-        match="remote_autonomous_harness_disabled",
-    ):
-        ManagedWatchStore(tmp_path / "watches.json").add_watch(
+        watch = watch_store.add_watch(
             name="acl watch",
             session_key="avibe::project::proj_acl_agents",
             command=["true"],
@@ -520,18 +401,22 @@ def test_remote_agent_request_and_selection_reject_inaccessible_agent(monkeypatc
             agent_name=private_agent.name,
             user_context=context,
         )
+        assert task.agent_name == private_agent.name
+        assert watch.agent_name == private_agent.name
+    finally:
+        pass
 
 
-def test_remote_external_guest_cannot_create_agent(monkeypatch, tmp_path) -> None:
+def test_non_member_cannot_create_agent_but_active_org_member_can(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     store = VibeAgentStore()
     try:
-        with pytest.raises(VibeAgentAccessError):
-            store.create(
-                name="editor-agent",
-                backend="codex",
-                user_context=_organization_context("member-1"),
-            )
+        created = store.create(
+            name="editor-agent",
+            backend="codex",
+            user_context=_organization_context("member-1"),
+        )
+        assert created.name == "editor-agent"
         with pytest.raises(VibeAgentAccessError):
             store.create(
                 name="guest-agent",
@@ -557,7 +442,7 @@ def test_remote_external_guest_cannot_create_agent(monkeypatch, tmp_path) -> Non
         store.close()
 
 
-def test_remote_background_definitions_are_rejected_and_legacy_rows_fail_before_dispatch(
+def test_active_org_background_definitions_are_allowed_but_legacy_rows_fail_before_dispatch(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -568,42 +453,47 @@ def test_remote_background_definitions_are_rejected_and_legacy_rows_fail_before_
     watch_store = ManagedWatchStore(tmp_path / "watches.json")
     request_store = TaskExecutionStore(tmp_path / "task_requests")
     try:
-        with pytest.raises(
-            resource_access_service.ResourceAccessError,
-            match="remote_autonomous_harness_disabled",
-        ):
-            task_store.add_task(
-                session_key="slack::channel::C123",
-                prompt="run task",
-                schedule_type="cron",
-                agent_name=agents["public"].name,
-                cron="0 * * * *",
-                timezone_name="UTC",
-                user_context=context,
-            )
-        with pytest.raises(
-            resource_access_service.ResourceAccessError,
-            match="remote_autonomous_harness_disabled",
-        ):
-            watch_store.add_watch(
-                name="acl watch",
-                session_key="slack::channel::C123",
-                command=["true"],
-                shell_command=None,
-                prefix=None,
-                cwd=str(tmp_path),
-                mode="once",
-                timeout_seconds=1,
-                lifetime_timeout_seconds=0,
-                retry_exit_codes=[75],
-                retry_delay_seconds=1,
-                post_to=None,
-                deliver_key=None,
-                agent_name=agents["public"].name,
-                user_context=context,
-            )
-        assert task_store.list_tasks() == []
-        assert watch_store.list_watches() == []
+        task = task_store.add_task(
+            session_key="slack::channel::C123",
+            prompt="run task",
+            schedule_type="cron",
+            agent_name=agents["public"].name,
+            cron="0 * * * *",
+            timezone_name="UTC",
+            user_context=context,
+        )
+        watch = watch_store.add_watch(
+            name="acl watch",
+            session_key="slack::channel::C123",
+            command=["true"],
+            shell_command=None,
+            prefix=None,
+            cwd=str(tmp_path),
+            mode="once",
+            timeout_seconds=1,
+            lifetime_timeout_seconds=0,
+            retry_exit_codes=[75],
+            retry_delay_seconds=1,
+            post_to=None,
+            deliver_key=None,
+            agent_name=agents["public"].name,
+            user_context=context,
+        )
+        assert task.agent_name == agents["public"].name
+        assert watch.agent_name == agents["public"].name
+        assert resource_access_service.metadata_allows_temporary_unrestricted_runtime(
+            task.metadata
+        )
+        assert resource_access_service.metadata_allows_temporary_unrestricted_runtime(
+            watch.metadata
+        )
+        restored = resource_access_service.resource_user_context_from_metadata(
+            task.metadata
+        )
+        assert restored is not None
+        assert restored.subject == context.subject
+        assert restored.is_remote is True
+        assert restored.is_trusted_local is False
 
         task = task_store.add_task(
             session_key="slack::channel::C123",

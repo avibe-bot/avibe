@@ -9,7 +9,11 @@ import { useApi } from '../../context/ApiContext';
 import { selectApiErrorFields } from '../../context/apiErrorParse';
 import { useToast } from '../../context/ToastContext';
 import { useWorkbenchInbox } from '../../context/WorkbenchInboxContext';
-import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
+import {
+  canUseAppsSurface,
+  canUseRuntimeSurfaces,
+  useInstanceAuthorization,
+} from '../../context/InstanceAuthorizationContext';
 import { useRegisterComposerTarget, type ComposerInsertTarget } from '../../context/ComposerBridgeContext';
 import { useWindowManager } from '../../context/WindowManagerContext';
 import type { SessionActivityItemKind, SessionActivityState, SessionRuntimeState, VaultRequest, VibeAgentBrief, WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
@@ -216,19 +220,24 @@ export const ChatPage: React.FC = () => {
   // true })) — a general signal that this navigation must leave Show Page mode.
   const showChatSignal = searchParams.get('view') === 'chat';
   const api = useApi();
-  const { capabilities } = useInstanceAuthorization();
+  const {
+    capabilities,
+    remote,
+    hasTemporaryUnrestrictedOrgAccess,
+  } = useInstanceAuthorization();
   const [sessionCanChat, setSessionCanChat] = useState(false);
-  const canChat = capabilities.can_chat && sessionCanChat;
-  // Show Page resource ACLs are temporarily disabled for remote Organization
-  // members (avibe#1313). The existing role-level Show Pages capability is
-  // sufficient here; Apps availability must never depend on can_use_system.
-  const canManageShowPageAsInstance = capabilities.can_use_show_pages;
+  const canUseRuntime = canUseRuntimeSurfaces(remote, hasTemporaryUnrestrictedOrgAccess);
+  const canChat = (capabilities.can_chat || canUseRuntime) && sessionCanChat;
+  const canUseApps = canUseAppsSurface(remote, hasTemporaryUnrestrictedOrgAccess);
+  const canManageShowPageAsInstance = canUseApps && (
+    capabilities.can_use_show_pages || canUseRuntime
+  );
   const [showPageAccessResult, setShowPageAccessResult] = useState<{
     sessionId: string;
     probe: ShowPageAccessProbe;
   } | null>(null);
   const showPageAccessProbeGenerationRef = useRef(0);
-  const currentShowPageAccessProbe = capabilities.can_use_show_pages
+  const currentShowPageAccessProbe = canManageShowPageAsInstance
     && showPageAccessResult?.sessionId === sessionId
     ? showPageAccessResult?.probe ?? null
     : null;
@@ -382,12 +391,12 @@ export const ChatPage: React.FC = () => {
     }
   }, [api]);
   useEffect(() => {
-    if (!sessionId || !capabilities.can_use_show_pages) return undefined;
+    if (!sessionId || !canManageShowPageAsInstance) return undefined;
     void probeShowPageAccess(sessionId);
     return () => {
       showPageAccessProbeGenerationRef.current += 1;
     };
-  }, [capabilities.can_use_show_pages, probeShowPageAccess, sessionId]);
+  }, [canManageShowPageAsInstance, probeShowPageAccess, sessionId]);
   // The mounted Show Page frame, so parent-level chords can also be bound inside
   // its document (see the ⌘⇧D effect). Stable callback + ref, never state: a ref
   // callback that set state would re-create itself on every commit and re-attach
@@ -2683,7 +2692,7 @@ export const ChatPage: React.FC = () => {
           showPageAccess={showPageAccess}
           canOpenShowPage={canOpenShowPage}
           canManageShowPage={canManageShowPage}
-          canManageInstance={capabilities.can_manage_instance}
+          canManageInstance={capabilities.can_manage_instance || canUseRuntime}
           sessionActions={sessionActions}
           titleFieldRef={titleFieldRef}
         />
@@ -2770,7 +2779,7 @@ export const ChatPage: React.FC = () => {
             // BEFORE the archive still holds them in state, though — the same
             // stale-tab case that reaches the archived 409 — and their
             // approve/deny buttons would write to a session that can't accept it.
-            sessionId && !readOnly && capabilities.can_manage_instance ? (
+            sessionId && !readOnly && (capabilities.can_manage_instance || canUseRuntime) ? (
               <VaultChatRequests
                 requests={transcriptTailVaultRequests}
                 onResolved={refreshVaultRequests}
@@ -2791,7 +2800,7 @@ export const ChatPage: React.FC = () => {
         {writable && (
           <QueueStrip queue={queue} onRemove={removeQueued} onRecall={recallQueued} onSendNow={sendQueueNow} />
         )}
-        {sessionId && !readOnly && capabilities.can_manage_instance && pendingApprovals.length > 0 ? (
+        {sessionId && !readOnly && (capabilities.can_manage_instance || canUseRuntime) && pendingApprovals.length > 0 ? (
           <VaultApprovalFloat offscreen={offscreenApprovals} pending={pendingApprovals} onResolved={refreshVaultRequests} />
         ) : null}
         {/* key by session so the composer remounts per session — its draft-seeding

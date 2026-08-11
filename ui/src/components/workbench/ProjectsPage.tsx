@@ -21,7 +21,10 @@ import clsx from 'clsx';
 
 import { useWorkbenchInbox } from '../../context/WorkbenchInboxContext';
 import { useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
-import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
+import {
+  canUseRuntimeSurfaces,
+  useInstanceAuthorization,
+} from '../../context/InstanceAuthorizationContext';
 import type { ProjectSessionsState } from '../../context/WorkbenchProjectsContext';
 import type { WorkbenchProject, WorkbenchSession } from '../../context/ApiContext';
 import { formatRelativeTime } from '../../lib/relativeTime';
@@ -82,14 +85,17 @@ const MobileProjectRow: React.FC<{
 }> = ({ project, open, state, onToggle }) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const { capabilities, remote } = useInstanceAuthorization();
-  // Rename and the Project settings are remote-permitted; archiving is not
-  // (`DELETE /api/projects/{id}` is local-only) even though
-  // `can_manage_projects` stays true for a remote Instance owner.
-  const canArchive = capabilities.can_manage_projects && canArchiveProjects({ remote });
-  // Reading a project's AGENTS.md is remote-permitted but saving it is not, and
-  // this surface is an editor with no read-only mode, so it stays local.
-  const canEditAgentsMd = capabilities.can_manage_projects && canEditProjectInstructions({ remote });
+  const { capabilities, remote, hasTemporaryUnrestrictedOrgAccess } = useInstanceAuthorization();
+  const canUseRuntime = canUseRuntimeSurfaces(remote, hasTemporaryUnrestrictedOrgAccess);
+  const canManageProjects = capabilities.can_manage_projects || canUseRuntime;
+  const canArchive = canManageProjects && canArchiveProjects({
+    remote,
+    temporaryUnrestrictedOrgAccess: hasTemporaryUnrestrictedOrgAccess,
+  });
+  const canEditAgentsMd = canManageProjects && canEditProjectInstructions({
+    remote,
+    temporaryUnrestrictedOrgAccess: hasTemporaryUnrestrictedOrgAccess,
+  });
   const { renameProject, archiveProject, createSessionForProject } = useWorkbenchProjectsTree();
   const [menuOpen, setMenuOpen] = useState(false);
   // Guards against a double-tap creating two sessions before navigation unmounts.
@@ -102,7 +108,7 @@ const MobileProjectRow: React.FC<{
   // Enter (or blur) commits, then the input unmounts and its blur fires again;
   // Escape cancels and must not let that trailing blur commit the stale draft.
   const handledRef = useRef(false);
-  const canChat = capabilities.can_chat && project.capabilities.can_chat;
+  const canChat = (capabilities.can_chat || canUseRuntime) && (canUseRuntime || project.capabilities.can_chat);
 
   useEffect(() => {
     if (renaming) inputRef.current?.focus();
@@ -167,7 +173,7 @@ const MobileProjectRow: React.FC<{
           )}
           {open ? <ChevronDown className="size-4 shrink-0 text-muted" /> : <ChevronRight className="size-4 shrink-0 text-muted" />}
         </button>
-        {(canChat || capabilities.can_manage_projects) && <Popover open={menuOpen} onOpenChange={setMenuOpen}>
+        {(canChat || canManageProjects) && <Popover open={menuOpen} onOpenChange={setMenuOpen}>
           <PopoverTrigger asChild>
             <Button
               type="button"
@@ -199,7 +205,7 @@ const MobileProjectRow: React.FC<{
             >
               {t('newSession.title')}
             </MenuItem>}
-            {capabilities.can_manage_projects && <>
+            {canManageProjects && <>
             <MenuItem
               icon={Pencil}
               onClick={() => {
@@ -247,7 +253,7 @@ const MobileProjectRow: React.FC<{
           </PopoverContent>
         </Popover>}
       </div>
-      {capabilities.can_manage_projects && (
+      {canManageProjects && (
         <>
           <ProjectSettingsDialog project={project} open={settingsOpen} onClose={() => setSettingsOpen(false)} />
           <ProjectAgentsMdDialog project={project} open={agentsOpen} onClose={() => setAgentsOpen(false)} />
@@ -383,8 +389,13 @@ const MobileSessionRow: React.FC<{
 export const ProjectsPage: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const { capabilities } = useInstanceAuthorization();
-  const canCreateProject = canCreateLocalProject(capabilities);
+  const {
+    capabilities,
+    remote,
+    hasTemporaryUnrestrictedOrgAccess,
+  } = useInstanceAuthorization();
+  const canUseRuntime = canUseRuntimeSurfaces(remote, hasTemporaryUnrestrictedOrgAccess);
+  const canCreateProject = canUseRuntime || canCreateLocalProject(capabilities);
   const { unreadBySession } = useWorkbenchInbox();
   const {
     projects,
@@ -494,8 +505,8 @@ export const ProjectsPage: React.FC = () => {
                     projectId={project.id}
                     session={session}
                     unread={unreadBySession[session.id] ?? 0}
-                    canChat={capabilities.can_chat && project.capabilities.can_chat}
-                    canManageMetadata={project.capabilities.can_chat}
+                    canChat={(capabilities.can_chat || canUseRuntime) && (canUseRuntime || project.capabilities.can_chat)}
+                    canManageMetadata={canUseRuntime || project.capabilities.can_chat}
                     onOpen={() => openSession(session.id)}
                   />
                 ))}

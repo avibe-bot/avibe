@@ -6,7 +6,11 @@ from dataclasses import dataclass
 import re
 from typing import Any, Mapping
 
-from core.inbox_events import RUNS_UPDATED_EVENT
+from core.inbox_events import (
+    DEFINITIONS_UPDATED_EVENT,
+    RUNS_UPDATED_EVENT,
+    VAULTS_UPDATED_EVENT,
+)
 
 
 INSTANCE_ROLES = frozenset({"owner", "editor", "viewer"})
@@ -44,7 +48,13 @@ _VIEWER_WORKBENCH_EVENTS = frozenset(
     }
 )
 _EDITOR_WORKBENCH_EVENTS = frozenset({"queue.updated", "show.event"})
-_REMOTE_LOCAL_ONLY_WORKBENCH_EVENTS = frozenset({RUNS_UPDATED_EVENT})
+_PRIVILEGED_RUNTIME_WORKBENCH_EVENTS = frozenset(
+    {
+        DEFINITIONS_UPDATED_EVENT,
+        RUNS_UPDATED_EVENT,
+        VAULTS_UPDATED_EVENT,
+    }
+)
 
 REMOTE_HTTP_ALLOWED = "allowed"
 REMOTE_HTTP_ACTIVE_ORGANIZATION_MEMBER = "active_organization_member"
@@ -78,19 +88,41 @@ class AuthorizationContext:
 
     @property
     def is_instance_owner(self) -> bool:
-        return self.is_trusted_local or self.instance_role == "owner"
+        if self.is_trusted_local:
+            return True
+        return self._has_admitted_remote_identity() and self.instance_role == "owner"
 
     @property
     def is_active_organization_member(self) -> bool:
         return bool(
-            self.organization_id
+            self.instance_role in INSTANCE_ROLES
+            and self.instance_access_source in INSTANCE_ACCESS_SOURCES
+            and self.organization_id
             and self.organization_member_id
             and self.organization_role in ORGANIZATION_ROLES
         )
 
+    def _has_admitted_remote_identity(self) -> bool:
+        """Return whether this context carries an identity accepted for runtime use.
+
+        HTTP admission validates the signed session before a request reaches a
+        service. Services are also callable directly, so they must not infer
+        authority from a caller-constructed ``owner`` role alone. Show Page
+        email grants are the one non-Organization remote identity and retain
+        their signed viewer/page scope.
+        """
+
+        if not self.is_remote:
+            return True
+        if self.instance_access_source == "show_page_email":
+            return self.instance_role == "viewer" and bool(self.show_page_id)
+        return self.is_active_organization_member
+
     def has_role(self, minimum_role: str) -> bool:
         if self.is_trusted_local:
             return True
+        if not self._has_admitted_remote_identity():
+            return False
         return _ROLE_RANK.get(self.instance_role or "", 0) >= _ROLE_RANK[minimum_role]
 
     @property
@@ -182,15 +214,16 @@ class AuthorizationContext:
         }
 
 
-def has_temporary_unrestricted_org_app_access(
+def has_temporary_unrestricted_org_access(
     context: AuthorizationContext | Mapping[str, Any] | None,
 ) -> bool:
-    """Return whether the temporary Organization Apps policy applies.
+    """Return whether the temporary unrestricted Organization policy applies.
 
     This is an HTTP/product rollout rule, not a projected capability. Until the
-    per-App and Show Page authorization model tracked in avibe#1313 ships, every
-    authenticated Organization member may use the remote Apps surfaces. Exact
-    Show Page email grants remain confined to their signed page subtree.
+    per-surface authorization model tracked in avibe#1313 ships, every
+    authenticated active Organization member may use the explicitly opened
+    runtime surfaces. Exact Show Page email grants remain confined to their
+    signed page subtree.
     """
 
     resolved = (
@@ -206,6 +239,27 @@ def has_temporary_unrestricted_org_app_access(
         and resolved.instance_access_source != "show_page_email"
         and resolved.is_active_organization_member
     )
+
+
+def has_temporary_unrestricted_org_app_access(
+    context: AuthorizationContext | Mapping[str, Any] | None,
+) -> bool:
+    """Backward-compatible alias for the renamed unrestricted policy signal."""
+
+    return has_temporary_unrestricted_org_access(context)
+
+
+def has_temporary_unrestricted_runtime_access(
+    context: AuthorizationContext | Mapping[str, Any] | None,
+) -> bool:
+    """Return the temporary runtime admission signal without changing identity.
+
+    Callers must use this predicate for the explicitly opened runtime surfaces
+    instead of treating an Organization member as a trusted-local principal or
+    projecting synthetic owner capabilities to the browser.
+    """
+
+    return has_temporary_unrestricted_org_access(context)
 
 
 def _optional_string(value: Any, *, limit: int = 320) -> str | None:
@@ -319,6 +373,15 @@ def require_instance_role(
         if isinstance(context, AuthorizationContext)
         else context_from_session_payload(context)
     )
+    # The temporary rollout intentionally has no per-surface role split for an
+    # active Organization member, but it does not turn an arbitrary remote
+    # Instance owner into an Organization member. Keep exact Show Page email
+    # grants on their signed viewer role; the HTTP/page boundary scopes them to
+    # the one page separately.
+    if resolved.is_remote and resolved.instance_access_source != "show_page_email":
+        if not has_temporary_unrestricted_org_access(resolved):
+            raise InstanceAuthorizationError(minimum_role)
+        return resolved
     if not resolved.has_role(minimum_role):
         raise InstanceAuthorizationError(minimum_role)
     return resolved
@@ -344,13 +407,33 @@ def can_receive_workbench_event(
 ) -> bool:
     """Return whether an SSE subscriber may receive a workbench event."""
 
-    if event_type == "show.event" and has_temporary_unrestricted_org_app_access(context):
+    known_event = event_type in (
+        _VIEWER_WORKBENCH_EVENTS
+        | _EDITOR_WORKBENCH_EVENTS
+        | _PRIVILEGED_RUNTIME_WORKBENCH_EVENTS
+    )
+    if has_temporary_unrestricted_org_access(context) and known_event:
         return True
+    # A signed Show Page email grant is still a viewer session, but its exact
+    # page subtree is enforced by the payload/resource visibility filters below.
+    if (
+        event_type == "show.event"
+        and isinstance(context, AuthorizationContext)
+        and context.instance_access_source == "show_page_email"
+        and context.can_use_show_page(context.show_page_id or "")
+    ):
+        return True
+    # Unknown event names remain owner-only. The temporary rollout is an
+    # explicit allowlist for known runtime events, not a blanket event-bus
+    # capability that would expose a future control-plane event. Existing
+    # remote owners still retain their established owner-level behavior.
+    if not known_event and has_temporary_unrestricted_org_access(context):
+        return False
     try:
         require_instance_role(context, required_workbench_event_role(event_type))
     except InstanceAuthorizationError:
         return False
-    if getattr(context, "is_remote", False) and event_type in _REMOTE_LOCAL_ONLY_WORKBENCH_EVENTS:
+    if getattr(context, "is_remote", False) and event_type in _PRIVILEGED_RUNTIME_WORKBENCH_EVENTS:
         return False
     return True
 
@@ -442,10 +525,9 @@ _REMOTE_LOCAL_ONLY_HTTP_RULES = tuple(
         ("GET", r"^/api/harness/(?:runs|bootstrap|runs/[^/]+)$"),
         ("GET", r"^/api/vault/(?:pubkey|agent/pubkey|sandbox/root-metadata|vmk)$"),
         ("GET", r"^/api/global-prompts$"),
-        # Model Hub source listing returns credential metadata
-        # (credential_ref, masked_credential, account_label, custom base_url,
-        # usage/billing) that must not cross the tunnel; the mutation surface
-        # is already fail-closed local-only, so the read stays local-only too.
+        # Baseline for remote identities outside the temporary active-member
+        # rollout. The explicit matrix below admits the same Model Hub metadata
+        # and mutations for active Organization members.
         ("GET", r"^/api/models/sources$"),
         ("HEAD", r"^/api/models/sources$"),
         ("GET", r"^/api/skills/(?:check|find)$"),
@@ -467,35 +549,101 @@ _REMOTE_PAYLOAD_FILTERED_HTTP_RULES = tuple(
     )
 )
 
-# Temporary, exact remote App surface for authenticated Organization members.
-# Keep this list route-specific: unrelated control-plane and future unknown API
-# endpoints must continue to fall through to the local-only default. The
-# replacement capability/resource model is tracked in avibe#1313.
-_TEMPORARY_ORGANIZATION_APP_HTTP_RULES = tuple(
+# Temporary unrestricted runtime surface for authenticated active Organization
+# members. This is deliberately an explicit route matrix: Organization auth,
+# membership, tunnel pairing, cloud-management, and unknown future API routes
+# still use their existing policy. The per-surface authorization model is
+# tracked in avibe#1313.
+_UNRESTRICTED_ORG_METHODS = frozenset({"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"})
+_TEMPORARY_UNRESTRICTED_ORG_HTTP_RULES = tuple(
     (methods, re.compile(pattern))
     for methods, pattern in (
-        (frozenset({"GET", "HEAD"}), r"^/api/dock$"),
-        (frozenset({"POST"}), r"^/api/dock/pins$"),
-        (frozenset({"DELETE"}), r"^/api/dock/pins/[^/]+$"),
-        (frozenset({"PUT"}), r"^/api/dock/order$"),
+        # Settings, configuration, workbench preferences, and service control.
+        # Config responses use the local runtime projection with only the
+        # pairing/tunnel block removed.
+        (frozenset({"POST"}), r"^/api/config$"),
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/(?:settings|settings/thread|workbench/prefs|ui/reload)$"),
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/(?:control|doctor|logs|upgrade)$"),
+        # The shell polls the process status and the setup pages use these
+        # local discovery/configuration helpers. They do not alter Organization
+        # identity, pairing, or tunnel state.
+        (_UNRESTRICTED_ORG_METHODS, r"^/status$"),
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/(?:cli/detect|slack/manifest)$"),
+        # Harness, Agent definitions, global prompts, and runtime diagnostics.
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/harness/(?:counts|tasks|tasks/[^/]+|watches|watches/[^/]+|runs|runs/[^/]+|bootstrap)$"),
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/agents(?:/(?:default|import|[^/]+))?$"),
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/(?:agent-backends|agents-graph|agent-onboarding|running-agents(?:/end)?)$"),
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/agent/[^/]+/install(?:/[^/]+)?$"),
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/global-prompts$"),
+        # Skills and their installed runtime dependencies.
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/skills(?:/(?:preview|find|check|update|upload|[^/]+))?$"),
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/dependencies(?:/[^/]+(?:/install(?:/[^/]+)?)?)?$"),
+        # Vault inventory, key material, secret CRUD, grants, approvals, and audit.
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/vault/(?:secrets(?:/[^/]+(?:/reveal-context)?)?|tags|pubkey|agent/pubkey|sandbox/root-metadata|agent-bindings:batch|agent-binding|settings|vmk|authz/factors/webauthn(?:/options)?|signing-addresses|requests(?:/[^/]+(?:/(?:deny|fulfill-access))?)?|provision-requests(?:/(?:by-id/)?[^/]+)?|grants(?:/[^/]+)?|sign|pubkey-pin|audit)$"),
+        # Model Hub source/mapping/OAuth/runtime management.
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/models/sources(?:/[^/]+(?:/(?:credential|reauth|refresh|models(?:/.*)?)?)?)?$"),
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/models/(?:agents|events)$"),
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/models/agents/(?:opencode/menu|[^/]+/(?:sources|mode|mappings|chain|probe))$"),
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/models/turns/[^/]+/provenance$"),
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/models/oauth/(?:start|status/[^/]+|submit|cancel)$"),
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/models/migration/(?:scan|apply)$"),
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/models/runtime/(?:status|start)$"),
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/models/sources/[^/]+/models(?:/.*)?$"),
+        # Memory administration.
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/memory/(?:settings|status|failures|profile|log|log/entry|search|runtime/restart|clear)$"),
+        # Projects, sessions, chat execution, and ASR.
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/projects(?:/[^/]+(?:/agents-md)?)?$"),
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/workbench/projects-bootstrap$"),
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/sessions(?:/[^/]+(?:/(?:fork|bootstrap|archive-preview|messages|activity|cli-activity|cancel|mark-read|turn-state|queue(?:/[^/]+(?:/send-now)?)?|draft|attachments))?)?$"),
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/(?:search/messages|events|inbox)$"),
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/asr/(?:transcribe|telemetry|status)$"),
+        # Apps: Dock, Files, browse favorites, Terminal teardown, and Show Pages.
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/dock(?:/pins(?:/[^/]+)?|/order)?$"),
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/files/(?:list|meta|content|write|upload|mkdir|rename|move|copy|delete|delete/undo|search|search_names|search/replace|search/undo)$"),
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/media/[^/]+(?:/meta)?$"),
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/browse(?:/favorites|/mkdir)?$"),
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/terminal/[^/]+$"),
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/show-pages(?:/[^/]+(?:/(?:visibility|ensure|access|authorized-emails|rotate-share|share-id|icon))?)?$"),
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/show/sessions/[^/]+/(?:events|prewarm)$"),
+        # Agent backends, provider setup, platform settings, and channel tools.
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/backend/(?:codex|claude|opencode)/(?:runtime|restart)$"),
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/backend/(?:codex|claude)/auth$"),
         (
-            frozenset({"GET", "HEAD"}),
-            r"^/api/files/(?:list|meta|content|search|search_names)$",
+            _UNRESTRICTED_ORG_METHODS,
+            r"^/api/backend/(?:codex|claude|opencode)/auth/(?:oauth/(?:start|status/[^/]+|submit-code|cancel|remove)|api-key/remove|test)$",
         ),
         (
-            frozenset({"POST"}),
-            r"^/api/files/(?:upload|mkdir|rename|move|copy|delete|delete/undo|search/replace|search/undo)$",
+            _UNRESTRICTED_ORG_METHODS,
+            r"^/api/backend/claude/auth/oauth/credentials/remove$",
         ),
-        (frozenset({"PUT"}), r"^/api/files/write$"),
-        (frozenset({"GET", "HEAD"}), r"^/api/browse/favorites$"),
-        (frozenset({"DELETE"}), r"^/api/terminal/[^/]+$"),
-        (frozenset({"POST"}), r"^/api/show-pages/[^/]+/icon$"),
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/backend/opencode/(?:providers|custom-provider(?:/[^/]+)?|default-provider|provider/[^/]+/(?:auth(?:/.*)?|test|models(?:/.*)?))$"),
+        (
+            _UNRESTRICTED_ORG_METHODS,
+            r"^/api/(?:opencode/(?:options|permission-status|setup-permission)|claude/(?:agents|models)|codex/(?:agents|models))$",
+        ),
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/(?:platforms|slack(?:/(?:auth_test|channels))?|discord/(?:auth_test|channels|guilds)|telegram/(?:auth_test|chats)|lark/(?:auth_test|chats|temp_ws/(?:start|stop))|wechat/qr_login/(?:start|poll)|channels/delete)$"),
+        # Push registration is a runtime notification surface.
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/web-push/(?:status|vapid-public-key|subscriptions|test)$"),
+        # Local IM users and bind codes are part of the temporarily unrestricted
+        # runtime administration surface. This does not include Organization
+        # membership, Cloud pairing, or tunnel control routes.
+        (frozenset({"GET", "HEAD", "POST"}), r"^/api/users$"),
+        (frozenset({"POST"}), r"^/api/users/[^/]+/admin$"),
+        (frozenset({"DELETE"}), r"^/api/users/[^/]+$"),
+        (frozenset({"GET", "HEAD", "POST"}), r"^/api/bind-codes$"),
+        (frozenset({"DELETE"}), r"^/api/bind-codes/[^/]+$"),
+        (frozenset({"GET", "HEAD"}), r"^/api/setup/first-bind-code$"),
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/resource-policies(?:/[^/]+/[^/]+)?$"),
     )
 )
 
-# Positive allowlist for remote-safe owner surfaces. Any route that mutates
-# local Agent, IM, Vault, or other execution state must stay absent here and
-# therefore use the fail-closed local-only default below.
+# Compatibility name retained for callers/tests from the previous Apps-only
+# rollout. New code should use the unrestricted Organization matrix above.
+_TEMPORARY_ORGANIZATION_APP_HTTP_RULES = _TEMPORARY_UNRESTRICTED_ORG_HTTP_RULES
+
+# Compatibility allowlist for remote identities outside the temporary active
+# Organization rollout. The unrestricted active-member matrix is evaluated
+# first; unknown routes still use the fail-closed local-only default below.
 _REMOTE_OWNER_ALLOWED_HTTP_RULES = tuple(
     (methods, re.compile(pattern))
     for methods, pattern in (
@@ -597,14 +745,25 @@ def _owner_http_rule_matches(method: str, path: str) -> bool:
     )
 
 
-def _temporary_organization_app_rule_matches(method: str, path: str) -> bool:
+def _temporary_unrestricted_org_rule_matches(method: str, path: str) -> bool:
     return any(
         method in methods and pattern.fullmatch(path)
-        for methods, pattern in _TEMPORARY_ORGANIZATION_APP_HTTP_RULES
+        for methods, pattern in _TEMPORARY_UNRESTRICTED_ORG_HTTP_RULES
     )
 
 
-def http_authorization_policy(method: str, path: str) -> HttpAuthorizationPolicy:
+def _temporary_organization_app_rule_matches(method: str, path: str) -> bool:
+    """Compatibility alias for the previous Apps-only policy matcher."""
+
+    return _temporary_unrestricted_org_rule_matches(method, path)
+
+
+def http_authorization_policy(
+    method: str,
+    path: str,
+    *,
+    temporary_org_access: bool = False,
+) -> HttpAuthorizationPolicy:
     """Return role and remote-exposure policy for one HTTP request.
 
     Explicit viewer/editor and owner-management routes keep their approved remote
@@ -634,14 +793,22 @@ def http_authorization_policy(method: str, path: str) -> HttpAuthorizationPolicy
         )
         return HttpAuthorizationPolicy(minimum_role, remote_access)
     if path == "/status":
-        return HttpAuthorizationPolicy(None, REMOTE_HTTP_LOCAL_ONLY)
+        return HttpAuthorizationPolicy(None, REMOTE_HTTP_ACTIVE_ORGANIZATION_MEMBER)
     if not path.startswith("/api/"):
         return HttpAuthorizationPolicy(None)
-    if _temporary_organization_app_rule_matches(normalized_method, path):
-        return HttpAuthorizationPolicy(
-            "viewer",
-            REMOTE_HTTP_ACTIVE_ORGANIZATION_MEMBER,
+    if _temporary_unrestricted_org_rule_matches(normalized_method, path):
+        # The matrix is an identity-independent route classification. The
+        # request boundary below admits it only after verifying the signed
+        # active-Organization claim; ordinary remote callers still receive
+        # ``remote_execution_disabled`` there. The optional keyword is retained
+        # for callers from the previous Apps-only rollout, but classification is
+        # deliberately context-independent.
+        minimum_role = (
+            "owner"
+            if re.fullmatch(r"^/api/projects/[^/]+/agents-md$", path)
+            else "viewer"
         )
+        return HttpAuthorizationPolicy(minimum_role, REMOTE_HTTP_ACTIVE_ORGANIZATION_MEMBER)
 
     minimum_role = "owner"
     if _http_rule_matches(normalized_method, path, _VIEWER_HTTP_MUTATION_RULES):

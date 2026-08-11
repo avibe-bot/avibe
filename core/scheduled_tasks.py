@@ -7760,12 +7760,12 @@ class ScheduledTaskService:
         try:
             from storage.resource_access_service import (
                 REMOTE_AUTONOMOUS_HARNESS_DISABLED_CODE,
-                metadata_has_remote_resource_context,
+                metadata_allows_temporary_unrestricted_runtime,
             )
 
             if (
                 request.request_type not in {"task_run", "scheduled"}
-                and metadata_has_remote_resource_context(request.metadata)
+                and not metadata_allows_temporary_unrestricted_runtime(request.metadata)
             ):
                 raise PermissionError(REMOTE_AUTONOMOUS_HARNESS_DISABLED_CODE)
             if request.request_type in {"task_run", "scheduled"}:
@@ -8436,7 +8436,7 @@ class ScheduledTaskService:
     ) -> TaskExecutionResult:
         from storage.resource_access_service import (
             REMOTE_AUTONOMOUS_HARNESS_DISABLED_CODE,
-            metadata_has_remote_resource_context,
+            metadata_allows_temporary_unrestricted_runtime,
         )
 
         error: Optional[str] = None
@@ -8445,7 +8445,7 @@ class ScheduledTaskService:
         failure_code: Optional[str] = None
         session_id = task.session_id
         session_key = task.session_key
-        if metadata_has_remote_resource_context(task.metadata):
+        if not metadata_allows_temporary_unrestricted_runtime(task.metadata):
             error = REMOTE_AUTONOMOUS_HARNESS_DISABLED_CODE
             if not self.store.suspend_task(task.id, error=error):
                 logger.warning(

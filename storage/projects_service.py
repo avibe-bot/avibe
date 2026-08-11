@@ -24,7 +24,11 @@ from sqlalchemy.engine import Connection
 from storage.agent_session_rows import reserve_write_lock
 from storage import project_access_service
 from storage.models import agents, scope_settings, scopes
-from vibe.authorization import AuthorizationContext, require_instance_role
+from vibe.authorization import (
+    AuthorizationContext,
+    has_temporary_unrestricted_runtime_access,
+    require_instance_role,
+)
 
 
 PROJECT_PLATFORM = "avibe"
@@ -210,9 +214,9 @@ def _project_for_context(
             str(project.get("id") or ""),
         )
     }
-    if context.is_remote:
-        # A remote Instance owner is still not trusted to inspect the host's
-        # absolute workdir or arbitrary local metadata.
+    if context.is_remote and not has_temporary_unrestricted_runtime_access(context):
+        # Remote identities outside the temporary active-Organization rollout
+        # remain unable to inspect the host's workdir and local metadata.
         payload["folder_path"] = ""
         payload["metadata"] = {}
     return payload
@@ -286,6 +290,27 @@ def get_project(
         raise LookupError(f"Project not found: {project_id}")
     scope_id = _make_scope_id(project_id)
     return _project_for_context(conn, context, _project_payload(conn, scope_id))
+
+
+def get_project_workdir(
+    conn: Connection,
+    project_id: str,
+    *,
+    authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
+) -> str:
+    """Return the authorized Project workdir for internal runtime execution.
+
+    Remote Project payloads deliberately redact host paths. Runtime services
+    such as Skills and the project instruction editor still need the real cwd
+    after authorization, so keep that internal lookup separate from the HTTP
+    response projection instead of weakening ``get_project`` redaction.
+    """
+
+    context = require_instance_role(authorization_context, "viewer")
+    if not project_access_service.can_read_project(conn, context, project_id):
+        raise LookupError(f"Project not found: {project_id}")
+    project = _project_payload(conn, _make_scope_id(project_id))
+    return str(project.get("folder_path") or "")
 
 
 def create_project(

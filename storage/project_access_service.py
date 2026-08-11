@@ -11,6 +11,8 @@ from sqlalchemy import delete, insert, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Connection
 
+from vibe.authorization import has_temporary_unrestricted_runtime_access
+
 from storage.models import (
     agent_sessions,
     project_access_bindings,
@@ -312,7 +314,7 @@ def get_effective_project_role(
     context: AuthorizationContext,
     project_id: str,
 ) -> str | None:
-    if context.is_instance_owner:
+    if context.is_instance_owner or has_temporary_unrestricted_runtime_access(context):
         return "owner"
     if not is_active_project(conn, project_id):
         return None
@@ -366,7 +368,10 @@ def get_effective_session_role(
     ).scalar_one_or_none()
     project_id = project_id_from_scope_id(scope_id)
     if project_id is None:
-        return "owner" if context.is_instance_owner else None
+        return "owner" if (
+            context.is_instance_owner
+            or has_temporary_unrestricted_runtime_access(context)
+        ) else None
     return get_effective_project_role(conn, context, project_id)
 
 
