@@ -366,7 +366,7 @@ export const AppShell: React.FC = () => {
   const ownerOnlyPath =
     location.pathname === '/setup' ||
     (location.pathname.startsWith('/admin') && !location.pathname.startsWith('/admin/organization')) ||
-    ['/agents', '/harness', '/apps/library'].some(
+    ['/agents', '/harness'].some(
       (path) => location.pathname === path || location.pathname.startsWith(`${path}/`),
     );
   // Owner is not enough for these: `can_manage_instance` stays true for a remote
@@ -377,15 +377,10 @@ export const AppShell: React.FC = () => {
   const resourceUseDenied =
     (location.pathname.startsWith('/skills') && !capabilities.can_use_skills) ||
     (location.pathname.startsWith('/vaults') && !capabilities.can_use_vault_secrets);
-  const fileOnlyPath =
-    location.pathname.startsWith('/apps/files') || location.pathname.startsWith('/apps/editor');
-  const terminalOnlyPath = location.pathname.startsWith('/apps/terminal');
   if (
     (ownerOnlyPath && !capabilities.can_manage_instance) ||
     (localSystemPath && !capabilities.can_use_system) ||
-    resourceUseDenied ||
-    (fileOnlyPath && !capabilities.can_use_files) ||
-    (terminalOnlyPath && !capabilities.can_use_terminal)
+    resourceUseDenied
   ) {
     return <Navigate to="/" replace />;
   }
@@ -528,9 +523,7 @@ export const AppShell: React.FC = () => {
     // Apps (§7.1b): replaces the old 更多 route tab. Tapping toggles the Dock
     // drawer (the mobile Dock) rather than navigating; `grid-2x2` distinguishes
     // it from Capabilities' `layout-grid`.
-    ...(capabilities.can_use_system
-      ? [{ label: t('nav.apps'), icon: Grid2x2, onClick: () => setAppsDrawerOpen((v) => !v), match: () => appsDrawerOpen }]
-      : []),
+    { label: t('nav.apps'), icon: Grid2x2, onClick: () => setAppsDrawerOpen((v) => !v), match: () => appsDrawerOpen },
   ];
 
   // Chat is a full-screen detail (own composer) and Search is a full-screen
@@ -554,7 +547,7 @@ export const AppShell: React.FC = () => {
     // Desktop: normal document flow.
     <WindowManagerProvider standalone={standaloneAppTab}>
     <StandaloneAppTabContext.Provider value={standaloneAppTab}>
-    <DockProvider enabled={capabilities.can_use_system}>
+    <DockProvider>
     <ShowPageDragProvider>
     {/* Chromeless (single-app tab): the locked full-viewport column applies on DESKTOP too —
         the app fills the browser area exactly, with nothing to scroll around it. */}
@@ -625,7 +618,7 @@ export const AppShell: React.FC = () => {
                 centered Chat composer. Workbench → Settings (control panel);
                 Control Panel → Back to Workbench, the mint counterpart. */}
             <div className="flex items-stretch gap-2">
-              {capabilities.can_use_system && <AppsLauncher />}
+              <AppsLauncher />
               {shellMode === 'workbench' && ORGANIZATION_NAV_ENABLED && (
                 <Link
                   to="/admin/organization/overview"
@@ -808,7 +801,7 @@ export const AppShell: React.FC = () => {
       {/* Mobile Dock drawer — the workbench Apps tab summons it (§7.1b). Mobile-only
           (md:hidden internally); mounted inside DockProvider so it reads the same
           docked tiles + order as the desktop Dock. */}
-      {shellMode === 'workbench' && capabilities.can_use_system && (
+      {shellMode === 'workbench' && (
         <MobileDockDrawer open={appsDrawerOpen} onClose={() => setAppsDrawerOpen(false)} />
       )}
 
@@ -831,7 +824,7 @@ export const AppShell: React.FC = () => {
           second launcher on top in full-screen anymore (product: avoid the fullscreen floating
           button; a Dock redesign comes later). Un-maximize via the window traffic-lights to reach
           the sidebar launcher. */}
-      {capabilities.can_use_system && <WindowLayer />}
+      <WindowLayer />
     </div>
     </ShowPageDragProvider>
     </DockProvider>

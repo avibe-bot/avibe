@@ -219,7 +219,10 @@ export const ChatPage: React.FC = () => {
   const { capabilities } = useInstanceAuthorization();
   const [sessionCanChat, setSessionCanChat] = useState(false);
   const canChat = capabilities.can_chat && sessionCanChat;
-  const canManageShowPageAsInstance = capabilities.can_manage_instance && capabilities.can_use_system;
+  // Show Page resource ACLs are temporarily disabled for remote Organization
+  // members (avibe#1313). The existing role-level Show Pages capability is
+  // sufficient here; Apps availability must never depend on can_use_system.
+  const canManageShowPageAsInstance = capabilities.can_use_show_pages;
   const [showPageAccessResult, setShowPageAccessResult] = useState<{
     sessionId: string;
     probe: ShowPageAccessProbe;

@@ -47,6 +47,7 @@ _EDITOR_WORKBENCH_EVENTS = frozenset({"queue.updated", "show.event"})
 _REMOTE_LOCAL_ONLY_WORKBENCH_EVENTS = frozenset({RUNS_UPDATED_EVENT})
 
 REMOTE_HTTP_ALLOWED = "allowed"
+REMOTE_HTTP_ACTIVE_ORGANIZATION_MEMBER = "active_organization_member"
 REMOTE_HTTP_LOCAL_ONLY = "local_only"
 REMOTE_HTTP_PAYLOAD_FILTERED = "payload_filtered"
 
@@ -136,18 +137,30 @@ class AuthorizationContext:
 
     @property
     def can_use_terminal_files(self) -> bool:
+        """Legacy trusted-local control capability, not an Apps visibility gate."""
+
         return not self.is_remote and self.has_role("owner")
 
     @property
     def can_use_terminal(self) -> bool:
+        """Legacy trusted-local control capability, not Terminal App access."""
+
         return not self.is_remote and self.has_role("owner")
 
     @property
     def can_use_files(self) -> bool:
+        """Legacy local-project filesystem capability, not Files App access."""
+
         return not self.is_remote and self.has_role("owner")
 
     @property
     def can_use_system(self) -> bool:
+        """Return access to trusted-local control-plane surfaces.
+
+        Apps are not system administration and must not use this capability as
+        an availability gate.
+        """
+
         return not self.is_remote and self.has_role("owner")
 
     def capability_projection(self) -> dict[str, bool]:
@@ -167,6 +180,25 @@ class AuthorizationContext:
             "can_use_files": self.can_use_files,
             "can_use_system": self.can_use_system,
         }
+
+
+def has_temporary_unrestricted_org_app_access(
+    context: AuthorizationContext | None,
+) -> bool:
+    """Return whether the temporary Organization Apps policy applies.
+
+    This is an HTTP/product rollout rule, not a projected capability. Until the
+    per-App and Show Page authorization model tracked in avibe#1313 ships, every
+    authenticated Organization member may use the remote Apps surfaces. Exact
+    Show Page email grants remain confined to their signed page subtree.
+    """
+
+    return bool(
+        context is not None
+        and context.is_remote
+        and context.instance_access_source != "show_page_email"
+        and context.is_active_organization_member
+    )
 
 
 def _optional_string(value: Any, *, limit: int = 320) -> str | None:
@@ -325,6 +357,7 @@ _VIEWER_HTTP_RULES = tuple(
         r"^/api/projects(?:/[^/]+)?$",
         r"^/api/workbench/prefs$",
         r"^/api/workbench/projects-bootstrap$",
+        r"^/api/dock$",
         r"^/api/sessions$",
         r"^/api/sessions/[^/]+$",
         r"^/api/sessions/[^/]+/(?:bootstrap|messages|activity|turn-state)$",
@@ -426,6 +459,31 @@ _REMOTE_PAYLOAD_FILTERED_HTTP_RULES = tuple(
     )
 )
 
+# Temporary, exact remote App surface for authenticated Organization members.
+# Keep this list route-specific: unrelated control-plane and future unknown API
+# endpoints must continue to fall through to the local-only default. The
+# replacement capability/resource model is tracked in avibe#1313.
+_TEMPORARY_ORGANIZATION_APP_HTTP_RULES = tuple(
+    (methods, re.compile(pattern))
+    for methods, pattern in (
+        (frozenset({"POST"}), r"^/api/dock/pins$"),
+        (frozenset({"DELETE"}), r"^/api/dock/pins/[^/]+$"),
+        (frozenset({"PUT"}), r"^/api/dock/order$"),
+        (
+            frozenset({"GET", "HEAD"}),
+            r"^/api/files/(?:list|meta|content|search|search_names)$",
+        ),
+        (
+            frozenset({"POST"}),
+            r"^/api/files/(?:upload|mkdir|rename|move|copy|delete|delete/undo|search/replace|search/undo)$",
+        ),
+        (frozenset({"PUT"}), r"^/api/files/write$"),
+        (frozenset({"GET", "HEAD"}), r"^/api/browse/favorites$"),
+        (frozenset({"DELETE"}), r"^/api/terminal/[^/]+$"),
+        (frozenset({"POST"}), r"^/api/show-pages/[^/]+/icon$"),
+    )
+)
+
 # Positive allowlist for remote-safe owner surfaces. Any route that mutates
 # local Agent, IM, Vault, or other execution state must stay absent here and
 # therefore use the fail-closed local-only default below.
@@ -449,11 +507,9 @@ _REMOTE_OWNER_ALLOWED_HTTP_RULES = tuple(
             frozenset({"GET", "HEAD", "PUT"}),
             r"^/api/show-pages/[^/]+/authorized-emails$",
         ),
-        # Reading the Dock is safe, but its pins/order and the Workbench prefs
-        # are one process-global record shared by the local owner and every
-        # remote principal. Until they are keyed by the authenticated subject a
-        # remote write would reorder and re-pin everyone else's Dock and flip
-        # another principal's banner preference, so the mutations stay local.
+        # Reading the Dock remains generally remote-safe. Dock writes are not
+        # listed here: the temporary Organization Apps matrix above admits only
+        # active members, while Workbench preference writes remain local-only.
         (frozenset({"GET", "HEAD"}), r"^/api/dock$"),
         # Reading push status stays remote, and so does the `POST` form of it:
         # it reports this principal's own subscription count and can only
@@ -534,6 +590,13 @@ def _owner_http_rule_matches(method: str, path: str) -> bool:
     )
 
 
+def _temporary_organization_app_rule_matches(method: str, path: str) -> bool:
+    return any(
+        method in methods and pattern.fullmatch(path)
+        for methods, pattern in _TEMPORARY_ORGANIZATION_APP_HTTP_RULES
+    )
+
+
 def http_authorization_policy(method: str, path: str) -> HttpAuthorizationPolicy:
     """Return role and remote-exposure policy for one HTTP request.
 
@@ -556,17 +619,22 @@ def http_authorization_policy(method: str, path: str) -> HttpAuthorizationPolicy
             r"^/show/[^/]+/(?:__show/events|__events)$",
             path,
         )
-        minimum_role = "viewer" if is_read else "editor"
+        minimum_role = "viewer"
         remote_access = (
             REMOTE_HTTP_ALLOWED
             if is_read or is_safe_human_event
-            else REMOTE_HTTP_LOCAL_ONLY
+            else REMOTE_HTTP_ACTIVE_ORGANIZATION_MEMBER
         )
         return HttpAuthorizationPolicy(minimum_role, remote_access)
     if path == "/status":
         return HttpAuthorizationPolicy(None, REMOTE_HTTP_LOCAL_ONLY)
     if not path.startswith("/api/"):
         return HttpAuthorizationPolicy(None)
+    if _temporary_organization_app_rule_matches(normalized_method, path):
+        return HttpAuthorizationPolicy(
+            "viewer",
+            REMOTE_HTTP_ACTIVE_ORGANIZATION_MEMBER,
+        )
 
     minimum_role = "owner"
     if _http_rule_matches(normalized_method, path, _VIEWER_HTTP_MUTATION_RULES):

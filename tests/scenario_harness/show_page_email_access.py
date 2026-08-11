@@ -70,14 +70,25 @@ class ShowPageEmailAccessScenarioHarness:
 
     def begin_login(self, show_page_id: str) -> dict[str, str]:
         next_path = f"/show/{show_page_id}/__show/me"
-        response = self.client.get(
+        navigation = self.client.get(
             next_path,
             base_url=REMOTE_ORIGIN,
             environ_base=REMOTE_PEER,
+            headers={"Accept": "text/html"},
             follow_redirects=False,
         )
-        assert response.status_code == 302
-        authorize_params = httpx.URL(response.headers["Location"]).params
+        assert navigation.status_code == 302
+        authorize_url = navigation.headers["Location"]
+        if authorize_url.startswith("/auth/login?"):
+            response = self.client.get(
+                authorize_url,
+                base_url=REMOTE_ORIGIN,
+                environ_base=REMOTE_PEER,
+                follow_redirects=False,
+            )
+            assert response.status_code == 302
+            authorize_url = response.headers["Location"]
+        authorize_params = httpx.URL(authorize_url).params
         state = authorize_params["state"]
         state_payload = ui_server._read_oauth_state(
             self.config.remote_access.vibe_cloud.session_secret,

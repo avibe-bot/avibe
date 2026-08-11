@@ -6,14 +6,14 @@ from sqlalchemy import select
 from config import paths
 from core.dock_store import BUILTIN_DOCK_IDS, DockError
 from core.show_pages import ShowPageError, ShowPageStore, public_url
-from storage import media_service, projects_service, resource_access_service
+from storage import media_service, project_access_service, projects_service, resource_access_service
 from storage import workbench_sessions_service as sessions_service
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
 from storage.models import agent_sessions, show_pages
 from tests.test_ui_remote_access_auth import _remote_peer, _save_config
 from tests.ui_server_test_helpers import csrf_headers
-from vibe import api, remote_access
+from vibe import api, remote_access, ui_server
 from vibe.ui_server import app
 
 
@@ -43,6 +43,7 @@ def _organization_cookie(
     subject: str,
     groups: list[str] | None = None,
     instance_role: str = "viewer",
+    organization_role: str = "member",
 ) -> str:
     claims = {
         "vibe_instance_id": "inst_123",
@@ -50,7 +51,7 @@ def _organization_cookie(
         "vibe_instance_access_source": "organization_group",
         "vibe_organization_id": "org-1",
         "vibe_organization_member_id": f"member-{subject}",
-        "vibe_organization_role": "member",
+        "vibe_organization_role": organization_role,
         "vibe_membership_version": "membership-v2",
     }
     if groups is not None:
@@ -184,19 +185,38 @@ def test_broader_instance_context_unions_its_signed_show_page_entitlement(
         store.close()
 
 
-def test_remote_show_page_list_and_direct_requests_enforce_policy(monkeypatch, tmp_path) -> None:
+@pytest.mark.parametrize(
+    ("subject", "instance_role", "organization_role"),
+    [
+        ("owner-2", "owner", "owner"),
+        ("member-1", "viewer", "member"),
+    ],
+)
+def test_remote_org_members_can_open_all_show_pages_temporarily(
+    monkeypatch,
+    tmp_path,
+    subject,
+    instance_role,
+    organization_role,
+) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
     store = _seed_show_pages_with_policies()
     store.close()
+
+    async def _runtime_response(*args, **kwargs):
+        return ui_server.FastAPIResponse(content=b"Show Page", media_type="text/html")
+
+    monkeypatch.setattr(ui_server, "_show_page_runtime_response", _runtime_response)
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
         _organization_cookie(
             config,
-            subject="member-1",
+            subject=subject,
             groups=["group-engineering"],
-            instance_role="owner",
+            instance_role=instance_role,
+            organization_role=organization_role,
         ),
         domain="alex.avibe.bot",
     )
@@ -222,21 +242,15 @@ def test_remote_show_page_list_and_direct_requests_enforce_policy(monkeypatch, t
     )
 
     assert catalog.status_code == 200
-    assert {item["session_id"] for item in catalog.get_json()["pages"]} == {"ses-public", "ses-scope"}
+    assert {item["session_id"] for item in catalog.get_json()["pages"]} == {
+        "ses-private",
+        "ses-public",
+        "ses-scope",
+    }
     assert all("path" not in item for item in catalog.get_json()["pages"])
-    assert mutation.status_code == 403
-    assert mutation.get_json()["code"] == "resource_access_forbidden"
-    assert page.status_code == 302
-    assert "show_page_id=ses-private" in page.headers["Location"]
-
-    reauth_result = client.get(
-        "/show/ses-private/?__vibe_show_page_reauth=1",
-        base_url="https://alex.avibe.bot",
-        environ_base=_remote_peer(),
-        headers={"Accept": "text/html"},
-        follow_redirects=False,
-    )
-    assert reauth_result.status_code == 403
+    assert mutation.status_code == 200
+    assert mutation.get_json()["visibility"] == "offline"
+    assert page.status_code == 200
 
 
 def test_remote_show_page_creation_defaults_private_and_org_public_does_not_share(monkeypatch, tmp_path) -> None:
@@ -815,7 +829,7 @@ def test_show_page_email_grant_change_requires_authorization_revision(monkeypatc
         )
 
 
-def test_remote_dock_filters_private_pins_and_authorizes_mutations(monkeypatch, tmp_path) -> None:
+def test_remote_org_dock_temporarily_bypasses_show_page_acl(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
     store = _seed_show_pages_with_policies()
@@ -862,13 +876,11 @@ def test_remote_dock_filters_private_pins_and_authorizes_mutations(monkeypatch, 
         base_url="https://alex.avibe.bot",
         environ_base=_remote_peer(),
     )
-    assert response.status_code == 403
-    # The Dock record is process-global rather than keyed by the authenticated
-    # subject, so every remote mutation now stops at the transport boundary
-    # before the resource ACL is consulted - a stricter refusal than the
-    # per-page `resource_access_forbidden` this once returned. The ACL itself is
-    # unchanged and still enforced in-process, as the `api.*` calls above assert.
-    assert response.get_json()["code"] == "remote_execution_disabled"
+    assert response.status_code == 200
+    assert {pin["session_id"] for pin in response.get_json()["dock"]["pins"]} == {
+        "ses-private",
+        "ses-scope",
+    }
 
 
 def test_remote_admin_dock_order_preserves_hidden_private_pins(monkeypatch, tmp_path) -> None:
@@ -982,16 +994,10 @@ def test_remote_member_cannot_archive_session_with_another_owners_page(monkeypat
         engine.dispose()
 
 
-def test_remote_show_annotation_media_follows_the_page_acl(monkeypatch, tmp_path) -> None:
-    """A screenshot token does not outlive access to the page it was drawn on.
-
-    `/api/media/<token>` authorizes Project/session role and short-circuits for
-    the Instance owner, so without a page check a caller who once saw a private
-    Show Page keeps its annotation screenshot readable after the page policy
-    stops naming them - and a remote Instance owner reads one they were never
-    allowed to open. The caller below is exactly that: Instance owner, but not
-    the subject the private page's policy names.
-    """
+def test_remote_org_show_annotation_media_temporarily_follows_open_page_policy(
+    monkeypatch,
+    tmp_path,
+) -> None:
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
@@ -1010,6 +1016,15 @@ def test_remote_show_annotation_media_follows_the_page_acl(monkeypatch, tmp_path
                 )["id"]
                 for access_level in ("private", "public")
             }
+            project_access_service.apply_project_access_intent(
+                connection,
+                {
+                    "project_id": project["id"],
+                    "revision": 1,
+                    "mode": "restricted",
+                    "bindings": [],
+                },
+            )
 
         store = ShowPageStore()
         try:
@@ -1061,7 +1076,7 @@ def test_remote_show_annotation_media_follows_the_page_acl(monkeypatch, tmp_path
                 config,
                 subject="member-1",
                 groups=["group-engineering"],
-                instance_role="owner",
+                instance_role="viewer",
             ),
             domain="alex.avibe.bot",
         )
@@ -1073,13 +1088,13 @@ def test_remote_show_annotation_media_follows_the_page_acl(monkeypatch, tmp_path
                 environ_base=_remote_peer(),
             )
 
-        # The page ACL decides, not the Instance-owner shortcut.
-        assert _media(tokens["show_annotation:private"]).status_code == 404
+        # Show annotation screenshots are part of the temporarily open page.
+        assert _media(tokens["show_annotation:private"]).status_code == 200
         assert _media(tokens["show_annotation:public"]).status_code == 200
         # An annotation with no page to check against cannot be authorized.
         assert _media(orphan_token).status_code == 404
-        # Only Show annotations gained the page check; other media keeps the
-        # Project/session authorization it already had as its only gate.
-        assert _media(tokens["agent_reply:private"]).status_code == 200
+        # Unrelated media keeps Project/session authorization as its gate.
+        assert _media(tokens["agent_reply:private"]).status_code == 404
+        assert _media(tokens["agent_reply:public"]).status_code == 404
     finally:
         engine.dispose()
