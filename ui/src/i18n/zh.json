@@ -3654,6 +3654,7 @@
       "runtime": {
         "title": "引擎状态",
         "help": "记忆引擎在本机后台运行，负责把你的消息整理成记忆。这里显示它当前的运行情况。",
+        "helpLabel": "关于引擎状态",
         "loading": "正在读取引擎状态…",
         "unavailable": "暂时读取不到引擎状态。",
         "healthStatus": {
@@ -3662,14 +3663,18 @@
         "version": "版本",
         "capabilities": "可用能力",
         "capabilitiesHelp": "引擎当前能使用的模型类型。「是」表示该能力已配置好、可以使用。",
+        "capabilitiesHelpLabel": "关于可用能力",
         "noCapabilities": "暂无能力信息。",
         "disabledFeatures": "未启用的功能",
         "disabledFeaturesHelp": "引擎中暂未开启的功能，一般不影响日常使用。",
+        "disabledFeaturesHelpLabel": "关于未启用的功能",
         "noneDisabled": "所有功能均已启用。",
         "cascade": "处理队列",
-        "cascadeHelp": "消息会先进入队列，再由引擎逐条整理成记忆。这里是队列的处理进度和失败统计，失败的条目会自动重试。",
+        "cascadeHelp": "消息会先进入队列，再由引擎逐条整理成记忆。这里是队列的处理进度和失败统计；可重试的失败会自动重试，永久失败不会。",
+        "cascadeHelpLabel": "关于处理队列",
         "recorder": "调用记录",
-        "recorderHelp": "引擎每次调用模型接口都会留下记录，方便出问题时排查。",
+        "recorderHelp": "调用记录正常时会保存模型调用详情，方便排查问题；记录异常或关闭时，新的调用可能不会被记录。",
+        "recorderHelpLabel": "关于调用记录",
         "noFacts": "暂无相关信息。",
         "fact": {
           "capability": {
@@ -3690,7 +3695,7 @@
             "drainConsecutiveFailures": "连续失败次数",
             "unrecoverableTotal": "累计放弃条数",
             "optimizeFailureStreak": "整理连续失败次数",
-            "pruneStaleSeconds": "旧数据清理周期"
+            "pruneStaleSeconds": "删除超过此时长的数据"
           },
           "recorder": {
             "state": "状态",
@@ -3739,11 +3744,13 @@
       "sources": {
         "title": "数据来源",
         "help": "本页各部分的数据分别来自不同来源，这里显示每个来源上次更新的时间。",
+        "helpLabel": "关于数据来源",
         "description": "某一项暂时不可用，不代表记忆功能出了问题。"
       },
       "anomalies": {
         "title": "异常记录",
         "help": "处理过程中出现的问题会记录在这里，大多数会自动恢复，一般无需处理。",
+        "helpLabel": "关于异常记录",
         "description": "处理过程中出现的问题会记录在这里。",
         "loading": "正在读取异常记录…",
         "empty": "没有异常记录。",
@@ -3790,7 +3797,8 @@
       },
       "timeline": {
         "title": "最近处理记录",
-        "help": "最近的消息是如何一步步被处理成记忆的。"
+        "help": "最近的消息是如何一步步被处理成记忆的。",
+        "helpLabel": "关于最近处理记录"
       }
     },
     "profile": {
@@ -3923,8 +3931,10 @@
       "goToDependencies": "前往依赖页面",
       "llmTitle": "语言模型（LLM）",
       "llmHelp": "记忆功能用这个模型来阅读消息并总结成记忆。填写兼容 OpenAI 格式的接口地址、模型名称和 API Key。",
+      "llmHelpLabel": "关于语言模型",
       "embeddingTitle": "向量模型（Embedding）",
-      "embeddingHelp": "记忆功能用这个模型为记忆建立索引，让你可以搜索记忆。更改后需要重建索引。",
+      "embeddingHelp": "记忆功能用这个模型为记忆建立索引，让你可以搜索记忆。更改向量模型接口地址或模型后需要重建索引。",
+      "embeddingHelpLabel": "关于向量模型",
       "baseUrl": "Base URL",
       "baseUrlPlaceholder": "https://api.example.com/v1",
       "model": "模型",
@@ -3944,21 +3954,21 @@
       "disclosure": [
         "开启后，你的 Workbench 消息和已授权用户的私聊消息会被提炼成记忆；Agent 工作时总结的长期信息（如你的偏好和决定）也会记录进来。",
         "提炼记忆时，消息内容会发送到上面配置的模型接口处理。这些接口与 Agent 使用的模型是分开的，对方会按其自身政策处理数据。",
-        "记忆数据只保存在本机。关闭记忆只是暂停记录，不会删除已有数据。",
+        "Avibe 的本地 Memory 存储保留在这台机器上；发送到已配置模型接口的内容副本不在此范围内。关闭记忆只是暂停记录，不会删除已有数据。",
         "「清除全部」会删除本机的全部记忆数据，但无法撤回已发送给模型接口的内容，也不影响原始聊天记录。",
         "不同平台的账号各自拥有独立的记忆，互不关联。"
       ],
       "clearKeyLabel": "清除已保存的密钥",
       "rebuildRequiredTitle": "需要重建记忆索引",
-      "rebuildRequiredDescription": "向量模型的更改已保存。索引重建完成前，无法重启记忆引擎。",
+      "rebuildRequiredDescription": "向量模型接口地址或模型的更改已保存。索引重建完成前，无法重启记忆引擎。",
       "rebuildConfirmTitle": "重建记忆索引？",
-      "rebuildConfirmDescription": "更换向量模型后需要重新建立索引。已有记忆不会丢失，但重建可能需要一些时间，并会消耗 Embedding API 用量。",
+      "rebuildConfirmDescription": "更改向量模型接口地址或模型后需要重新建立索引。已有记忆不会丢失，但重建可能需要一些时间，并会消耗 Embedding API 用量。",
       "rebuildConfirmLabel": "保存并重建",
       "retryRebuild": "重试重建",
       "retryingRebuild": "正在重建…",
       "rebuildCompleted": "记忆索引重建完成。",
       "rebuildFailed": "记忆索引重建失败。",
-      "embeddingIdentityHint": "更改向量模型会重建本地索引，已有记忆不会丢失。"
+      "embeddingIdentityHint": "更改向量模型接口地址或模型会重建本地索引，已有记忆不会丢失。"
     },
     "clear": {
       "button": "清除全部",

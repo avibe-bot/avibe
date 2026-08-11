@@ -164,6 +164,7 @@ describe('SettingsMemoryPage Processing Record', () => {
 
     expect(await screen.findByRole('radio', { name: 'memory.tabs.processingRecord' })).toBeTruthy();
     expect(await screen.findByTestId('processing-log')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'memory.processingRecord.timeline.helpLabel' })).toBeTruthy();
     await waitFor(() => expect(api.getMemoryProcessingRecord).toHaveBeenCalledTimes(1));
     expect(setInterval.mock.calls.some(([, delay]) => delay === 4000)).toBe(false);
   });

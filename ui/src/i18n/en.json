@@ -3654,6 +3654,7 @@
       "runtime": {
         "title": "Engine status",
         "help": "The Memory engine runs in the background on this machine and turns your messages into memories. This shows how it's doing.",
+        "helpLabel": "About engine status",
         "loading": "Reading engine status…",
         "unavailable": "Engine status is temporarily unavailable.",
         "healthStatus": {
@@ -3662,14 +3663,18 @@
         "version": "Version",
         "capabilities": "Available capabilities",
         "capabilitiesHelp": "The kinds of models the engine can use right now. \"Yes\" means the capability is configured and ready.",
+        "capabilitiesHelpLabel": "About available capabilities",
         "noCapabilities": "No capability information yet.",
         "disabledFeatures": "Features not enabled",
         "disabledFeaturesHelp": "Engine features that aren't turned on. This usually doesn't affect everyday use.",
+        "disabledFeaturesHelpLabel": "About features not enabled",
         "noneDisabled": "All features are enabled.",
         "cascade": "Processing queue",
-        "cascadeHelp": "Messages wait in a queue and the engine turns them into memories one by one. This shows the queue's progress and failure counts; failed items retry automatically.",
+        "cascadeHelp": "Messages wait in a queue and the engine turns them into memories one by one. This shows the queue's progress and failure counts; retryable failures retry automatically, while permanently failed items do not.",
+        "cascadeHelpLabel": "About the processing queue",
         "recorder": "Call log",
-        "recorderHelp": "Every model call the engine makes is logged here, which helps with troubleshooting.",
+        "recorderHelp": "When recording is active, the call log keeps model-call details for troubleshooting. Degraded or off recording may omit new calls.",
+        "recorderHelpLabel": "About the call log",
         "noFacts": "Nothing to show yet.",
         "fact": {
           "capability": {
@@ -3690,7 +3695,7 @@
             "drainConsecutiveFailures": "Consecutive failures",
             "unrecoverableTotal": "Total given up",
             "optimizeFailureStreak": "Consecutive cleanup failures",
-            "pruneStaleSeconds": "Old-data cleanup cycle"
+            "pruneStaleSeconds": "Remove data older than"
           },
           "recorder": {
             "state": "Status",
@@ -3739,11 +3744,13 @@
       "sources": {
         "title": "Data sources",
         "help": "Each part of this page gets its data from a different source. This shows when each source last updated.",
+        "helpLabel": "About data sources",
         "description": "One source being temporarily unavailable doesn't mean Memory is broken."
       },
       "anomalies": {
         "title": "Issue log",
         "help": "Problems that came up during processing are recorded here. Most recover on their own and need no action.",
+        "helpLabel": "About the issue log",
         "description": "Problems that came up during processing are recorded here.",
         "loading": "Reading issue log…",
         "empty": "No issues recorded.",
@@ -3790,7 +3797,8 @@
       },
       "timeline": {
         "title": "Recent processing",
-        "help": "How recent messages were turned into memories, step by step."
+        "help": "How recent messages were turned into memories, step by step.",
+        "helpLabel": "About recent processing"
       }
     },
     "profile": {
@@ -3923,8 +3931,10 @@
       "goToDependencies": "Open Dependencies",
       "llmTitle": "Language model (LLM)",
       "llmHelp": "Memory uses this model to read your messages and summarize them into memories. Enter an OpenAI-compatible base URL, model name, and API key.",
+      "llmHelpLabel": "About the language model",
       "embeddingTitle": "Embedding model",
-      "embeddingHelp": "Memory uses this model to index memories so you can search them. Changing it requires rebuilding the index.",
+      "embeddingHelp": "Memory uses this model to index memories so you can search them. Changing the embedding endpoint or model requires rebuilding the index.",
+      "embeddingHelpLabel": "About the embedding model",
       "baseUrl": "Base URL",
       "baseUrlPlaceholder": "https://api.example.com/v1",
       "model": "Model",
@@ -3944,21 +3954,21 @@
       "disclosure": [
         "When on, your Workbench messages and authorized users' private messages are distilled into memories; long-term notes your Agent takes while working (like your preferences and decisions) are included too.",
         "To build memories, message content is sent to the model endpoints configured above. These are separate from your Agent's models, and those providers handle the data under their own policies.",
-        "Memory data is stored only on this machine. Turning Memory off pauses it — it doesn't delete anything.",
+        "Avibe's local Memory store stays on this machine; copies sent to configured model endpoints are outside that local store. Turning Memory off pauses it — it doesn't delete anything.",
         "Clear all deletes all Memory data on this machine, but can't take back content already sent to the model endpoints, and doesn't touch your original chat history.",
         "Accounts on different platforms each have their own separate memory; they aren't linked."
       ],
       "clearKeyLabel": "Clear the saved key",
       "rebuildRequiredTitle": "Memory index rebuild required",
-      "rebuildRequiredDescription": "Your embedding model change is saved. The Memory engine can't restart until the rebuild finishes.",
+      "rebuildRequiredDescription": "Your embedding endpoint or model change is saved. The Memory engine can't restart until the rebuild finishes.",
       "rebuildConfirmTitle": "Rebuild Memory index?",
-      "rebuildConfirmDescription": "Switching the embedding model requires rebuilding the index. Your memories are kept, but the rebuild can take a while and uses embedding API credit.",
+      "rebuildConfirmDescription": "Changing the embedding endpoint or model requires rebuilding the index. Your memories are kept, but the rebuild can take a while and uses embedding API credit.",
       "rebuildConfirmLabel": "Save and rebuild",
       "retryRebuild": "Retry rebuild",
       "retryingRebuild": "Rebuilding…",
       "rebuildCompleted": "Memory index rebuild completed.",
       "rebuildFailed": "Memory index rebuild failed.",
-      "embeddingIdentityHint": "Changing the embedding model rebuilds the local index. Your memories are kept."
+      "embeddingIdentityHint": "Changing the embedding endpoint or model rebuilds the local index. Your memories are kept."
     },
     "clear": {
       "button": "Clear all",

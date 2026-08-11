@@ -303,7 +303,7 @@ export const SettingsMemoryPage: React.FC = () => {
                     {t('memory.processingRecord.timeline.title')}
                   </h3>
                   <InfoHint
-                    label={t('memory.processingRecord.timeline.title')}
+                    label={t('memory.processingRecord.timeline.helpLabel')}
                     content={t('memory.processingRecord.timeline.help')}
                   />
                 </div>

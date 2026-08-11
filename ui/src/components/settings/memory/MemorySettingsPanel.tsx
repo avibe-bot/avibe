@@ -29,6 +29,7 @@ type MemorySettingsOk = Extract<MemorySettingsResult, { status: 'ok' }>;
 const EndpointFields: React.FC<{
   title: string;
   help: string;
+  helpLabel: string;
   draft: EndpointDraft;
   original: MemoryEndpointConfig;
   onChange: (next: EndpointDraft) => void;
@@ -38,6 +39,7 @@ const EndpointFields: React.FC<{
 }> = ({
   title,
   help,
+  helpLabel,
   draft,
   original,
   onChange,
@@ -50,7 +52,7 @@ const EndpointFields: React.FC<{
     <div className="flex flex-col gap-3 rounded-xl border border-border bg-surface p-4">
       <div className="flex items-center gap-2">
         <span className="text-[13px] font-semibold text-foreground">{title}</span>
-        <InfoHint label={title} content={help} />
+        <InfoHint label={helpLabel} content={help} />
         {original.has_api_key ? (
           <Badge variant="success">{t('memory.settings.apiKeySet')}</Badge>
         ) : (
@@ -322,6 +324,7 @@ export const MemorySettingsPanel: React.FC<{
       <EndpointFields
         title={t('memory.settings.llmTitle')}
         help={t('memory.settings.llmHelp')}
+        helpLabel={t('memory.settings.llmHelpLabel')}
         draft={llmDraft}
         original={settings.processing.llm}
         onChange={setLlmDraft}
@@ -332,6 +335,7 @@ export const MemorySettingsPanel: React.FC<{
       <EndpointFields
         title={t('memory.settings.embeddingTitle')}
         help={t('memory.settings.embeddingHelp')}
+        helpLabel={t('memory.settings.embeddingHelpLabel')}
         draft={embeddingDraft}
         original={settings.processing.embedding}
         onChange={setEmbeddingDraft}

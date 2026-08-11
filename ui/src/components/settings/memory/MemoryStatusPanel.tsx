@@ -264,7 +264,7 @@ export const MemoryStatusPanel: React.FC<{
             {t('memory.processingRecord.runtime.title')}
           </h3>
           <InfoHint
-            label={t('memory.processingRecord.runtime.title')}
+            label={t('memory.processingRecord.runtime.helpLabel')}
             content={t('memory.processingRecord.runtime.help')}
           />
         </div>
@@ -295,7 +295,7 @@ export const MemoryStatusPanel: React.FC<{
                     <div className="mb-2 flex items-center gap-1.5 text-[11.5px] font-semibold text-foreground">
                       {t('memory.processingRecord.runtime.capabilities')}
                       <InfoHint
-                        label={t('memory.processingRecord.runtime.capabilities')}
+                        label={t('memory.processingRecord.runtime.capabilitiesHelpLabel')}
                         content={t('memory.processingRecord.runtime.capabilitiesHelp')}
                       />
                     </div>
@@ -309,7 +309,7 @@ export const MemoryStatusPanel: React.FC<{
                     <div className="mb-2 flex items-center gap-1.5 text-[11.5px] font-semibold text-foreground">
                       {t('memory.processingRecord.runtime.disabledFeatures')}
                       <InfoHint
-                        label={t('memory.processingRecord.runtime.disabledFeatures')}
+                        label={t('memory.processingRecord.runtime.disabledFeaturesHelpLabel')}
                         content={t('memory.processingRecord.runtime.disabledFeaturesHelp')}
                       />
                     </div>
@@ -328,7 +328,7 @@ export const MemoryStatusPanel: React.FC<{
                       <div className="mb-2 flex items-center gap-1.5 text-[11.5px] font-semibold text-foreground">
                         {t('memory.processingRecord.runtime.cascade')}
                         <InfoHint
-                          label={t('memory.processingRecord.runtime.cascade')}
+                          label={t('memory.processingRecord.runtime.cascadeHelpLabel')}
                           content={t('memory.processingRecord.runtime.cascadeHelp')}
                         />
                       </div>
@@ -342,7 +342,7 @@ export const MemoryStatusPanel: React.FC<{
                       <div className="mb-2 flex items-center gap-1.5 text-[11.5px] font-semibold text-foreground">
                         {t('memory.processingRecord.runtime.recorder')}
                         <InfoHint
-                          label={t('memory.processingRecord.runtime.recorder')}
+                          label={t('memory.processingRecord.runtime.recorderHelpLabel')}
                           content={t('memory.processingRecord.runtime.recorderHelp')}
                         />
                       </div>
@@ -372,7 +372,7 @@ export const MemoryStatusPanel: React.FC<{
               {t('memory.processingRecord.sources.title')}
             </h3>
             <InfoHint
-              label={t('memory.processingRecord.sources.title')}
+              label={t('memory.processingRecord.sources.helpLabel')}
               content={t('memory.processingRecord.sources.help')}
             />
           </div>
@@ -390,7 +390,7 @@ export const MemoryStatusPanel: React.FC<{
               {t('memory.processingRecord.anomalies.title')}
             </h3>
             <InfoHint
-              label={t('memory.processingRecord.anomalies.title')}
+              label={t('memory.processingRecord.anomalies.helpLabel')}
               content={t('memory.processingRecord.anomalies.help')}
             />
           </div>
