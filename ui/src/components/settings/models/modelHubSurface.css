@@ -233,6 +233,7 @@
   --model-hub-add-key-strip-padding-x: 13px;
   --model-hub-add-key-strip-gap: 10px;
   --model-hub-add-key-strip-radius: 9px;
+  --model-hub-add-key-inventory-height: 59px;
   --model-hub-add-key-strip-title-size: 12px;
   --model-hub-add-key-strip-detail-size: 10.5px;
   --model-hub-add-key-strip-detail-line: 16px;
@@ -324,6 +325,10 @@
 .model-hub-add-key-strip--advisory {
   border-color: var(--model-hub-add-key-advisory-border);
   background: var(--model-hub-add-key-advisory-fill);
+}
+.model-hub-add-key-strip--inventory {
+  min-height: var(--model-hub-add-key-inventory-height);
+  align-items: center;
 }
 .model-hub-add-key-strip--success {
   align-items: center;

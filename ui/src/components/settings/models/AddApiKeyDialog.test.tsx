@@ -119,11 +119,36 @@ describe('AddApiKeyDialog', () => {
     await user.click(screen.getByRole('button', { name: /^Retry$|^重试$/i }));
     await waitFor(() => expect(observe).toHaveBeenCalledTimes(2));
     expect(create).not.toHaveBeenCalled();
+    expect(screen.queryByText(/The list could not be read|清单没能读出来/i)).toBeNull();
 
     await user.click(await screen.findByRole('button', { name: /Add anyway|仍要添加/i }));
     await waitFor(() => expect(create).toHaveBeenCalledOnce());
     expect(create.mock.calls[0][0]).not.toHaveProperty('protocol');
     expect(create.mock.calls[0][0].protocol_order?.[0]).toBe('openai_chat');
+  });
+
+  it('adopts the new observation result when inventory retry moves to interface undetermined', async () => {
+    const inventory = observed({ discovery: 'failed', models: [] });
+    const ambiguous = observed({
+      outcome: 'ambiguous',
+      authenticated: 'unknown',
+      protocol: null,
+      discovery: 'not_attempted',
+      models: [],
+    });
+    const observe = vi.spyOn(modelsApi, 'observeApiKeySource')
+      .mockResolvedValueOnce(inventory)
+      .mockResolvedValueOnce(ambiguous);
+    renderDialog();
+    const user = await fillCredentials();
+
+    await user.click(screen.getByRole('button', { name: /^Add$|^添加$/i }));
+    await screen.findByRole('button', { name: /Add anyway|仍要添加/i });
+    await user.click(screen.getByRole('button', { name: /^Retry$|^重试$/i }));
+
+    await waitFor(() => expect(observe).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText(/cannot tell which interface|无法判断是哪种接口/i)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /Add anyway|仍要添加/i })).toBeNull();
   });
 
   it('aborts an in-flight pull and returns to the form without dismissing', async () => {

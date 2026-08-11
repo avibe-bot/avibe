@@ -1053,13 +1053,7 @@
           "openaiChatCompletions": "OpenAI Chat Completions"
         },
         "inventory": {
-          "title": "The interface is identified — but its model list did not come back this time",
-          "detail": "{{protocol}} identified · {{reason}}",
-          "reason": {
-            "transport": "The source could not be reached",
-            "rateLimited": "Upstream rate limit — the list was not returned",
-            "unknown": "The list could not be read"
-          }
+          "title": "The interface is identified — but its model list did not come back this time"
         },
         "addAnyway": "Add anyway",
         "success": {

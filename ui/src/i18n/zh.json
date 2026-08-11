@@ -1053,13 +1053,7 @@
           "openaiChatCompletions": "OpenAI Chat Completions"
         },
         "inventory": {
-          "title": "接口已经认出来了 —— 但这次没拿到它的型号清单",
-          "detail": "{{protocol}} 已认出 · {{reason}}",
-          "reason": {
-            "transport": "没能连上来源",
-            "rateLimited": "上游限流,清单没返回",
-            "unknown": "清单没能读出来"
-          }
+          "title": "接口已经认出来了 —— 但这次没拿到它的型号清单"
         },
         "addAnyway": "仍要添加",
         "success": {

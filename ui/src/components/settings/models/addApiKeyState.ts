@@ -6,12 +6,11 @@ import {
 
 export type AddApiKeyOrigin = 'add' | 'pull';
 export type AddApiKeyFailure = 'auth' | 'network' | 'unclassified' | 'engineDown';
-export type InventoryReason = 'transport' | 'rateLimited' | 'unknown';
 
 export type ObservationVerdict =
   | { kind: 'ready'; observation: SourceObservation }
   | { kind: 'undetermined'; observation: SourceObservation }
-  | { kind: 'inventory'; observation: SourceObservation; reason: InventoryReason }
+  | { kind: 'inventory'; observation: SourceObservation }
   | { kind: 'failure'; cause: AddApiKeyFailure };
 
 export const PROTOCOL_COPY_KEYS: Record<SourceProtocol, string> = {
@@ -32,9 +31,7 @@ export function classifyObservation(observation: SourceObservation): Observation
         return { kind: 'ready', observation };
       }
       if (observation.protocol && observation.discovery === 'failed') {
-        // The current v5 wire shape exposes no inventory failure evidence. Keep
-        // the residual reason until the optional evidence members are contracted.
-        return { kind: 'inventory', observation, reason: 'unknown' };
+        return { kind: 'inventory', observation };
       }
       return { kind: 'failure', cause: 'unclassified' };
     case 'ambiguous':

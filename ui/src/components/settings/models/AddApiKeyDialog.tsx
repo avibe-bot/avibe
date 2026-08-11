@@ -23,7 +23,6 @@ import {
   protocolOrderWithHint,
   type AddApiKeyFailure,
   type AddApiKeyOrigin,
-  type InventoryReason,
 } from './addApiKeyState';
 import { apiFailure, modelsApi, type SourceCreated } from './modelsApi';
 import {
@@ -38,7 +37,7 @@ type Phase =
   | { kind: 'working'; origin: AddApiKeyOrigin; stage: 'observe' | 'persist' }
   | { kind: 'failure'; origin: AddApiKeyOrigin; cause: AddApiKeyFailure }
   | { kind: 'undetermined'; origin: AddApiKeyOrigin; observation: SourceObservation; hint: SourceProtocol | null }
-  | { kind: 'inventory'; origin: AddApiKeyOrigin; observation: SourceObservation; reason: InventoryReason }
+  | { kind: 'inventory'; origin: AddApiKeyOrigin; observation: SourceObservation }
   | { kind: 'save_unconfirmed'; protocolOrder: SourceProtocol[] | undefined };
 
 const INITIAL_PHASE: Phase = { kind: 'form', report: null };
@@ -51,9 +50,6 @@ const failureCopy = (cause: AddApiKeyFailure): string => {
     case 'unclassified': return 'settings.models.addKey.fail.unclassified';
   }
 };
-
-const inventoryReasonCopy = (reason: InventoryReason): string =>
-  `settings.models.addKey.inventory.reason.${reason}`;
 
 export const AddApiKeyDialog: React.FC<{
   open: boolean;
@@ -135,7 +131,7 @@ export const AddApiKeyDialog: React.FC<{
       } else if (verdict.kind === 'undetermined') {
         setPhase({ kind: 'undetermined', origin, observation, hint: null });
       } else if (verdict.kind === 'inventory') {
-        setPhase({ kind: 'inventory', origin, observation, reason: verdict.reason });
+        setPhase({ kind: 'inventory', origin, observation });
       } else {
         setPhase({ kind: 'failure', origin, cause: verdict.cause });
       }
@@ -208,10 +204,6 @@ export const AddApiKeyDialog: React.FC<{
   const canCancel = !(phase.kind === 'working' && phase.stage === 'persist');
   const canSubmit = Boolean(baseUrl.trim() && apiKey.trim()) && !isWorking;
   const showForm = phase.kind !== 'undetermined' && phase.kind !== 'inventory';
-  const protocolLabel = phase.kind === 'inventory' && phase.observation.protocol
-    ? t(PROTOCOL_COPY_KEYS[phase.observation.protocol])
-    : '';
-
   return (
     <DialogPrimitive.Root open={open} onOpenChange={(next) => !next && canCancel && cancel()}>
       <DialogPrimitive.Portal>
@@ -343,17 +335,9 @@ export const AddApiKeyDialog: React.FC<{
 
         {phase.kind === 'inventory' && (
           <div className="model-hub-add-key-outcome-wrap">
-            <div className="model-hub-add-key-strip model-hub-add-key-strip--advisory">
+            <div className="model-hub-add-key-strip model-hub-add-key-strip--advisory model-hub-add-key-strip--inventory">
               <TriangleAlert className="size-3.5 shrink-0 text-gold" />
-              <div className="flex min-w-0 flex-col gap-[3px]">
-                <span className="model-hub-add-key-strip-title text-gold">{t('settings.models.addKey.inventory.title')}</span>
-                <span className="model-hub-add-key-strip-detail">
-                  {t('settings.models.addKey.inventory.detail', {
-                    protocol: protocolLabel,
-                    reason: t(inventoryReasonCopy(phase.reason)),
-                  })}
-                </span>
-              </div>
+              <span className="model-hub-add-key-strip-title text-gold">{t('settings.models.addKey.inventory.title')}</span>
             </div>
           </div>
         )}

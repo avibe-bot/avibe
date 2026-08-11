@@ -23,7 +23,8 @@ describe('Add API key observation state', () => {
   });
 
   it('separates proven inventory failure from unknown protocol and connectivity failures', () => {
-    expect(classifyObservation(observation({ discovery: 'failed', models: [] })).kind).toBe('inventory');
+    const inventory = observation({ discovery: 'failed', models: [] });
+    expect(classifyObservation(inventory)).toEqual({ kind: 'inventory', observation: inventory });
     expect(classifyObservation(observation({
       outcome: 'ambiguous',
       authenticated: 'unknown',
