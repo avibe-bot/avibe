@@ -632,12 +632,14 @@ def _memory_repair_request_task(*, user_key: str) -> asyncio.Task[tuple[dict, in
     )
 
 
-def _settings_ok_payload(memory, runtime_payload: dict | None = None) -> dict:
+async def _settings_ok_payload(memory, runtime_payload: dict | None = None) -> dict:
+    from core.memory.blocking import run_blocking
+
     payload = _memory_settings_projection(memory)
     payload["status"] = "ok"
     payload["rebuild_required"] = getattr(memory, "recovery_intent", None) == "rebuild"
     payload["factory_reset_required"] = getattr(memory, "recovery_intent", None) == "factory_reset"
-    payload["repair_available"] = _memory_repair_available()
+    payload["repair_available"] = await run_blocking(_memory_repair_available)
     if runtime_payload is not None:
         payload["runtime"] = runtime_payload
     return payload
@@ -755,7 +757,7 @@ async def _apply_memory_settings_patch(
                 return _memory_response({"status": "failed", "error": "memory_invalid_input"}, status_code=400)
             except Exception:
                 return _memory_response({"status": "failed", "error": "memory_store_unavailable"}, status_code=503)
-            return _memory_response(_settings_ok_payload(saved.memory))
+            return _memory_response(await _settings_ok_payload(saved.memory))
 
         recovery_intent = "rebuild" if pending_marker or identity_changed else None
         try:
@@ -787,7 +789,7 @@ async def _apply_memory_settings_patch(
             )
             runtime_payload = body if isinstance(body, dict) else {}
             latest = await asyncio.to_thread(V2Config.load)
-            payload = _settings_ok_payload(latest.memory, runtime_payload)
+            payload = await _settings_ok_payload(latest.memory, runtime_payload)
             if status_code != 200 or runtime_payload.get("ok") is not True:
                 error = _memory_closed_error(
                     runtime_payload,
@@ -809,7 +811,7 @@ async def _apply_memory_settings_patch(
             )
             # Pending-marker reconcile that only needs rebuild is not a rollback.
             if closed_error == "memory_embedding_rebuild_required":
-                payload = _settings_ok_payload(saved.memory, runtime_payload)
+                payload = await _settings_ok_payload(saved.memory, runtime_payload)
                 payload["rebuild_required"] = True
                 return _memory_response(payload)
             # Ordinary non-identity saves must not outrun the controller's closed
@@ -845,7 +847,7 @@ async def _apply_memory_settings_patch(
         if response.status_code >= 500:
             return response
         latest = await asyncio.to_thread(V2Config.load)
-        return _memory_response(_settings_ok_payload(latest.memory, runtime_payload))
+        return _memory_response(await _settings_ok_payload(latest.memory, runtime_payload))
 
 
 def register_memory_routes(app) -> None:

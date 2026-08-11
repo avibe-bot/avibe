@@ -350,6 +350,47 @@ def test_memory_settings_projects_only_admitted_repair_capability(monkeypatch, t
     assert response.get_json()["repair_available"] is True
 
 
+def test_memory_settings_patch_projects_repair_capability_off_event_loop(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    observed_running_loops: list[bool] = []
+
+    class Artifact:
+        def sync_capability(self) -> bool:
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                observed_running_loops.append(False)
+            else:
+                observed_running_loops.append(True)
+            return True
+
+    async def reconcile():
+        return {"status_code": 200, "body": {"ok": True, "state": "disabled"}}
+
+    monkeypatch.setattr(
+        "core.memory.artifact.get_memory_artifact_manager",
+        lambda: Artifact(),
+    )
+    monkeypatch.setattr(internal_client, "reconcile_memory", reconcile)
+    client = app.test_client()
+    response = client.patch(
+        "/api/memory/settings",
+        json={"enabled": False},
+        headers=csrf_headers(client, "http://127.0.0.1:15131"),
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["repair_available"] is True
+    assert response.get_json()["runtime"] == {"ok": True, "state": "disabled"}
+    assert observed_running_loops == [False]
+
+
 def test_memory_settings_get_accepts_same_origin_referer_without_origin(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
