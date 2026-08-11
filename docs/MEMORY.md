@@ -97,11 +97,12 @@ the `memory` or `state/memory` roots themselves, original Avibe chats, copies
 already sent to providers, or data outside those surfaces (including logs,
 backups, and user-created snapshots); it is not a secure wipe.
 
-If Clear all is interrupted, Processing Record shows explicit **Resume** and
-**Abort** actions for that operation. **Resume** continues the journaled
-deletion; **Abort** restores every surface from the verified snapshot. Nothing
-resumes automatically, and Memory remains fenced until one action reaches a
-terminal result.
+If Clear all is interrupted, Processing Record shows explicit **Resume Clear**
+and **Abort and restore** actions for that operation. **Resume Clear** continues
+the journaled deletion; **Abort and restore** restores every surface from the
+verified snapshot and is available only after the initial snapshot is complete.
+Nothing resumes automatically, and Memory remains fenced until one action
+reaches a terminal result.
 
 4. **Factory reset**: Use it only as a last resort when the earlier actions
    cannot recover Memory. It is available under **Settings > Memory** when the
