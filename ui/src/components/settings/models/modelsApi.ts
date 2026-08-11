@@ -26,7 +26,6 @@ import type {
   AgentBackend,
   AgentChain,
   AgentChainLink,
-  AgentChainPut,
   AgentMenu,
   AgentMode,
   AgentSourcesPut,
@@ -110,8 +109,6 @@ export type ModelsApi = {
   getAgentSources(backend: AgentBackend): Promise<AgentSupply>;
   /** Total write of the exact stored source order. */
   putAgentSources(backend: AgentBackend, body: AgentSourcesPut): Promise<AgentSupply>;
-  /** Replace one exact per-model Route chain. */
-  putAgentChain(backend: AgentBackend, model: string, body: AgentChainPut): Promise<AgentChain>;
   /** Resolution chain for one model. Hub mode only — direct answers `direct_mode`. */
   getAgentChain(backend: AgentBackend, model: string): Promise<AgentChain>;
   /** One real request through the chain. Hub mode only, same reason. */
@@ -385,7 +382,6 @@ const liveApi: ModelsApi = {
   // The body is TOTAL and closed: the route rejects unknown keys, so
   // `contract_version` is deliberately absent (unlike every other write here).
   putAgentSources: (backend, body) => call<{ agent: AgentSupply }>(`/api/models/agents/${backend}/sources`, jsonInit('PUT', body)).then((r) => r.agent),
-  putAgentChain: (backend, model, body) => call<{ chain: AgentChain }>(`/api/models/agents/${backend}/chain?model=${encodeURIComponent(model)}`, jsonInit('PUT', body)).then((r) => r.chain),
   getAgentChain: (backend, model) => call<{ chain: AgentChain }>(`/api/models/agents/${backend}/chain?model=${encodeURIComponent(model)}`).then((r) => r.chain),
   probeAgent: (backend, model) => call<{ probe: ProbeResult }>(`/api/models/agents/${backend}/probe`, jsonInit('POST', model ? { model } : {})).then((r) => r.probe),
   setAgentMode: (backend, mode) => call<{ agent?: AgentSupply } & AgentSupply>(`/api/models/agents/${backend}/mode`, jsonInit('PATCH', { mode })).then((r) => (r.agent ?? r) as AgentSupply),
@@ -815,22 +811,6 @@ class MockStore {
     });
   }
 
-  putAgentChain(backend: AgentBackend, model: string, body: AgentChainPut) {
-    const agent = this.agentOr404(backend);
-    if (agent.mode === 'direct') throw new ApiCallError('direct_mode');
-    const seen = new Set<string>();
-    for (const hop of body.hops) {
-      if (seen.has(hop.source_id)) throw new ApiCallError('invalid_route');
-      if (!this.sources.some((source) => source.id === hop.source_id && source.models.some((m) => m.id === hop.model_id))) {
-        throw new ApiCallError('invalid_route');
-      }
-      seen.add(hop.source_id);
-    }
-    agent.routes = { ...(agent.routes ?? {}), [model]: { hops: structuredClone(body.hops) } };
-    this.syncAgents();
-    return delay({ contract_version: AGENT_CHAIN_CONTRACT_VERSION, backend, model_id: model, ...this.chainFor(agent, model) }, 380);
-  }
-
   probeAgent(backend: AgentBackend, model?: string) {
     this.syncAgents();
     const agent = this.agentOr404(backend);
@@ -1251,7 +1231,6 @@ const mockApi: ModelsApi = {
   listAgents: () => mockStore.listAgents(),
   getAgentSources: (backend) => mockStore.getAgentSources(backend),
   putAgentSources: (backend, body) => mockStore.putAgentSources(backend, body),
-  putAgentChain: (backend, model, body) => mockStore.putAgentChain(backend, model, body),
   getAgentChain: (backend, model) => mockStore.getAgentChain(backend, model),
   probeAgent: (backend, model) => mockStore.probeAgent(backend, model),
   setAgentMode: (backend, mode) => mockStore.setAgentMode(backend, mode),

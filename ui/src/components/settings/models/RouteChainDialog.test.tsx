@@ -52,7 +52,9 @@ describe('RouteChainDialog', () => {
 
   it('has no mutation client or write callback wired into the frame', () => {
     const source = readFileSync(join(__dirname, 'RouteChainDialog.tsx'), 'utf8');
+    const api = readFileSync(join(__dirname, 'modelsApi.ts'), 'utf8');
 
     expect(source).not.toMatch(/modelsApi|putAgentChain|onCommit|onSave/);
+    expect(api).not.toMatch(/putAgentChain|\/chain[^\n]*jsonInit\(['"]PUT/);
   });
 });

@@ -560,8 +560,6 @@ export type SourcePatch = {
 export type AgentSourcesPut = { order: string[] };
 
 /** PUT /api/models/agents/<backend>/chain?model=<id> — replaces exact hops. */
-export type AgentChainPut = { hops: RouteHop[]; force?: boolean };
-
 /**
  * PUT /api/models/sources/<id>/credential — hub-channel api_key sources only.
  * Also a TOTAL body that rejects unknown keys (`contract_version` included), so
