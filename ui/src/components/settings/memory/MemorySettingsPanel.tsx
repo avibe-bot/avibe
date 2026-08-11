@@ -7,6 +7,7 @@ import { Badge } from '../../ui/badge';
 import { Button } from '../../ui/button';
 import { Checkbox } from '../../ui/checkbox';
 import { ConfirmDialog } from '../../ui/confirm-dialog';
+import { InfoHint } from '../../ui/info-hint';
 import { Input } from '../../ui/input';
 import { Label } from '../../ui/label';
 import { Switch } from '../../ui/switch';
@@ -27,6 +28,7 @@ type MemorySettingsOk = Extract<MemorySettingsResult, { status: 'ok' }>;
 
 const EndpointFields: React.FC<{
   title: string;
+  help: string;
   draft: EndpointDraft;
   original: MemoryEndpointConfig;
   onChange: (next: EndpointDraft) => void;
@@ -35,6 +37,7 @@ const EndpointFields: React.FC<{
   canClearKey: boolean;
 }> = ({
   title,
+  help,
   draft,
   original,
   onChange,
@@ -47,10 +50,11 @@ const EndpointFields: React.FC<{
     <div className="flex flex-col gap-3 rounded-xl border border-border bg-surface p-4">
       <div className="flex items-center gap-2">
         <span className="text-[13px] font-semibold text-foreground">{title}</span>
+        <InfoHint label={title} content={help} />
         {original.has_api_key ? (
           <Badge variant="success">{t('memory.settings.apiKeySet')}</Badge>
         ) : (
-          <Badge variant="secondary">{t('memory.settings.apiKeyNotSet')}</Badge>
+          <Badge variant="destructive">{t('memory.settings.apiKeyNotSet')}</Badge>
         )}
       </div>
       {identityHint ? <p className="text-[11.5px] leading-snug text-muted">{identityHint}</p> : null}
@@ -83,11 +87,12 @@ const EndpointFields: React.FC<{
           autoComplete="off"
           value={draft.apiKey}
           disabled={disabled || draft.clearKey}
-          placeholder={t('memory.settings.apiKeyPlaceholder')}
+          placeholder={original.has_api_key
+            ? t('memory.settings.apiKeyPlaceholderSet')
+            : t('memory.settings.apiKeyPlaceholder')}
           onChange={(e) => onChange({ ...draft, apiKey: e.target.value, clearKey: false })}
           className="text-[13px]"
         />
-        <p className="text-[11px] text-muted">{t('memory.settings.apiKeyClearHint')}</p>
         {canClearKey && original.has_api_key ? (
           <button
             type="button"
@@ -316,6 +321,7 @@ export const MemorySettingsPanel: React.FC<{
 
       <EndpointFields
         title={t('memory.settings.llmTitle')}
+        help={t('memory.settings.llmHelp')}
         draft={llmDraft}
         original={settings.processing.llm}
         onChange={setLlmDraft}
@@ -325,6 +331,7 @@ export const MemorySettingsPanel: React.FC<{
 
       <EndpointFields
         title={t('memory.settings.embeddingTitle')}
+        help={t('memory.settings.embeddingHelp')}
         draft={embeddingDraft}
         original={settings.processing.embedding}
         onChange={setEmbeddingDraft}

@@ -6,6 +6,7 @@ import { ArrowUpRight, Brain, Loader2, RotateCw, ShieldAlert } from 'lucide-reac
 import { SettingsPageShell } from './SettingsPageShell';
 import { Button } from '../ui/button';
 import { ConfirmDialog } from '../ui/confirm-dialog';
+import { InfoHint } from '../ui/info-hint';
 import { SegmentedRadio } from '../ui/segmented';
 import { MemoryProfilePanel } from './memory/MemoryProfilePanel';
 import { MemoryLogPanel } from './memory/MemoryLogPanel';
@@ -297,9 +298,15 @@ export const SettingsMemoryPage: React.FC = () => {
                 onAbortClear={(operationId) => void runClearRecovery('abort', operationId)}
               />
               <section className="flex flex-col gap-2" aria-labelledby="memory-timeline-title">
-                <h3 id="memory-timeline-title" className="text-[13px] font-semibold text-foreground">
-                  {t('memory.processingRecord.timeline.title')}
-                </h3>
+                <div className="flex items-center gap-1.5">
+                  <h3 id="memory-timeline-title" className="text-[13px] font-semibold text-foreground">
+                    {t('memory.processingRecord.timeline.title')}
+                  </h3>
+                  <InfoHint
+                    label={t('memory.processingRecord.timeline.title')}
+                    content={t('memory.processingRecord.timeline.help')}
+                  />
+                </div>
                 <MemoryLogPanel
                   key={logGeneration}
                   refreshToken={logRefreshToken}

@@ -100,9 +100,10 @@ describe('MemoryStatusPanel', () => {
       'memory-sources-title',
       'memory-anomalies-title',
     ]);
-    expect(container.querySelector('#memory-sources-title')?.parentElement?.nextElementSibling?.className).toBe(
-      'grid gap-2 sm:grid-cols-2 xl:grid-cols-4',
-    );
+    // The title now sits inside a flex row (title + InfoHint) within the header div.
+    expect(
+      container.querySelector('#memory-sources-title')?.parentElement?.parentElement?.nextElementSibling?.className,
+    ).toBe('grid gap-2 sm:grid-cols-2 xl:grid-cols-4');
     expect(screen.getByTestId('memory-anomaly-result_unknown').className).toBe(
       'flex min-w-0 flex-col gap-3 border-b border-border py-3 last:border-b-0 lg:flex-row lg:justify-between',
     );

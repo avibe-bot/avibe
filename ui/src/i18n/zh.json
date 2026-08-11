@@ -3566,7 +3566,7 @@
   "memory": {
     "title": "记忆",
     "betaTitle": "记忆 · Beta",
-    "subtitle": "从你的 Workbench 和私聊消息中提炼出的个人记忆，以及 Agent 在为你工作时记录的长期事实。你可以在这里查看、搜索或清除。",
+    "subtitle": "Avibe 会从你的对话和 Agent 的工作记录中提炼记忆，让它越来越懂你。你可以在这里查看、搜索或清除这些记忆。",
     "setup": {
       "runtimeRequired": "请先安装记忆运行时",
       "runtimeRequiredHint": "请前往依赖页面安装或修复记忆运行时。你仍可在下方停用记忆或清除已存储的数据。"
@@ -3599,10 +3599,10 @@
       "syncing": "处理中",
       "succeeded": "成功",
       "receiptUnknown": "结果未知",
-      "receiptUnknownHint": "已投递，但无法确认是否已提炼（回执丢失）。",
+      "receiptUnknownHint": "消息已发送，但未能确认处理结果。",
       "distillFailed": "失败",
       "dead": "已放弃",
-      "deadHint": "投递未获记忆引擎确认。",
+      "deadHint": "消息发送后未收到记忆引擎的确认。",
       "missed": "已跳过",
       "fault": {
         "credential": "记忆引擎无法调用已配置的模型接口，请检查 API Key 余额/权限。",
@@ -3616,74 +3616,81 @@
       "engineRestartCompleted": "记忆引擎已重启。",
       "engineRestartFailed": "记忆引擎重启失败。",
       "providerTitle": "记忆引擎 (EverOS)",
-      "providerSubtitle": "最近一次提供方回执",
+      "providerSubtitle": "最近一次处理结果",
       "observation": {
         "succeeded": "成功",
         "rejected": "拒绝",
         "unknown": "未知"
       },
-      "flushStatus": "提供方状态",
+      "flushStatus": "处理状态",
       "flushError": "错误代码",
       "flushAt": "观察时间",
       "requestId": "请求 ID",
       "copyRequestId": "复制请求 ID",
-      "queueBytes": "排队文本",
+      "queueBytes": "等待处理的文本",
       "storageUsed": "本地已用存储",
-      "lastSuccess": "最近提炼成功时间",
+      "lastSuccess": "上次成功处理时间",
       "lastSuccessNever": "从未",
       "failureLog": {
         "title": "失败日志",
-        "subtitle": "保留最近 {{days}} 天的脱敏投递与提炼失败记录。",
+        "subtitle": "最近 {{days}} 天的处理失败记录（已去除敏感内容）。",
         "empty": "暂无失败记录。",
         "loadFailed": "无法加载记忆失败日志。",
         "errorCode": "错误代码",
         "attempts": "尝试次数",
         "kind": {
           "boot_recovery": "启动恢复",
-          "delivery_abandoned": "投递已放弃",
-          "distillation_rejected": "提炼被拒绝",
-          "recorder_degraded": "记录器已降级",
+          "delivery_abandoned": "发送失败（已放弃）",
+          "distillation_rejected": "处理被拒绝",
+          "recorder_degraded": "调用记录异常",
           "result_unknown": "处理结果未知"
         }
       }
     },
     "processingRecord": {
       "title": "处理记录",
-      "description": "查看运行时观测、来源新鲜度、恢复证据和有界处理诊断。",
+      "description": "查看记忆引擎的运行状态、数据更新情况，以及处理中遇到的问题。",
       "refresh": "刷新",
       "runtime": {
-        "title": "运行时与能力",
-        "loading": "正在读取运行时健康状态…",
-        "unavailable": "当前没有可用的运行时健康快照。",
+        "title": "引擎状态",
+        "help": "记忆引擎在本机后台运行，负责把你的消息整理成记忆。这里显示它当前的运行情况。",
+        "loading": "正在读取引擎状态…",
+        "unavailable": "暂时读取不到引擎状态。",
         "healthStatus": {
           "ok": "正常"
         },
         "version": "版本",
-        "capabilities": "能力",
-        "noCapabilities": "运行时未报告能力。",
-        "disabledFeatures": "已禁用功能",
-        "noneDisabled": "运行时未报告已禁用功能。",
-        "cascade": "级联处理",
-        "recorder": "记录器",
-        "noFacts": "未报告相关事实。",
+        "capabilities": "可用能力",
+        "capabilitiesHelp": "引擎当前能使用的模型类型。「是」表示该能力已配置好、可以使用。",
+        "noCapabilities": "暂无能力信息。",
+        "disabledFeatures": "未启用的功能",
+        "disabledFeaturesHelp": "引擎中暂未开启的功能，一般不影响日常使用。",
+        "noneDisabled": "所有功能均已启用。",
+        "cascade": "处理队列",
+        "cascadeHelp": "消息会先进入队列，再由引擎逐条整理成记忆。这里是队列的处理进度和失败统计，失败的条目会自动重试。",
+        "recorder": "调用记录",
+        "recorderHelp": "引擎每次调用模型接口都会留下记录，方便出问题时排查。",
+        "noFacts": "暂无相关信息。",
         "fact": {
           "capability": {
-            "llm": "LLM",
-            "embed": "Embedding",
+            "llm": "语言模型",
+            "embed": "向量模型",
             "rerank": "重排序",
-            "multimodalLlm": "多模态 LLM",
-            "parser": "解析器"
+            "multimodalLlm": "多模态模型",
+            "parser": "文件解析",
+            "agenticSearch": "智能搜索",
+            "knowledge": "知识库"
           },
           "cascade": {
-            "healthy": "健康",
-            "reasons": "原因",
-            "pending": "待处理",
-            "failedPermanent": "永久失败",
-            "failedRetryable": "可重试失败",
-            "drainConsecutiveFailures": "连续排空失败",
-            "unrecoverableTotal": "不可恢复总数",
-            "optimizeFailureStreak": "连续优化失败",
-            "pruneStaleSeconds": "过期数据清理阈值（秒）"
+            "healthy": "运行正常",
+            "reasons": "异常原因",
+            "pending": "等待处理",
+            "failedPermanent": "失败（不再重试）",
+            "failedRetryable": "失败（将自动重试）",
+            "drainConsecutiveFailures": "连续失败次数",
+            "unrecoverableTotal": "累计放弃条数",
+            "optimizeFailureStreak": "整理连续失败次数",
+            "pruneStaleSeconds": "旧数据清理周期"
           },
           "recorder": {
             "state": "状态",
@@ -3693,27 +3700,32 @@
             "true": "是",
             "false": "否"
           },
+          "duration": {
+            "hoursMinutes": "{{hours}} 小时 {{minutes}} 分",
+            "minutesSeconds": "{{minutes}} 分 {{seconds}} 秒",
+            "seconds": "{{seconds}} 秒"
+          },
           "cascadeReason": {
-            "drainFailures": "排空失败",
-            "optimizeStuck": "优化停滞",
-            "pruneStale": "过期数据清理停滞",
-            "healthProbeFailed": "健康探测失败",
+            "drainFailures": "队列处理失败",
+            "optimizeStuck": "整理任务卡住",
+            "pruneStale": "旧数据清理卡住",
+            "healthProbeFailed": "健康检查失败",
             "unknown": "未知"
           },
           "recorderState": {
-            "active": "活跃",
-            "degraded": "已降级",
-            "disabled": "已禁用"
+            "active": "正常记录中",
+            "degraded": "部分异常",
+            "disabled": "已关闭"
           },
           "recorderReason": {
             "writerFailures": "写入失败",
-            "serializationFailed": "序列化失败",
-            "callLogCorrupt": "调用日志损坏"
+            "serializationFailed": "数据保存失败",
+            "callLogCorrupt": "调用记录损坏"
           }
         }
       },
       "source": {
-        "health": "运行时健康状态"
+        "health": "引擎健康"
       },
       "sourceState": {
         "available": "可用",
@@ -3725,17 +3737,19 @@
       "sourceReason": "原因：{{reason}}",
       "sourceNotObserved": "未观测",
       "sources": {
-        "title": "来源可用性",
-        "description": "每个来源独立观测；单个来源不可用不代表运行时存在全局状态。"
+        "title": "数据来源",
+        "help": "本页各部分的数据分别来自不同来源，这里显示每个来源上次更新的时间。",
+        "description": "某一项暂时不可用，不代表记忆功能出了问题。"
       },
       "anomalies": {
-        "title": "异常与恢复",
-        "description": "查看本机保留的有界处理与恢复证据。",
-        "loading": "正在读取异常…",
-        "empty": "没有保留的异常。",
-        "loadFailed": "无法加载记忆异常。"
+        "title": "异常记录",
+        "help": "处理过程中出现的问题会记录在这里，大多数会自动恢复，一般无需处理。",
+        "description": "处理过程中出现的问题会记录在这里。",
+        "loading": "正在读取异常记录…",
+        "empty": "没有异常记录。",
+        "loadFailed": "无法加载异常记录。"
       },
-      "manualRequiredReadOnly": "需要人工检查。此记录只读，不提供操作。",
+      "manualRequiredReadOnly": "这条记录需要人工确认，暂无可执行的操作。",
       "anomalyState": {
         "dead": "已放弃",
         "degraded": "已降级",
@@ -3754,12 +3768,12 @@
         "occurredAt": "发生时间",
         "errorCode": "错误代码",
         "attempts": "尝试次数",
-        "generation": "代次",
+        "generation": "数据版本",
         "requestId": "请求 ID"
       },
       "clearRecovery": {
-        "title": "中断的清除操作需要处理",
-        "description": "可从日志记录处继续删除，或中止并恢复已捕获的快照。",
+        "title": "有一次未完成的清除操作",
+        "description": "上次清除中途被打断。你可以继续完成删除，或中止并恢复到清除前的状态。",
         "state": {
           "preparing": "正在准备快照",
           "prepared": "快照已准备完成",
@@ -3775,11 +3789,12 @@
         "loadFailed": "无法加载清除维护状态。"
       },
       "timeline": {
-        "title": "最近处理时间线"
+        "title": "最近处理记录",
+        "help": "最近的消息是如何一步步被处理成记忆的。"
       }
     },
     "profile": {
-      "description": "由已捕获的消息提炼出的、你当前的画像。",
+      "description": "根据你的对话内容整理出的个人画像。",
       "loading": "正在加载画像…",
       "empty": "还没有画像——继续聊天，消息处理后再来看看。",
       "loadFailed": "无法加载你的画像。",
@@ -3794,7 +3809,7 @@
       "sourceNote": "由你的对话历史，以及 Agent 记录的内容（如有）提炼而来。"
     },
     "search": {
-      "description": "搜索你的画像、事件和事实。",
+      "description": "搜索你的所有记忆。",
       "placeholder": "搜索你的记忆…",
       "button": "搜索",
       "searching": "搜索中…",
@@ -3804,7 +3819,7 @@
       "sourceNote": "由你的对话历史，以及 Agent 记录的内容（如有）提炼而来。"
     },
     "log": {
-      "description": "查看所有项目和用户的消息如何转化为记忆状态。",
+      "description": "查看每条消息的处理进展和结果。",
       "loading": "正在加载处理日志…",
       "loadFailed": "无法加载处理日志。",
       "detailLoading": "正在加载处理详情…",
@@ -3823,8 +3838,8 @@
       "projectId": "项目 ID",
       "userId": "用户 ID",
       "noPreview": "没有可用的文本预览。",
-      "recorderDegraded": "新的提供方调用未被记录，已有记录仍可读取。",
-      "recorderCorrupt": "提供方调用日志已损坏。必须先通过「清除全部」移除该日志，之后才能恢复记录。",
+      "recorderDegraded": "新的模型调用暂时没有被记录，已有记录仍可查看。",
+      "recorderCorrupt": "模型调用记录已损坏，需要先「清除全部」后才能恢复记录。",
       "clearAction": "打开「清除全部」",
       "sectionUnavailable": "{{section}}不可用（{{reason}}），其他部分可能仍然完整。",
       "sectionPartial": "{{section}}部分可用（{{reason}}）。",
@@ -3832,13 +3847,13 @@
       "sectionUnknown": "{{section}}的可用性未知（{{reason}}）。",
       "section": {
         "everos": "时间线数据",
-        "capture": "捕获关联",
-        "calls": "提供方调用"
+        "capture": "消息追踪",
+        "calls": "模型调用"
       },
       "timeline": "处理时间线",
       "step": {
-        "capture": "捕获与投递",
-        "memcell": "已创建 Memcell",
+        "capture": "收集与发送",
+        "memcell": "已生成记忆片段",
         "strategy": "记忆策略"
       },
       "reason": {
@@ -3870,28 +3885,28 @@
         "indexed": "已索引"
       },
       "callKind": {
-        "llm": "LLM",
-        "multimodalLlm": "多模态 LLM",
-        "embedding": "Embedding"
+        "llm": "语言模型",
+        "multimodalLlm": "多模态模型",
+        "embedding": "向量模型"
       },
       "callStage": {
-        "boundary": "请求边界",
+        "boundary": "请求预处理",
         "strategy": "处理策略",
-        "cascade": "级联处理",
+        "cascade": "队列处理",
         "episodeExtract": "事件提取",
-        "parse": "多模态解析"
+        "parse": "图片/文件解析"
       },
       "callSummary": "{{kind}} · {{status}}",
       "profileTrigger": "触发画像运行",
       "unavailable": "不可用：{{reason}}",
       "omittedSteps": "已省略 {{count}} 个较早的时间线步骤。",
-      "callDetails": "提供方调用",
-      "callsNotRecorded": "提供方调用未被记录或已经过期。",
-      "omittedCalls": "已省略 {{count}} 个较早的提供方调用。",
-      "droppedCalls": "此记录之前有 {{count}} 次提供方调用被丢弃。",
+      "callDetails": "模型调用",
+      "callsNotRecorded": "模型调用未被记录或已过期。",
+      "omittedCalls": "已省略 {{count}} 次较早的模型调用。",
+      "droppedCalls": "此记录之前有 {{count}} 次模型调用未被保留。",
       "copyCall": "复制请求和响应",
       "finishReason": "结束原因",
-      "usage": "提示 / 补全 token",
+      "usage": "输入 / 输出 token",
       "request": "请求",
       "response": "响应",
       "currentState": "当前记忆状态",
@@ -3903,72 +3918,66 @@
       "loading": "正在加载设置…",
       "loadFailed": "无法加载记忆设置。",
       "enableLabel": "记忆",
-      "enableHint": "将符合条件的 Workbench 消息，以及已绑定且已启用用户的私聊消息，提炼为按用户隔离的可搜索记忆。Agent 在为你工作时记录的长期事实也会包含在内。",
+      "enableHint": "开启后，Avibe 会从你的对话和 Agent 的工作记录中提炼出可搜索的个人记忆。每个用户的记忆相互独立。",
       "dependencyNotReady": "memory-runtime 依赖尚未就绪。请先在「设置 → 依赖」中安装或修复，然后重新尝试启用记忆。",
       "goToDependencies": "前往依赖页面",
-      "llmTitle": "LLM 端点",
-      "embeddingTitle": "Embedding 端点",
+      "llmTitle": "语言模型（LLM）",
+      "llmHelp": "记忆功能用这个模型来阅读消息并总结成记忆。填写兼容 OpenAI 格式的接口地址、模型名称和 API Key。",
+      "embeddingTitle": "向量模型（Embedding）",
+      "embeddingHelp": "记忆功能用这个模型为记忆建立索引，让你可以搜索记忆。更改后需要重建索引。",
       "baseUrl": "Base URL",
       "baseUrlPlaceholder": "https://api.example.com/v1",
       "model": "模型",
       "modelPlaceholder": "模型名称",
       "apiKey": "API Key",
-      "apiKeySet": "已设置密钥——留空可保留原值。",
-      "apiKeyNotSet": "尚未设置密钥。",
+      "apiKeySet": "已设置",
+      "apiKeyNotSet": "未设置",
       "apiKeyPlaceholder": "sk-…",
-      "apiKeyClearHint": "密钥仅可写入——Avibe 不会把已保存的密钥回显给你。",
-      "embeddingStatusPending": "正在读取本地维护状态……确认没有数据后，Embedding 端点将解锁。",
+      "apiKeyPlaceholderSet": "sk-*****（留空保持不变）",
+      "embeddingStatusPending": "正在检查本地数据……确认没有数据后即可修改向量模型。",
       "maintenanceLoadFailed": "无法加载本地记忆维护状态。",
       "save": "保存设置",
       "saving": "保存中…",
       "saveFailed": "无法保存记忆设置。",
       "saved": "记忆设置已保存。",
-      "disclosureTitle": "启用记忆前请了解",
+      "disclosureTitle": "关于记忆功能",
       "disclosure": [
-        "符合条件的 Workbench 文本和已绑定、已启用用户的私聊文本会被复制到有界本地队列中等待处理。",
-        "Agent 还会在没有明确要求的情况下，把它从对话以及在本机工作中提炼的长期结论（如偏好、纠偏、决策，以及在文件或工具输出中遇到的持久环境或账户事实）记录到同一队列。",
-        "一条消息处理成功或重试耗尽后，其文本会立即被清除；一个不含内容的去重标记最多保留 90 天，且以最新的 100,000 条为上限。",
-        "记忆使用的 LLM 与 Embedding 端点与你的 Agent 模型订阅是分开的。",
-        "这些远程端点会接收到被捕获的文本或搜索查询，并可能按其自身策略保留。",
-        "私聊文本在被捕获前已经过该平台传输，并继续受该平台自身的留存与同步策略约束。",
-        "本地运行时除了可见的画像外，还会在本地状态中保留尚未处理的原始消息和提取数据。",
-        "记忆处理会为本安装的所有用户和项目保留经脱敏且有大小限制的提供方请求与响应诊断，最长 14 天或直到执行「清除全部」。",
-        "禁用记忆只会冻结本地数据，不会删除——如需删除请使用「清除全部」。",
-        "「清除全部」只会移除本机上的本地记忆数据，无法追回已发送到远程端点的副本，也不会影响原始聊天记录。",
-        "发往记忆端点的投递是至少一次——超时或崩溃后偶尔可能出现重复的派生记忆。",
-        "每个平台用户拥有独立的记忆范围；不同平台之间不会自动关联身份。"
+        "开启后，你的 Workbench 消息和已授权用户的私聊消息会被提炼成记忆；Agent 工作时总结的长期信息（如你的偏好和决定）也会记录进来。",
+        "提炼记忆时，消息内容会发送到上面配置的模型接口处理。这些接口与 Agent 使用的模型是分开的，对方会按其自身政策处理数据。",
+        "记忆数据只保存在本机。关闭记忆只是暂停记录，不会删除已有数据。",
+        "「清除全部」会删除本机的全部记忆数据，但无法撤回已发送给模型接口的内容，也不影响原始聊天记录。",
+        "不同平台的账号各自拥有独立的记忆，互不关联。"
       ],
       "clearKeyLabel": "清除已保存的密钥",
       "rebuildRequiredTitle": "需要重建记忆索引",
-      "rebuildRequiredDescription": "已确认的 Embedding 更改已保存。重建成功前，重启引擎会保持禁用。",
+      "rebuildRequiredDescription": "向量模型的更改已保存。索引重建完成前，无法重启记忆引擎。",
       "rebuildConfirmTitle": "重建记忆索引？",
-      "rebuildConfirmDescription": "更改 Embedding 端点或模型会重建本地向量索引。Markdown 记忆会保留，但重建可能较久，并可能消耗 Embedding API 配额。",
+      "rebuildConfirmDescription": "更换向量模型后需要重新建立索引。已有记忆不会丢失，但重建可能需要一些时间，并会消耗 Embedding API 用量。",
       "rebuildConfirmLabel": "保存并重建",
       "retryRebuild": "重试重建",
       "retryingRebuild": "正在重建…",
       "rebuildCompleted": "记忆索引重建完成。",
       "rebuildFailed": "记忆索引重建失败。",
-      "embeddingIdentityHint": "更改 Embedding 端点或模型会重建本地向量索引。Markdown 记忆会保留。"
+      "embeddingIdentityHint": "更改向量模型会重建本地索引，已有记忆不会丢失。"
     },
     "clear": {
       "button": "清除全部",
-      "confirmTitle": "清除全部本地记忆数据？",
-      "confirmDescription": "这会移除你的画像、事件、事实、本机上尚未处理的排队文本，以及已保留的提供方调用诊断。",
-      "removesTitle": "将会移除：",
+      "confirmTitle": "清除全部记忆数据？",
+      "confirmDescription": "这会删除本机上的所有记忆数据，包括你的画像、已提炼的记忆和待处理的消息。",
+      "removesTitle": "将会删除：",
       "removes": [
-        "你可见的画像",
-        "用于构建画像的隐藏本地缓冲区和索引",
-        "本地处理队列中待处理和已完成的条目",
-        "已保留的提供方请求和响应诊断"
+        "你的画像和所有记忆条目",
+        "用于搜索的本地索引和缓存",
+        "处理队列中的全部消息",
+        "模型调用的诊断记录"
       ],
-      "keepsTitle": "不会移除：",
+      "keepsTitle": "不会删除：",
       "keeps": [
-        "你原始的 Avibe 聊天记录",
-        "已发送到远程记忆端点的副本",
-        "你自己创建的副本或快照",
-        "存储在专用记忆目录之外的任何数据",
-        "现有的日志、崩溃报告或备份",
-        "存储设备上的物理残留——这不是安全擦除"
+        "你的原始聊天记录",
+        "已发送到模型接口的内容",
+        "你自己创建的副本或备份",
+        "记忆目录之外的其他数据（如日志和备份）",
+        "磁盘上的物理残留（这不是安全擦除）"
       ],
       "confirmLabel": "清除全部",
       "clearing": "清除中…",

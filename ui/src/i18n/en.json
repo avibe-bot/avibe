@@ -3566,7 +3566,7 @@
   "memory": {
     "title": "Memory",
     "betaTitle": "Memory · Beta",
-    "subtitle": "A personal memory distilled from your Workbench and private-IM messages — plus durable facts your Agent records while working for you. Review it, search it, or clear it here.",
+    "subtitle": "Avibe builds a personal memory from your conversations and your Agent's work, so it understands you better over time. Review, search, or clear it here.",
     "setup": {
       "runtimeRequired": "Install the Memory runtime first",
       "runtimeRequiredHint": "Install or repair Memory from Dependencies. You can still disable Memory or clear stored data below."
@@ -3599,10 +3599,10 @@
       "syncing": "Syncing",
       "succeeded": "Succeeded",
       "receiptUnknown": "Result unknown",
-      "receiptUnknownHint": "Delivered, but the distillation receipt was lost.",
+      "receiptUnknownHint": "The message was sent, but the result couldn't be confirmed.",
       "distillFailed": "Failed",
-      "dead": "Dead",
-      "deadHint": "Delivery was not acknowledged by the Memory engine.",
+      "dead": "Given up",
+      "deadHint": "The Memory engine never confirmed receiving this message.",
       "missed": "Missed",
       "fault": {
         "credential": "The Memory engine cannot call the configured model endpoint. Check API key balance and permissions.",
@@ -3616,104 +3616,116 @@
       "engineRestartCompleted": "Memory engine restarted.",
       "engineRestartFailed": "Memory engine restart failed.",
       "providerTitle": "Memory engine (EverOS)",
-      "providerSubtitle": "Latest provider observation",
+      "providerSubtitle": "Latest processing result",
       "observation": {
         "succeeded": "Succeeded",
         "rejected": "Rejected",
         "unknown": "Unknown"
       },
-      "flushStatus": "Provider status",
+      "flushStatus": "Processing status",
       "flushError": "Error code",
       "flushAt": "Observed at",
       "requestId": "Request ID",
       "copyRequestId": "Copy request ID",
-      "queueBytes": "Queued text",
+      "queueBytes": "Text waiting to process",
       "storageUsed": "Local storage used",
-      "lastSuccess": "Last successful distillation",
+      "lastSuccess": "Last successful processing",
       "lastSuccessNever": "Never",
       "failureLog": {
         "title": "Failure log",
-        "subtitle": "Sanitized delivery and distillation failures retained for {{days}} days.",
-        "empty": "No retained failures.",
+        "subtitle": "Processing failures from the last {{days}} days (sensitive content removed).",
+        "empty": "No failures recorded.",
         "loadFailed": "Couldn't load the Memory failure log.",
         "errorCode": "Error code",
         "attempts": "Attempts",
         "kind": {
-          "boot_recovery": "Boot recovery",
-          "delivery_abandoned": "Delivery abandoned",
-          "distillation_rejected": "Distillation rejected",
-          "recorder_degraded": "Recorder degraded",
+          "boot_recovery": "Startup recovery",
+          "delivery_abandoned": "Send failed (given up)",
+          "distillation_rejected": "Processing rejected",
+          "recorder_degraded": "Call log issue",
           "result_unknown": "Result unknown"
         }
       }
     },
     "processingRecord": {
       "title": "Processing Record",
-      "description": "Runtime observations, source freshness, recovery evidence, and bounded processing diagnostics.",
+      "description": "How the Memory engine is running, how fresh its data is, and any issues it hit while processing.",
       "refresh": "Refresh",
       "runtime": {
-        "title": "Runtime and capabilities",
-        "loading": "Reading runtime health…",
-        "unavailable": "No runtime health snapshot is available.",
+        "title": "Engine status",
+        "help": "The Memory engine runs in the background on this machine and turns your messages into memories. This shows how it's doing.",
+        "loading": "Reading engine status…",
+        "unavailable": "Engine status is temporarily unavailable.",
         "healthStatus": {
           "ok": "Healthy"
         },
         "version": "Version",
-        "capabilities": "Capabilities",
-        "noCapabilities": "No capabilities were reported.",
-        "disabledFeatures": "Disabled features",
-        "noneDisabled": "No disabled features were reported.",
-        "cascade": "Cascade",
-        "recorder": "Recorder",
-        "noFacts": "No facts were reported.",
+        "capabilities": "Available capabilities",
+        "capabilitiesHelp": "The kinds of models the engine can use right now. \"Yes\" means the capability is configured and ready.",
+        "noCapabilities": "No capability information yet.",
+        "disabledFeatures": "Features not enabled",
+        "disabledFeaturesHelp": "Engine features that aren't turned on. This usually doesn't affect everyday use.",
+        "noneDisabled": "All features are enabled.",
+        "cascade": "Processing queue",
+        "cascadeHelp": "Messages wait in a queue and the engine turns them into memories one by one. This shows the queue's progress and failure counts; failed items retry automatically.",
+        "recorder": "Call log",
+        "recorderHelp": "Every model call the engine makes is logged here, which helps with troubleshooting.",
+        "noFacts": "Nothing to show yet.",
         "fact": {
           "capability": {
-            "llm": "LLM",
-            "embed": "Embedding",
+            "llm": "Language model",
+            "embed": "Embedding model",
             "rerank": "Reranking",
-            "multimodalLlm": "Multimodal LLM",
-            "parser": "Parser"
+            "multimodalLlm": "Multimodal model",
+            "parser": "File parsing",
+            "agenticSearch": "Agentic search",
+            "knowledge": "Knowledge base"
           },
           "cascade": {
-            "healthy": "Healthy",
-            "reasons": "Reasons",
-            "pending": "Pending",
-            "failedPermanent": "Permanent failures",
-            "failedRetryable": "Retryable failures",
-            "drainConsecutiveFailures": "Consecutive drain failures",
-            "unrecoverableTotal": "Unrecoverable total",
-            "optimizeFailureStreak": "Optimization failure streak",
-            "pruneStaleSeconds": "Stale prune threshold (seconds)"
+            "healthy": "Running normally",
+            "reasons": "Issue reasons",
+            "pending": "Waiting to process",
+            "failedPermanent": "Failed (won't retry)",
+            "failedRetryable": "Failed (will retry)",
+            "drainConsecutiveFailures": "Consecutive failures",
+            "unrecoverableTotal": "Total given up",
+            "optimizeFailureStreak": "Consecutive cleanup failures",
+            "pruneStaleSeconds": "Old-data cleanup cycle"
           },
           "recorder": {
-            "state": "State",
+            "state": "Status",
             "reason": "Reason"
           },
           "boolean": {
             "true": "Yes",
             "false": "No"
           },
+          "duration": {
+            "hoursMinutes": "{{hours}}h {{minutes}}m",
+            "minutesSeconds": "{{minutes}}m {{seconds}}s",
+            "seconds": "{{seconds}}s"
+          },
           "cascadeReason": {
-            "drainFailures": "Drain failures",
-            "optimizeStuck": "Optimization stuck",
-            "pruneStale": "Stale pruning stalled",
-            "healthProbeFailed": "Health probe failed",
+            "drainFailures": "Queue processing failed",
+            "optimizeStuck": "Cleanup task stuck",
+            "pruneStale": "Old-data cleanup stuck",
+            "healthProbeFailed": "Health check failed",
             "unknown": "Unknown"
           },
           "recorderState": {
-            "active": "Active",
-            "degraded": "Degraded",
-            "disabled": "Disabled"
+            "active": "Recording normally",
+            "degraded": "Partial issues",
+            "disabled": "Off"
           },
           "recorderReason": {
-            "writerFailures": "Writer failures",
-            "serializationFailed": "Serialization failed",
+            "writerFailures": "Write failures",
+            "serializationFailed": "Couldn't save data",
             "callLogCorrupt": "Call log corrupt"
           }
         }
       },
       "source": {
-        "health": "Runtime health"
+        "health": "Engine health"
       },
       "sourceState": {
         "available": "Available",
@@ -3725,17 +3737,19 @@
       "sourceReason": "Reason: {{reason}}",
       "sourceNotObserved": "Not observed",
       "sources": {
-        "title": "Source availability",
-        "description": "Each source is observed independently; one unavailable source does not imply a global runtime state."
+        "title": "Data sources",
+        "help": "Each part of this page gets its data from a different source. This shows when each source last updated.",
+        "description": "One source being temporarily unavailable doesn't mean Memory is broken."
       },
       "anomalies": {
-        "title": "Anomalies and recovery",
-        "description": "Bounded processing and recovery evidence retained by this installation.",
-        "loading": "Reading anomalies…",
-        "empty": "No retained anomalies.",
-        "loadFailed": "Couldn't load Memory anomalies."
+        "title": "Issue log",
+        "help": "Problems that came up during processing are recorded here. Most recover on their own and need no action.",
+        "description": "Problems that came up during processing are recorded here.",
+        "loading": "Reading issue log…",
+        "empty": "No issues recorded.",
+        "loadFailed": "Couldn't load the issue log."
       },
-      "manualRequiredReadOnly": "Manual review is required. This record is read-only and has no action.",
+      "manualRequiredReadOnly": "This record needs manual review; there's no action to take here.",
       "anomalyState": {
         "dead": "Dead",
         "degraded": "Degraded",
@@ -3754,12 +3768,12 @@
         "occurredAt": "Occurred at",
         "errorCode": "Error code",
         "attempts": "Attempts",
-        "generation": "Generation",
+        "generation": "Data version",
         "requestId": "Request ID"
       },
       "clearRecovery": {
-        "title": "Interrupted Clear requires a decision",
-        "description": "Resume deletion from its journal, or abort and restore the captured snapshot.",
+        "title": "An unfinished Clear needs your decision",
+        "description": "The last Clear was interrupted. You can finish the deletion, or abort and restore everything to how it was before.",
         "state": {
           "preparing": "Preparing snapshot",
           "prepared": "Snapshot prepared",
@@ -3775,11 +3789,12 @@
         "loadFailed": "Couldn't load Clear maintenance state."
       },
       "timeline": {
-        "title": "Recent processing timeline"
+        "title": "Recent processing",
+        "help": "How recent messages were turned into memories, step by step."
       }
     },
     "profile": {
-      "description": "The provider's current distilled profile of you, built from captured messages.",
+      "description": "A profile of you, built from your conversations.",
       "loading": "Loading profile…",
       "empty": "No profile yet — keep chatting, then check back once messages have been processed.",
       "loadFailed": "Couldn't load your profile.",
@@ -3794,7 +3809,7 @@
       "sourceNote": "Distilled from your conversation history, plus any notes your Agent recorded."
     },
     "search": {
-      "description": "Search your distilled profile, episodes, and facts.",
+      "description": "Search everything Memory knows about you.",
       "placeholder": "Search your memory…",
       "button": "Search",
       "searching": "Searching…",
@@ -3804,7 +3819,7 @@
       "sourceNote": "Distilled from your conversation history, plus any notes your Agent recorded."
     },
     "log": {
-      "description": "Trace captured messages across every project and user.",
+      "description": "Follow each message's processing progress and result.",
       "loading": "Loading processing log…",
       "loadFailed": "Couldn't load the processing log.",
       "detailLoading": "Loading processing details…",
@@ -3823,8 +3838,8 @@
       "projectId": "Project ID",
       "userId": "User ID",
       "noPreview": "No text preview available.",
-      "recorderDegraded": "New provider calls aren't being recorded. Existing rows remain readable.",
-      "recorderCorrupt": "The provider call log is corrupt. Clear all Memory data to remove it before recording can resume.",
+      "recorderDegraded": "New model calls aren't being logged right now. Existing entries are still readable.",
+      "recorderCorrupt": "The model call log is corrupt. Use Clear all to remove it before logging can resume.",
       "clearAction": "Open Clear all",
       "sectionUnavailable": "{{section}} is unavailable ({{reason}}). Other sections may still be complete.",
       "sectionPartial": "{{section}} is partially available ({{reason}}).",
@@ -3832,13 +3847,13 @@
       "sectionUnknown": "{{section}} availability is unknown ({{reason}}).",
       "section": {
         "everos": "Timeline data",
-        "capture": "Capture attribution",
-        "calls": "Provider calls"
+        "capture": "Message tracking",
+        "calls": "Model calls"
       },
       "timeline": "Processing timeline",
       "step": {
-        "capture": "Capture and delivery",
-        "memcell": "Memcell created",
+        "capture": "Collected and sent",
+        "memcell": "Memory snippet created",
         "strategy": "Memory strategy"
       },
       "reason": {
@@ -3870,28 +3885,28 @@
         "indexed": "Indexed"
       },
       "callKind": {
-        "llm": "LLM",
-        "multimodalLlm": "Multimodal LLM",
-        "embedding": "Embedding"
+        "llm": "Language model",
+        "multimodalLlm": "Multimodal model",
+        "embedding": "Embedding model"
       },
       "callStage": {
-        "boundary": "Request boundary",
+        "boundary": "Request preparation",
         "strategy": "Strategy",
-        "cascade": "Cascade",
+        "cascade": "Queue processing",
         "episodeExtract": "Episode extraction",
-        "parse": "Multimodal parsing"
+        "parse": "Image/file parsing"
       },
       "callSummary": "{{kind}} · {{status}}",
       "profileTrigger": "Triggered profile run",
       "unavailable": "Unavailable: {{reason}}",
       "omittedSteps": "{{count}} older timeline steps omitted.",
-      "callDetails": "Provider calls",
-      "callsNotRecorded": "Provider calls were not recorded or have expired.",
-      "omittedCalls": "{{count}} older provider calls omitted.",
-      "droppedCalls": "{{count}} provider calls were dropped before this row.",
+      "callDetails": "Model calls",
+      "callsNotRecorded": "Model calls weren't logged or have expired.",
+      "omittedCalls": "{{count}} older model calls omitted.",
+      "droppedCalls": "{{count}} model calls before this row weren't kept.",
       "copyCall": "Copy request and response",
       "finishReason": "Finish reason",
-      "usage": "Prompt / completion tokens",
+      "usage": "Input / output tokens",
       "request": "Request",
       "response": "Response",
       "currentState": "Current Memory state",
@@ -3903,72 +3918,66 @@
       "loading": "Loading settings…",
       "loadFailed": "Couldn't load Memory settings.",
       "enableLabel": "Memory",
-      "enableHint": "Distill eligible Workbench messages and bound, enabled private-IM messages into a per-user searchable memory. Durable facts your Agent records while working for you are included as well.",
+      "enableHint": "When on, Avibe distills your conversations and your Agent's work notes into a searchable personal memory. Each user's memory stays separate.",
       "dependencyNotReady": "The memory-runtime dependency isn't ready yet. Install or repair it from Settings → Dependencies, then try enabling Memory again.",
       "goToDependencies": "Open Dependencies",
-      "llmTitle": "LLM endpoint",
-      "embeddingTitle": "Embedding endpoint",
+      "llmTitle": "Language model (LLM)",
+      "llmHelp": "Memory uses this model to read your messages and summarize them into memories. Enter an OpenAI-compatible base URL, model name, and API key.",
+      "embeddingTitle": "Embedding model",
+      "embeddingHelp": "Memory uses this model to index memories so you can search them. Changing it requires rebuilding the index.",
       "baseUrl": "Base URL",
       "baseUrlPlaceholder": "https://api.example.com/v1",
       "model": "Model",
       "modelPlaceholder": "model name",
       "apiKey": "API key",
-      "apiKeySet": "A key is set — leave blank to keep it.",
-      "apiKeyNotSet": "No key set.",
+      "apiKeySet": "Key set",
+      "apiKeyNotSet": "No key",
       "apiKeyPlaceholder": "sk-…",
-      "apiKeyClearHint": "Keys are write-only — Avibe never shows a saved key back to you.",
-      "embeddingStatusPending": "Reading local maintenance state… the embedding endpoint unlocks once it's confirmed no data exists.",
+      "apiKeyPlaceholderSet": "sk-***** (leave blank to keep)",
+      "embeddingStatusPending": "Checking local data… the embedding model unlocks once it's confirmed no data exists.",
       "maintenanceLoadFailed": "Couldn't load local Memory maintenance state.",
       "save": "Save settings",
       "saving": "Saving…",
       "saveFailed": "Couldn't save Memory settings.",
       "saved": "Memory settings saved.",
-      "disclosureTitle": "Before you enable Memory",
+      "disclosureTitle": "About Memory",
       "disclosure": [
-        "Eligible Workbench and bound, enabled private-IM text is copied into a bounded local queue for processing.",
-        "Your Agent also records durable conclusions it distills from your conversations and from work on your machine — such as preferences, corrections, decisions, and lasting environment or account facts it encounters in files or tool output — into the same queue without an explicit request.",
-        "Once a message succeeds or exhausts its retries, its text is scrubbed immediately; a content-free tombstone may remain for up to 90 days, bounded to the newest 100,000 rows.",
-        "The Memory LLM and embedding endpoints are separate from your agent's model subscriptions.",
-        "These remote endpoints receive captured text or search queries and may retain them under their own policy.",
-        "Private-IM text has already traveled over that platform before capture and remains subject to that platform's own retention and sync.",
-        "The local runtime retains unflushed raw messages and extracted data in local state in addition to the visible profile.",
-        "Memory processing retains scrubbed, bounded provider request and response diagnostics for every user and project on this installation for up to 14 days or until Clear all.",
-        "Disabling Memory freezes local data rather than deleting it — use Clear all to remove it.",
-        "Clear all removes this install's local Memory data but cannot retract copies already sent to a remote endpoint or your original chat history.",
-        "Delivery to the Memory endpoints is at-least-once — a rare duplicate derived memory is possible after a timeout or crash.",
-        "Each platform user has a separate memory scope; identities are not linked across platforms."
+        "When on, your Workbench messages and authorized users' private messages are distilled into memories; long-term notes your Agent takes while working (like your preferences and decisions) are included too.",
+        "To build memories, message content is sent to the model endpoints configured above. These are separate from your Agent's models, and those providers handle the data under their own policies.",
+        "Memory data is stored only on this machine. Turning Memory off pauses it — it doesn't delete anything.",
+        "Clear all deletes all Memory data on this machine, but can't take back content already sent to the model endpoints, and doesn't touch your original chat history.",
+        "Accounts on different platforms each have their own separate memory; they aren't linked."
       ],
       "clearKeyLabel": "Clear the saved key",
       "rebuildRequiredTitle": "Memory index rebuild required",
-      "rebuildRequiredDescription": "The confirmed embedding change is saved. Restart engine stays blocked until rebuild finishes successfully.",
+      "rebuildRequiredDescription": "Your embedding model change is saved. The Memory engine can't restart until the rebuild finishes.",
       "rebuildConfirmTitle": "Rebuild Memory index?",
-      "rebuildConfirmDescription": "Changing the embedding endpoint or model rebuilds the local vector index. Markdown memory is preserved, but the rebuild can take time and may use embedding API quota.",
+      "rebuildConfirmDescription": "Switching the embedding model requires rebuilding the index. Your memories are kept, but the rebuild can take a while and uses embedding API credit.",
       "rebuildConfirmLabel": "Save and rebuild",
       "retryRebuild": "Retry rebuild",
       "retryingRebuild": "Rebuilding…",
       "rebuildCompleted": "Memory index rebuild completed.",
       "rebuildFailed": "Memory index rebuild failed.",
-      "embeddingIdentityHint": "Changing the embedding endpoint or model rebuilds the local vector index. Markdown memory is preserved."
+      "embeddingIdentityHint": "Changing the embedding model rebuilds the local index. Your memories are kept."
     },
     "clear": {
       "button": "Clear all",
-      "confirmTitle": "Clear all local Memory data?",
-      "confirmDescription": "This removes your distilled profile, episodes, facts, pending queued text, and retained provider-call diagnostics on this install.",
-      "removesTitle": "This removes:",
+      "confirmTitle": "Clear all Memory data?",
+      "confirmDescription": "This deletes all Memory data on this machine, including your profile, distilled memories, and messages waiting to process.",
+      "removesTitle": "This deletes:",
       "removes": [
-        "Your visible distilled profile",
-        "Hidden local buffers and indexes used to build it",
-        "Pending and finished items in the local processing queue",
-        "Retained provider request and response diagnostics"
+        "Your profile and all memory entries",
+        "Local search indexes and caches",
+        "Everything in the processing queue",
+        "Model-call diagnostic logs"
       ],
-      "keepsTitle": "This does not remove:",
+      "keepsTitle": "This does not delete:",
       "keeps": [
-        "Your original Avibe chat history",
-        "Copies already sent to a remote Memory endpoint",
-        "Copies or snapshots you created yourself",
-        "Any data stored outside the dedicated Memory folder",
-        "Existing logs, crash reports, or backups",
-        "Physical traces on the storage device — this is not a secure wipe"
+        "Your original chat history",
+        "Content already sent to the model endpoints",
+        "Copies or backups you made yourself",
+        "Anything outside the Memory folder (like logs and backups)",
+        "Physical traces on the disk (this is not a secure wipe)"
       ],
       "confirmLabel": "Clear all",
       "clearing": "Clearing…",
