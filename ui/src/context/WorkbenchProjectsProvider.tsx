@@ -123,6 +123,8 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
   // paginated read, or targeted row read that started before a newer mutation
   // must not commit its snapshot after that mutation is accepted.
   const readOwnershipRef = useRef(createWorkbenchSessionReadOwnership());
+  const authoritativeProjectsLoadedRef = useRef(false);
+  const bootstrapRetryPendingRef = useRef(false);
 
   const acceptSessionMutation = useCallback(() => {
     readOwnershipRef.current.acceptMutation();
@@ -161,9 +163,26 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
 
   const fetchProjects = useCallback(async (options?: { cache?: boolean }) => {
     const read = readOwnershipRef.current.beginRead(['projects', 'projects-bootstrap']);
+    const retryAfterMutation = () => {
+      if (
+        authoritativeProjectsLoadedRef.current ||
+        readOwnershipRef.current.epoch() === read.epoch ||
+        bootstrapRetryPendingRef.current
+      ) {
+        return;
+      }
+      bootstrapRetryPendingRef.current = true;
+      queueMicrotask(() => {
+        bootstrapRetryPendingRef.current = false;
+        if (!authoritativeProjectsLoadedRef.current) void fetchProjects({ cache: false });
+      });
+    };
     try {
       const result = await api.getWorkbenchProjectsBootstrap({ cache: options?.cache });
-      if (!readOwnershipRef.current.isCurrent(read, 'projects')) return;
+      if (!readOwnershipRef.current.isCurrent(read, 'projects')) {
+        retryAfterMutation();
+        return;
+      }
       setProjects(result.projects);
       const pages = Object.fromEntries(
         Object.entries(result.sessions ?? {}).filter(([projectId]) =>
@@ -172,11 +191,14 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       );
       applyBootstrapSessions(pages);
       setProjectsError(null);
+      authoritativeProjectsLoadedRef.current = true;
     } catch (err) {
       // Don't strand consumers on an empty-state for a transient failure — keep
       // any list we had and surface the error (mobile shows a retry).
       if (readOwnershipRef.current.isCurrent(read, 'projects')) {
         setProjectsError(errorMessage(err) ?? String(err));
+      } else {
+        retryAfterMutation();
       }
     }
   }, [api, applyBootstrapSessions]);
@@ -246,6 +268,19 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       }
     },
     [api, queueReconcile, takePendingReconcile],
+  );
+
+  const queueReconcileForSession = useCallback(
+    (sessionId: string) => {
+      const entry = Object.entries(sessionsRef.current).find(([, state]) =>
+        state.sessions?.some((session) => session.id === sessionId),
+      );
+      if (!entry) return;
+      const [projectId, state] = entry;
+      if (!inFlightRef.current.has(projectId)) return;
+      queueReconcile(projectId, state.sessions?.length ?? 0);
+    },
+    [queueReconcile],
   );
 
   const reconcileProjectTree = useCallback(async () => {
@@ -467,6 +502,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       },
       onSessionStatus: ({ session_id, agent_status }) => {
         acceptSessionMutation();
+        queueReconcileForSession(session_id);
         setSessions((prev) =>
           patchSessionRow(prev, session_id, (s) => (s.agent_status === agent_status ? s : { ...s, agent_status })),
         );
@@ -474,6 +510,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       },
       onTurnEnd: ({ session_id }) => {
         acceptSessionMutation();
+        queueReconcileForSession(session_id);
         // The first turn can bind the native_session_id server-side, but the
         // status event only carries the dot state. Refresh the cached row so
         // actions gated on native binding, such as Fork session, unlock without
@@ -482,7 +519,14 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       },
     });
     return disconnect;
-  }, [acceptSessionMutation, api, reconcileProjectTree, reconcileSessions, refreshCachedSessionRow]);
+  }, [
+    acceptSessionMutation,
+    api,
+    queueReconcileForSession,
+    reconcileProjectTree,
+    reconcileSessions,
+    refreshCachedSessionRow,
+  ]);
 
   const toggleExpanded = useCallback(
     (projectId: string) => {

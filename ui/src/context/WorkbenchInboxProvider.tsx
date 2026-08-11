@@ -81,6 +81,9 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   // one authoritative feed read after that response settles.
   const authoritativeFeedLoadedRef = useRef(false);
   const coldRefreshRetryPendingRef = useRef(false);
+  const reconcileRetryPendingRef = useRef(false);
+  const refreshLoadingGenerationRef = useRef(0);
+  const loadMoreLoadingGenerationRef = useRef(0);
 
   const acceptSessionMutation = useCallback(() => {
     readOwnershipRef.current.acceptMutation();
@@ -97,6 +100,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
 
   const refresh = useCallback(async () => {
     const read = readOwnershipRef.current.beginRead('inbox-feed');
+    const loadingGeneration = ++refreshLoadingGenerationRef.current;
     setLoading(true);
     try {
       const result = await api.listInbox({ platform: 'avibe', limit: PAGE_SIZE });
@@ -117,7 +121,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
     } catch (err) {
       console.error('[inbox] refresh failed', err);
     } finally {
-      if (readOwnershipRef.current.isLatestRead(read)) setLoading(false);
+      if (refreshLoadingGenerationRef.current === loadingGeneration) setLoading(false);
     }
   }, [api, applyUnreadMap]);
 
@@ -125,6 +129,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
     const cursor = cursorRef.current;
     if (!cursor) return;
     const read = readOwnershipRef.current.beginRead('inbox-feed');
+    const loadingGeneration = ++loadMoreLoadingGenerationRef.current;
     setLoadingMore(true);
     try {
       const result = await api.listInbox({ platform: 'avibe', limit: PAGE_SIZE, before: cursor });
@@ -134,7 +139,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
     } catch (err) {
       console.error('[inbox] load more failed', err);
     } finally {
-      if (readOwnershipRef.current.isLatestRead(read)) setLoadingMore(false);
+      if (loadMoreLoadingGenerationRef.current === loadingGeneration) setLoadingMore(false);
     }
   }, [api]);
 
@@ -170,7 +175,16 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
         cache: false,
         handleError: false,
       });
-      if (!readOwnershipRef.current.isCurrent(read)) return;
+      if (!readOwnershipRef.current.isCurrent(read)) {
+        if (readOwnershipRef.current.epoch() !== read.epoch && !reconcileRetryPendingRef.current) {
+          reconcileRetryPendingRef.current = true;
+          queueMicrotask(() => {
+            reconcileRetryPendingRef.current = false;
+            void reconcile();
+          });
+        }
+        return;
+      }
       setInboxSessions((prev) => {
         const incoming = new Map(result.sessions.map((s) => [s.session_id, s]));
         const merged = prev.map((s) => incoming.get(s.session_id) ?? s);
@@ -215,7 +229,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
           handleError: false,
         });
         const row = result.sessions.find((s) => s.session_id === sessionId);
-        if (!readOwnershipRef.current.isCurrent(read, ['inbox-feed', `inbox-session:${sessionId}`])) return;
+        if (!readOwnershipRef.current.isCurrent(read)) return;
         if (row) setInboxSessions((prev) => upsertSession(prev, row));
         applyUnreadMap(result.unread_by_session ?? {});
       } catch (err) {
