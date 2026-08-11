@@ -6841,6 +6841,55 @@ def test_hfr_439_turn_failure_metadata_reaches_every_linked_run(
         assert notice["turn_fallback_run_id"] == expected_owner
 
 
+def test_hfr_474_resultless_turn_settlement_creates_one_restart_notice(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A current release never creates the legacy per-Run restart shape."""
+
+    from core import failure_notices
+    from core.run_settlement import SETTLED_BY_RESTARTED
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = TaskExecutionStore()
+    requests = [
+        request_store.enqueue_agent_run(message=message, agent_name="codex")
+        for message in ("participant one", "participant two", "participant three")
+    ]
+    for request in requests:
+        assert request_store.claim(request.id) is not None
+
+    service = _callback_service(tmp_path=tmp_path, request_store=request_store)
+    service.settle_agent_runs_from_terminal_turn(
+        [request.id for request in requests],
+        turn_id="turn-resultless-restart",
+        outcome="failed",
+        settled_by=SETTLED_BY_RESTARTED,
+        evidence_kind="service_shutdown",
+        evidence={"reason": "scheduled_service_shutdown"},
+    )
+
+    expected_owner = min(request.id for request in requests)
+    deliverable = []
+    for request in requests:
+        row = request_store.get_run(request.id)
+        assert row is not None and row["status"] == "failed"
+        notice = request_store.sqlite_backend.owed_failure_notice(request.id)
+        assert notice is not None
+        assert notice["failure_id"] == "turn:turn-resultless-restart"
+        assert notice["turn_id"] == "turn-resultless-restart"
+        assert notice["turn_fallback_run_id"] == expected_owner
+        if failure_notices.decide(
+            run_id=request.id,
+            definition_id=None,
+            notice=notice,
+            streak_facts=None,
+            earlier_unsettled=None,
+        ).action == failure_notices.ACTION_DELIVER:
+            deliverable.append(request.id)
+    assert deliverable == [expected_owner]
+
+
 def test_turn_fallback_owner_excludes_a_canceled_participant(
     tmp_path: Path,
     monkeypatch,

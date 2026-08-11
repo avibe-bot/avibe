@@ -60,7 +60,7 @@ from storage import messages_service
 from storage import message_deliveries as delivery_store
 from storage.agent_session_rows import reserve_write_lock
 from storage.db import get_cached_sqlite_engine
-from storage.background import normalize_run_status
+from storage.background import OWED_FAILURE_NOTICE_KEY, normalize_run_status
 from storage.session_reclaim import reconcile_explicit_overrides
 from storage.models import (
     agent_runs,
@@ -3859,6 +3859,7 @@ class SessionTurnManager:
         result: dict[str, Any]
         materialized_id: str | None = None
         terminal_run_ids: list[str] = []
+        terminal_turn_snapshot: dict[str, Any] | None = None
         projected_status: str | None = None
         status_changed = False
         replayed_unknown_start = False
@@ -4275,6 +4276,7 @@ class SessionTurnManager:
                             turn_id,
                         )
                     )
+                    terminal_turn_snapshot = delivery_store.get_turn(conn, turn_id)
                     projected_status = (
                         "running"
                         if claimed_successor
@@ -4295,7 +4297,20 @@ class SessionTurnManager:
                 if result.get("unknown_start_exhausted")
                 else settled_by
             )
-            self._settle_agent_run_ids(terminal_run_ids, run_settled_by)
+            if (
+                terminal_turn_snapshot is not None
+                and run_settled_by in SETTLEMENTS_WITHOUT_RESULT
+            ):
+                terminal_turn_snapshot = {
+                    **terminal_turn_snapshot,
+                    "settled_by": run_settled_by,
+                }
+                self._settle_agent_run_ids_from_terminal_turn(
+                    terminal_run_ids,
+                    terminal_turn_snapshot,
+                )
+            else:
+                self._settle_agent_run_ids(terminal_run_ids, run_settled_by)
         if materialized_id:
             self._publish_materialized_delivery(materialized_id)
         if result.get("changed"):
@@ -6119,24 +6134,61 @@ class SessionTurnManager:
                 for _terminal_turn, run_ids in terminal_run_owners
                 for run_id in run_ids
             }
-            statuses = {
-                str(row["id"]): normalize_run_status(row["status"])
+            run_rows = {
+                str(row["id"]): row
                 for row in conn.execute(
-                    select(agent_runs.c.id, agent_runs.c.status).where(
+                    select(
+                        agent_runs.c.id,
+                        agent_runs.c.status,
+                        agent_runs.c.metadata_json,
+                    ).where(
                         agent_runs.c.id.in_(all_run_ids)
                     )
                 ).mappings()
             }
-            unsettled_owners: list[tuple[dict[str, Any], list[str]]] = []
+            recoverable_owners: list[tuple[dict[str, Any], list[str]]] = []
             for terminal_turn, run_ids in terminal_run_owners:
                 unsettled = [
                     run_id
                     for run_id in run_ids
-                    if statuses.get(run_id) in {"queued", "running"}
+                    if run_id in run_rows
+                    and normalize_run_status(run_rows[run_id]["status"])
+                    in {"queued", "running"}
                 ]
-                if unsettled:
-                    unsettled_owners.append((terminal_turn, unsettled))
-        for terminal_turn, run_ids in unsettled_owners:
+                settled_by = str(terminal_turn.get("settled_by") or "")
+                legacy_pending_notice = False
+                if settled_by in SETTLEMENTS_WITHOUT_RESULT:
+                    for run_id in run_ids:
+                        row = run_rows.get(run_id)
+                        if row is None:
+                            continue
+                        try:
+                            metadata = json.loads(str(row["metadata_json"] or "{}"))
+                        except (TypeError, ValueError, json.JSONDecodeError):
+                            continue
+                        notice = (
+                            metadata.get(OWED_FAILURE_NOTICE_KEY)
+                            if isinstance(metadata, dict)
+                            else None
+                        )
+                        if (
+                            isinstance(notice, dict)
+                            and notice.get("state") == "pending"
+                            and not str(notice.get("turn_id") or "").strip()
+                            and str(
+                                notice.get("interrupt_reason")
+                                or metadata.get("interrupt_reason")
+                                or ""
+                            ).strip()
+                            == settled_by
+                        ):
+                            legacy_pending_notice = True
+                            break
+                if unsettled or legacy_pending_notice:
+                    # Older releases stamped one notice per Run even though the
+                    # accepted Delivery relation retained this exact Turn owner.
+                    recoverable_owners.append((terminal_turn, run_ids))
+        for terminal_turn, run_ids in recoverable_owners:
             self._settle_agent_run_ids_from_terminal_turn(run_ids, terminal_turn)
         with self._sqlite_engine().begin() as conn:
             reserve_write_lock(conn)

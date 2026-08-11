@@ -191,6 +191,13 @@ does not claim that an event was detected.
 - `HFR-473`: a definitively dead Codex transport can be replaced for the next
   request even while stale Turn ownership from that dead generation remains;
   unknown ownership and active Activities continue to fail closed.
+- `HFR-474`: result-less settlement carries the durable Turn failure contract
+  into every accepted Run. During an old-to-new upgrade, startup repairs legacy
+  per-Run restart notices from the exact accepted `Run -> Delivery -> Turn`
+  relation before activating the notice lane. It never groups by Session or
+  timestamp. If one legacy notice was already sent, that delivery evidence owns
+  the Turn and all pending siblings stand down; otherwise one stable participant
+  becomes the only fallback.
 
 Residual manual check: trigger two one-shot Watches into one failing Turn and
 confirm that the conversation contains one backend error, both Runs are failed,
