@@ -436,6 +436,15 @@ class MemoryRuntime:
         )
 
     @property
+    def rebuild_pending(self) -> bool:
+        """Whether this aggregate is fenced by a durable embedding rebuild intent."""
+
+        return any(
+            getattr(config, "recovery_intent", None) == "rebuild"
+            for config in (self._config, self._restart_config)
+        )
+
+    @property
     def retired(self) -> bool:
         """Whether this aggregate has been permanently retired."""
 
@@ -1811,6 +1820,7 @@ class MemoryRuntime:
         if (
             self._closing
             or self.factory_reset_pending
+            or self.rebuild_pending
             or self._rebuild_running()
             or self._restart_running()
             or self._reconcile_lock.locked()
@@ -1839,6 +1849,7 @@ class MemoryRuntime:
             if (
                 self._closing
                 or self.factory_reset_pending
+                or self.rebuild_pending
                 or self._rebuild_running()
                 or self._restart_running()
                 or self._reconcile_lock.locked()

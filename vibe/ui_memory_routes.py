@@ -134,7 +134,7 @@ def _memory_settings_payload() -> dict:
     payload["rebuild_required"] = memory.recovery_intent == "rebuild"
     payload["factory_reset_required"] = memory.recovery_intent == "factory_reset"
     payload["repair_available"] = (
-        memory.recovery_intent != "factory_reset" and _memory_repair_available()
+        memory.recovery_intent is None and _memory_repair_available()
     )
  
     return payload
@@ -642,7 +642,7 @@ async def _settings_ok_payload(memory, runtime_payload: dict | None = None) -> d
     payload["rebuild_required"] = getattr(memory, "recovery_intent", None) == "rebuild"
     payload["factory_reset_required"] = getattr(memory, "recovery_intent", None) == "factory_reset"
     payload["repair_available"] = (
-        getattr(memory, "recovery_intent", None) != "factory_reset"
+        getattr(memory, "recovery_intent", None) is None
         and await run_blocking(_memory_repair_available)
     )
     if runtime_payload is not None:

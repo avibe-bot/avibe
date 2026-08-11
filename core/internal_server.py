@@ -927,6 +927,12 @@ def create_app(
                 status_code=403,
                 content={"ok": False, "error": "memory_access_denied", "result": "failed"},
             )
+        payload = await _safe_json(request)
+        if payload != {"confirm": True}:
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": "memory_invalid_input", "result": "failed"},
+            )
         if _memory_factory_reset_running():
             return JSONResponse(
                 status_code=409,
@@ -942,12 +948,6 @@ def create_app(
             return JSONResponse(
                 status_code=409,
                 content={"ok": False, "error": "memory_operation_in_progress", "result": "failed"},
-            )
-        payload = await _safe_json(request)
-        if payload != {"confirm": True}:
-            return JSONResponse(
-                status_code=400,
-                content={"ok": False, "error": "memory_invalid_input", "result": "failed"},
             )
         try:
             result = await runtime.rebuild()

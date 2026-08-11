@@ -763,9 +763,10 @@ def test_memory_rebuild_rejects_non_exact_confirmation(payload: object) -> None:
     secret = "test-memory-ui-secret"
     path = "/internal/memory/rebuild"
     user_key = "avibe:local"
-    runtime = SimpleNamespace(rebuild=AsyncMock())
+    runtime = SimpleNamespace(rebuild=AsyncMock(), factory_reset_pending=True)
     controller = _build_controller_double()
     controller.memory_runtime = runtime
+    controller._memory_factory_reset_task = SimpleNamespace(done=lambda: False)
     app = internal_server.create_app(controller, memory_ui_secret=secret)
 
     async def _exercise() -> httpx.Response:

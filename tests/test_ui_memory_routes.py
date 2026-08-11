@@ -350,6 +350,34 @@ def test_memory_settings_projects_only_admitted_repair_capability(monkeypatch, t
     assert response.get_json()["repair_available"] is True
 
 
+def test_memory_settings_hides_repair_capability_during_pending_rebuild(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    _save_memory(MemoryConfig(recovery_intent="rebuild"))
+
+    class Artifact:
+        def sync_capability(self) -> bool:
+            return True
+
+    monkeypatch.setattr(
+        "core.memory.artifact.get_memory_artifact_manager",
+        lambda: Artifact(),
+    )
+    response = app.test_client().get(
+        "/api/memory/settings",
+        headers=_local_headers(),
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["rebuild_required"] is True
+    assert response.get_json()["repair_available"] is False
+
+
 def test_memory_settings_patch_projects_repair_capability_off_event_loop(
     monkeypatch,
     tmp_path,

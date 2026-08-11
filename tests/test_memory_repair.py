@@ -135,6 +135,27 @@ async def test_repair_is_fenced_by_durable_factory_reset_intent(
     }
 
 
+@pytest.mark.parametrize("config_attr", ["_config", "_restart_config"])
+async def test_repair_is_fenced_by_durable_rebuild_intent(
+    tmp_path: Path,
+    memory_runtime_factory,
+    config_attr: str,
+) -> None:
+    runtime, _sidecar = _runtime(memory_runtime_factory, tmp_path)
+    setattr(
+        runtime,
+        config_attr,
+        replace(getattr(runtime, config_attr), recovery_intent="rebuild"),
+    )
+
+    assert await runtime.repair() == {
+        "ok": False,
+        "error": "memory_operation_in_progress",
+        "result": "failed",
+    }
+    assert runtime._repair_task is None
+
+
 async def test_repair_rejects_artifact_without_sync_capability(
     monkeypatch,
     tmp_path: Path,
