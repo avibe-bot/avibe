@@ -71,6 +71,13 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   // without re-creating its identity (and the context value) on every page.
   const cursorRef = useRef<string | null>(null);
   cursorRef.current = nextCursor;
+  const applyNextCursor = useCallback((cursor: string | null) => {
+    // A queued feed intent may start from the completing request's finally
+    // block, before React renders the state update. Commit both owners together
+    // so that intent always reads the logically latest cursor.
+    cursorRef.current = cursor;
+    setNextCursor(cursor);
+  }, []);
   // Mirror the loaded feed so ``reconcile`` can size its re-read to the current
   // window without depending on (and re-identifying with) ``inboxSessions``.
   const inboxSessionsRef = useRef<InboxSession[]>([]);
@@ -83,15 +90,17 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   // Every Inbox read shares one ordering fence. This covers page-one refresh,
   // cursor reads, resume reconcile, and the targeted foreground-restore read.
   const readOwnershipRef = useRef(createWorkbenchSessionReadOwnership());
-  // Broad reads and cursor reads both own the feed. Run only one broad read at a
-  // time and preserve trailing intents while it or a cursor request is active,
-  // so a later failed duplicate cannot discard an earlier successful recovery.
+  // Broad reads and cursor reads both own the feed. Serialize every feed read
+  // and preserve trailing intents so response completion order cannot discard a
+  // recovery snapshot or a page the user asked to load.
   const refreshPendingRef = useRef(false);
   const reconcilePendingRef = useRef(false);
+  const loadMorePendingRef = useRef(false);
   const broadReadInFlightRef = useRef(false);
   const cursorReadsInFlightRef = useRef(0);
   const refreshRunnerRef = useRef<() => void>(() => {});
   const reconcileRunnerRef = useRef<() => void>(() => {});
+  const loadMoreRunnerRef = useRef<() => void>(() => {});
   const reconcileSessionRef = useRef<(sessionId: string) => void>(() => {});
   const refreshLoadingGenerationRef = useRef(0);
   const loadMoreLoadingGenerationRef = useRef(0);
@@ -101,7 +110,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   // outside the page; a later broad omission revalidates them by exact id.
   const targetedSnapshotsRef = useRef<Map<string, TargetedInboxSnapshot>>(new Map());
 
-  const flushBroadReadIntent = useCallback(() => {
+  const flushFeedReadIntent = useCallback(() => {
     if (broadReadInFlightRef.current || cursorReadsInFlightRef.current > 0) return;
     if (refreshPendingRef.current) {
       refreshPendingRef.current = false;
@@ -114,18 +123,28 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
     if (reconcilePendingRef.current) {
       reconcilePendingRef.current = false;
       reconcileRunnerRef.current();
+      return;
+    }
+    if (loadMorePendingRef.current) {
+      loadMorePendingRef.current = false;
+      loadMoreRunnerRef.current();
     }
   }, []);
 
   const queueRefreshIntent = useCallback(() => {
     refreshPendingRef.current = true;
-    queueMicrotask(flushBroadReadIntent);
-  }, [flushBroadReadIntent]);
+    queueMicrotask(flushFeedReadIntent);
+  }, [flushFeedReadIntent]);
 
   const queueReconcileIntent = useCallback(() => {
     reconcilePendingRef.current = true;
-    queueMicrotask(flushBroadReadIntent);
-  }, [flushBroadReadIntent]);
+    queueMicrotask(flushFeedReadIntent);
+  }, [flushFeedReadIntent]);
+
+  const queueLoadMoreIntent = useCallback(() => {
+    loadMorePendingRef.current = true;
+    queueMicrotask(flushFeedReadIntent);
+  }, [flushFeedReadIntent]);
 
   const acceptSessionMutation = useCallback((sessionId: string) => {
     readOwnershipRef.current.acceptMutation([
@@ -221,7 +240,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
       } else {
         const snapshotsToRevalidate = acceptFeedRows(read, result.sessions);
         setInboxSessions(() => mergeTargetedSnapshots(result.sessions));
-        setNextCursor(result.next_cursor);
+        applyNextCursor(result.next_cursor);
         for (const sessionId of snapshotsToRevalidate) reconcileSessionRef.current(sessionId);
       }
       if (readOwnershipRef.current.isCurrent(read, 'inbox-unread')) {
@@ -232,11 +251,23 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
     } finally {
       if (refreshLoadingGenerationRef.current === loadingGeneration) setLoading(false);
       broadReadInFlightRef.current = false;
-      flushBroadReadIntent();
+      flushFeedReadIntent();
     }
-  }, [acceptFeedRows, api, applyUnreadMap, flushBroadReadIntent, mergeTargetedSnapshots, queueRefreshIntent]);
+  }, [acceptFeedRows, api, applyNextCursor, applyUnreadMap, flushFeedReadIntent, mergeTargetedSnapshots, queueRefreshIntent]);
 
   const loadMore = useCallback(async function loadMore() {
+    if (
+      broadReadInFlightRef.current ||
+      refreshPendingRef.current ||
+      reconcilePendingRef.current
+    ) {
+      queueLoadMoreIntent();
+      return;
+    }
+    // A duplicate click while the same cursor is already loading is not a new
+    // page intent. Mutation invalidation queues its retry explicitly below.
+    if (cursorReadsInFlightRef.current > 0) return;
+    loadMorePendingRef.current = false;
     const cursor = cursorRef.current;
     if (!cursor) return;
     const read = readOwnershipRef.current.beginRead(['inbox-feed', 'inbox-feed-cursor']);
@@ -251,7 +282,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
         return;
       }
       setInboxSessions((prev) => appendPage(prev, result.sessions));
-      setNextCursor(result.next_cursor);
+      applyNextCursor(result.next_cursor);
     } catch (err) {
       retryAfterInvalidation =
         !readOwnershipRef.current.isCurrent(read, 'inbox-feed') &&
@@ -260,10 +291,10 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
     } finally {
       cursorReadsInFlightRef.current -= 1;
       if (loadMoreLoadingGenerationRef.current === loadingGeneration) setLoadingMore(false);
-      if (retryAfterInvalidation) queueMicrotask(() => void loadMore());
-      else flushBroadReadIntent();
+      if (retryAfterInvalidation) queueLoadMoreIntent();
+      else flushFeedReadIntent();
     }
-  }, [api, flushBroadReadIntent]);
+  }, [api, applyNextCursor, flushFeedReadIntent, queueLoadMoreIntent]);
 
   const markRead = useCallback(
     async (sessionId: string, untilMessageId?: string) => {
@@ -301,7 +332,11 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   // that arrived during the gap surface at top. No loading flag — the user
   // already has content; this is a silent catch-up.
   const reconcile = useCallback(async () => {
-    if (broadReadInFlightRef.current || cursorReadsInFlightRef.current > 0) {
+    if (
+      broadReadInFlightRef.current ||
+      cursorReadsInFlightRef.current > 0 ||
+      refreshPendingRef.current
+    ) {
       queueReconcileIntent();
       return;
     }
@@ -366,7 +401,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
         // between this read and the old feed — adopt result.next_cursor so "Load
         // more" can page through them (loadMore dedupes the overlap).
         const overlap = result.sessions.some((s) => loadedIds.has(s.session_id));
-        if (!overlap) setNextCursor(result.next_cursor);
+        if (!overlap) applyNextCursor(result.next_cursor);
       }
       if (readOwnershipRef.current.isCurrent(read, 'inbox-unread')) {
         applyUnreadMap(result.unread_by_session ?? {});
@@ -375,9 +410,9 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
       if (!retryAfterInvalidation()) console.error('[inbox] reconcile failed', err);
     } finally {
       broadReadInFlightRef.current = false;
-      flushBroadReadIntent();
+      flushFeedReadIntent();
     }
-  }, [acceptFeedRows, api, applyUnreadMap, flushBroadReadIntent, mergeTargetedSnapshots, queueReconcileIntent]);
+  }, [acceptFeedRows, api, applyNextCursor, applyUnreadMap, flushFeedReadIntent, mergeTargetedSnapshots, queueReconcileIntent]);
 
   // Targeted reconcile for one session (contract A6 foreground restore): fetch
   // that exact session by id and upsert its card, so a restored session
@@ -428,6 +463,7 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
   );
   refreshRunnerRef.current = () => void refresh();
   reconcileRunnerRef.current = () => void reconcile();
+  loadMoreRunnerRef.current = () => void loadMore();
   reconcileSessionRef.current = (sessionId) => void reconcileSession(sessionId);
 
   useEffect(() => {

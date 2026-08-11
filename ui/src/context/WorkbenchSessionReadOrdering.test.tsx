@@ -880,31 +880,34 @@ describe('Workbench session read ownership', () => {
     expect(inbox?.unreadBySession).toEqual({ [sessionB.id]: 5 });
   });
 
-  it('retries a loaded Inbox refresh superseded by load-more', async () => {
-    const staleRefresh = deferred({
-      sessions: [inboxRow],
-      next_cursor: 'stale_cursor',
+  it('defers a later load-more until an in-flight Inbox refresh completes', async () => {
+    const pageRow = {
+      ...inboxRow,
+      session_id: sessionB.id,
+      scope_id: sessionB.scope_id,
+      title: sessionB.title,
+      preview_message_id: 'msg_b',
+      last_activity_at: '2026-08-10T23:00:00Z',
+    };
+    const refreshedRow = { ...inboxRow, title: 'Fresh before deferred load-more' };
+    const refreshRead = deferred({
+      sessions: [refreshedRow],
+      next_cursor: 'cursor_after_refresh',
       unread_by_session: { [session.id]: 3 },
     });
     const loadMoreRead = deferred({
-      sessions: [],
+      sessions: [pageRow],
       next_cursor: 'cursor_after_load_more',
       unread_by_session: { [session.id]: 3 },
     });
-    const refreshedRow = { ...inboxRow, title: 'Fresh after explicit refresh' };
     const listInbox = vi.fn()
       .mockResolvedValueOnce({
         sessions: [inboxRow],
         next_cursor: 'cursor_a',
         unread_by_session: { [session.id]: 3 },
       })
-      .mockReturnValueOnce(staleRefresh.promise)
-      .mockReturnValueOnce(loadMoreRead.promise)
-      .mockResolvedValueOnce({
-        sessions: [refreshedRow],
-        next_cursor: 'cursor_after_refresh',
-        unread_by_session: { [session.id]: 3 },
-      });
+      .mockReturnValueOnce(refreshRead.promise)
+      .mockReturnValueOnce(loadMoreRead.promise);
     apiRef.current = {
       listInbox,
       connectWorkbenchEvents: vi.fn(() => vi.fn()),
@@ -926,30 +929,36 @@ describe('Workbench session read ownership', () => {
     await settle();
     act(() => {
       void inbox?.refresh();
+    });
+    await settle();
+    act(() => {
       void inbox?.loadMore();
     });
     await settle();
+    expect(listInbox).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      refreshRead.resolve({
+        sessions: [refreshedRow],
+        next_cursor: 'cursor_after_refresh',
+        unread_by_session: { [session.id]: 3 },
+      });
+      await refreshRead.promise;
+    });
+    await settle();
+    expect(listInbox).toHaveBeenCalledTimes(3);
+    expect(listInbox.mock.calls[2]?.[0]).toMatchObject({ before: 'cursor_after_refresh' });
     await act(async () => {
       loadMoreRead.resolve({
-        sessions: [],
+        sessions: [pageRow],
         next_cursor: 'cursor_after_load_more',
         unread_by_session: { [session.id]: 3 },
       });
       await loadMoreRead.promise;
     });
-    await act(async () => {
-      staleRefresh.resolve({
-        sessions: [inboxRow],
-        next_cursor: 'stale_cursor',
-        unread_by_session: { [session.id]: 3 },
-      });
-      await staleRefresh.promise;
-    });
     await settle();
 
-    expect(listInbox).toHaveBeenCalledTimes(4);
-    expect(inbox?.inboxSessions).toEqual([refreshedRow]);
-    expect(inbox?.nextCursor).toBe('cursor_after_refresh');
+    expect(inbox?.inboxSessions).toEqual([refreshedRow, pageRow]);
+    expect(inbox?.nextCursor).toBe('cursor_after_load_more');
   });
 
   it('defers a later Inbox refresh until an in-flight load-more completes', async () => {
@@ -1081,15 +1090,30 @@ describe('Workbench session read ownership', () => {
     expect(inbox?.nextCursor).toBeNull();
   });
 
-  it('retries a resume reconcile superseded by load-more', async () => {
-    const staleReconcile = deferred({ sessions: [inboxRow], next_cursor: 'stale_cursor', unread_by_session: { [session.id]: 3 } });
-    const loadMoreRead = deferred({ sessions: [], next_cursor: 'cursor_after_load_more', unread_by_session: { [session.id]: 3 } });
-    const retryReconcile = deferred({ sessions: [inboxRow], next_cursor: 'cursor_after_reconcile', unread_by_session: { [session.id]: 3 } });
+  it('defers a later load-more until an in-flight resume reconcile completes', async () => {
+    const pageRow = {
+      ...inboxRow,
+      session_id: sessionB.id,
+      scope_id: sessionB.scope_id,
+      title: sessionB.title,
+      preview_message_id: 'msg_b',
+      last_activity_at: '2026-08-10T23:00:00Z',
+    };
+    const reconciledRow = { ...inboxRow, title: 'Fresh before deferred load-more' };
+    const reconcileRead = deferred({
+      sessions: [reconciledRow],
+      next_cursor: 'cursor_after_reconcile',
+      unread_by_session: { [session.id]: 3 },
+    });
+    const loadMoreRead = deferred({
+      sessions: [pageRow],
+      next_cursor: 'cursor_after_load_more',
+      unread_by_session: { [session.id]: 3 },
+    });
     const listInbox = vi.fn()
       .mockResolvedValueOnce({ sessions: [inboxRow], next_cursor: 'cursor_a', unread_by_session: { [session.id]: 3 } })
-      .mockReturnValueOnce(staleReconcile.promise)
-      .mockReturnValueOnce(loadMoreRead.promise)
-      .mockReturnValueOnce(retryReconcile.promise);
+      .mockReturnValueOnce(reconcileRead.promise)
+      .mockReturnValueOnce(loadMoreRead.promise);
     let inbox: ReturnType<typeof useWorkbenchInbox> | null = null;
     const Probe = () => {
       const value = useWorkbenchInbox();
@@ -1117,27 +1141,33 @@ describe('Workbench session read ownership', () => {
       void inbox?.loadMore();
     });
     await settle();
+    expect(listInbox).toHaveBeenCalledTimes(2);
     await act(async () => {
-      loadMoreRead.resolve({ sessions: [], next_cursor: 'cursor_after_load_more', unread_by_session: { [session.id]: 3 } });
-      await loadMoreRead.promise;
-    });
-    await act(async () => {
-      staleReconcile.resolve({ sessions: [inboxRow], next_cursor: 'stale_cursor', unread_by_session: { [session.id]: 3 } });
-      await staleReconcile.promise;
+      reconcileRead.resolve({
+        sessions: [reconciledRow],
+        next_cursor: 'cursor_after_reconcile',
+        unread_by_session: { [session.id]: 3 },
+      });
+      await reconcileRead.promise;
     });
     await settle();
-    expect(listInbox).toHaveBeenCalledTimes(4);
+    expect(listInbox).toHaveBeenCalledTimes(3);
+    expect(listInbox.mock.calls[2]?.[0]).toMatchObject({ before: 'cursor_a' });
     await act(async () => {
-      retryReconcile.resolve({ sessions: [inboxRow], next_cursor: 'cursor_after_reconcile', unread_by_session: { [session.id]: 3 } });
-      await retryReconcile.promise;
+      loadMoreRead.resolve({
+        sessions: [pageRow],
+        next_cursor: 'cursor_after_load_more',
+        unread_by_session: { [session.id]: 3 },
+      });
+      await loadMoreRead.promise;
     });
     await settle();
 
-    expect(inbox?.inboxSessions).toEqual([inboxRow]);
+    expect(inbox?.inboxSessions).toEqual([reconciledRow, pageRow]);
     expect(inbox?.nextCursor).toBe('cursor_after_load_more');
   });
 
-  it('defers a resume retry until a later load-more completes', async () => {
+  it('runs a queued resume retry before a later load-more', async () => {
     const pageRow = {
       ...inboxRow,
       session_id: sessionB.id,
@@ -1154,12 +1184,12 @@ describe('Workbench session read ownership', () => {
     const loadMoreRead = deferred({
       sessions: [pageRow],
       next_cursor: 'cursor_after_load_more',
-      unread_by_session: { [session.id]: 3 },
+      unread_by_session: {},
     });
     const retryReconcile = deferred({
-      sessions: [inboxRow],
+      sessions: [],
       next_cursor: 'cursor_after_reconcile',
-      unread_by_session: { [session.id]: 3 },
+      unread_by_session: {},
     });
     const listInbox = vi.fn()
       .mockResolvedValueOnce({
@@ -1168,11 +1198,15 @@ describe('Workbench session read ownership', () => {
         unread_by_session: { [session.id]: 3 },
       })
       .mockReturnValueOnce(staleReconcile.promise)
-      .mockReturnValueOnce(loadMoreRead.promise)
-      .mockReturnValueOnce(retryReconcile.promise);
+      .mockReturnValueOnce(retryReconcile.promise)
+      .mockReturnValueOnce(loadMoreRead.promise);
+    let handlers: WorkbenchEventHandlers | null = null;
     apiRef.current = {
       listInbox,
-      connectWorkbenchEvents: vi.fn(() => vi.fn()),
+      connectWorkbenchEvents: vi.fn((next) => {
+        handlers = next;
+        return vi.fn();
+      }),
     };
     let inbox: ReturnType<typeof useWorkbenchInbox> | null = null;
     const Probe = () => {
@@ -1194,6 +1228,12 @@ describe('Workbench session read ownership', () => {
     });
     await settle();
     act(() => {
+      handlers?.onSessionActivity?.({
+        session_id: session.id,
+        scope_id: session.scope_id,
+        event: 'updated',
+        visibility: 'background',
+      });
       void inbox?.loadMore();
     });
     await settle();
@@ -1208,29 +1248,27 @@ describe('Workbench session read ownership', () => {
     await settle();
     expect(listInbox).toHaveBeenCalledTimes(3);
     await act(async () => {
-      loadMoreRead.resolve({
-        sessions: [pageRow],
-        next_cursor: 'cursor_after_load_more',
-        unread_by_session: { [session.id]: 3 },
-      });
-      await loadMoreRead.promise;
-    });
-    await settle();
-    expect(listInbox).toHaveBeenCalledTimes(4);
-    await act(async () => {
       retryReconcile.resolve({
-        sessions: [inboxRow],
+        sessions: [],
         next_cursor: 'cursor_after_reconcile',
-        unread_by_session: { [session.id]: 3 },
+        unread_by_session: {},
       });
       await retryReconcile.promise;
     });
     await settle();
+    expect(listInbox).toHaveBeenCalledTimes(4);
+    expect(listInbox.mock.calls[3]?.[0]).toMatchObject({ before: 'cursor_after_reconcile' });
+    await act(async () => {
+      loadMoreRead.resolve({
+        sessions: [pageRow],
+        next_cursor: 'cursor_after_load_more',
+        unread_by_session: {},
+      });
+      await loadMoreRead.promise;
+    });
+    await settle();
 
-    expect(inbox?.inboxSessions.map((row) => row.session_id).sort()).toEqual([
-      session.id,
-      sessionB.id,
-    ]);
+    expect(inbox?.inboxSessions.map((row) => row.session_id)).toEqual([sessionB.id]);
     expect(inbox?.nextCursor).toBe('cursor_after_load_more');
   });
 
@@ -1432,14 +1470,13 @@ describe('Workbench session read ownership', () => {
     consoleError.mockRestore();
   });
 
-  it('clears independent Inbox loading flags when reads overlap', async () => {
+  it('starts the load-more indicator only after a blocking refresh settles', async () => {
     const refreshRead = deferred({ sessions: [inboxRow], next_cursor: 'cursor_refresh', unread_by_session: { [session.id]: 3 } });
     const loadMoreRead = deferred({ sessions: [], next_cursor: null, unread_by_session: { [session.id]: 3 } });
     const listInbox = vi.fn()
       .mockResolvedValueOnce({ sessions: [inboxRow], next_cursor: 'cursor_a', unread_by_session: { [session.id]: 3 } })
       .mockReturnValueOnce(refreshRead.promise)
-      .mockReturnValueOnce(loadMoreRead.promise)
-      .mockResolvedValueOnce({ sessions: [inboxRow], next_cursor: 'cursor_refresh', unread_by_session: { [session.id]: 3 } });
+      .mockReturnValueOnce(loadMoreRead.promise);
     apiRef.current = {
       listInbox,
       connectWorkbenchEvents: vi.fn(() => vi.fn()),
@@ -1465,7 +1502,8 @@ describe('Workbench session read ownership', () => {
     });
     await settle();
     expect(inbox?.loading).toBe(true);
-    expect(inbox?.loadingMore).toBe(true);
+    expect(inbox?.loadingMore).toBe(false);
+    expect(listInbox).toHaveBeenCalledTimes(2);
     await act(async () => {
       refreshRead.resolve({ sessions: [inboxRow], next_cursor: 'cursor_refresh', unread_by_session: { [session.id]: 3 } });
       await refreshRead.promise;
@@ -1473,6 +1511,7 @@ describe('Workbench session read ownership', () => {
     await settle();
     expect(inbox?.loading).toBe(false);
     expect(inbox?.loadingMore).toBe(true);
+    expect(listInbox).toHaveBeenCalledTimes(3);
     await act(async () => {
       loadMoreRead.resolve({ sessions: [], next_cursor: null, unread_by_session: { [session.id]: 3 } });
       await loadMoreRead.promise;
