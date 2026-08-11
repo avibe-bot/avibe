@@ -154,6 +154,30 @@ async def test_finalized_gone_sync_record_is_retired_independently(tmp_path: Pat
     assert not ownership.path.exists()
 
 
+async def test_recycled_sync_leader_retires_stale_finalized_record(tmp_path: Path) -> None:
+    memory_dir = tmp_path / "memory"
+    root = memory_dir / "everos-root"
+    record = _record(root, state="finalized", pid=451)
+    uid = os.getuid() if hasattr(os, "getuid") else None
+    host = _Host(
+        {
+            451: _ProcessIdentity(
+                create_time=99.5,
+                cmdline=tuple(record["argv"]),
+                uid=uid,
+                environment={},
+            )
+        }
+    )
+    ownership = SyncOwnership(sync_record_path(memory_dir), provider_root=root, host=host)
+    ownership.write(record)
+
+    await ownership.reconcile()
+
+    assert not ownership.path.exists()
+    assert host.signals == []
+
+
 async def test_live_parent_keeps_singleton_sync_record_and_child_untouched(tmp_path: Path) -> None:
     memory_dir = tmp_path / "memory"
     root = memory_dir / "everos-root"
@@ -226,7 +250,7 @@ async def test_gone_leader_with_live_helper_is_swept_before_retirement(tmp_path:
     }
     helper = _ProcessIdentity(
         create_time=11.5,
-        cmdline=tuple(record["argv"]),
+        cmdline=("/runtime/bin/python", "-c", "everos-helper"),
         uid=uid,
         environment=helper_env,
     )
@@ -414,6 +438,102 @@ async def test_sync_finalizes_ownership_before_sigcont_and_cleans_group(tmp_path
     assert result is SyncProcessResult.COMPLETED
     assert events[:4] == ["spawned", "stopped", "validated", "continued"]
     assert events[-1] == "cleaned"
+    assert not record_path.exists()
+
+
+async def test_sync_spawn_handoff_finishes_before_honoring_cancellation(tmp_path: Path) -> None:
+    python = tmp_path / "runtime" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_bytes(b"python")
+    memory_dir = tmp_path / "home" / "memory"
+    record_path = sync_record_path(memory_dir)
+    events: list[str] = []
+    spawn_started = asyncio.Event()
+    release_spawn = asyncio.Event()
+
+    class Process:
+        pid = 451
+        returncode = None
+
+        def send_signal(self, signum):
+            assert signum.name == "SIGCONT"
+            assert json.loads(record_path.read_text(encoding="utf-8"))["state"] == "finalized"
+            events.append("continued")
+
+        async def wait(self):
+            events.append("waited")
+            self.returncode = 0
+            return 0
+
+    process = Process()
+
+    class Host:
+        environment: dict[str, str] = {}
+        alive = True
+
+        async def spawn(self, kind, artifact_python, *, cwd, env, socket_path=None):
+            del cwd, socket_path
+            assert kind is _ProcessKind.CASCADE_SYNC
+            assert artifact_python == python
+            self.environment = dict(env)
+            events.append("spawn-start")
+            spawn_started.set()
+            await release_spawn.wait()
+            events.append("spawn-return")
+            return process
+
+        def process_group(self, pid):
+            return pid
+
+        def snapshot_tree(self, pid, process_group):
+            assert process_group == pid
+            return {pid: 10.5} if self.alive else {}
+
+        def recorded_group_members(self, process_group, *, socket_path, provider_root, role=None):
+            del process_group, socket_path, provider_root, role
+            return {}, []
+
+        async def wait_for_stopped(self, pid, timeout_seconds):
+            del timeout_seconds
+            assert pid == process.pid
+            return True
+
+        def inspect_identity(self, pid):
+            assert pid == process.pid
+            return _ProcessIdentity(
+                create_time=10.5,
+                cmdline=(str(python), *SYNC_ARGV),
+                uid=os.getuid() if hasattr(os, "getuid") else None,
+                environment=self.environment,
+            )
+
+        def live(self, identities):
+            return dict(identities) if self.alive else {}
+
+        def signal(self, identities, signum, *, process_group=None, process=None):
+            del identities, signum, process_group, process
+            events.append("cleaned")
+            self.alive = False
+
+        async def wait_for_exit(self, identities, timeout_seconds, **_kwargs):
+            del identities, timeout_seconds
+            return not self.alive
+
+    task = asyncio.create_task(
+        EverOSSyncProcess(
+            python,
+            effective_home=tmp_path / "home",
+            _host=Host(),
+        ).run()
+    )
+    await spawn_started.wait()
+    task.cancel()
+    release_spawn.set()
+
+    assert await task is SyncProcessResult.INTERRUPTED
+    assert events.index("spawn-return") < events.index("continued")
+    assert "waited" not in events
+    assert "cleaned" in events
     assert not record_path.exists()
 
 

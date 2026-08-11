@@ -41,6 +41,20 @@ def test_release_workflows_emit_metadata_for_the_current_runtime_version() -> No
         assert "memory-runtime-1.2.1-${{ matrix.artifact }}.json" not in workflow
 
 
+def test_github_only_release_runs_memory_runtime_guard_before_uploading_assets() -> None:
+    workflow = (
+        Path(__file__).resolve().parents[1] / ".github/workflows/release_ai.yml"
+    ).read_text(encoding="utf-8")
+
+    guard = workflow.index("Run Memory Runtime release guard for GitHub-only assets")
+    upload = workflow.index("Add Show Runtime release assets")
+    guarded_section = workflow[guard:upload]
+
+    assert '[[ "$TAG" != gh-v* ]]' in guarded_section
+    assert "scripts/memory_runtime_release_guard.py" in guarded_section
+    assert "verify --asset-dir memory-release-guard-assets" in guarded_section
+
+
 def _write_archive(directory: Path, platform: str, *, sync: bool = False) -> tuple[Path, bytes]:
     binary = f"python-{platform}".encode()
     archive = directory / f"memory-runtime-1.2.3-{platform}.tar.gz"

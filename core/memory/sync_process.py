@@ -32,6 +32,7 @@ from core.memory.process import (
     EverOSProcessSettings,
     _memory_child_environment,
     _positive_timeout,
+    _finish_handoff_despite_cancellation,
     _terminate_owned_process_tree,
 )
 
@@ -65,6 +66,10 @@ class SyncOwnershipError(RuntimeError):
 
 class _SyncOwnershipBusy(SyncOwnershipError):
     """Another launcher won the record claim."""
+
+
+class _SyncIdentityMismatch(SyncOwnershipError):
+    """A disclosed child identity proves a recorded pid was recycled."""
 
 
 def sync_record_path(memory_dir: Path | str) -> Path:
@@ -284,7 +289,13 @@ class SyncOwnership:
             raise SyncOwnershipError("finalized sync ownership record has no pid")
         identity = self.host.inspect_identity(pid)
         if identity is not None:
-            _validate_child_identity(identity, record, provider_root=self.provider_root)
+            try:
+                _validate_child_identity(identity, record, provider_root=self.provider_root)
+            except _SyncIdentityMismatch:
+                # A disclosed mismatch (for example, a different creation time)
+                # proves the recorded leader is gone and this pid was recycled.
+                self.remove(nonce=str(record["nonce"]))
+                return
         group = record.get("process_group")
         if not isinstance(group, int) or group <= 1:
             raise SyncOwnershipError("finalized sync ownership record has no process group")
@@ -306,7 +317,12 @@ class SyncOwnership:
             if member is None:
                 continue
             member_record = {**record, "pid": member_pid, "create_time": created_at}
-            _validate_child_identity(member, member_record, provider_root=self.provider_root)
+            _validate_child_identity(
+                member,
+                member_record,
+                provider_root=self.provider_root,
+                require_argv=False,
+            )
             identities[member_pid] = float(created_at)
         if self.host.live(identities):
             for signum, timeout in ((signal.SIGTERM, _STOP_TIMEOUT_SECONDS), (getattr(signal, "SIGKILL", signal.SIGTERM), 3.0)):
@@ -386,6 +402,7 @@ class EverOSSyncProcess:
         process: asyncio.subprocess.Process | None = None
         group: int | None = None
         identities: dict[int, float] = {}
+        spawn_interrupted = False
         try:
             self._ownership.claim(pending)
             env = _sync_environment(
@@ -396,11 +413,13 @@ class EverOSSyncProcess:
                 nonce,
                 settings=self.settings,
             )
-            process = await self._ownership.host.spawn(
-                _ProcessKind.CASCADE_SYNC,
-                self.python,
-                cwd=self.memory_dir,
-                env=env,
+            process, spawn_interrupted = await _finish_handoff_despite_cancellation(
+                self._ownership.host.spawn(
+                    _ProcessKind.CASCADE_SYNC,
+                    self.python,
+                    cwd=self.memory_dir,
+                    env=env,
+                )
             )
             group = self._ownership.host.process_group(process.pid)
             identities = self._ownership.host.snapshot_tree(process.pid, group)
@@ -418,13 +437,16 @@ class EverOSSyncProcess:
             finalized = {**pending, "state": "finalized", "pid": process.pid, "create_time": identity.create_time, "process_group": group}
             self._ownership.finalize(finalized, nonce=nonce)
             process.send_signal(signal.SIGCONT)
-            try:
-                await asyncio.wait_for(process.wait(), timeout=self.timeout_seconds)
-                result = SyncProcessResult.COMPLETED if process.returncode == 0 else SyncProcessResult.FAILED
-            except asyncio.TimeoutError:
-                result = SyncProcessResult.TIMED_OUT
-            except asyncio.CancelledError:
+            if spawn_interrupted:
                 result = SyncProcessResult.INTERRUPTED
+            else:
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=self.timeout_seconds)
+                    result = SyncProcessResult.COMPLETED if process.returncode == 0 else SyncProcessResult.FAILED
+                except asyncio.TimeoutError:
+                    result = SyncProcessResult.TIMED_OUT
+                except asyncio.CancelledError:
+                    result = SyncProcessResult.INTERRUPTED
             identities[process.pid] = float(identity.create_time)
             await self._terminate_owned_sync_tree(
                 process,
@@ -591,30 +613,44 @@ def _validate_record(record: Mapping[str, Any], *, provider_root: Path) -> None:
         raise SyncOwnershipError("sync parent uid is invalid")
 
 
-def _validate_child_identity(identity: _ProcessIdentity, record: Mapping[str, Any], *, provider_root: Path) -> None:
+def _validate_child_identity(
+    identity: _ProcessIdentity,
+    record: Mapping[str, Any],
+    *,
+    provider_root: Path,
+    require_argv: bool = True,
+) -> None:
     expected_create = record.get("create_time")
-    if expected_create is not None and identity.create_time != float(expected_create):
-        raise SyncOwnershipError("sync child creation time does not match")
+    if expected_create is not None:
+        if identity.create_time is None:
+            raise SyncOwnershipError("sync child creation time is unavailable")
+        if identity.create_time != float(expected_create):
+            raise _SyncIdentityMismatch("sync child creation time does not match")
     uid = record.get("parent_uid")
-    getter = getattr(os, "getuid", None)
-    if uid is not None and identity.uid != int(uid):
-        raise SyncOwnershipError("sync child uid does not match")
+    if uid is not None:
+        if identity.uid is None:
+            raise SyncOwnershipError("sync child uid is unavailable")
+        if identity.uid != int(uid):
+            raise _SyncIdentityMismatch("sync child uid does not match")
     argv = record.get("argv")
-    if identity.cmdline is None or tuple(identity.cmdline) != tuple(argv):
-        raise SyncOwnershipError("sync child argv does not match")
+    if require_argv:
+        if identity.cmdline is None:
+            raise SyncOwnershipError("sync child argv is unavailable")
+        if tuple(identity.cmdline) != tuple(argv):
+            raise _SyncIdentityMismatch("sync child argv does not match")
     environment = identity.environment
     if environment is None:
         raise SyncOwnershipError("sync child environment is unavailable")
     if environment.get("EVEROS_ROOT") != str(provider_root):
-        raise SyncOwnershipError("sync child provider root does not match")
+        raise _SyncIdentityMismatch("sync child provider root does not match")
     if environment.get("AVIBE_MEMORY_CHILD_ROLE") != SYNC_ROLE:
-        raise SyncOwnershipError("sync child role does not match")
+        raise _SyncIdentityMismatch("sync child role does not match")
     if environment.get(SYNC_NONCE_ENV) != record.get("nonce"):
-        raise SyncOwnershipError("sync child nonce does not match")
+        raise _SyncIdentityMismatch("sync child nonce does not match")
     if environment.get(SYNC_PARENT_PID_ENV) != str(record.get("parent_pid")):
-        raise SyncOwnershipError("sync parent pid does not match")
+        raise _SyncIdentityMismatch("sync parent pid does not match")
     if environment.get(SYNC_PARENT_CREATE_TIME_ENV) != float(record.get("parent_create_time")).hex():
-        raise SyncOwnershipError("sync parent create-time does not match")
+        raise _SyncIdentityMismatch("sync parent create-time does not match")
     expected_uid = "" if uid is None else str(uid)
     if environment.get(SYNC_PARENT_UID_ENV) != expected_uid:
-        raise SyncOwnershipError("sync parent uid does not match")
+        raise _SyncIdentityMismatch("sync parent uid does not match")
