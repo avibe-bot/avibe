@@ -4,10 +4,12 @@ import asyncio
 import json
 import os
 import signal
+import sys
 from pathlib import Path
 
 import pytest
 
+import core.memory.process as memory_process
 import core.memory.sync_process as memory_sync_process
 from core.memory.process import _MemoryChildRole, _ProcessIdentity, _ProcessKind, _SystemProcessHost
 from core.memory.sync_process import (
@@ -75,6 +77,44 @@ def _record(root: Path, *, state: str, pid: int | None = None) -> dict[str, obje
         "role": SYNC_ROLE,
         "argv": [str(python), *SYNC_ARGV],
     }
+
+
+async def _hold_rebuild_lock(provider_root: Path) -> asyncio.subprocess.Process:
+    lock_path = memory_process._provider_rebuild_lock_path(provider_root=provider_root)
+    lock_path.parent.mkdir(mode=0o700)
+    script = "\n".join(
+        (
+            "import fcntl",
+            "import os",
+            "import sys",
+            "descriptor = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o600)",
+            "fcntl.flock(descriptor, fcntl.LOCK_EX)",
+            "print('locked', flush=True)",
+            "sys.stdin.read(1)",
+            "fcntl.flock(descriptor, fcntl.LOCK_UN)",
+            "os.close(descriptor)",
+        )
+    )
+    locker = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-c",
+        script,
+        str(lock_path),
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    assert locker.stdout is not None
+    assert await locker.stdout.readline() == b"locked\n"
+    return locker
+
+
+async def _release_rebuild_lock(locker: asyncio.subprocess.Process) -> None:
+    assert locker.stdin is not None
+    locker.stdin.write(b"\n")
+    await locker.stdin.drain()
+    locker.stdin.close()
+    assert await locker.wait() == 0
 
 
 async def test_pending_sync_record_fails_closed_without_touching_sidecar(tmp_path: Path) -> None:
@@ -391,6 +431,53 @@ async def test_handleless_spawn_failure_marks_discovered_pending_record_retryabl
     assert not sync._ownership.path.exists()
 
 
+async def test_handleless_spawn_failure_marks_uncertain_pending_record_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    python = tmp_path / "runtime" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_bytes(b"python")
+    uid = os.getuid() if hasattr(os, "getuid") else None
+    parent = _ParentIdentity(pid=99, create_time=8.25, uid=uid)
+
+    class UncertainHandlelessSpawnHost(_Host):
+        discovery_is_uncertain = True
+
+        async def spawn(self, *_args, **_kwargs):
+            raise OSError("child was created before the spawn handoff failed")
+
+        def find_syncs(self, *, provider_root, python, nonce):
+            del provider_root, python
+            assert len(nonce) == 64
+            if self.discovery_is_uncertain:
+                raise RuntimeError("sync child identity is temporarily unavailable")
+            return {}
+
+    host = UncertainHandlelessSpawnHost(
+        {
+            parent.pid: _ProcessIdentity(
+                create_time=parent.create_time,
+                cmdline=("avibe",),
+                uid=uid,
+                environment={},
+            )
+        }
+    )
+    sync = EverOSSyncProcess(python, effective_home=tmp_path / "home", _host=host)
+    monkeypatch.setattr(memory_sync_process, "_parent_identity", lambda: parent)
+
+    assert await sync.run() is SyncProcessResult.FAILED
+    record = sync._ownership.read()
+    assert record is not None
+    assert record["state"] == "pending"
+    assert record["cleanup_failed"] is True
+
+    host.discovery_is_uncertain = False
+    await sync._ownership.reconcile()
+    assert not sync._ownership.path.exists()
+
+
 async def test_sync_cleanup_runtime_error_marks_the_finalized_record(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -525,7 +612,7 @@ async def test_sync_ownership_is_shared_across_homes_for_one_provider_root(
     python.parent.mkdir(parents=True)
     python.write_bytes(b"python")
     provider_root = tmp_path / "shared" / "everos-root"
-    provider_root.parent.mkdir()
+    provider_root.parent.mkdir(mode=0o700)
     owner = EverOSSyncProcess(
         python,
         effective_home=tmp_path / "owner-home",
@@ -542,6 +629,60 @@ async def test_sync_ownership_is_shared_across_homes_for_one_provider_root(
 
     assert owner._ownership.path == contender._ownership.path
     assert await contender.run() is SyncProcessResult.ALREADY_RUNNING
+
+
+async def test_sync_serializes_with_a_held_rebuild_lock(tmp_path: Path) -> None:
+    python = tmp_path / "runtime" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_bytes(b"python")
+    provider_root = tmp_path / "shared" / "everos-root"
+    provider_root.parent.mkdir(mode=0o700)
+    provider_root.mkdir(mode=0o700)
+
+    class NoSpawnHost(_Host):
+        async def spawn(self, *_args, **_kwargs):
+            pytest.fail("sync must not spawn while rebuild owns the provider root")
+
+    locker = await _hold_rebuild_lock(provider_root)
+    sync = EverOSSyncProcess(
+        python,
+        effective_home=tmp_path / "sync-home",
+        provider_root=provider_root,
+        _host=NoSpawnHost(),
+    )
+    try:
+        with pytest.raises(memory_process._ProviderRootBusy):
+            await sync.reconcile_orphan()
+        assert await sync.run() is SyncProcessResult.ALREADY_RUNNING
+        assert not sync._ownership.path.exists()
+    finally:
+        if locker.returncode is None:
+            await _release_rebuild_lock(locker)
+
+
+async def test_sync_rejects_a_symlinked_provider_root_without_touching_target(
+    tmp_path: Path,
+) -> None:
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir(mode=0o700)
+    target = tmp_path / "provider-target"
+    target.mkdir(mode=0o700)
+    sentinel = target / "sentinel"
+    sentinel.write_text("unchanged", encoding="utf-8")
+    provider_root = memory_dir / "everos-root"
+    provider_root.symlink_to(target, target_is_directory=True)
+    sync = EverOSSyncProcess(
+        sys.executable,
+        effective_home=tmp_path,
+        provider_root=provider_root,
+        _host=_Host(),
+    )
+
+    assert await sync.run() is SyncProcessResult.FAILED
+    assert provider_root.is_symlink()
+    assert sentinel.read_text(encoding="utf-8") == "unchanged"
+    assert sorted(path.name for path in target.iterdir()) == ["sentinel"]
+    assert not sync._ownership.path.exists()
 
 
 async def test_finalized_sync_reconciliation_cleans_exact_recorded_group(tmp_path: Path) -> None:

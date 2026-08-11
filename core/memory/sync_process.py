@@ -28,9 +28,13 @@ from core.memory.process import (
     _ProcessKind,
     _ProcessIdentity,
     _ProcessHost,
+    _ProviderRootBusy,
+    _ProviderRootLock,
     _ensure_owner_directory,
+    _provider_rebuild_lock_path,
     _provider_root_coordination_path,
     _provider_roots_match,
+    _require_provider_root_access_path,
     EverOSProcessSettings,
     _memory_child_environment,
     _positive_timeout,
@@ -401,13 +405,42 @@ class EverOSSyncProcess:
         )
 
     async def reconcile_orphan(self) -> None:
-        await self._ownership.reconcile()
+        _ensure_owner_directory(self.memory_dir)
+        _require_provider_root_access_path(self.provider_root)
+        root_lock = self._provider_root_lock()
+        root_lock.acquire()
+        try:
+            await self._ownership.reconcile()
+        finally:
+            root_lock.release()
+
+    def _provider_root_lock(self) -> _ProviderRootLock:
+        lock_path = _provider_rebuild_lock_path(provider_root=self.provider_root)
+        return _ProviderRootLock(
+            confinement_root=lock_path.parent.parent,
+            path=lock_path,
+        )
 
     async def run(self) -> SyncProcessResult:
         if os.name != "posix" or self.python is None or not self.python.is_file():
             return SyncProcessResult.FAILED
+        root_lock: _ProviderRootLock | None = None
         try:
             _ensure_owner_directory(self.memory_dir)
+            _require_provider_root_access_path(self.provider_root)
+            root_lock = self._provider_root_lock()
+            root_lock.acquire()
+        except _ProviderRootBusy:
+            return SyncProcessResult.ALREADY_RUNNING
+        except Exception:
+            return SyncProcessResult.FAILED
+        try:
+            return await self._run_exclusive()
+        finally:
+            root_lock.release()
+
+    async def _run_exclusive(self) -> SyncProcessResult:
+        try:
             _ensure_owner_directory(self.memory_dir / ".rt")
             await self._ownership.reconcile()
         except SyncOwnershipError:
@@ -566,8 +599,12 @@ class EverOSSyncProcess:
                             # returned. Let this same live parent retry discovery.
                             self._ownership.mark_cleanup_failed(nonce=nonce)
                 except Exception:
-                    # Preserve the record when discovery is uncertain.
-                    pass
+                    # Preserve the record fail-closed, but let this same live
+                    # parent retry exact discovery when it becomes observable.
+                    try:
+                        self._ownership.mark_cleanup_failed(nonce=nonce)
+                    except SyncOwnershipError:
+                        pass
             return
         try:
             await self._terminate_owned_sync_tree(
