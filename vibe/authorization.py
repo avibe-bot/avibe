@@ -357,6 +357,7 @@ _REMOTE_LOCAL_ONLY_HTTP_RULES = tuple(
             "POST",
             r"^/api/sessions/[^/]+/(?:messages|attachments|cancel|queue/[^/]+/send-now)$",
         ),
+        ("POST", r"^/api/projects$"),
         ("POST", r"^/api/asr/transcribe$"),
         ("POST", r"^/api/show/sessions/[^/]+/(?:events|prewarm)$"),
         ("GET", r"^/api/settings$"),
@@ -388,10 +389,7 @@ _REMOTE_LOCAL_ONLY_HTTP_RULES = tuple(
 _REMOTE_PAYLOAD_FILTERED_HTTP_RULES = tuple(
     (method, re.compile(pattern))
     for method, pattern in (
-        (
-            "POST",
-            r"^/api/(?:config|projects|sessions)$",
-        ),
+        ("POST", r"^/api/(?:config|sessions)$"),
         ("PATCH", r"^/api/(?:projects|sessions)/[^/]+$"),
     )
 )

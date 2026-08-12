@@ -1545,11 +1545,14 @@ def test_localized_show_event_errors_follow_configured_language(
 
     conflict = localized_show_event_error("event_id_conflict")
     pending = localized_show_event_error("show_event_dispatch_pending")
+    unsupported = localized_show_event_error("unsupported_event_type")
 
     assert conflict.code == "event_id_conflict"
     assert str(conflict) == "此 Show 事件 ID 已绑定到不同的事件内容。"
     assert pending.code == "show_event_dispatch_pending"
     assert str(pending) == "Show 事件可能仍在处理中，未在本地重复提交。"
+    assert unsupported.code == "unsupported_event_type"
+    assert str(unsupported) == "Show Page 写入必须使用受支持的人类事件或标记解析类型。"
 
 
 def test_direct_dispatching_show_event_requires_acceptance_before_visibility(isolated_state):

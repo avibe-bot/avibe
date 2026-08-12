@@ -64,6 +64,7 @@ SHOW_EVENT_ERROR_I18N_KEYS = {
     "event_id_conflict": "show.event.idConflict",
     "show_event_dispatch_failed": "show.event.dispatchFailed",
     "show_event_dispatch_pending": "show.event.acceptanceUnknown",
+    "unsupported_event_type": "show.event.unsupportedEventType",
 }
 SHOW_TRIGGER_KIND = {
     "human.annotation.created": "show_annotation",

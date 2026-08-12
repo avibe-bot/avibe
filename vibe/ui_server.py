@@ -2414,8 +2414,6 @@ def _remote_payload_is_allowed(method: str, path: str, payload: Any) -> bool:
         return _payload_has_only_fields(payload, {"title"})
     if normalized_method == "PATCH" and re.fullmatch(r"/api/projects/[^/]+", path):
         return _payload_has_only_fields(payload, {"display_name"})
-    if normalized_method == "POST" and path == "/api/projects":
-        return _payload_has_only_fields(payload, {"display_name"})
     return False
 
 
@@ -8423,6 +8421,7 @@ async def sessions_bootstrap(session_id: str):
             session_id=session_id,
             limit=50,
             types=messages_service.TRANSCRIPT_TYPES,
+            authorization_context=authorization_context,
             tail=True,
         )
         from storage import message_deliveries
@@ -9092,9 +9091,14 @@ def sessions_messages_list(session_id: str):
     tail = request.args.get("tail") == "1"
 
     engine = _projects_engine()
+    authorization_context = getattr(g, "authorization_context", None)
     with engine.connect() as conn:
         try:
-            workbench_sessions_service.get_session(conn, session_id)
+            workbench_sessions_service.get_session(
+                conn,
+                session_id,
+                authorization_context=authorization_context,
+            )
         except LookupError as err:
             return jsonify({"error": str(err)}), 404
         # Chat transcript = the dialogue + turn-terminal markers. avibe turns
@@ -9114,6 +9118,7 @@ def sessions_messages_list(session_id: str):
             around_run_id=around_run_id,
             limit=limit,
             types=messages_service.TRANSCRIPT_TYPES,
+            authorization_context=authorization_context,
             tail=tail,
         )
     return jsonify(result)
@@ -9144,9 +9149,14 @@ def sessions_activity(session_id: str):
 
     group_id = request.args.get("group_id") or None
     engine = _projects_engine()
+    authorization_context = getattr(g, "authorization_context", None)
     with engine.connect() as conn:
         try:
-            workbench_sessions_service.get_session(conn, session_id)
+            workbench_sessions_service.get_session(
+                conn,
+                session_id,
+                authorization_context=authorization_context,
+            )
         except LookupError as err:
             return jsonify({"error": str(err)}), 404
         if group_id:
@@ -12252,16 +12262,7 @@ async def _show_event_response_from_payload(
         # callers keep the full supported set.
         event_type = str(payload.get("type") or "").strip()
         if event_type not in HUMAN_EVENT_TYPES and event_type != "assistant.mark.resolved":
-            return (
-                jsonify(
-                    {
-                        "ok": False,
-                        "code": "unsupported_event_type",
-                        "error": "Remote Show Page writes require a supported human event or mark resolution type.",
-                    }
-                ),
-                400,
-            )
+            return _unsupported_show_event_type_response()
     # The echo of the stored event goes back to whoever posted it, so a remote
     # author must not learn the local screenshot path from its own response.
     remote = not public and _is_remote_show_page_request()
@@ -12552,6 +12553,15 @@ def _show_event_dispatch_error() -> ShowSessionEventError:
 
 def _show_event_dispatch_pending_error() -> ShowSessionEventError:
     return localized_show_event_error("show_event_dispatch_pending")
+
+
+def _unsupported_show_event_type_response():
+    error = localized_show_event_error("unsupported_event_type")
+    return _coded_error_response(
+        error.code,
+        str(error),
+        400,
+    )
 
 
 def _load_session_message(session_id: str, message_id: str) -> dict[str, Any] | None:
@@ -13887,16 +13897,7 @@ async def serve_public_show_page(share_id, asset_path):
             payload = _sanitize_public_show_event_payload(_show_events_payload_from_request())
             event_type = str(payload.get("type") or "").strip()
             if event_type not in HUMAN_EVENT_TYPES and event_type != "assistant.mark.resolved":
-                return (
-                    jsonify(
-                        {
-                            "ok": False,
-                            "code": "unsupported_event_type",
-                            "error": "Public Show Page writes require a supported human event or mark resolution type.",
-                        }
-                    ),
-                    400,
-                )
+                return _unsupported_show_event_type_response()
             return await _show_event_response_from_payload(
                 page.session_id,
                 payload,

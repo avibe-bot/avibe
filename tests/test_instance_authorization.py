@@ -240,6 +240,7 @@ def test_remote_http_policy_defaults_local_machine_and_unknown_routes_to_local_o
         ("POST", "/api/memory/runtime/restart", REMOTE_HTTP_LOCAL_ONLY),
         ("POST", "/api/memory/clear", REMOTE_HTTP_LOCAL_ONLY),
         ("GET", "/api/projects/proj-1/agents-md", REMOTE_HTTP_LOCAL_ONLY),
+        ("POST", "/api/projects", REMOTE_HTTP_LOCAL_ONLY),
         ("GET", "/show/ses-1/", REMOTE_HTTP_ALLOWED),
         ("POST", "/show/ses-1/__show/events", REMOTE_HTTP_ALLOWED),
         ("POST", "/api/config", REMOTE_HTTP_PAYLOAD_FILTERED),

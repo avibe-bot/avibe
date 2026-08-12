@@ -1214,6 +1214,7 @@ def test_remote_session_execution_settings_are_blocked_before_store_access(
 @pytest.mark.parametrize(
     ("method", "path", "json_body"),
     [
+        ("POST", "/api/projects", {"display_name": "Remote only"}),
         ("POST", "/api/projects", {"folder_path": "/tmp/remote-project"}),
         ("PATCH", "/api/projects/proj-local", {"folder_path": "/tmp/remote-project"}),
         ("PATCH", "/api/projects/proj-local", {"agent_name": "codex"}),
@@ -2613,6 +2614,73 @@ async def test_remote_show_write_rejects_agent_provenance_event_types(
         assert _show_event_response_json(response)["code"] == "unsupported_event_type"
 
 
+async def test_show_write_unsupported_event_error_uses_request_locale(
+    monkeypatch,
+    tmp_path,
+):
+    from vibe.authorization import AuthorizationContext
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    config.language = "zh"
+    config.save()
+    remote_context = AuthorizationContext(instance_role="editor", is_remote=True)
+
+    def unexpected_store():
+        raise AssertionError("an unsupported event must not be stored")
+
+    monkeypatch.setattr(ui_server, "_show_session_event_store", unexpected_store)
+
+    with app.test_request_context(
+        "/show/ses-remote/__show/events",
+        method="POST",
+        base_url="https://alex.avibe.bot",
+        headers={"Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"},
+    ):
+        g.authorization_context = remote_context
+        response = await ui_server._show_event_response_from_payload(
+            "ses-remote",
+            {"type": "assistant.mark.created", "actor": "agent", "payload": {}},
+        )
+
+    body = _show_event_response_json(response)
+    assert body["code"] == "unsupported_event_type"
+    assert body["message"] == "Show Page 写入必须使用受支持的人类事件或标记解析类型。"
+
+
+async def test_public_show_write_unsupported_event_error_uses_request_locale(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    config.language = "zh"
+    config.save()
+
+    def unexpected_store():
+        raise AssertionError("an unsupported public event must not be stored")
+
+    monkeypatch.setattr(ui_server, "_show_session_event_store", unexpected_store)
+
+    with app.test_request_context(
+        "/show/share/shr_test/__show/events",
+        method="POST",
+        base_url="https://alex.avibe.bot",
+        headers={"Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"},
+    ):
+        response = await ui_server._show_event_response_from_payload(
+            "ses-public",
+            {"type": "assistant.mark.created", "actor": "agent", "payload": {}},
+            public=True,
+            public_share_id="shr_test",
+            allow_dispatch=False,
+        )
+
+    body = _show_event_response_json(response)
+    assert body["code"] == "unsupported_event_type"
+    assert body["message"] == "Show Page 写入必须使用受支持的人类事件或标记解析类型。"
+
+
 async def test_remote_show_write_accepts_human_event_and_mark_resolution(
     monkeypatch,
     tmp_path,
@@ -2776,6 +2844,139 @@ def test_remote_owner_can_still_read_authorized_session_history(
     ]
 
 
+def test_remote_editor_session_history_hides_inaccessible_source_provenance(
+    monkeypatch,
+    tmp_path,
+):
+    from storage import project_access_service, workbench_sessions_service
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.models import agent_runs, messages
+    from storage.settings_service import upsert_scope
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        visible_scope = upsert_scope(
+            conn,
+            platform="avibe",
+            scope_type="project",
+            native_id="proj_visible",
+            now="2026-08-04T00:00:00Z",
+        )
+        hidden_scope = upsert_scope(
+            conn,
+            platform="avibe",
+            scope_type="project",
+            native_id="proj_hidden",
+            now="2026-08-04T00:00:00Z",
+        )
+        project_access_service.apply_project_access_intent(
+            conn,
+            {
+                "project_id": "proj_visible",
+                "revision": 1,
+                "mode": "restricted",
+                "bindings": [
+                    {
+                        "principal_kind": "email",
+                        "principal_value": "editor@example.com",
+                        "access_role": "viewer",
+                    }
+                ],
+            },
+        )
+        project_access_service.apply_project_access_intent(
+            conn,
+            {
+                "project_id": "proj_hidden",
+                "revision": 1,
+                "mode": "restricted",
+                "bindings": [],
+            },
+        )
+        target_session = workbench_sessions_service.create_session(
+            conn,
+            scope_id=visible_scope,
+            agent_backend="codex",
+            agent_name="worker",
+        )
+        hidden_session = workbench_sessions_service.create_session(
+            conn,
+            scope_id=hidden_scope,
+            agent_backend="codex",
+            agent_name="worker",
+            title="Hidden Source",
+        )
+        conn.execute(
+            agent_runs.insert().values(
+                id="run_cross_project",
+                run_type="agent_run",
+                status="succeeded",
+                cancel_requested=0,
+                source_kind="agent",
+                source_actor=hidden_session["id"],
+                session_id=target_session["id"],
+                created_at="2026-08-04T00:00:01Z",
+                updated_at="2026-08-04T00:00:01Z",
+                metadata_json="{}",
+            )
+        )
+        conn.execute(
+            messages.insert().values(
+                id="msg_cross_project",
+                scope_id=visible_scope,
+                session_id=target_session["id"],
+                platform="avibe",
+                author="harness",
+                type="harness",
+                source="harness",
+                author_name="agent_run",
+                native_message_id="agent_run:run_cross_project",
+                content_text="prompt",
+                content_json="{}",
+                metadata_json="{}",
+                created_at="2026-08-04T00:00:02Z",
+                updated_at="2026-08-04T00:00:02Z",
+            )
+        )
+
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(config, "editor@example.com", "user-editor", role="editor"),
+        domain="alex.avibe.bot",
+    )
+    messages_response = client.get(
+        f"/api/sessions/{target_session['id']}/messages",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+    bootstrap_response = client.get(
+        f"/api/sessions/{target_session['id']}/bootstrap",
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+
+    assert messages_response.status_code == 200
+    messages_payload = next(
+        row for row in messages_response.get_json()["messages"] if row["id"] == "msg_cross_project"
+    )
+    assert "source_session_id" not in messages_payload
+    assert "source_session_title" not in messages_payload
+    assert "source_session_agent_name" not in messages_payload
+
+    assert bootstrap_response.status_code == 200
+    bootstrap_payload = next(
+        row for row in bootstrap_response.get_json()["messages"] if row["id"] == "msg_cross_project"
+    )
+    assert "source_session_id" not in bootstrap_payload
+    assert "source_session_title" not in bootstrap_payload
+    assert "source_session_agent_name" not in bootstrap_payload
+
+
 def test_remote_viewer_can_read_but_cannot_use_management_api(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
@@ -2819,7 +3020,7 @@ def test_remote_viewer_can_read_but_cannot_use_management_api(monkeypatch, tmp_p
     [
         ("viewer", 403, 403, 403, 200, 403, 403),
         ("editor", 200, 200, 200, 200, 400, 403),
-        ("owner", 200, 200, 200, 200, 400, 400),
+        ("owner", 200, 200, 200, 200, 400, 403),
     ],
 )
 def test_remote_instance_role_route_matrix(
