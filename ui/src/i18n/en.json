@@ -793,7 +793,7 @@
           "status": {
             "ok": "Healthy",
             "degraded": "Degraded",
-            "waiting": "All sources are cooling down",
+            "waiting": "Supply unavailable for now",
             "interrupted": "No source is available",
             "noSelection": "No model selected"
           },

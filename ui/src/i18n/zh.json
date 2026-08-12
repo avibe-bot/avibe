@@ -793,7 +793,7 @@
           "status": {
             "ok": "正常",
             "degraded": "降级",
-            "waiting": "暂时全部在冷却",
+            "waiting": "供给暂不可用",
             "interrupted": "无可用来源",
             "noSelection": "未选型号"
           },
