@@ -309,12 +309,7 @@ class ClaudeNativeSessionProvider(NativeSessionProvider):
         items.sort(key=lambda item: (-item.sort_ts, item.native_session_id))
         return items
 
-    def hydrate_preview(
-        self,
-        item: NativeResumeSession,
-        *,
-        strip_quick_replies: bool = True,
-    ) -> NativeResumeSession:
+    def hydrate_preview(self, item: NativeResumeSession) -> NativeResumeSession:
         preview = ""
         full_path_raw = str(item.locator.get("full_path") or "").strip()
         full_path = Path(full_path_raw) if full_path_raw else None
@@ -338,20 +333,12 @@ class ClaudeNativeSessionProvider(NativeSessionProvider):
                     if parts:
                         preview = "\n".join(parts)
                         break
-        assistant_preview = bool(preview)
-        if not assistant_preview:
+        if not preview:
             preview = str(
                 item.locator.get("first_prompt") or item.locator.get("history_display") or ""
             )
-        item.last_agent_message = normalize_preview_text(
-            preview,
-            strip_quick_replies=assistant_preview and strip_quick_replies,
-        )
-        item.last_agent_tail = build_tail_preview(
-            item.last_agent_message or preview or item.native_session_id,
-            strip_quick_replies=assistant_preview and strip_quick_replies,
-        )
-        item.strip_quick_replies = assistant_preview and strip_quick_replies
+        item.last_agent_message = normalize_preview_text(preview)
+        item.last_agent_tail = build_tail_preview(item.last_agent_message or preview or item.native_session_id)
         return item
 
     def get_title(

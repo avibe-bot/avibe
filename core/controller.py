@@ -387,7 +387,10 @@ class Controller:
             selected_agent_override=default_vibe_agent_name,
             named_agents_override=named_vibe_agents,
         )
-        self.model_hub_turn_gateway = ModelHubTurnGateway(self.model_hub_service)
+        self.model_hub_turn_gateway = ModelHubTurnGateway(
+            self.model_hub_service,
+            language_provider=lambda: self.config.language,
+        )
         self.model_hub_runtime = ModelHubRuntimeRouter(
             service=self.model_hub_service,
             turn_gateway=self.model_hub_turn_gateway,
@@ -486,19 +489,10 @@ class Controller:
         return result
 
     def get_native_session_service(self):
-        config = getattr(self, "config", None)
         if self.native_session_service is None:
             from modules.agents.native_sessions.service import AgentNativeSessionService
 
-            self.native_session_service = AgentNativeSessionService(
-                reply_enhancements=getattr(config, "reply_enhancements", True),
-            )
-        else:
-            self.native_session_service.reply_enhancements = getattr(
-                config,
-                "reply_enhancements",
-                True,
-            )
+            self.native_session_service = AgentNativeSessionService()
         return self.native_session_service
 
     def _create_formatter(self, platform: str):
@@ -2628,6 +2622,11 @@ class Controller:
                 raise RuntimeError(
                     "controller runtime work lane shutdown failed"
                 ) from controller_errors[0]
+
+        dispatcher = getattr(self, "message_dispatcher", None)
+        drain_activity = getattr(dispatcher, "drain_agent_run_activity", None)
+        if callable(drain_activity):
+            await drain_activity()
 
         service_stops: list[asyncio.Task[None]] = []
         for service_name in ("scheduled_task_service", "watch_service"):

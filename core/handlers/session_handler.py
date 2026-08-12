@@ -595,7 +595,10 @@ class SessionHandler(BaseHandler):
                 "Recreating cached Claude subagent SDK client for %s because avibe system prompt changed",
                 composite_key,
             )
-            await self.cleanup_session(composite_key)
+            await self._cleanup_session_locked(
+                composite_key,
+                retire_model_hub_scope=model_hub_launch.channel == "direct",
+            )
             return None
         caller_env = self._caller_env_for_context(context)
         if getattr(client, "_vibe_caller_env", {}) != caller_env:
@@ -760,11 +763,10 @@ class SessionHandler(BaseHandler):
 
         SESSION-STABLE ONLY, and that is not a shortcut. This env is baked into a Claude
         SDK client at spawn and is also the value compared to decide whether a cached
-        client may be reused, so a field that changes per turn would respawn the Agent on
-        every message, and a field that changes per author would attribute one
-        participant's definition to another. ``CallerContext.session_stable`` documents
-        both, and what a Claude-created definition therefore keeps: the conversation, not
-        the author or the individual message.
+        client may be reused, so ordinary IM author/message fields are dropped. A trusted
+        remote Workbench ACL snapshot is retained: changing remote identity or revision
+        must recreate the client rather than let one user's resource authority leak into
+        another user's turn. ``CallerContext.session_stable`` documents both cases.
         """
 
         return caller_env_for_platform_payload(
@@ -1142,10 +1144,7 @@ class SessionHandler(BaseHandler):
             return ""
         if item is None:
             return ""
-        return build_resume_preview(
-            item.last_agent_message or item.last_agent_tail,
-            strip_quick_replies=item.strip_quick_replies,
-        )
+        return build_resume_preview(item.last_agent_message or item.last_agent_tail)
 
     def _claude_runtime_generation_lock(self, composite_key: str) -> asyncio.Lock:
         return self.claude_runtime_generation_locks.setdefault(

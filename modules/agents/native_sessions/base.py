@@ -6,7 +6,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
-from core.reply_enhancer import strip_quick_reply_buttons
 from .types import BackendSessionTitle, NativeResumeSession
 
 logger = logging.getLogger(__name__)
@@ -19,12 +18,7 @@ class NativeSessionProvider(Protocol):
     def list_metadata(self, working_path: str) -> list[NativeResumeSession]:
         """Return lightweight session metadata for a working path."""
 
-    def hydrate_preview(
-        self,
-        item: NativeResumeSession,
-        *,
-        strip_quick_replies: bool = True,
-    ) -> NativeResumeSession:
+    def hydrate_preview(self, item: NativeResumeSession) -> NativeResumeSession:
         """Fill in the assistant preview text for one item."""
 
     def get_title(
@@ -37,12 +31,10 @@ class NativeSessionProvider(Protocol):
         """Return a backfillable title for a native session, if available."""
 
 
-def normalize_preview_text(text: str, *, strip_quick_replies: bool = True) -> str:
+def normalize_preview_text(text: str) -> str:
     if not text:
         return ""
     cleaned = text.replace("\r\n", "\n").replace("\r", "\n")
-    if strip_quick_replies:
-        cleaned = strip_quick_reply_buttons(cleaned)
     if "\n---\n" in cleaned:
         cleaned = cleaned.split("\n---\n", 1)[0]
     lines = [line.strip() for line in cleaned.split("\n") if line.strip()]
@@ -50,24 +42,16 @@ def normalize_preview_text(text: str, *, strip_quick_replies: bool = True) -> st
 
 
 def normalize_title_text(text: str, *, limit: int | None = None) -> str:
-    # Titles come from user prompts; button-like lines are content there, not
-    # assistant controls to strip.
-    cleaned = normalize_preview_text(text, strip_quick_replies=False)
+    cleaned = normalize_preview_text(text)
     if not cleaned:
         return ""
     return cleaned[:limit] if limit is not None else cleaned
 
 
-def normalize_multiline_preview_text(
-    text: str,
-    *,
-    strip_quick_replies: bool = True,
-) -> str:
+def normalize_multiline_preview_text(text: str) -> str:
     if not text:
         return ""
     cleaned = text.replace("\r\n", "\n").replace("\r", "\n")
-    if strip_quick_replies:
-        cleaned = strip_quick_reply_buttons(cleaned)
     if "\n---\n" in cleaned:
         cleaned = cleaned.split("\n---\n", 1)[0]
 
@@ -95,14 +79,8 @@ def trim_edge_symbols(text: str) -> str:
     return (text or "").strip(EDGE_SYMBOLS)
 
 
-def build_trailing_excerpt(
-    text: str,
-    limit: int,
-    *,
-    prefix_ellipsis: bool = True,
-    strip_quick_replies: bool = True,
-) -> str:
-    cleaned = normalize_preview_text(text, strip_quick_replies=strip_quick_replies)
+def build_trailing_excerpt(text: str, limit: int, *, prefix_ellipsis: bool = True) -> str:
+    cleaned = normalize_preview_text(text)
     if not cleaned:
         return ""
     excerpt = cleaned if len(cleaned) <= limit else cleaned[-limit:]
@@ -114,30 +92,12 @@ def build_trailing_excerpt(
     return f"...{excerpt}" if prefix_ellipsis else excerpt
 
 
-def build_tail_preview(
-    text: str,
-    limit: int = 15,
-    *,
-    strip_quick_replies: bool = True,
-) -> str:
-    return build_trailing_excerpt(
-        text,
-        limit,
-        prefix_ellipsis=True,
-        strip_quick_replies=strip_quick_replies,
-    )
+def build_tail_preview(text: str, limit: int = 15) -> str:
+    return build_trailing_excerpt(text, limit, prefix_ellipsis=True)
 
 
-def build_resume_preview(
-    text: str,
-    limit: int = 200,
-    *,
-    strip_quick_replies: bool = True,
-) -> str:
-    cleaned = normalize_multiline_preview_text(
-        text,
-        strip_quick_replies=strip_quick_replies,
-    )
+def build_resume_preview(text: str, limit: int = 200) -> str:
+    cleaned = normalize_multiline_preview_text(text)
     if not cleaned:
         return ""
     excerpt = cleaned if len(cleaned) <= limit else cleaned[-limit:]

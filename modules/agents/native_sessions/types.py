@@ -20,7 +20,6 @@ class NativeResumeSession:
     sort_ts: float
     last_agent_message: str = ""
     last_agent_tail: str = ""
-    strip_quick_replies: bool = False
     locator: dict[str, Any] = field(default_factory=dict)
 
 
