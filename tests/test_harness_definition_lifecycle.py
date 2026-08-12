@@ -29,6 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from storage import workbench_sessions_service
 from storage.background import (
+    COMMAND_TIMED_OUT_METADATA_KEY,
     DEFINITION_CYCLE_COLUMNS,
     DEFINITION_RETIREMENT_COLUMNS,
     DEFINITION_STATUS_COUNTS,
@@ -37,6 +38,7 @@ from storage.background import (
     SQLiteBackgroundTaskStore,
     TASK_RETIREMENT_SCHEDULE_CONSUMED,
     TASK_RETIREMENT_SCHEDULE_MISSED,
+    TASK_LAST_RESULT_STATUS_METADATA_KEY,
     TaskScheduleRetired,
     _id_batches,
     compute_next_run_at,
@@ -997,6 +999,64 @@ def test_a_past_one_shot_without_a_recovery_fact_stays_nonterminal(store) -> Non
     assert row["lifecycle_state"] == "finished"
     assert row["lifecycle_detail"] == "missed"
     assert row["last_run_at"] is None
+
+
+def test_schedule_missed_clears_prior_manual_result_mirrors_but_keeps_run_history(
+    store,
+) -> None:
+    """HFR-478 -- a missed schedule cannot borrow an earlier manual failure."""
+
+    _task(
+        store,
+        "missed-after-manual-failure",
+        schedule_type="at",
+        run_at=FUTURE,
+        enabled=True,
+        last_run_at=NOW,
+        last_run_id="manual-failure",
+        last_error="manual run failed",
+        last_exit_code=7,
+        metadata={
+            "keep": "definition policy",
+            COMMAND_TIMED_OUT_METADATA_KEY: False,
+            TASK_LAST_RESULT_STATUS_METADATA_KEY: "failed",
+        },
+    )
+    store.enqueue_run(
+        {
+            "id": "manual-failure",
+            "definition_id": "missed-after-manual-failure",
+            "request_type": "scheduled",
+            "source_kind": "cli",
+            "status": "failed",
+            "created_at": NOW,
+            "updated_at": NOW,
+            "completed_at": NOW,
+            "error": "manual run failed",
+            "exit_code": 7,
+        }
+    )
+
+    assert store.retire_missed_one_shot(
+        "missed-after-manual-failure",
+        expected_run_at=FUTURE,
+        expected_timezone="UTC",
+        expected_updated_at=NOW,
+        retired_at=NOW,
+    )
+
+    row = store.get_scheduled_task("missed-after-manual-failure")
+    assert row["lifecycle_detail"] == "missed"
+    assert (row["last_run_at"], row["last_run_id"]) == (None, None)
+    assert (row["last_error"], row["last_exit_code"]) == (None, None)
+    assert row["metadata"] == {"keep": "definition policy"}
+    historical = store.get_run("manual-failure")
+    assert historical is not None
+    assert (historical["status"], historical["error"], historical["exit_code"]) == (
+        "failed",
+        "manual run failed",
+        7,
+    )
 
 
 def test_pausing_a_one_shot_before_its_moment_is_a_pause(store) -> None:

@@ -2062,13 +2062,14 @@ def _task_projection_state(task: Mapping[str, object]) -> str:
     if lifecycle_state in {"waiting", "running"}:
         return "active"
     if lifecycle_state == "finished":
-        if task.get("lifecycle_detail") == "canceled":
+        lifecycle_detail = task.get("lifecycle_detail")
+        if lifecycle_detail == "canceled":
             return "canceled"
-        return (
-            "failed"
-            if task.get("lifecycle_detail") in {"timeout", "error", "missed"}
-            else "completed"
-        )
+        if lifecycle_detail in {"timeout", "error", "missed"}:
+            return "failed"
+        if lifecycle_detail == "normal":
+            return "completed"
+        return "unknown"
     if lifecycle_state == "paused":
         return "paused"
     return "unknown"

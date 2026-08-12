@@ -10645,17 +10645,116 @@ def test_hfr_478_misfire_retires_only_the_schedule_apscheduler_observed(
         "default",
         resolve_run_at(replacement_run_at, "Asia/Shanghai"),
     )
+    service.scheduler.remove_job(replacement_job_id)
     service._on_scheduler_event(missed_event)
     missed = store.refresh_task(task.id)
     assert missed is not None
     assert missed.enabled is False
     assert missed.retired_at is not None
     assert missed.retirement_reason == "schedule_missed"
+    assert service.scheduler.get_jobs() == []
+    assert task.id not in service._job_ids
     assert [
         row
         for row in service.request_store._sqlite.list_runs()
         if row["definition_id"] == task.id
     ] == []
+
+
+@pytest.mark.parametrize("replacement_schedule", ["cron", "at"])
+@pytest.mark.parametrize("event_code", ["missed", "error"])
+def test_hfr_478_stale_event_reconciles_the_current_replacement_schedule(
+    tmp_path: Path,
+    monkeypatch,
+    replacement_schedule: str,
+    event_code: str,
+) -> None:
+    """HFR-478 -- rejecting a removed DateTrigger restores current intent."""
+
+    from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_MISSED, JobExecutionEvent
+
+    _binding_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    original_run_at = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    task = store.add_task(
+        session_key="",
+        prompt="original",
+        schedule_type="at",
+        run_at=original_run_at,
+        timezone_name="UTC",
+        session_policy="create_per_run",
+    )
+    service = ScheduledTaskService(
+        controller=SimpleNamespace(platform_settings_managers={}),
+        store=store,
+        request_store=TaskExecutionStore(),
+    )
+    service.scheduler = _StubScheduler()
+    service.reconcile_jobs()
+    original_job_id = service._job_ids[task.id]
+    original_identity = service._one_shot_job_identities[original_job_id]
+    assert store.maybe_reload() is False
+
+    writer = ScheduledTaskStore()
+    current = writer.get_task(task.id)
+    assert current is not None
+    replacement_run_at = (
+        (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+        if replacement_schedule == "at"
+        else None
+    )
+    replacement = writer.update_task(
+        task.id,
+        name=current.name,
+        session_key=current.session_key,
+        session_id=current.session_id,
+        prompt="replacement",
+        schedule_type=replacement_schedule,
+        post_to=current.post_to,
+        deliver_key=current.deliver_key,
+        cron="0 * * * *" if replacement_schedule == "cron" else None,
+        run_at=replacement_run_at,
+        timezone_name="UTC",
+        agent_name=current.agent_name,
+        session_policy=current.session_policy,
+    )
+
+    # APScheduler removes a DateTrigger before publishing its terminal event.
+    service.scheduler.remove_job(original_job_id)
+    code = EVENT_JOB_ERROR if event_code == "error" else EVENT_JOB_MISSED
+    event = JobExecutionEvent(
+        code,
+        original_job_id,
+        "default",
+        resolve_run_at(original_identity[1], original_identity[2]),
+        exception=RuntimeError("stale callback") if event_code == "error" else None,
+    )
+    service._on_scheduler_event(event)
+
+    refreshed = store.refresh_task(task.id)
+    assert refreshed is not None
+    assert (refreshed.enabled, refreshed.retired_at, refreshed.schedule_type) == (
+        True,
+        None,
+        replacement_schedule,
+    )
+    assert refreshed.updated_at == replacement.updated_at
+    assert len(service.scheduler.get_jobs()) == 1
+    replacement_job_id = service._job_ids[task.id]
+    replacement_job = service.scheduler.get_job(replacement_job_id)
+    assert replacement_job is not None
+    assert replacement_job.args[0] == task.id
+    if replacement_schedule == "at":
+        assert replacement_job_id != original_job_id
+        assert tuple(replacement_job.args[1:4]) == (
+            replacement_run_at,
+            "UTC",
+            replacement.updated_at,
+        )
+    else:
+        assert replacement_job_id == task.id
+        assert tuple(replacement_job.args[1:4]) == (None, None, None)
+    assert original_job_id not in service._one_shot_job_identities
 
 
 def test_hfr_477_stale_scheduler_enqueue_cannot_consume_a_replacement_generation(

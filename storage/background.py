@@ -3437,6 +3437,17 @@ class SQLiteBackgroundTaskStore:
         """
 
         now = retired_at or _utc_now_iso()
+        metadata_without_result = case(
+            (
+                func.json_valid(run_definitions.c.metadata_json) == 1,
+                func.json_remove(
+                    run_definitions.c.metadata_json,
+                    f"$.{COMMAND_TIMED_OUT_METADATA_KEY}",
+                    f"$.{TASK_LAST_RESULT_STATUS_METADATA_KEY}",
+                ),
+            ),
+            else_=run_definitions.c.metadata_json,
+        )
         with self.engine.begin() as conn:
             result = conn.execute(
                 update(run_definitions)
@@ -3453,7 +3464,11 @@ class SQLiteBackgroundTaskStore:
                     enabled=0,
                     retired_at=now,
                     retirement_reason=TASK_RETIREMENT_SCHEDULE_MISSED,
+                    last_run_at=None,
                     last_run_id=None,
+                    last_error=None,
+                    last_exit_code=None,
+                    metadata_json=metadata_without_result,
                     updated_at=now,
                 )
             )

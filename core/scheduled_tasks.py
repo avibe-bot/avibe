@@ -1805,7 +1805,12 @@ class ScheduledTaskStore:
         task.enabled = False
         task.retired_at = _utc_now_iso()
         task.retirement_reason = TASK_RETIREMENT_SCHEDULE_MISSED
+        task.last_run_at = None
         task.last_run_id = None
+        task.last_error = None
+        task.last_exit_code = None
+        task.metadata.pop(COMMAND_TIMED_OUT_METADATA_KEY, None)
+        task.metadata.pop(TASK_LAST_RESULT_STATUS_METADATA_KEY, None)
         task.updated_at = task.retired_at
         self._save()
         return True
@@ -5657,6 +5662,11 @@ class ScheduledTaskService:
             self._job_ids.pop(task_id, None)
             self._job_signatures.pop(task_id, None)
         self._one_shot_job_identities.pop(job_id, None)
+        if not changed:
+            # refresh_task above consumed any cross-process invalidation. Return
+            # the refreshed desired row to the existing scheduler owner now that
+            # APScheduler has removed the stale DateTrigger that raised this event.
+            self.reconcile_jobs()
 
     def _recover_failed_one_shot_fire(
         self,
