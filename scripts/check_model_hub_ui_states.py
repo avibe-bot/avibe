@@ -263,7 +263,7 @@ ANY_ROUTE_RE = re.compile(r"`(GET|POST|PUT|PATCH|DELETE) (/api/[^`]*)`")
 # Candidate first, validity second. A method typo still has the unmistakable
 # shape of a route claim and must reach the route universe instead of vanishing
 # before it can be rejected.
-ROUTE_CANDIDATE_RE = re.compile(r"`([A-Za-z][A-Za-z0-9_-]*) (/api/[^`]*)`")
+ROUTE_CANDIDATE_RE = re.compile(r"`([A-Za-z][A-Za-z0-9_-]*) (/[^`\s][^`]*)`")
 
 # A method word on its own, with no path after it. `ANY_ROUTE_RE` is what the
 # route arms resolve; this is what they cannot, and the two together are how many
@@ -809,6 +809,10 @@ SECTION_RE = re.compile(r"^### (\d+\.\d+)\b")
 
 API_ROW_RE = re.compile(r"^(GET|POST|PUT|PATCH|DELETE)\s+`([^`]+)`$")
 BODY_RE = re.compile(r"`(\{[^`{}]*\})`")
+# A body claim owns every backticked brace-shaped candidate, including one
+# whose closing brace was damaged. Syntax is a property of the candidate, not
+# the condition for admitting it to the inventory.
+BODY_CANDIDATE_RE = re.compile(r"`(\{(?!\{)[^`\n]*)`")
 # A response half that spells no body names its shape instead — "→ OAuth result"
 # — and the shape gets a section of its own further down. The subject word is
 # what links the two, so it has to be a word the file capitalises: matching on
@@ -842,7 +846,8 @@ GUARD_ENVELOPE_RE = re.compile(r"every guarded [^\n]*envelope", re.I)
 # is citing a schema file"; whether that file exists is the universe's answer,
 # and `empty` is a finding. Spelled once because three extractors ask it.
 SCHEMA_FILE = r"[^`\s/]+\.schema\.json"
-SCHEMA_CITE_RE = re.compile(rf"`({SCHEMA_FILE})`")
+SCHEMA_FILE_CANDIDATE = r"[^`\s/]+\.schema(?:\.[^`\s/]*)?"
+SCHEMA_CITE_RE = re.compile(rf"`({SCHEMA_FILE_CANDIDATE})`")
 DOTTED_TOKEN_RE = re.compile(r"`([a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*)`")
 # The symbol half accepts a dotted name because `defined_symbols` produces one:
 # a method is registered as `ConfigStore.load` with `load` as its alias, and a
@@ -864,6 +869,7 @@ PRECISE_LINE_CANDIDATE_RE = re.compile(
     r"[A-Za-z0-9._-]+):([^`\s]+)`"
 )
 STATUS_RE = re.compile(r"\b(4\d\d|5\d\d)\b")
+STATUS_CANDIDATE_RE = re.compile(r"\b([45][A-Za-z0-9_-]{2,})\b")
 COUNT_WORDS = {
     "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
     "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
@@ -1026,7 +1032,10 @@ def literal_members(text: str) -> LiteralMembers:
     members: dict[str, LiteralMember] = {}
     occurrences: list[tuple[str, LiteralMember]] = []
     duplicates: list[str] = []
-    for block in JSONISH_RE.findall(text):
+    blocks = JSONISH_RE.findall(text)
+    if not blocks and text.startswith("{"):
+        blocks = [text]
+    for block in blocks:
         for part in block.strip("{}").split(","):
             declared, separator, member_type = part.partition(":")
             declared = declared.strip().strip('"').strip()
@@ -1622,41 +1631,62 @@ def registry_table(
             ((label, f"{label} has no {len(expected_header)}-column table header"),),
         )
 
-    pos, header, separator_is_valid = min(
-        candidates,
-        key=lambda candidate: (
+    def score(candidate: tuple[int, tuple[str, ...], bool]) -> int:
+        return (
             abs(len(candidate[1]) - len(expected_header))
             + sum(
                 actual.lower() != expected.lower()
                 for actual, expected in zip(candidate[1], expected_header)
             )
-        ),
-    )
+        )
+
+    best_score = min(map(score, candidates))
+    selected = [
+        candidate
+        for candidate in candidates
+        if score(candidate) == best_score or score(candidate) <= 1
+    ]
+    pos, header, _separator_is_valid = selected[0]
     header_line = numbered[pos][0]
     malformed: list[tuple[int | str, str]] = []
-    if header != expected_header:
+    if len(selected) > 1:
         malformed.append(
             (
                 header_line,
-                f"{label} header is {header!r}; expected {expected_header!r}",
+                f"{label} has {len(selected)} matching tables; expected exactly one",
             )
         )
-    if not separator_is_valid:
-        malformed.append((header_line, f"{label} header has no Markdown separator row"))
 
     rows: list[tuple[int, tuple[str, ...], str]] = []
-    row_pos = pos + (2 if separator_is_valid else 1)
-    while row_pos < len(numbered):
-        line_no, line = numbered[row_pos]
-        if not line.startswith("|"):
-            break
-        if SEPARATOR_RE.match(line.strip()):
-            malformed.append((line_no, f"{label} contains an unexpected separator row"))
+    candidate_positions = {candidate[0] for candidate in candidates}
+    for table_pos, table_header, separator_is_valid in selected:
+        table_header_line = numbered[table_pos][0]
+        if table_header != expected_header:
+            malformed.append(
+                (
+                    table_header_line,
+                    f"{label} header is {table_header!r}; expected {expected_header!r}",
+                )
+            )
+        if not separator_is_valid:
+            malformed.append(
+                (table_header_line, f"{label} header has no Markdown separator row")
+            )
+
+        row_pos = table_pos + (2 if separator_is_valid else 1)
+        while row_pos < len(numbered):
+            line_no, line = numbered[row_pos]
+            if row_pos in candidate_positions:
+                break
+            if not line.startswith("|"):
+                break
+            if SEPARATOR_RE.match(line.strip()):
+                malformed.append((line_no, f"{label} contains an unexpected separator row"))
+                row_pos += 1
+                continue
+            cells = tuple(cell.strip() for cell in line.strip().strip("|").split("|"))
+            rows.append((line_no, cells, line))
             row_pos += 1
-            continue
-        cells = tuple(cell.strip() for cell in line.strip().strip("|").split("|"))
-        rows.append((line_no, cells, line))
-        row_pos += 1
 
     return RegistryTable(header_line, header, tuple(rows), tuple(malformed))
 
@@ -2206,6 +2236,7 @@ MAPPING_HEADER_CANDIDATE_RE = re.compile(r"^\s*`([^`]+)`((?:\s*`\[[^`]+\]`)*)\s*
 MAPPING_HEADER_UNQUOTED_RE = re.compile(
     r"^\s*([A-Za-z][A-Za-z0-9_.\[\]]*)(\s+(?:`?\[[a-z-]+\]`?))?\s*$"
 )
+MAPPING_HEADER_MARKERS = frozenset({"[contract]", "[derived]", "[frame]", "[spec]"})
 LEADING_MAPPING_VALUE_RE = re.compile(r"\s*`([a-z][a-z0-9_]*)`")
 
 
@@ -2264,6 +2295,18 @@ def _mapping_scan(doc: Document) -> list[MappingScan]:
             if m:
                 candidate_columns.add(col)
                 fields[col] = (m.group(1), m.group(2))
+                unknown_markers = sorted(
+                    set(re.findall(r"`(\[[^`]+\])`", m.group(2)))
+                    - MAPPING_HEADER_MARKERS
+                )
+                if unknown_markers:
+                    malformed.append(
+                        (
+                            line_no,
+                            f"mapping header `{m.group(1)}` has unknown marker(s) "
+                            f"{', '.join('`' + marker + '`' for marker in unknown_markers)}",
+                        )
+                    )
             elif candidate := MAPPING_HEADER_CANDIDATE_RE.match(cell):
                 candidate_columns.add(col)
                 malformed.append(
@@ -2931,11 +2974,14 @@ def authority_claims(
             if hit.one["guarded"]:
                 guarded_named.setdefault(route, line_no)
 
-        for m_body in BODY_RE.finditer(scope):
+        for m_body in BODY_CANDIDATE_RE.finditer(scope):
             literal = m_body.group(1)
             scale["bodies"] += 1
             claimed = literal_members(literal)
             scale["body members"] += len(claimed.occurrences)
+            if BODY_RE.fullmatch(m_body.group(0)) is None:
+                add(f"L{line_no}", f"`{literal}` is a malformed body literal")
+                continue
             keys = set(claimed)
             if claimed.duplicates:
                 add(
@@ -3121,8 +3167,12 @@ def authority_claims(
         # fired. Same binder as the body literals, one line above.
         if named:
             excused = named if line_no in registrations else gap_excused_routes(gaps, scope)
-            for m_code in STATUS_RE.finditer(scope):
+            for m_code in STATUS_CANDIDATE_RE.finditer(scope):
                 scale["status branches"] += 1
+                status = m_code.group(1)
+                if re.fullmatch(r"[45]\d{2}", status) is None:
+                    add(f"L{line_no}", f"`{status}` is a malformed HTTP status candidate")
+                    continue
                 local_mentions = [
                     mention
                     for mention in mentions
@@ -3140,7 +3190,6 @@ def authority_claims(
                 hit = auth["routes"].resolve(route)
                 if hit.empty:
                     continue
-                status = m_code.group(1)
                 if status not in hit.one["statuses"]:
                     allowed = ", ".join(sorted(hit.one["statuses"])) or "no error status"
                     add(
@@ -3151,6 +3200,9 @@ def authority_claims(
         cited: list[tuple[int, int, str]] = []
         for m_file in SCHEMA_CITE_RE.finditer(scope):
             scale["schema citations"] += 1
+            if re.fullmatch(SCHEMA_FILE, m_file.group(1)) is None:
+                add(f"L{line_no}", f"`{m_file.group(1)}` is a malformed schema-file citation")
+                continue
             if auth["schema files"].resolve(m_file.group(1)).empty:
                 add(f"L{line_no}", f"`{m_file.group(1)}` is not a file in {CONTRACTS}")
                 continue
@@ -4123,10 +4175,10 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
 
     # ---- C ------------------------------------------------------------------
     for r in reg:
-        if len(FRAME_REF_RE.findall(r["frame"])) != 1:
-            continue
         if not r["exit"] or r["exit"] == "—":
             add("C", f"L{r['line']}", f"「{r['state']}」 has no exit")
+            continue
+        if len(FRAME_REF_RE.findall(r["frame"])) != 1:
             continue
         # And that the exit go somewhere. Class A resolves the destination of a
         # *failure* cell and has since the round that found 「F1 → Vanished

@@ -869,6 +869,58 @@ def test_model_hub_ui_gate_preserves_malformed_query_candidates(
     )
 
 
+@pytest.mark.parametrize(
+    ("scales", "before", "after", "message"),
+    [
+        (
+            ("authority: route claims",),
+            "`DELETE /api/models/sources/<source_id>/models/<model_id>` now persists",
+            "`DELETE /ap1/models/sources/<source_id>/models/<model_id>` now persists",
+            "contracted by no `api.md` route row",
+        ),
+        (
+            (
+                "authority: request/response body claims",
+                "body member candidates",
+            ),
+            "with the held `{flow_id, value}` `[contract]`",
+            "with the held `{flow_id, value` `[contract]`",
+            "malformed body literal",
+        ),
+        (
+            ("authority: guarded-status claims",),
+            "yes — the existing `force` + 409 envelope",
+            "yes — the existing `force` + 409x envelope",
+            "malformed HTTP status candidate",
+        ),
+        (
+            ("authority: schema citations",),
+            "`agent-supply.schema.json` does not",
+            "`agent-supply.schema.jso` does not",
+            "malformed schema-file citation",
+        ),
+    ],
+)
+def test_model_hub_ui_gate_authority_mutations_preserve_candidate_inventory(
+    tmp_path: Path,
+    scales: tuple[str, ...],
+    before: str,
+    after: str,
+    message: str,
+):
+    spec = Path("docs/plans/model-hub-ui-spec.md").read_text(encoding="utf-8")
+    baseline = check_model_hub_ui_states(Path.cwd())
+    assert spec.count(before) >= 1
+    mutated = tmp_path / "mutated.md"
+    mutated.write_text(spec.replace(before, after, 1), encoding="utf-8")
+
+    result = check_model_hub_ui_states(mutated, authorities=Path.cwd())
+
+    for scale in scales:
+        assert result["input_scale"][scale] == baseline["input_scale"][scale]
+    assert any(message in finding["message"] for finding in result["findings"])
+
+
 def test_model_hub_ui_gate_preserves_unquoted_mapping_table_candidate(tmp_path: Path):
     spec = Path("docs/plans/model-hub-ui-spec.md").read_text(encoding="utf-8")
     baseline = check_model_hub_ui_states(Path.cwd())
@@ -889,6 +941,27 @@ def test_model_hub_ui_gate_preserves_unquoted_mapping_table_candidate(tmp_path: 
         "unquoted field citation" in finding["message"]
         for finding in result["findings"]
     )
+
+
+def test_model_hub_ui_gate_rejects_unknown_mapping_header_marker_without_shrinking(
+    tmp_path: Path,
+):
+    spec = Path("docs/plans/model-hub-ui-spec.md").read_text(encoding="utf-8")
+    baseline = check_model_hub_ui_states(Path.cwd())
+    before = "| `Source.state.status` `[contract]` | Ink | Key |"
+    after = "| `Source.state.status` `[contracts]` | Ink | Key |"
+    assert spec.count(before) == 1
+    mutated = tmp_path / "mutated.md"
+    mutated.write_text(spec.replace(before, after, 1), encoding="utf-8")
+
+    result = check_model_hub_ui_states(mutated, authorities=Path.cwd())
+
+    for scale in (
+        "authority: mapping-table candidates",
+        "authority: contract mapping tables",
+    ):
+        assert result["input_scale"][scale] == baseline["input_scale"][scale]
+    assert any("unknown marker(s) `[contracts]`" in finding["message"] for finding in result["findings"])
 
 
 def test_model_hub_ui_gate_preserves_pathless_register_route_candidate(tmp_path: Path):
@@ -1114,6 +1187,85 @@ def test_model_hub_ui_gate_reports_duplicate_registry_identity_without_shrinking
 
     assert result["input_scale"][scale] == baseline["input_scale"][scale] + 1
     assert any(message in finding["message"] for finding in result["findings"])
+
+
+def test_model_hub_ui_gate_inventories_every_matching_registry_table(tmp_path: Path):
+    spec = Path("docs/plans/model-hub-ui-spec.md").read_text(encoding="utf-8")
+    baseline = check_model_hub_ui_states(Path.cwd())
+    treatment_header = "| # | Treatment | What the user sees |"
+    extra_table = (
+        "| Frame | State | Entry condition | Failure / pending | Copy keys | Exit |\n"
+        "| --- | --- | --- | --- | --- | --- |\n"
+        "| frame one | Phantom | condition | F5 | — | exit |\n\n"
+    )
+    assert spec.count(treatment_header) == 1
+    mutated = tmp_path / "mutated.md"
+    mutated.write_text(
+        spec.replace(treatment_header, extra_table + treatment_header, 1),
+        encoding="utf-8",
+    )
+
+    result = check_model_hub_ui_states(mutated, authorities=Path.cwd())
+
+    assert result["input_scale"]["state-register candidates"] == baseline["input_scale"][
+        "state-register candidates"
+    ] + 1
+    assert any("has 2 matching tables" in finding["message"] for finding in result["findings"])
+    assert any("malformed frame identity `frame one`" in finding["message"] for finding in result["findings"])
+
+
+def test_model_hub_ui_gate_inventories_a_damaged_additional_registry_table(
+    tmp_path: Path,
+):
+    spec = Path("docs/plans/model-hub-ui-spec.md").read_text(encoding="utf-8")
+    baseline = check_model_hub_ui_states(Path.cwd())
+    treatment_header = "| # | Treatment | What the user sees |"
+    extra_table = (
+        "| Frame | State name | Entry condition | Failure / pending | Copy keys | Exit |\n"
+        "| --- | --- | --- | --- | --- | --- |\n"
+        "| §1.0 | Phantom | condition | F5 | — | exit |\n\n"
+    )
+    assert spec.count(treatment_header) == 1
+    mutated = tmp_path / "mutated.md"
+    mutated.write_text(
+        spec.replace(treatment_header, extra_table + treatment_header, 1),
+        encoding="utf-8",
+    )
+
+    result = check_model_hub_ui_states(mutated, authorities=Path.cwd())
+
+    assert result["input_scale"]["state-register candidates"] == baseline["input_scale"][
+        "state-register candidates"
+    ] + 1
+    assert any("has 2 matching tables" in finding["message"] for finding in result["findings"])
+    assert any("State name" in finding["message"] for finding in result["findings"])
+
+
+def test_model_hub_ui_gate_validates_shared_frame_exit_before_frame_resolution(
+    tmp_path: Path,
+):
+    spec = Path("docs/plans/model-hub-ui-spec.md").read_text(encoding="utf-8")
+    baseline = check_model_hub_ui_states(Path.cwd())
+    row = next(
+        line
+        for line in spec.splitlines()
+        if line.startswith("| §1.6 / §1.9 / §1.10 / §1.11 | Committed projection stale")
+    )
+    cells = row.split("|")
+    cells[-2] = " — "
+    mutated = tmp_path / "mutated.md"
+    mutated.write_text(spec.replace(row, "|".join(cells), 1), encoding="utf-8")
+
+    result = check_model_hub_ui_states(mutated, authorities=Path.cwd())
+
+    assert result["input_scale"]["state-register candidates"] == baseline["input_scale"][
+        "state-register candidates"
+    ]
+    assert any(
+        "Committed projection stale" in finding["message"]
+        and "has no exit" in finding["message"]
+        for finding in result["findings"]
+    )
 
 
 def test_model_hub_ui_gate_reports_duplicate_body_members_before_type_comparison(
