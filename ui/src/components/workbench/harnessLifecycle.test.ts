@@ -131,8 +131,8 @@ describe('definitionFailureSummaryKey', () => {
     ],
     [
       'watch timeout',
-      { lifecycle_detail: 'timeout', last_exit_code: 124, last_error: 'permission denied' },
-      'harness.failure.timeout',
+      { lifecycle_state: 'finished', lifecycle_detail: 'timeout', retry_exit_codes: [], last_exit_code: 124, last_error: 'permission denied' },
+      'harness.failure.generic',
     ],
     [
       'task nonzero exit',
@@ -154,9 +154,13 @@ describe('definitionFailureSummaryKey', () => {
 
   it('does not let stderr wording change the category', () => {
     const facts = { last_exit_code: 9, lifecycle_detail: 'error' };
-    expect(definitionFailureSummaryKey({ ...facts, last_error: 'timed out' })).toBe(
-      definitionFailureSummaryKey({ ...facts, last_error: 'command not found' }),
-    );
+    const classify = (lastError: string) => definitionFailureSummaryKey({ ...facts }, Boolean(lastError));
+    expect(classify('timed out')).toBe(classify('command not found'));
+  });
+
+  it('uses only error presence for an otherwise unknown failure', () => {
+    expect(definitionFailureSummaryKey({ health: 'healthy' }, true)).toBe('harness.failure.generic');
+    expect(definitionFailureSummaryKey({ health: 'healthy' }, false)).toBeNull();
   });
 
   it('does not turn technical text into a failure when structured facts say healthy', () => {
@@ -191,10 +195,12 @@ describe('definitionFailureSummaryKey', () => {
 
 describe('definitionHasNeutralWatchExit', () => {
   it.each([
-    ['no-event completion', { last_exit_code: 64, retry_exit_codes: [] }, true],
-    ['default retry exit', { last_exit_code: 75, retry_exit_codes: [75] }, true],
-    ['custom retry exit', { last_exit_code: 90, retry_exit_codes: [75, 90] }, true],
-    ['unconfigured watch exit', { last_exit_code: 9, retry_exit_codes: [75] }, false],
+    ['no-event completion', { health: 'healthy', lifecycle_state: 'waiting', lifecycle_detail: null, last_exit_code: 64, retry_exit_codes: [] }, true],
+    ['default retry exit', { health: 'healthy', lifecycle_state: 'waiting', lifecycle_detail: null, last_exit_code: 75, retry_exit_codes: [75] }, true],
+    ['custom retry exit', { health: 'healthy', lifecycle_state: 'waiting', lifecycle_detail: null, last_exit_code: 90, retry_exit_codes: [75, 90] }, true],
+    ['terminal retry exit', { health: 'failing', lifecycle_state: 'finished', last_exit_code: 1, retry_exit_codes: [1] }, false],
+    ['unconfigured watch exit', { health: 'healthy', lifecycle_state: 'waiting', lifecycle_detail: null, last_exit_code: 9, retry_exit_codes: [75] }, false],
+    ['finished error with no-event code', { health: 'healthy', lifecycle_state: 'finished', lifecycle_detail: 'error', last_exit_code: 64, retry_exit_codes: [] }, false],
     ['task exit without watch evidence', { last_exit_code: 75 }, false],
   ] as const)('classifies %s from structured fields', (_name, row, expected) => {
     expect(definitionHasNeutralWatchExit(row)).toBe(expected);

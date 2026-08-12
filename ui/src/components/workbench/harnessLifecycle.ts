@@ -352,11 +352,28 @@ export type HarnessDefinitionFacts = {
 export type HarnessFailureSummaryKey = 'harness.failure.timeout' | 'harness.failure.generic';
 
 export function definitionHasNeutralWatchExit(
-  row: Pick<HarnessDefinitionFacts, 'last_exit_code' | 'retry_exit_codes'>,
+  row: Pick<HarnessDefinitionFacts, 'health' | 'lifecycle_detail' | 'last_exit_code' | 'retry_exit_codes'>,
 ): boolean {
   if (!Array.isArray(row.retry_exit_codes)) return false;
+  // A terminal pre-cycle failure (for example a missing cwd) can reuse the
+  // configured code, but its projected health must remain visible. A healthy
+  // once-watch may be finished after a successful no-event cycle, so lifecycle
+  // state is intentionally not required here.
+  if (row.health !== 'healthy') return false;
+  if (row.lifecycle_detail != null && row.lifecycle_detail !== 'normal') return false;
   const exitCode = row.last_exit_code;
   return exitCode === 64 || (typeof exitCode === 'number' && row.retry_exit_codes.includes(exitCode));
+}
+
+function definitionIsCircuitPaused(
+  row: Pick<HarnessDefinitionFacts, 'lifecycle_state' | 'metadata'>,
+): boolean {
+  return (
+    row.lifecycle_state === 'paused' &&
+    row.metadata?.watch_circuit_breaker != null &&
+    typeof row.metadata.watch_circuit_breaker === 'object' &&
+    (row.metadata.watch_circuit_breaker as { status?: unknown }).status === 'tripped'
+  );
 }
 
 // The UI can only name a timeout when the scheduler's structured fact or the
@@ -366,10 +383,16 @@ export function definitionHasNeutralWatchExit(
 export function definitionFailureSummaryKey(
   row: Pick<
     HarnessDefinitionFacts,
-    'health' | 'lifecycle_detail' | 'last_exit_code' | 'metadata' | 'retry_exit_codes'
+    'health' | 'lifecycle_detail' | 'lifecycle_state' | 'last_exit_code' | 'metadata' | 'retry_exit_codes'
   >,
+  technicalErrorPresent = false,
 ): HarnessFailureSummaryKey | null {
-  const timedOut = row.metadata?.last_command_timed_out === true || row.lifecycle_detail === 'timeout';
+  if (definitionIsCircuitPaused(row)) return null;
+  const isWatch = Array.isArray(row.retry_exit_codes);
+  // A Watch lifecycle timeout can be its overall lifetime expiring before a
+  // cycle starts. Only the scheduler's explicit command fact proves a run timed
+  // out; insufficiently evidenced Watch endings stay in the generic category.
+  const timedOut = row.metadata?.last_command_timed_out === true || (!isWatch && row.lifecycle_detail === 'timeout');
   const exitCode = row.last_exit_code;
   const successfulWatchExit = definitionHasNeutralWatchExit(row);
   const lifecycleFailure =
@@ -379,6 +402,7 @@ export function definitionFailureSummaryKey(
     (row.health === 'failing' && !successfulWatchExit) ||
     lifecycleFailure ||
     (typeof exitCode === 'number' && exitCode !== 0 && !successfulWatchExit);
+  if (!failed && technicalErrorPresent && !successfulWatchExit) return 'harness.failure.generic';
   if (!failed) return null;
   return timedOut ? 'harness.failure.timeout' : 'harness.failure.generic';
 }
@@ -386,7 +410,7 @@ export function definitionFailureSummaryKey(
 export function definitionExitCodeTone(
   row: Pick<
     HarnessDefinitionFacts,
-    'health' | 'lifecycle_detail' | 'last_exit_code' | 'metadata' | 'retry_exit_codes'
+    'health' | 'lifecycle_detail' | 'lifecycle_state' | 'last_exit_code' | 'metadata' | 'retry_exit_codes'
   >,
 ): 'neutral' | 'failure' {
   if (definitionHasNeutralWatchExit(row)) return 'neutral';

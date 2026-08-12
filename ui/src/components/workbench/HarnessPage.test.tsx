@@ -102,6 +102,7 @@ const watch = (overrides: Partial<HarnessWatch>): HarnessWatch => ({
   last_event_at: null,
   last_error: null,
   last_exit_code: null,
+  metadata: {},
   lifecycle_state: 'paused',
   lifecycle_detail: null,
   next_run_at: null,
@@ -448,6 +449,25 @@ describe('HealthBadge', () => {
 
     expect(html).toContain(`title="${en.harness.failure.generic}"`);
     expect(html).not.toContain(raw);
+  });
+
+  it('does not turn a circuit-breaker pause into an ordinary failure tooltip', () => {
+    const html = render(
+      <HealthBadge
+        row={watch({
+          health: 'failing',
+          consecutive_failures: 1,
+          recent_failures: 1,
+          lifecycle_state: 'paused',
+          metadata: { watch_circuit_breaker: { status: 'tripped' } },
+          last_exit_code: 0,
+          last_error: 'localized circuit pause detail',
+        })}
+      />,
+    );
+
+    expect(html).not.toContain(`title="${en.harness.failure.generic}"`);
+    expect(html).not.toContain('localized circuit pause detail');
   });
 });
 
@@ -884,7 +904,7 @@ describe('WatchDetail runtime', () => {
     expect(html).toContain(`>${i18n.t('harness.processingHealth.unknown')}<`);
   });
 
-  it('shows timeout as translated copy and keeps raw diagnostics collapsed', () => {
+  it('keeps an insufficiently evidenced Watch timeout generic and technical details collapsed', () => {
     const raw = 'localized-looking stderr must stay technical';
     const html = render(
       <WatchDetail
@@ -899,7 +919,8 @@ describe('WatchDetail runtime', () => {
       />,
     );
 
-    expect(html).toContain(en.harness.failure.timeout);
+    expect(html).toContain(en.harness.failure.generic);
+    expect(html).not.toContain(en.harness.failure.timeout);
     expect(html).toContain(`>${en.harness.detail.lastExitCode}<`);
     expect(html).toContain('>124<');
     expect(html).toContain(`>${en.harness.detail.technicalDetails}<`);
@@ -914,8 +935,9 @@ describe('WatchDetail runtime', () => {
           watch={watch({
             enabled: true,
             retry_exit_codes: [75],
-            health: 'failing',
-            lifecycle_detail: 'error',
+            health: 'healthy',
+            lifecycle_state: 'waiting',
+            lifecycle_detail: null,
             last_exit_code,
           })}
           onToggleEnabled={() => undefined}
@@ -934,7 +956,8 @@ describe('WatchDetail runtime', () => {
           enabled: true,
           retry_exit_codes: [75],
           health: 'healthy',
-          lifecycle_detail: 'error',
+          lifecycle_state: 'waiting',
+          lifecycle_detail: null,
           last_exit_code: 75,
           last_error: raw,
         })}
@@ -946,6 +969,74 @@ describe('WatchDetail runtime', () => {
     expect(html).not.toContain(en.harness.failure.generic);
     expect(html).toContain(`<span class="font-mono text-[11px] text-muted">75</span>`);
     expect(html).toContain(`>${en.harness.detail.technicalDetails}<`);
+    expect(html).toContain(raw);
+    expect(html).toMatch(/<details(?![^>]*\bopen\b)[^>]*>/);
+  });
+
+  it('keeps a terminal missing-cwd retry exit as a failure', () => {
+    const raw = 'working directory is unavailable';
+    const html = render(
+      <WatchDetail
+        watch={watch({
+          enabled: false,
+          retry_exit_codes: [1],
+          health: 'failing',
+          lifecycle_state: 'finished',
+          lifecycle_detail: 'error',
+          last_exit_code: 1,
+          last_error: raw,
+        })}
+        onToggleEnabled={() => undefined}
+        pending={false}
+      />,
+    );
+
+    expect(html).toContain(en.harness.failure.generic);
+    expect(html).toContain('<span class="font-mono text-[11px] text-pink">1</span>');
+    expect(html).toContain(raw);
+    expect(html).toMatch(/<details(?![^>]*\bopen\b)[^>]*>/);
+  });
+
+  it('does not call a Watch lifetime expiry a run timeout', () => {
+    const html = render(
+      <WatchDetail
+        watch={watch({
+          enabled: false,
+          health: 'failing',
+          lifecycle_state: 'finished',
+          lifecycle_detail: 'timeout',
+          last_exit_code: 124,
+          last_error: 'watch lifetime expired before the next cycle',
+        })}
+        onToggleEnabled={() => undefined}
+        pending={false}
+      />,
+    );
+
+    expect(html).toContain(en.harness.failure.generic);
+    expect(html).not.toContain(en.harness.failure.timeout);
+  });
+
+  it('keeps a circuit-breaker pause explanation technical without a false run failure', () => {
+    const raw = 'Watch paused after rapid event burst';
+    const html = render(
+      <WatchDetail
+        watch={watch({
+          enabled: false,
+          health: 'failing',
+          lifecycle_state: 'paused',
+          lifecycle_detail: null,
+          last_exit_code: 0,
+          last_error: raw,
+          metadata: { watch_circuit_breaker: { status: 'tripped', exit_code: 0 } },
+        })}
+        onToggleEnabled={() => undefined}
+        pending={false}
+      />,
+    );
+
+    expect(html).not.toContain(en.harness.failure.generic);
+    expect(html).not.toContain(en.harness.failure.timeout);
     expect(html).toContain(raw);
     expect(html).toMatch(/<details(?![^>]*\bopen\b)[^>]*>/);
   });
