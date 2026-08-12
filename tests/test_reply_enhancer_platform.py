@@ -1950,12 +1950,34 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(enhanced.text, "report")
         self.assertEqual([file.path for file in enhanced.files], ["/tmp/a>b.md"])
 
+    def test_angle_wrapped_file_links_allow_unbalanced_parentheses(self):
+        enhanced = process_reply(r"[draft](<file:///tmp/draft (v1.txt>)")
+
+        self.assertEqual(enhanced.text, "draft")
+        self.assertEqual([file.path for file in enhanced.files], ["/tmp/draft (v1.txt"])
+
+    def test_angle_wrapped_file_links_unescape_before_percent_decoding(self):
+        enhanced = process_reply(r"[literal](<file:///tmp/a%5C%3Eb.txt>)")
+
+        self.assertEqual(enhanced.text, "literal")
+        self.assertEqual([file.path for file in enhanced.files], [r"/tmp/a\>b.txt"])
+
+    def test_angle_wrapped_file_links_ignore_escaped_openers(self):
+        escaped = process_reply(r"\[example](<file:///tmp/report.txt>)")
+        even_escaped = process_reply(r"\\[example](<file:///tmp/report.txt>)")
+
+        self.assertEqual(escaped.text, r"\[example](<file:///tmp/report.txt>)")
+        self.assertEqual(escaped.files, [])
+        self.assertEqual(even_escaped.text, r"\\example")
+        self.assertEqual([file.path for file in even_escaped.files], ["/tmp/report.txt"])
+
     def test_angle_wrapped_file_links_reject_malformed_markdown_and_code(self):
         specimens = [
             "[missing close](<file:///tmp/report.md)",
             "[extra angle](<file:///tmp/report>copy.md>)",
             "[extra open](<<file:///tmp/report.md>>)",
             "[missing label close(<file:///tmp/report.md>)",
+            "[missing close](<file://" + "a" * 10000,
             "`[inline](<file:///tmp/report.md>)`",
             "```markdown\n[fenced](<file:///tmp/report.md>)\n```",
         ]

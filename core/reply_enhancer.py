@@ -147,7 +147,10 @@ class EnhancedReply:
 # The lookahead validates the complete destination form before the shared URL
 # capture consumes it, keeping malformed or half-paired brackets unmatched.
 _BARE_FILE_URI = r"file://(?:[^()]+|\([^)]*\))+"
-_ANGLE_FILE_URI = r"file://(?:\\[<>]|[^()<>\\\r\n]+|\([^)]*\))+"
+# Pointy destinations may contain spaces and unbalanced parentheses. Each
+# repetition begins with either a non-backslash or a backslash, keeping
+# malformed input linear while allowing escaped angle brackets.
+_ANGLE_FILE_URI = r"file://(?:[^\\<>\r\n]|\\[^\r\n])+"
 _FILE_LINK_RE = re.compile(
     rf"(!?)\[([^\]]*)\]\("
     rf"(?=(?:<{_ANGLE_FILE_URI}>|{_BARE_FILE_URI})\))"
@@ -313,7 +316,7 @@ def _file_uri_to_local_path(parsed) -> str:
     """Convert a parsed file URI into a local path for the current OS."""
     # CommonMark pointy destinations permit backslash-escaped angle brackets;
     # those escapes are Markdown syntax, not part of the local filename.
-    path = re.sub(r"\\([<>])", r"\1", unquote(parsed.path))
+    path = unquote(re.sub(r"\\([<>])", r"\1", parsed.path))
     if os.name != "nt":
         return path
 
@@ -377,8 +380,19 @@ def _file_link_matches(
             masked_match.start(),
             masked_match.end(),
         )
-        if original_match is not None:
-            matches.append(original_match)
+        if original_match is None:
+            continue
+        bracket_start = original_match.start() + (
+            1 if original_match.group(1) else 0
+        )
+        backslash_count = 0
+        cursor = bracket_start - 1
+        while cursor >= 0 and text[cursor] == "\\":
+            backslash_count += 1
+            cursor -= 1
+        if backslash_count % 2:
+            continue
+        matches.append(original_match)
     return matches
 
 
