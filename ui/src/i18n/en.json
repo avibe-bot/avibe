@@ -1812,6 +1812,11 @@
       "newFolderName": "Folder name"
     }
   },
+  "configRecovery": {
+    "title": "Configuration repair required",
+    "body": "Avibe recovered part of the configuration and preserved the original file. Repair it before changing settings.",
+    "action": "Diagnostics"
+  },
   "appShell": {
     "title": "Avibe",
     "subtitle": "Agent OS · Workbench",

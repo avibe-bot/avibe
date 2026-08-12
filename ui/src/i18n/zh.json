@@ -1812,6 +1812,11 @@
       "newFolderName": "文件夹名称"
     }
   },
+  "configRecovery": {
+    "title": "配置需要修复",
+    "body": "Avibe 已恢复部分配置并保留原文件。请先修复，再修改设置。",
+    "action": "诊断"
+  },
   "appShell": {
     "title": "Avibe",
     "subtitle": "Agent OS · 工作台",

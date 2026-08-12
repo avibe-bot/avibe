@@ -214,6 +214,10 @@
       "message": "Agent routing changed while these settings were open.",
       "hint": "Reload the settings and apply your change again."
     },
+    "configRecovery": {
+      "beforeAuth": "Config was loaded with recovery warnings; repair the backed-up config before changing backend credentials",
+      "action": "Review the preserved config backup and repair it before changing settings."
+    },
     "scopeAgentUnavailable": {
       "message": "Agent `{agent}` is unavailable for this route.",
       "hint": "Choose an enabled Agent and apply the setting again."

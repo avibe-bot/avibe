@@ -10712,13 +10712,26 @@ def _doctor(*, deep: bool = False):
     config = None
     try:
         config = V2Config.load(config_path)
-        config_items.append(
-            {
-                "status": "pass",
-                "message": "Configuration loaded successfully",
-            }
-        )
-        summary["pass"] += 1
+        if config.load_warnings:
+            recovery_notice = api.config_recovery_notice(config)
+            if recovery_notice:
+                recovery_language = getattr(config, "language", "en") or "en"
+                _add_doctor_item(
+                    config_items,
+                    "warn",
+                    recovery_notice,
+                    i18n_t("error.configRecovery.action", recovery_language),
+                    code="config.recovery",
+                )
+                summary["warn"] += 1
+        else:
+            config_items.append(
+                {
+                    "status": "pass",
+                    "message": "Configuration loaded successfully",
+                }
+            )
+            summary["pass"] += 1
     except Exception as exc:
         config_items.append(
             {
