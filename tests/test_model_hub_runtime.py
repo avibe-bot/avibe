@@ -1869,7 +1869,7 @@ def test_engine_client_rejects_non_sse_stream_before_forwarding(
         ),
         (
             "openai_chat",
-            b'data: {"object":"chat.completion.chunk","type":"error","error":'
+            b'data: {"object":"chat.completion.chunk","error":'
             b'{"type":"permission_error","message":"denied"},"choices":[]}\n\n',
             RawOutcomeKind.HTTP_ERROR,
         ),
@@ -1945,6 +1945,64 @@ def test_engine_client_requires_a_protocol_terminal_event_before_clean_eof(
         else:
             assert outcome.error_code is None
             assert decision.reason == "network"
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("invalid_type", [None, [], {}])
+def test_engine_client_rejects_non_string_stream_event_types(
+    monkeypatch: pytest.MonkeyPatch,
+    invalid_type: object,
+) -> None:
+    async def run() -> None:
+        first = (
+            b"event: response.completed\ndata: "
+            + json.dumps({"type": invalid_type}, separators=(",", ":")).encode()
+            + b"\n\n"
+        )
+
+        class Content:
+            async def read(self, _size: int) -> bytes:
+                return first
+
+            async def iter_chunked(self, _size: int):
+                if False:
+                    yield b""
+
+        class Response:
+            status = 200
+            content = Content()
+            headers = {"Content-Type": "text/event-stream"}
+
+            def close(self) -> None:
+                return None
+
+        class Session:
+            async def post(self, *_args, **_kwargs):
+                return Response()
+
+            async def close(self) -> None:
+                return None
+
+        monkeypatch.setattr(client_module.aiohttp, "ClientSession", lambda **_: Session())
+        source = SourceRecord(
+            source_id="src_fixture123",
+            vendor="custom",
+            protocol="openai_responses",
+            base_url="https://api.example.test/v1",
+            credential_ref="cred_fixture123",
+            allowed_origins=(),
+            model_ids=("model-a",),
+            prefix="source-fixture123",
+        )
+        handle = await EngineClient(EngineConnection("http://127.0.0.1:15220", "management", "gateway")).invoke(
+            source, "model-a", {}, stream=True
+        )
+        assert handle.stream is not None
+        assert [chunk async for chunk in handle.stream] == [first]
+        outcome = await handle.outcome()
+        assert outcome.kind is RawOutcomeKind.PROTOCOL_ERROR
+        assert outcome.error_code is None
 
     asyncio.run(run())
 
@@ -2074,6 +2132,22 @@ def test_engine_error_fields_preserve_nested_candidates(
     else:
         assert decision.action == "fallback"
         assert decision.reason == "server_error"
+
+
+def test_engine_error_fields_ignore_machine_codes_outside_the_trusted_envelope() -> None:
+    payload = json.dumps(
+        {
+            "error": {"type": "api_error"},
+            "request": {"type": "permission_error"},
+            "metadata": {"code": "permission_error"},
+        }
+    ).encode()
+
+    raw_type, raw_code, candidates = client_module._raw_error_fields(payload)
+
+    assert raw_type == "api_error"
+    assert raw_code is None
+    assert candidates == ("api_error",)
 
 
 @pytest.mark.parametrize(

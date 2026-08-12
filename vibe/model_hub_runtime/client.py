@@ -20,7 +20,12 @@ from core.handlers.model_hub.adapter import (
     RawOutcomeKind,
 )
 from core.handlers.model_hub.classification import UPSTREAM_MACHINE_ERROR_CODES
-from core.handlers.model_hub.stream_wire import ProtocolSSEState, SSEFrameLimitError
+from core.handlers.model_hub.stream_wire import (
+    PROTOCOL_STREAM_TAXONOMY,
+    ErrorEnvelopePath,
+    ProtocolSSEState,
+    SSEFrameLimitError,
+)
 from vibe.model_hub_runtime.state import SourceRecord
 
 
@@ -208,7 +213,10 @@ class EngineClient:
                     )
                 except (_ResponseTooLargeError, asyncio.TimeoutError, aiohttp.ClientError):
                     payload = b""
-                error_type, error_code, error_candidates = _raw_error_fields(payload)
+                error_type, error_code, error_candidates = _raw_error_fields(
+                    payload,
+                    PROTOCOL_STREAM_TAXONOMY[request_protocol].buffered_error_envelope_paths,
+                )
                 outcome = _outcome(
                     kind=RawOutcomeKind.HTTP_ERROR,
                     source=source,
@@ -601,6 +609,15 @@ def _observed_stream_terminal_outcome(
             message="upstream emitted data after a protocol terminal event",
             stream_started=True,
         )
+    if wire_state.invalid_protocol_shape:
+        return _outcome(
+            kind=RawOutcomeKind.PROTOCOL_ERROR,
+            source=source,
+            model_id=model_id,
+            http_status=http_status,
+            message="upstream emitted an invalid protocol event shape",
+            stream_started=True,
+        )
     if wire_state.terminal_outcome == "served":
         return _outcome(
             kind=RawOutcomeKind.SUCCESS,
@@ -610,7 +627,10 @@ def _observed_stream_terminal_outcome(
             stream_started=True,
         )
     if wire_state.terminal_outcome == "failed_terminal":
-        error_type, error_code, candidates = _raw_error_fields(wire_state.error_payload or b"")
+        error_type, error_code, candidates = _raw_error_fields(
+            wire_state.error_payload or b"",
+            wire_state.error_envelope_paths,
+        )
         return _outcome(
             kind=RawOutcomeKind.HTTP_ERROR,
             source=source,
@@ -675,7 +695,10 @@ def _endpoint_for_protocol(protocol: str) -> str:
     raise ValueError("unsupported source protocol")
 
 
-def _raw_error_fields(payload: bytes) -> tuple[str | None, str | None, tuple[str, ...]]:
+def _raw_error_fields(
+    payload: bytes,
+    envelope_paths: tuple[ErrorEnvelopePath, ...] = (("error",),),
+) -> tuple[str | None, str | None, tuple[str, ...]]:
     try:
         decoded = json.loads(payload.decode("utf-8"))
     except (UnicodeDecodeError, ValueError):
@@ -684,23 +707,21 @@ def _raw_error_fields(payload: bytes) -> tuple[str | None, str | None, tuple[str
         return None, None, ()
     types: list[str] = []
     codes: list[str] = []
-
-    def visit(value: object) -> None:
-        if isinstance(value, list):
-            for nested in value:
-                visit(nested)
-            return
-        if not isinstance(value, dict):
-            return
-        for key, nested in value.items():
-            safe_value = _safe_error_code(nested)
-            if key == "type" and safe_value is not None:
-                types.append(safe_value)
-            elif key == "code" and safe_value is not None:
-                codes.append(safe_value)
-            visit(nested)
-
-    visit(decoded)
+    for path in envelope_paths:
+        envelope: object = decoded
+        for component in path:
+            if not isinstance(envelope, Mapping) or component not in envelope:
+                envelope = None
+                break
+            envelope = envelope[component]
+        if not isinstance(envelope, Mapping):
+            continue
+        error_type = _safe_error_code(envelope["type"]) if "type" in envelope else None
+        error_code = _safe_error_code(envelope["code"]) if "code" in envelope else None
+        if error_type is not None:
+            types.append(error_type)
+        if error_code is not None:
+            codes.append(error_code)
     candidates = tuple(dict.fromkeys((*types, *codes)))
     return (types[0] if types else None, codes[0] if codes else None, candidates)
 

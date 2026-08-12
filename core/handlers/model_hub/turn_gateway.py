@@ -23,6 +23,7 @@ from .adapter import (
     RawCallOutcome,
     RawOutcomeKind,
 )
+from .classification import ResolutionDecision
 from .provenance import (
     BoundedProvenanceStore,
     ENGINE_DOWN_TURN_OUTCOME,
@@ -83,6 +84,7 @@ class _TurnExecution:
     settlement_task: asyncio.Task[tuple[RawCallOutcome | None, HandleSettlement]] | None = None
     settlement_origin: HandleTerminationOrigin | None = None
     settlement_recorded: bool = False
+    terminal_fact_committed: bool = False
 
 
 class _SSEWireState(ProtocolSSEState):
@@ -142,7 +144,7 @@ class ModelHubTurnGateway:
             "Abandoned Model Hub turn resource after the engine transport deadline",
             extra={"phase": phase, "turn_id": terminalizer.turn_id},
         )
-        if execution.settlement_recorded:
+        if execution.settlement_recorded or execution.terminal_fact_committed:
             return None
         terminalizer.engine_down()
         execution.settlement_origin = "upstream_terminal"
@@ -722,14 +724,21 @@ class ModelHubTurnGateway:
             if handle is not None and handle.outcome_available
             else None
         )
+        def record_attempt(
+            terminal_outcome: RawCallOutcome,
+            decision: ResolutionDecision,
+        ) -> None:
+            terminalizer.finish_attempt(
+                outcome=terminal_outcome,
+                decision=decision,
+            )
+            execution.terminal_fact_committed = True
+
         settlement = await self.service.settle_handle_outcome(
             resolved,
             outcome,
             termination_origin=termination_origin,
-            record_attempt=lambda terminal_outcome, decision: terminalizer.finish_attempt(
-                outcome=terminal_outcome,
-                decision=decision,
-            ),
+            record_attempt=record_attempt,
         )
         if termination_origin == "downstream_cancel":
             return settlement.outcome, settlement

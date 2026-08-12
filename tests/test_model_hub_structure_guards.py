@@ -15,6 +15,7 @@ from core.handlers.model_hub.stream_wire import (
     SSE_LINE_ENDINGS,
     SSEFrameLimitError,
     SSEFrameTokenizer,
+    ProtocolTerminalEnvelope,
     ProtocolSSEState,
     ProtocolStreamTaxonomy,
 )
@@ -53,28 +54,98 @@ E64_SETTLEMENT_BOUNDARIES = json.loads((FIXTURES / "e64_settlement_boundaries.js
 # - https://platform.openai.com/docs/api-reference/responses-streaming
 # - https://platform.openai.com/docs/api-reference/realtime-server-events/response/done
 # - https://platform.openai.com/docs/api-reference/chat/create#chat-create-stream
-STREAM_ACCEPTANCE_FIXTURES = {
-    "anthropic": {
-        "served": (("message_stop", b'{"type":"message_stop"}'),),
-        "failed_terminal": (("error", b'{"type":"error","error":{"type":"permission_error"}}'),),
+STREAM_ENVELOPE_FIXTURES = (
+    {
+        "protocol": "anthropic",
+        "terminal_fact": "served",
+        "event_name": "message_stop",
+        "selector_path": ("type",),
+        "selector_value": "message_stop",
+        "error_paths": (),
+        "payload": b'{"type":"message_stop"}',
+        "source": "https://platform.claude.com/docs/en/build-with-claude/streaming",
     },
-    "openai_responses": {
-        "served": (
-            ("response.completed", b'{"type":"response.completed"}'),
-            ("response.done", b'{"type":"response.done"}'),
-        ),
-        "failed_terminal": (
-            ("error", b'{"type":"error","code":"permission_error"}'),
-            # https://platform.openai.com/docs/api-reference/responses-streaming/response/failed
-            ("response.failed", b'{"type":"response.failed"}'),
-            # https://platform.openai.com/docs/api-reference/responses-streaming/response/incomplete
-            ("response.incomplete", b'{"type":"response.incomplete"}'),
-        ),
+    {
+        "protocol": "anthropic",
+        "terminal_fact": "failed_terminal",
+        "event_name": "error",
+        "selector_path": ("type",),
+        "selector_value": "error",
+        "error_paths": (("error",),),
+        "payload": b'{"type":"error","error":{"type":"permission_error"}}',
+        "source": "https://platform.claude.com/docs/en/build-with-claude/streaming#error-events",
     },
-    "openai_chat": {
-        "served": ((None, b"[DONE]"),),
-        "failed_terminal": ((None, b'{"type":"error","error":{"type":"permission_error"}}'),),
+    {
+        "protocol": "openai_responses",
+        "terminal_fact": "served",
+        "event_name": "response.completed",
+        "selector_path": ("type",),
+        "selector_value": "response.completed",
+        "error_paths": (),
+        "payload": b'{"type":"response.completed"}',
+        "source": "https://platform.openai.com/docs/api-reference/responses-streaming/response/completed",
     },
+    {
+        "protocol": "openai_responses",
+        "terminal_fact": "served",
+        "event_name": "response.done",
+        "selector_path": ("type",),
+        "selector_value": "response.done",
+        "error_paths": (),
+        "payload": b'{"type":"response.done"}',
+        "source": "https://platform.openai.com/docs/api-reference/realtime-server-events/response/done",
+    },
+    {
+        "protocol": "openai_responses",
+        "terminal_fact": "failed_terminal",
+        "event_name": "error",
+        "selector_path": ("type",),
+        "selector_value": "error",
+        "error_paths": ((), ("error",)),
+        "payload": b'{"type":"error","code":"permission_error"}',
+        "source": "https://platform.openai.com/docs/api-reference/responses-streaming/error",
+    },
+    {
+        "protocol": "openai_responses",
+        "terminal_fact": "failed_terminal",
+        "event_name": "response.failed",
+        "selector_path": ("type",),
+        "selector_value": "response.failed",
+        "error_paths": ((), ("response", "error"), ("error",)),
+        "payload": b'{"type":"response.failed","response":{"error":{"code":"permission_error"}}}',
+        "source": "https://platform.openai.com/docs/api-reference/responses-streaming/response/failed",
+    },
+    {
+        "protocol": "openai_responses",
+        "terminal_fact": "failed_terminal",
+        "event_name": "response.incomplete",
+        "selector_path": ("type",),
+        "selector_value": "response.incomplete",
+        "error_paths": ((), ("response", "error"), ("error",)),
+        "payload": b'{"type":"response.incomplete","response":{"error":{"code":"permission_error"}}}',
+        "source": "https://platform.openai.com/docs/api-reference/responses-streaming/response/incomplete",
+    },
+    {
+        "protocol": "openai_chat",
+        "terminal_fact": "served",
+        "event_name": None,
+        "literal": b"[DONE]",
+        "payload": b"[DONE]",
+        "source": "https://developers.openai.com/api/reference/resources/chat",
+    },
+    {
+        "protocol": "openai_chat",
+        "terminal_fact": "failed_terminal",
+        "event_name": None,
+        "selector_path": ("error",),
+        "selector_value": None,
+        "error_paths": (("error",),),
+        "payload": b'{"error":{"type":"permission_error"}}',
+        "source": "https://developers.openai.com/api/reference/resources/chat",
+    },
+)
+BUFFERED_ERROR_TRUST_ROOT_FIXTURES = {
+    protocol: (("error",),) for protocol in ("anthropic", "openai_responses", "openai_chat")
 }
 ACCEPTED_SSE_LINE_ENDINGS = (b"\r\n", b"\n", b"\r")
 STREAM_BOUNDARY_DIMENSIONS = {
@@ -84,9 +155,17 @@ STREAM_BOUNDARY_DIMENSIONS = {
 }
 STREAM_BOUNDARY_CASES = tuple(
     (protocol, transport_event, settlement_state, line_ending, event_name, payload)
-    for protocol, fixtures in STREAM_ACCEPTANCE_FIXTURES.items()
+    for protocol in BUFFERED_ERROR_TRUST_ROOT_FIXTURES
     for transport_event, settlement_state, line_ending in product(*STREAM_BOUNDARY_DIMENSIONS.values())
-    for event_name, payload in (((None, b"{}"),) if settlement_state == "pending" else fixtures[settlement_state])
+    for event_name, payload in (
+        ((None, b"{}"),)
+        if settlement_state == "pending"
+        else tuple(
+            (fixture["event_name"], fixture["payload"])
+            for fixture in STREAM_ENVELOPE_FIXTURES
+            if fixture["protocol"] == protocol and fixture["terminal_fact"] == settlement_state
+        )
+    )
 )
 # Review 4913029024: each family must behave identically when its machine fact
 # arrives in a buffered error body or a protocol-native stream error event.
@@ -335,6 +414,37 @@ def test_machine_error_field_access_has_one_extractor() -> None:
                 assert node.args[0].value not in {"type", "code"}, (path, node.lineno)
 
 
+def test_machine_error_extractor_reads_only_declared_envelope_paths() -> None:
+    extractor = _functions(_tree(CLIENT))["_raw_error_fields"]
+    source = ast.get_source_segment(CLIENT.read_text(encoding="utf-8"), extractor)
+    assert source is not None
+    assert "envelope_paths" in source
+    assert "for path in envelope_paths" in source
+    assert not any(
+        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node is not extractor
+        for node in ast.walk(extractor)
+    )
+
+
+def test_settlement_abandonment_cannot_overwrite_a_committed_terminal_fact() -> None:
+    tree = _tree(TURN_GATEWAY)
+    abandon = ast.get_source_segment(
+        TURN_GATEWAY.read_text(encoding="utf-8"),
+        _functions(tree)["_abandon_owned_task"],
+    )
+    settle = ast.get_source_segment(
+        TURN_GATEWAY.read_text(encoding="utf-8"),
+        _functions(tree)["_settle_consumed_handle"],
+    )
+    assert abandon is not None and settle is not None
+    guard_at = abandon.index("execution.terminal_fact_committed")
+    engine_down_at = abandon.index("terminalizer.engine_down()")
+    finish_at = settle.index("terminalizer.finish_attempt(")
+    commit_at = settle.index("execution.terminal_fact_committed = True")
+    assert guard_at < engine_down_at
+    assert finish_at < commit_at
+
+
 def test_machine_error_family_product_is_complete_across_transports() -> None:
     expected_codes = {code for codes in MACHINE_ERROR_FAMILY_FIXTURES.values() for code in codes}
     assert expected_codes == set(UPSTREAM_MACHINE_ERROR_CODES)
@@ -366,39 +476,35 @@ def test_machine_error_family_product_is_complete_across_transports() -> None:
     }
 
 
-def _accepted_events(
-    fixtures: tuple[tuple[str | None, bytes], ...],
-) -> tuple[frozenset[tuple[str | None, str]], bytes | None]:
-    events: set[tuple[str | None, str]] = set()
-    literal: bytes | None = None
-    for event_name, payload in fixtures:
-        try:
-            document = json.loads(payload)
-        except ValueError:
-            assert event_name is None
-            literal = payload
-            continue
-        assert isinstance(document, dict) and isinstance(document["type"], str)
-        events.add((event_name, document["type"]))
-    return frozenset(events), literal
-
-
 def _assert_stream_taxonomy_matches(
     protocol: str,
     taxonomy: ProtocolStreamTaxonomy,
 ) -> None:
-    fixtures = STREAM_ACCEPTANCE_FIXTURES[protocol]
-    success_events, success_literal = _accepted_events(fixtures["served"])
-    error_events, _error_literal = _accepted_events(fixtures["failed_terminal"])
-    assert taxonomy.success_events == success_events
-    expected_literal = None if success_literal is None else (None, success_literal)
-    assert taxonomy.success_literal == expected_literal
-    assert taxonomy.error_events == error_events
+    fixtures = tuple(fixture for fixture in STREAM_ENVELOPE_FIXTURES if fixture["protocol"] == protocol)
+    expected_envelopes = tuple(
+        ProtocolTerminalEnvelope(
+            event_name=fixture["event_name"],
+            selector_path=fixture["selector_path"],
+            selector_value=fixture["selector_value"],
+            terminal_outcome=fixture["terminal_fact"],
+            error_envelope_paths=fixture["error_paths"],
+        )
+        for fixture in fixtures
+        if "literal" not in fixture
+    )
+    literal = next(
+        (fixture for fixture in fixtures if "literal" in fixture),
+        None,
+    )
+    assert taxonomy.terminal_envelopes == expected_envelopes
+    assert taxonomy.success_literal == (None if literal is None else (literal["event_name"], literal["literal"]))
+    assert taxonomy.buffered_error_envelope_paths == BUFFERED_ERROR_TRUST_ROOT_FIXTURES[protocol]
 
 
 def test_stream_authority_and_acceptance_fixtures_match_both_ways() -> None:
-    assert set(PROTOCOL_STREAM_TAXONOMY) == set(STREAM_ACCEPTANCE_FIXTURES)
+    assert set(PROTOCOL_STREAM_TAXONOMY) == {str(fixture["protocol"]) for fixture in STREAM_ENVELOPE_FIXTURES}
     assert set(SSE_LINE_ENDINGS) == set(ACCEPTED_SSE_LINE_ENDINGS)
+    assert all(str(fixture["source"]).startswith("https://") for fixture in STREAM_ENVELOPE_FIXTURES)
     for protocol, taxonomy in PROTOCOL_STREAM_TAXONOMY.items():
         _assert_stream_taxonomy_matches(protocol, taxonomy)
 
@@ -407,7 +513,25 @@ def test_stream_authority_guard_rejects_an_unaccepted_alias() -> None:
     taxonomy = PROTOCOL_STREAM_TAXONOMY["openai_responses"]
     mutated = replace(
         taxonomy,
-        success_events=taxonomy.success_events | {("response.unaccepted", "response.unaccepted")},
+        terminal_envelopes=taxonomy.terminal_envelopes
+        + (
+            ProtocolTerminalEnvelope(
+                "response.unaccepted",
+                ("type",),
+                "response.unaccepted",
+                "served",
+            ),
+        ),
+    )
+    with pytest.raises(AssertionError):
+        _assert_stream_taxonomy_matches("openai_responses", mutated)
+
+
+def test_stream_authority_guard_rejects_an_orphaned_acceptance_fixture() -> None:
+    taxonomy = PROTOCOL_STREAM_TAXONOMY["openai_responses"]
+    mutated = replace(
+        taxonomy,
+        terminal_envelopes=taxonomy.terminal_envelopes[:-1],
     )
     with pytest.raises(AssertionError):
         _assert_stream_taxonomy_matches("openai_responses", mutated)

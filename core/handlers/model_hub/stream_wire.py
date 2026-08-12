@@ -128,72 +128,130 @@ def _chat_terminal_event(
     }
 
 
+StreamTerminalOutcome = Literal["served", "failed_terminal"]
+ErrorEnvelopePath = tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ProtocolTerminalEnvelope:
+    event_name: str | None
+    selector_path: tuple[str, ...]
+    selector_value: str | None
+    terminal_outcome: StreamTerminalOutcome
+    error_envelope_paths: tuple[ErrorEnvelopePath, ...] = ()
+
+
 @dataclass(frozen=True)
 class ProtocolStreamTaxonomy:
-    success_events: frozenset[tuple[str | None, str]]
+    terminal_envelopes: tuple[ProtocolTerminalEnvelope, ...]
     success_literal: tuple[str | None, bytes] | None
-    error_events: frozenset[tuple[str | None, str]]
+    buffered_error_envelope_paths: tuple[ErrorEnvelopePath, ...]
     terminal_event_name: str | None
     render_terminal_event: Callable[[str, str, int], dict[str, object]]
 
 
 PROTOCOL_STREAM_TAXONOMY: Final[Mapping[str, ProtocolStreamTaxonomy]] = {
     "anthropic": ProtocolStreamTaxonomy(
-        success_events=frozenset(
-            {
+        terminal_envelopes=(
+            ProtocolTerminalEnvelope(
                 # https://platform.claude.com/docs/en/build-with-claude/streaming
-                ("message_stop", "message_stop"),
-            }
+                "message_stop",
+                ("type",),
+                "message_stop",
+                "served",
+            ),
+            ProtocolTerminalEnvelope(
+                # https://platform.claude.com/docs/en/build-with-claude/streaming#error-events
+                "error",
+                ("type",),
+                "error",
+                "failed_terminal",
+                (("error",),),
+            ),
         ),
         success_literal=None,
-        error_events=frozenset(
-            {
-                # https://platform.claude.com/docs/en/build-with-claude/streaming
-                ("error", "error"),
-            }
-        ),
+        buffered_error_envelope_paths=(("error",),),
         terminal_event_name="error",
         render_terminal_event=_anthropic_terminal_event,
     ),
     "openai_responses": ProtocolStreamTaxonomy(
-        success_events=frozenset(
-            {
+        terminal_envelopes=(
+            ProtocolTerminalEnvelope(
                 # https://platform.openai.com/docs/api-reference/responses-streaming/response/completed
-                ("response.completed", "response.completed"),
+                "response.completed",
+                ("type",),
+                "response.completed",
+                "served",
+            ),
+            ProtocolTerminalEnvelope(
                 # https://platform.openai.com/docs/api-reference/realtime-server-events/response/done
-                ("response.done", "response.done"),
-            }
+                "response.done",
+                ("type",),
+                "response.done",
+                "served",
+            ),
+            ProtocolTerminalEnvelope(
+                # https://platform.openai.com/docs/api-reference/responses-streaming/error
+                "error",
+                ("type",),
+                "error",
+                "failed_terminal",
+                ((), ("error",)),
+            ),
+            ProtocolTerminalEnvelope(
+                # https://platform.openai.com/docs/api-reference/responses-streaming/response/failed
+                "response.failed",
+                ("type",),
+                "response.failed",
+                "failed_terminal",
+                ((), ("response", "error"), ("error",)),
+            ),
+            ProtocolTerminalEnvelope(
+                # https://platform.openai.com/docs/api-reference/responses-streaming/response/incomplete
+                "response.incomplete",
+                ("type",),
+                "response.incomplete",
+                "failed_terminal",
+                ((), ("response", "error"), ("error",)),
+            ),
         ),
         success_literal=None,
-        error_events=frozenset(
-            {
-                # https://platform.openai.com/docs/api-reference/responses-streaming/error
-                ("error", "error"),
-                # https://platform.openai.com/docs/api-reference/responses-streaming/response/failed
-                ("response.failed", "response.failed"),
-                # https://platform.openai.com/docs/api-reference/responses-streaming/response/incomplete
-                ("response.incomplete", "response.incomplete"),
-            }
-        ),
+        buffered_error_envelope_paths=(("error",),),
         terminal_event_name="error",
         render_terminal_event=_responses_terminal_event,
     ),
     "openai_chat": ProtocolStreamTaxonomy(
-        success_events=frozenset(),
+        terminal_envelopes=(
+            ProtocolTerminalEnvelope(
+                # https://developers.openai.com/api/reference/resources/chat
+                # Chat streaming errors use the top-level error member; they
+                # do not require a second, top-level type discriminator.
+                None,
+                ("error",),
+                None,
+                "failed_terminal",
+                (("error",),),
+            ),
+        ),
         # https://platform.openai.com/docs/api-reference/chat/create#chat-create-stream
         success_literal=(None, b"[DONE]"),
-        error_events=frozenset(
-            {
-                # https://platform.openai.com/docs/api-reference/chat/create#chat-create-stream
-                (None, "error"),
-            }
-        ),
+        buffered_error_envelope_paths=(("error",),),
         terminal_event_name=None,
         render_terminal_event=_chat_terminal_event,
     ),
 }
 
-StreamTerminalOutcome = Literal["served", "failed_terminal"]
+
+def _path_value(document: Mapping[str, object], path: tuple[str, ...]) -> object:
+    value: object = document
+    for component in path:
+        if not isinstance(value, Mapping) or component not in value:
+            return _MISSING
+        value = value[component]
+    return value
+
+
+_MISSING: Final = object()
 
 
 @dataclass
@@ -204,8 +262,10 @@ class ProtocolSSEState:
     tokenizer: SSEFrameTokenizer = field(default_factory=SSEFrameTokenizer)
     terminal_outcome: StreamTerminalOutcome | None = None
     error_payload: bytes | None = None
+    error_envelope_paths: tuple[ErrorEnvelopePath, ...] = ()
     last_sequence_number: int = -1
     invalid_after_terminal: bool = False
+    invalid_protocol_shape: bool = False
 
     def observe(self, chunk: bytes) -> None:
         for frame in self.tokenizer.feed(chunk):
@@ -241,13 +301,25 @@ class ProtocolSSEState:
             return
         if not isinstance(payload, dict):
             return
-        event_type = payload["type"] if "type" in payload else None
-        event_identity = (event_name, event_type)
-        if event_identity in taxonomy.success_events:
-            self.terminal_outcome = "served"
-        elif event_identity in taxonomy.error_events:
-            self.terminal_outcome = "failed_terminal"
-            self.error_payload = data
+        if "type" in payload and not isinstance(payload["type"], str):
+            self.invalid_protocol_shape = True
+            return
+        for envelope in taxonomy.terminal_envelopes:
+            if envelope.event_name != event_name:
+                continue
+            selector = _path_value(payload, envelope.selector_path)
+            matched = (
+                isinstance(selector, Mapping)
+                if envelope.selector_value is None
+                else selector == envelope.selector_value
+            )
+            if not matched:
+                continue
+            self.terminal_outcome = envelope.terminal_outcome
+            if envelope.terminal_outcome == "failed_terminal":
+                self.error_payload = data
+                self.error_envelope_paths = envelope.error_envelope_paths
+            break
         sequence_number = payload.get("sequence_number")
         if isinstance(sequence_number, int) and not isinstance(sequence_number, bool):
             self.last_sequence_number = max(self.last_sequence_number, sequence_number)

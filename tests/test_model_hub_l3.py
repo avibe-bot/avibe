@@ -2892,6 +2892,67 @@ def test_gateway_repeated_cancellation_drains_settlement_before_reraise(
     asyncio.run(exercise())
 
 
+def test_settlement_timeout_preserves_an_already_committed_upstream_fact(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        source = _source("src_t3barrier1", "Committed terminal fact")
+        outcome = _outcome(
+            RawOutcomeKind.HTTP_ERROR,
+            status=429,
+            code="rate_limit_error",
+            source_id=source.id,
+        )
+        handle = LiveInvokeHandle(
+            outcome,
+            (b'data: {"error":{"type":"rate_limit_error"}}\n\n',),
+        )
+        service = _service(tmp_path, sources=[source], live_handles=[handle])
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        transition_started = asyncio.Event()
+        never_release = asyncio.Event()
+
+        async def blocked_transition(*_args, **_kwargs):
+            transition_started.set()
+            await never_release.wait()
+
+        service._settle_fallback_source = AsyncMock(side_effect=blocked_transition)
+        gateway = ModelHubTurnGateway(service, transport_timeout=0.02)
+        turn_id = "turn_t3_barrier"
+        request = _prepared_gateway_request(
+            gateway,
+            turn_id=turn_id,
+            requested_model=requested_model,
+            source_id=source.id,
+            stream=True,
+        )
+
+        with patch(
+            "core.handlers.model_hub.turn_gateway.web.StreamResponse",
+            return_value=FakeStreamResponse(),
+        ):
+            task = asyncio.create_task(gateway._handle_request(request))
+            await asyncio.wait_for(transition_started.wait(), timeout=1)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, timeout=1)
+
+        assert gateway.resource_leak_records == (("settlement", turn_id),)
+        gateway.correlation.settle(
+            turn_id,
+            settled_by=SETTLED_BY_STOPPED,
+            ts=NOW.isoformat(),
+        )
+        record = service.provenance.get(turn_id)
+        assert record is not None
+        assert record["outcome"] == "failed_terminal"
+        assert record["terminal_error"]["reason"] == "stream_interrupted"
+        assert record["terminal_error"]["source_id"] == source.id
+        assert service.store.load().sources[0].state.status == "standby"
+
+    asyncio.run(exercise())
+
+
 def test_gateway_abandons_never_resolving_teardown_at_transport_deadline(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
