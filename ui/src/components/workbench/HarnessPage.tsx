@@ -64,6 +64,7 @@ import {
   DEFINITION_STATUS_FILTERS,
   definitionActiveCount,
   definitionChipLabel,
+  definitionExitCodeTone,
   definitionHealth,
   definitionFailureSummaryKey,
   definitionProcessingHealth,
@@ -1461,7 +1462,10 @@ export const TaskDetail: React.FC<TaskDetailProps> = ({ task, agent, onToggleEna
       {task.last_exit_code != null && (
         <DetailField label={t('harness.detail.lastExitCode')}>
           <span
-            className={clsx('font-mono text-[11px]', task.last_exit_code === 0 ? 'text-muted' : 'text-pink')}
+            className={clsx(
+              'font-mono text-[11px]',
+              definitionExitCodeTone(task) === 'failure' ? 'text-pink' : 'text-muted',
+            )}
           >
             {task.last_exit_code}
           </span>
@@ -1626,7 +1630,10 @@ export const WatchDetail: React.FC<WatchDetailProps> = ({ watch, agent, onToggle
       {watch.last_exit_code != null && (
         <DetailField label={t('harness.detail.lastExitCode')}>
           <span
-            className={clsx('font-mono text-[11px]', watch.last_exit_code === 0 ? 'text-muted' : 'text-pink')}
+            className={clsx(
+              'font-mono text-[11px]',
+              definitionExitCodeTone(watch) === 'failure' ? 'text-pink' : 'text-muted',
+            )}
           >
             {watch.last_exit_code}
           </span>
@@ -2156,6 +2163,7 @@ const FailureDetails: React.FC<{
   // structure still proves an unclassified failure, so keep the default copy
   // generic instead of letting raw stderr choose a category.
   const summaryKey = definitionFailureSummaryKey(row) ?? (row.last_error ? 'harness.failure.generic' : null);
+  const disclosureKey = `${'retry_exit_codes' in row ? 'watch' : 'task'}:${row.id}`;
   if (!summaryKey && !row.last_error) return null;
   return (
     <div className="flex flex-col gap-1.5">
@@ -2170,7 +2178,10 @@ const FailureDetails: React.FC<{
         </>
       )}
       {row.last_error && (
-        <details className="group min-w-0 rounded-md border border-border bg-surface-3 px-2 py-1.5">
+        <details
+          key={disclosureKey}
+          className="group min-w-0 rounded-md border border-border bg-surface-3 px-2 py-1.5"
+        >
           <summary className="flex cursor-pointer list-none items-center gap-1.5 text-[10px] font-medium uppercase tracking-wide text-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-cyan/60">
             <ChevronRight aria-hidden className="size-3 shrink-0 transition-transform group-open:rotate-90" />
             {t('harness.detail.technicalDetails')}

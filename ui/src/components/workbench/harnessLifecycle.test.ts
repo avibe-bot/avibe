@@ -162,6 +162,20 @@ describe('definitionFailureSummaryKey', () => {
     expect(definitionFailureSummaryKey({ health: 'healthy', last_exit_code: null })).toBeNull();
   });
 
+  it('keeps structured last-run failure visible after health history ages out', () => {
+    expect(
+      definitionFailureSummaryKey({ health: 'healthy', lifecycle_detail: 'error', last_exit_code: 7 }),
+    ).toBe('harness.failure.generic');
+    expect(
+      definitionFailureSummaryKey({
+        health: 'healthy',
+        lifecycle_detail: 'timeout',
+        metadata: { last_command_timed_out: true },
+        last_exit_code: 124,
+      }),
+    ).toBe('harness.failure.timeout');
+  });
+
   it('keeps the summary key set translated and in parity', () => {
     expect(Object.keys(en.harness.failure).sort()).toEqual(['generic', 'timeout']);
     expect(Object.keys(zh.harness.failure).sort()).toEqual(Object.keys(en.harness.failure).sort());

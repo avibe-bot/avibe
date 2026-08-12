@@ -346,6 +346,7 @@ export type HarnessDefinitionFacts = {
   // Decoded server-side (key is ``metadata``, not ``metadata_json``). Holds the
   // command-task-only ``on_failure`` policy; see ``taskOnFailure``.
   metadata?: Record<string, unknown> | null;
+  retry_exit_codes?: number[] | null;
 };
 
 export type HarnessFailureSummaryKey = 'harness.failure.timeout' | 'harness.failure.generic';
@@ -355,17 +356,36 @@ export type HarnessFailureSummaryKey = 'harness.failure.timeout' | 'harness.fail
 // failure facts collapse to one generic category; last_error is deliberately
 // absent from this mapper and remains technical disclosure content only.
 export function definitionFailureSummaryKey(
-  row: Pick<HarnessDefinitionFacts, 'health' | 'lifecycle_detail' | 'last_exit_code' | 'metadata'>,
+  row: Pick<
+    HarnessDefinitionFacts,
+    'health' | 'lifecycle_detail' | 'last_exit_code' | 'metadata' | 'retry_exit_codes'
+  >,
 ): HarnessFailureSummaryKey | null {
-  if (row.health === 'healthy') return null;
   const timedOut = row.metadata?.last_command_timed_out === true || row.lifecycle_detail === 'timeout';
+  const exitCode = row.last_exit_code;
+  const successfulWatchExit =
+    Array.isArray(row.retry_exit_codes) &&
+    (exitCode === 64 || row.retry_exit_codes.includes(exitCode ?? Number.NaN));
+  const lifecycleFailure =
+    row.lifecycle_detail != null && row.lifecycle_detail !== 'normal' && !successfulWatchExit;
   const failed =
     timedOut ||
     row.health === 'failing' ||
-    (row.lifecycle_detail != null && row.lifecycle_detail !== 'normal') ||
-    (typeof row.last_exit_code === 'number' && row.last_exit_code !== 0);
+    lifecycleFailure ||
+    (typeof exitCode === 'number' && exitCode !== 0 && !successfulWatchExit);
   if (!failed) return null;
   return timedOut ? 'harness.failure.timeout' : 'harness.failure.generic';
+}
+
+export function definitionExitCodeTone(
+  row: Pick<
+    HarnessDefinitionFacts,
+    'health' | 'lifecycle_detail' | 'last_exit_code' | 'metadata' | 'retry_exit_codes'
+  >,
+): 'neutral' | 'failure' {
+  return row.last_exit_code != null && row.last_exit_code !== 0 && definitionFailureSummaryKey(row)
+    ? 'failure'
+    : 'neutral';
 }
 
 // ``failing`` = the newest verdict failed; ``degraded`` = the newest succeeded but

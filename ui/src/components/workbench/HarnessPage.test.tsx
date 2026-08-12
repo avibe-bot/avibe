@@ -1,6 +1,9 @@
+/* @vitest-environment jsdom */
+
 import { createInstance } from 'i18next';
 import type { ReactElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { fireEvent, render as renderDom } from '@testing-library/react';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { MemoryRouter } from 'react-router-dom';
 import { describe, expect, it } from 'vitest';
@@ -902,6 +905,59 @@ describe('WatchDetail runtime', () => {
     expect(html).toContain(`>${en.harness.detail.technicalDetails}<`);
     expect(html).toContain(raw);
     expect(html).toMatch(/<details(?![^>]*\bopen\b)[^>]*>/);
+  });
+
+  it('keeps configured retry and no-event exits neutral', () => {
+    for (const last_exit_code of [64, 75]) {
+      const html = render(
+        <WatchDetail
+          watch={watch({
+            enabled: true,
+            retry_exit_codes: [75],
+            health: 'healthy',
+            lifecycle_detail: 'error',
+            last_exit_code,
+          })}
+          onToggleEnabled={() => undefined}
+          pending={false}
+        />,
+      );
+      expect(html).toContain(`<span class="font-mono text-[11px] text-muted">${last_exit_code}</span>`);
+    }
+  });
+
+  it('resets technical details when selecting another definition', () => {
+    const renderInteractive = (ui: ReactElement) =>
+      renderDom(
+        <I18nextProvider i18n={i18n}>
+          <MemoryRouter>{ui}</MemoryRouter>
+        </I18nextProvider>,
+      );
+    const view = renderInteractive(
+      <TaskDetail
+        task={task({ id: 'task-a', shell_command: 'first', last_error: 'first technical error' })}
+        onToggleEnabled={() => undefined}
+        pending={false}
+      />,
+    );
+    const details = view.container.querySelector('details');
+    expect(details?.open).toBe(false);
+    fireEvent.click(details?.querySelector('summary') as HTMLElement);
+    expect(view.container.querySelector('details')?.open).toBe(true);
+
+    view.rerender(
+      <I18nextProvider i18n={i18n}>
+        <MemoryRouter>
+          <TaskDetail
+            task={task({ id: 'task-b', shell_command: 'second', last_error: 'second technical error' })}
+            onToggleEnabled={() => undefined}
+            pending={false}
+          />
+        </MemoryRouter>
+      </I18nextProvider>,
+    );
+    expect(view.container.querySelector('details')?.open).toBe(false);
+    view.unmount();
   });
 });
 
