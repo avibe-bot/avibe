@@ -407,6 +407,49 @@ describe('SettingsModelsPage surface branches', () => {
     expect(screen.queryByText(/Now: Replacement source \(takeover\)|当前 Replacement source（接管）/i)).toBeNull();
   });
 
+  it('installs a removed backend before the committed route closes and applies PF-1', async () => {
+    const head = { ...retainedSource, id: 'src_head', display_name: 'Paused source', state: { status: 'active' as const, retry_at: null, detail_key: null } };
+    const relay = { ...retainedSource, id: 'src_relay', display_name: 'Replacement source', state: { status: 'active' as const, retry_at: null, detail_key: null } };
+    vi.spyOn(modelsApi, 'listSources').mockResolvedValue([head, relay]);
+    vi.spyOn(modelsApi, 'listAgents')
+      .mockResolvedValueOnce([takeoverAgent])
+      .mockResolvedValueOnce([]);
+    vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
+    vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
+    vi.spyOn(modelsApi, 'getAgentChain').mockResolvedValue(takeoverChain);
+    vi.spyOn(modelsApi, 'putAgentChain').mockResolvedValue({
+      chain: { ...takeoverChain, chain: [takeoverChain.chain[0]], current: takeoverChain.chain[0] },
+      removed_hops: [],
+      interrupted: [],
+    });
+
+    render(
+      <ToastProvider>
+        <I18nextProvider i18n={i18n}>
+          <SettingsModelsPage />
+        </I18nextProvider>
+      </ToastProvider>,
+    );
+
+    await userEvent.click(await screen.findByRole('button', { name: /Open gpt-5\.6-sol route chain|打开 gpt-5\.6-sol 的路由链/i }));
+    await userEvent.click((await screen.findAllByRole('button', { name: /^Remove hop$|^移除这一跳$/i }))[1]);
+    await userEvent.click(screen.getByRole('button', { name: /^Save$|^保存$/i }));
+
+    await waitFor(() =>
+      expect(document.querySelector('[data-agent-backend="codex"]')).toBeNull(),
+    );
+    await userEvent.click((await screen.findByText(/^Done$|^完成$/i)).closest('button') as HTMLButtonElement);
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    const firstRegisteredDestination = document.querySelector(
+      '.model-hub-shell-info',
+    );
+    await waitFor(() =>
+      expect(document.activeElement).toBe(firstRegisteredDestination),
+    );
+    expect(document.activeElement?.isConnected).toBe(true);
+    expect(document.activeElement?.closest('[data-agent-backend="codex"]')).toBeNull();
+  });
+
   it('reconciles a lost Direct-mode response before rendering failure', async () => {
     const direct = { ...takeoverAgent, mode: 'direct' as const, sources: null, routes: null, supply_status: null, model_supply: null };
     const agentRead = vi.spyOn(modelsApi, 'listAgents')

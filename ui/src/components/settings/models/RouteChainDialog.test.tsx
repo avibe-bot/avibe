@@ -148,6 +148,9 @@ describe("RouteChainDialog", () => {
     const current = document.querySelector('[data-current="true"]');
     expect(current?.textContent).toContain("Claude subscription");
     expect(current?.textContent).toContain("opus-5");
+    const ordinals = [...document.querySelectorAll(".model-hub-route-ordinal")];
+    expect(ordinals[0]?.className).toContain("model-hub-accent-pill--mint");
+    expect(ordinals[1]?.className).toContain("model-hub-fill-white-0a");
     expect(screen.getAllByRole("button", { name: "Remove hop" })).toHaveLength(
       2,
     );
@@ -206,9 +209,16 @@ describe("RouteChainDialog", () => {
 
   it("keeps Done available while page-owned M6 is pending and failed", async () => {
     const user = userEvent.setup();
+    const removed = {
+      backend: "claude" as const,
+      menu_model: "opus-5",
+      source_id: "src_a",
+      model_id: "claude-opus-5",
+      position: 1,
+    };
     const put = vi
       .spyOn(modelsApi, "putAgentChain")
-      .mockResolvedValue(mutation());
+      .mockResolvedValue(mutation(chain, { removed_hops: [removed] }));
     const onCommitted = vi.fn();
     const retry = vi.fn();
     vi.spyOn(modelsApi, "getAgentChain").mockResolvedValue(chain);
@@ -235,6 +245,11 @@ describe("RouteChainDialog", () => {
         "Route chain saved. Refreshing the model surface…",
       ),
     ).toBeTruthy();
+    expect(
+      screen.getByText(
+        "These are the items this save actually removed or interrupted.",
+      ),
+    ).toBeTruthy();
     expect(screen.getByText("Done").closest("button")).toBeTruthy();
     page.rerender(
       <I18nextProvider i18n={i18n}>
@@ -252,6 +267,11 @@ describe("RouteChainDialog", () => {
     expect(
       await screen.findByText(
         "The route chain was saved, but the model surface could not be refreshed.",
+      ),
+    ).toBeTruthy();
+    expect(
+      screen.getByText(
+        "These are the items this save actually removed or interrupted.",
       ),
     ).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Retry" }));
@@ -294,6 +314,20 @@ describe("RouteChainDialog", () => {
       await screen.findByRole("button", { name: "Save anyway" }),
     ).toBeTruthy();
     expect(screen.getByText("Save the route chain for opus-5")).toBeTruthy();
+    expect(screen.getByText("Hops that will be removed")).toBeTruthy();
+    expect(screen.getByText("1 hop")).toBeTruthy();
+    expect(
+      screen.getByText((_, element) =>
+        element?.classList.contains("model-hub-guard-hop") === true &&
+        element.textContent?.includes("Order #1") === true,
+      ),
+    ).toBeTruthy();
+    expect(
+      screen.getByText("Some models will be left with no usable source."),
+    ).toBeTruthy();
+    expect(
+      screen.queryByText("Models that will be left with no source"),
+    ).toBeNull();
     await user.click(screen.getByRole("button", { name: "Save anyway" }));
 
     await waitFor(() =>
@@ -555,8 +589,20 @@ describe("RouteChainDialog", () => {
     await user.click(grips[1]);
     await user.keyboard("{Space}");
     expect(grips[1].getAttribute("aria-grabbed")).toBe("true");
+    await user.keyboard("{ArrowUp}");
+    expect(screen.getByText("Moved to hop 1.")).toBeTruthy();
+    await waitFor(() =>
+      expect(document.activeElement).toBe(
+        screen.getAllByRole("button", { name: "Reorder this hop" })[0],
+      ),
+    );
     await user.keyboard("{Escape}");
-    expect(grips[1].getAttribute("aria-grabbed")).toBe("false");
+    expect(screen.getByText("Reorder cancelled. Restored to hop 2.")).toBeTruthy();
+    const restoredGrips = screen.getAllByRole("button", {
+      name: "Reorder this hop",
+    });
+    expect(restoredGrips[1].getAttribute("aria-grabbed")).toBe("false");
+    await waitFor(() => expect(document.activeElement).toBe(restoredGrips[1]));
     expect(
       (screen.getByRole("button", { name: "Save" }) as HTMLButtonElement)
         .disabled,

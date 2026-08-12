@@ -17,6 +17,7 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
+import { GuardGapList } from "./GuardGapList";
 import { equalHopIdentity, hopBelongsToSource } from "./hopIdentity";
 import { apiFailure, modelsApi, type GuardConfirmation } from "./modelsApi";
 import type { ModelChainRead } from "./modelRows";
@@ -27,7 +28,11 @@ import {
   validateRouteDraft,
   type RouteCandidate,
 } from "./routeChainDraft";
-import { SupplyGapNote } from "./SupplyGapNote";
+import {
+  advanceRouteChainInteraction,
+  createRouteChainInteraction,
+  type RouteChainInteractionAction,
+} from "./routeChainInteraction";
 import type {
   AgentChainMutation,
   AgentSupply,
@@ -67,6 +72,7 @@ export type RouteChainSelection = {
   agent: AgentSupply;
   modelId: string;
   read: ModelChainRead | undefined;
+  available?: boolean;
 };
 export type RouteCollectionObservation<T> = {
   value: T;
@@ -111,7 +117,8 @@ export const RouteChainDialog: React.FC<{
   const { t } = useTranslation();
   const [phase, setPhase] = React.useState<Phase>("loading");
   const [origin, setOrigin] = React.useState<RouteHop[]>([]);
-  const [draft, setDraft] = React.useState<RouteHop[]>([]);
+  const interactionRef = React.useRef(createRouteChainInteraction());
+  const [interaction, setInteraction] = React.useState(interactionRef.current);
   const [chain, setChain] = React.useState<AgentChainMutation["chain"] | null>(
     null,
   );
@@ -129,8 +136,6 @@ export const RouteChainDialog: React.FC<{
   const [unknownSourceCurrent, setUnknownSourceCurrent] = React.useState(false);
   const [selectorOpen, setSelectorOpen] = React.useState(false);
   const [candidate, setCandidate] = React.useState<RouteCandidate | null>(null);
-  const [grabbed, setGrabbed] = React.useState<number | null>(null);
-  const [rovingIndex, setRovingIndex] = React.useState(0);
   const [announcement, setAnnouncement] = React.useState<{
     key: string;
     params?: Record<string, unknown>;
@@ -147,13 +152,23 @@ export const RouteChainDialog: React.FC<{
   const doneButtonRef = React.useRef<HTMLButtonElement | null>(null);
   const openedIdentity = React.useRef<string | null>(null);
   const invalidSignature = React.useRef("");
-  const grabSnapshot = React.useRef<RouteHop[] | null>(null);
-  const grabOriginIndex = React.useRef<number | null>(null);
   const generation = React.useRef(0);
 
   const agent = selection?.agent ?? null;
   const modelId = selection?.modelId ?? "";
   const selectionBackend = selection?.agent.backend;
+  const draft = interaction.draft;
+  const rovingIndex = interaction.focusIndex;
+  const grabbed = interaction.grab?.index ?? null;
+  const advanceInteraction = React.useCallback(
+    (action: RouteChainInteractionAction) => {
+      const next = advanceRouteChainInteraction(interactionRef.current, action);
+      interactionRef.current = next;
+      setInteraction(next);
+      return next;
+    },
+    [],
+  );
   const candidates = agent ? routeCandidates(agent, sources, draft) : [];
   const candidateGroups = candidates.reduce<
     Array<{
@@ -198,7 +213,7 @@ export const RouteChainDialog: React.FC<{
       setChain(next);
       onObserved?.(next);
       setOrigin(hops);
-      setDraft(hops);
+      advanceInteraction({ type: "reset", draft: hops, focusIndex: 0 });
       setGuard(null);
       setPhase("ready");
     } catch (error) {
@@ -211,7 +226,7 @@ export const RouteChainDialog: React.FC<{
       setPhase("unread");
       requestAnimationFrame(() => retryButtonRef.current?.focus());
     }
-  }, [modelId, onDirectMode, onObserved, selectionBackend]);
+  }, [advanceInteraction, modelId, onDirectMode, onObserved, selectionBackend]);
 
   React.useEffect(() => {
     const nextIdentity = selection
@@ -230,12 +245,22 @@ export const RouteChainDialog: React.FC<{
     setUnknownSourceCurrent(false);
     setSelectorOpen(false);
     setCandidate(null);
-    setGrabbed(null);
-    setRovingIndex(0);
-    grabSnapshot.current = null;
-    grabOriginIndex.current = null;
+    advanceInteraction({ type: "reset", draft: [], focusIndex: 0 });
     if (selection) void readChain();
-  }, [readChain, selection]);
+  }, [advanceInteraction, readChain, selection]);
+
+  React.useEffect(() => {
+    if (
+      !selection ||
+      selection.available !== false ||
+      phase === "impact" ||
+      phase === "refreshing"
+    ) {
+      return;
+    }
+    generation.current += 1;
+    onClose();
+  }, [onClose, phase, selection]);
 
   React.useEffect(() => {
     if (selectorOpen) candidateRefs.current[0]?.focus();
@@ -253,13 +278,11 @@ export const RouteChainDialog: React.FC<{
     if (phase === "rejected") setPhase("ready");
     setSelectorOpen(false);
     setCandidate(null);
-    setGrabbed(null);
-    grabSnapshot.current = null;
-    grabOriginIndex.current = null;
+    advanceInteraction({ type: "drop-grab" });
     focusAfterRender({
       current: removeRefs.current[valid.invalidIndexes[0]] ?? null,
     });
-  }, [phase, valid.invalidIndexes]);
+  }, [advanceInteraction, phase, valid.invalidIndexes]);
 
   React.useEffect(() => {
     if (!report || !commitReconciliation) return;
@@ -283,21 +306,15 @@ export const RouteChainDialog: React.FC<{
       if (phase !== "impact" && phase !== "refreshing") {
         generation.current += 1;
       }
-      grabSnapshot.current = null;
-      grabOriginIndex.current = null;
       onClose();
     }
   };
   const remove = (index: number) => {
     if (phase === "saving" || phase === "impact" || phase === "refreshing")
       return;
-    const nextDraft = draft.filter((_, cursor) => cursor !== index);
-    setDraft(nextDraft);
-    setGrabbed(null);
-    const focusedIndex = Math.min(index, Math.max(0, nextDraft.length - 1));
-    setRovingIndex(focusedIndex);
-    grabSnapshot.current = null;
-    grabOriginIndex.current = null;
+    const next = advanceInteraction({ type: "remove", index });
+    const nextDraft = next.draft;
+    const focusedIndex = next.focusIndex;
     requestAnimationFrame(() => {
       if (nextDraft.length > 0) {
         gripRefs.current[focusedIndex]?.focus();
@@ -315,18 +332,13 @@ export const RouteChainDialog: React.FC<{
       });
     }
   };
-  const reorder = (index: number, nextIndex: number) => {
-    if (nextIndex < 0 || nextIndex >= draft.length) return;
-    setDraft((current) => {
-      const next = [...current];
-      const [item] = next.splice(index, 1);
-      next.splice(nextIndex, 0, item);
-      return next;
-    });
-    setRovingIndex(nextIndex);
-    requestAnimationFrame(() => gripRefs.current[nextIndex]?.focus());
+  const moveGrab = (action: RouteChainInteractionAction) => {
+    const previous = interactionRef.current;
+    const next = advanceInteraction(action);
+    if (next.focusIndex === previous.focusIndex) return;
+    requestAnimationFrame(() => gripRefs.current[next.focusIndex]?.focus());
     announce("settings.models.routeDialog.reorder.position", {
-      position: nextIndex + 1,
+      position: next.focusIndex + 1,
     });
   };
   const onGripKeyDown = (
@@ -334,11 +346,9 @@ export const RouteChainDialog: React.FC<{
     index: number,
   ) => {
     if (event.key === "Tab" && grabbed !== null) {
-      setGrabbed(null);
-      grabSnapshot.current = null;
-      grabOriginIndex.current = null;
+      const next = advanceInteraction({ type: "drop-grab" });
       announce("settings.models.routeDialog.reorder.dropped", {
-        position: index + 1,
+        position: next.focusIndex + 1,
       });
     } else if (
       event.key === " " ||
@@ -348,48 +358,52 @@ export const RouteChainDialog: React.FC<{
     ) {
       event.preventDefault();
       if (grabbed === index) {
-        setGrabbed(null);
-        grabSnapshot.current = null;
-        grabOriginIndex.current = null;
+        const next = advanceInteraction({ type: "drop-grab" });
         announce("settings.models.routeDialog.reorder.dropped", {
-          position: index + 1,
+          position: next.focusIndex + 1,
         });
       } else {
-        grabSnapshot.current = draft.map((hop) => ({ ...hop }));
-        grabOriginIndex.current = index;
-        setGrabbed(index);
-        setRovingIndex(index);
+        const next = advanceInteraction({ type: "begin-grab", index });
         announce("settings.models.routeDialog.reorder.grabbed", {
-          position: index + 1,
+          position: next.focusIndex + 1,
         });
       }
     } else if (event.key === "Escape" && grabbed !== null) {
       event.preventDefault();
-      const restoredIndex = grabOriginIndex.current ?? index;
-      setDraft(grabSnapshot.current ?? origin);
-      setGrabbed(null);
-      setRovingIndex(restoredIndex);
-      grabSnapshot.current = null;
-      grabOriginIndex.current = null;
-      requestAnimationFrame(() => gripRefs.current[restoredIndex]?.focus());
+      const next = advanceInteraction({ type: "cancel-grab" });
+      requestAnimationFrame(() => gripRefs.current[next.focusIndex]?.focus());
       announce("settings.models.routeDialog.reorder.cancelled", {
-        position: index + 1,
+        position: next.focusIndex + 1,
       });
     } else if (event.key === "ArrowUp" || event.key === "ArrowDown") {
       event.preventDefault();
-      const target = index + (event.key === "ArrowUp" ? -1 : 1);
       if (grabbed === null) {
-        const bounded = Math.max(0, Math.min(draft.length - 1, target));
-        setRovingIndex(bounded);
-        gripRefs.current[bounded]?.focus();
-      } else reorder(index, target);
+        const target = Math.max(
+          0,
+          Math.min(draft.length - 1, index + (event.key === "ArrowUp" ? -1 : 1)),
+        );
+        const next = advanceInteraction({ type: "focus", index: target });
+        gripRefs.current[next.focusIndex]?.focus();
+      } else {
+        moveGrab({
+          type: "move-grab",
+          direction: event.key === "ArrowUp" ? -1 : 1,
+        });
+      }
     } else if (event.key === "Home" || event.key === "End") {
       event.preventDefault();
-      const target = event.key === "Home" ? 0 : draft.length - 1;
       if (grabbed === null) {
-        setRovingIndex(target);
-        gripRefs.current[target]?.focus();
-      } else reorder(index, target);
+        const next = advanceInteraction({
+          type: "focus",
+          index: event.key === "Home" ? 0 : draft.length - 1,
+        });
+        gripRefs.current[next.focusIndex]?.focus();
+      } else {
+        moveGrab({
+          type: "move-grab-edge",
+          edge: event.key === "Home" ? "start" : "end",
+        });
+      }
     }
   };
   const beginCommitted = (
@@ -400,7 +414,7 @@ export const RouteChainDialog: React.FC<{
     setChain(nextReport.chain);
     setReport(nextReport);
     setOrigin(committedHops);
-    setDraft(committedHops);
+    advanceInteraction({ type: "reset", draft: committedHops });
     setUnknownObservation("none");
     setUnknownSourceCurrent(false);
     onCommitted?.(nextReport);
@@ -660,12 +674,10 @@ export const RouteChainDialog: React.FC<{
   };
   const addCandidate = () => {
     if (!candidate) return;
-    const nextIndex = draft.length;
-    setDraft((current) => [...current, candidate.hop]);
-    setRovingIndex(nextIndex);
+    const next = advanceInteraction({ type: "append", hop: candidate.hop });
     setSelectorOpen(false);
     setCandidate(null);
-    requestAnimationFrame(() => gripRefs.current[nextIndex]?.focus());
+    requestAnimationFrame(() => gripRefs.current[next.focusIndex]?.focus());
   };
   const renderHop = (hop: RouteHop, index: number) => {
     const chainLink = chain?.chain.find((entry) =>
@@ -686,10 +698,13 @@ export const RouteChainDialog: React.FC<{
         onDragOver={(event) => event.preventDefault()}
         onDrop={(event) => {
           event.preventDefault();
-          if (grabbed !== null) reorder(grabbed, index);
-          setGrabbed(null);
-          grabSnapshot.current = null;
-          grabOriginIndex.current = null;
+          if (grabbed !== null) {
+            advanceInteraction({
+              type: "move-grab-to",
+              index,
+            });
+            advanceInteraction({ type: "drop-grab" });
+          }
         }}
         data-current={current || undefined}
         className="model-hub-route-hop model-hub-fill-white-08 flex items-center border border-border"
@@ -705,17 +720,12 @@ export const RouteChainDialog: React.FC<{
           onClick={(event) => event.currentTarget.focus()}
           draggable={phase === "ready"}
           onDragStart={() => {
-            grabSnapshot.current = draft.map((item) => ({ ...item }));
-            grabOriginIndex.current = index;
-            setGrabbed(index);
-            setRovingIndex(index);
+            advanceInteraction({ type: "begin-grab", index });
           }}
           onDragEnd={() => {
-            setGrabbed(null);
-            grabSnapshot.current = null;
-            grabOriginIndex.current = null;
+            advanceInteraction({ type: "drop-grab" });
           }}
-          onFocus={() => setRovingIndex(index)}
+          onFocus={() => advanceInteraction({ type: "focus", index })}
           onKeyDown={(event) => onGripKeyDown(event, index)}
           tabIndex={
             grabbed === index || (grabbed === null && rovingIndex === index)
@@ -729,7 +739,7 @@ export const RouteChainDialog: React.FC<{
         <span
           className={cn(
             "model-hub-route-ordinal grid shrink-0 place-items-center font-mono font-medium",
-            current
+            index === 0
               ? "model-hub-accent-pill--mint"
               : "model-hub-fill-white-0a text-muted",
           )}
@@ -820,28 +830,35 @@ export const RouteChainDialog: React.FC<{
       </div>
     ) : phase === "guard" && guard ? (
       <div className="model-hub-route-body flex flex-1 flex-col gap-4">
-        <h3 className="model-hub-route-label font-bold">
-          {t("settings.models.guard.title.saveRoute", {
-            menuModel: modelId,
-          })}
-        </h3>
-        <p className="text-xs text-muted">
-          {t("settings.models.guard.subtitle.saveRoute", {
-            menuModel: modelId,
-          })}
-        </p>
-        <SupplyGapNote gaps={guard.gaps} />
-        <ul className="flex flex-col gap-2">
+        <div className="model-hub-guard-label">
+          <p>{t("settings.models.guard.label")}</p>
+          <span>{t("settings.models.guard.count", { count: guard.hops.length })}</span>
+        </div>
+        <ul className="model-hub-guard-list">
           {guard.hops.map((hop) => (
             <li
               key={`${hop.backend}:${hop.menu_model}:${hop.position}`}
-              className="text-xs text-muted"
+              className="model-hub-guard-hop"
             >
-              {t("settings.models.guard.hop.position", { n: hop.position })} ·{" "}
-              {hop.model_id}
+              <span className="min-w-0 flex-1">
+                <strong>
+                  {t(`settings.models.backends.${hop.backend}`, {
+                    defaultValue: hop.backend,
+                  })} · {hop.menu_model}
+                </strong>
+                <span>
+                  {hop.model_id} · {t("settings.models.guard.hop.position", {
+                    n: hop.position,
+                  })}
+                </span>
+              </span>
             </li>
           ))}
         </ul>
+        <p className="model-hub-guard-hint text-destructive">
+          <Info aria-hidden="true" />
+          {t("settings.models.guard.hint.interrupt")}
+        </p>
       </div>
     ) : phase === "rejected" ? (
       <div className="model-hub-route-body flex flex-1 flex-col items-center justify-center gap-3 text-muted">
@@ -904,18 +921,20 @@ export const RouteChainDialog: React.FC<{
             ))}
           </ul>
         ) : null}
-        <SupplyGapNote gaps={report?.interrupted ?? []} />
-        {(reconcileFailed ||
-          phase === "refreshing" ||
-          Boolean(
-            report?.removed_hops?.length || report?.interrupted?.length,
-          )) && (
+        <GuardGapList gaps={report?.interrupted ?? []} />
+        {Boolean(report?.removed_hops?.length || report?.interrupted?.length) && (
           <p className="text-xs text-muted">
-            {reconcileFailed
-              ? t("settings.models.routeDialog.impact.refreshFail")
-              : phase === "refreshing"
-                ? t("settings.models.routeDialog.refreshing")
-                : t("settings.models.routeDialog.impact.detail")}
+            {t("settings.models.routeDialog.impact.detail")}
+          </p>
+        )}
+        {phase === "refreshing" && (
+          <p className="text-xs text-muted">
+            {t("settings.models.routeDialog.refreshing")}
+          </p>
+        )}
+        {reconcileFailed && (
+          <p className="text-xs text-muted">
+            {t("settings.models.routeDialog.impact.refreshFail")}
           </p>
         )}
         {reconcileFailed && commitReconciliation?.failed && (
@@ -1041,7 +1060,7 @@ export const RouteChainDialog: React.FC<{
           type="button"
           onClick={() => {
             const sorted = reorderRouteDraft(agent as AgentSupply, draft);
-            setDraft(sorted);
+            advanceInteraction({ type: "reset", draft: sorted });
             announce(
               sameRouteDraft(sorted, draft)
                 ? "settings.models.routeDialog.reorder.unchanged"
@@ -1059,8 +1078,10 @@ export const RouteChainDialog: React.FC<{
           </span>
         )}
         <p className="model-hub-route-hint flex items-start">
-          <Info aria-hidden="true" className="mt-0.5 shrink-0" />
-          {t("settings.models.routeDialog.hint")}
+          <Info aria-hidden="true" className="shrink-0" />
+          <span className="model-hub-route-hint-copy">
+            {t("settings.models.routeDialog.hint")}
+          </span>
         </p>
         {valid.invalidIndexes.length > 0 && (
           <p
@@ -1086,7 +1107,7 @@ export const RouteChainDialog: React.FC<{
             phase === "refreshing" ||
             phase === "reconciling"
           }
-          className="model-hub-route-dialog fixed left-1/2 top-1/2 z-50 flex -translate-x-1/2 -translate-y-1/2 flex-col gap-0 overflow-hidden border border-border-strong bg-surface p-0 shadow-xl"
+          className="model-hub-route-dialog fixed left-1/2 z-50 flex -translate-x-1/2 flex-col gap-0 overflow-hidden border border-border-strong bg-surface p-0"
           onOpenAutoFocus={(event) => {
             event.preventDefault();
             cancelButtonRef.current?.focus();
@@ -1095,9 +1116,12 @@ export const RouteChainDialog: React.FC<{
           <header className="model-hub-route-head flex flex-col border-b border-border">
             <span className="flex items-center justify-between gap-3">
               <DialogPrimitive.Title className="model-hub-route-title font-bold text-foreground">
-                {t("settings.models.routeDialog.title", {
-                  menuModel: modelId,
-                })}
+                {t(
+                  phase === "guard"
+                    ? "settings.models.guard.title.saveRoute"
+                    : "settings.models.routeDialog.title",
+                  { menuModel: modelId },
+                )}
               </DialogPrimitive.Title>
               <DialogPrimitive.Close
                 disabled={phase === "saving"}
@@ -1116,7 +1140,9 @@ export const RouteChainDialog: React.FC<{
               </DialogPrimitive.Close>
             </span>
             <DialogPrimitive.Description className="model-hub-route-subtitle font-mono text-muted">
-              {backend}
+              {phase === "guard"
+                ? t("settings.models.guard.subtitle.saveRoute")
+                : backend}
             </DialogPrimitive.Description>
           </header>
           {body}

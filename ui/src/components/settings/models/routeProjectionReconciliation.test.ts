@@ -59,6 +59,32 @@ describe("route projection reconciliation", () => {
     });
   });
 
+  it("installs an authoritative collection that omits the edited backend", async () => {
+    const agentInstall = vi.fn();
+    const sourceInstall = vi.fn();
+    const readSources = vi.fn().mockResolvedValue({
+      value: [source],
+      install: sourceInstall,
+    });
+    const statuses = vi.fn();
+    const reconciler = createRouteProjectionReconciler({
+      readAgents: vi.fn().mockResolvedValue({ value: [], install: agentInstall }),
+      readSources,
+      onFailure: vi.fn(),
+      onStatus: statuses,
+    });
+
+    reconciler.start("claude");
+
+    await vi.waitFor(() => expect(sourceInstall).toHaveBeenCalledTimes(1));
+    expect(agentInstall).toHaveBeenCalledTimes(1);
+    expect(readSources).toHaveBeenCalledTimes(1);
+    expect(statuses).toHaveBeenLastCalledWith({
+      pending: false,
+      failed: new Set(),
+    });
+  });
+
   it("retries an Agents failure before activating its deferred Source member", async () => {
     const readAgents = vi
       .fn()

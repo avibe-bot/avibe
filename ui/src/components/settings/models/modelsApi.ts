@@ -19,6 +19,7 @@ import {
   mockRecommendedOrder,
 } from './mockData';
 import { canReauth, canReplaceKey, wasBlocked } from './repair';
+import { validateRouteDraft } from './routeChainDraft';
 import { isUnhealthy } from './supply';
 import type {
   AdoptedBy,
@@ -839,15 +840,10 @@ class MockStore {
     const agent = this.agentOr404(backend);
     if (agent.mode === 'direct') throw new ApiCallError('direct_mode');
     const byId = new Map(this.sources.map((source) => [source.id, source]));
-    const seen = new Set<string>();
-    for (const hop of body.hops) {
-      const source = byId.get(hop.source_id);
-      const supplied = source?.models.some((entry) => entry.id === hop.model_id && entry.retired !== true);
-      const identity = `${hop.source_id}\u0000${hop.model_id}`;
-      if (!source || !supplied || seen.has(identity)) throw new ApiCallError('model_unsupported');
-      seen.add(identity);
-    }
     const previous = agent.routes?.[model]?.hops ?? [];
+    if (!validateRouteDraft(agent, this.sources, previous, body.hops).valid) {
+      throw new ApiCallError('model_unsupported');
+    }
     const removed_hops: RouteHopRef[] = previous.flatMap((hop, index) => body.hops.some((next) => equalHopIdentity(next, hop))
       ? []
       : [{ backend, menu_model: model, ...hop, position: index + 1 }]);

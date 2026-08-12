@@ -33,7 +33,6 @@ export const createRouteProjectionReconciler = ({
 
   const settle = async (
     token: number,
-    backend: AgentBackend,
     members: ReadonlySet<RouteProjectionMember>,
   ) => {
     failed = new Set();
@@ -43,9 +42,6 @@ export const createRouteProjectionReconciler = ({
       try {
         const observation = await readAgents();
         if (token !== generation) return;
-        if (!observation.value.some((agent) => agent.backend === backend)) {
-          throw new Error("route_agent_missing");
-        }
         observation.install();
       } catch {
         if (token !== generation) return;
@@ -74,12 +70,12 @@ export const createRouteProjectionReconciler = ({
     start: (backend: AgentBackend) => {
       activeBackend = backend;
       const token = ++generation;
-      void settle(token, backend, new Set(["agents"]));
+      void settle(token, new Set(["agents"]));
     },
     retry: () => {
       if (failed.size === 0 || !activeBackend) return;
       const token = ++generation;
-      void settle(token, activeBackend, failed);
+      void settle(token, failed);
     },
     invalidate: () => {
       generation += 1;

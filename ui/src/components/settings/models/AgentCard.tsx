@@ -58,6 +58,8 @@ const ModelRow: React.FC<{
   return (
     <button
       type="button"
+      data-route-backend={agent.backend}
+      data-route-model={modelId}
       onClick={(event) => onOpenRoute(agent, modelId, event.currentTarget)}
       aria-label={t('settings.models.routeDialog.open', { model: modelId }) as string}
       className="model-hub-model-row flex h-9 w-full min-w-0 items-center gap-2.5 overflow-hidden rounded-lg border border-border px-3 text-left"
@@ -128,7 +130,11 @@ const AgentModelCard: React.FC<{
         : 'bg-muted';
   return (
     <section className="overflow-hidden rounded-xl border border-border bg-background" data-agent-backend={agent.backend}>
-      <div className="flex min-h-[66px] flex-col justify-center gap-[7px] border-b border-border px-3.5 py-3 sm:h-[66px] sm:py-0">
+      <div
+        tabIndex={-1}
+        data-agent-group-head={agent.backend}
+        className="flex min-h-[66px] flex-col justify-center gap-[7px] border-b border-border px-3.5 py-3 sm:h-[66px] sm:py-0"
+      >
         <div className="flex min-w-0 flex-col items-stretch gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
           <div className="flex min-w-0 items-center gap-[9px]">
             <span className={cn('flex size-[30px] shrink-0 items-center justify-center rounded-[9px]', ACCENT_TILE[accent])}><Icon className={cn('size-[15px]', ACCENT_ICON[accent])} /></span>

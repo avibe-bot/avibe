@@ -46,7 +46,7 @@ import {
   subscriptionOptionOrder,
   subscriptionVendorCopy,
 } from './subscriptionOptions';
-import { SupplyGapNote } from './SupplyGapNote';
+import { GuardGapList } from './GuardGapList';
 import { ACCENT_ICON, ACCENT_TILE } from './vendorMeta';
 import type { Source, SupplyChannel, SupplyGap } from './types';
 
@@ -770,7 +770,8 @@ export const OAuthConnectDialog: React.FC<{
               {/* Past tense (`gapsDone`), because this is not a confirm: the
                   credential change these pairs are the cost of has already
                   happened. Self-hides when the failure stranded nobody. */}
-              <SupplyGapNote gaps={stranded} title={t('settings.models.repair.gapsDone') as string} />
+              <p className="text-[12px] font-semibold text-foreground">{t('settings.models.repair.gapsDone')}</p>
+              <GuardGapList gaps={stranded} />
             </div>
           )}
 
@@ -785,7 +786,7 @@ export const OAuthConnectDialog: React.FC<{
                 <span className="model-hub-ink-gold text-[12.5px] font-semibold leading-relaxed">
                   {t('settings.models.repair.gapsDone')}
                 </span>
-                <SupplyGapNote gaps={repair.gaps} />
+                <GuardGapList gaps={repair.gaps} />
               </div>
             ) : repair?.kind === 'unresolved' ? (
               // Gold, not destructive, and not a green check: nothing failed —
