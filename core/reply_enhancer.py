@@ -175,7 +175,7 @@ _BUTTON_LINE_TOKEN = (
     + r"|<https?://[^|>\r\n]+\|[^>\r\n]+>)"
 )
 _UNSEPARATED_BUTTON_ROW_RE = re.compile(
-    r"(?:^|\r?\n)"
+    r"\r?\n"
     r"([ \t]*"
     + _BUTTON_LINE_TOKEN
     + r"[ \t]*(?:[|｜][ \t]*"
@@ -199,15 +199,30 @@ _BUTTON_TOKEN_RE = re.compile(
 _PLAIN_LINKS_ONLY_RE = re.compile(r"(?:\s*\[[^\]]+\]\(" + _PLAIN_URL + r"\)\s*)+")
 
 
-def _is_markdown_table_delimiter_before(text: str, start: int) -> bool:
-    """Return whether a separator-free row follows a Markdown table delimiter."""
-    line = text[:start].splitlines()[-1].strip() if text[:start] else ""
+def _is_markdown_table_delimiter_line(line: str) -> bool:
+    """Return whether *line* is a Markdown table delimiter row."""
     if "|" not in line:
         return False
-    cells = line.strip("|").split("|")
+    cells = line.strip().strip("|").split("|")
     return len(cells) >= 2 and all(
         re.fullmatch(r"\s*:?-{3,}:?\s*", cell) for cell in cells
     )
+
+
+def _is_markdown_table_delimiter_before(text: str, start: int) -> bool:
+    """Return whether a separator-free row belongs to the preceding table."""
+    lines = text[:start].splitlines()
+    if not lines or "|" not in lines[-1]:
+        return False
+
+    # Walk through contiguous table rows so the final row of a multi-row table
+    # is not mistaken for a quick-reply footer.
+    index = len(lines) - 1
+    while index >= 0 and "|" in lines[index]:
+        if _is_markdown_table_delimiter_line(lines[index]):
+            return index > 0 and "|" in lines[index - 1]
+        index -= 1
+    return False
 
 # Silent output blocks are intentionally simple and model-facing. Once a real
 # opener is found outside code, its contents are opaque until the closing tag.

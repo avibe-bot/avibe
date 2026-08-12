@@ -1424,6 +1424,27 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             [":eyes: 看 PR", ":rocket: 等评审完合并", ":test_tube: 先回归测一遍"],
         )
 
+    def test_process_reply_preserves_bodyless_pipe_row_without_rule(self):
+        text = "[A] | [B]"
+
+        reply = process_reply(text)
+
+        self.assertEqual(reply.text, text)
+        self.assertEqual(reply.buttons, [])
+
+    def test_process_reply_preserves_final_row_of_markdown_table(self):
+        text = (
+            "Option | Status\n"
+            "--- | ---\n"
+            "[Docs](https://example.com) | [Open]\n"
+            "[Issue](https://example.com/1) | [Closed]"
+        )
+
+        reply = process_reply(text)
+
+        self.assertEqual(reply.text, text)
+        self.assertEqual(reply.buttons, [])
+
     def test_process_reply_accepts_slack_angle_link_style_quick_reply_button(self):
         reply = process_reply(
             "Done.\n\n---\n"

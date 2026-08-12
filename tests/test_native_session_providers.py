@@ -11,6 +11,7 @@ from modules.agents.native_sessions.base import (
     build_tail_preview,
     normalize_multiline_preview_text,
     normalize_preview_text,
+    normalize_title_text,
 )
 from modules.agents.native_sessions import claude as claude_module
 from modules.agents.native_sessions.claude import ClaudeNativeSessionProvider, encode_project_path
@@ -619,7 +620,21 @@ def test_native_session_previews_strip_unseparated_quick_replies() -> None:
     assert normalize_multiline_preview_text(text) == "Done"
 
 
-def test_native_session_previews_preserve_markdown_table_rows() -> None:
-    text = "Option | Status\n--- | ---\n[Docs](https://example.com) | [Issue](https://example.com/1)"
+def test_native_session_titles_preserve_button_like_user_prompt_content() -> None:
+    text = "Compare these values:\n[A] | [B]"
 
-    assert normalize_preview_text(text) == "Option | Status --- | --- [Docs](https://example.com) | [Issue](https://example.com/1)"
+    assert normalize_title_text(text) == "Compare these values: [A] | [B]"
+
+
+def test_native_session_previews_preserve_markdown_table_rows() -> None:
+    text = (
+        "Option | Status\n"
+        "--- | ---\n"
+        "[Docs](https://example.com) | [Open]\n"
+        "[Issue](https://example.com/1) | [Closed]"
+    )
+
+    assert normalize_preview_text(text) == (
+        "Option | Status --- | --- [Docs](https://example.com) | [Open] "
+        "[Issue](https://example.com/1) | [Closed]"
+    )

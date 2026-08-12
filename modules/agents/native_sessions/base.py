@@ -32,11 +32,12 @@ class NativeSessionProvider(Protocol):
         """Return a backfillable title for a native session, if available."""
 
 
-def normalize_preview_text(text: str) -> str:
+def normalize_preview_text(text: str, *, strip_quick_replies: bool = True) -> str:
     if not text:
         return ""
     cleaned = text.replace("\r\n", "\n").replace("\r", "\n")
-    cleaned = strip_quick_reply_buttons(cleaned)
+    if strip_quick_replies:
+        cleaned = strip_quick_reply_buttons(cleaned)
     if "\n---\n" in cleaned:
         cleaned = cleaned.split("\n---\n", 1)[0]
     lines = [line.strip() for line in cleaned.split("\n") if line.strip()]
@@ -44,7 +45,9 @@ def normalize_preview_text(text: str) -> str:
 
 
 def normalize_title_text(text: str, *, limit: int | None = None) -> str:
-    cleaned = normalize_preview_text(text)
+    # Titles come from user prompts; button-like lines are content there, not
+    # assistant controls to strip.
+    cleaned = normalize_preview_text(text, strip_quick_replies=False)
     if not cleaned:
         return ""
     return cleaned[:limit] if limit is not None else cleaned
