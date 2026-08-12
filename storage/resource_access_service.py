@@ -641,14 +641,18 @@ def _policy_allows(
 
 
 def _policy_allows_management(context: ResourceUserContext, policy: Mapping[str, Any] | None) -> bool:
+    # Resource ACL management is a durable Org boundary, not a runtime surface
+    # that the temporary Organization rollout opens. Keep the origin/org gate
+    # by checking the role rank directly so the runtime-only owner bypass
+    # applied for runtime API admission does not bleed into ACL decisions.
     if context.is_trusted_local:
         return True
-    if isinstance(policy, Mapping) and _temporary_unrestricted_resource_bypass(
-        context,
-        str(policy.get("resource_kind") or ""),
-    ):
-        return True
-    if not context.has_role("owner"):
+    instance_role_rank = {
+        "owner": 3,
+        "editor": 2,
+        "viewer": 1,
+    }.get(context.instance_role or "", 0)
+    if instance_role_rank < 3:
         return False
     if policy is None:
         return True
@@ -781,7 +785,9 @@ def can_manage_resource_acl(
     context = _as_context(user_context)
     kind = _validate_resource_kind(resource_kind)
     identifier = _required_identifier(resource_id, code="invalid_resource_id")
-    if context.is_trusted_local or _temporary_unrestricted_resource_bypass(context, kind):
+    # Resource ACL management is a durable Org boundary, not a runtime surface
+    # that the temporary Organization rollout opens. Keep the origin/org gate.
+    if context.is_trusted_local:
         return True
     with _connection(connection) as conn:
         policy = _policy_row(conn, kind, identifier)

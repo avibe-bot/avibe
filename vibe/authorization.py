@@ -90,7 +90,7 @@ class AuthorizationContext:
     def is_instance_owner(self) -> bool:
         if self.is_trusted_local:
             return True
-        return self._has_admitted_remote_identity() and self.instance_role == "owner"
+        return self.instance_role == "owner"
 
     @property
     def is_active_organization_member(self) -> bool:
@@ -571,8 +571,10 @@ _TEMPORARY_UNRESTRICTED_ORG_HTTP_RULES = tuple(
         (_UNRESTRICTED_ORG_METHODS, r"^/api/(?:agent-backends|agents-graph|agent-onboarding|running-agents(?:/end)?)$"),
         (_UNRESTRICTED_ORG_METHODS, r"^/api/agent/[^/]+/install(?:/[^/]+)?$"),
         (_UNRESTRICTED_ORG_METHODS, r"^/api/global-prompts$"),
-        # Skills and their installed runtime dependencies.
-        (_UNRESTRICTED_ORG_METHODS, r"^/api/skills(?:/(?:preview|find|check|update|upload|[^/]+))?$"),
+        # Skills mutations (read endpoints are viewer-allowed on origin/org).
+        (frozenset({"POST"}), r"^/api/skills$"),
+        (frozenset({"POST"}), r"^/api/skills/preview$"),
+        (frozenset({"POST", "DELETE"}), r"^/api/skills/(?:update|upload|[^/]+)$"),
         (_UNRESTRICTED_ORG_METHODS, r"^/api/dependencies(?:/[^/]+(?:/install(?:/[^/]+)?)?)?$"),
         # Vault inventory, key material, secret CRUD, grants, approvals, and audit.
         (_UNRESTRICTED_ORG_METHODS, r"^/api/vault/(?:secrets(?:/[^/]+(?:/reveal-context)?)?|tags|pubkey|agent/pubkey|sandbox/root-metadata|agent-bindings:batch|agent-binding|settings|vmk|authz/factors/webauthn(?:/options)?|signing-addresses|requests(?:/[^/]+(?:/(?:deny|fulfill-access))?)?|provision-requests(?:/(?:by-id/)?[^/]+)?|grants(?:/[^/]+)?|sign|pubkey-pin|audit)$"),

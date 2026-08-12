@@ -1562,6 +1562,21 @@ def _is_ui_static_request() -> bool:
     return getattr(endpoint, "__name__", "") == "serve_static_compat_endpoint"
 
 
+_PROJECT_RESOURCE_POLICY_WRITE = re.compile(r"^/api/resource-policies/[^/]+/[^/]+$")
+
+
+def _project_resource_policy_write_path(path: str) -> bool:
+    """Resource policy write endpoints surface not_found for non-members.
+
+    These routes stay classified ``local_only`` so the boundary still refuses
+    trusted-local writes from arbitrary remote callers, but active members and
+    owners pass through to the handler, which returns 404 to non-members so the
+    existence of an unrelated Organization's policy is not leaked.
+    """
+
+    return bool(_PROJECT_RESOURCE_POLICY_WRITE.match(path))
+
+
 def _oauth_cookie_signature(secret: str, payload: str) -> str:
     return hmac.new(secret.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
 
@@ -2470,9 +2485,15 @@ def enforce_instance_role_capabilities():
             # trusted-local routes retain the remote-execution error contract.
             # Ordinary remotely exposed runtime APIs instead fail the active
             # Organization membership admission check here, before role rank.
+            # Resource policy write endpoints defer to the handler so non-members
+            # get not_found (no existence leak).
             if policy.remote_access == REMOTE_HTTP_ACTIVE_ORGANIZATION_MEMBER:
+                if _project_resource_policy_write_path(request.path):
+                    return None
                 return _remote_execution_disabled_response()
             if policy.remote_access != REMOTE_HTTP_LOCAL_ONLY:
+                if _project_resource_policy_write_path(request.path):
+                    return None
                 raise InstanceAuthorizationError(minimum_role)
         require_instance_role(context, minimum_role)
     except InstanceAuthorizationError:
@@ -2666,8 +2687,15 @@ async def enforce_remote_local_execution_boundary():
                     payload.pop("remote_access", None)
                 g.remote_unrestricted_config_payload = payload
             return None
+        # Org resource policy writes keep the local-only classification but the
+        # handler returns 404 for non-members (no existence leak). Defer to the
+        # handler so callers learn not_found instead of remote_execution_disabled.
+        if _project_resource_policy_write_path(request.path):
+            return None
         return _remote_execution_disabled_response()
     if policy.remote_access == REMOTE_HTTP_LOCAL_ONLY:
+        if _project_resource_policy_write_path(request.path):
+            return None
         return _remote_execution_disabled_response()
     if policy.remote_access != REMOTE_HTTP_PAYLOAD_FILTERED:
         return None
@@ -6968,10 +6996,17 @@ def resource_policy_put(resource_kind: str, resource_id: str):
             )
             if policy is None:
                 return jsonify({"error": "resource_not_found"}), 404
-            if policy.get("organization_id") and policy.get("organization_id") != user_context.organization_id:
-                return jsonify({"error": "resource_not_found"}), 404
-            if policy.get("organization_id") and not user_context.is_active_organization_member:
-                return jsonify({"error": "organization_context_required"}), 403
+            if policy.get("organization_id"):
+                # Resource existence is hidden from non-member callers and from
+                # callers whose Organization membership does not match the
+                # resource's owning Organization; surface not_found in either
+                # case so the existence of an unrelated Organization's policy
+                # is not leaked.
+                if (
+                    not user_context.is_active_organization_member
+                    or user_context.organization_id != policy.get("organization_id")
+                ):
+                    return jsonify({"error": "resource_not_found"}), 404
             if not resource_access_service.can_manage_resource_acl(
                 user_context,
                 resource_kind,
@@ -8170,12 +8205,12 @@ def _resolve_project_dir(project_id):
     authorization_context = getattr(g, "authorization_context", None)
     engine = _projects_engine()
     with engine.connect() as conn:
-        folder = projects_service.get_project_workdir(
+        project = projects_service.get_project(
             conn,
             project_id,
             authorization_context=authorization_context,
         )
-    folder = folder.strip()
+    folder = (project.get("folder_path") or "").strip()
     if not folder:
         raise _ProjectNoFolder(project_id)
     return folder
