@@ -64,6 +64,34 @@ describe('Memory UI copy contracts', () => {
     expect(zh.memory.log.callStage.cascade).not.toContain('队列');
   });
 
+  it('presents reinitialization roots as user data areas with secondary technical paths', () => {
+    expect(en.memory.factoryReset.confirmDescription).toBe(
+      'This permanently deletes Memory content and runtime state on this device, then creates a fresh Memory engine. Memory settings, credentials, the installed runtime, and original chats are kept.',
+    );
+    expect(en.memory.factoryReset.roots.content).toEqual({
+      label: 'Memory content',
+      description: 'Profiles, facts, indexes, and pending work',
+    });
+    expect(en.memory.factoryReset.roots.runtimeState).toEqual({
+      label: 'Runtime state',
+      description: 'Processing queues, recovery progress, and operational records',
+    });
+    expect(en.memory.factoryReset.technicalPath).toContain('{{path}}');
+
+    expect(zh.memory.factoryReset.confirmDescription).toBe(
+      '将永久删除本机的记忆内容和运行状态，并重新创建记忆引擎。记忆设置、凭据、已安装的运行时和原始聊天记录会保留。',
+    );
+    expect(zh.memory.factoryReset.roots.content).toEqual({
+      label: '记忆内容',
+      description: '画像、事实、索引及待处理数据',
+    });
+    expect(zh.memory.factoryReset.roots.runtimeState).toEqual({
+      label: '运行状态',
+      description: '处理队列、恢复进度和运行记录',
+    });
+    expect(zh.memory.factoryReset.technicalPath).toContain('{{path}}');
+  });
+
   it.each(['en', 'zh'] as const)('keeps operational guidance scoped to runtime behavior in %s', (language) => {
     const bundle = BUNDLES[language];
     const disclosure = bundle.memory.settings.disclosure.join('\n');

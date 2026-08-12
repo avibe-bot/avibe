@@ -4013,25 +4013,32 @@
       "button": "Reinitialize Memory",
       "retry": "Retry initialization",
       "artifactRepairRequired": "Reinitializing Memory is unavailable until the pinned Memory artifact is installed and ready. Repair it first.",
-      "dependenciesHint": "Permanently replaces both mutable Memory roots. Settings and the installed runtime are retained.",
+      "dependenciesHint": "Permanently replaces Memory content and runtime state. Settings and the installed runtime are retained.",
       "settingsUnavailable": "Memory settings are unavailable. Re-check before reinitializing.",
       "confirmTitle": "Reinitialize Memory?",
-      "confirmDescription": "This permanently removes both mutable Memory roots. Settings and the installed Memory artifact are retained.",
+      "confirmDescription": "This permanently deletes Memory content and runtime state on this device, then creates a fresh Memory engine. Memory settings, credentials, the installed runtime, and original chats are kept.",
       "confirmLabel": "Reinitialize Memory",
       "deletesTitle": "This deletes exactly:",
-      "deletes": [
-        "The installed Memory root (memory)",
-        "The mutable Memory state root (state/memory)"
-      ],
+      "roots": {
+        "content": {
+          "label": "Memory content",
+          "description": "Profiles, facts, indexes, and pending work"
+        },
+        "runtimeState": {
+          "label": "Runtime state",
+          "description": "Processing queues, recovery progress, and operational records"
+        }
+      },
+      "technicalPath": "Technical path: {{path}}",
       "retainsTitle": "This keeps:",
       "retains": [
         "Memory settings and credentials",
         "The pinned, installed Memory artifact",
-        "Original Avibe chats and data outside these roots"
+        "Original Avibe chats and data outside Memory content and runtime state"
       ],
       "resultTitle": "Memory initialization result",
-      "resultCompleted": "The fresh Memory state is ready. The per-root report below is authoritative.",
-      "rootOutcome": "{{path}}: {{deleted}}",
+      "resultCompleted": "The fresh Memory engine is ready. The Memory content and runtime state report below is authoritative.",
+      "rootOutcome": "{{label}}: {{deleted}}",
       "unknownRoot": "unknown root",
       "deleted": "deleted",
       "partial": "partially deleted",
