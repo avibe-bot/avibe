@@ -845,6 +845,114 @@ def test_model_hub_ui_gate_rejects_empty_required_register_cells(tmp_path: Path)
     )
 
 
+@pytest.mark.parametrize(
+    "query",
+    ("?model", "?model=", "?=id", "?model=<id>&bogus"),
+)
+def test_model_hub_ui_gate_preserves_malformed_query_candidates(
+    tmp_path: Path, query: str
+):
+    spec = Path("docs/plans/model-hub-ui-spec.md").read_text(encoding="utf-8")
+    baseline = check_model_hub_ui_states(Path.cwd())
+    assert spec.count("?model=<id>") >= 1
+    mutated = tmp_path / "mutated.md"
+    mutated.write_text(spec.replace("?model=<id>", query, 1), encoding="utf-8")
+
+    result = check_model_hub_ui_states(mutated, authorities=Path.cwd())
+
+    assert result["input_scale"]["authority: route claims"] == baseline["input_scale"][
+        "authority: route claims"
+    ]
+    assert any(
+        "malformed query component" in finding["message"]
+        for finding in result["findings"]
+    )
+
+
+def test_model_hub_ui_gate_preserves_unquoted_mapping_table_candidate(tmp_path: Path):
+    spec = Path("docs/plans/model-hub-ui-spec.md").read_text(encoding="utf-8")
+    baseline = check_model_hub_ui_states(Path.cwd())
+    before = "| `Source.state.status` `[contract]` | Ink | Key |"
+    after = "| Source.state.status [contract] | Ink | Key |"
+    assert spec.count(before) == 1
+    mutated = tmp_path / "mutated.md"
+    mutated.write_text(spec.replace(before, after), encoding="utf-8")
+
+    result = check_model_hub_ui_states(mutated, authorities=Path.cwd())
+
+    for scale in (
+        "authority: mapping-table candidates",
+        "authority: contract mapping tables",
+    ):
+        assert result["input_scale"][scale] == baseline["input_scale"][scale]
+    assert any(
+        "unquoted field citation" in finding["message"]
+        for finding in result["findings"]
+    )
+
+
+def test_model_hub_ui_gate_preserves_pathless_register_route_candidate(tmp_path: Path):
+    spec = Path("docs/plans/model-hub-ui-spec.md").read_text(encoding="utf-8")
+    baseline = check_model_hub_ui_states(Path.cwd())
+    before = "then sends `POST /api/models/oauth/start`; RR-1/RR-2"
+    after = "then sends `POST`; RR-1/RR-2"
+    assert spec.count(before) == 1
+    mutated = tmp_path / "mutated.md"
+    mutated.write_text(spec.replace(before, after), encoding="utf-8")
+
+    result = check_model_hub_ui_states(mutated, authorities=Path.cwd())
+
+    scale = "state-register route candidates"
+    assert result["input_scale"][scale] == baseline["input_scale"][scale]
+    assert any(
+        "Default" in finding["message"] and "`POST` with no path" in finding["message"]
+        for finding in result["findings"]
+    )
+
+
+def test_model_hub_ui_gate_keeps_unqualified_exits_in_their_frame(tmp_path: Path):
+    spec = Path("docs/plans/model-hub-ui-spec.md").read_text(encoding="utf-8")
+    baseline = check_model_hub_ui_states(Path.cwd())
+    before = "first source → Ready"
+    after = "first source → Awaiting paste-back"
+    assert spec.count(before) == 1
+    mutated = tmp_path / "mutated.md"
+    mutated.write_text(spec.replace(before, after), encoding="utf-8")
+
+    result = check_model_hub_ui_states(mutated, authorities=Path.cwd())
+
+    assert result["input_scale"]["state-register exit candidates"] == baseline[
+        "input_scale"
+    ][
+        "state-register exit candidates"
+    ]
+    assert any(
+        "Awaiting paste-back" in finding["message"]
+        and "no state §1.0 files" in finding["message"]
+        for finding in result["findings"]
+    )
+
+
+def test_model_hub_ui_gate_uses_only_mapping_cells_leading_domain_value(tmp_path: Path):
+    spec = Path("docs/plans/model-hub-ui-spec.md").read_text(encoding="utf-8")
+    baseline = check_model_hub_ui_states(Path.cwd())
+    before = "The source is `standby`, or `active` with nothing adopting it"
+    after = "The source is `adopted_by`, or `active` with nothing adopting it"
+    assert spec.count(before) == 1
+    mutated = tmp_path / "mutated.md"
+    mutated.write_text(spec.replace(before, after), encoding="utf-8")
+
+    result = check_model_hub_ui_states(mutated, authorities=Path.cwd())
+
+    scale = "frame mapping-table domain values"
+    assert result["input_scale"][scale] == baseline["input_scale"][scale]
+    assert any(
+        "enters on `adopted_by`" in finding["message"]
+        and "mapping of `Source.state.status` does not define" in finding["message"]
+        for finding in result["findings"]
+    )
+
+
 def test_model_hub_ui_gate_line_citations_do_not_read_git_history(
     monkeypatch, tmp_path: Path
 ):

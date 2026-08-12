@@ -322,24 +322,60 @@ def normalize_route(method: str, path: str) -> str:
     return f"{method} {path}"
 
 
-def route_query(path: str) -> tuple[tuple[str, str], ...]:
-    """Return exact query claims while route coverage remains path-grained.
+class QueryScan(NamedTuple):
+    """One route query, including components that cannot become key/value pairs."""
+
+    present: bool
+    values: tuple[tuple[str, str], ...]
+    malformed: tuple[str, ...]
+
+
+def route_query(path: str) -> QueryScan:
+    """Return every query component while route coverage remains path-grained.
 
     A route mention may omit its query when discussing the endpoint as a whole.
     Once it spells a query, however, the names and values are a contract claim
-    and must not disappear through `normalize_route`.
+    and must not disappear through `normalize_route`. Candidacy is the presence
+    of ``?`` and ``&``-delimited components; validity is answered afterwards, so
+    a missing separator, name, or value remains visible as malformed input.
     """
     _path, marker, query = path.partition("?")
     if not marker:
-        return ()
-    return tuple(
-        sorted(
-            (name.strip(), value.strip())
-            for part in query.split("&")
-            for name, separator, value in (part.partition("="),)
-            if separator and name.strip() and value.strip()
-        )
-    )
+        return QueryScan(False, (), ())
+    values: list[tuple[str, str]] = []
+    malformed: list[str] = []
+    for part in query.split("&"):
+        name, separator, value = part.partition("=")
+        name = name.strip()
+        value = value.strip()
+        if not separator or not name or not value:
+            malformed.append(part)
+            continue
+        values.append((name, value))
+    return QueryScan(True, tuple(sorted(values)), tuple(malformed))
+
+
+class RegisterRouteClaim(NamedTuple):
+    """One route-shaped claim in a state-register cell."""
+
+    method: str
+    route: str | None
+
+
+def register_route_claims(cell: str) -> tuple[RegisterRouteClaim, ...]:
+    """Return every typed or malformed route claim in one register cell."""
+    claims = [
+        RegisterRouteClaim(method, normalize_route(method, path))
+        for method, path in ANY_ROUTE_RE.findall(cell)
+    ]
+    for match in BARE_METHOD_RE.finditer(cell):
+        prefix = cell[max(0, match.start() - 56) : match.start()]
+        if not re.search(r"\b(?:send|sends|call|calls|invoke|invokes)\b", prefix):
+            continue
+        if re.search(r"\b(?:same|mode|value|reading)\b[^.;]{0,36}$", prefix):
+            continue
+        claims.append(RegisterRouteClaim(match.group(1), None))
+    return tuple(claims)
 
 
 # --- the gate's one comparison ---------------------------------------------
@@ -1194,7 +1230,7 @@ def load_authorities(origin: Origin) -> dict[str, Any]:
                 "named_answer": "",
                 "guarded": guarded,
                 "statuses": statuses,
-                "query": route_query(m.group(2)),
+                "query": route_query(m.group(2)).values,
                 "cell": cells[1],
             },
             content=cells[1],
@@ -1975,7 +2011,19 @@ def cited_rows(tokens: set[str], copy: Universe) -> set[int]:
 
 MAPPING_HEADER_CELL_RE = re.compile(r"^\s*`([A-Za-z][A-Za-z0-9_.\[\]]*)`((?:\s*`\[[a-z-]+\]`)*)\s*$")
 MAPPING_HEADER_CANDIDATE_RE = re.compile(r"^\s*`([^`]+)`((?:\s*`\[[^`]+\]`)*)\s*$")
+MAPPING_HEADER_UNQUOTED_RE = re.compile(
+    r"^\s*([A-Za-z][A-Za-z0-9_.\[\]]*)(\s+(?:`?\[[a-z-]+\]`?))?\s*$"
+)
 SEPARATOR_RE = re.compile(r"^\|[\s:|-]+\|$")
+LEADING_MAPPING_VALUE_RE = re.compile(r"\s*`([a-z][a-z0-9_]*)`")
+
+
+class MappingRow(NamedTuple):
+    """One mapping row with its owned field values parsed once."""
+
+    line: int
+    cells: list[str]
+    values: dict[int, str]
 
 
 class MappingScan(NamedTuple):
@@ -1983,7 +2031,8 @@ class MappingScan(NamedTuple):
 
     line: int
     fields: dict[int, tuple[str, str]]
-    rows: list[tuple[int, list[str]]]
+    candidate_columns: frozenset[int]
+    rows: list[MappingRow]
     cites: set[str]
     malformed: tuple[tuple[int, str], ...]
 
@@ -1999,11 +2048,12 @@ def _mapping_scan(doc: Document) -> list[MappingScan]:
     finding lives, so the convention is recognised once here and read twice
     above.
 
-    Three things have to be true at once, or the shape is something else: the
-    header cell is a bare backticked name, a separator row follows, and the run
-    of `|` lines after it is the body. Row *identity* is kept — the line number
-    and the cells — because an arm that reports a contradiction has to be able
-    to say which row it read.
+    Table structure is recognised before a field's quoting is validated. A
+    field-shaped header followed by a Markdown separator is therefore still
+    this reader's table when the backticks disappear; the candidate becomes a
+    malformed finding instead of making the entire inventory shrink. Row
+    identity is kept, and each mapped column's leading value is extracted once
+    here for every downstream consumer.
     """
     tables: list[MappingScan] = []
     numbered = doc.scope("mapping tables")
@@ -2016,18 +2066,33 @@ def _mapping_scan(doc: Document) -> list[MappingScan]:
             continue
         headers = line.strip().strip("|").split("|")
         fields: dict[int, tuple[str, str]] = {}
+        candidate_columns: set[int] = set()
         malformed: list[tuple[int, str]] = []
         for col, cell in enumerate(headers):
             m = MAPPING_HEADER_CELL_RE.match(cell)
             if m:
+                candidate_columns.add(col)
                 fields[col] = (m.group(1), m.group(2))
             elif candidate := MAPPING_HEADER_CANDIDATE_RE.match(cell):
+                candidate_columns.add(col)
                 malformed.append(
                     (line_no, f"mapping header `{candidate.group(1)}` is not a valid field citation")
                 )
-        if not fields and not malformed:
+            elif candidate := MAPPING_HEADER_UNQUOTED_RE.match(cell):
+                if "." not in candidate.group(1) and "[contract]" not in (
+                    candidate.group(2) or ""
+                ):
+                    continue
+                candidate_columns.add(col)
+                malformed.append(
+                    (
+                        line_no,
+                        f"mapping header `{candidate.group(1)}` is an unquoted field citation",
+                    )
+                )
+        if not candidate_columns:
             continue
-        rows: list[tuple[int, list[str]]] = []
+        rows: list[MappingRow] = []
         for n, row in numbered[pos + 2 :]:
             if not row.startswith("|"):
                 break
@@ -2040,7 +2105,18 @@ def _mapping_scan(doc: Document) -> list[MappingScan]:
                         f"{len(headers)}",
                     )
                 )
-            rows.append((n, cells))
+            rows.append(
+                MappingRow(
+                    n,
+                    cells,
+                    {
+                        col: leading.group(1)
+                        for col in candidate_columns
+                        if col < len(cells)
+                        and (leading := LEADING_MAPPING_VALUE_RE.match(cells[col]))
+                    },
+                )
+            )
         # The lead-in paragraph is where these tables say whose field this is —
         # "`runtime-dependency.schema.json` enumerates five values", and then the
         # table. Reading it keeps the gate from calling a bound table ambiguous,
@@ -2057,6 +2133,7 @@ def _mapping_scan(doc: Document) -> list[MappingScan]:
             MappingScan(
                 line_no,
                 fields,
+                frozenset(candidate_columns),
                 rows,
                 set(SCHEMA_CITE_RE.findall("\n".join(lead))),
                 tuple(malformed),
@@ -2101,16 +2178,11 @@ def mapping_tables(
     found: list[tuple[int, str, set[str], set[str], bool]] = []
     for table in scans if scans is not None else _mapping_scan(doc):
         values: dict[int, set[str]] = {col: set() for col in table.fields}
-        for _n, cells in table.rows:
-            for col in table.fields:
-                if col < len(cells):
-                    # The mapped field owns this column, so only its leading
-                    # value token is a domain member. Qualifying conditions in
-                    # the same cell (`error_key`, `host_platform`, `adopted_by`)
-                    # select a rendering; they do not extend the field's enum.
-                    leading = re.match(r"\s*`([a-z][a-z0-9_]*)`", cells[col])
-                    if leading:
-                        values[col].add(leading.group(1))
+        for row in table.rows:
+            for col, value in row.values.items():
+                if col not in values:
+                    continue
+                values[col].add(value)
         for col, (field, markers) in sorted(table.fields.items()):
             if values[col]:
                 found.append((table.line, field, values[col], table.cites, "[contract]" in markers))
@@ -2136,7 +2208,11 @@ LANDING_END_RE = re.compile(r"[。;;]|\.\s")
 LANDING_NAME_RE = re.compile(r"\s*\*?[A-Z]")
 
 
-def frame_mappings(doc: Document, copy_u: Universe) -> dict[str, dict[str, dict[str, set[str]]]]:
+def frame_mappings(
+    doc: Document,
+    copy_u: Universe,
+    scans: list[MappingScan] | None = None,
+) -> dict[str, dict[str, dict[str, set[str]]]]:
     """frame → field → value → the copy keys that frame's own table renders it as.
 
     The resolver for "what does this value look like on screen" is per frame and
@@ -2162,22 +2238,22 @@ def frame_mappings(doc: Document, copy_u: Universe) -> dict[str, dict[str, dict[
     pairings filter on a non-empty set, which the value→key arm already did.
     """
     per: dict[str, dict[str, dict[str, set[str]]]] = {}
-    for table in _mapping_scan(doc):
+    for table in scans if scans is not None else _mapping_scan(doc):
         by_field = per.setdefault(doc.section_of(table.line), {})
-        for _n, cells in table.rows:
+        for row in table.rows:
             keys: set[str] = set()
-            for col, cell in enumerate(cells):
+            for col, cell in enumerate(row.cells):
                 if col in table.fields:
                     continue
                 for cite in KEY_REF_RE.findall(cell):
                     hit = copy_u.resolve(cite)
                     if not hit.empty and not hit.ambiguous and not hit.wildcard:
                         keys.add(hit.hits[0])
-            for col, (field, _markers) in table.fields.items():
-                if col >= len(cells):
+            for col, value in row.values.items():
+                if col not in table.fields:
                     continue
-                for value in VALUE_TOKEN_RE.findall(cells[col]):
-                    by_field.setdefault(field, {}).setdefault(value, set()).update(keys)
+                field, _markers = table.fields[col]
+                by_field.setdefault(field, {}).setdefault(value, set()).update(keys)
     return per
 
 
@@ -2541,7 +2617,14 @@ def self_test(auth: dict[str, Any], origin: Origin) -> list[str]:
     return broken
 
 
-def authority_claims(doc: Document, auth: dict[str, Any], origin: Origin, register: list[dict[str, Any]], gaps: Universe) -> tuple[list[dict[str, str]], dict[str, int]]:
+def authority_claims(
+    doc: Document,
+    auth: dict[str, Any],
+    origin: Origin,
+    register: list[dict[str, Any]],
+    gaps: Universe,
+    scans: list[MappingScan] | None = None,
+) -> tuple[list[dict[str, str]], dict[str, int]]:
     """Class E — every factual claim the spec makes, against the file that owns it.
 
     Returns the findings and the input scale. The scale is not decoration: this
@@ -2607,7 +2690,7 @@ def authority_claims(doc: Document, auth: dict[str, Any], origin: Origin, regist
         ]
         mentions = [(start, end, route) for start, end, route, _query in route_claims]
         named = {route for _s, _e, route in mentions}
-        checked_claims: set[tuple[str, tuple[tuple[str, str], ...]]] = set()
+        checked_claims: set[tuple[str, QueryScan]] = set()
         for _start, _end, route, query in route_claims:
             if (route, query) in checked_claims:
                 continue
@@ -2617,8 +2700,14 @@ def authority_claims(doc: Document, auth: dict[str, Any], origin: Origin, regist
             if hit.empty:
                 add(f"L{line_no}", f"`{route}` is contracted by no `api.md` route row")
                 continue
-            if query and query != hit.one["query"]:
-                claimed = "&".join(f"{name}={value}" for name, value in query)
+            if query.malformed:
+                malformed = "&".join(query.malformed)
+                add(
+                    f"L{line_no}",
+                    f"`{route}` has malformed query component(s) `{malformed}`",
+                )
+            elif query.present and query.values != hit.one["query"]:
+                claimed = "&".join(f"{name}={value}" for name, value in query.values)
                 contracted = "&".join(f"{name}={value}" for name, value in hit.one["query"])
                 add(
                     f"L{line_no}",
@@ -3015,12 +3104,17 @@ def authority_claims(doc: Document, auth: dict[str, Any], origin: Origin, regist
     # reads as a per-backend one); only after both does the row set mean
     # anything. Values are compared as sets — not counted — because one value
     # may legitimately occupy two rows.
-    scans = _mapping_scan(doc)
+    scans = scans if scans is not None else _mapping_scan(doc)
+    scale["contract mapping tables"] = sum(
+        1
+        for table in scans
+        for col in table.candidate_columns
+        if any(col in row.values for row in table.rows)
+    )
     for table in scans:
         for where, message in table.malformed:
             add(f"L{where}", message)
     for line_no, field, drawn, cited, contracted in mapping_tables(doc, scans):
-        scale["contract mapping tables"] += 1
         hit = auth["schema fields"].resolve(field)
         if cited:
             # The lead-in named which schemas it is quoting, so the citation is
@@ -3080,6 +3174,7 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
     doc = Document(text)
     fingerprint = doc.fingerprint
     p = parse(doc)
+    mapping_scans = _mapping_scan(doc)
     reg = p["register"]
     findings: list[dict[str, str]] = []
 
@@ -3101,10 +3196,17 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
 
     # ---- A ------------------------------------------------------------------
     auth = load_authorities(origin)
-    covered_routes: set[str] = set()
-    for r in reg:
-        cells = f"{r['entry']} {r['exit']} {r['failure']}"
-        covered_routes.update(normalize_route(m, path) for m, path in ROUTE_RE.findall(cells))
+    register_route_inventory = [
+        (r, cell_name, claim)
+        for r in reg
+        for cell_name in ("entry", "failure", "exit")
+        for claim in register_route_claims(r[cell_name])
+    ]
+    covered_routes: set[str] = {
+        claim.route
+        for _row, _cell_name, claim in register_route_inventory
+        if claim.route is not None and claim.method != "GET"
+    }
     # A route the document names is normally an affordance, and an affordance
     # owes §0.8 a state. The exception is a route named as *evidence of its own
     # absence* — "the contract has this call and no frame draws it" — where
@@ -3334,16 +3436,12 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
     # all read the sentence as making no route claim, and it went on contradicting
     # both §0.8 and the contract matrix while reading perfectly well to a human.
     #
-    # The rule governs §1 prose and stops there. §0.5 and §0.8 name other
-    # sections' calls as part of registering them, and one withdrawn gap row
-    # explains in prose that it deliberately names none — registers describing
-    # themselves, not a frame borrowing a neighbour's request.
-    #
-    # The trigger is a bare method sharing a sentence with another frame's
-    # number, because that pair is precisely "another page's request, in English".
-    # A method word alone is usually the vocabulary rather than a call: §1.6
-    # weighs "a `PATCH` that can only ever be rejected", a request that by
-    # construction does not exist and so has no literal to name.
+    # Structured state-register cells are route inventory too. A row that once
+    # held a literal route and loses only its path must not be rescued by another
+    # row's aggregate coverage of that endpoint. In a register cell the method
+    # is admitted by the row shape; validity is whether that same cell also
+    # carries a literal route. Prose remains narrower: there a bare method is a
+    # route claim only when the sentence attributes it to another frame.
     method_words = 0
     for line_no, scope_text in doc.claims():
         here = doc.section_of(line_no)
@@ -3379,11 +3477,21 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
                     f"§{here} names §{'/§'.join(elsewhere)}'s request as "
                     f"`{'`/`'.join(bare)}` with no path, so no route arm can read the claim",
                 )
+    for r, cell_name, claim in register_route_inventory:
+        if claim.route is not None:
+            continue
+        add(
+            "A",
+            f"L{r['line']}",
+            f"§0.8 「{r['state']}」 {cell_name} cell names `{claim.method}` with no path, "
+            "so no route arm can bind the row's claim",
+        )
 
     # ---- B ------------------------------------------------------------------
     cited: set[tuple[str, str]] = set()
     for sec, line, k in p["refs"]:
         cited.add((k, f"§{sec} L{line}"))
+    state_exit_candidates = 0
     for r in reg:
         for k in KEY_REF_RE.findall(r["copy"]):
             if k.startswith("models.") and (
@@ -3722,7 +3830,7 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
     # it leaves the value ambiguous the arm declines. It also declines on a row
     # citing anything other than exactly one key: a row with two keys is drawing
     # a composite, and asserts no single value→key pairing to contradict.
-    frame_maps = frame_mappings(doc, copy_u)
+    frame_maps = frame_mappings(doc, copy_u, mapping_scans)
     pairs = sum(1 for maps in frame_maps.values() for dom in maps.values() for ks in dom.values() if ks)
     for r in reg:
         row_frames = FRAME_REF_RE.findall(r["frame"])
@@ -3739,17 +3847,29 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
         if len(cited) != 1:
             continue
         key = cited.pop()
-        for value in VALUE_TOKEN_RE.findall(r["entry"]):
-            owners = [field for field, dom in maps.items() if dom.get(value)]
-            if len(owners) != 1:
+        entry_values = set(VALUE_TOKEN_RE.findall(r["entry"]))
+        owners = [field for field, dom in maps.items() if entry_values & set(dom)]
+        if len(owners) != 1:
+            continue
+        owner = owners[0]
+        for value in entry_values:
+            if value == owner.rsplit(".", 1)[-1]:
                 continue
-            drawn = maps[owners[0]][value]
+            drawn = maps[owner].get(value)
+            if drawn is None:
+                add(
+                    "B",
+                    f"L{r['line']}",
+                    f"「{r['state']}」 enters on `{value}`, which §{row_frames[0]}'s "
+                    f"mapping of `{owner}` does not define",
+                )
+                continue
             if key not in drawn:
                 add(
                     "B",
                     f"L{r['line']}",
                     f"「{r['state']}」 enters on `{value}` and renders `{key}`, but "
-                    f"§{row_frames[0]}'s own mapping of `{owners[0]}` draws that "
+                    f"§{row_frames[0]}'s own mapping of `{owner}` draws that "
                     f"value as {', '.join('`' + k + '`' for k in sorted(drawn))}",
                 )
 
@@ -3799,7 +3919,18 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
             best = max((score for score, _row in scored), default=0)
             return [row for score, row in scored if score == best and score > 0]
 
-        for segment in ARROW_SEGMENT_RE.findall(r["exit"]):
+        for arrow in ARROW_SEGMENT_RE.finditer(r["exit"]):
+            segment = arrow.group(1)
+            prefix_text = r["exit"][: arrow.start()]
+            clause_start = max(prefix_text.rfind(";"), prefix_text.rfind(". "))
+            clause = f"{prefix_text[clause_start + 1:]} {segment}"
+            explicit_foreign_frames = frame_refs(clause, frame_u) - {frame}
+            # A colon introduces one dispatch list. Its explicit frame context
+            # owns every semicolon-delimited branch until the sentence ends.
+            sentence_start = prefix_text.rfind(". ") + 1
+            sentence_prefix = prefix_text[sentence_start:]
+            if ":" in sentence_prefix:
+                explicit_foreign_frames |= frame_refs(sentence_prefix, frame_u) - {frame}
             for branch in ALTERNATIVE_RE.split(segment.split(";")[0]):
                 said, stop = phrase(branch)
                 if not said or not said[0].isupper() or "§" in said or stop == ":":
@@ -3812,6 +3943,7 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
                     continue
                 if re.match(r"^[A-Z][A-Za-z -]+['’]s\b", said) or " dispatch" in said:
                     continue
+                state_exit_candidates += 1
                 # Either spelling of the same landing: the cell may qualify the
                 # state's name (「Ready while any row is left」) or shorten it
                 # (「Dirty」 for 「Dirty (uncommitted moves)」). Both are the
@@ -3822,7 +3954,12 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
                     continue
                 global_matches = best_rows(said, reg)
                 if len(global_matches) == 1:
-                    continue
+                    target_frames = set(FRAME_REF_RE.findall(global_matches[0]["frame"]))
+                    classifier_owned = bool(
+                        re.search(r"\b(?:E\d+[a-z]?|M\d+|RR-\d+|PD-\d+|R\d+)\b", segment)
+                    )
+                    if target_frames & explicit_foreign_frames or classifier_owned:
+                        continue
                 add(
                     "C",
                     f"L{r['line']}",
@@ -4114,7 +4251,7 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
         add("D", f"L{row['line']}", f"condition key `{row['key']}` is cited by no §0.8 row")
 
     # ---- E ------------------------------------------------------------------
-    e_findings, e_scale = authority_claims(doc, auth, origin, reg, gaps)
+    e_findings, e_scale = authority_claims(doc, auth, origin, reg, gaps, mapping_scans)
     findings.extend(e_findings)
 
     # ---- the duplicate and malformed rules, for every universe at once ------
@@ -4153,9 +4290,15 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
         "cross-frame failure destinations": destinations,
         "cross-frame dispersals compared": compared,
         "frame mapping-table value→key pairs": pairs,
+        "frame mapping-table domain values": sum(
+            len(domain)
+            for maps in frame_maps.values()
+            for domain in maps.values()
+        ),
         "dispatch landings compared": dispatch_landings,
         "dispatch rows checked": dispatch_rows,
         "dispatch value→state pairs read": dispatch_pairs,
+        "state-register exit candidates": state_exit_candidates,
         "copy tables / rows": f"{p['tables']} / {p['rows']}",
         "copy keys defined": len(copy_u),
         "condition-named keys": len(conditions),
@@ -4164,6 +4307,7 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
         "rendered shapes quoted in prose": quoted,
         "copy vocabularies prose can enumerate": len(vocabularies),
         "frame-prose route mentions": method_words,
+        "state-register route candidates": len(register_route_inventory),
         "frame-prose guard-envelope claims": guard_claims,
         "failure treatments declared": len(treatment_u),
         "frame sections declared": len(frame_u),
@@ -4181,6 +4325,9 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
         "authority: counted-vocabulary claims": e_scale["vocabulary claims"],
         "authority: attributed field claims": e_scale["attributed fields"],
         "authority: contract mapping tables": e_scale["contract mapping tables"],
+        "authority: mapping-table candidates": sum(
+            len(table.candidate_columns) for table in mapping_scans
+        ),
         "authority: repo symbol citations": e_scale["repo symbols"],
         "authority: precise line citations": e_scale["authority lines"],
     }
