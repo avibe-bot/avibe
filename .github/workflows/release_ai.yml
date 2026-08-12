@@ -190,6 +190,15 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Pin package version to release tag
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          PACKAGE_VERSION="$(python scripts/release_package_version.py "$RELEASE_TAG")"
+          echo "SETUPTOOLS_SCM_PRETEND_VERSION=$PACKAGE_VERSION" >> "$GITHUB_ENV"
+          echo "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_AVIBE_OS=$PACKAGE_VERSION" >> "$GITHUB_ENV"
+
       - name: Build Python package
         run: |
           pip install build
