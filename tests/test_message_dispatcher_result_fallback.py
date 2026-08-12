@@ -968,6 +968,20 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("[✅ Yes]", persist.call_args.args[2])
         self.assertIn("Pick one", persist.call_args.args[2])
 
+    async def test_avibe_result_persists_unseparated_quick_replies_for_workbench(self):
+        controller = _StubController(platform="avibe", reply_enhancements=True)
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(user_id="U1", channel_id="C1", platform="avibe")
+        raw = "Pick one:\n[✅ Yes] | [🙅 No]"
+
+        with mock.patch("core.message_dispatcher.persist_agent_message") as persist:
+            await dispatcher.emit_agent_message(context, "result", raw)
+
+        persist.assert_called_once()
+        self.assertEqual(persist.call_args.kwargs.get("quick_replies"), ["✅ Yes", "🙅 No"])
+        self.assertNotIn("[✅ Yes]", persist.call_args.args[2])
+        self.assertIn("Pick one", persist.call_args.args[2])
+
     async def test_visible_workbench_terminal_result_requires_durable_message(self):
         controller = _StubController(platform="avibe")
         dispatcher = ConsolidatedMessageDispatcher(controller)

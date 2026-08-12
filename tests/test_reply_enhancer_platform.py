@@ -553,6 +553,14 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reply.text, text)
         self.assertEqual(reply.buttons, [])
 
+    def test_process_reply_preserves_unseparated_button_row_in_code(self):
+        text = "```markdown\n[Yes] | [No]\n```"
+
+        reply = process_reply(text)
+
+        self.assertEqual(reply.text, text)
+        self.assertEqual(reply.buttons, [])
+
     def test_silent_parser_preserves_inline_code_and_trailing_report_byte_for_byte(self):
         trailing_report = "\n".join(
             [
@@ -1428,6 +1436,37 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             [button.text for button in reply.buttons],
             [":eyes: 看 PR", ":rocket: 等评审完合并", ":test_tube: 先回归测一遍"],
         )
+
+    def test_process_reply_accepts_pipe_separated_buttons_without_rule(self):
+        reply = process_reply("Done.\n[查看冲突] | [继续修复]")
+
+        self.assertEqual(reply.text, "Done.")
+        self.assertEqual(
+            [button.text for button in reply.buttons],
+            ["查看冲突", "继续修复"],
+        )
+
+    def test_process_reply_accepts_fullwidth_pipe_without_rule(self):
+        reply = process_reply("Done.\n[A] ｜ [B]")
+
+        self.assertEqual(reply.text, "Done.")
+        self.assertEqual([button.text for button in reply.buttons], ["A", "B"])
+
+    def test_process_reply_preserves_single_bracket_line_without_rule(self):
+        text = "Use this value:\n[example]"
+
+        reply = process_reply(text)
+
+        self.assertEqual(reply.text, text)
+        self.assertEqual(reply.buttons, [])
+
+    def test_process_reply_preserves_plain_link_without_rule(self):
+        text = "Done.\n[Release notes](https://example.com)"
+
+        reply = process_reply(text)
+
+        self.assertEqual(reply.text, text)
+        self.assertEqual(reply.buttons, [])
 
     def test_process_reply_ignores_bare_angle_link_as_quick_reply_button(self):
         text = "Done.\n\n---\n<https://github.com/avibe-bot/avibe/pull/298>"

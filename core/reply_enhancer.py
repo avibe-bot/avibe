@@ -8,8 +8,9 @@ Extracts special syntaxes from agent reply text:
 2. **File links** – Markdown links whose URL starts with ``file://``
    e.g. ``[screenshot](file:///tmp/shot.png)``
 
-3. **Quick-reply buttons** – A ``---`` separator followed by
-   ``[button text]`` tokens separated by ``|``
+3. **Quick-reply buttons** – A trailing row of ``[button text]`` tokens
+   separated by ``|``. The preferred form starts with a ``---`` separator;
+   pipe-separated rows are also accepted without it for compatibility.
    e.g. ``---\\n[👌好的] | [✅提交PR] | [先review一下]``
 """
 
@@ -162,6 +163,25 @@ _BUTTON_BLOCK_RE = re.compile(
     r"\n-{3,}\s*\n"  # --- separator line
     r"((?:\s*(?:\[[^\]]+\]" + _LINK_SUFFIX + r"|<https?://[^|>\n]+\|[^>\n]+>)\s*(?:[|｜]\s*)?)+)"  # button tokens
     r"\s*$",  # trailing whitespace / end of string
+)
+
+# Compatibility form for replies that omit the ``---`` line. Keep this more
+# restrictive than the preferred form: it must be one trailing line with at
+# least two tokens and an explicit pipe, so ordinary ``[bracketed text]`` and
+# reference links remain message content.
+_BUTTON_LINE_TOKEN = (
+    r"(?:\[[^\]\r\n]+\]"
+    + _LINK_SUFFIX
+    + r"|<https?://[^|>\r\n]+\|[^>\r\n]+>)"
+)
+_UNSEPARATED_BUTTON_ROW_RE = re.compile(
+    r"(?:^|\n)"
+    r"([ \t]*"
+    + _BUTTON_LINE_TOKEN
+    + r"[ \t]*(?:[|｜][ \t]*"
+    + _BUTTON_LINE_TOKEN
+    + r"[ \t]*)+)"
+    r"(?:\n[ \t]*)*$"
 )
 
 # Individual button tokens. Link variants are accepted for compatibility only;
@@ -907,10 +927,14 @@ def _extract_buttons(
 ) -> Tuple[List[QuickReplyButton], str]:
     """Extract trailing quick-reply buttons and return ``(buttons, cleaned_text)``."""
     mask = markdown_mask if markdown_mask is not None else _mask_markdown_code(text)
-    masked_match = _BUTTON_BLOCK_RE.search(mask)
+    pattern = _BUTTON_BLOCK_RE
+    masked_match = pattern.search(mask)
     if masked_match is None:
-        return [], text
-    m = _BUTTON_BLOCK_RE.fullmatch(
+        pattern = _UNSEPARATED_BUTTON_ROW_RE
+        masked_match = pattern.search(mask)
+        if masked_match is None:
+            return [], text
+    m = pattern.fullmatch(
         text,
         masked_match.start(),
         masked_match.end(),
