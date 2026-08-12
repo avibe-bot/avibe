@@ -2619,6 +2619,62 @@ async def test_artifact_repair_rejects_uninspectable_root_without_pending_recove
     await memory_runtime_factory.close(runtime)
 
 
+@pytest.mark.parametrize(
+    ("recovery_intent", "commits"),
+    [("factory_reset", True), ("rebuild", False)],
+)
+async def test_uninspectable_recovery_root_admission_depends_on_operation_intent(
+    tmp_path: Path,
+    memory_runtime_factory,
+    monkeypatch: pytest.MonkeyPatch,
+    recovery_intent: str,
+    commits: bool,
+) -> None:
+    """Only reset may replace an artifact without proving retained-root compatibility."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    pending = MemoryConfig(enabled=False, recovery_intent=recovery_intent)
+    V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+        memory=pending,
+    ).save()
+    runtime = memory_runtime_factory(
+        pending,
+        artifact_manager=_installed_artifact(),
+        effective_home=tmp_path,
+    )
+    committed: list[bool] = []
+
+    def coordinate() -> None:
+        runtime._coordinate_artifact_activation(
+            MemoryArtifactCandidate(
+                provider_root_format="everos-1.2.3",
+                compatible_provider_root_formats=frozenset({"everos-1.2.3"}),
+                artifact_fingerprint="candidate",
+            ),
+            None,
+            lambda: committed.append(True),
+            lambda: pytest.fail("nothing was committed to roll back"),
+        )
+
+    if commits:
+        coordinate()
+        assert committed == [True]
+    else:
+        with pytest.raises(
+            MemoryRuntimeActivationError,
+            match="provider root could not be inspected",
+        ):
+            coordinate()
+        assert committed == []
+
+    await memory_runtime_factory.close(runtime)
+
+
 async def test_synthetic_rebuild_fence_cannot_authorize_pointer_only_admission(
     tmp_path: Path,
     memory_runtime_factory,

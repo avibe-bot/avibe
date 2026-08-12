@@ -446,18 +446,22 @@ class MemoryRuntime:
             for config in (self._config, self._restart_config)
         )
 
-    def _durable_recovery_pending(self) -> bool:
-        """Verify pointer-only repair authority from the persisted config."""
+    def _durable_recovery_intent(self) -> str | None:
+        """Return the persisted recovery intent matching this runtime fence."""
 
         try:
             durable_intent = V2Config.load().memory.recovery_intent
         except Exception:
             logger.exception("Memory artifact admission could not load durable recovery intent")
-            return False
-        return durable_intent in MEMORY_RECOVERY_INTENTS and any(
+            return None
+        if durable_intent not in MEMORY_RECOVERY_INTENTS:
+            return None
+        if not any(
             config.recovery_intent == durable_intent
             for config in (self._config, self._restart_config)
-        )
+        ):
+            return None
+        return durable_intent
 
     @property
     def factory_reset_pending(self) -> bool:
@@ -2628,15 +2632,23 @@ class MemoryRuntime:
     ) -> None:
         """Bridge the synchronous shared installer into the controller loop."""
 
-        # A durable recovery marker deliberately fences runtime activation.
-        # Repair still needs to publish an admitted pointer so explicit Retry
-        # can proceed, but it must not resurrect the pending runtime.
-        if self.recovery_pending and self._durable_recovery_pending():
+        # Factory reset deletes retained roots, so its durable fence may admit
+        # the pointer without inspecting them. Rebuild preserves retained data
+        # and therefore requires ProviderRoot.inspect() to have established
+        # compatibility before pointer-only admission.
+        durable_intent = (
+            self._durable_recovery_intent() if self.recovery_pending else None
+        )
+        if durable_intent == "factory_reset":
             commit()
             return
 
         if root_state is None:
             raise MemoryRuntimeActivationError("memory provider root could not be inspected")
+
+        if durable_intent == "rebuild":
+            commit()
+            return
 
         loop = self._activation_loop
         if loop is None or loop.is_closed():
