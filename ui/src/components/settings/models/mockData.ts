@@ -1,5 +1,5 @@
-// Typed fixtures for the Model Hub UI while the L2 REST API is unmerged.
-// Mirrors the V6 design mock story (design.pen `产品改造 V6 01`) and the frozen
+// Typed fixtures for hermetic Model Hub visual tests.
+// Mirrors the frozen
 // v3 contract example payloads. Timestamps are computed relative to "now" at
 // fetch time so the 最近切换 list always renders 今天 / 昨天 correctly.
 //
@@ -17,7 +17,6 @@ import type {
   Source,
   SourceEligibility,
 } from './types';
-import { SUBSCRIPTION_HUB_EXPERIMENTAL } from './featureFlags';
 
 const iso = (offsetMs: number) => new Date(Date.now() + offsetMs).toISOString();
 const MIN = 60_000;
@@ -42,9 +41,9 @@ export function buildMockSources(): Source[] {
       account_label: 'me@gmail.com',
       masked_credential: null,
       models: [
-        { id: 'claude-opus-4-6', display_name: 'Opus 4.6', provenance: 'discovered', discovered_at: iso(-3 * HOUR) },
-        { id: 'claude-sonnet-4-6', display_name: 'Sonnet 4.6', provenance: 'discovered', discovered_at: iso(-3 * HOUR) },
-        { id: 'claude-haiku-4-5', display_name: 'Haiku 4.5', provenance: 'discovered', discovered_at: iso(-3 * HOUR) },
+        { id: 'claude-opus-4-6', display_name: 'Opus 4.6', origin: 'discovered', reasoning_efforts: [], discovered_at: iso(-3 * HOUR) },
+        { id: 'claude-sonnet-4-6', display_name: 'Sonnet 4.6', origin: 'discovered', reasoning_efforts: [], discovered_at: iso(-3 * HOUR) },
+        { id: 'claude-haiku-4-5', display_name: 'Haiku 4.5', origin: 'discovered', reasoning_efforts: [], discovered_at: iso(-3 * HOUR) },
       ],
       credential_ref: null,
     },
@@ -64,8 +63,8 @@ export function buildMockSources(): Source[] {
       account_label: 'me@gmail.com',
       masked_credential: null,
       models: [
-        { id: 'gpt-5.6', display_name: 'GPT-5.6', provenance: 'discovered', discovered_at: iso(-3 * HOUR) },
-        { id: 'gpt-5.6-mini', display_name: 'GPT-5.6 mini', provenance: 'discovered', discovered_at: iso(-3 * HOUR) },
+        { id: 'gpt-5.6', display_name: 'GPT-5.6', origin: 'discovered', reasoning_efforts: [], discovered_at: iso(-3 * HOUR) },
+        { id: 'gpt-5.6-mini', display_name: 'GPT-5.6 mini', origin: 'discovered', reasoning_efforts: [], discovered_at: iso(-3 * HOUR) },
       ],
       credential_ref: null,
     },
@@ -85,9 +84,9 @@ export function buildMockSources(): Source[] {
       account_label: null,
       masked_credential: 'sk-ant-…8f2A',
       models: [
-        { id: 'claude-opus-4-6', display_name: 'Opus 4.6', provenance: 'discovered', discovered_at: iso(-6 * HOUR) },
-        { id: 'claude-sonnet-4-6', display_name: 'Sonnet 4.6', provenance: 'discovered', discovered_at: iso(-6 * HOUR) },
-        { id: 'claude-haiku-4-5', display_name: 'Haiku 4.5', provenance: 'discovered', discovered_at: iso(-6 * HOUR) },
+        { id: 'claude-opus-4-6', display_name: 'Opus 4.6', origin: 'discovered', reasoning_efforts: [], discovered_at: iso(-6 * HOUR) },
+        { id: 'claude-sonnet-4-6', display_name: 'Sonnet 4.6', origin: 'discovered', reasoning_efforts: [], discovered_at: iso(-6 * HOUR) },
+        { id: 'claude-haiku-4-5', display_name: 'Haiku 4.5', origin: 'discovered', reasoning_efforts: [], discovered_at: iso(-6 * HOUR) },
       ],
       credential_ref: 'cred_anth01',
     },
@@ -107,10 +106,10 @@ export function buildMockSources(): Source[] {
       account_label: null,
       masked_credential: 'glm-…c31b',
       models: [
-        { id: 'glm-5.2', display_name: 'GLM 5.2', provenance: 'discovered', discovered_at: iso(-6 * HOUR) },
-        { id: 'glm-5.2-air', display_name: 'GLM 5.2 Air', provenance: 'discovered', discovered_at: iso(-6 * HOUR) },
-        { id: 'glm-5-flash', display_name: 'GLM 5 Flash', provenance: 'discovered', discovered_at: iso(-6 * HOUR) },
-        { id: 'glm-5.2-pro', display_name: 'GLM 5.2 Pro', provenance: 'manual', discovered_at: null },
+        { id: 'glm-5.2', display_name: 'GLM 5.2', origin: 'discovered', reasoning_efforts: [], discovered_at: iso(-6 * HOUR) },
+        { id: 'glm-5.2-air', display_name: 'GLM 5.2 Air', origin: 'discovered', reasoning_efforts: [], discovered_at: iso(-6 * HOUR) },
+        { id: 'glm-5-flash', display_name: 'GLM 5 Flash', origin: 'discovered', reasoning_efforts: [], discovered_at: iso(-6 * HOUR) },
+        { id: 'glm-5.2-pro', display_name: 'GLM 5.2 Pro', origin: 'manual', reasoning_efforts: [], discovered_at: null },
       ],
       credential_ref: 'cred_zhipu01',
     },
@@ -128,12 +127,12 @@ export function buildMockSources(): Source[] {
       base_url: 'https://relay.example/v1',
       supply_channel: 'hub',
       billing: 'metered',
-      state: { status: 'cooldown', retry_at: iso(47 * MIN), detail_key: 'models.source.cooldown.timeout' },
+      state: { status: 'cooldown', retry_at: iso(47 * MIN), detail_key: 'models.source.cooldown.server_error' },
       usage: { cycle_used_pct: null, month_spend_cents: 320, currency: 'USD' },
       account_label: null,
       masked_credential: 'key …9c1',
       models: [
-        { id: 'glm-5.2-air', display_name: 'GLM 5.2 Air', provenance: 'manual', discovered_at: null },
+        { id: 'glm-5.2-air', display_name: 'GLM 5.2 Air', origin: 'manual', reasoning_efforts: [], discovered_at: null },
       ],
       credential_ref: 'cred_relay01',
     },
@@ -149,6 +148,7 @@ export function buildMockAgents(sources: Source[] = buildMockSources()): AgentSu
   return [
     {
       backend: 'claude',
+      cli_present: true,
       mode: 'hub',
       menu_kind: 'fixed',
       selected_by_agent: null,
@@ -157,7 +157,6 @@ export function buildMockAgents(sources: Source[] = buildMockSources()): AgentSu
       // as explicit — the resolver-picked case only exists on the open menu.
       selected_model_explicit: true,
       sources: {
-        policy: 'custom',
         order: claudeOrder,
         eligibility: mockEligibility(sources, 'claude'),
       },
@@ -169,50 +168,47 @@ export function buildMockAgents(sources: Source[] = buildMockSources()): AgentSu
       // 智谱 is 未启用 here. Depth 0 is the honest answer, and AC-9's Case A: a
       // menu-model gap that must NOT render any Agent as interrupted.
       model_supply: [
-        { model_id: 'claude-opus-4-6', chain_length: 2 },
-        { model_id: 'claude-sonnet-4-6', chain_length: 2 },
-        { model_id: 'claude-haiku-4-5', chain_length: 0 },
+        { model_id: 'claude-opus-4-6', chain_length: 2, has_runnable_hop: true },
+        { model_id: 'claude-sonnet-4-6', chain_length: 2, has_runnable_hop: true },
+        { model_id: 'claude-haiku-4-5', chain_length: 0, has_runnable_hop: false },
       ],
       named_agents: [
         { name: 'claude', effective_model_id: 'claude-opus-4-6', supply_status: 'ok' },
         { name: 'pm', effective_model_id: 'claude-opus-4-6', supply_status: 'ok' },
       ],
-      // Fixed-menu backends surface their full built-in id list as mappings; an
-      // enabled entry is an override (frame 04), disabled = 跟随原生 (identity).
-      mappings: [
-        { builtin_id: 'claude-opus-4-6', target_model_id: '', enabled: false },
-        { builtin_id: 'claude-sonnet-4-6', target_model_id: '', enabled: false },
-        { builtin_id: 'claude-haiku-4-5', target_model_id: 'glm-5.2', enabled: true },
-      ],
+      routes: {
+        'claude-opus-4-6': { hops: [{ source_id: 'src_claudepro1', model_id: 'claude-opus-4-6' }, { source_id: 'src_anthkey01', model_id: 'claude-opus-4-6' }] },
+        'claude-sonnet-4-6': { hops: [{ source_id: 'src_claudepro1', model_id: 'claude-sonnet-4-6' }, { source_id: 'src_anthkey01', model_id: 'claude-sonnet-4-6' }] },
+        'claude-haiku-4-5': { hops: [] },
+      },
       menu: null,
       // Fixed-menu backends carry the server-populated built-in catalog
-      // (agent-supply v1.2); the mapping drawer renders these rows.
+      // The server projects these ids; the route editor never hardcodes them.
       builtin_models: ['claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5'],
       standard_vendors: null,
     },
     {
       backend: 'codex',
+      cli_present: true,
       mode: 'hub',
       menu_kind: 'fixed',
       selected_by_agent: 'codex',
       selected_model_id: 'gpt-5.6',
       selected_model_explicit: true,
       sources: {
-        policy: 'follow',
-        // Recomputed on every read: 跟随推荐 means a new source joins by itself.
         order: mockRecommendedOrder(sources, 'codex'),
         eligibility: mockEligibility(sources, 'codex'),
       },
       supply_status: 'ok',
       model_supply: [
-        { model_id: 'gpt-5.6', chain_length: 1 },
-        { model_id: 'gpt-5.6-mini', chain_length: 1 },
+        { model_id: 'gpt-5.6', chain_length: 1, has_runnable_hop: true },
+        { model_id: 'gpt-5.6-mini', chain_length: 1, has_runnable_hop: true },
       ],
       named_agents: [{ name: 'codex', effective_model_id: 'gpt-5.6', supply_status: 'ok' }],
-      mappings: [
-        { builtin_id: 'gpt-5.6', target_model_id: '', enabled: false },
-        { builtin_id: 'gpt-5.6-mini', target_model_id: '', enabled: false },
-      ],
+      routes: {
+        'gpt-5.6': { hops: [{ source_id: 'src_chatgptplus', model_id: 'gpt-5.6' }] },
+        'gpt-5.6-mini': { hops: [{ source_id: 'src_chatgptplus', model_id: 'gpt-5.6-mini' }] },
+      },
       menu: null,
       builtin_models: ['gpt-5.6', 'gpt-5.6-mini'],
       standard_vendors: null,
@@ -221,6 +217,7 @@ export function buildMockAgents(sources: Source[] = buildMockSources()): AgentSu
       // 直连: the CLI runs its own native config. Every hub-side projection is
       // null by contract — no order, no chain, no probe (AC-7's gate).
       backend: 'opencode',
+      cli_present: true,
       mode: 'direct',
       menu_kind: 'open',
       selected_by_agent: null,
@@ -230,7 +227,6 @@ export function buildMockAgents(sources: Source[] = buildMockSources()): AgentSu
       supply_status: null,
       model_supply: null,
       named_agents: [{ name: 'opencode', effective_model_id: null, supply_status: null }],
-      mappings: [],
       // Prefixed identifiers (opencode-overlay.md): provider = the SOURCE's
       // vendor (custom fallback). Retained across the mode switch — it is stored
       // config, not live state, and applies again the moment OpenCode rejoins.
@@ -377,15 +373,10 @@ export function buildMockRuntime(): RuntimeDependency {
 // Migration scan fixture (frame 03). Mirrors the frozen migration-scan schema
 // example, adapted to the mock backends. Per spec v1.1 + the 2026-07-23 L6
 // finding: API keys / base URLs → import; subscription OAuth (Claude account +
-// Codex auth.json) → keep_native ALWAYS (controlled_import is deferred — adapter
-// v1.2 forbids OAuth material in provision_credential). When the experimental
-// flag is on, those rows only add a "re-authorize inside the hub" hint; they
-// never become an import. So this fixture emits only import / keep_native.
+// Codex auth.json) → keep_native. controlled_import is reserved and not
+// applicable in v3, so this fixture emits only import / keep_native.
 export function buildMockMigration(): MigrationScan {
-  // Subscription-OAuth rows stay native; the flag only swaps their hint line.
-  const oauthNote = SUBSCRIPTION_HUB_EXPERIMENTAL
-    ? 'settings.models.migration.notes.keepNativeReauthHint'
-    : 'settings.models.migration.notes.keepNativeSanctioned';
+  const oauthNote = 'settings.models.migration.notes.keepNativeSanctioned';
   return {
     items: [
       {

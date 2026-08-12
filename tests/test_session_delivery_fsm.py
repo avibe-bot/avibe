@@ -2845,6 +2845,50 @@ def test_definitive_p0_refusal_leaves_backlog_behind_the_active_turn(managers) -
     assert _row(engine, queued_id)["state"] == "queued"
 
 
+def test_refused_replacement_releases_its_control_ownership(managers) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+
+    async def run() -> tuple[str, str]:
+        turn_id, context = await _activate(manager)
+        holder = asyncio.create_task(asyncio.Event().wait())
+        manager.in_flight["ses_fsm"] = Turn(
+            task=holder,
+            context=context,
+            logical_turn_id=turn_id,
+        )
+
+        async def refused(stop_context):
+            stop_context.platform_specific["stop_failure_reason"] = "refused"
+            return False
+
+        manager.controller.command_handler.handle_stop = AsyncMock(side_effect=refused)
+        try:
+            result = await manager.deliver(
+                DeliveryRequest(
+                    session_id="ses_fsm",
+                    priority="p0",
+                    content="replacement",
+                ),
+                context=_context(),
+            )
+        finally:
+            holder.cancel()
+            await asyncio.gather(holder, return_exceptions=True)
+        assert result.state == "queued"
+        return turn_id, str(result.delivery_id)
+
+    turn_id, replacement_delivery_id = asyncio.run(run())
+    with engine.connect() as conn:
+        active = delivery_store.get_turn(conn, turn_id)
+    assert active is not None
+    assert active["state"] == "active"
+    assert active["control_state"] == "refused"
+    assert active["control_mode"] is None
+    assert active["control_successor_turn_id"] is None
+    assert active["control_successor_delivery_id"] is None
+    assert _row(engine, replacement_delivery_id)["state"] == "queued"
+
+
 def test_empty_p0_uses_the_control_slot_without_creating_a_message_delivery(managers) -> None:
     manager, _other, engine, _engine_b, _starts = managers
 
@@ -6126,6 +6170,148 @@ def test_owned_run_sweep_retries_terminal_turn_settlement_before_orphaning(
         assert conn.execute(
             select(agent_runs.c.status).where(agent_runs.c.id == run_id)
         ).scalar_one() == "succeeded"
+
+
+@pytest.mark.parametrize("sent_before_recovery", [False, True])
+def test_hfr_474_startup_collapses_legacy_restart_notices_by_durable_turn(
+    managers,
+    tmp_path: Path,
+    sent_before_recovery: bool,
+) -> None:
+    """Upgrade recovery uses exact Delivery ownership before notices can drain."""
+
+    from core import failure_notices
+    from core.scheduled_tasks import ScheduledTaskService, TaskExecutionStore
+    from storage.background import SQLiteBackgroundTaskStore
+
+    manager, _restarted, engine, _engine_b, _starts = managers
+    turn_id, _context_value = asyncio.run(_activate(manager))
+    run_ids = [f"run-legacy-restart-{index}" for index in range(3)]
+    now = "2026-08-01T00:00:00Z"
+    with engine.begin() as conn:
+        initial = delivery_store.initial_deliveries_for_turn(conn, turn_id)[0]
+        assert initial["state"] == "accepted"
+        initial_row = delivery_store.get_delivery(conn, str(initial["id"]))
+        assert initial_row is not None
+        delivery_ids = [str(initial["id"])]
+        for index in range(1, len(run_ids)):
+            delivery_id = delivery_store.new_delivery_id()
+            values = dict(initial_row)
+            values.update(
+                id=delivery_id,
+                priority="p1",
+                dedupe_key=None,
+                turn_role="steer",
+                turn_position=index,
+                submitted_at=now,
+                updated_at=now,
+                version=1,
+            )
+            conn.execute(message_deliveries.insert().values(**values))
+            delivery_ids.append(delivery_id)
+        for run_id, delivery_id in zip(run_ids, delivery_ids, strict=True):
+            conn.execute(
+                agent_runs.insert().values(
+                    id=run_id,
+                    definition_id=None,
+                    run_type="agent_run",
+                    status="running",
+                    cancel_requested=0,
+                    session_id="ses_fsm",
+                    callback_status="pending",
+                    delivery_id=delivery_id,
+                    created_at=now,
+                    started_at=now,
+                    updated_at=now,
+                    metadata_json="{}",
+                )
+            )
+
+    db_path = Path(str(engine.url.database))
+    run_store = SQLiteBackgroundTaskStore(db_path)
+    request_store = TaskExecutionStore(root=tmp_path / "legacy-restart-requests")
+    request_store._sqlite = run_store
+    scheduled = ScheduledTaskService.__new__(ScheduledTaskService)
+    scheduled.controller = manager.controller
+    scheduled.request_store = request_store
+    scheduled._drain_dirty = False
+    manager.controller.scheduled_task_service = scheduled
+    try:
+        # Reproduce the old release: each failed Run independently receives a
+        # restart notice although all rows retain the same exact durable Turn.
+        for run_id in run_ids:
+            assert run_store.settle_run_terminal(
+                run_id,
+                terminal_status="failed",
+                error="service restarted",
+                metadata={"interrupt_reason": SETTLED_BY_RESTARTED},
+                updated_at=now,
+            ) == "failed"
+        sent_id = run_ids[0]
+        if sent_before_recovery:
+            run_store.update_owed_failure_notice(
+                sent_id,
+                state="sent",
+                ack_evidence="receipt",
+            )
+
+        # Match an upgrade: the old process wrote the terminal Turn and per-Run
+        # notices; the new process owns startup reconciliation.
+        with engine.begin() as conn:
+            terminal = manager._write_terminal_snapshot(
+                conn,
+                turn_id,
+                outcome="failed",
+                settled_by=SETTLED_BY_RESTARTED,
+                evidence_kind="service_shutdown",
+                evidence={"reason": "scheduled_service_shutdown"},
+            )
+        assert terminal["changed"] is True
+
+        asyncio.run(manager.recover_durable_delivery_state(service_restart=True))
+
+        notices = {
+            run_id: run_store.owed_failure_notice(run_id) for run_id in run_ids
+        }
+        assert all(notice is not None for notice in notices.values())
+        assert {
+            notice["turn_id"] for notice in notices.values() if notice is not None
+        } == {turn_id}
+        assert {
+            notice["turn_fallback_run_id"]
+            for notice in notices.values()
+            if notice is not None
+        } == {sent_id}
+        assert {
+            tuple(notice["turn_participant_run_ids"])
+            for notice in notices.values()
+            if notice is not None
+        } == {tuple(run_ids)}
+
+        deliverable = [
+            run_id
+            for run_id, notice in notices.items()
+            if notice is not None
+            and notice["state"] == "pending"
+            and failure_notices.decide(
+                run_id=run_id,
+                definition_id=None,
+                notice=notice,
+                streak_facts=None,
+                earlier_unsettled=None,
+            ).action
+            == failure_notices.ACTION_DELIVER
+        ]
+        assert deliverable == ([] if sent_before_recovery else [sent_id])
+        if sent_before_recovery:
+            assert notices[sent_id]["state"] == "sent"
+            assert all(
+                notice["turn_notification_delivered"] is True
+                for notice in notices.values()
+                if notice is not None
+            )
+    finally:
+        run_store.close()
 
 
 def test_restored_opencode_generation_rebinds_turn_control_and_steer(

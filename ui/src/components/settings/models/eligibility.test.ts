@@ -26,7 +26,6 @@ const agent = (sources: AgentSupply['sources']): Agent => ({ sources });
 describe('eligibilityOf', () => {
   it('returns the server’s verdict verbatim, reason included', () => {
     const a = agent({
-      policy: 'custom',
       order: [],
       eligibility: [
         { source_id: 'src_ok', eligible: true, reason_key: null },
@@ -41,7 +40,7 @@ describe('eligibilityOf', () => {
   });
 
   it('grays out an ineligible row whose reason the payload omitted', () => {
-    const a = agent({ policy: 'custom', order: [], eligibility: [{ source_id: 'src_x', eligible: false }] });
+    const a = agent({ order: [], eligibility: [{ source_id: 'src_x', eligible: false }] });
     expect(eligibilityOf(a, 'src_x')).toEqual({ eligible: false, reasonKey: null });
   });
 
@@ -49,7 +48,7 @@ describe('eligibilityOf', () => {
   // when the optional field is missing (or when a source is created between the
   // /sources and /agents reads).
   it('trusts the order when `eligibility` does not mention the id', () => {
-    const a = agent({ policy: 'follow', order: ['src_in'] });
+    const a = agent({ order: ['src_in'] });
     expect(eligibilityOf(a, 'src_in')).toEqual({ eligible: true, reasonKey: null });
     expect(eligibilityOf(a, 'src_out')).toEqual({ eligible: false, reasonKey: null });
   });
@@ -69,7 +68,6 @@ describe('offCurrentModelChain', () => {
   // markers the chain strip has always been right to draw.
   it('speaks only when the server says false', () => {
     const a = agent({
-      policy: 'follow',
       order: ['src_on', 'src_off', 'src_unknown'],
       eligibility: [
         { source_id: 'src_on', eligible: true, in_current_model_chain: true },
@@ -83,7 +81,7 @@ describe('offCurrentModelChain', () => {
   });
 
   it('is silent for a row the payload never mentions, and in Direct mode', () => {
-    expect(offCurrentModelChain(agent({ policy: 'follow', order: ['src_a'] }), 'src_a')).toBe(false);
+    expect(offCurrentModelChain(agent({ order: ['src_a'] }), 'src_a')).toBe(false);
     expect(offCurrentModelChain(agent(null), 'src_a')).toBe(false);
   });
 });
@@ -92,7 +90,6 @@ describe('eligibleSources', () => {
   it('keeps inventory order and drops what the server refused', () => {
     const sources = [source('src_a'), source('src_b'), source('src_c')];
     const a = agent({
-      policy: 'custom',
       order: ['src_c'],
       eligibility: [
         { source_id: 'src_a', eligible: true, reason_key: null },

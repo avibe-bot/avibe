@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Link, Navigate, NavLink, Outlet, useLocation } from 'react-router-dom';
-import { ArrowLeft, Bot, Brain, Building2, ChevronDown, Cpu, FolderTree, Globe, Grid2x2, Hash, Inbox, LayoutDashboard, LayoutGrid, Link as LinkIcon, Menu, MessageCircle, PlugZap, Plus, Settings, Sparkles, X } from 'lucide-react';
+import { AlertTriangle, ArrowLeft, Bot, Brain, Building2, ChevronDown, Cpu, FolderTree, Globe, Grid2x2, Hash, Inbox, LayoutDashboard, LayoutGrid, Link as LinkIcon, Menu, MessageCircle, PlugZap, Plus, Settings, Sparkles, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
@@ -229,6 +229,36 @@ const MobileTabBar: React.FC<{ items: ShellNavItem[]; center?: CenterButton }> =
   );
 };
 
+type ConfigRecoveryProjection = {
+  config_recovery?: {
+    required?: boolean;
+    warnings?: unknown[];
+  };
+};
+
+const ConfigRecoveryNotice: React.FC<{ config: ConfigRecoveryProjection | null }> = ({ config }) => {
+  const { t } = useTranslation();
+  if (!config?.config_recovery?.required) return null;
+
+  return (
+    <div className="fixed inset-x-2 top-2 z-[70] mx-auto flex max-w-3xl items-start gap-3 rounded-lg border border-gold/45 bg-surface px-3 py-2.5 shadow-xl" role="alert">
+      <AlertTriangle className="mt-0.5 size-4 shrink-0 text-gold" />
+      <div className="min-w-0 flex-1">
+        <p className="text-[13px] font-semibold text-foreground">{t('configRecovery.title')}</p>
+        <p className="mt-0.5 break-words text-[12px] text-muted">
+          {t('configRecovery.body')}
+        </p>
+      </div>
+      <Link
+        to="/admin/settings/diagnostics"
+        className="shrink-0 text-[12px] font-semibold text-gold hover:underline"
+      >
+        {t('configRecovery.action')}
+      </Link>
+    </div>
+  );
+};
+
 export const AppShell: React.FC = () => {
   const { t } = useTranslation();
   const { status } = useStatus();
@@ -392,7 +422,7 @@ export const AppShell: React.FC = () => {
   }
 
   if (location.pathname === '/setup') {
-    return <Outlet />;
+    return <><ConfigRecoveryNotice config={config} /><Outlet /></>;
   }
 
   // Two shell modes share the same chrome (brand + bottom status):
@@ -557,6 +587,7 @@ export const AppShell: React.FC = () => {
         !chromeless && 'md:block md:h-auto md:min-h-screen md:overflow-visible'
       )}
     >
+      <ConfigRecoveryNotice config={config} />
       {/* The sidebar forms its own stacking context BELOW the window layer (aside z-10 < window
           layer z-20), so a maximized window covers the WHOLE sidebar — including the Apps launcher.
           The Apps button no longer floats on top in full-screen (a Dock redesign comes later);

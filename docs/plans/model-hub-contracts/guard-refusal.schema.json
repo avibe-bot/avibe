@@ -1,0 +1,136 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "model-hub/guard-refusal.schema.json",
+  "title": "GuardRefusal",
+  "$comment": "<!-- authority-consumer: guard.error_plan guard_error.source_in_route_chain guard_error.source_model_in_route_chain guard_error.source_last_supplier -->",
+  "description": "The shared HTTP 409 envelope for a guarded Model Hub mutation with a nonempty current guarded-impact plan. A forced retry confirms this plan by echoing would_remove_hops and would_interrupt unchanged; the server recomputes the plan and commits only when both arrays match exactly.",
+  "type": "object",
+  "required": [
+    "ok",
+    "contract_version",
+    "error",
+    "would_remove_hops",
+    "would_interrupt"
+  ],
+  "additionalProperties": false,
+  "anyOf": [
+    {
+      "properties": {
+        "would_remove_hops": { "minItems": 1 }
+      }
+    },
+    {
+      "properties": {
+        "would_interrupt": { "minItems": 1 }
+      }
+    }
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "error": {
+            "enum": [
+              "source_in_route_chain",
+              "source_model_in_route_chain"
+            ]
+          }
+        },
+        "required": ["error"]
+      },
+      "then": {
+        "properties": {
+          "would_remove_hops": { "minItems": 1 }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "error": { "const": "source_last_supplier" }
+        },
+        "required": ["error"]
+      },
+      "then": {
+        "properties": {
+          "would_interrupt": { "minItems": 1 }
+        }
+      }
+    }
+  ],
+  "properties": {
+    "ok": { "const": false },
+    "contract_version": { "const": 5 },
+    "error": {
+      "enum": [
+        "source_last_supplier",
+        "source_in_route_chain",
+        "source_model_in_route_chain"
+      ],
+      "description": "Existing lead guard code selected by the Source-mutation matrix. A changed plan returns the same top-level guard error family with the newly recomputed arrays."
+    },
+    "would_remove_hops": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/RouteHopRef" },
+      "uniqueItems": true
+    },
+    "would_interrupt": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/SupplyGap" },
+      "uniqueItems": true,
+      "description": "Canonical order is ascending by (backend, model_id); each SupplyGap.agents array is ascending by stable Agent id."
+    }
+  },
+  "definitions": {
+    "RouteHopRef": {
+      "type": "object",
+      "required": ["backend", "menu_model", "source_id", "model_id", "position"],
+      "additionalProperties": false,
+      "properties": {
+        "backend": { "enum": ["claude", "codex", "opencode"] },
+        "menu_model": { "type": "string", "minLength": 1 },
+        "source_id": { "type": "string", "pattern": "^src_[a-z0-9]{8,}$" },
+        "model_id": { "type": "string", "minLength": 1 },
+        "position": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "SupplyGap": {
+      "type": "object",
+      "required": ["backend", "model_id", "agents"],
+      "additionalProperties": false,
+      "properties": {
+        "backend": { "enum": ["claude", "codex", "opencode"] },
+        "model_id": { "type": "string", "minLength": 1 },
+        "agents": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true,
+          "description": "Enabled named Agent ids in ascending lexicographic order."
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "ok": false,
+      "contract_version": 5,
+      "error": "source_model_in_route_chain",
+      "would_remove_hops": [
+        {
+          "backend": "claude",
+          "menu_model": "claude-opus-4-6",
+          "source_id": "src_anthkey01",
+          "model_id": "claude-opus-4-6",
+          "position": 2
+        }
+      ],
+      "would_interrupt": [
+        {
+          "backend": "claude",
+          "model_id": "claude-opus-4-6",
+          "agents": ["pm"]
+        }
+      ]
+    }
+  ]
+}

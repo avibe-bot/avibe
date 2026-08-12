@@ -33,6 +33,7 @@ def test_source_policy_has_one_explicit_delivery_intent(
     [
         ("replace", "p0"),
         ("steer", "p1"),
+        ("send_now", "p1"),
         ("queue", "p3"),
     ],
 )
@@ -62,6 +63,12 @@ def test_agent_run_queue_intent_is_not_normalized_back_to_steer() -> None:
     from core.scheduled_tasks import normalize_agent_run_delivery_intent
 
     assert normalize_agent_run_delivery_intent("queue") == "queue"
+
+
+def test_legacy_content_send_now_is_normalized_to_steer() -> None:
+    from core.scheduled_tasks import normalize_agent_run_delivery_intent
+
+    assert normalize_agent_run_delivery_intent("send_now") == "steer"
 
 
 def test_session_context_rebuilds_an_im_target_from_durable_scope(monkeypatch) -> None:

@@ -11510,7 +11510,10 @@ def test_an_interruption_notice_never_prints_the_raw_wire_reason(tmp_path: Path)
     ``tests/test_i18n_backend_keys.py`` so a new reason cannot ship unlabelled.
     """
 
-    from core.run_settlement import RUN_INTERRUPTION_REASONS as REASONS
+    from core.run_settlement import (
+        RUN_INTERRUPTION_REASONS as REASONS,
+        SETTLED_BY_RESTARTED,
+    )
 
     sqlite, requests = _store(tmp_path)
     _task(sqlite, "task-zh-reason", name="daily report")
@@ -11524,7 +11527,8 @@ def test_an_interruption_notice_never_prints_the_raw_wire_reason(tmp_path: Path)
         assert reason not in body, (
             f"the raw wire reason {reason!r} leaked into user-visible copy: {body}"
         )
-        assert "被中断" in body, f"the interrupted headline must still render: {body}"
+        expected_copy = "重启停止" if reason == SETTLED_BY_RESTARTED else "被中断"
+        assert expected_copy in body, f"the interruption must still render: {body}"
 
 
 def test_an_unmapped_interruption_reason_renders_a_localized_fallback(
@@ -11565,6 +11569,58 @@ def test_an_unmapped_interruption_reason_renders_a_localized_fallback(
     assert failure_notices.NOTICE_REASON_UNKNOWN_I18N_KEY not in body, (
         f"nor the dotted key path: {body}"
     )
+
+
+@pytest.mark.parametrize("language", ["en", "zh"])
+def test_hfr_475_restart_notice_is_one_calm_action_without_internal_details(
+    tmp_path: Path,
+    language: str,
+) -> None:
+    """A restart notice names readable work but never exposes an orphaned id."""
+
+    from types import SimpleNamespace
+
+    from core.run_settlement import SETTLED_BY_RESTARTED
+    from core.scheduled_tasks import ScheduledTaskService
+    from vibe.i18n import t as i18n_t
+
+    sqlite, requests = _store(tmp_path)
+    _watch(sqlite, "watch-release", name="Watch release", mode="once")
+    service = _drain_service(tmp_path, SimpleNamespace(), sqlite, requests)
+    service.controller.config = SimpleNamespace(language=language, platform="avibe")
+    service._t = ScheduledTaskService._t.__get__(service, ScheduledTaskService)
+
+    def _body(definition_id: str, run_id: str) -> str:
+        _settled_run(
+            sqlite,
+            definition_id,
+            run_id,
+            status="failed",
+            at="2026-08-11T04:47:17+00:00",
+            metadata={"interrupt_reason": SETTLED_BY_RESTARTED},
+        )
+        return service._failure_notice_body(
+            sqlite.get_run(run_id),
+            {
+                "failure_id": run_id,
+                "interrupt_reason": SETTLED_BY_RESTARTED,
+            },
+        )
+
+    named = _body("watch-release", "run-restart-named")
+    assert named == i18n_t(
+        "harness.notice.restartStopped",
+        language,
+        name="Watch release",
+    )
+    assert "\n" not in named
+
+    opaque_definition_id = "b366664bf5db"
+    unnamed = _body(opaque_definition_id, "run-restart-unnamed")
+    assert unnamed == i18n_t("harness.notice.restartStoppedUnnamed", language)
+    assert opaque_definition_id not in unnamed
+    assert "run-restart-unnamed" not in unnamed
+    assert "\n" not in unnamed
 
 
 def _settled_run(

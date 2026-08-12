@@ -114,6 +114,7 @@ PRE_SHOW_SESSION_EVENTS_REQUIRED_COLUMNS = {
         "callback_error",
         "callback_run_id",
         "callback_completed_at",
+        "callback_terminal_turn_id",
         "cancel_requested",
         "cancel_requested_at",
     },
@@ -276,10 +277,10 @@ def ensure_background_indexes(db_path: Path | None = None) -> None:
     """Repair head indexes even when the tables already pass readiness checks.
 
     ``metadata.create_all`` can produce every required table and column without
-    the expression indexes owned by migrations 0039/0041/0042. Such a database
-    correctly skips schema migration, so store construction must still enter the
-    index repair path. Correct expression indexes are detected byte-for-byte
-    against their owning migration DDL and are not rebuilt on ordinary opens.
+    migration-owned indexes. Such a database correctly skips schema migration,
+    so store construction must still enter the index repair path. Correct indexes
+    are detected byte-for-byte against their owning migration DDL and are not
+    rebuilt on ordinary opens.
     """
 
     target_db = (db_path or paths.get_sqlite_state_path()).expanduser().resolve()
@@ -287,8 +288,8 @@ def ensure_background_indexes(db_path: Path | None = None) -> None:
         return
     with sqlite3.connect(target_db) as conn:
         tables = _table_names(conn)
-        if {"run_definitions", "agent_runs"}.issubset(tables) and not _agent_runs_expression_indexes_ready(conn):
-            _ensure_agent_runs_expression_indexes(conn)
+        if {"run_definitions", "agent_runs"}.issubset(tables) and not _agent_runs_managed_indexes_ready(conn):
+            _ensure_agent_runs_managed_indexes(conn)
             conn.commit()
 
 
@@ -567,6 +568,7 @@ def _repair_head_required_columns(conn: sqlite3.Connection, tables: set[str]) ->
         "callback_error": "TEXT",
         "callback_run_id": "VARCHAR",
         "callback_completed_at": "VARCHAR",
+        "callback_terminal_turn_id": "VARCHAR",
         "cancel_requested": "INTEGER not null default 0",
         "cancel_requested_at": "VARCHAR",
     }.items():
@@ -710,8 +712,8 @@ def _ensure_new_background_indexes(conn: sqlite3.Connection) -> None:
     conn.execute('create index if not exists ix_agent_runs_agent_created on agent_runs (agent_name, created_at)')
     conn.execute('create index if not exists ix_agent_runs_callback_status on agent_runs (callback_status, completed_at)')
     conn.execute('create index if not exists ix_agent_runs_updated on agent_runs (updated_at)')
-    if not _agent_runs_expression_indexes_ready(conn):
-        _ensure_agent_runs_expression_indexes(conn)
+    if not _agent_runs_managed_indexes_ready(conn):
+        _ensure_agent_runs_managed_indexes(conn)
 
 
 #: The ``agent_runs`` index migrations whose DDL the head-schema repair path must also
@@ -722,18 +724,30 @@ _AGENT_RUNS_INDEX_REVISION_MODULES = (
     "storage.alembic.versions.20260728_0039_agent_runs_settled_at_index",
     "storage.alembic.versions.20260728_0041_agent_runs_owed_notice_backoff_index",
     "storage.alembic.versions.20260729_0042_agent_runs_definition_streak_index",
+    "storage.alembic.versions.20260811_0051_callback_terminal_turn_identity",
 )
-#: Columns the three index expressions read. A head-shaped database has all of them, but
+#: Columns the managed indexes read. A head-shaped database has all of them, but
 #: this helper is also reached from ``_repair_head_required_columns`` on older drifted
 #: shapes, and ``create index`` on a missing column raises rather than skipping.
-_AGENT_RUNS_INDEX_COLUMNS = frozenset({"definition_id", "created_at", "completed_at", "metadata_json"})
+_AGENT_RUNS_INDEX_COLUMNS = frozenset(
+    {
+        "definition_id",
+        "created_at",
+        "completed_at",
+        "metadata_json",
+        "callback_terminal_turn_id",
+        "session_id",
+        "run_type",
+        "source_kind",
+    }
+)
 
 
 def _normalized_index_sql(value: object) -> str:
     return " ".join(str(value or "").split()).casefold()
 
 
-def _agent_runs_expression_indexes_ready(conn: sqlite3.Connection) -> bool:
+def _agent_runs_managed_indexes_ready(conn: sqlite3.Connection) -> bool:
     if not _AGENT_RUNS_INDEX_COLUMNS.issubset(_column_names(conn, "agent_runs")):
         return True
     for module_name in _AGENT_RUNS_INDEX_REVISION_MODULES:
@@ -747,11 +761,12 @@ def _agent_runs_expression_indexes_ready(conn: sqlite3.Connection) -> bool:
     return True
 
 
-def _ensure_agent_runs_expression_indexes(conn: sqlite3.Connection) -> None:
-    """Install the 0039/0041/0042 ``agent_runs`` indexes on a head-shaped database.
+def _ensure_agent_runs_managed_indexes(conn: sqlite3.Connection) -> None:
+    """Install migration-owned ``agent_runs`` indexes on a head-shaped database.
 
     ``_ensure_head_indexes`` promises that a head-shaped unversioned database ends up
-    with every index head has, and until now it silently lagged head by these three.
+    with every index head has. It once silently lagged the three performance indexes;
+    the same repair path now owns the callback identity index too.
     Two lanes make that gap reachable without any migration ever running: a database
     born from ``metadata.create_all`` satisfies ``background_tables_ready`` (tables and
     columns only — never indexes), so ``SQLiteBackgroundTaskStore`` accepts it as ready

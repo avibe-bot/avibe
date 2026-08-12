@@ -298,11 +298,11 @@ vibe agent run --session-id sesworker123 --callback-session-id sescaller456 --me
 vibe agent run --no-callback --create-session --scope-id slack::channel::C999 --agent release-reviewer --message 'Post the deployment summary.'
 ```
 
-`--send-now` 只能和现有 `--session-id` 一起使用。Avibe 会先把新的 Agent Run
-以 P3 持久化，再通过 P1 提升精确的 FIFO 队头。活动 Turn 存在时，队头会 steering
-进同一个 backend native Turn；Session 空闲时则正常启动。新消息不会越过更早的
-排队工作。`vibe session send-now` 执行相同的精确队头提升，但不会新增消息。
-两种形式都不会调用 Stop；过期或被拒绝的 steering 会保持持久化排队。
+`--send-now` 只能和现有 `--session-id` 一起使用，它显式选择普通的带内容 P1
+语义：新消息会 steering 进活动 native Turn，Session 空闲时立即启动；只有明确
+拒绝后才回退到 P3。它不会提升更早的排队消息。`vibe session send-now` 是无内容
+P1 操作，只提升现有的精确 FIFO 队头，不新增消息。过期队头会被拒绝，而不会改为
+提升下一条；两个命令都不会调用 Stop。
 
 当一个新 Agent Session 需要从现有 Session 的 native backend 上下文分叉，而不是空白开始时，
 使用 `--fork-session <session-id>`。新 Session 会保持源 Session 的 backend。

@@ -109,49 +109,79 @@ The v3 batch separates product truth and fidelity evidence from implementation
 lanes with exclusive file ownership. K1 and K2 may run in parallel. K1 owns this
 orchestrator-authorized S-1 contract consolidation and the generated authority guard;
 after this head, those contract files transfer to I1 and then freeze for downstream
-lanes. The I1–I6 split is **tentative pending the UI lane's design-to-spec reconciliation table**;
+lanes. The K5/K6/I1–I7 split is **tentative pending the UI lane's design-to-spec reconciliation table**;
 that reconciliation may change content but is not expected to change file ownership.
 
 | Lane | Executor preference | Exclusive scope | Depends on |
 | --- | --- | --- | --- |
 | **K1 spec v3 sync** | codex | This PR's planning documents plus the owner-authorized final S-1/protocol edits under `docs/plans/model-hub-contracts/`, their byte-mirror/version consumers, and the live-input authority guard. It does not implement the remaining Gateway runtime | — |
 | **K2 conversion fidelity** | codex | Preserve the recorded M0 measurements and go/no-go rows; record the 2026-08-08 owner waiver of an official-API attribution re-test and the accepted relay-attributed reasoning degradation without rewriting the evidence or adding product/UI scope | — |
-| **I1 contracts and config core** *(tentative)* | codex | All files under `docs/plans/model-hub-contracts/`; `config/v2_config.py`; `core/controller.py`; `core/handlers/model_hub/adapter.py` and the byte-identical contract interface; `core/handlers/model_hub/{service,resolver,classification,errors,provenance,rpc,request,events}.py`; `modules/agents/model_hub.py`; `vibe/{ui_server,model_hub_client}.py`; `tests/test_model_hub_config.py`; `tests/test_model_hub_api.py`; `tests/test_model_hub_resolution.py`; `tests/test_model_hub_injection.py`; `tests/test_controller_model_hub_gate.py`; `tests/test_model_hub_l3.py` through the same-tested-head contract transition. `tests/test_multi_platform_runtime.py` and `tests/test_claude_cli_path.py` are read-only dependency checks: I1 repairs breakage caused by removed resolver symbols but does not refactor them. Owns the §8 final contracts, same-tested-head closure, §4.3 configured-chain executor, serializers, API envelopes, shared validation, and the default-off release gate while I1 is active | K1. **Merges first** |
-| **I2 runtime transport** *(tentative)* | codex | `core/handlers/model_hub/turn_gateway.py`; `vibe/model_hub_runtime/**`; `tests/test_model_hub_runtime.py`; after I1 merges, `tests/test_model_hub_l3.py` transfers wholly to I2 for runtime behavior | I1 |
-| **I3 subscription custody and native import** *(tentative)* | codex | `core/handlers/model_hub/{oauth,native_oauth,revocations,migration}.py`; `tests/test_model_hub_oauth.py`; `tests/scenarios/model_hub/test_model_hub_migration_scenarios.py`; `tests/scenarios/auth_setup/catalog.yaml`; `tests/scenarios/auth_setup/test_auth_setup_scenarios.py`. The migration scenario and complete auth-setup catalog/test loop are the sole carve-outs from I5's scenario tree | I1 |
-| **I4 Sources / Gateway UI** *(tentative)* | codex | `ui/src/components/settings/models/**`; `ui/src/i18n/*.json`; `vibe/i18n/*.json`; UI tests. Both i18n trees are I4-exclusive | I1's API envelopes + the UI-spec PR |
-| **I5 scenario validation** *(tentative)* | codex | `tests/scenarios/model_hub/**` except I3's native-import scenario; `tests/scenario_harness/**` | I1–I4 |
+| **K5 UI specification closure** | codex | Sole ownership of `docs/plans/model-hub-ui-spec.md` across three serialized rounds: (1) the frame registry in in-flight PR #1336; (2) K4 gap-reference upgrades plus the AC-49 withdrawn-evidence cleanup and AC-50 live-backoff presentation registration; (3) the G-32 interaction specification. K5 edits no contract, implementation, locale, or UI file. **K3 residual-queue transfer recorded by PM ruling 2026-08-11 23:09.** | round 1 is independently in flight; round 2 waits for K4 merged; round 3 waits for rounds 1 and 2 merged and must merge before I4's second increment |
+| **K6 post-#1312 Turn-outcome contract closure** | codex; dispatch at activation | One bounded contract round, dispatched by the orchestrator only after K4 and #1312 merge. Exclusive scope is `docs/plans/model-hub.md` §4.5's Turn-outcome matrix/consumer segment; `docs/plans/model-hub-contracts/{api.md,turn-provenance.schema.json,resolution-event.schema.json,mirror-registry.json}`; and the corresponding binding/ledger rows in this document. It closes only registered G-34 plus any §4.5 gap row left by the merged #1312 head, changes either schema only when the selected outcome/copy/payload requires it, and owns no implementation, test, UI, or locale file. **Single-round scope and dispatch edge fixed by PM ruling 2026-08-12 02:00.** | K4 + #1312 merged; must merge before I7 starts |
+| **I1 contracts and config core** *(tentative)* | codex | All files under `docs/plans/model-hub-contracts/`; `config/v2_config.py`; `core/controller.py`; `core/handlers/model_hub/adapter.py` and the byte-identical contract interface; `core/handlers/model_hub/{service,resolver,classification,errors,provenance,rpc,request,events}.py`; `vibe/{ui_server,model_hub_client}.py`; `tests/test_model_hub_config.py`; `tests/test_model_hub_api.py`; resolver unit coverage through #1312; `tests/test_model_hub_injection.py`; `tests/test_controller_model_hub_gate.py`; `tests/test_model_hub_l3.py` through #1312's same-tested-head transition. I1 also finishes #1312's already-open shared native-launch-module edits before the transfer recorded solely in I7's row. `tests/test_multi_platform_runtime.py` and `tests/test_claude_cli_path.py` are read-only dependency checks during I1: I1 repairs breakage caused by removed resolver symbols but does not refactor them. I1 owns the §8 final contracts, same-tested-head closure, §4.3 configured-chain executor, serializers, API envelopes, shared validation, and the default-off release gate while #1312 is active. After #1312 merges, only K6's bounded contract scope transfers immediately; the implementation/test files explicitly named by I7 remain unavailable to I7 until K6 merges, and the other I1 files retain their stated owner. **Turn-outcome transfer revised 2026-08-12 02:00.** | K1. **Merges first** |
+| **I2 runtime transport** *(tentative)* | codex | `core/handlers/model_hub/turn_gateway.py`; `vibe/model_hub_runtime/**`; `tests/test_model_hub_runtime.py`; after #1312 merges, `tests/test_model_hub_l3.py` transfers to I2 for managed-Gateway runtime behavior, except for I7's one authorized AC-50 strict-xfail marker deletion. I2 owns authoritative raw shaped-error and `stream_started` facts produced by the managed Gateway only; this boundary flips at the first user-visible model-output byte, never at HTTP status, headers, or another response byte. Native backend callback facts and every classification/state decision belong to I7. The K4 increment additionally owns AC-38's install worker, persisted status/lease, orphan reconciliation, and runtime-level no-op assertions without moving the HTTP/API boundary out of I7. **Native failure ownership revised 2026-08-11 22:37.** | I1 + K4 merged; `test_model_hub_l3.py` transfer waits for #1312 merged |
+| **I3 subscription custody and native import** *(tentative)* | codex | `core/handlers/model_hub/{oauth,native_oauth,revocations,migration}.py`; `tests/test_model_hub_oauth.py`; `tests/scenarios/model_hub/test_model_hub_migration_scenarios.py`; `tests/scenarios/auth_setup/catalog.yaml`; `tests/scenarios/auth_setup/test_auth_setup_scenarios.py`. The migration scenario and complete auth-setup catalog/test loop are the sole carve-outs from I5's scenario tree. The K4 increment owns AC-48's OAuth registry: it atomically claims the exact nonce/vendor/channel tuple before provider work, coalesces concurrent retries to one pending terminal result, releases failure/task cancellation only before a flow exists, atomically converts success to one echoed-nonce flow, retains an explicitly canceled nonce-bearing flow as the same terminal `cancelled` flow until its existing expiry, and releases the tuple at expiry. AUTH-SETUP-210 blocks the first provider call, overlaps the same-nonce retry, and proves provider invocation exactly once. For AC-52, AUTH-SETUP-109 is the Hub-held re-auth closed loop: missing/false acknowledgement rejects before any adapter/provider call, true acknowledgement starts exactly one Hub flow, and terminal status/repair projection agrees; I7 owns the API/service gate and I5 only consumes the completed scenario. **Explicit-cancel totality revised 2026-08-12 00:37; Hub re-auth scenario binding revised 2026-08-12 01:30.** | K4 merged + #1312 merged |
+| **I4 Sources / Gateway UI** *(tentative; one lane, two increments)* | codex | `ui/src/components/settings/models/**`; `ui/src/i18n/*.json`; `vibe/i18n/*.json`; UI tests. Both i18n trees are I4-exclusive. The current increment consumes the already-specified install/unsupported-host surfaces for AC-38/AC-43; each model row may open frame 02, render the drawing, and consume the chain read projection, but no chain-write caller is wired and Save remains disabled. Exact-chain editing and its UI tests belong to the second increment only after K5's third-round G-32 specification merges. That second increment sends visible noninterrupting hop removal as one ordinary PUT and echoes both refusal-plan arrays unchanged only when protected supply would be interrupted, after I7 freezes both fixtures; the current increment continues to consume master's pre-I7 refusal shape and must not add inactive confirmation fields. It consumes AC-36/37/39–42/44–50 only after K5 round 2 changes their G rows from gaps to contract references and registers the live-backoff presentation; AC-51's read-before-retry client rule activates in the second increment after I7 freezes the deletion/recreate fixture. AC-53's materialization-error `interrupted_pairs` consumer activates only in that second increment after K5 round 2 registers E6 and I7 freezes positive/negative API payload fixtures. AC-54's `accept_unavailable_inventory` producer also belongs to the second increment after K5 round 2 names state ⑤ and I7 freezes both server-result cells; clean creation and pull-origin state ⑤′ never emit it. This is an ordering split inside I4, not a new lane identity. **Revised through the 2026-08-12 04:40 PM ruling.** | current increment: I1 envelopes + K4 contracts; second increment: K5 rounds 1–3 merged + frozen I7/I2/I3 fixtures |
+| **I7 contract-completion implementation (backend)** | codex | After K6 merges, exclusive ownership transfers from I1 for `config/v2_config.py`; `core/handlers/model_hub/{service,resolver,classification,rpc,request,errors,events}.py`; `modules/agents/model_hub.py`; `vibe/{ui_server,model_hub_client}.py`; `tests/test_model_hub_config.py`; `tests/test_model_hub_api.py`; and `tests/test_model_hub_resolution.py`. For the Model Hub failure-callback seam only, I7 also exclusively owns `modules/agents/base.py`, `modules/agents/claude_agent.py`, `modules/agents/codex/{agent,event_handler}.py`, `modules/agents/opencode/{agent,poll_loop}.py`, exact cross-backend phase fixtures in `tests/{test_claude_agent_sessions,test_codex_agent,test_opencode_server}.py`, and mechanical signature consumers in `tests/{test_claude_cli_path,test_multi_platform_runtime}.py`. I7 owns AC-35–AC-47 and AC-50–AC-54's backend producers/tests plus AC-48's API/service half. `service.py` is the sole shared guard-plan owner and implements every guard-totality row and the error-to-required-array relation; it also enforces AC-52's both-channel re-auth acknowledgement before any OAuth adapter call and AC-53's materialization-error response condition, and AC-54's unavailable-inventory consent gate against the repeated server observation. `modules/agents/model_hub.py` owns the native classification/state decision: backend callbacks supply raw failure shape and phase only, and no native path writes a persistent network cooldown. The transferred resolver/classifier/event boundary owns `retired: false` filtering and all four network-failure cells; its post-output executor/provenance fixture consumes K6's G-34 row without inventing an outcome id, copy key, or payload shape. I7 delegates OAuth tuple claim/coalescing and terminal-flow expiry to I3's registry; its service/API half branches explicit cancellation by nonce presence, retaining the I3 flow for nonce-bearing reconciliation and forgetting only no-nonce flows. Its first AC-50 mechanical action is the sole owner-authorized I2-file exception: delete the strict xfail marker from `tests/test_model_hub_l3.py::test_probe_transport_failures_await_ac50_backoff_contract` in the same commit that makes its forward contract assertions XPASS; it otherwise consumes I2 managed-Gateway facts and I3 OAuth fixtures without editing their files. It never edits contracts, UI/i18n, scenario trees, or any other I2–I5 file. **Revised through the 2026-08-12 04:40 PM ruling.** | K4 + #1312 + K6 merged; every listed transfer and native callback seam activates only after all three merge |
+| **I5 scenario validation** *(tentative)* | codex | `tests/scenarios/model_hub/**` except I3's native-import scenario; `tests/scenario_harness/**` | I1–I4 + I7 |
 | **I6 release-gate removal** *(tentative)* | codex | After I5 merges, exclusive ownership transfers from I1 for `is_model_hub_enabled()` and every call site, `_init_model_hub()`, `core/controller.py`, and `tests/test_controller_model_hub_gate.py`. Delete the gate function rather than leaving a constant-true shell; invert the gate test so the final default state always constructs the v3 aggregate | I5 merged and all Model Hub scenarios green |
 
-**Executor ruling (owner, 2026-08-09).** Every new I1–I6 implementation lane uses
+**Executor ruling (owner, 2026-08-09; I7/K5/K6 registry completed 2026-08-12).** Every new K5, K6, and I1–I7 lane uses
 `codex`, including frontend work. Visual-fidelity risk is closed by process rather than
 by changing executor: `design.pen` is the pixel-level authority, and a separate Codex
 acceptance thread compares the built UI against its design frames. Already-dispatched
 Claude lanes complete their current specification work; subsequent implementation uses
 the table above.
 
-**Merge order:** K1 first for product authority; K2 remains independent evidence. I1
-must merge before I2–I5. I2 and I3 may then proceed in parallel under the exclusive
-file split; I4 additionally waits for the UI-spec PR; I5 closes integration after
-I1–I4; I6 removes the release gate only after that evidence is merged. Every lane
-follows `pr-delivery-loop`; no lane merges itself.
+**Merge order:** K1 first for product authority; K2 remains independent evidence. K5
+round 1 is independently in flight as PR #1336; round 2 starts only after K4 merges, and
+round 3 starts only after K5 rounds 1 and 2 merge. I1 must merge before I2–I5. K6 is
+dispatched only after #1312 merges and must merge after K4 and before I7; I7's whole lane,
+including every AC-50 producer and fixture, therefore depends on K4 + #1312 + K6 rather
+than a partial activation. I2 and I3 may proceed under their existing edges while K6 runs;
+I7 starts only after the three-way edge closes. I4's current increment may
+consume the already-specified install/host contracts and render frame 02 from the chain
+read projection with Save disabled; its second increment waits for the G-32 specification
+in K5 round 3 and frozen I7/I2/I3 fixtures. I5 closes integration after I1–I4 and
+I7; I6 removes the release gate only after that evidence is merged. Every lane follows
+`pr-delivery-loop`; no lane merges itself.
 
-**Exclusive-file circuit breakers.** `service.py` and
-`tests/test_model_hub_config.py` are I1-only. Both adapter copies move together under
-I1. `modules/agents/model_hub.py`, `tests/test_model_hub_injection.py`,
-`core/controller.py`, and `tests/test_controller_model_hub_gate.py` are I1-only until
-the explicit I6 transfer for the release-gate pair. `tests/test_model_hub_l3.py` has one serial ownership transfer: I1 alone updates its
-versioned contract/provenance fixtures on the first tested head; only after I1 merges
-does I2 own the whole file. I2–I5 stop and report to the orchestrator if their work
-requires any other I1 file. `ui/src/i18n/*.json` is I4-only: I3 or I5 requests any new
+**Exclusive-file circuit breakers.** `service.py`, `classification.py`, `events.py`,
+`tests/test_model_hub_config.py`, `core/handlers/model_hub/resolver.py`, and
+`tests/test_model_hub_resolution.py` are I1-only through #1312 and remain unavailable to
+K6, then transfer to I7 only after K6 merges under the explicit row above. The §4.5
+Turn-outcome matrix/consumer segment and
+`docs/plans/model-hub-contracts/{api.md,turn-provenance.schema.json,resolution-event.schema.json,mirror-registry.json}`
+are I1/#1312-only until #1312 merges, K6-only for its one bounded registered-gap round,
+and read-only to I7. `docs/plans/model-hub-ui-spec.md` is K5-only for all three
+serialized rounds; K4 and I1–I7 consume it without editing it. Both adapter copies move
+together under I1.
+`modules/agents/model_hub.py` is I1-only through #1312 and then transfers to I7 only after
+K6 merges; it does
+not transfer to I2. `tests/test_model_hub_injection.py` remains I1-owned. `core/controller.py`
+and `tests/test_controller_model_hub_gate.py` remain I1-only until their explicit I6
+release-gate transfer. The narrow Model Hub failure-callback seams and exact fixtures named
+in I7's row belong only to I7 after K4, #1312, and K6 merge; no ownership of unrelated behavior
+in those backend files is implied. `tests/test_model_hub_l3.py` has one serial ownership
+transfer: I1 alone updates its versioned contract/provenance fixtures through #1312; after
+#1312, I2 owns the file except for I7's one AC-50 strict-xfail marker deletion. I2–I5 stop and report to the orchestrator if their work
+requires any I1/I7 file not explicitly transferred to them. `ui/src/i18n/*.json` is I4-only: I3 or I5 requests any new
 migration-scenario note key through the orchestrator and never edits UI i18n locally.
 The authority guard discovers every Python file outside the resolver package that
 imports `core.handlers.model_hub.resolver` and requires each discovered file to occur
 in exactly one binding lane scope; the importer list is never copied into the guard.
+For the K4 implementation batch, I7's listed files and narrow backend callback seams
+activate only after K4, #1312, and the dispatched K6 round merge.
+I7 must not edit I2 runtime files, I3 OAuth/custody files, I4 UI/i18n files, or I5
+scenario files; those lanes consume the frozen contracts and exchange fixtures instead.
+Any newly required implementation file stops the lane for an ownership ruling rather
+than widening I7 by inference.
 
 **Final-contract anti-drift rule.** I1 owns every final-shape edit under
-`model-hub-contracts/` and the exact mechanical closure in §8. After I1 merges, those
-files are read-only to I2–I5. All remaining handoff rows still must land before release;
+`model-hub-contracts/` and the exact mechanical closure in §8 through #1312. K6 is the
+sole orchestrator-dispatched exception after #1312 and may edit only its registered
+Turn-outcome closure scope; after K6 merges, those files are read-only to I2–I7. All
+remaining handoff rows still must land before release;
 an implementation-proven mismatch
 escalates for an orchestrator-owned targeted revision; it is never patched by the
 discovering lane.
@@ -521,7 +551,7 @@ The contracts README's wording stays as written: it is still true, and still GA-
    canvas. For the v2 lanes that means **V6 01–04 and M01/M02** (§3); the frames
    this item originally named were V4's.
 
-## 8. Implementation acceptance criteria (AC-1–AC-34; v3 addenda through 2026-08-09)
+## 8. Implementation acceptance criteria (AC-1–AC-51; v3/K4 addenda through 2026-08-11)
 
 **Current authority.** AC-1 through AC-21 retain their existing order and historical
 record; AC-19's final acceptance is amended in place below. S-1 supersedes every
@@ -767,9 +797,10 @@ to AC-17** are not implementation work: lane L0 applied them to the blocks they 
 and they are listed so the repairs are traceable to the findings that caused them.
 
 The counts and completion statements above apply to the historical AC-1–AC-21
-inventory. The current ledger has **thirty-three** criteria. AC-22 onward are
-owner-settled; only the explicitly owner-vetoable final-shape and vocabulary choices in
-the v3 spec remain open to veto, not to lane-level invention.
+inventory. The ledger had **thirty-three** criteria at the K1 freeze and now has
+**fifty-one** after the owner-settled K4 addenda below. AC-22 onward are owner-settled;
+only the explicitly owner-vetoable final-shape and vocabulary choices in the v3 spec
+remain open to veto, not to lane-level invention.
 
 ### Final contract shape handoff — owner rulings 2026-08-09
 
@@ -837,19 +868,19 @@ external resolver importers.
 | ID | Contract file | Final required shape |
 | --- | --- | --- |
 | **FC-01** | `README.md` | Names §4.3 as the sole configured-chain execution authority and §4.2 as the sole Add-time Source placement authority; documents the same-tested-head terminal closure, the prelaunch full-handoff gate, and downstream read-only ownership; indexes the contract files and terminal `contract_version: 5`; describes Sources, exact configured routes, add-time matching, channel custody, configuration eligibility, inventory, adoption, and pull-only supply visibility without reproducing either authority. |
-| **FC-02** | `mirror-registry.json` | Mechanically covers every closed enum and cross-file identity used by the final files: three protocols, backend ids, Source/model origins, exact-hop blocker/reason/detail-key/remedy pairs (including `native_cli_unavailable`), credential refresh-capability branches, turn outcome/discriminator/copy-key rows, native-import actions and locale keys, event agents, the sole remaining eligibility reason, `added_to`/`adopted_by` shapes, channel defaults, the four `supply_status` labels, the derived takeover label, and UI locale homes. API-boundary-only refusal values register their contract field, named negative route test, and forbidden UI/i18n scope instead of fabricating a render consumer. The same live-input invocation proves retired route literals are absent repo-wide and path identities do not reappear in the Source-model request bodies. Every mirror names an executable relation and terminal version **5**. |
-| **FC-03** | `source.schema.json` | `Source` requires canonical id, kind, vendor, `protocol: anthropic | openai_responses | openai_chat`, credential reference/custody, channel, ordinary `created_at` audit metadata, state/usage, and an unordered model inventory whose ids are unique within that Source. Every model is `{id, origin: "discovered" | "manual", reasoning_efforts: string[], display_name?, discovered_at?}`; the list is required, may be empty, and is editable for either origin. Hub-held subscriptions require no flag, consent field, or acknowledgement record. |
+| **FC-02** | `mirror-registry.json` | Mechanically covers every closed enum and cross-file identity used by the final files: three protocols, backend ids, Source/model origins, exact-hop blocker/reason/detail-key/remedy pairs (including `native_cli_unavailable` and live connection backoff in AgentChain, ProbeResult, the API marker, and both frontend locale objects), credential refresh-capability branches, guard/OAuth/Source-create state machines, the guard-error-to-required-plan-array relation, network phase totality, turn outcome/discriminator/copy-key rows, native-import actions and locale keys, event agents, the sole remaining eligibility reason, `added_to`/`adopted_by` shapes, channel defaults, the four `supply_status` labels, the derived takeover label, and UI locale homes. The D21 fixture compares every consumer individually to the reason authority and mutation-tests ProbeResult drift; a surviving consumer cannot mask a missing peer. API-boundary-only refusal values register their contract field, named negative route test, and forbidden UI/i18n scope instead of fabricating a render consumer. The same live-input invocation proves retired route literals are absent repo-wide and path identities do not reappear in the Source-model request bodies. Every mirror names an executable relation and terminal version **5**. **D21 consumer-completeness revision: 2026-08-11 23:49 K4.** |
+| **FC-03** | `source.schema.json` | **Revised 2026-08-11 by the owner-authorized K4 completion and 19:56 network ruling.** `Source` requires canonical id, kind, vendor, `protocol: anthropic | openai_responses | openai_chat`, credential reference/custody, channel, ordinary `created_at` audit metadata, state/usage, and an unordered model inventory whose ids are unique within that Source. Every model is `{id, origin: "discovered" | "manual", reasoning_efforts: string[], retired?: boolean, display_name?, discovered_at?}`; omission means `retired: false`, only a discovered row may be true, and true is a persistent tombstone excluded from supply. The list is required, may be empty, and its reasoning list is editable for either origin. Only shaped explicit upstream errors enter existing non-permanent Source classifications; unclassified transport failures never write persistent health. Hub-held subscriptions require no flag, consent field, or acknowledgement record. |
 | **FC-04** | `oauth-flow.schema.json` | Subscription flows carry explicit vendor and `supply_channel`; an omitted channel resolves Claude to `native_cli` and ChatGPT to `hub`, while both opposite explicit choices remain legal. The native option exposes `native_source_already_exists` plus `existing_source_id` before login when the backend singleton is occupied. Claude Hub carries one informational risk-copy key; no other path carries warning or consent state. |
-| **FC-05** | `agent-supply.schema.json` | Each backend stores `mode: hub | direct`, one explicit `sources.order`, and exactly one `{hops: [{source_id, model_id}, ...]}` row per menu model. `hops` is always present and may be empty; neither order has a policy discriminator. It enforces at most one native Source per backend and exposes `adopted_by: [{backend, menu_model}]` from persisted references; Source-card attribution reuses that projection. `supply_status` is the sole backend-health projection. Fresh-install construction uses Gateway; the onboarding service supplies Direct for an existing installation with no Model Hub state. No separate mapping, matching, enrollment, or takeover field exists. |
-| **FC-06** | `agent-chain.schema.json` | Returns the stored exact Source/model hops in the same order with only `current`, `runnable`, closed blocker reasons (`source_missing`, `model_unsupported`, `native_cli_unavailable`, and Source-state reasons), and retry metadata added. It has no route-policy or capability-matching discriminator. Takeover derives from stored first hop plus live current position and adds no field. |
-| **FC-07** | `observation-result.schema.json` + `probe-result.schema.json` | Keeps unsaved Add Source connectivity/protocol/inventory observation separate from saved-Route runtime probes. Add-flow results report classified reachability/authentication plus an observed protocol only after a real upstream response, never a credential ref. A failed observation may request a manual three-value probe-order hint but cannot save a protocol without response proof. `ProbeResult` remains the configured-Route runtime domain. |
+| **FC-05** | `agent-supply.schema.json` | Each backend stores `mode: hub | direct`, one explicit `sources.order`, and exactly one `{hops: [{source_id, model_id}, ...]}` row per menu model. `hops` is always present and may be empty; neither order has a policy discriminator. It enforces at most one native Source per backend and exposes `adopted_by: [{backend, menu_model}]` from persisted references; Source-card attribution reuses that projection. `supply_status` is the sole backend-health projection, and every `model_supply` row with `chain_length: 0` must carry `has_runnable_hop: false`. Fresh-install construction uses Gateway; the onboarding service supplies Direct for an existing installation with no Model Hub state. No separate mapping, matching, enrollment, or takeover field exists. **Empty-chain correlation revision: 2026-08-11 22:37 K4.** |
+| **FC-06** | `agent-chain.schema.json` | Returns the stored exact Source/model hops in the same order with only `current`, `runnable`, closed blocker reasons (`source_missing`, `model_unsupported`, `native_cli_unavailable`, Source-state reasons, and live `models.source.backoff.connection_failed`), and retry metadata added. `health: backoff` is a Source-scoped in-memory connection throttle before the first user-visible model-output byte with a `retry_at` strictly later than the read assembler's captured time; an expired overlay is normalized to underlying non-backoff health before serialization and never persists in Source/config state. Only output from that affected Source clears its streak; another Source's fallback output does not. The live overlay applies only over an otherwise healthy, exact-capability-present hop. Cooldown, needs-action, error, missing-Source, and unsupported-model facts suppress it and retain their established projection, so durable blockers roll up `interrupted`; only the native-process exception preserves backoff health/deadline while `native_cli_unavailable` takes the reason slot. A nonempty process-available chain blocked only by cooldown/ordinary backoff validates as `waiting` and cannot validate as `interrupted`. The shape has no route-policy or capability-matching discriminator. Takeover derives from stored first hop plus live current position and adds no field. **Blocker-precedence revision: 2026-08-11 23:49 K4.** |
+| **FC-07** | `observation-result.schema.json` + `probe-result.schema.json` | Keeps unsaved Add Source connectivity/protocol/inventory observation separate from saved-Route runtime probes. Add-flow results report classified reachability/authentication plus an observed protocol only after a real upstream response, never a credential ref or request/status evidence detail. A failed observation may request a manual three-value probe-order hint but cannot save a protocol without response proof. `ProbeResult` remains the configured-Route runtime domain; its distinct live backoff key for unclassified pre-output connection failure implies exactly `channel: hub`, `reachable: false`, and `latency_ms: null`, rejecting native probes and measured-latency results. **Probe relation revision: 2026-08-11 23:49; observation evidence expansion remains withdrawn by the 20:35 owner ruling.** |
 | **FC-08** | `turn-provenance.schema.json` | Gateway turn records contain no route-policy discriminator; they record exact requested/configured model ids, exact Source attribution, ordered attempts, and the closed outcome set owned by §4.5's authoritative Turn-outcome copy matrix. `requested_model_changed` is derived from those exact ids and is never persisted. The schema mirrors the outcome set without reproducing its branches. A canceled in-flight attempt carries no fabricated Source failure. No separate mapping field, compatibility discriminator, or internal-version conversion state exists. |
 | **FC-09** | `resolution-event.schema.json` | Removes `mapping_applied` and its `mapping` reason: an explicit model mapping is stored configuration, not a runtime resolution event. Remaining events carry exact Source/model attribution with mechanically mirrored reason/detail/severity fields. The feed is a pull surface; event descriptions contain no proactive-delivery or recipient-resolution contract. No mapping field, route-rewrite event, or internal-version conversion state exists. |
 | **FC-10** | `adapter-interface.py` | Defines the three protocols, response-backed protocol observation, connectivity classification, credential refresh capability, discovery, all-inventory reasoning-efforts validation, transient credential cleanup on every unsaved-flow exit, and durable reconciliation on revoke failure. `invoke(reasoning_effort: str | None)` stays singular because §4.3 passes zero or one exact member. Runtime-local `engine_down` is distinct from Source failure. The checked-in interface and runtime adapter are byte-identical. |
 | **FC-11** | `opencode-overlay.md` | Keeps stable normalized provider ids for menu identity and add-time match suggestions, supports the three protocols, and pins the exact configured Source/model hop per invocation. Runtime performs no provider matching, and no vendor metadata chooses a saved protocol. |
-| **FC-12** | `api.md` | Contracts Source CRUD, add-only unsaved connectivity/protocol observation and discovery, the sole saved `POST /sources/<id>/refresh` mutation, the unified `/sources/<source_id>/models` subresource for manual creation, all-inventory reasoning-list edits, and user-authored deletion, the explicit backend Source-order PUT, exact route GET/PUT, mode, events/provenance, native-config import, OAuth, and Direct-mode responses. Source create returns exact `added_to` positions; Source cards use `adopted_by`. Every Source/inventory mutation mirrors §4.5's total matrix row-for-row, including unguarded writes that cannot change `id`, `origin`, or Routes and forced Source/model deletion that preserves survivor order. A discovered-model delete returns the API-only `source_model_managed_upstream`; no UI action or copy consumes it. OAuth-start rejects a duplicate native Source before adapter invocation. No saved `/test`, separate saved discovery, route policy, separate mapping, takeover, experimental-consent, or vendor-guessed protocol surface exists. |
+| **FC-12** | `api.md` | **Revised 2026-08-11 by the owner-authorized K4 completion; guard/nonce simplified by the 20:35 owner subtraction ruling, with deletion/recreate, process-local reservation, direct-Route scope, guard error/plan relations, canonical plan order, blocker/Probe/credential-response ownership, both-channel re-auth acknowledgement, OAuth explicit-cancel totality, and terminal materialization-error response ownership closed through 2026-08-12 01:28.** Contracts Source CRUD, add-only unsaved connectivity/protocol observation and discovery, the sole saved `POST /sources/<id>/refresh` mutation, the unified `/sources/<source_id>/models` subresource for manual creation, all-inventory reasoning-list edits, discovered-model retirement, and manual deletion, the explicit backend Source-order PUT, exact route GET/PUT, mode, events/provenance, native-config import, OAuth, and Direct-mode responses. Source create returns exact `added_to` positions; Source cards use `adopted_by`; an optional nonce is reserved only in process before work and persisted on the Source only at commit, while committed retries conflict and reconcile through the ordinary Source list. Nonce uniqueness covers only live-process reservations and live Sources: clients read before retry, and restart or deletion plus list miss makes a same-nonce request a fresh create. OAuth start claims its nonce/vendor/channel tuple before provider work and coalesces a concurrent retry; failure or task cancellation before a flow exists releases after cleanup, while explicit cancellation of a nonce-bearing committed flow retains that same terminal `cancelled` flow until its existing expiry and never starts the provider on a delayed retry. A no-nonce cancel still forgets. Every Source/inventory mutation mirrors §4.5's total matrix row-for-row, including unguarded writes that cannot change `id`, `origin`, or Routes. Every guard lead error requires its corresponding nonempty evidence array; both plan arrays are duplicate-free and `would_interrupt` uses canonical outer `(backend, model_id)` plus inner stable-Agent-id order; every nonempty forced guarded-impact plan requires exact echoes of the refusal's `would_remove_hops` and `would_interrupt`. A missing or changed echo returns the same 409 family with the new plan and never removes an unconfirmed hop, while an empty recomputed plan follows ordinary success with force/echo inert. API-key credential success uses only `{source, removed_hops, interrupted}` and exposes repair through `Source.state`. Successful terminal OAuth re-auth alone owns the complete `{recovered, interrupted_pairs}` tail and may report an empty array; a terminal materialization error instead uses the standard error envelope and carries nonempty `interrupted_pairs` if and only if acquisition-stage Source mutation has already stranded supply, otherwise omitting the field. A visible noninterrupting `route_replace` removal is ordinary success; only protected-supply interruption enters that guard. The network totality table uses `stream_started` at the first user-visible model-output byte: it admits shaped errors before or after that boundary to existing Source classifications, gives an unclassified pre-output connection failure bounded live backoff, clears the streak only on later output from that same Source, normalizes an expired overlay before API serialization, and makes an unclassified post-output interruption event-only. A live overlay applies only over a healthy capability-present hop; cooldown, needs-action, error, missing Source, and unsupported model keep their stronger projections, while native-process unavailability is the sole reason-priority exception. Probe `connection_failed` is confined to the Hub/unreachable/null-latency shape. Forced Source/manual-model deletion preserves survivor order; discovered-model DELETE instead persists `retired: true`, retains the row through refresh, and uses the same exact-hop and protected-supply guards. OAuth-start rejects a duplicate native Source before adapter invocation. No saved `/test`, separate saved discovery, route policy, separate mapping, takeover, experimental-consent, observation-evidence detail, durable pre-create claim, receipt/digest, or vendor-guessed protocol surface exists. |
 | **FC-13** | `migration-scan.schema.json` | Describes only the user-facing copy-only import of existing Claude, Codex, and OpenCode local configuration. Its action enum and one contract example/fixture per value mirror §6's authoritative Native-config import action matrix, including the `keep_native` default and the rejected/deferred `reauth` and `controlled_import` cases. Successful `keep_native` and `import` items run Add Source's one-time match and sole §4.2 placement policy, then report the same visible `added_to` positions. Originals are never modified or deleted, duplicate native selection fails before OAuth or partial commit, and it contains no Model Hub internal contract/data conversion. |
-| **FC-14** | `runtime-dependency.schema.json` | Defines the single local engine asset, immutable version/SHA, loopback binding, lifecycle/health, management and Gateway tokens, and fail-closed behavior. Engine availability is local Gateway health and never mutates an upstream Source cooldown. This entry does not widen the GA asset-mirror or platform-matrix research scope. |
+| **FC-14** | `runtime-dependency.schema.json` | Defines the single local engine asset, immutable version/SHA, loopback binding, lifecycle/health, management and Gateway tokens, and fail-closed behavior. `installing` is exactly the unverified non-listening shape with null installed version; any verified/listening runtime settles outside that transition. Engine availability is local Gateway health and never mutates an upstream Source cooldown. This entry does not widen the GA asset-mirror or platform-matrix research scope. **Installing-shape revision: 2026-08-11 23:09 K4.** |
 
 The final set contains no `subscription_hub_experimental`, `experimental_consent_at`,
 per-source consent record, `consent_required`, `opencode_api_key_only`,
@@ -857,26 +888,28 @@ per-source consent record, `consent_required`, `opencode_api_key_only`,
 route `policy`, `order_enrolled_by`, separate `mappings` field, `mapping_applied` event,
 `mapping` event reason, compatibility
 discriminator, or internal contract-conversion transaction. I1 verifies the contract,
-core, and shared-test absences; I2–I5 verify their owned runtime, UI, fixture, scenario,
+core, and shared-test absences; I2–I5 and I7 verify their owned runtime, UI, fixture, scenario,
 and locale surfaces before release.
 
-**Implementation and test landing checklist (complete before release).** The I1–I5 PRs
+**Implementation and test landing checklist (complete before release).** The K5, K6, I1–I5, and I7 PRs
 collectively touch every applicable row and leave no downstream compatibility task:
 
 | Landing point | Required result |
 | --- | --- |
-| `config/v2_config.py` | Final Source/model/protocol/configured-route types, one canonical validation boundary shared by every persisted-Source writer and subsequent load, singleton and exact-pair uniqueness validation, one explicit Source order per backend and one explicit hops array per menu model, serializer completeness, fresh-install Gateway construction, and existing-install-with-no-Hub-state Direct onboarding. No policy state exists. |
-| `core/handlers/model_hub/{service,resolver,classification,errors}.py` | One §4.3 stored-chain executor and one Add Source implementation of §4.2's placement policy; the latter chooses and persists each matched hop position before returning `added_to`. Also owns the complete credential-failure matrix keyed by refresh capability, closed error classes, `adopted_by`, Source-global health, local-engine distinction, and all route/inventory guards. Runtime never matches, places, or substitutes. A static-key `401` performs no retry; only refresh-capable credentials receive one bounded refresh. |
-| `core/handlers/model_hub/{oauth,native_oauth,revocations,migration}.py` | Vendor-specific OAuth defaults, duplicate-native rejection before adapter work, all-exit transient credential cleanup, durable revoke reconciliation, and the complete four-row native-config action matrix with original files untouched. Every imported Source passes I1's canonical final-shape validator before commit; no import writer bypasses it with direct dataclass construction. |
-| `core/handlers/model_hub/{rpc,request,provenance,events}.py`, `vibe/ui_server.py`, `vibe/model_hub_client.py`, `core/controller.py` | Final API envelopes/routes mirror the guarded-mutation matrix, including forced Source-delete and whole-Route replacement in the shared `{removed_hops, interrupted}` reporting family; provenance/events mirror the complete turn-outcome matrix including `canceled`; Direct-mode responses remain explicit. During I1–I5, absence of `VIBE_MODEL_HUB_ENABLED` keeps the controller/routes/UI disabled; explicit enablement must construct the v3 aggregate. This is a release-control gate, not a compatibility layer. I6 removes it only after I5 evidence is green. |
+| `config/v2_config.py` | Final Source/model/protocol/configured-route types, one canonical validation boundary shared by every persisted-Source writer and subsequent load, singleton and exact-pair uniqueness validation, one explicit Source order per backend and one explicit hops array per menu model, persisted discovered-model retirement plus the committed Source-create `client_nonce` column, serializer completeness, fresh-install Gateway construction, and existing-install-with-no-Hub-state Direct onboarding. No durable pre-create claim, receipt, digest, tombstone, terminal-envelope snapshot, plaintext key, or policy state exists. A committed nonce survives with its Source, Source deletion releases it, and the post-read same-nonce request creates a new id. Unclassified transport failure and live connection backoff never serialize into Source/config state. **Retirement/nonce/network revision: 2026-08-11 21:14 K4.** |
+| `core/handlers/model_hub/{service,resolver,classification,errors}.py` | One §4.3 stored-chain executor and one Add Source implementation of §4.2's placement policy; the latter chooses and persists each matched hop position before returning `added_to`. Also owns the complete credential-failure matrix keyed by refresh capability, closed error classes, `adopted_by`, Source-global health, local-engine distinction, and all route/inventory guards. After K4, #1312, and K6 merge, I7 owns `resolver.py`, `classification.py`, and `tests/test_model_hub_resolution.py`: Add-time matching, inventory membership, new-Route validation, runnability, and invocation admit only `retired: false` rows; the network classifier executes every shaped/unclassified × `stream_started: false/true` cell at the first user-visible model-output boundary and alone owns live connection-backoff state. Only later output from the affected Source resets its streak; another Source's successful fallback does not. Before serialization, the read assembler normalizes an expired overlay to underlying non-backoff health. Concurrent cooldown, needs-action, error, missing-Source, or unsupported-model facts suppress a live overlay and keep the stronger projection; none may roll up as waiting. Simultaneous native-process unavailability is the sole exception and takes reason precedence while backoff health/deadline remains. `service.py` is the single shared guard planner for every matrix row; it recomputes and compares duplicate-free refusal arrays, emits SupplyGap rows in canonical `(backend, model_id)` order with stable-id-sorted `agents`, enforces each lead error's corresponding nonempty plan array, commits noninterrupting `route_replace` normally, and uses `source_last_supplier` only for interruption. It is also the sole AC-53 materialization decision owner: a failed terminal settlement attaches the exact nonempty acquisition-stage `interrupted_pairs` report only after persisted route impact, otherwise omitting the field. Discovered-model DELETE persists the retirement tombstone and refresh never revives it. Source-create reserves its nonce only in process before work, releases it only after retained-material reconciliation, atomically reclaims it after release, persists it only on success, and returns committed conflict for list-based reconciliation; process restart or deletion releases the live-only nonce and the post-read same-nonce request is a fresh create. Runtime never matches, places, substitutes, or writes a network health verdict. A static-key `401` performs no retry; only refresh-capable credentials receive one bounded refresh. **Turn-outcome dependency revision: 2026-08-12 02:00 K4.** |
+| `modules/agents/model_hub.py`; Model Hub failure callbacks in `modules/agents/{base,claude_agent}.py`, `modules/agents/codex/{agent,event_handler}.py`, and `modules/agents/opencode/{agent,poll_loop}.py` | After K4, #1312, and K6 merge, I7 moves the native launch seam from persistent 30-second network cooldowns to AC-50's phase-aware decision. Each backend callback supplies exact failure shape and `stream_started`, which flips only at the first user-visible model-output byte; `modules/agents/model_hub.py` alone classifies and chooses persistent Source state, live connection backoff, or event-only handling. Exact cross-backend fixtures in `tests/{test_claude_agent_sessions,test_codex_agent,test_opencode_server}.py` cover both phases and prove zero persistent write for unclassified transport failures; the post-output same-current-hop fixture consumes K6's G-34 outcome/copy/payload row exactly. `tests/{test_claude_cli_path,test_multi_platform_runtime}.py` receive only required signature adaptations. I2 owns the equivalent raw phase facts only for the managed Gateway. **Turn-outcome dependency revision: 2026-08-12 02:00 K4.** |
+| `core/handlers/model_hub/{oauth,native_oauth,revocations,migration}.py` | Vendor-specific OAuth defaults, duplicate-native rejection before adapter work, all-exit transient credential cleanup, durable revoke reconciliation, and pre-provider exact-tuple OAuth-start claim/coalescing/release/flow conversion and nonce echo. The registry releases only a failed/task-canceled start before a flow exists; it retains an explicitly canceled nonce-bearing committed flow as the same terminal `cancelled` flow until existing expiry, then releases the tuple. The row also owns the complete four-row native-config action matrix with original files untouched. Every imported Source passes the canonical final-shape validator before commit; no import writer bypasses it with direct dataclass construction. **OAuth explicit-cancel revision: 2026-08-12 00:37 K4.** |
+| `core/handlers/model_hub/{rpc,request,provenance,events}.py`, `vibe/ui_server.py`, `vibe/model_hub_client.py`, `core/controller.py` | Final API envelopes/routes mirror the guarded-mutation and guard-totality matrices, including current-plan refusal, exact plan-echo confirmation, empty-plan ordinary success, Source-delete, discovered-model retirement, ordinary noninterrupting Route replacement versus interrupted refusal, existing-chain reorder, runtime install/no-op, all three nonce-retry states, read-before-retry plus restart/deletion fresh-create behavior, nonce-bearing canceled-flow replay/expiry versus no-nonce forget, terminal materialization error/report totality, and live connection-backoff reads. `rpc.py`, `request.py`, `ui_server.py`, and `model_hub_client.py` only carry refusal plans when a refusal exists; they do not mint or persist confirmation state. For AC-53, `ui_server.py` and `model_hub_client.py` preserve an exact nonempty `interrupted_pairs` error member and omit it otherwise; they never synthesize `[]`, `flow`, or future-tense `would_interrupt` on an error. After K6, `events.py` transfers from I1 to I7 and records each network-totality cell without turning an unclassified failure into persistent state; unclassified interruption after user-visible model output is event-only. Provenance mirrors the complete K6-frozen turn-outcome matrix, including `canceled` and G-34's selected row, and never invents an outcome id, copy key, or payload shape. Direct-mode responses remain explicit. During implementation, absence of `VIBE_MODEL_HUB_ENABLED` keeps the controller/routes/UI disabled; explicit enablement must construct the v3 aggregate. This is a release-control gate, not a compatibility layer. I6 removes it only after I5 evidence is green. **Turn-outcome dependency revision: 2026-08-12 02:00.** |
 | `core/handlers/model_hub/adapter.py` | Exact byte mirror of `model-hub-contracts/adapter-interface.py`, including three protocols and observation/cleanup signatures. |
-| `core/handlers/model_hub/turn_gateway.py`, `vibe/model_hub_runtime/{config,client,state,adapter}.py` | Exact stored-hop execution, three-protocol transport, credential refresh capability, pre-stream fallthrough, post-stream no replay with classified health, and local Gateway failures at any request phase excluded from Source state and fallback. Turn copy is selected from the authoritative outcome matrix after state persistence and live annotation of the same stored chain. |
-| `ui/src/components/settings/models/**` | Final Source/Gateway types and calls; protocol selector only after failed observation as a probe-order hint; Source cards reuse `adopted_by`; Add Source renders the stored backend Source order plus returned `added_to` positions without inferring newness from order; every model row edits the exact stored hops and mappings runtime executes; backend groups consume `supply_status`; takeover derives from the chain; saved Source details exposes only guarded Refresh models; Direct groups expose reversible mode actions. No bottom-only “new” section, policy control, “not enabled” hint, latency/last-check copy, consent/experimental surface, separate mapping object, takeover field, supplying-backends field, or vendor default protocol exists. Any new-item marker is transient presentation state, not a route field. `vendorMeta.ts` may order probes but cannot choose a saved protocol. Narrowing `SourceProtocol` must be checked against production and test files, not only the production-only `tsconfig.app.json` program. |
-| `ui/src/i18n/{en,zh}.json`, `vibe/i18n/{en,zh}.json` | Exact mirrored final reason/detail and `supply_status` keys, including `native_cli_unavailable` and `route_unconfigured`; every Turn-outcome copy-matrix key; the derived takeover label; distinct Direct/Native terms; the sole Claude Hub warning; compact protocol-observation failure copy; and no retired policy, consent, experimental, or mechanism-copy keys. A registry-generated guard compares closed outcome/discriminator, blocker/remedy, and credential-remedy relations with both locale sets. |
-| `tests/test_model_hub_config.py` | The adapter parity gate at current line 159 remains exact; the mirror-registry version gate at current line 236 and provenance version gate at current line 314 use terminal value **5**; round-trip/completeness fixtures use only final Source and route shapes. |
-| `tests/test_model_hub_api.py` | The current line-1204 `experimental_consent_at` assertion becomes an absence assertion; API fixtures cover unique final model entries, edited-effort preservation across rediscovery, distinct add-only unsaved operations versus the sole guarded saved refresh, all-exit discovery cleanup, three protocols, observation-before-save, deterministic policy-chosen Add Source placement with the returned persisted position, every guarded-mutation row including Source deletion from all backend Source orders and routes with survivor order preserved, duplicate-native pre-adapter rejection, adoption, and absence of policy/enrollment/takeover/supplying sibling fields. |
-| `tests/test_model_hub_{resolution,runtime,oauth,l3}.py` | Sole §4.3 stored-chain consumption, no runtime matching or substitution branch, exact effort membership, every credential-capability row, configured-order fallthrough, every turn-outcome/copy row, blocked `no_candidate` detail, `native_cli_unavailable`, engine loss before/during/after streaming with no Source mutation or replay, canceled provenance, vendor OAuth defaults, and exact diagnostic shapes. I1 moves the versioned contract/provenance fixtures in `test_model_hub_l3.py` to terminal version **5** on its same tested head; after I1 merges, I2 owns that whole file's runtime-behavior updates. |
-| `ui/src/components/settings/models/**/*.test.*` | No protocol control on the normal add flow, honest manual probe-order fallback, final inventory editing, visible and adjustable backend Source order plus policy-chosen Add Source placement, no position-based newness or bottom-only new section, exact configured-chain editing, one guarded saved refresh button, adopted/supply-status projection consumption, derived takeover versus exhausted rendering, reversible Direct mode, distinct Native copy, and no policy/not-enabled/latency/consent surface. I4 supplies a mechanical type-check gate that includes these test files despite `tsconfig.app.json` excluding them. |
+| `core/handlers/model_hub/turn_gateway.py`, `vibe/model_hub_runtime/**` | Exact stored-hop execution, three-protocol transport, credential refresh capability, authoritative `stream_started` facts at the first user-visible model-output byte, pre-output fallthrough, post-output no replay, and local Gateway failures at any request phase excluded from Source state and fallback. I2 transports raw phase/shaped-error evidence but does not own the network taxonomy, Source decision, or live-backoff executor transferred to I7. The runtime owns the persisted install worker/lease, orphan reconciliation, host detection, installed-state no-op, and the exact installing shape `{installed_version: null, verified: false, listening: null}` without owning HTTP routes. Turn copy is selected only from the K6-frozen authoritative outcome matrix after I7's state decision and live annotation of the same stored chain. **Turn-outcome dependency revision: 2026-08-12 02:00 K4.** |
+| `ui/src/components/settings/models/**` | Final Source/Gateway types and calls; protocol selector only after failed observation as a probe-order hint; Source cards reuse `adopted_by`; Add Source renders the stored backend Source order plus returned `added_to` positions without inferring newness from order; state ⑤ alone emits `accept_unavailable_inventory: true`, while clean creation and pull-origin state ⑤′ omit it; backend groups consume `supply_status`; takeover derives from the chain; saved Source details exposes only guarded Refresh models; Direct groups expose reversible mode actions. For frame 02, I4's current increment opens the editor from each model row, renders the drawing, and consumes the chain read projection only: it wires no chain-write caller and keeps Save disabled. Exact stored-hop/mapping editing and exact two-array plan echo belong to I4's second increment after K5 round 3 and I7 refusal fixtures merge. Live connection-backoff presentation also belongs to the second increment after K5 round 2 corrects its UI-spec copy and I7 freezes producer fixtures. AC-53 error-gap rendering likewise belongs to the second increment after K5 round 2 registers E6 and I7 freezes positive/negative payloads; `modelsApi.ts` carries only an actually present nonempty `interrupted_pairs`, and `OAuthConnectDialog.tsx` refetches Source state after the materialization error. The current increment consumes master's pre-I7 refusal shape and must not add inactive confirmation fields. K5 round 2 separately removes the withdrawn observation request/status detail slots. The current increment also consumes the already-specified install/unsupported-host states; the second consumes the remaining K4 projections/actions only after their named K5 round-2 upgrades. **Materialization-response revision: 2026-08-12 01:28 by PM ruling.** No bottom-only “new” section, policy control, “not enabled” hint, latency/last-check copy, separate experimental-consent surface, separate mapping object, takeover field, supplying-backends field, or vendor default protocol exists. Any new-item marker is transient presentation state, not a route field. `vendorMeta.ts` may order probes but cannot choose a saved protocol. Narrowing `SourceProtocol` must be checked against production and test files, not only the production-only `tsconfig.app.json` program. |
+| `ui/src/i18n/{en,zh}.json`, `vibe/i18n/{en,zh}.json` | Exact mirrored final reason/detail and `supply_status` keys, including `native_cli_unavailable` and `route_unconfigured`; every Turn-outcome copy-matrix key; the derived takeover label; distinct Direct/Native terms; the sole Claude Hub warning; compact protocol-observation failure copy; and no retired policy, separate experimental-consent, or mechanism-copy keys. After K5 round 2's UI-spec sync, I4's second increment adds the distinct short connection-backoff copy for `models.source.backoff.connection_failed`; it never reuses quota-cooldown wording. A registry-generated guard compares closed outcome/discriminator, blocker/remedy, and credential-remedy relations with both locale sets. |
+| `tests/test_model_hub_config.py` | The adapter parity and terminal-version gates remain exact; round-trip/completeness fixtures use only final Source and route shapes. It validates committed Source `client_nonce` persistence and live-only uniqueness, deletion release, rejects durable claim/receipt/digest/tombstone fields and unregistered observation evidence, and mechanically closes OAuth cancel totality: pending-start cancellation releases, explicit nonce-bearing cancellation retains the same terminal flow until expiry, no-nonce cancellation forgets, and the old blanket-forget promise is absent. It proves live backoff cannot serialize as Source state, rejects pure cooldown/backoff chains mislabeled `interrupted`, and keeps durable/capability blockers interrupted under a concurrent deadline. D21 compares AgentChain, ProbeResult, the API marker, and both UI locales individually, with a ProbeResult mutation that must break equality. D22 proves the same five OAuth terminal decision ids exist exactly once in authority and API, success re-auth may carry an empty complete report, materialization errors carry an exact nonempty report if and only if persisted acquisition impact exists, and every other error omits the member. The narrow K4 ledger assertion binds AC-52 and the I3/auth-setup landing row to AUTH-SETUP-109, its two exact scenario files, the pre-adapter negative cells, the provider-once positive cell, the terminal repair projection, and the K4+#1312 activation edge. The same fixture rejects zero-length model supply marked runnable, each installing-shape contradiction, every guard error paired with an empty required plan array, duplicate hop/gap plan entries, and any credential response that revives the OAuth-only repair tail. The K4 AC-54 fixture validates the optional boolean, rejects non-booleans, and freezes every repeat-observation × consent row plus its owner/files/activation handoff. K6 never owns this file; after K6 freezes G-34, I7 adds the mechanical matrix/schema consumer fixture under the three-way activation edge. **Turn-outcome handoff revision: 2026-08-12 02:00 K4.** |
+| `tests/test_model_hub_api.py` | The current line-1204 `experimental_consent_at` assertion becomes an absence assertion; API fixtures cover unique final model entries, edited-effort and retirement preservation across rediscovery, distinct add-only unsaved operations versus the sole guarded saved refresh, all-exit discovery cleanup, three protocols, observation-before-save, all three pre-observation nonce retry states, deterministic policy-chosen Add Source placement with the returned persisted position, and every guarded-mutation row. OAuth API fixtures prove nonce-bearing explicit cancel retains the same `cancelled` flow and exact-tuple retry performs zero provider starts, existing expiry releases it for one fresh start, and no-nonce cancel forgets. Terminal materialization fixtures prove a native re-auth failure after acquisition has stranded at least one sibling emits that exact nonempty `interrupted_pairs` in the standard error envelope with no `flow`; the same materialization error with no gap and every non-materialization error omit the member rather than sending `[]`. Successful terminal re-auth keeps the complete array and may send `[]`. Guard fixtures cover every totality cell: unforced empty/nonempty plans, forced nonempty exact/missing/different plan echoes, and a forced request whose old nonempty echo recomputes to an empty plan. They prove every exactly confirmed nonempty plan commits once, every other nonempty forced plan returns the current refusal without removing a hop, every empty plan follows ordinary success, a noninterrupting `route_replace` removal succeeds once without 409, an interrupting replacement refuses with `source_last_supplier`, every produced guard code has its schema-required nonempty evidence array, every produced plan array is duplicate-free, and permuted guard inputs emit canonically ordered SupplyGap rows and agent ids. Source-create fixtures prove process-local pre-work reservation, read-before-retry, in-progress conflict/no work, released atomic reserve/exactly one fresh attempt including after restart, committed conflict plus list lookup of exactly one nonce-bearing Source, AC-26 pending-revocation settlement, and Source-delete release followed by same-nonce fresh creation with a new id and one upstream attempt. AC-54 adds repeated-observation fixtures for failed inventory with omitted/false rejection, true empty-inventory commit, successful rediscovery with stale true, and protocol-unproved rejection regardless of the flag. Observation fixtures reject request/status evidence not present in the six-field contract. Network fixtures cover all four shaped/transport × `stream_started: false/true` cells at the first user-visible model-output boundary, same-Source output reset, other-Source fallback non-reset, clocked future/expired read assembly, bounded auto-clearing live backoff, and zero config writes for unclassified failures. Concurrent-transition fixtures overlay an active deadline with healthy, cooldown, needs-action, error, missing-Source, unsupported-model, and unavailable-native facts: only healthy/capability-present hops project ordinary backoff; durable/capability blockers keep their established projection and `interrupted`; the native exception preserves deadline with reason priority. Probe payload fixtures cover the exact Hub/unreachable/null-latency relation. Credential PUT payloads use only the standard guarded Source envelope; the OAuth repair tail remains flow-only. AgentSupply fixtures prove the valid `{chain_length: 0, has_runnable_hop: false}` pair, reject the corresponding true pair, and prove pure process-available cooldown/backoff chains are waiting rather than interrupted. The same file covers Source deletion from all backend Source orders and routes with survivor order preserved, discovered retirement, existing-chain reorder, exact installing shape plus runtime install/no-op, duplicate-native pre-adapter rejection, adoption, and absence of policy/enrollment/takeover/supplying sibling fields. **OAuth terminal fixture revision: 2026-08-12 01:28.** |
+| `tests/test_model_hub_{resolution,runtime,oauth,l3}.py` | After K6 merges, `tests/test_model_hub_resolution.py` transfers to I7 and proves `retired: false` filtering in Add-time matching, inventory membership, new-Route validation, runnability, and invocation plus the complete network-classification/live-backoff table; I2 retains runtime/l3 files and supplies exact managed-Gateway raw shaped/transport facts and `stream_started` phase at the first user-visible model-output byte without owning state decisions, while I3 retains OAuth. Together they cover sole §4.3 stored-chain consumption, no runtime matching or substitution branch, exact effort membership, every K6-frozen turn-outcome/copy row including G-34, blocked `no_candidate` detail, `native_cli_unavailable`, engine loss before/during/after streaming with no Source mutation or replay, persisted install/restart/no-op behavior, canceled provenance, vendor OAuth defaults, and OAuth nonce released/in-flight/committed totality with pre-provider claim, concurrent coalescing, cleanup release, atomic flow conversion, echo, explicit canceled-flow replay with provider-zero, and expiry-triggered fresh start. Until I7 lands AC-50, only `test_probe_transport_failures_await_ac50_backoff_contract` carries the corrected narrow authorization: it already asserts the future `connection_failed` live-backoff projection and zero Source/config writes under strict xfail, while `test_chain_projection_and_probe_latency_partition` and all unrelated assertions remain active. I7's first mechanical action deletes only that marker in the same commit that makes these forward assertions XPASS; an accidental early implementation is therefore a failing XPASS. I1 moves the versioned contract/provenance fixtures in `test_model_hub_l3.py` to terminal version **5** through #1312; afterward I2 owns that file's runtime updates except for the one deletion. **Turn-outcome dependency revision: 2026-08-12 02:00.** |
+| `ui/src/components/settings/models/**/*.test.*` | No protocol control on the normal add flow, honest manual probe-order fallback, final inventory editing, visible and adjustable backend Source order plus policy-chosen Add Source placement, no position-based newness or bottom-only new section, one guarded saved refresh button, adopted/supply-status projection consumption, derived takeover versus exhausted rendering, reversible Direct mode, distinct Native copy, and no policy/not-enabled/latency or separate experimental-consent surface. Under the 2026-08-11 18:10 PM ruling, the current-increment frame-02 fixture proves that a model row opens the drawn editor, renders the chain read projection, keeps Save disabled, and emits no chain mutation. Exact configured-chain editing and its save/refusal/reconciliation tests are second-increment obligations after K5 round 3 and I7 fixtures merge; a visible noninterrupting hop removal sends one ordinary PUT with no wire confirmation, while a protected-supply interruption echoes both returned refusal arrays, replaces the displayed plan when either differs after recomputation, and never forces a nonempty plan without an exact echo. The Add Source client reads Sources before a lost-response retry and treats a released nonce as fresh. Only state ⑤ sends `accept_unavailable_inventory: true`; clean creation, every retry that has not received that consent, and pull-origin state ⑤′ omit it. After K5 round 2 and I7 fixtures, the same second increment proves live connection backoff uses its distinct short-delay copy rather than quota cooldown copy; K5 round 2 removes the withdrawn observation request/status slots. I4 supplies a mechanical type-check gate that includes these test files despite `tsconfig.app.json` excluding them. |
+| `tests/scenarios/auth_setup/{catalog.yaml,test_auth_setup_scenarios.py}` | After K4 and #1312 merge, I3 owns AUTH-SETUP-210 and AUTH-SETUP-109. AUTH-SETUP-210 blocks the first OAuth-start provider call, loses that caller's response, overlaps a same-nonce retry that coalesces to the same terminal flow/provider, then asserts provider start exactly once. AUTH-SETUP-109 selects a Hub-held Source and proves missing and false re-auth acknowledgement return `reauth_confirmation_required` before any adapter/provider call, true acknowledgement starts exactly one Hub flow, and terminal status plus repair projection agree. Pending-start failure/task-cancellation release and committed-flow replay cover the other nonce rows; I3 unit/API fixtures separately prove explicit canceled-flow replay starts no provider and expiry permits exactly one fresh start. I5 consumes both completed scenarios but does not edit either file. **Hub re-auth scenario binding revised 2026-08-12 01:30 by PM ruling.** |
 | `tests/scenarios/model_hub/**`, `tests/scenario_harness/model_hub_native_oauth.py` | End-to-end final-shape setup, all four native-import action rows, reversible Direct/Gateway onboarding, subscription custody, protocol observation, one-time add matching plus deterministic persisted placement, exact configured route execution and mapping, guarded saved refresh and Source-delete envelopes, silent successful takeover, truthful blocked/native/engine terminal copy, and exhaustion failure without takeover semantics. The I3-owned migration scenario validates each imported Source, serializes the full result, and reloads it through the same canonical validator. |
 
 #### Sealed current-consumer findings — reviewed head `5cffd3fff7`
@@ -891,7 +924,7 @@ the implementing lane receives the evidence rather than a paraphrase.
 
 | Review thread | AC / disposition | Landing point | Responsible lane |
 | --- | --- | --- | --- |
-| `3742846987` | Owner ruling 2026-08-09: no internal v4-to-v5 data migration; the finding's upgraded-install premise is superseded and no compatibility loader is permitted | Final-contract handoff and `config/v2_config.py` absence proof | K1 ruling only; no implementation lane |
+| `3742846987` | Historical owner ruling 2026-08-09: no internal v4-to-v5 data migration. Superseded by the 3.0.10 upgraded-install incident: `V2Config.load` now performs a disk-boundary migration and preserves strict `from_payload` validation; unrecoverable sections start with safe defaults while the original file is backed up. | Final-contract handoff and `config/v2_config.py` load boundary | K1 ruling superseded; migration/recovery is owned by `config/v2_config.py` |
 | `3742846989` | AC-22; valid prelaunch consumer gap | Agent projection/write flow in `service.py` and Models route editor | I1 + I4 |
 | `3742846991` | AC-26; valid prelaunch consumer gap | Source serializer plus all Models `SuppliedModel` consumers and mocks | I1 + I4 |
 | `3742846992` | AC-30; valid prelaunch consumer gap | No-candidate provenance producer, runtime blocker propagation, and pull-surface rendering | I1 + I2 + I4 |
@@ -1948,9 +1981,10 @@ a parallel branch outside those tables.
 
 ### AC-34 — Make Source-model ownership and routes one total resource contract
 
-**Owner ruling, 2026-08-09.** Source inventory is a subresource of one Source. A
-`discovered` entry's existence is upstream-owned; a user may edit its declared
-`reasoning_efforts`, but only user-authored entries can be created or deleted.
+**Owner ruling, revised 2026-08-11.** Source inventory is a subresource of one Source.
+A `discovered` entry is an upstream record whose user correction is persisted as
+`retired: true`; a user may also edit its declared `reasoning_efforts`. User-authored
+entries alone can be created, and their DELETE removes the row.
 
 **Acceptance.** Model creation, capability-list replacement, and user-authored deletion
 use only the three `/api/models/sources/<source_id>/models` family routes registered in
@@ -1958,15 +1992,585 @@ use only the three `/api/models/sources/<source_id>/models` family routes regist
 by those request bodies. POST and PATCH cannot change an existing `id`, `origin`, or
 Route, so their matrix rows are explicitly unguarded; DELETE reuses the registered
 guarded Source envelope. Rediscovery of the same id continues to preserve the edited
-`reasoning_efforts`, `display_name`, and `discovered_at` as one total merge rule.
+`reasoning_efforts`, `display_name`, `discovered_at`, and retirement tombstone as one
+total merge rule. DELETE on a discovered row stages retirement and uses the same guard;
+confirmed success retains the row and excludes it from supply. The generated same-run
+closure also proves that no Source-model request body repeats `source_id`; this is a
+derived check, not a copied occurrence count.
 
-A direct DELETE of `origin: "discovered"` returns
-`source_model_managed_upstream`. The registry names the contract error and
-`test_discovered_source_model_delete_is_rejected_as_upstream_managed` as its negative
-route consumer and rejects the value from Model Hub UI/i18n files. No UI entry may exist
-whose only possible result is this refusal. The generated same-run closure also proves
-the retired parallel route literal is absent repo-wide and that no Source-model request
-body repeats `source_id`; these are derived checks, not copied occurrence counts.
+### AC-35 — Preserve the G-9 Source-order tombstone
+
+**Acceptance.** For a fixture with at least two nonempty stored Routes, every successful
+`PUT /api/models/agents/<backend>/sources` changes and re-echoes only
+`sources.order`. Before/after Route documents are byte-identical, and the route exposes
+no `force`, guarded `409`, `would_remove_hops`, or `would_interrupt` branch. The API
+route table and §4.5 explicitly keep this write outside the exhaustive Source-mutation
+matrix.
+
+**Binding handoff (owner / files / activation).** After K4, #1312, and K6 merge, I7 owns
+`core/handlers/model_hub/{service,rpc,request}.py`, `vibe/{ui_server,model_hub_client}.py`,
+and `tests/test_model_hub_api.py` for the byte-before/after Route fixture. There is no
+I4 write consumer. After that fixture freezes, I5 consumes it in
+`tests/scenarios/model_hub/{catalog.yaml,test_model_hub_live_resolution_scenarios.py}`.
+
+### AC-36 — Expose G-11 CLI installation presence per backend
+
+**Acceptance.** Every AgentSupply API row includes one server-produced boolean
+`cli_present`, including absent executables and Direct-mode backends. In a three-backend
+fixture, the zero-installed state is mechanically equivalent to
+`all(agent.cli_present is false)`. Changing login or process-readiness fixtures without
+changing executable presence cannot change the boolean.
+
+**Binding handoff (owner / files / activation).** After K4, #1312, and K6 merge, I7 owns
+`core/handlers/model_hub/{service,rpc}.py`, `vibe/{ui_server,model_hub_client}.py`, and
+`tests/test_model_hub_api.py` for CLI detection and the three-row AgentSupply fixture.
+After K5 round 2 upgrades G-11 and that fixture freezes, I4's second increment owns
+`ui/src/components/settings/models/{types.ts,SettingsModelsPage.tsx,modelRows.ts,modelRows.test.ts}`.
+I5 then consumes the frozen backend/UI result in
+`tests/scenarios/model_hub/{catalog.yaml,test_model_hub_live_resolution_scenarios.py}`.
+
+### AC-37 — Persist G-3 discovered-model retirement
+
+**Acceptance.** FC-03 and FC-12 are the single final-shape authorities: DELETE on a
+discovered model stages `retired: true`, applies the same exact-hop and protected-supply
+guards as manual deletion, and on confirmed success retains exactly one row with the
+same `id`, `origin`, and edited metadata. Manual DELETE still removes the row. Refresh
+fixtures in which the upstream both includes and omits that id retain `retired: true`;
+matching, model-capability eligibility, new-Route validation, runnability, and
+invocation fixtures never consume the retired row.
+
+**Binding handoff (owner / files / activation).** After K4, #1312, and K6 merge, ownership of
+`config/v2_config.py`, `core/handlers/model_hub/{service,resolver,rpc,request,errors}.py`,
+`vibe/{ui_server,model_hub_client}.py`, and
+`tests/test_model_hub_{config,api,resolution}.py` transfers from I1 to I7. Those files
+own persistence, refresh/DELETE/guard behavior, and `retired: false` filtering in
+Add-time matching, inventory membership, new-Route validation, runnability, and
+invocation. After K5 round 2 upgrades G-3 and I7 freezes the guarded Source fixtures, I4's
+second increment owns `ui/src/components/settings/models/{types.ts,SourceRow.tsx,SourceRowMenu.tsx,SourceRow.test.tsx,modelRows.ts,modelRows.test.ts}`.
+I5 then consumes the result in
+`tests/scenarios/model_hub/{catalog.yaml,test_model_hub_live_resolution_scenarios.py}`.
+
+### AC-38 — Own the G-10 runtime installation state on the server
+
+**Acceptance.** Runtime health validates against exactly the six registered decisions.
+On a supported host, install persists `installing` before work with exactly
+`installed_version: null`, `verified: false`, and `listening: null`; status reload and a
+concurrent repeated install return that same state and start one job. One positive schema
+fixture validates that shape, while separate negative fixtures make each of the three
+fields contradictory and fail validation. Verified success
+settles at `not_started` with null `error_key`; failure settles at `not_installed` with
+`settings.models.install.fail.detail`. On process reconstruction, an orphaned
+`installing` fixture either verifies an already-complete target to `not_started`, claims
+one fresh job while staying `installing`, or settles at `not_installed` with that key;
+it never remains ownerless. On an unsupported exact `host_platform`, the route performs
+no download, returns `runtime_platform_unsupported`, and status remains
+`not_installed`. Calls from `not_started`, `ok`, `degraded`, and `down` return the exact
+current RuntimeDependency with HTTP 200, perform zero downloads, preserve the verified
+binary, and neither start, stop, nor restart the process. Install has the same
+authentication and CSRF negative fixtures as runtime start, while `/start` never
+installs.
+
+**Binding handoff (owner / files / activation).** After K4 and #1312 merge, I2 owns
+`core/handlers/model_hub/turn_gateway.py`, `vibe/model_hub_runtime/**`, and
+`tests/test_model_hub_runtime.py` for installer lifecycle, persisted lease/recovery, and
+runtime no-op fixtures. After K6 also merges, I7 owns
+`core/handlers/model_hub/{service,rpc,request,errors}.py`,
+`vibe/{ui_server,model_hub_client}.py`, `tests/test_model_hub_config.py`, and
+`tests/test_model_hub_api.py` for the schema, RPC/HTTP/client, CSRF, and error boundary
+without editing I2 files. Once both producers
+freeze success, failure, unsupported, concurrent, installed-no-op, and restart fixtures,
+I4's current increment owns
+`ui/src/components/settings/models/{types.ts,runtimeLifecycle.ts,SettingsModelsPage.tsx,RuntimeNotStartedAction.test.tsx}`
+plus `ui/src/i18n/{en,zh}.json` and `vibe/i18n/{en,zh}.json`. I5 consumes the combined
+result in `tests/scenarios/model_hub/{catalog.yaml,test_model_hub_live_resolution_scenarios.py}`.
+
+### AC-39 — Apply G-13 order to existing chains and close G-26
+
+**Acceptance.** Seed Routes containing repeated listed Sources and multiple unlisted
+Sources, invoke reorder, and sort the original hops by §4.6's exact stable key. The
+response equals that expected order for every Route; the multiset of exact
+`(source_id, model_id)` pairs and every explicit model mapping are unchanged. A second
+invocation is byte-identical. No matching, add/remove, guard, force, or interruption
+path runs. The route is the registered existing-chain consumer of `sources.order`.
+
+**Binding handoff (owner / files / activation).** After K4, #1312, and K6 merge, I7 owns
+`core/handlers/model_hub/{service,rpc,request}.py`, `vibe/{ui_server,model_hub_client}.py`,
+and `tests/test_model_hub_api.py` for the reorder route and before/after property fixture.
+After K5 round 3 specifies G-32, K5 round 2 upgrades G-13/G-26, and that fixture
+freezes, I4's second increment owns
+`ui/src/components/settings/models/{types.ts,modelsApi.ts,ModelRoutePicker.tsx,reorder.ts,reorder.test.ts}`.
+I5 then consumes it in
+`tests/scenarios/model_hub/{catalog.yaml,test_model_hub_live_resolution_scenarios.py}`.
+
+### AC-40 — Commit the G-14 native takeover transaction atomically
+
+**Acceptance.** For `direct` → `hub` with a sanctioned recognized CLI login and no
+native Source, one transaction creates exactly one backend-bound `native_cli` Source,
+applies `placement-v1`, commits all accepted exact matches, changes mode, and returns an
+AgentSupply that already contains those results. Injected failures at every commit seam
+leave both mode and Source/Route state unchanged. Existing-native, absent-login,
+unrecognized-login, non-transition, and repeated-request fixtures create zero Sources;
+`cli_present` alone never satisfies recognition.
+
+**Binding handoff (owner / files / activation).** After K4, #1312, and K6 merge, I7 owns
+`config/v2_config.py`, `core/handlers/model_hub/{service,rpc,request}.py`,
+`vibe/{ui_server,model_hub_client}.py`, and
+`tests/test_model_hub_{config,api}.py` for recognition reuse and the atomic transaction.
+After K5 round 2 upgrades G-14 and I7 freezes all five transition fixtures, I4's second
+increment owns
+`ui/src/components/settings/models/{types.ts,modelsApi.ts,BackendSupplyModeCard.tsx,AgentCard.test.tsx}`.
+I5 then consumes them in
+`tests/scenarios/model_hub/{catalog.yaml,test_model_hub_live_resolution_scenarios.py}`.
+
+### AC-41 — Close the G-19 post-commit cancellation boundary
+
+**Acceptance.** AC-26 and I1 continue to own every pre-commit cancellation cleanup
+fixture. For cancellation after the durable Source commit, the server exposes no abort
+branch: the Source, accepted placements, and AgentSupply state complete normally and
+are coherent on the next read even when the response is never received. The fixture
+contains neither Source deletion nor committed-credential revocation after that point.
+
+**Binding handoff (owner / files / activation).** After K4, #1312, and K6 merge, I7 owns
+`core/handlers/model_hub/{service,rpc,request}.py`, `vibe/{ui_server,model_hub_client}.py`,
+and `tests/test_model_hub_api.py` for cancellation ownership, commit-boundary faults,
+and coherent readback. After K5 round 2 upgrades G-19 and I7 freezes both boundary fixtures,
+I4's second increment owns
+`ui/src/components/settings/models/{types.ts,modelsApi.ts,AddApiKeyDialog.tsx,asyncLifetime.ts,asyncLifetime.test.ts}`.
+I5 then consumes them in
+`tests/scenarios/model_hub/{catalog.yaml,test_model_hub_live_resolution_scenarios.py}`.
+
+### AC-42 — Reload G-20 Source adoption facts
+
+**Acceptance.** Every Source returned by list, detail/mutation, API-key create, and OAuth
+create carries `adopted_by` with the schema's exact item shape. After process restart,
+the Source list projection equals the complete set of persisted `(backend, menu_model)`
+references to that Source, uniquely sorted by backend then menu model, independent of
+hop health and without a client chain walk.
+In creation responses, top-level `adopted_by` is byte-equal to
+`source.adopted_by`.
+
+**Binding handoff (owner / files / activation).** After K4, #1312, and K6 merge, I7 owns
+`core/handlers/model_hub/{service,rpc}.py`, `vibe/{ui_server,model_hub_client}.py`, and
+`tests/test_model_hub_api.py` for Source read assembly and sorted serializer fixtures.
+After K5 round 2 upgrades G-20 and those fixtures freeze, I4's second increment owns
+`ui/src/components/settings/models/{types.ts,SourceRow.tsx,SourceRow.test.tsx,AdoptionNote.tsx,AdoptionNote.test.tsx}`.
+I5 then consumes them in
+`tests/scenarios/model_hub/{catalog.yaml,test_model_hub_live_resolution_scenarios.py}`.
+
+### AC-43 — Derive G-24 host support from the server platform
+
+**Acceptance.** Every runtime API payload includes the server-detected
+`host_platform`. Installation support is true if and only if that exact string appears
+in `manifest.assets[].platform`; changing only the browser user agent or client platform
+cannot change it. The unsupported-host install fixture performs no asset request.
+
+**Binding handoff (owner / files / activation).** After K4 and #1312 merge, I2 owns
+`vibe/model_hub_runtime/**` and `tests/test_model_hub_runtime.py` for host detection and
+the manifest producer. After K6 also merges, I7 owns
+`core/handlers/model_hub/{service,rpc,request,errors}.py`,
+`vibe/{ui_server,model_hub_client}.py`, and `tests/test_model_hub_api.py` for the API
+projection and exact 422. Once both supported/unsupported fixtures freeze, I4's current
+increment owns
+`ui/src/components/settings/models/{types.ts,runtimeLifecycle.ts,SettingsModelsPage.tsx,RuntimeNotStartedAction.test.tsx}`
+plus `ui/src/i18n/{en,zh}.json` and `vibe/i18n/{en,zh}.json`. I5 consumes the combined
+result in `tests/scenarios/model_hub/{catalog.yaml,test_model_hub_live_resolution_scenarios.py}`.
+
+### AC-44 — Distinguish G-25 all-stale Routes from empty Routes
+
+**Acceptance.** Every `model_supply` row includes `has_runnable_hop`, and its value
+equals `any(hop.runnable for hop in the complete exact AgentChain)`. A nonempty fixture
+whose every hop is stale yields `{chain_length: N, has_runnable_hop: false}` with
+`N > 0`; an empty fixture yields `{chain_length: 0, has_runnable_hop: false}`. No
+consumer infers the boolean from length. The schema accepts the empty/false pair and
+rejects `{chain_length: 0, has_runnable_hop: true}`; producer and API fixtures cover
+both cells.
+
+**Binding handoff (owner / files / activation).** After K4, #1312, and K6 merge, I7 owns
+`core/handlers/model_hub/{service,rpc}.py`, `vibe/{ui_server,model_hub_client}.py`, and
+`tests/test_model_hub_api.py` for exact-chain annotation and live/all-stale/empty
+AgentSupply fixtures. After K5 round 2 upgrades G-25 and those fixtures freeze, I4's second
+increment owns
+`ui/src/components/settings/models/{types.ts,modelRows.ts,modelRows.test.ts,sufficiency.ts,sufficiency.test.ts}`.
+I5 then consumes them in
+`tests/scenarios/model_hub/{catalog.yaml,test_model_hub_live_resolution_scenarios.py}`.
+
+### AC-45 — Define the complete G-27 SourceCreate request
+
+**Acceptance.** `source-create.schema.json` rejects every property outside its seven
+registered fields, requires `vendor` and nonempty write-only `key`, and accepts optional
+display, endpoint, full three-value probe order, client nonce, and explicit unavailable-
+inventory consent. Contract examples
+validate. Create responses and logs contain no plaintext key, and request fixtures
+cannot submit server-owned identity, protocol conclusion, inventory, health, usage,
+custody, or timestamp fields.
+
+**Binding handoff (owner / files / activation).** After K4, #1312, and K6 merge, I7 owns
+`core/handlers/model_hub/{service,rpc,request}.py`, `vibe/{ui_server,model_hub_client}.py`,
+and `tests/test_model_hub_api.py` for request validation and provisioning boundaries.
+After K5 round 2 upgrades G-27 and I7 freezes valid, empty-inventory, and rejected-body
+fixtures, I4's second increment owns
+`ui/src/components/settings/models/{types.ts,modelsApi.ts,AddApiKeyDialog.tsx,dialogFields.tsx,dialogFields.test.tsx}`.
+I5 then consumes them in
+`tests/scenarios/model_hub/{catalog.yaml,test_model_hub_live_resolution_scenarios.py}`.
+
+### AC-46 — Bind and number every G-28 guarded mutation plan
+
+**Acceptance.** Every `would_remove_hops` and `removed_hops` item includes one-based
+`position` in its named pre-mutation Route. Cross-Route output sorts by backend, menu
+model, then position. For the same planned mutation, refusal and confirmed success
+report byte-identical RouteHopRef arrays even though the latter commits the cascade.
+Every refusal validates against `guard-refusal.schema.json`, has a nonempty current
+plan, and pairs its lead error with the corresponding nonempty evidence array:
+route/source-model errors require `would_remove_hops`, while `source_last_supplier`
+requires `would_interrupt`. Positive fixtures cover all three relations; negative
+fixtures keep the other array nonempty while leaving the required array empty and fail
+schema validation. Both plan arrays are sets: a structurally duplicate `RouteHopRef` or
+`SupplyGap` item fails schema validation, and positive plus duplicate-negative fixtures
+cover each array. `would_interrupt` has one canonical producer order: ascending
+`(backend, model_id)`, with every nested `agents` array ascending by stable Agent id.
+Producer fixtures permute both input levels and assert byte-identical ordered output.
+The fixture covers every row of the force/plan/echo totality matrix: unforced empty
+success; unforced nonempty refusal; forced nonempty exact two-array echo success; forced
+nonempty absent or differing echo returning the newly recomputed plan; and a world change
+where the forced retry carries the old nonempty echo but recomputes to an empty plan and
+takes ordinary success without a 409 or removed hop. A direct `route_replace` fixture
+removes one hop while retaining runnable protected supply and succeeds once without 409;
+its paired interruption fixture refuses with the existing `source_last_supplier` code
+and enters the same echo matrix. No token, digest, version receipt,
+server-side confirmation state, or parallel plan-changed discriminator exists. The
+closed error vocabulary, error-to-plan relation, and guard-decision vocabulary are
+checked through `mirror-registry.json`.
+
+**Binding handoff (owner / files / activation).** K4 freezes
+`docs/plans/model-hub-contracts/{guard-refusal.schema.json,api.md,mirror-registry.json}`.
+After K4, #1312, and K6 merge, I7 owns the sole shared guard planner and exact-array comparison in
+`core/handlers/model_hub/service.py`; transport-only changes in
+`core/handlers/model_hub/{rpc,request,errors}.py` and
+`vibe/{ui_server,model_hub_client}.py`; and every totality/concurrent fixture in
+`tests/test_model_hub_api.py`. K4's negative schema-relation fixture lives in
+`tests/test_model_hub_config.py`; K6 never owns that test, and I7 consumes and extends it
+only after all three prerequisites merge.
+After K5 round 3 specifies G-32, K5 round 2 upgrades G-28, and I7 freezes those
+fixtures, I4's second increment owns
+`ui/src/components/settings/models/{types.ts,modelsApi.ts,ModelRoutePicker.tsx,ModelRoutePicker.test.tsx}`
+for numbered rows, ordinary noninterrupting removal, interruption-only two-array plan
+echo, and replacement by a newly refused plan.
+I4's current increment owns none of this confirmation path. I5 then consumes the frozen result in
+`tests/scenarios/model_hub/{catalog.yaml,test_model_hub_live_resolution_scenarios.py}`.
+
+### AC-47 — Reconcile G-29 lost Source-create responses
+
+**Acceptance.** When SourceCreate supplies a valid `client_nonce`, the server atomically
+reserves that unique value in process before observation or credential work and stores
+no durable claim, digest, terminal envelope, or plaintext credential with it. The
+committed Source alone persists and
+echoes the nonce unchanged so list reads expose exactly one match. After a lost response,
+the client reads Sources before retrying; a match terminates reconciliation and a miss
+permits the same-nonce state-machine action. One table-driven
+fixture covers every state/action cell. `nonce.in_flight` returns HTTP 409
+`source_create_in_progress` before observation or provisioning. `nonce.released` first
+settles AC-26 cleanup, then the same-nonce retry atomically reserves the value and performs
+exactly one fresh attempt. `nonce.committed` returns HTTP 409 `source_nonce_conflict`
+without upstream work or a replay promise; the client then reads Sources and recognizes
+the committed row by exact nonce. Source deletion releases the nonce and makes it
+claimable again; AC-51 owns the positive fresh-create boundary after that deletion.
+After a simulated lost response, in-progress waits/retries, committed conflict reads,
+and a released/list-miss retry all terminate without a separate endpoint.
+Process termination ends the work and its in-memory reservation. Reconstruction
+reconciles only AC-26 durable pending-revocation material; the next same-nonce attempt is
+fresh and no ownerless claim is reconstructed.
+Omitting the nonce preserves existing create behavior.
+
+**Binding handoff (owner / files / activation).** After K4, #1312, and K6 merge, I7 owns
+`config/v2_config.py`, `core/handlers/model_hub/{service,rpc,request,errors}.py`,
+`vibe/{ui_server,model_hub_client}.py`, and
+`tests/test_model_hub_{config,api}.py` for committed-column validation, process-local
+reservation, cleanup/restart, Source-delete release, and the complete state/action AC-47
+fixture. After K5 round 2 upgrades G-29 and I7 freezes in-progress conflict, committed conflict
+plus list lookup, released reclaim, cleanup/recovery, Source-delete release, and
+lost-response fixtures, I4's second increment
+owns `ui/src/components/settings/models/{types.ts,modelsApi.ts,AddApiKeyDialog.tsx,asyncLifetime.ts,asyncLifetime.test.ts}`.
+I5 then consumes them in
+`tests/scenarios/model_hub/{catalog.yaml,test_model_hub_live_resolution_scenarios.py}`.
+
+### AC-48 — Reconcile G-30 lost OAuth-start responses
+
+**Acceptance.** When OAuth start supplies `client_nonce`, the server atomically claims
+the exact `(client_nonce, vendor, channel)` tuple before provider work and every flow
+response echoes it. One table-driven fixture covers all three states and every exit:
+released claims start exactly once, including after cleanup from a provider-start
+failure/task cancellation before a flow exists; an in-flight same-tuple retry coalesces
+to the same pending terminal result without a second provider invocation; and committed
+retries return the same `flow_id`, state, and presentation. Provider success atomically
+converts the claim to a flow with a non-null date-time `expires_at`, and every later
+response for that flow preserves the same bounded deadline. An ordinary or
+presentation-only flow without a nonce retains the existing nullable expiry branch.
+Explicitly canceling a nonce-bearing committed flow
+cancels provider work but retains that same bounded terminal flow as `state: "cancelled"`
+until its existing `expires_at`; a same-tuple retry inside that window returns the
+canceled flow with zero provider starts. Clocked expiry releases the tuple, and the first
+same-tuple retry afterward starts exactly one fresh flow. Explicit cancellation without
+a nonce forgets the flow. A different tuple cannot resolve to the retained flow, and a
+new user action always generates a new nonce. This zero-new-concept closure keeps
+`contract_version: 5` under the PM ruling of 2026-08-12 00:37.
+
+The contract fixture accepts a nonce-bearing flow with a date-time expiry, rejects that
+same flow with `expires_at: null`, and accepts the null expiry after `client_nonce` is
+omitted. These three cells mechanically prove both the nonce implication and preservation
+of the pre-existing non-nonce branch.
+
+**Binding handoff (owner / files / activation).** After K4 and #1312 merge, I3 owns
+`core/handlers/model_hub/oauth.py`, `tests/test_model_hub_oauth.py`,
+`tests/scenarios/auth_setup/catalog.yaml`, and
+`tests/scenarios/auth_setup/test_auth_setup_scenarios.py`. AUTH-SETUP-210 blocks the
+first provider call, loses that caller's response, overlaps a same-nonce retry, receives
+the same terminal flow/provider through both callers, and proves provider start exactly
+once. The OAuth unit table additionally covers pending-start cleanup/release, explicit
+cancel followed by same-tuple canceled replay with zero provider calls, existing-expiry
+release followed by one fresh provider start, different-tuple isolation, and no-nonce
+forget. After K6 also merges, I7 owns only
+`core/handlers/model_hub/{service,rpc,request,errors}.py`,
+`vibe/{ui_server,model_hub_client}.py`, and `tests/test_model_hub_api.py` for the service
+and API envelope, including the nonce-aware cancel branch and clocked expiry boundary.
+After K5 round 2 upgrades G-30 and I3/I7 freeze same-tuple, different-tuple,
+omitted-nonce, released/in-flight/committed, canceled-replay/expiry, and concurrent
+lost-response fixtures, I4's second increment owns
+`ui/src/components/settings/models/{types.ts,modelsApi.ts,OAuthConnectDialog.tsx,oauthResult.test.ts}`.
+I5 only consumes the completed flow in
+`tests/scenarios/model_hub/{catalog.yaml,test_model_hub_native_oauth_scenarios.py}` after
+all producer and UI fixtures settle.
+
+### AC-49 — Withdraw the observation evidence expansion
+
+**Acceptance.** Under the 2026-08-11 20:35 owner subtraction ruling,
+`observation-result.schema.json` has `contract_version` plus exactly the established six result fields and rejects
+an `evidence`, `request`, or `status` sibling. Model Hub contracts and implementation
+lanes add no evidence producer, mirror vocabulary, or UI payload field; protocol and
+discovery decisions continue to use the existing semantic result only.
+
+**Binding handoff (owner / files / activation).** K4 freezes the absence in
+`docs/plans/model-hub-contracts/{observation-result.schema.json,api.md,mirror-registry.json}`.
+After K4 merges, K5 round 2 alone owns `docs/plans/model-hub-ui-spec.md` §1.5 and removes
+its request/status slots under the 20:35 ruling; no backend or I4 implementation file is
+activated by AC-49.
+
+### AC-50 — Classify network failures without inventing persistent health
+
+**Acceptance.** One table-driven fixture covers the Cartesian product of failure shape
+(`shaped` explicit closed upstream classification versus unclassified `transport`) and
+phase (`stream_started: false` versus `stream_started: true`). `stream_started` is false
+until the first user-visible model-output byte and true from that byte onward; HTTP
+status, headers, and other response bytes do not cross it. The existing
+`network_failure.*_before_first_byte` and `network_failure.*_after_first_byte` decision
+IDs retain their spelling but refer to this canonical model-output boundary. Both shaped
+cells enter exactly their existing non-permanent Source classification and unchanged
+recovery rule; phase changes only retry/replay behavior. Unclassified pre-output
+connection failure retains Source/config bytes exactly, emits the redacted network
+event, and creates one
+Source-scoped in-memory `health: backoff` projection with
+`reason: models.source.backoff.connection_failed`, a future `retry_at`, and the exact
+bounded delays 1, 2, 4, 8, 16, then 30 seconds. Expiry makes the hop runnable; a later
+first user-visible model-output byte from that same affected Source, Source
+endpoint/credential replacement, or process reconstruction clears the streak. A
+successful fallback from another Source is a negative fixture and does not clear it.
+Before serialization, the API/read assembler captures one read time: a live backoff
+must have `retry_at` strictly after that time, while an expired overlay is normalized to
+the Source's underlying non-backoff health and runnability and is never emitted as stale
+backoff. Clocked positive/expired fixtures cover this boundary in I7 API/service tests;
+the contract fixture records the boundary because Draft-07 cannot compare a date-time to
+the moving clock. While the deadline is live, the overlay applies only over an otherwise
+healthy hop whose exact Source/model capability remains present. Concurrent cooldown,
+`needs_action`, `error`, `source_missing`, or `model_unsupported` suppresses the overlay
+and emits that blocker's established health/reason/retry facts; the four non-self-healing
+rows roll up `interrupted`, so `waiting` cannot mask a durable blocker. The sole overlay
+exception is the native-process row below. A nonempty process-available chain blocked only by
+cooldown/backoff must validate as `waiting` and must fail validation as `interrupted`;
+positive and negative schema fixtures cover that converse. If a `native_cli` process is
+simultaneously unavailable, its actionable
+`native_cli_unavailable` fact takes the single reason slot; `health: backoff` and the
+future `retry_at` remain unchanged, `runnable` stays false, and the chain is
+`interrupted`. Restoring the process reveals any still-live connection backoff.
+Unclassified post-output interruption emits only the event: it writes no
+Source/config state, creates no backoff, performs no replay, and does not change the
+chain. Schema fixtures reject the removed persistent network/timeout cooldown keys,
+reject backoff on Source state, and reject any backoff hop without false runnability,
+one of the two precedence-valid closed reasons, and a date-time deadline. A ProbeResult
+carrying `models.source.backoff.connection_failed` implies exactly `channel: hub`,
+`reachable: false`, and `latency_ms: null`; native-channel and non-null-latency fixtures
+fail. Contract version
+stays 5 under the owner’s
+pre-release semantic correction of 2026-08-11 19:44–19:56 and the blocker/Probe closure
+of 2026-08-11 23:49.
+
+**Binding handoff (owner / files / activation).** K4 freezes
+`docs/plans/model-hub-contracts/{source,agent-chain,agent-supply,probe-result}.schema.json`,
+`api.md`, and `mirror-registry.json`. After K4 and #1312 merge, the orchestrator dispatches K6
+for one bounded round over `docs/plans/model-hub.md` §4.5's Turn-outcome segment and
+`docs/plans/model-hub-contracts/{api.md,turn-provenance.schema.json,resolution-event.schema.json,mirror-registry.json}`.
+K6 freezes G-34's exact outcome id, copy key, and payload shape plus any §4.5 gap row left
+by #1312; it edits either schema only when that selected shape requires it and owns no
+implementation or test file. After K4, #1312, and K6 merge, ownership transfers from
+I1 to I7 for `core/handlers/model_hub/{service,resolver,classification,errors,events,rpc}.py`,
+`modules/agents/model_hub.py`, `vibe/{ui_server,model_hub_client}.py`, and
+`tests/test_model_hub_{api,resolution}.py`. For the Model Hub failure-callback seam only,
+the same three-way activation transfers `modules/agents/base.py`, `modules/agents/claude_agent.py`,
+`modules/agents/codex/{agent,event_handler}.py`,
+`modules/agents/opencode/{agent,poll_loop}.py`, exact phase fixtures in
+`tests/{test_claude_agent_sessions,test_codex_agent,test_opencode_server}.py`, and
+mechanical signature consumers in
+`tests/{test_claude_cli_path,test_multi_platform_runtime}.py` to I7. I7 alone owns the
+native classifier/state decision, cross-backend raw-shape/phase handoff, live-backoff
+executor/read projection, Source no-write assertions, same- versus other-Source reset,
+clocked live/expired API assembly, the concurrent transition matrix for cooldown,
+needs-action, error, missing Source, unsupported model, and native-process precedence,
+the exact ProbeResult relation, and the event-only cell plus its K6-defined G-34
+executor/provenance fixture;
+no native callback may persist the old 30-second network cooldown.
+I2 retains
+`core/handlers/model_hub/turn_gateway.py`, `vibe/model_hub_runtime/**`,
+`tests/test_model_hub_runtime.py`, and `tests/test_model_hub_l3.py`; it supplies the raw
+shaped/transport and `stream_started` facts at the model-output boundary for the managed
+Gateway but does not classify or
+mutate Source/backoff state. Under the 2026-08-11 20:20 gate ruling as corrected through
+the 21:58 PM ruling, the future contract assertions live alone in the adjacent strict-xfail test
+`tests/test_model_hub_l3.py::test_probe_transport_failures_await_ac50_backoff_contract`;
+the mixed chain/probe test remains active. I7's first mechanical action is to delete that
+strict marker in the same commit that makes its `connection_failed` live-backoff and zero
+Source/config-write assertions XPASS; no other I2-file
+edit is authorized. After K5 round 2 registers the distinct short-backoff copy and I7
+freezes all four cells plus same-Source reset, other-Source non-reset, clock, and cap
+fixtures, I4's second increment owns
+`ui/src/components/settings/models/{types.ts,modelsApi.ts,modelRows.ts,modelRows.test.ts,sufficiency.ts,sufficiency.test.ts}`
+and both locale trees. I5 then consumes the frozen behavior in
+`tests/scenarios/model_hub/{catalog.yaml,test_model_hub_live_resolution_scenarios.py}`.
+
+### AC-51 — Make G-29 nonce release after Source deletion explicit
+
+**Acceptance.** Nonce uniqueness exists only while a live-process reservation or live
+Source owns the value. A positive fixture commits a nonce-bearing Source, deletes that
+Source, reads the Source list and observes no matching nonce, then submits the same nonce
+again. The server treats that request as a fresh create: it performs exactly one new
+upstream attempt and commits exactly one new Source with a new server-issued id and the
+same nonce. No tombstone, gone result, receipt, digest, replay, or deleted-Source
+protection state exists. The supported UI client always performs the D-36 Source read
+before a lost-response retry; a stale client that skips that read and recreates a deleted
+Source is explicitly outside the single-user threat model. A restart fixture proves the
+in-process reservation disappears, AC-26 pending-revocation material settles, and the
+next same-nonce request is one fresh attempt; no durable claim collection is serialized.
+
+**Binding handoff (owner / files / activation).** After K4, #1312, and K6 merge, I7 owns
+`config/v2_config.py`, `core/handlers/model_hub/{service,rpc,request,errors}.py`,
+`vibe/{ui_server,model_hub_client}.py`, and
+`tests/test_model_hub_{config,api}.py` for live-only uniqueness, restart release,
+Source-delete release, new-id recreation, and upstream-once fixtures. After K5 round 2 upgrades G-29 and I7 freezes
+those fixtures, I4's second increment owns
+`ui/src/components/settings/models/{types.ts,modelsApi.ts,AddApiKeyDialog.tsx,asyncLifetime.ts,asyncLifetime.test.ts}`
+for the mandatory read-before-retry client branch. I5 then consumes the frozen behavior
+in `tests/scenarios/model_hub/{catalog.yaml,test_model_hub_live_resolution_scenarios.py}`.
+
+### AC-52 — Require acknowledgement before OAuth re-auth on either supply channel
+
+**Acceptance.** `POST /api/models/sources/<id>/reauth` starts no OAuth adapter work
+unless the request carries `{"acknowledge_irreversible": true}`. This is identical for
+Hub OAuth and `native_cli` Sources: missing or false acknowledgement returns the existing
+`reauth_confirmation_required` error before the adapter is called, and a true
+acknowledgement permits exactly one ordinary re-auth start. The rule does not extend to
+transactional API-key replacement through `PUT /credential`. A negative Hub fixture and
+the corresponding native fixture prove zero adapter calls; positive fixtures prove both
+channels cross the same server boundary. This additive pre-release correction keeps
+`contract_version: 5` under the PM ruling of 2026-08-12 00:15.
+
+**Binding handoff (owner / files / activation).** After K4, #1312, and K6 merge, I7 owns
+`core/handlers/model_hub/{service,rpc,request,errors}.py`,
+`vibe/{ui_server,model_hub_client}.py`, and `tests/test_model_hub_api.py` for the shared
+pre-adapter acknowledgement gate and both-channel positive/negative route fixtures. At
+the earlier K4 + #1312 edge, I3 owns `tests/scenarios/auth_setup/catalog.yaml` and
+`tests/scenarios/auth_setup/test_auth_setup_scenarios.py` for AUTH-SETUP-109. The case
+selects a Hub-held Source, proves missing and false acknowledgement return
+`reauth_confirmation_required` before any adapter/provider call, proves true
+acknowledgement starts exactly one Hub flow, and closes only after terminal status and the
+repair read projection agree. `core/handlers/model_hub/oauth.py` remains downstream of
+the I7 gate and requires no ownership transfer. I5 consumes the completed scenario but
+does not edit either I3 file. Existing UI confirmation consumes the same request field;
+this criterion creates no UI-spec or locale change. K4's narrow
+`tests/test_model_hub_config.py` ledger assertion freezes the scenario id, both files,
+journey, lane split, and activation edge before implementation starts.
+
+### AC-53 — Make OAuth materialization-error route impact observable exactly once
+
+**Acceptance.** OAuth status/submit implements all five rows of the authoritative
+`oauth_terminal.*` matrix. A successful terminal re-auth response owns the complete
+`interrupted_pairs` array and may return it empty. A local terminal materialization error
+uses the standard error envelope and never returns `flow`: when acquisition-stage Source
+mutation has already left one or more exact `(backend, model_id, agents)` supply gaps,
+the envelope contains that exact nonempty `interrupted_pairs`; when no persisted
+interruption exists, the member is absent rather than `[]`. The same materialization
+error code may take either branch, so code identity alone cannot decide the payload.
+Ordinary adapter failure/cancellation remains successful `{flow}` state settlement, and
+every non-materialization error omits `interrupted_pairs`. The error member never aliases
+the future-tense guard field `would_interrupt`, and no new field, error code, or contract
+version is introduced.
+
+A positive fixture drives native re-auth materialization failure after acquisition has
+already stranded a sibling and asserts the exact nonempty report, standard error
+envelope, absent `flow`, persisted Source state, and subsequent Source-list refetch. The
+negative table drives the same materialization error with no gap, a materialization
+failure before route impact, and an ordinary non-materialization error; all omit the
+member. A success fixture proves re-auth still sends the complete array and accepts `[]`.
+
+**Binding handoff (owner / files / activation).** After K4, #1312, and K6 merge, I7 owns
+`core/handlers/model_hub/{service,errors}.py`, `vibe/{ui_server,model_hub_client}.py`, and
+`tests/test_model_hub_api.py` for the sole materialization decision, exact error-envelope
+transport, persisted-impact positive fixture, same-error/no-gap negative fixture, and
+ordinary-error negative fixture. After K4 merges, K5 round 2 alone records E6 in
+`docs/plans/model-hub-ui-spec.md`; it edits no contract or implementation file. After
+that K5 round and the I7 payload fixtures freeze, I4's second increment owns
+`ui/src/components/settings/models/{modelsApi.ts,OAuthConnectDialog.tsx,apiFailure.test.ts,oauthResult.test.ts}`
+for exact optional error-member consumption and the Source-list refetch. I5 consumes the
+settled behavior only after I7 and I4 finish; it owns no AC-53 producer. K4's contract
+fixture in `tests/test_model_hub_config.py` freezes the five decision ids, D22 mirror,
+presence/absence totality, and this lane/file/activation handoff.
+
+### AC-54 — Require explicit consent before saving unavailable inventory
+
+**Acceptance.** `SourceCreate.accept_unavailable_inventory` is an optional boolean whose
+omission is `false`. The server repeats response-backed observation for every create and
+uses that new result rather than trusting the preceding unsaved observation. When the new
+result proves a protocol and returns `discovery: failed`, omission or `false` returns the
+existing classified `discovery_failed` without a Source or committed credential, after
+AC-26 cleanup settles; `true` commits exactly one Source with the proved protocol,
+`models: []`, and the existing uncertain health projection. A successful discovery follows
+the ordinary create path regardless of the boolean, including a legitimately empty
+inventory. A result without protocol proof, reachability, or authentication still rejects
+regardless of the boolean. Thus the field authorizes only the state-⑤ inventory-failure
+cell and never supplies protocol or inventory evidence. `contract_version` remains 5.
+
+The K4 contract fixture validates omission, explicit `false`, and explicit `true`; rejects
+non-booleans; and mechanically finds every row of the server-observation × consent table.
+Its negative row requires `discovery_failed`, no Source, no committed credential, and
+AC-26 cleanup. Its positive row requires the proved protocol, empty inventory, and exactly
+one commit. A clean-observation fixture proves a stale `true` is inert rather than turning
+a newly successful repeat observation into a failure.
+
+**Binding handoff (owner / files / activation).** This K4 micro-round freezes
+`docs/plans/model-hub-contracts/{source-create.schema.json,api.md}` and
+`tests/test_model_hub_config.py`. After it merges, K5 round 2 alone updates
+`docs/plans/model-hub-ui-spec.md` state ⑤ to name `accept_unavailable_inventory`; no other
+UI-spec state emits it. After K4, #1312, and K6 merge, I7 owns
+`core/handlers/model_hub/{service,rpc,request,errors}.py`,
+`vibe/{ui_server,model_hub_client}.py`, and `tests/test_model_hub_{config,api}.py` for the
+repeat-observation gate and positive/negative API fixtures. After K5 round 2 merges and I7
+freezes those fixtures, I4's second increment owns
+`ui/src/components/settings/models/{types.ts,modelsApi.ts,AddApiKeyDialog.tsx,dialogFields.test.tsx,asyncLifetime.test.ts}`
+for sending `true` only from state ⑤ and omitting the field from clean creation, retry, and
+pull-origin state ⑤′. I5 consumes the settled behavior after I7 and I4; it owns no AC-54
+producer.
+
+### K4 open contract-gap registry
+
+| Gap | Missing contract truth | Consumer | Activation edge |
+| --- | --- | --- | --- |
+| **G-34 — truncated stream with the same current hop** | §4.5 has no Turn-outcome row for a stream truncated after user-visible model output when the network policy writes no Source state and the same hop remains `current`. The current `streamed_fallback` behavior depends on the persistent cooldown that I7 must remove, so it cannot be treated as the future row. This entry records the absence only; it does not choose an outcome id, copy key, or payload shape. G-33 remains the K5/UI-owned OAuth device-code/helper presentation gap and never names this behavior. | K6 contract authority, then I7 executor/provenance implementation and its exact turn fixture | After K4 and #1312 merge and the §4.5 Turn-outcome matrix segment is unfrozen, the orchestrator dispatches K6 for its single registered-gap round; K6 must merge before I7 starts. **PM rulings: 2026-08-12 00:18 and 02:00.** |
 
 ### Post-consolidation review ledger — sealed 2026-08-08
 
@@ -1999,12 +2603,12 @@ architecture inputs to S-1, not sealed-ledger deferrals.
 | Finding (verbatim) | AC | Implementation landing point | Responsible lane |
 | --- | --- | --- | --- |
 | **Guard the saved Fetch models mutation**<br><br>When a user runs the newly specified “Fetch models” action from saved Source details and upstream discovery removes a referenced model, lines 185–191 say that operation replaces the discovered slice, but this exhaustive guard list covers refresh/recovery and manual deletion without covering saved discovery. Fresh evidence beyond the earlier inventory-shrink thread is that Fetch models is now a separate saved-Source mutation; unless it is explicitly defined as an alias of guarded refresh or given the same exact-hop and supply-gap handling, it can invalidate a Custom hop or the last Follow supplier without refusal, cascade confirmation, or stale-hop retention. | AC-26 | `core/handlers/model_hub/service.py`; final `api.md`; `tests/test_model_hub_api.py`; saved Source-details Fetch-models UI test | I1 (shape/guard) + I4 (action) + I5 (scenario) |
-| **Include the required auth-setup scenarios**<br><br>When K3/K4 change the multi-step OAuth flows—vendor-specific defaults, duplicate-native rejection before adapter work, re-auth acknowledgement, polling, cancellation, and retry—the final landing checklist names only `tests/scenarios/model_hub/**` and the lower-level native OAuth harness. That can leave the repository's auth/setup catalog and its closed-loop user journey on the old flow even while all listed Model Hub tests pass; add or update the mandated `tests/scenarios/auth_setup/catalog.yaml` entry and `test_auth_setup_scenarios.py` case in this handoff.<br><br>AGENTS.md reference: [AGENTS.md:L253-L253](https://github.com/avibe-bot/avibe/blob/7984aabf4e1d9d541084c7078dba093f2832045d/AGENTS.md#L253-L253) | AC-23 + AC-25 | `tests/scenarios/auth_setup/catalog.yaml`; `tests/scenarios/auth_setup/test_auth_setup_scenarios.py` | I1 (final auth envelopes) + I3 (catalog/test) + I5 (integration gate) |
+| **Include the required auth-setup scenarios**<br><br>When contract rounds change the multi-step OAuth flows—vendor-specific defaults, duplicate-native rejection before adapter work, re-auth acknowledgement, polling, cancellation, and retry—the final landing checklist names only `tests/scenarios/model_hub/**` and the lower-level native OAuth harness. That can leave the repository's auth/setup catalog and its closed-loop user journey on the old flow even while all listed Model Hub tests pass; add or update the mandated `tests/scenarios/auth_setup/catalog.yaml` entry and `test_auth_setup_scenarios.py` case in this handoff.<br><br>AGENTS.md reference: [AGENTS.md:L253-L253](https://github.com/avibe-bot/avibe/blob/7984aabf4e1d9d541084c7078dba093f2832045d/AGENTS.md#L253-L253) | AC-23 + AC-25 | `tests/scenarios/auth_setup/catalog.yaml`; `tests/scenarios/auth_setup/test_auth_setup_scenarios.py` | I1 (final auth envelopes) + I3 (catalog/test) + I5 (integration gate) |
 | **Define protocol observation for OAuth-created Sources**<br><br>When a Claude/Codex native login or a Hub-held subscription OAuth flow completes, the resulting Source still requires a `protocol`, but the specified observation workflow covers only the API-key Add form and never defines how OAuth credentials are probed before commit. The current OAuth creation path uses `core/handlers/model_hub/service.py::_default_protocol(binding.vendor)`, which this rule explicitly forbids; removing that default leaves OAuth creation without a contract-valid value, while retaining it violates AC-27. Define response-backed observation and failure/credential-cleanup behavior for OAuth Sources, or make `protocol` conditional where native dispatch does not use it. | AC-23 + AC-27 | final `source.schema.json`, `oauth-flow.schema.json`, `probe-result.schema.json`, and `api.md`; `core/handlers/model_hub/{service,oauth,native_oauth,revocations}.py`; OAuth/API/scenario tests | I1 (final shape/API) + I3 (OAuth observation/cleanup) + I5 (scenario) |
 | **Define discovery collisions with manual model IDs**<br><br>When a user manually adds model id `foo` and a later Fetch models result also contains `foo`, the preceding discovery rule says to preserve the manual entry while these lines require unique ids and say discovery creates a discovered entry. Without collision precedence, an implementation must either emit duplicate ids, fail the refresh, or overwrite the user's manual origin and edited capability metadata. Define a deterministic coalescing rule for manual/discovered collisions and cover it in the discovery fixtures. | AC-26 | final `source.schema.json`, `api.md`, and adapter interface; `core/handlers/model_hub/service.py`; API, adapter, Source-details UI, and scenario fixtures | I1 (shape/consumer) + I4 (result rendering) + I5 (scenario) |
-| **Observe protocols before committing imported Sources**<br><br>When a user applies native-config import, this universal invariant conflicts with the retained import flow in §6: the current scanners derive `protocol` from vendor or local wire configuration (`core/handlers/model_hub/migration.py:180-220`, `285-306`, and `489-520`), and `_source_from_item` persists that value directly at lines 596-605 without obtaining an upstream response. K3 must therefore either preserve import while violating AC-27, or enforce AC-27 and prevent an imported Source from being created whenever the upstream is unavailable; FC-12/FC-13 define neither observation nor its failure/credential-cleanup behavior. Require response-backed observation during import, or explicitly scope and contract an exception.<br><br>AGENTS.md reference: [AGENTS.md:L145-L147](https://github.com/avibe-bot/avibe/blob/0ce001cfd62fdab736492c094914aa32a4991688/AGENTS.md#L145-L147) | AC-23 + AC-27 | final `migration-scan.schema.json`, `probe-result.schema.json`, and `api.md`; `core/handlers/model_hub/{migration,service,revocations}.py`; native-import API and scenario tests | I1 (final shape/API) + I3 (import observation/cleanup) + I5 (scenario) |
+| **Observe protocols before committing imported Sources**<br><br>When a user applies native-config import, this universal invariant conflicts with the retained import flow in §6: the current scanners derive `protocol` from vendor or local wire configuration (`core/handlers/model_hub/migration.py:180-220`, `285-306`, and `489-520`), and `_source_from_item` persists that value directly at lines 596-605 without obtaining an upstream response. I1 must therefore either preserve import while violating AC-27, or enforce AC-27 and prevent an imported Source from being created whenever the upstream is unavailable; FC-12/FC-13 define neither observation nor its failure/credential-cleanup behavior. Require response-backed observation during import, or explicitly scope and contract an exception.<br><br>AGENTS.md reference: [AGENTS.md:L145-L147](https://github.com/avibe-bot/avibe/blob/0ce001cfd62fdab736492c094914aa32a4991688/AGENTS.md#L145-L147) | AC-23 + AC-27 | final `migration-scan.schema.json`, `probe-result.schema.json`, and `api.md`; `core/handlers/model_hub/{migration,service,revocations}.py`; native-import API and scenario tests | I1 (final shape/API) + I3 (import observation/cleanup) + I5 (scenario) |
 | **Assign the actual auth-setup scenario file**<br><br>Fresh evidence after the recorded auth-scenario thread is the repository layout: repo-wide search finds the harness at `tests/scenarios/auth_setup/test_auth_setup_scenarios.py`, while this lane assigns the nonexistent `tests/test_auth_setup_scenarios.py`. Because I5 owns only the Model Hub scenario tree, the real closed-loop OAuth/setup test remains outside every active lane and can stay stale while the listed work completes; correct the path and ownership here and in the landing ledger.<br><br>AGENTS.md reference: [AGENTS.md:L253-L253](https://github.com/avibe-bot/avibe/blob/0309b62d167ede209bd429afc401144c93cc677a/AGENTS.md#L253-L253) | AC-23 + AC-25 | `tests/scenarios/auth_setup/catalog.yaml`; `tests/scenarios/auth_setup/test_auth_setup_scenarios.py` | I3 |
-| **Assign the shared backend launch seam to an active lane**<br><br>When I1 replaces resolver/config shapes and I2 changes exact-hop transport, `modules/agents/model_hub.py` must change as well: it is the shared launch boundary for Claude, Codex, and OpenCode and currently imports and executes the runtime-matching resolver through `resolve_model_hub_turn`, `matching_sources`, and eligibility walks. None of the active I1–I5 scopes or landing rows owns this file; its only assignment is in the explicitly non-binding historical L3 table, so every active lane can complete while backend launches still use the retired routing model. Assign this shared seam and its backend call-site coverage to I1 or I2.<br><br>AGENTS.md reference: [AGENTS.md:L28-L30](https://github.com/avibe-bot/avibe/blob/0309b62d167ede209bd429afc401144c93cc677a/AGENTS.md#L28-L30) | AC-22 | `modules/agents/model_hub.py`; shared Claude/Codex/OpenCode launch call-site tests | I2 |
+| **Assign the shared backend launch seam to an active lane**<br><br>**Closed by PM rulings 2026-08-11 22:37 and 2026-08-12 02:00.** Through #1312, I1 owns `modules/agents/model_hub.py`. After K4, #1312, and K6 merge, I7 exclusively owns that shared classification/state seam plus the narrow Model Hub failure callbacks in Claude, Codex, and OpenCode. Backend callbacks supply raw failure shape and exact `stream_started` phase, whose boundary is the first user-visible model-output byte; I7 removes the native 30-second persistent network cooldown and implements AC-50's live-backoff/event-only totality, consuming K6's G-34 Turn-outcome row for the post-output same-current-hop case. I2 retains only managed-Gateway raw phase facts. Exact cross-backend phase fixtures and mechanical signature consumers are named in the binding table and landing checklist, leaving one active owner and one three-way activation edge.<br><br>AGENTS.md reference: [AGENTS.md:L28-L30](https://github.com/avibe-bot/avibe/blob/0309b62d167ede209bd429afc401144c93cc677a/AGENTS.md#L28-L30) | AC-22 + AC-50 | `modules/agents/model_hub.py`; Model Hub callbacks in `modules/agents/{base,claude_agent}.py`, `modules/agents/codex/{agent,event_handler}.py`, `modules/agents/opencode/{agent,poll_loop}.py`; `tests/{test_claude_agent_sessions,test_codex_agent,test_opencode_server,test_claude_cli_path,test_multi_platform_runtime}.py` | I7 after K4 + #1312 + K6 merge |
 | **Specify the add-time model matching algorithm**<br><br>**Closed by owner ruling 2026-08-09: `matching-v1`.** The Add Source path transcribes the former resolver semantics: Claude native aliases use discovered-only inventory and the deterministic `(version_tuple, date_or_zero, model_id)` maximum; OpenCode uses exact checked identifiers or a unique bare suffix; Codex and non-native sources use literal equality. The stored hop is the concrete upstream id and runtime never repeats matching. | AC-22 | `model-hub.md` §4.2 `matching-v1`, `opencode-overlay.md`, `api.md`, `core/handlers/model_hub/{service,resolver}.py`, and backend fixtures in `tests/test_model_hub_{api,resolution}.py` | I1 |
 | **Assign the controller gate removal to I1**<br><br>Fresh evidence beyond the resolved default-off thread is that this landing row promises an available Models controller but assigns only handler files and `vibe/ui_server.py`; neither the active lane scopes nor the complete checklist includes `core/controller.py` or `tests/test_controller_model_hub_gate.py`. The current controller returns early when `VIBE_MODEL_HUB_ENABLED` is absent, and that test explicitly expects `model_hub_runtime is None`, so I1 can satisfy every named file/test while fresh installations still have no runtime. Add the controller and its gate test to I1's owned transition.<br><br>AGENTS.md reference: [AGENTS.md:L145-L147](https://github.com/avibe-bot/avibe/blob/0309b62d167ede209bd429afc401144c93cc677a/AGENTS.md#L145-L147) | AC-22 + AC-31 | `core/controller.py`; `tests/test_controller_model_hub_gate.py` | I1 |
 

@@ -244,6 +244,16 @@ def delivery_admission_context(delivery: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
+def delivery_has_history_event(delivery: dict[str, Any], *, kind: str) -> bool:
+    """Return whether a Delivery recorded an event of the requested kind."""
+
+    events = _history(delivery.get("delivery_history_json"))["events"]
+    return any(
+        isinstance(event, dict) and str(event.get("kind") or "") == kind
+        for event in events
+    )
+
+
 def active_turn(conn: Connection, session_id: str) -> dict[str, Any] | None:
     return _one(
         conn,
@@ -1847,6 +1857,118 @@ def accepted_agent_run_ids_for_turn(conn: Connection, turn_id: str) -> list[str]
     return run_ids
 
 
+def agent_run_exclusively_owns_turn(
+    conn: Connection,
+    *,
+    run_id: str,
+    turn_id: str,
+) -> tuple[bool, str]:
+    """Whether stopping ``run_id`` may safely interrupt the exact Turn.
+
+    A Run may own either the sole claimed input of a starting Turn or the sole
+    accepted input of an active Turn. Steers, claimed batch siblings, and live
+    replacement control are independent participants. The caller holds SQLite's
+    writer reservation while asking, so no participant can slip between this
+    proof and the P0 control-slot write.
+    """
+
+    normalized_run_id = str(run_id or "").strip()
+    normalized_turn_id = str(turn_id or "").strip()
+    if not normalized_run_id or not normalized_turn_id:
+        return False, "missing_run_turn_identity"
+    turn = get_turn(conn, normalized_turn_id)
+    if turn is None or turn.get("state") not in TURN_OWNER_STATES:
+        return False, "turn_not_active"
+    row = conn.execute(
+        select(
+            agent_runs.c.status,
+            agent_runs.c.delivery_id,
+            message_deliveries.c.session_id,
+            message_deliveries.c.state,
+            message_deliveries.c.turn_id,
+        )
+        .select_from(
+            agent_runs.join(
+                message_deliveries,
+                message_deliveries.c.id == agent_runs.c.delivery_id,
+            )
+        )
+        .where(agent_runs.c.id == normalized_run_id)
+        .limit(1)
+    ).mappings().first()
+    if row is None:
+        return False, "run_delivery_missing"
+    if str(row["session_id"] or "") != str(turn["session_id"] or ""):
+        return False, "run_session_mismatch"
+    expected_delivery_state = "claimed" if turn["state"] == "starting" else "accepted"
+    if (
+        str(row["turn_id"] or "") != normalized_turn_id
+        or row["state"] != expected_delivery_state
+    ):
+        return False, "run_not_owned_by_turn"
+    if str(row["delivery_id"] or "") != str(turn["initial_delivery_id"] or ""):
+        return False, "run_is_steered_participant"
+    if str(row["status"] or "").strip().lower() not in {
+        "running",
+        "processing",
+    }:
+        return False, "run_not_running"
+    if agent_run_ids_for_delivery(conn, {"id": row["delivery_id"]}) != [
+        normalized_run_id
+    ]:
+        return False, "delivery_has_other_runs"
+    if turn.get("control_mode") == "replace" and turn.get("control_state") in {
+        "pending",
+        "interrupting",
+        "waiting_terminal",
+        "reconciling",
+    }:
+        successor_turn_id = str(turn.get("control_successor_turn_id") or "")
+        successor_delivery_id = str(
+            turn.get("control_successor_delivery_id") or ""
+        )
+        successor = get_turn(conn, successor_turn_id)
+        successor_delivery = get_delivery(conn, successor_delivery_id)
+        if (
+            successor is not None
+            and successor["state"] == "waiting"
+            and successor["session_id"] == turn["session_id"]
+            and successor["initial_delivery_id"] == successor_delivery_id
+            and successor_delivery is not None
+            and successor_delivery["state"] == "interrupt_waiting"
+            and successor_delivery["session_id"] == turn["session_id"]
+            and successor_delivery["turn_id"] == successor_turn_id
+            and successor_delivery["turn_role"] == "initial"
+        ):
+            return False, "turn_has_replacement_successor"
+        return False, "turn_replacement_unresolved"
+    participant_delivery_ids = [
+        str(value)
+        for value in conn.execute(
+            select(message_deliveries.c.id)
+            .where(
+                or_(
+                    and_(
+                        message_deliveries.c.turn_id == normalized_turn_id,
+                        message_deliveries.c.state.in_(("claimed", "accepted")),
+                    ),
+                    and_(
+                        message_deliveries.c.current_target_turn_id
+                        == normalized_turn_id,
+                        message_deliveries.c.state.in_(
+                            ("pending_steer", "steering", "reconciling_steer")
+                        ),
+                    ),
+                )
+            )
+            .order_by(message_deliveries.c.turn_position, message_deliveries.c.id)
+        ).scalars()
+    ]
+    if participant_delivery_ids != [str(row["delivery_id"])]:
+        return False, "turn_has_other_participants"
+    return True, "exclusive_run_owner"
+
+
 def retire_queued_with_run(
     conn: Connection,
     session_id: str,
@@ -1996,12 +2118,88 @@ def retire_for_run_cancellation(
 ) -> bool:
     """Retire an exact Run input only when its state proves no native side effect."""
 
-    return retire_not_written(
+    if retire_not_written(
         conn,
         session_id,
         delivery_id,
         reason="agent_run_canceled_before_native_write",
+    ):
+        return True
+    delivery = get_delivery(conn, delivery_id)
+    if (
+        delivery is None
+        or delivery["session_id"] != session_id
+        or delivery["state"] != "interrupt_waiting"
+    ):
+        return False
+    successor_turn_id = str(delivery.get("turn_id") or "")
+    successor = get_turn(conn, successor_turn_id)
+    if (
+        successor is None
+        or successor["session_id"] != session_id
+        or successor["state"] != "terminal"
+        or successor["initial_delivery_id"] != delivery_id
+        or successor["terminal_outcome"] != "not_written"
+        or successor["settled_by"] != "agent_run_canceled"
+        or successor["terminal_evidence_kind"] != "replacement_run_canceled"
+    ):
+        return False
+    predecessor = _one(
+        conn,
+        select(session_turns)
+        .where(session_turns.c.session_id == session_id)
+        .where(session_turns.c.control_successor_delivery_id == delivery_id)
+        .where(session_turns.c.control_successor_turn_id == successor_turn_id)
+        .order_by(session_turns.c.created_at.desc(), session_turns.c.id.desc())
+        .limit(1),
     )
+    retired = cas_delivery(
+        conn,
+        delivery_id,
+        expected_version=int(delivery["version"]),
+        expected_states=("interrupt_waiting",),
+        values={
+            "state": "retired",
+            "retired_at": utc_now_iso(),
+            "turn_id": None,
+            "turn_role": None,
+            "turn_position": None,
+        },
+        history_event={
+            "kind": "retire",
+            "reason": "replacement_agent_run_canceled",
+        },
+    )
+    if retired is None:
+        raise RuntimeError("replacement Run cancellation lost its waiting successor")
+    if predecessor is not None:
+        predecessor_values: dict[str, Any] = {
+            "control_successor_delivery_id": None,
+            "control_successor_turn_id": None,
+        }
+        if predecessor["state"] == "terminal":
+            predecessor_values["control_mode"] = None
+        elif predecessor.get("control_state") == "pending":
+            predecessor_values.update(
+                control_state=None,
+                control_mode=None,
+                control_attempt_id=None,
+                control_expected_native_turn_id=None,
+                control_receipt_outcome=None,
+                control_receipt_json="{}",
+            )
+        else:
+            predecessor_values["control_mode"] = "stop_only"
+        unlinked = cas_turn(
+            conn,
+            str(predecessor["id"]),
+            expected_version=int(predecessor["version"]),
+            expected_states=(str(predecessor["state"]),),
+            values=predecessor_values,
+        )
+        if unlinked is None:
+            raise RuntimeError("replacement Run cancellation lost predecessor unlink")
+    return True
 
 
 def retire_for_archive(conn: Connection, session_id: str) -> dict[str, Any]:
@@ -2048,29 +2246,39 @@ def retire_for_archive(conn: Connection, session_id: str) -> dict[str, Any]:
 
 
 def set_draft(conn: Connection, session_id: str, text: str | None) -> bool:
-    now = utc_now_iso()
+    # A clear is a real draft revision too: retaining its timestamp prevents an
+    # offline client based on the previous revision from recreating text that a
+    # successful send already cleared. Microseconds keep rapid edits distinct.
+    now = turn_now_iso()
     result = conn.execute(
         update(agent_sessions)
         .where(agent_sessions.c.id == session_id)
         .values(
             composer_draft_text=text if text and text.strip() else None,
-            composer_draft_updated_at=now if text and text.strip() else None,
+            composer_draft_updated_at=now,
             updated_at=now,
         )
     )
     return result.rowcount == 1
 
 
-def get_draft(conn: Connection, session_id: str) -> dict[str, Any] | None:
+def get_draft_state(conn: Connection, session_id: str) -> dict[str, Any] | None:
     row = conn.execute(
         select(
             agent_sessions.c.composer_draft_text,
             agent_sessions.c.composer_draft_updated_at,
         ).where(agent_sessions.c.id == session_id)
     ).first()
-    if row is None or not row[0]:
+    if row is None:
         return None
-    return {"text": str(row[0]), "updated_at": row[1]}
+    return {"text": str(row[0] or ""), "updated_at": row[1]}
+
+
+def get_draft(conn: Connection, session_id: str) -> dict[str, Any] | None:
+    state = get_draft_state(conn, session_id)
+    if state is None or not state["text"]:
+        return None
+    return state
 
 
 def pending_control_for_turn(conn: Connection, turn_id: str) -> dict[str, Any] | None:

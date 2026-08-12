@@ -1,6 +1,6 @@
 // Model Hub API client. Presents ONE typed surface to the UI; internally it
-// either serves in-memory fixtures (mock mode, default while L2 is unmerged) or
-// calls the frozen `/api/models/*` REST endpoints (live mode). Components never
+// either serves in-memory fixtures for hermetic visual tests or calls the frozen
+// `/api/models/*` REST endpoints (live mode). Components never
 // branch on the mode — flip `MODELS_API_MODE` in featureFlags.ts to switch.
 //
 // Methods unwrap the frozen envelope ({ok:true, …} | {ok:false, error}) and
@@ -18,20 +18,20 @@ import {
   mockEligibility,
   mockRecommendedOrder,
 } from './mockData';
-import { buildIdentifier } from './menus/identifiers';
 import { canReauth, canReplaceKey, wasBlocked } from './repair';
 import { isUnhealthy } from './supply';
 import type {
   AdoptedBy,
+  AddedTo,
   AgentBackend,
   AgentChain,
   AgentChainLink,
-  AgentMapping,
   AgentMenu,
   AgentMode,
   AgentSourcesPut,
   AgentSupply,
   ApiKeySourceCreate,
+  ApiKeySourceObservation,
   CredentialReplace,
   CustomModelCreate,
   MigrationApplyResult,
@@ -39,37 +39,27 @@ import type {
   OAuthFlow,
   ProbeResult,
   ResolutionEvent,
+  RouteHopRef,
   RuntimeDependency,
-  SkippedBy,
   Source,
+  SourceObservation,
   SourcePatch,
   SourceRepaired,
   SupplyChannel,
   SupplyGap,
 } from './types';
-import { AGENT_CHAIN_CONTRACT_VERSION, PROBE_RESULT_CONTRACT_VERSION } from './types';
+import { equalHopIdentity } from './hopIdentity';
+import { AGENT_CHAIN_CONTRACT_VERSION, CONTRACT_VERSION, PROBE_RESULT_CONTRACT_VERSION } from './types';
 
-/**
- * The terminal result of BOTH creation paths (api.md 「The terminal result of both
- * ordinary API-key creation and OAuth creation is」).
- *
- * `adopted_by` travels with the source rather than being re-read from
- * `/agents` afterwards, and that is the whole point: it is a snapshot frozen at
- * commit time, listing only the eligible `follow` backends that took the source
- * in and at which one-based position. A `custom` backend is absent — not because
- * nothing happened to it, but because nothing did, which is exactly the case the
- * user has to be told about while the dialog is still open.
- *
- * `skipped_by` is the server naming that case: the backends that COULD have used
- * this source and were left out because they keep a `custom` order. It is carried
- * beside `adopted_by` rather than derived from it, because 「absent」 covers both
- * that and 「never eligible」, and only the server can tell the two apart. Kept
- * nullable through this reader: an absent array is a server that did not answer
- * the question, which is not the same as one answering 「nobody」.
- */
-export type Adoption = { adopted_by: AdoptedBy[]; skipped_by: SkippedBy[] | null };
+/** Add-time Route placement returned by both source-creation paths. */
+export type Adoption = { added_to: AddedTo[]; adopted_by: AdoptedBy[] };
 export type SourceCreated = { source: Source } & Adoption;
 export type SourceRefresh = { source: Source; discovered: number };
+export type GuardConfirmation = {
+  force: true;
+  would_remove_hops: RouteHopRef[];
+  would_interrupt: SupplyGap[];
+};
 
 /**
  * The response of BOTH oauth status and submit (api.md → OAuth completion): the
@@ -98,6 +88,8 @@ export type OAuthResult = {
 
 export type ModelsApi = {
   listSources(): Promise<Source[]>;
+  /** Unsaved observation; its transient credential is revoked before settling. */
+  observeApiKeySource(draft: ApiKeySourceObservation, signal?: AbortSignal): Promise<SourceObservation>;
   createApiKeySource(draft: ApiKeySourceCreate): Promise<SourceCreated>;
   /** Rename / re-point a source (display_name, base_url). */
   patchSource(id: string, patch: SourcePatch): Promise<Source>;
@@ -105,7 +97,7 @@ export type ModelsApi = {
    *  Contractually ALSO the recovery test: run on a needs_action / error source
    *  it clears the blocker and returns the source to standby. v3 adds no second
    *  「recover」 endpoint, so this is the whole retry affordance. */
-  refreshSource(id: string): Promise<SourceRefresh>;
+  refreshSource(id: string, confirmation?: GuardConfirmation): Promise<SourceRefresh>;
   /** Delete a source. `force` overrides the only-supplier guard. */
   deleteSource(id: string, force?: boolean): Promise<void>;
   /** Replace the credential of a hub-channel api_key source. Refuses with
@@ -119,30 +111,28 @@ export type ModelsApi = {
    *  status/submit response as `OAuthResult.repaired`. */
   reauthSource(id: string): Promise<OAuthFlow>;
   listAgents(): Promise<AgentSupply[]>;
-  /** Per-backend enabled subset + order + policy (the 来源顺序 drawer's read). */
+  /** Per-backend enabled subset + order (the 来源顺序 drawer's read). */
   getAgentSources(backend: AgentBackend): Promise<AgentSupply>;
-  /** Total write: `follow` hands the order back to the server, `custom` freezes
-   *  exactly the ids sent. The response re-echoes the canonical order. */
+  /** Total write of the exact stored source order. */
   putAgentSources(backend: AgentBackend, body: AgentSourcesPut): Promise<AgentSupply>;
   /** Resolution chain for one model. Hub mode only — direct answers `direct_mode`. */
   getAgentChain(backend: AgentBackend, model: string): Promise<AgentChain>;
   /** One real request through the chain. Hub mode only, same reason. */
   probeAgent(backend: AgentBackend, model?: string): Promise<ProbeResult>;
   setAgentMode(backend: AgentBackend, mode: AgentMode): Promise<AgentSupply>;
-  putMappings(backend: AgentBackend, mappings: AgentMapping[]): Promise<AgentSupply>;
   putMenu(menu: AgentMenu): Promise<AgentSupply>;
   addCustomModel(sourceId: string, draft: CustomModelCreate): Promise<Source>;
   updateModelReasoningEfforts(sourceId: string, modelId: string, reasoningEfforts: string[]): Promise<Source>;
-  deleteCustomModel(sourceId: string, modelId: string): Promise<Source>;
+  deleteCustomModel(sourceId: string, modelId: string, confirmation?: GuardConfirmation): Promise<Source>;
   scanMigration(): Promise<MigrationScan>;
   applyMigration(itemIds: string[]): Promise<MigrationApplyResult>;
   /** `before` is an event id cursor (「查看全部」 pagination). */
   listEvents(limit?: number, before?: string): Promise<ResolutionEvent[]>;
   getRuntimeStatus(): Promise<RuntimeDependency>;
+  /** Start the contract-owned client installation transaction. */
+  installRuntime(): Promise<RuntimeDependency>;
   startRuntime(): Promise<RuntimeDependency>;
-  /** `experimentalConsent` MUST be true for a consent-gated hub-held
-   *  subscription connect, or the server returns consent_required. */
-  startOAuth(vendor: string, channel: SupplyChannel, experimentalConsent?: boolean): Promise<OAuthFlow>;
+  startOAuth(vendor: string, channel: SupplyChannel): Promise<OAuthFlow>;
   getOAuthStatus(flowId: string): Promise<OAuthResult>;
   submitOAuth(flowId: string, value: string): Promise<OAuthResult>;
   cancelOAuth(flowId: string): Promise<void>;
@@ -165,6 +155,7 @@ class ApiCallError extends Error {
    * first proving which error it has.
    */
   wouldInterrupt: SupplyGap[];
+  wouldRemoveHops: RouteHopRef[];
   /**
    * The OTHER half, and deliberately not the same field: `would_interrupt` names
    * what a REFUSED write would have stranded (nothing changed, the copy is future
@@ -192,12 +183,16 @@ class ApiCallError extends Error {
    * it says so at both sites.
    */
   serverNamed: boolean;
+  /** HTTP status observed by this client. Absent when no response arrived. */
+  responseStatus?: number;
   constructor(
     code: string,
     detail?: string,
     serverNamed = true,
     wouldInterrupt: SupplyGap[] = [],
     interrupted: SupplyGap[] = [],
+    wouldRemoveHops: RouteHopRef[] = [],
+    responseStatus?: number,
   ) {
     super(detail || code);
     this.name = 'ApiCallError';
@@ -206,6 +201,8 @@ class ApiCallError extends Error {
     this.serverNamed = serverNamed;
     this.wouldInterrupt = wouldInterrupt;
     this.interrupted = interrupted;
+    this.wouldRemoveHops = wouldRemoveHops;
+    this.responseStatus = responseStatus;
   }
 }
 
@@ -221,6 +218,11 @@ const supplyGaps = (raw: unknown): SupplyGap[] =>
           model_id: String(g.model_id ?? ''),
           agents: Array.isArray(g.agents) ? g.agents.map(String) : [],
         }))
+    : [];
+
+const routeHopRefs = (raw: unknown): RouteHopRef[] =>
+  Array.isArray(raw)
+    ? raw.filter((hop): hop is RouteHopRef => Boolean(hop) && typeof hop === 'object')
     : [];
 
 /**
@@ -240,6 +242,8 @@ export const apiFailure = (
   serverNamed: boolean;
   wouldInterrupt: SupplyGap[];
   interrupted: SupplyGap[];
+  wouldRemoveHops: RouteHopRef[];
+  responseStatus?: number;
 } | null =>
   err instanceof ApiCallError
     ? {
@@ -248,29 +252,35 @@ export const apiFailure = (
         serverNamed: err.serverNamed,
         wouldInterrupt: err.wouldInterrupt,
         interrupted: err.interrupted,
+        wouldRemoveHops: err.wouldRemoveHops,
+        responseStatus: err.responseStatus,
       }
     : null;
 
 async function call<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await apiFetch(path, init);
-  let payload: any = null;
+  let payload: unknown = null;
   try {
     payload = await res.json();
   } catch {
     // Invented here, not read off the wire: the request may well have been
     // carried out and its answer lost coming back.
-    throw new ApiCallError('bad_response', `Non-JSON response from ${path}`, false);
+    throw new ApiCallError('bad_response', `Non-JSON response from ${path}`, false, [], [], [], res.status);
   }
-  if (!res.ok || payload?.ok === false) {
+  const envelope = payload && typeof payload === 'object' ? payload as Record<string, unknown> : {};
+  if (!res.ok || envelope.ok === false) {
+    const error = typeof envelope.error === 'string' ? envelope.error : null;
     throw new ApiCallError(
-      payload?.error || `http_${res.status}`,
-      payload?.detail,
+      error ?? `http_${res.status}`,
+      typeof envelope.detail === 'string' ? envelope.detail : undefined,
       // `payload.error` is the only thing that carries a route's own verdict, so
       // its presence IS the answer. `http_502` is this client summarizing a
       // response that never gave one.
-      Boolean(payload?.error),
-      supplyGaps(payload?.would_interrupt),
-      supplyGaps(payload?.interrupted_pairs),
+      error !== null,
+      supplyGaps(envelope.would_interrupt),
+      supplyGaps(envelope.interrupted_pairs),
+      routeHopRefs(envelope.would_remove_hops),
+      res.status,
     );
   }
   return payload as T;
@@ -282,27 +292,14 @@ const jsonInit = (method: string, body?: unknown): RequestInit => ({
   body: body === undefined ? undefined : JSON.stringify(body),
 });
 
-/**
- * The adoption tail, defaulted. Both creation routes answer with it — the plain
- * one and the oauth envelope — and the two defaults below are DIFFERENT rules, so
- * they get one reader rather than two copies that would eventually agree.
- *
- * `adopted_by` is a list of things that happened: absent can only mean none did.
- * (Absent-is-not-empty holds in the contract for reauth, which never reaches here.)
- *
- * `skipped_by` is the answer to 「who was left out」, and `[]` there is a positive
- * claim that nobody was. A server that never sent the field has not made that
- * claim, so silence stays null — defaulting it to `[]` would upgrade 「did not
- * say」 into 「fully covered」, which is the one thing the adoption note exists to
- * avoid.
- */
-type AdoptionTail = { adopted_by?: AdoptedBy[]; skipped_by?: SkippedBy[] };
+/** The creation response's add-time placement projection. */
+type AdoptionTail = { added_to?: AddedTo[]; adopted_by?: AdoptedBy[] };
 const adoption = (r: AdoptionTail): Adoption => ({
+  added_to: r.added_to ?? [],
   adopted_by: r.adopted_by ?? [],
-  skipped_by: r.skipped_by ?? null,
 });
 
-/** api.md pins the shape to `{source, adopted_by, skipped_by}` with no extra
+/** api.md pins the shape to `{source, added_to, adopted_by}` with no extra
  *  nesting; the bare-`Source` arm is the same tolerance every other write here
  *  keeps. */
 type SourceCreatedResponse = { source?: Source } & AdoptionTail & Source;
@@ -360,12 +357,17 @@ export const oauthResult = (r: OAuthResultResponse): OAuthResult => {
 
 const liveApi: ModelsApi = {
   listSources: () => call<{ sources: Source[] }>('/api/models/sources').then((r) => r.sources),
+  observeApiKeySource: (draft, signal) =>
+    call<{ observation: SourceObservation }>('/api/models/sources/observe', {
+      ...jsonInit('POST', draft),
+      signal,
+    }).then((r) => r.observation),
   // Both keep `adopted_by`. The old unwrap-to-`source` dropped it on the floor,
   // and no later read can put it back: `/agents` shows today's orders, not which
   // of them this commit changed.
   createApiKeySource: (draft) => call<SourceCreatedResponse>('/api/models/sources', jsonInit('POST', draft)).then(created),
   patchSource: (id, patch) => call<{ source?: Source } & Source>(`/api/models/sources/${encodeURIComponent(id)}`, jsonInit('PATCH', patch)).then((r) => (r.source ?? r) as Source),
-  refreshSource: (id) => call<SourceRefresh>(`/api/models/sources/${encodeURIComponent(id)}/refresh`, jsonInit('POST')),
+  refreshSource: (id, confirmation) => call<SourceRefresh>(`/api/models/sources/${encodeURIComponent(id)}/refresh`, jsonInit('POST', confirmation ?? {})),
   deleteSource: (id, force) => call(`/api/models/sources/${encodeURIComponent(id)}${force ? '?force=true' : ''}`, jsonInit('DELETE')).then(() => undefined),
   // Both repair routes reject unknown body keys outright (`discovery_failed` /
   // `reauth_confirmation_required`), so these bodies are exactly the contract's
@@ -384,11 +386,10 @@ const liveApi: ModelsApi = {
   getAgentChain: (backend, model) => call<{ chain: AgentChain }>(`/api/models/agents/${backend}/chain?model=${encodeURIComponent(model)}`).then((r) => r.chain),
   probeAgent: (backend, model) => call<{ probe: ProbeResult }>(`/api/models/agents/${backend}/probe`, jsonInit('POST', model ? { model } : {})).then((r) => r.probe),
   setAgentMode: (backend, mode) => call<{ agent?: AgentSupply } & AgentSupply>(`/api/models/agents/${backend}/mode`, jsonInit('PATCH', { mode })).then((r) => (r.agent ?? r) as AgentSupply),
-  putMappings: (backend, mappings) => call<{ agent?: AgentSupply } & AgentSupply>(`/api/models/agents/${backend}/mappings`, jsonInit('PUT', { mappings })).then((r) => (r.agent ?? r) as AgentSupply),
   putMenu: (menu) => call<{ agent?: AgentSupply } & AgentSupply>('/api/models/agents/opencode/menu', jsonInit('PUT', { menu })).then((r) => (r.agent ?? r) as AgentSupply),
   addCustomModel: (sourceId, draft) => call<{ source?: Source } & Source>(`/api/models/sources/${encodeURIComponent(sourceId)}/models`, jsonInit('POST', draft)).then((r) => (r.source ?? r) as Source),
   updateModelReasoningEfforts: (sourceId, modelId, reasoningEfforts) => call<{ source?: Source } & Source>(`/api/models/sources/${encodeURIComponent(sourceId)}/models/${encodeURIComponent(modelId)}`, jsonInit('PATCH', { reasoning_efforts: reasoningEfforts })).then((r) => (r.source ?? r) as Source),
-  deleteCustomModel: (sourceId, modelId) => call<{ source?: Source } & Source>(`/api/models/sources/${encodeURIComponent(sourceId)}/models/${encodeURIComponent(modelId)}`, jsonInit('DELETE', {})).then((r) => (r.source ?? r) as Source),
+  deleteCustomModel: (sourceId, modelId, confirmation) => call<{ source?: Source } & Source>(`/api/models/sources/${encodeURIComponent(sourceId)}/models/${encodeURIComponent(modelId)}`, jsonInit('DELETE', confirmation ?? {})).then((r) => (r.source ?? r) as Source),
   scanMigration: () => call<{ scan?: MigrationScan } & MigrationScan>('/api/models/migration/scan', jsonInit('POST')).then((r) => (r.scan ?? r) as MigrationScan),
   applyMigration: (itemIds) => call<MigrationApplyResult>('/api/models/migration/apply', jsonInit('POST', { item_ids: itemIds })),
   listEvents: (limit = 20, before) =>
@@ -396,11 +397,12 @@ const liveApi: ModelsApi = {
       `/api/models/events?limit=${limit}${before ? `&before=${encodeURIComponent(before)}` : ''}`,
     ).then((r) => r.events),
   getRuntimeStatus: () => call<{ runtime?: RuntimeDependency } & RuntimeDependency>('/api/models/runtime/status').then((r) => (r.runtime ?? r) as RuntimeDependency),
+  installRuntime: () => call<{ runtime?: RuntimeDependency } & RuntimeDependency>('/api/models/runtime/install', jsonInit('POST')).then((r) => (r.runtime ?? r) as RuntimeDependency),
   startRuntime: () => call<{ runtime?: RuntimeDependency } & RuntimeDependency>('/api/models/runtime/start', jsonInit('POST')).then((r) => (r.runtime ?? r) as RuntimeDependency),
-  startOAuth: (vendor, channel, experimentalConsent) =>
+  startOAuth: (vendor, channel) =>
     call<{ flow?: OAuthFlow } & OAuthFlow>(
       '/api/models/oauth/start',
-      jsonInit('POST', { vendor, channel, ...(experimentalConsent ? { experimental_consent: true } : {}) }),
+      jsonInit('POST', { vendor, channel }),
     ).then((r) => (r.flow ?? r) as OAuthFlow),
   getOAuthStatus: (flowId) => call<OAuthResultResponse>(`/api/models/oauth/status/${encodeURIComponent(flowId)}`).then(oauthResult),
   submitOAuth: (flowId, value) => call<OAuthResultResponse>('/api/models/oauth/submit', jsonInit('POST', { flow_id: flowId, value })).then(oauthResult),
@@ -413,10 +415,31 @@ const liveApi: ModelsApi = {
 /** `recovered` is captured when a reauth flow STARTS, like the server's own
  *  `recovered = source.state.status in {needs_action, error}` — read before the
  *  native irreversible step rewrites that very status. */
-type MockFlow = { flow: OAuthFlow; polls: number; submitted: boolean; recovered?: boolean };
+type MockFlow = {
+  flow: OAuthFlow;
+  polls: number;
+  submitted: boolean;
+  recovered?: boolean;
+  placement?: Adoption;
+};
 
 const rid = (prefix: string) => `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
-const delay = <T>(value: T, ms = 260): Promise<T> => new Promise((r) => setTimeout(() => r(value), ms));
+const delay = <T>(value: T, ms = 260, signal?: AbortSignal): Promise<T> =>
+  new Promise((resolve, reject) => {
+    const timer = globalThis.setTimeout(() => resolve(value), ms);
+    signal?.addEventListener('abort', () => {
+      globalThis.clearTimeout(timer);
+      reject(new DOMException('The operation was aborted.', 'AbortError'));
+    }, { once: true });
+  });
+const listedModelIdsForPlacement = (agent: AgentSupply): string[] => {
+  const values = [
+    ...(agent.builtin_models ?? []),
+    ...(agent.menu?.checked ?? []),
+    ...Object.keys(agent.routes ?? {}),
+  ];
+  return [...new Set(values)];
+};
 
 class MockStore {
   sources = buildMockSources();
@@ -426,31 +449,23 @@ class MockStore {
   flows = new Map<string, MockFlow>();
 
   // ── Fake server-side recomputation ───────────────────────────────────
-  // Every read of an agent re-derives what the real server derives: the
-  // per-backend order (recommended under `follow`, pruned under `custom`),
-  // eligibility, and the supply rollup. That is what makes a drag-reorder or a
-  // source deletion update supply status in the demo instead of leaving it stale.
+  // Reads refresh server-authoritative eligibility while preserving the stored
+  // order. Matching and Route construction happen only at add time.
   private syncAgents() {
     for (const a of this.agents) {
       if (a.mode === 'direct') {
         a.sources = null;
       } else {
-        const policy = a.sources?.policy ?? 'follow';
         const eligibility = mockEligibility(this.sources, a.backend);
         const eligible = new Set(eligibility.filter((e) => e.eligible).map((e) => e.source_id));
-        const order =
-          policy === 'follow'
-            ? mockRecommendedOrder(this.sources, a.backend)
-            : // A `custom` subset is frozen, never extended — but a deleted or
-              // newly ineligible id drops out (the invariant the server enforces).
-              (a.sources?.order ?? []).filter((id) => eligible.has(id));
-        a.sources = { policy, order, eligibility };
+        const order = (a.sources?.order ?? []).filter((id) => eligible.has(id));
+        a.sources = { order, eligibility };
       }
       this.deriveSupply(a);
     }
   }
 
-  /** §4.3 + §4.5 in miniature: capability (supplies the mapped id) split from
+  /** §4.3 + §4.5 in miniature: capability (supplies the configured id) split from
    *  runnability (not blocked), then the rollup over the resulting chain. */
   private deriveSupply(a: AgentSupply) {
     if (a.mode === 'direct') {
@@ -463,14 +478,16 @@ class MockStore {
       return;
     }
     const byId = new Map(this.sources.map((s) => [s.id, s]));
-    const order = (a.sources?.order ?? []).map((id) => byId.get(id)).filter((s): s is Source => Boolean(s));
-    const target = (model: string) => {
-      const m = a.mappings?.find((x) => x.builtin_id === model && x.enabled && x.target_model_id);
-      return m ? m.target_model_id : model;
-    };
-    const chainFor = (model: string) => order.filter((s) => s.models.some((mm) => mm.id === target(model)));
+    const routeFor = (model: string) => a.routes?.[model]?.hops ?? [];
+    const chainFor = (model: string) => routeFor(model)
+      .map((hop) => byId.get(hop.source_id))
+      .filter((s): s is Source => Boolean(s));
     if (a.builtin_models) {
-      a.model_supply = a.builtin_models.map((m) => ({ model_id: m, chain_length: chainFor(m).length }));
+      a.model_supply = a.builtin_models.map((m) => ({
+        model_id: m,
+        chain_length: routeFor(m).length,
+        has_runnable_hop: chainFor(m).some(isRunnable),
+      }));
     }
     const selected = a.selected_model_id ?? null;
     if (!selected) {
@@ -497,62 +514,61 @@ class MockStore {
     return delay(structuredClone(this.sources));
   }
 
-  /**
-   * The `adopted_by` projection, derived the same way the server derives it:
-   * re-run the recommendation, then report where the new id actually landed.
-   *
-   * It is deliberately NOT a guess from the source's vendor — a `follow` backend
-   * adopts only what its eligibility admits, so the answer for one credential can
-   * be 「claude 第 2 位」 and nothing at all for opencode. Anything on `custom` is
-   * omitted by the contract; that omission is the signal the dialogs read.
-   */
-  private adoptionOf(sourceId: string): AdoptedBy[] {
+  /** Materialize placement once, in the same transaction that creates a Source. */
+  private placeNewSource(source: Source): Adoption {
+    const added_to: AddedTo[] = [];
+    const adopted_by: AdoptedBy[] = [];
+    for (const agent of this.agents) {
+      if (agent.mode !== 'hub') continue;
+      const eligible = mockEligibility(this.sources, agent.backend).some(
+        (entry) => entry.source_id === source.id && entry.eligible,
+      );
+      if (!eligible) continue;
+      const order = agent.sources?.order ?? [];
+      if (!order.includes(source.id)) order.push(source.id);
+      agent.sources = { order, eligibility: agent.sources?.eligibility ?? null };
+      for (const menuModel of listedModelIdsForPlacement(agent)) {
+        const supplied = source.models.find((model) => model.id === menuModel);
+        if (!supplied) continue;
+        const hops = agent.routes?.[menuModel]?.hops ?? [];
+        if (hops.some((hop) => hop.source_id === source.id)) continue;
+        const next = [...hops, { source_id: source.id, model_id: supplied.id }];
+        agent.routes = { ...(agent.routes ?? {}), [menuModel]: { hops: next } };
+        added_to.push({
+          backend: agent.backend,
+          menu_model: menuModel,
+          source_id: source.id,
+          model_id: supplied.id,
+          position: next.length,
+        });
+        adopted_by.push({ backend: agent.backend, menu_model: menuModel });
+      }
+    }
     this.syncAgents();
-    return this.agents
-      .filter((a) => a.mode === 'hub' && a.sources?.policy === 'follow')
-      .map((a) => ({ backend: a.backend, order: a.sources?.order ?? [] }))
-      .filter(({ order }) => order.includes(sourceId))
-      .map(({ backend, order }) => ({
-        backend,
-        policy: 'follow' as const,
-        position: order.indexOf(sourceId) + 1, // one-based, per api.md
-      }));
-  }
-
-  /**
-   * The complement, derived the way `_skipped_by` derives it: ELIGIBLE for this
-   * backend, on a `custom` order, and not in it. The eligibility filter is what
-   * makes the two lists different from `MODEL_HUB_BACKENDS` minus `adopted_by` —
-   * a backend that could never use the credential belongs to neither.
-   */
-  private skippedOf(sourceId: string): SkippedBy[] {
-    this.syncAgents();
-    return this.agents
-      .filter(
-        (a) =>
-          a.mode === 'hub' &&
-          a.sources?.policy === 'custom' &&
-          !a.sources.order.includes(sourceId) &&
-          (a.sources.eligibility ?? []).some((e) => e.source_id === sourceId && e.eligible),
-      )
-      .map((a) => ({ backend: a.backend, reason: 'custom_order' as const }));
-  }
-
-  /** Both creation routes answer with the same pair. */
-  private adoptionTail(sourceId: string) {
-    return { adopted_by: this.adoptionOf(sourceId), skipped_by: this.skippedOf(sourceId) };
+    return { added_to, adopted_by };
   }
 
   createApiKeySource(draft: ApiKeySourceCreate) {
+    const existing = draft.client_nonce
+      ? this.sources.find((source) => source.client_nonce === draft.client_nonce)
+      : undefined;
+    if (existing) {
+      return delay({
+        source: structuredClone(existing),
+        added_to: [],
+        adopted_by: structuredClone(existing.adopted_by ?? []),
+      });
+    }
     const count = mockDiscoveredCount(draft.vendor);
     const source: Source = {
       id: rid('src'),
+      client_nonce: draft.client_nonce ?? null,
       created_at: new Date().toISOString(),
       last_discovered_at: new Date().toISOString(),
       kind: 'api_key',
       vendor: draft.vendor,
-      display_name: draft.vendor === 'custom' ? hostLabel(draft.base_url) : vendorLabel(draft.vendor),
-      protocol: draft.vendor === 'anthropic' ? 'anthropic' : 'openai_chat',
+      display_name: draft.display_name || (draft.vendor === 'custom' ? hostLabel(draft.base_url) : vendorLabel(draft.vendor)),
+      protocol: draft.protocol_order?.[0] ?? (draft.vendor === 'anthropic' ? 'anthropic' : 'openai_chat'),
       base_url: draft.base_url ?? null,
       supply_channel: 'hub',
       billing: 'metered',
@@ -564,14 +580,50 @@ class MockStore {
       models: Array.from({ length: count }, (_, i) => ({
         id: `${draft.vendor}-model-${i + 1}`,
         display_name: null,
-        provenance: 'discovered' as const,
+        origin: 'discovered' as const,
+        reasoning_efforts: [],
         discovered_at: new Date().toISOString(),
       })),
       credential_ref: rid('cred'),
     };
     this.sources.push(source);
+    const placement = this.placeNewSource(source);
+    source.adopted_by = placement.adopted_by;
     // simulate probe latency
-    return delay({ source: structuredClone(source), ...this.adoptionTail(source.id) }, 900);
+    return delay({ source: structuredClone(source), ...placement }, 900);
+  }
+
+  observeApiKeySource(draft: ApiKeySourceObservation, signal?: AbortSignal) {
+    const marker = `${draft.base_url ?? ''} ${draft.key}`.toLowerCase();
+    const base = {
+      contract_version: CONTRACT_VERSION,
+      models: [] as string[],
+    };
+    let observation: SourceObservation;
+    if (marker.includes('timeout')) {
+      observation = { ...base, outcome: 'timeout', reachable: null, authenticated: 'unknown', protocol: null, discovery: 'not_attempted' };
+    } else if (marker.includes('auth')) {
+      observation = { ...base, outcome: 'authentication_failed', reachable: true, authenticated: 'rejected', protocol: null, discovery: 'not_attempted' };
+    } else if (marker.includes('ambiguous')) {
+      observation = { ...base, outcome: 'ambiguous', reachable: true, authenticated: 'authenticated', protocol: null, discovery: 'not_attempted' };
+    } else if (marker.includes('inventory')) {
+      observation = { ...base, outcome: 'observed', reachable: true, authenticated: 'authenticated', protocol: draft.protocol_order?.[0] ?? 'openai_chat', discovery: 'failed' };
+    } else if (marker.includes('adapter')) {
+      observation = { ...base, outcome: 'adapter_error', reachable: null, authenticated: 'unknown', protocol: null, discovery: 'not_attempted' };
+    } else if (marker.includes('unreachable')) {
+      observation = { ...base, outcome: 'unreachable', reachable: false, authenticated: 'unknown', protocol: null, discovery: 'not_attempted' };
+    } else {
+      observation = {
+        ...base,
+        outcome: 'observed',
+        reachable: true,
+        authenticated: 'authenticated',
+        protocol: draft.protocol_order?.[0] ?? 'openai_chat',
+        discovery: 'succeeded',
+        models: ['model-1', 'model-2', 'model-3'],
+      };
+    }
+    return delay(observation, 900, signal);
   }
 
   /**
@@ -592,14 +644,10 @@ class MockStore {
       if (a.mode !== 'hub') continue;
       const model = a.selected_model_id;
       if (!model) continue;
-      const mapping = a.mappings?.find((x) => x.builtin_id === model && x.enabled && x.target_model_id);
-      const resolved = mapping ? mapping.target_model_id : model;
-      // A `follow` order only ever LOSES the removed id (the recommendation never
-      // gains a source from a write), so filtering the live order through the
-      // candidate set is the same answer refresh_follow_orders would give.
-      const survives = (a.sources?.order ?? [])
-        .map((id) => byId.get(id))
-        .some((s) => s !== undefined && s.models.some((mm) => mm.id === resolved) && isRunnable(s));
+      const hops = a.routes?.[model]?.hops ?? [];
+      const survives = hops
+        .map((hop) => byId.get(hop.source_id))
+        .some((s) => s !== undefined && isRunnable(s));
       if (survives) continue;
       gaps.push({
         backend: a.backend,
@@ -712,22 +760,15 @@ class MockStore {
   putAgentSources(backend: AgentBackend, body: AgentSourcesPut) {
     const agent = this.agentOr404(backend);
     if (agent.mode === 'direct') throw new ApiCallError('direct_mode');
-    if (body.policy === 'follow') {
-      // 恢复推荐顺序 discards the frozen subset; the order comes back from §4.2.
-      agent.sources = { policy: 'follow', order: [], eligibility: null };
-    } else {
-      // §4.4's invariants, server-side: every id exists, is eligible here, and
-      // appears once. Omitting one is how the user says 未启用 — not an error.
-      const eligible = new Set(
-        mockEligibility(this.sources, backend).filter((e) => e.eligible).map((e) => e.source_id),
-      );
-      const seen = new Set<string>();
-      for (const id of body.order) {
-        if (!eligible.has(id) || seen.has(id)) throw new ApiCallError('invalid_source_order', id);
-        seen.add(id);
-      }
-      agent.sources = { policy: 'custom', order: [...body.order], eligibility: null };
+    const eligible = new Set(
+      mockEligibility(this.sources, backend).filter((e) => e.eligible).map((e) => e.source_id),
+    );
+    const seen = new Set<string>();
+    for (const id of body.order) {
+      if (!eligible.has(id) || seen.has(id)) throw new ApiCallError('invalid_source_order', id);
+      seen.add(id);
     }
+    agent.sources = { order: [...body.order], eligibility: null };
     this.syncAgents();
     return delay(structuredClone(agent), 380);
   }
@@ -741,33 +782,36 @@ class MockStore {
    */
   private chainFor(agent: AgentSupply, model: string) {
     const byId = new Map(this.sources.map((s) => [s.id, s]));
-    const mapping = agent.mappings?.find((x) => x.builtin_id === model && x.enabled && x.target_model_id);
-    const resolved = mapping ? mapping.target_model_id : model;
-    const chain: AgentChainLink[] = (agent.sources?.order ?? [])
-      .map((id) => byId.get(id))
-      .filter((s): s is Source => s !== undefined && s.models.some((mm) => mm.id === resolved))
-      .map((s) => ({
-        source_id: s.id,
-        channel: s.supply_channel,
-        via_mapping: Boolean(mapping),
-        resolved_model_id: mapping ? resolved : null,
-        health: chainHealth(s),
-        runnable: isRunnable(s),
+    const hops = agent.routes?.[model]?.hops ?? [];
+    const chain: AgentChainLink[] = hops
+      .map((hop) => ({ hop, source: byId.get(hop.source_id) }))
+      .map(({ hop, source }) => ({
+        source_id: hop.source_id,
+        model_id: hop.model_id,
+        source,
+      }))
+      .map(({ source_id, model_id, source }) => ({
+        source_id,
+        model_id,
+        channel: source?.supply_channel ?? 'hub',
+        health: source ? chainHealth(source) : 'error',
+        runnable: source ? isRunnable(source) : false,
         // v4: process availability is a fact about the serving process — which
         // native CLI it can launch under its own login — and a browser mock has
         // no way to observe it. So it stands in for a runtime where every
         // configured CLI is launchable, rather than inventing an outage. The
         // unavailable branch is asserted in the unit tests, which can state the
         // fact instead of guessing it.
-        reason: null,
-        retry_at: s.state.status === 'cooldown' ? s.state.retry_at ?? null : null,
+        reason: source ? null : 'source_missing',
+        retry_at: source?.state.status === 'cooldown' ? source.state.retry_at ?? null : null,
       }));
     const supply_state: AgentChain['supply_state'] = chain.some((l) => l.runnable)
       ? 'ok'
       : chain.length > 0 && chain.every((l) => l.health === 'cooldown' && l.reason === null)
         ? 'waiting'
         : 'interrupted';
-    return { chain, supply_state };
+    const current = chain.find((link) => link.runnable);
+    return { chain, current: current ? { source_id: current.source_id, model_id: current.model_id } : null, supply_state };
   }
 
   getAgentChain(backend: AgentBackend, model: string) {
@@ -776,11 +820,12 @@ class MockStore {
     // AC-7: direct mode has no src_* identity to report, so the route refuses
     // rather than answering with an empty (falsely alarming) chain.
     if (agent.mode === 'direct') throw new ApiCallError('direct_mode');
-    const { chain, supply_state } = this.chainFor(agent, model);
+    const { chain, current, supply_state } = this.chainFor(agent, model);
     return delay({
       contract_version: AGENT_CHAIN_CONTRACT_VERSION,
       backend,
       model_id: model,
+      current,
       chain,
       supply_state,
     });
@@ -813,11 +858,8 @@ class MockStore {
       channel: head.channel,
       reachable: true,
       source_id: head.source_id,
-      // The resolved id, mapping applied — what the server reports, and not the
-      // requested id it was rewritten from.
-      model_id: head.resolved_model_id ?? modelId,
+      model_id: head.model_id,
       latency_ms: native ? null : 180 + Math.floor(Math.random() * 420),
-      via_mapping: head.via_mapping,
       error: null,
     };
     // A real upstream request takes a real moment; a local readiness check does not.
@@ -828,9 +870,15 @@ class MockStore {
     const agent = this.agentOr404(backend);
     agent.mode = mode;
     if (mode === 'hub') {
-      // Rejoining the hub starts on the recommendation, and picks up whatever
-      // model selected for the Agent (first built-in / first supplied id in mock mode).
-      agent.sources = { policy: 'follow', order: [], eligibility: null };
+      // Rejoining the gateway materializes one exact Route per matching menu model.
+      const order = mockRecommendedOrder(this.sources, backend);
+      agent.sources = { order, eligibility: null };
+      agent.routes = Object.fromEntries(
+        (agent.builtin_models ?? []).map((modelId) => [modelId, { hops: order
+          .map((sourceId) => this.sources.find((source) => source.id === sourceId))
+          .filter((source): source is Source => Boolean(source && source.models.some((model) => model.id === modelId)))
+          .map((source) => ({ source_id: source.id, model_id: modelId })) }]),
+      );
       agent.selected_model_id = agent.builtin_models?.[0] ?? this.sources[0]?.models[0]?.id ?? null;
       // The server's default comes from the STORED per-backend request, so a
       // non-null id here is explicit; nothing selected is the false case.
@@ -844,66 +892,9 @@ class MockStore {
     return delay(structuredClone(agent));
   }
 
-  /**
-   * `_enroll_target_sources` in miniature (api.md → "Mapping and menu
-   * enrollment"): a target whose suppliers are all outside the order pulls in
-   * EXACTLY ONE — the first in the recommendation — and the order forks to
-   * `custom` only when something was actually appended.
-   *
-   * Modelled here rather than left as a no-op for the reason `oauthResult`
-   * documents: a mock that treats a mutation and its side effect as separate is
-   * a mock that cannot fail the way the product does, and the drawers' 完成
-   * notice exists only because of this side effect.
-   */
-  private enrollTargets(agent: AgentSupply, targetGroups: string[][]) {
-    const order = agent.sources?.order ?? [];
-    const enrolled = new Set(order);
-    const appended: string[] = [];
-    for (const group of targetGroups) {
-      if (group.length === 0 || group.some((id) => enrolled.has(id))) continue;
-      enrolled.add(group[0]);
-      appended.push(group[0]);
-    }
-    if (appended.length === 0) return;
-    agent.sources = { policy: 'custom', order: [...order, ...appended], eligibility: null };
-  }
-
-  /** The suppliers of one target, in the recommendation's order — the list the
-   *  server picks its single enrollee from. */
-  private suppliersOf(backend: AgentBackend, carries: (source: Source) => boolean): string[] {
-    const byId = new Map(this.sources.map((s) => [s.id, s]));
-    return mockRecommendedOrder(this.sources, backend).filter((id) => {
-      const source = byId.get(id);
-      return source ? carries(source) : false;
-    });
-  }
-
-  putMappings(backend: AgentBackend, mappings: AgentMapping[]) {
-    const agent = this.agents.find((a) => a.backend === backend);
-    if (!agent) throw new ApiCallError('source_not_found');
-    this.enrollTargets(
-      agent,
-      mappings
-        .filter((m) => m.enabled)
-        .map((m) => this.suppliersOf(backend, (s) => s.models.some((mm) => mm.id === m.target_model_id))),
-    );
-    agent.mappings = mappings;
-    this.syncAgents();
-    return delay(structuredClone(agent));
-  }
-
   putMenu(menu: AgentMenu) {
     const agent = this.agents.find((a) => a.backend === 'opencode');
     if (!agent) throw new ApiCallError('source_not_found');
-    const standardVendors = new Set(agent.standard_vendors ?? []);
-    this.enrollTargets(
-      agent,
-      menu.checked.map((identifier) =>
-        this.suppliersOf('opencode', (s) =>
-          s.models.some((mm) => buildIdentifier(s.vendor, mm.id, standardVendors) === identifier),
-        ),
-      ),
-    );
     agent.menu = menu;
     this.syncAgents();
     return delay(structuredClone(agent));
@@ -915,13 +906,13 @@ class MockStore {
     const existing = source.models.find((m) => m.id === draft.model_id);
     if (existing) {
       existing.display_name = draft.display_name ?? existing.display_name;
-      existing.provenance = 'manual';
+      existing.origin = 'manual';
       existing.reasoning_efforts = [...draft.reasoning_efforts];
     } else {
       source.models.push({
         id: draft.model_id,
         display_name: draft.display_name ?? null,
-        provenance: 'manual',
+        origin: 'manual',
         reasoning_efforts: [...draft.reasoning_efforts],
         discovered_at: null,
       });
@@ -933,15 +924,42 @@ class MockStore {
     const source = this.sources.find((s) => s.id === sourceId);
     if (!source) throw new ApiCallError('source_not_found');
     const model = source.models.find((item) => item.id === modelId);
-    if (!model) throw new ApiCallError('mapping_target_unavailable');
+    if (!model) throw new ApiCallError('source_not_found');
     model.reasoning_efforts = [...reasoningEfforts];
     return delay(structuredClone(source));
   }
 
-  deleteCustomModel(sourceId: string, modelId: string) {
+  deleteCustomModel(sourceId: string, modelId: string, confirmation?: GuardConfirmation) {
     const source = this.sources.find((s) => s.id === sourceId);
     if (!source) throw new ApiCallError('source_not_found');
-    source.models = source.models.filter((m) => !(m.id === modelId && m.provenance === 'manual'));
+    const references: RouteHopRef[] = [];
+    for (const agent of this.agents) {
+      for (const [menuModel, route] of Object.entries(agent.routes ?? {})) {
+        for (const [index, hop] of route.hops.entries()) {
+          if (equalHopIdentity(hop, { source_id: sourceId, model_id: modelId })) {
+            references.push({ backend: agent.backend, menu_model: menuModel, ...hop, position: index + 1 });
+          }
+        }
+      }
+    }
+    const confirmed = confirmation !== undefined
+      && JSON.stringify(confirmation.would_remove_hops) === JSON.stringify(references)
+      && JSON.stringify(confirmation.would_interrupt) === JSON.stringify([]);
+    if (references.length > 0 && !confirmed) {
+      throw new ApiCallError('source_model_in_route_chain', undefined, true, [], [], references);
+    }
+    source.models = source.models.filter((m) => !(m.id === modelId && m.origin === 'manual'));
+    if (confirmation) {
+      for (const agent of this.agents) {
+        agent.routes = Object.fromEntries(
+          Object.entries(agent.routes ?? {}).map(([menuModel, route]) => [
+            menuModel,
+            { hops: route.hops.filter((hop) => !equalHopIdentity(hop, { source_id: sourceId, model_id: modelId })) },
+          ]),
+        );
+      }
+    }
+    this.syncAgents();
     return delay(structuredClone(source));
   }
 
@@ -971,14 +989,12 @@ class MockStore {
         protocol: item.backend === 'codex' ? 'openai_responses' : 'anthropic',
         base_url: null,
         supply_channel: channel,
-        // No hub-held subscription is created by migration, so never consented.
-        experimental_consent_at: null,
         billing: isKey ? 'metered' : 'monthly',
         state: { status: 'standby', retry_at: null, detail_key: null },
         usage: isKey ? { cycle_used_pct: null, month_spend_cents: 0, currency: 'USD' } : { cycle_used_pct: 0, month_spend_cents: null, currency: null },
         account_label: channel === 'native_cli' ? 'me@gmail.com' : null,
         masked_credential: isKey ? 'sk-…dd3c' : null,
-        models: [{ id: item.backend === 'opencode' ? 'glm-5.2' : item.backend === 'codex' ? 'gpt-5.6' : 'claude-opus-4-6', display_name: null, provenance: 'discovered', discovered_at: new Date().toISOString() }],
+        models: [{ id: item.backend === 'opencode' ? 'glm-5.2' : item.backend === 'codex' ? 'gpt-5.6' : 'claude-opus-4-6', display_name: null, origin: 'discovered', reasoning_efforts: [], discovered_at: new Date().toISOString() }],
         credential_ref: channel === 'hub' ? rid('cred') : null,
       });
     }
@@ -1000,15 +1016,24 @@ class MockStore {
     return delay(structuredClone(this.runtime));
   }
 
+  installRuntime() {
+    this.runtime.status.health = 'installing';
+    this.runtime.status.error_key = null;
+    setTimeout(() => {
+      this.runtime.status.installed_version = this.runtime.manifest.version;
+      this.runtime.status.verified = true;
+      this.runtime.status.health = 'not_started';
+    }, 1200);
+    return delay(structuredClone(this.runtime));
+  }
+
   startRuntime() {
     this.runtime.status.health = 'ok';
     this.runtime.status.listening = { host: '127.0.0.1', port: 15220 };
     return delay(structuredClone(this.runtime));
   }
 
-  startOAuth(vendor: string, channel: SupplyChannel, experimentalConsent?: boolean) {
-    // Mirror the server: a hub-held subscription connect requires recorded consent.
-    if (channel === 'hub' && !experimentalConsent) throw new ApiCallError('consent_required');
+  startOAuth(vendor: string, channel: SupplyChannel) {
     const isDevice = vendor === 'openai';
     const flow: OAuthFlow = {
       flow_id: rid('oaf'),
@@ -1096,7 +1121,8 @@ class MockStore {
           {
             id: isOpenai ? 'gpt-5.6' : 'claude-opus-4-6',
             display_name: isOpenai ? 'GPT-5.6' : 'Opus 4.6',
-            provenance: 'discovered',
+            origin: 'discovered',
+            reasoning_efforts: [],
             discovered_at: new Date().toISOString(),
           },
         ];
@@ -1106,7 +1132,7 @@ class MockStore {
     // Idempotent, like `_create_oauth_source(idempotent=True)`: re-polling a
     // completed flow re-echoes the same source instead of creating a second one.
     if (this.sources.some((s) => s.id === id)) return;
-    this.sources.push({
+    const source: Source = {
       id,
       created_at: new Date().toISOString(),
       last_discovered_at: new Date().toISOString(),
@@ -1116,19 +1142,20 @@ class MockStore {
       protocol: isOpenai ? 'openai_responses' : 'anthropic',
       base_url: null,
       supply_channel: flow.channel,
-      experimental_consent_at: flow.channel === 'hub' ? new Date().toISOString() : null,
       billing: 'monthly',
       state: { status: 'standby', retry_at: null, detail_key: null },
       usage: { cycle_used_pct: 0, month_spend_cents: null, currency: null },
-      // native_cli subscriptions surface the sanctioned CLI account; hub-held
-      // experimental sources may stay null until a later adapter rev (schema).
+      // native_cli subscriptions surface the CLI account; gateway-held sources
+      // may stay null until a later adapter revision publishes an account label.
       account_label: flow.channel === 'native_cli' ? 'me@gmail.com' : null,
       masked_credential: null,
       models: isOpenai
-        ? [{ id: 'gpt-5.6', display_name: 'GPT-5.6', provenance: 'discovered', discovered_at: new Date().toISOString() }]
-        : [{ id: 'claude-opus-4-6', display_name: 'Opus 4.6', provenance: 'discovered', discovered_at: new Date().toISOString() }],
+        ? [{ id: 'gpt-5.6', display_name: 'GPT-5.6', origin: 'discovered', reasoning_efforts: [], discovered_at: new Date().toISOString() }]
+        : [{ id: 'claude-opus-4-6', display_name: 'Opus 4.6', origin: 'discovered', reasoning_efforts: [], discovered_at: new Date().toISOString() }],
       credential_ref: flow.channel === 'hub' ? rid('cred') : null,
-    });
+    };
+    this.sources.push(source);
+    entry.placement = this.placeNewSource(source);
   }
 
   /**
@@ -1158,7 +1185,10 @@ class MockStore {
     }
     return {
       flow,
-      created: { source: structuredClone(source), ...this.adoptionTail(source.id) },
+      created: {
+        source: structuredClone(source),
+        ...(entry.placement ?? { added_to: [], adopted_by: [] }),
+      },
       repaired: null,
     };
   }
@@ -1171,7 +1201,7 @@ class MockStore {
     return delay(structuredClone(source), 300);
   }
 
-  refreshSource(id: string) {
+  refreshSource(id: string, _confirmation?: GuardConfirmation) {
     const source = this.sources.find((s) => s.id === id);
     if (!source) throw new ApiCallError('source_not_found');
     // Native-CLI subscriptions can't be re-discovered (server rejects them);
@@ -1226,9 +1256,10 @@ const mockStore = new MockStore();
 
 const mockApi: ModelsApi = {
   listSources: () => mockStore.listSources(),
+  observeApiKeySource: (draft, signal) => mockStore.observeApiKeySource(draft, signal),
   createApiKeySource: (draft) => mockStore.createApiKeySource(draft),
   patchSource: (id, patch) => mockStore.patchSource(id, patch),
-  refreshSource: (id) => mockStore.refreshSource(id),
+  refreshSource: (id, confirmation) => mockStore.refreshSource(id, confirmation),
   deleteSource: (id, force) => mockStore.deleteSource(id, force),
   replaceCredential: (id, body) => mockStore.replaceCredential(id, body),
   reauthSource: (id) => mockStore.reauthSource(id),
@@ -1238,17 +1269,17 @@ const mockApi: ModelsApi = {
   getAgentChain: (backend, model) => mockStore.getAgentChain(backend, model),
   probeAgent: (backend, model) => mockStore.probeAgent(backend, model),
   setAgentMode: (backend, mode) => mockStore.setAgentMode(backend, mode),
-  putMappings: (backend, mappings) => mockStore.putMappings(backend, mappings),
   putMenu: (menu) => mockStore.putMenu(menu),
   addCustomModel: (sourceId, draft) => mockStore.addCustomModel(sourceId, draft),
   updateModelReasoningEfforts: (sourceId, modelId, reasoningEfforts) => mockStore.updateModelReasoningEfforts(sourceId, modelId, reasoningEfforts),
-  deleteCustomModel: (sourceId, modelId) => mockStore.deleteCustomModel(sourceId, modelId),
+  deleteCustomModel: (sourceId, modelId, confirmation) => mockStore.deleteCustomModel(sourceId, modelId, confirmation),
   scanMigration: () => mockStore.scanMigration(),
   applyMigration: (itemIds) => mockStore.applyMigration(itemIds),
   listEvents: (limit, before) => mockStore.listEvents(limit, before),
   getRuntimeStatus: () => mockStore.getRuntimeStatus(),
+  installRuntime: () => mockStore.installRuntime(),
   startRuntime: () => mockStore.startRuntime(),
-  startOAuth: (vendor, channel, experimentalConsent) => mockStore.startOAuth(vendor, channel, experimentalConsent),
+  startOAuth: (vendor, channel) => mockStore.startOAuth(vendor, channel),
   getOAuthStatus: (flowId) => mockStore.getOAuthStatus(flowId),
   submitOAuth: (flowId, value) => mockStore.submitOAuth(flowId, value),
   cancelOAuth: (flowId) => mockStore.cancelOAuth(flowId),

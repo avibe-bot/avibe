@@ -61,6 +61,8 @@ from storage.session_reclaim import (
 
 logger = logging.getLogger(__name__)
 
+CALLBACK_TERMINAL_TURN_ID_METADATA_KEY = "callback_terminal_turn_id"
+
 
 def _json_dumps(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
@@ -332,6 +334,127 @@ _BLANK_DEFINITION_SUMMARY: dict[str, Any] = {
 # Where a definition's session binding hides when it has no ``session_id``: a
 # legacy IM binding, then a ``create_per_run`` delivery target. Precedence order.
 _DEFINITION_SESSION_KEY_FIELDS = ("session_key", "deliver_key")
+ORPHANED_TASK_OWNER_METADATA_KEY = "orphaned_task_owner"
+TASK_OWNER_UNAVAILABLE_REASON_CODE = "task_owner_session_unavailable"
+_SQLITE_TRIM_WHITESPACE = " \t\n\r\f\v"
+
+
+def definition_owner_session_id(metadata: Any) -> Optional[str]:
+    """Return a valid creation-owner Session ID from definition metadata."""
+
+    if not isinstance(metadata, dict):
+        return None
+    created_by = metadata.get("created_by")
+    if not isinstance(created_by, dict):
+        return None
+    caller = created_by.get("caller")
+    if not isinstance(caller, dict):
+        return None
+    raw_owner = caller.get("session_id")
+    if not isinstance(raw_owner, str):
+        return None
+    return raw_owner.strip() or None
+
+
+def task_resume_block(metadata: Any, session_id: Any) -> Optional[dict[str, str]]:
+    """Return the durable reason an orphaned Task cannot be resumed yet."""
+
+    if str(session_id or "").strip() or not isinstance(metadata, dict):
+        return None
+    marker = metadata.get(ORPHANED_TASK_OWNER_METADATA_KEY)
+    if not isinstance(marker, dict):
+        return None
+    if marker.get("reason_code") != TASK_OWNER_UNAVAILABLE_REASON_CODE:
+        return None
+    owner_session_id = str(marker.get("owner_session_id") or "").strip()
+    if not owner_session_id:
+        return None
+    return {
+        "code": TASK_OWNER_UNAVAILABLE_REASON_CODE,
+        "owner_session_id": owner_session_id,
+    }
+
+
+def definition_owner_session_id_expression() -> Any:
+    """Return the durable Session that manages a scheduled definition, when known.
+
+    Definitions created from an Avibe Agent shell preserve their creation
+    provenance under ``metadata_json.created_by.caller.session_id``. That is
+    the owner used by user-facing Session projections: the execution target may
+    be a newly-created Session, or absent for a pure command / per-run task.
+    Invalid and legacy metadata deliberately resolve to ``NULL`` so callers can
+    fall back to the historical bound ``run_definitions.session_id``. A recorded
+    owner that has since been archived or removed is treated the same way for
+    projections, preserving visibility for pre-upgrade orphaned definitions.
+    """
+
+    metadata_json = run_definitions.c.metadata_json
+    raw_owner = func.json_extract(
+        metadata_json,
+        "$.created_by.caller.session_id",
+    )
+    return case(
+        (
+            func.json_valid(metadata_json) == 1,
+            case(
+                (
+                    func.json_type(metadata_json, "$.created_by.caller.session_id")
+                    == "text",
+                    func.nullif(func.trim(raw_owner, _SQLITE_TRIM_WHITESPACE), ""),
+                ),
+                else_=None,
+            ),
+        ),
+        else_=None,
+    )
+
+
+def scheduled_definition_owned_by_session_expression(session_id: str) -> Any:
+    """Return the owner-first Session predicate for scheduled Task projections.
+
+    Creation ownership wins while that owner Session still exists and is not
+    archived. Once the owner is gone, the execution target resumes the legacy
+    fallback so persisted Tasks remain visible instead of becoming orphaned.
+    """
+
+    owner_session_id = definition_owner_session_id_expression()
+    owner_session_is_live = exists(
+        select(literal(1))
+        .select_from(agent_sessions)
+        .where(
+            agent_sessions.c.id == owner_session_id,
+            agent_sessions.c.status != "archived",
+        )
+    )
+    return or_(
+        and_(owner_session_id == session_id, owner_session_is_live),
+        and_(
+            or_(owner_session_id.is_(None), ~owner_session_is_live),
+            run_definitions.c.session_id == session_id,
+        ),
+    )
+
+
+def scheduled_definition_reclaimable_by_session_expression(session_id: str) -> Any:
+    """Return the teardown predicate for scheduled Tasks touching a Session.
+
+    Teardown is broader than banner projection: removing an execution target must
+    also stop a Task created by a different Session from firing into that dead
+    target. Owner-first remains the projection rule; this expression is only for
+    reclaim and archive accounting.
+    """
+
+    # Teardown must retain the raw provenance match even after the owner row is
+    # archived; that is the event that caused this cleanup. Projection uses the
+    # liveness-aware owner-first expression above, while teardown covers both
+    # owner identity and execution target identity.
+    owner_session_id = definition_owner_session_id_expression()
+    return or_(
+        owner_session_id == session_id,
+        run_definitions.c.session_id == session_id,
+    )
+
+
 # The exit code a waiter that ran out of lifetime carries. Written by
 # ``core/watches.py`` (the ``timeout`` convention), read here to tell an ending
 # that ran out of time from one that failed.
@@ -415,6 +538,84 @@ class DefinitionWriteConflict(RuntimeError):
         )
         self.definition_id = str(definition_id)
         self.definition_type = str(definition_type)
+
+
+class TaskResumeBlocked(RuntimeError):
+    """A paused Task has neither a surviving owner nor an execution target."""
+
+    code = TASK_OWNER_UNAVAILABLE_REASON_CODE
+
+    def __init__(self, definition_id: str, owner_session_id: str) -> None:
+        super().__init__(
+            f"task {definition_id} cannot be resumed because its owner Session "
+            f"{owner_session_id} is unavailable and it has no execution target"
+        )
+        self.definition_id = str(definition_id)
+        self.owner_session_id = str(owner_session_id)
+
+
+def require_task_resumable(
+    definition_id: str,
+    *,
+    metadata: Any,
+    session_id: Any,
+) -> None:
+    blocked = task_resume_block(metadata, session_id)
+    if blocked is not None:
+        raise TaskResumeBlocked(definition_id, blocked["owner_session_id"])
+
+
+def clear_task_resume_blocks_for_available_owner(
+    conn: Any,
+    owner_session_id: str,
+) -> int:
+    """Clear stale orphan markers when a refused teardown leaves the owner live."""
+
+    sid = str(owner_session_id or "").strip()
+    if not sid:
+        return 0
+    owner_is_live = conn.execute(
+        select(literal(1))
+        .select_from(agent_sessions)
+        .where(agent_sessions.c.id == sid, agent_sessions.c.status != "archived")
+        .limit(1)
+    ).first()
+    if owner_is_live is None:
+        return 0
+
+    rows = (
+        conn.execute(
+            select(
+                run_definitions.c.id,
+                run_definitions.c.session_id,
+                run_definitions.c.metadata_json,
+            )
+            .where(run_definitions.c.definition_type == "scheduled")
+            .where(run_definitions.c.deleted_at.is_(None))
+        )
+        .mappings()
+        .all()
+    )
+    cleared = 0
+    now = _utc_now_iso()
+    for row in rows:
+        metadata = _json_loads(row["metadata_json"], {})
+        if definition_owner_session_id(metadata) != sid:
+            continue
+        blocked = task_resume_block(metadata, row["session_id"])
+        if blocked is None or blocked["owner_session_id"] != sid:
+            continue
+        metadata = dict(metadata)
+        metadata.pop(ORPHANED_TASK_OWNER_METADATA_KEY, None)
+        result = conn.execute(
+            update(run_definitions)
+            .where(run_definitions.c.id == row["id"])
+            .where(run_definitions.c.deleted_at.is_(None))
+            .where(run_definitions.c.metadata_json == row["metadata_json"])
+            .values(metadata_json=_json_dumps(metadata), updated_at=now)
+        )
+        cleared += int(result.rowcount or 0)
+    return cleared
 
 
 @dataclass(frozen=True)
@@ -881,6 +1082,7 @@ _RUN_PROJECTIONS: tuple[_RunProjection, ...] = (
     ),
 )
 _DEFERRED_RUN_EVENT_ROWS_KEY = "avibe.deferred_run_event_rows"
+_DEFERRED_QUEUE_UPDATED_SESSION_IDS_KEY = "avibe.deferred_queue_updated_session_ids"
 _TERMINAL_STATUS_PRIORITY = {
     "succeeded": 0,
     "canceled": 1,
@@ -2092,6 +2294,21 @@ def _publish_queue_updated(session_id: str) -> None:
         )
 
 
+def _defer_queue_updated_from_connection(conn: Any, session_id: str) -> None:
+    normalized_session_id = str(session_id or "").strip()
+    if not normalized_session_id:
+        return
+    pending = conn.info.setdefault(_DEFERRED_QUEUE_UPDATED_SESSION_IDS_KEY, set())
+    pending.add(normalized_session_id)
+
+
+def _pop_deferred_queue_updated_session_ids_from_connection(conn: Any) -> list[str]:
+    pending = conn.info.pop(_DEFERRED_QUEUE_UPDATED_SESSION_IDS_KEY, set())
+    if not isinstance(pending, set):
+        return []
+    return sorted(str(session_id) for session_id in pending if session_id)
+
+
 def _defer_run_rows_updated_from_connection(conn: Any, rows: list[Any]) -> None:
     if not rows:
         return
@@ -2117,14 +2334,21 @@ def run_update_event_transaction(engine: Any):
     """Commit DB writes before publishing deferred ``runs.updated`` snapshots."""
 
     pending_rows: list[dict[str, Any]] = []
+    pending_queue_session_ids: list[str] = []
     with engine.begin() as conn:
         try:
             yield conn
             pending_rows = pop_deferred_run_event_rows_from_connection(conn)
+            pending_queue_session_ids = (
+                _pop_deferred_queue_updated_session_ids_from_connection(conn)
+            )
         except Exception:
             conn.info.pop(_DEFERRED_RUN_EVENT_ROWS_KEY, None)
+            conn.info.pop(_DEFERRED_QUEUE_UPDATED_SESSION_IDS_KEY, None)
             raise
     _publish_run_rows_updated(pending_rows)
+    for session_id in pending_queue_session_ids:
+        _publish_queue_updated(session_id)
 
 
 def _run_rows_for_ids(conn: Any, run_ids: list[str]) -> list[Any]:
@@ -2432,6 +2656,85 @@ def attach_agent_run_delivery_in_connection(
         return False
     _defer_run_ids_updated_from_connection(conn, [normalized_run_id])
     return True
+
+
+def apply_live_agent_run_cancellation_in_connection(
+    conn: Any,
+    run_id: str,
+    *,
+    session_id: str,
+    detach: bool,
+    updated_at: Optional[str] = None,
+) -> str:
+    """Record one live Run cancellation inside the Turn owner's transaction.
+
+    ``detach`` is the outcome of the shared-Turn ownership check made under the
+    same SQLite writer reservation. A detached participant becomes terminal,
+    retires its exact input when the Delivery state proves no native side effect,
+    and suppresses its callback before any terminal writer or callback drain can
+    run; an exclusive owner only records the cancellation request before P0 Stop.
+    """
+
+    normalized_run_id = str(run_id or "").strip()
+    normalized_session_id = str(session_id or "").strip()
+    if not normalized_run_id or not normalized_session_id:
+        return "missing_run_identity"
+    row = conn.execute(
+        select(agent_runs)
+        .where(agent_runs.c.id == normalized_run_id)
+        .limit(1)
+    ).mappings().first()
+    if row is None:
+        return "run_not_found"
+    if str(row["session_id"] or "").strip() != normalized_session_id:
+        return "run_session_mismatch"
+    status = normalize_run_status(row["status"])
+    if status in TERMINAL_RUN_STATUSES:
+        return "run_already_terminal"
+    if status not in {"queued", "running"}:
+        return "run_not_cancelable"
+
+    now = updated_at or _utc_now_iso()
+    values: dict[str, Any] = {
+        "cancel_requested": 1,
+        "cancel_requested_at": row["cancel_requested_at"] or now,
+        "updated_at": now,
+    }
+    if detach:
+        delivery_id = str(row["delivery_id"] or "").strip()
+        if delivery_id:
+            from storage import message_deliveries as delivery_store
+
+            if delivery_store.retire_for_run_cancellation(
+                conn,
+                normalized_session_id,
+                delivery_id,
+            ):
+                _defer_queue_updated_from_connection(conn, normalized_session_id)
+        values.update(status="canceled", completed_at=now)
+        callback_session_id = str(row["callback_session_id"] or "").strip()
+        callback_status = str(row["callback_status"] or "").strip()
+        if callback_session_id and callback_status not in {"sent", "skipped"}:
+            values.update(
+                callback_status="skipped",
+                callback_error=None,
+                callback_completed_at=now,
+            )
+    result = conn.execute(
+        update(agent_runs)
+        .where(agent_runs.c.id == normalized_run_id)
+        .where(agent_runs.c.session_id == normalized_session_id)
+        .where(
+            agent_runs.c.status.in_(
+                _status_query_values("queued") + _status_query_values("running")
+            )
+        )
+        .values(**values)
+    )
+    if not result.rowcount:
+        return "run_transition_lost"
+    _defer_run_ids_updated_from_connection(conn, [normalized_run_id])
+    return "run_detached" if detach else "cancel_requested"
 
 
 def agent_run_cancellation_won_in_connection(conn: Any, run_id: str) -> bool:
@@ -2893,6 +3196,11 @@ class SQLiteBackgroundTaskStore:
         definition_type: Optional[str] = None,
     ) -> bool:
         with self.engine.begin() as conn:
+            if enabled:
+                # The resumability decision and enabling UPDATE are one atomic
+                # transition. Without the writer reservation, /new can stamp an
+                # orphan-owner block after the SELECT and before this UPDATE.
+                reserve_write_lock(conn)
             values: dict[str, Any] = {"enabled": 1 if enabled else 0, "updated_at": _utc_now_iso()}
             if enabled:
                 # Resuming may start a new lifecycle, and the old one must stop
@@ -2907,6 +3215,7 @@ class SQLiteBackgroundTaskStore:
                             run_definitions.c.definition_type,
                             run_definitions.c.mode,
                             run_definitions.c.enabled,
+                            run_definitions.c.session_id,
                             run_definitions.c.metadata_json,
                         )
                         .where(run_definitions.c.id == definition_id)
@@ -2916,6 +3225,12 @@ class SQLiteBackgroundTaskStore:
                     .first()
                 )
                 if current is not None and not current["enabled"]:
+                    if current["definition_type"] == "scheduled":
+                        require_task_resumable(
+                            definition_id,
+                            metadata=_json_loads(current["metadata_json"], {}),
+                            session_id=current["session_id"],
+                        )
                     clear_columns = definition_resume_clear_columns(
                         current["definition_type"], current["mode"]
                     )
@@ -3229,15 +3544,29 @@ class SQLiteBackgroundTaskStore:
             ).mappings().first()
             if parent is None:
                 raise ValueError(f"callback parent Run not found: {parent_run_id}")
-            callback_run_id = conn.execute(
-                select(agent_runs.c.id)
-                .where(agent_runs.c.run_type == "agent_run")
-                .where(agent_runs.c.source_kind == "callback")
-                .where(agent_runs.c.parent_run_id == parent_run_id)
-                .where(agent_runs.c.source_actor == source_actor)
-                .order_by(agent_runs.c.created_at, agent_runs.c.id)
-                .limit(1)
-            ).scalar_one_or_none()
+            terminal_turn_id = str(values.get("callback_terminal_turn_id") or "").strip()
+            callback_session_id = str(values.get("session_id") or "").strip()
+            callback_run_id = None
+            if terminal_turn_id and callback_session_id:
+                callback_run_id = conn.execute(
+                    select(agent_runs.c.id)
+                    .where(agent_runs.c.run_type == "agent_run")
+                    .where(agent_runs.c.source_kind == "callback")
+                    .where(agent_runs.c.callback_terminal_turn_id == terminal_turn_id)
+                    .where(agent_runs.c.session_id == callback_session_id)
+                    .order_by(agent_runs.c.created_at, agent_runs.c.id)
+                    .limit(1)
+                ).scalar_one_or_none()
+            if callback_run_id is None:
+                callback_run_id = conn.execute(
+                    select(agent_runs.c.id)
+                    .where(agent_runs.c.run_type == "agent_run")
+                    .where(agent_runs.c.source_kind == "callback")
+                    .where(agent_runs.c.parent_run_id == parent_run_id)
+                    .where(agent_runs.c.source_actor == source_actor)
+                    .order_by(agent_runs.c.created_at, agent_runs.c.id)
+                    .limit(1)
+                ).scalar_one_or_none()
             parent_status = normalize_run_status(parent["status"])
             parent_refuses_new_child = bool(parent["cancel_requested"]) and (
                 parent_status != "canceled"
@@ -3734,10 +4063,20 @@ class SQLiteBackgroundTaskStore:
             stmt.where(run_definitions.c.definition_type == definition_type)
             .where(run_definitions.c.deleted_at.is_(None))
         )
-        # Precise bound-session filter (ix_run_definitions_session) — powers the
-        # Harness "只看本会话" chip that background-work banner rows navigate into.
+        # This Session filter powers the Harness "只看本会话" chip that the
+        # background-work banner navigates into. Scheduled Tasks use creation
+        # provenance as the authoritative owner: a create-per-run or pure command
+        # definition may have no bound execution Session at all. Legacy Task rows
+        # without provenance retain the historical bound-session behavior.
         if session_id:
-            stmt = stmt.where(run_definitions.c.session_id == session_id)
+            if definition_type == "scheduled":
+                stmt = stmt.where(
+                    scheduled_definition_owned_by_session_expression(session_id)
+                )
+            else:
+                # A Watch is an event callback surface: its callback target, not
+                # the Session that created the definition, owns its banner row.
+                stmt = stmt.where(run_definitions.c.session_id == session_id)
         if status and status != "all":
             states = DEFINITION_STATUS_FILTERS.get(status)
             if not states:
@@ -4881,6 +5220,7 @@ class SQLiteBackgroundTaskStore:
                                 "turn_id",
                                 "turn_failure_notification",
                                 TURN_PARTICIPANT_RUN_IDS_METADATA_KEY,
+                                "interrupt_reason",
                             )
                             if provenance and (value := provenance.get(key)) is not None
                         }
@@ -5128,6 +5468,7 @@ class SQLiteBackgroundTaskStore:
                     "turn_id",
                     "turn_failure_notification",
                     TURN_PARTICIPANT_RUN_IDS_METADATA_KEY,
+                    "interrupt_reason",
                 )
                 if (value := terminal_provenance.get(key)) is not None
             }
@@ -5162,6 +5503,184 @@ class SQLiteBackgroundTaskStore:
                     _conn=conn,
                 )
         return results
+
+    def reconcile_resultless_turn_failure_notices(
+        self,
+        run_ids: Sequence[str],
+        *,
+        turn_id: str,
+        settled_by: str,
+        updated_at: Optional[str] = None,
+    ) -> list[str]:
+        """Attach one exact Turn owner to legacy per-Run interruption notices.
+
+        Releases before HFR-474 lost the notification contract from Run metadata,
+        but accepted Delivery ownership still retained the exact Turn. Startup calls
+        this before the notice lane activates. A sent notice is authoritative;
+        otherwise one pending participant is elected deterministically. Notice state,
+        attempts, errors, and retry timing remain unchanged.
+        """
+
+        from core import failure_notices
+
+        normalized_turn_id = str(turn_id or "").strip()
+        normalized_reason = str(settled_by or "").strip()
+        normalized_run_ids = list(
+            dict.fromkeys(
+                run_id
+                for value in run_ids
+                if (run_id := str(value or "").strip())
+            )
+        )
+        if not normalized_turn_id or not normalized_reason or not normalized_run_ids:
+            return []
+
+        now = updated_at or _utc_now_iso()
+        changed_ids: list[str] = []
+        with run_update_event_transaction(self.engine) as conn:
+            reserve_write_lock(conn)
+            rows: dict[str, Any] = {}
+            for batch in _id_batches(normalized_run_ids):
+                rows.update(
+                    {
+                        str(row["id"]): row
+                        for row in conn.execute(
+                            select(agent_runs).where(agent_runs.c.id.in_(batch))
+                        ).mappings()
+                    }
+                )
+            participant_ids = [
+                run_id for run_id in normalized_run_ids if run_id in rows
+            ]
+            notice_rows: dict[str, tuple[Any, dict[str, Any], dict[str, Any]]] = {}
+            for run_id in participant_ids:
+                row = rows[run_id]
+                if normalize_run_status(row["status"]) != "failed":
+                    continue
+                metadata = _decoded_failure_notice_metadata(row["metadata_json"])
+                if metadata is None:
+                    continue
+                notice = metadata.get(OWED_FAILURE_NOTICE_KEY)
+                if not isinstance(notice, dict) or notice.get("state") not in {
+                    NOTICE_PENDING,
+                    NOTICE_SENT,
+                }:
+                    continue
+                notice_turn_id = failure_notices.notice_turn_id(notice)
+                if notice_turn_id and notice_turn_id != normalized_turn_id:
+                    continue
+                reason = str(
+                    notice.get("interrupt_reason")
+                    or metadata.get("interrupt_reason")
+                    or ""
+                ).strip()
+                if reason != normalized_reason:
+                    continue
+                notice_rows[run_id] = (row, metadata, dict(notice))
+            if not notice_rows:
+                return []
+
+            ordered_ids = sorted(
+                notice_rows,
+                key=lambda run_id: (
+                    str(notice_rows[run_id][0]["created_at"] or ""),
+                    run_id,
+                ),
+            )
+            sent_ids = [
+                run_id
+                for run_id in ordered_ids
+                if notice_rows[run_id][2].get("state") == NOTICE_SENT
+            ]
+            pending_ids = [
+                run_id
+                for run_id in ordered_ids
+                if notice_rows[run_id][2].get("state") == NOTICE_PENDING
+            ]
+            existing_owner = ""
+            for run_id in ordered_ids:
+                _row, metadata, notice = notice_rows[run_id]
+                notification = metadata.get("turn_failure_notification")
+                notification = notification if isinstance(notification, dict) else {}
+                candidate = str(
+                    notification.get("fallback_run_id")
+                    or notice.get("turn_fallback_run_id")
+                    or ""
+                ).strip()
+                if candidate in notice_rows:
+                    existing_owner = candidate
+                    break
+
+            if sent_ids:
+                owner_id = sent_ids[0]
+            elif existing_owner in pending_ids:
+                owner_id = existing_owner
+            else:
+                owner_id = next(
+                    (
+                        run_id
+                        for run_id in pending_ids
+                        if not _callback_parent_owns_failure_notice(
+                            conn,
+                            source_kind=notice_rows[run_id][0]["source_kind"],
+                            parent_run_id=notice_rows[run_id][0]["parent_run_id"],
+                        )
+                    ),
+                    pending_ids[0] if pending_ids else "",
+                )
+            if not owner_id:
+                return []
+
+            delivered = bool(sent_ids)
+            ack_evidence = None
+            if sent_ids:
+                evidence_values = [
+                    str(notice_rows[run_id][2].get("ack_evidence") or "")
+                    for run_id in sent_ids
+                ]
+                ack_evidence = max(
+                    evidence_values,
+                    key=lambda value: _ACK_EVIDENCE_PRIORITY.get(value, 0),
+                ) or None
+            failure_id = f"turn:{normalized_turn_id}"
+            notification: dict[str, Any] = {
+                "failure_id": failure_id,
+                "delivered": delivered,
+                "fallback_run_id": owner_id,
+            }
+            if ack_evidence:
+                notification["ack_evidence"] = ack_evidence
+
+            for run_id in ordered_ids:
+                _row, metadata, notice = notice_rows[run_id]
+                updated_metadata = dict(metadata)
+                updated_notice = dict(notice)
+                updated_metadata["turn_id"] = normalized_turn_id
+                updated_metadata["turn_failure_notification"] = dict(notification)
+                updated_notice.update(
+                    {
+                        "failure_id": failure_id,
+                        "turn_id": normalized_turn_id,
+                        "turn_notification_delivered": delivered,
+                        "turn_notification_ack_evidence": ack_evidence,
+                        "turn_fallback_run_id": owner_id,
+                        TURN_PARTICIPANT_RUN_IDS_METADATA_KEY: participant_ids,
+                    }
+                )
+                updated_metadata[OWED_FAILURE_NOTICE_KEY] = updated_notice
+                if updated_metadata == metadata:
+                    continue
+                conn.execute(
+                    update(agent_runs)
+                    .where(agent_runs.c.id == run_id)
+                    .values(
+                        metadata_json=_json_dumps(updated_metadata),
+                        updated_at=now,
+                    )
+                )
+                changed_ids.append(run_id)
+            _defer_run_ids_updated_from_connection(conn, changed_ids)
+        return changed_ids
 
     def settle_run_terminal(
         self,
@@ -5641,10 +6160,41 @@ class SQLiteBackgroundTaskStore:
         *,
         parent_run_id: str,
         source_actor: str,
+        terminal_turn_id: Optional[str] = None,
+        callback_session_id: Optional[str] = None,
     ) -> Optional[dict[str, Any]]:
-        """Return the callback Run for one parent callback identity."""
+        """Return the callback Run referenced by one parent callback ledger."""
 
         with self.engine.connect() as conn:
+            callback_run_id = conn.execute(
+                select(agent_runs.c.callback_run_id)
+                .where(agent_runs.c.id == parent_run_id)
+                .limit(1)
+            ).scalar_one_or_none()
+            if callback_run_id:
+                row = conn.execute(
+                    select(agent_runs)
+                    .where(agent_runs.c.id == callback_run_id)
+                    .where(agent_runs.c.run_type == "agent_run")
+                    .where(agent_runs.c.source_kind == "callback")
+                    .limit(1)
+                ).mappings().first()
+                if row is not None:
+                    return self._run_from_row(row)
+            normalized_turn_id = str(terminal_turn_id or "").strip()
+            normalized_session_id = str(callback_session_id or "").strip()
+            if normalized_turn_id and normalized_session_id:
+                row = conn.execute(
+                    select(agent_runs)
+                    .where(agent_runs.c.run_type == "agent_run")
+                    .where(agent_runs.c.source_kind == "callback")
+                    .where(agent_runs.c.callback_terminal_turn_id == normalized_turn_id)
+                    .where(agent_runs.c.session_id == normalized_session_id)
+                    .order_by(agent_runs.c.created_at, agent_runs.c.id)
+                    .limit(1)
+                ).mappings().first()
+                if row is not None:
+                    return self._run_from_row(row)
             row = conn.execute(
                 select(agent_runs)
                 .where(agent_runs.c.run_type == "agent_run")
@@ -7405,6 +7955,8 @@ class SQLiteBackgroundTaskStore:
     def _run_values(self, payload: dict[str, Any]) -> dict[str, Any]:
         created_at = payload.get("created_at") or payload.get("updated_at")
         message = payload.get("message") or payload.get("prompt")
+        raw_metadata = payload.get("metadata")
+        metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
         return {
             "id": payload["id"],
             "definition_id": payload.get("definition_id") or payload.get("task_id"),
@@ -7435,6 +7987,10 @@ class SQLiteBackgroundTaskStore:
             "callback_error": payload.get("callback_error"),
             "callback_run_id": payload.get("callback_run_id"),
             "callback_completed_at": payload.get("callback_completed_at"),
+            "callback_terminal_turn_id": str(
+                metadata.get(CALLBACK_TERMINAL_TURN_ID_METADATA_KEY) or ""
+            ).strip()
+            or None,
             "cancel_requested": 1 if payload.get("cancel_requested") else 0,
             "cancel_requested_at": payload.get("cancel_requested_at"),
             "pid": payload.get("pid"),
@@ -7446,11 +8002,12 @@ class SQLiteBackgroundTaskStore:
             "started_at": payload.get("started_at"),
             "completed_at": payload.get("completed_at"),
             "updated_at": payload.get("updated_at") or created_at,
-            "metadata_json": _json_dumps(payload.get("metadata") or {}),
+            "metadata_json": _json_dumps(raw_metadata or {}),
         }
 
     @staticmethod
     def _scheduled_task_from_row(row: Any) -> dict[str, Any]:
+        metadata = _json_loads(row["metadata_json"], {})
         return {
             "id": row["id"],
             "name": row["name"],
@@ -7478,7 +8035,8 @@ class SQLiteBackgroundTaskStore:
             "last_run_at": row["last_run_at"],
             "last_run_id": row["last_run_id"],
             "last_error": row["last_error"],
-            "metadata": _json_loads(row["metadata_json"], {}),
+            "metadata": metadata,
+            "resume_blocked": task_resume_block(metadata, row["session_id"]),
             "lifecycle_state": _row_lifecycle_state(row),
         }
 
@@ -7560,6 +8118,7 @@ class SQLiteBackgroundTaskStore:
             "callback_error": row["callback_error"],
             "callback_run_id": row["callback_run_id"],
             "callback_completed_at": row["callback_completed_at"],
+            "callback_terminal_turn_id": row["callback_terminal_turn_id"],
             "cancel_requested": bool(row["cancel_requested"]),
             "cancel_requested_at": row["cancel_requested_at"],
             "pid": row["pid"],
