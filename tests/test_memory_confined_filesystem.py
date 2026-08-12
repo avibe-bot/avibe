@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import os
 import sqlite3
 import stat
@@ -598,7 +599,7 @@ def test_confined_replace_and_cleanup_accept_owner_only_directory_modes(
     assert not target.exists()
 
 
-@pytest.mark.parametrize("mode", (0o000, 0o500, 0o755, 0o777))
+@pytest.mark.parametrize("mode", (0o500, 0o755, 0o777))
 def test_remove_confined_path_hardens_owned_directories(
     tmp_path: Path,
     mode: int,
@@ -616,6 +617,160 @@ def test_remove_confined_path_hardens_owned_directories(
     assert not target.exists()
 
 
+@pytest.mark.skipif(not hasattr(os, "O_PATH"), reason="requires an O_PATH inode anchor")
+def test_remove_confined_path_hardens_an_inaccessible_owned_directory(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+    target = home / "target"
+    target.mkdir(mode=0o700)
+    nested = target / "nested"
+    nested.mkdir(mode=0o700)
+    nested.chmod(0o000)
+
+    remove_confined_path(home, target)
+
+    assert not target.exists()
+
+
+def test_remove_confined_path_never_chmods_a_swapped_entry_without_an_anchor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+    target = home / "target"
+    target.mkdir(mode=0o700)
+    locked = target / "locked"
+    locked.mkdir(mode=0o700)
+    locked.chmod(0o000)
+    held = target / "held-locked"
+
+    from core.memory import confined_filesystem
+
+    real_open = confined_filesystem.os.open
+    real_chmod = confined_filesystem.os.chmod
+    path_chmod_called = False
+
+    def refuse_inaccessible_directory(path, flags, *args, **kwargs):
+        if path == locked.name and kwargs.get("dir_fd") is not None:
+            raise PermissionError(errno.EACCES, "directory is inaccessible")
+        return real_open(path, flags, *args, **kwargs)
+
+    def swap_before_path_chmod(path, mode, *args, **kwargs):
+        nonlocal path_chmod_called
+        if path == locked.name and kwargs.get("dir_fd") is not None:
+            path_chmod_called = True
+            locked.rename(held)
+            locked.mkdir(mode=0o755)
+        return real_chmod(path, mode, *args, **kwargs)
+
+    monkeypatch.delattr(confined_filesystem.os, "O_PATH", raising=False)
+    monkeypatch.setattr(confined_filesystem.os, "open", refuse_inaccessible_directory)
+    monkeypatch.setattr(confined_filesystem.os, "chmod", swap_before_path_chmod)
+    try:
+        with pytest.raises(ConfinedFilesystemError, match="cannot be opened safely"):
+            remove_confined_path(home, target)
+    finally:
+        if held.exists():
+            real_chmod(held, 0o700)
+        real_chmod(locked, 0o700)
+
+    assert not path_chmod_called
+    assert stat.S_IMODE(locked.stat().st_mode) == 0o700
+
+
+@pytest.mark.parametrize("mode", (0o500, 0o755))
+def test_remove_confined_path_does_not_require_procfs_for_openable_directories(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: int,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+    target = home / "target"
+    target.mkdir(mode=0o700)
+    nested = target / "nested"
+    nested.mkdir(mode=0o700)
+    nested.chmod(mode)
+
+    from core.memory import confined_filesystem
+
+    fake_o_path = 1 << 30
+    real_open = confined_filesystem.os.open
+    real_chmod = confined_filesystem.os.chmod
+
+    def emulate_o_path(path, flags, *args, **kwargs):
+        if flags & fake_o_path:
+            flags = (flags & ~fake_o_path) | os.O_RDONLY
+        return real_open(path, flags, *args, **kwargs)
+
+    def reject_procfs_chmod(path, chmod_mode, *args, **kwargs):
+        if os.fspath(path).startswith("/proc/self/fd/"):
+            raise FileNotFoundError(errno.ENOENT, "procfs is unavailable")
+        return real_chmod(path, chmod_mode, *args, **kwargs)
+
+    monkeypatch.setattr(confined_filesystem.os, "O_PATH", fake_o_path, raising=False)
+    monkeypatch.setattr(confined_filesystem.os, "open", emulate_o_path)
+    monkeypatch.setattr(confined_filesystem.os, "chmod", reject_procfs_chmod)
+
+    remove_confined_path(home, target)
+
+    assert not target.exists()
+
+
+def test_remove_confined_path_rejects_a_mount_boundary_before_scanning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+    target = home / "target"
+    target.mkdir(mode=0o700)
+    mounted = target / "mounted"
+    mounted.mkdir(mode=0o700)
+    victim = mounted / "victim.txt"
+    victim.write_text("must survive", encoding="utf-8")
+
+    from core.memory import confined_filesystem
+
+    real_open = confined_filesystem.os.open
+    real_scandir = confined_filesystem.os.scandir
+    scanned_mount = False
+
+    def reject_mount(parent_fd, name, flags):
+        if name == mounted.name:
+            raise OSError(errno.EXDEV, "mount boundary")
+        return real_open(name, flags, dir_fd=parent_fd)
+
+    def record_scandir(path):
+        nonlocal scanned_mount
+        if isinstance(path, int):
+            opened = os.fstat(path)
+            mounted_info = mounted.stat()
+            if (opened.st_dev, opened.st_ino) == (
+                mounted_info.st_dev,
+                mounted_info.st_ino,
+            ):
+                scanned_mount = True
+        return real_scandir(path)
+
+    monkeypatch.setattr(
+        confined_filesystem,
+        "_open_directory_without_mount_crossing",
+        reject_mount,
+    )
+    monkeypatch.setattr(confined_filesystem.os, "scandir", record_scandir)
+
+    with pytest.raises(ConfinedFilesystemError, match="filesystem boundary"):
+        remove_confined_path(home, target)
+
+    assert not scanned_mount
+    assert victim.read_text(encoding="utf-8") == "must survive"
+
+
+@pytest.mark.skipif(not hasattr(os, "O_PATH"), reason="requires an O_PATH inode anchor")
 def test_remove_confined_path_rejects_directory_swap_during_permission_hardening(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -663,6 +818,7 @@ def test_remove_confined_path_rejects_directory_swap_during_permission_hardening
     assert (held / "original.txt").read_text(encoding="utf-8") == "original"
 
 
+@pytest.mark.skipif(not hasattr(os, "O_PATH"), reason="requires an O_PATH inode anchor")
 def test_remove_confined_path_does_not_follow_symlink_swapped_in_during_hardening(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -711,6 +867,7 @@ def test_remove_confined_path_does_not_follow_symlink_swapped_in_during_hardenin
     assert victim.read_text(encoding="utf-8") == "outside survives"
 
 
+@pytest.mark.skipif(not hasattr(os, "O_PATH"), reason="requires an O_PATH inode anchor")
 def test_remove_confined_path_rechecks_device_after_permission_hardening(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -755,6 +912,7 @@ def test_remove_confined_path_rechecks_device_after_permission_hardening(
     assert target.is_dir()
 
 
+@pytest.mark.skipif(not hasattr(os, "O_PATH"), reason="requires an O_PATH inode anchor")
 def test_remove_confined_path_fails_closed_without_anchored_hardening(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

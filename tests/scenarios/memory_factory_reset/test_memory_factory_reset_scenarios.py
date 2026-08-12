@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -239,6 +240,7 @@ async def test_memory_factory_004_capture_queued_for_reset_cannot_use_fresh_runt
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(not hasattr(os, "O_PATH"), reason="requires an O_PATH inode anchor")
 async def test_memory_factory_005_retry_deletes_owned_inaccessible_child_home(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
