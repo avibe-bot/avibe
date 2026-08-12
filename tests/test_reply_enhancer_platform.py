@@ -293,7 +293,15 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         # request; enabling Memory now grants the proactive contract directly.
         self.assertNotIn("explicitly requested by the user", prompt)
         self.assertIn("### When to remember", prompt)
-        self.assertIn("Call `remember` proactively, without being asked", prompt)
+        # An explicit remember request always lands in Memory, with a short
+        # confirmation, and never drifts to another surface.
+        self.assertIn(
+            "When the user explicitly asks you to remember, note, or keep track of something",
+            prompt,
+        )
+        self.assertIn("always record it with `remember` and confirm in one short sentence", prompt)
+        self.assertIn("An explicit request overrides the plain-text rule below", prompt)
+        self.assertIn("Also call `remember` proactively, without being asked", prompt)
         self.assertIn("a correction of your own behavior", prompt)
         self.assertIn("a decision, conclusion, or agreement the conversation arrived at", prompt)
         # Project knowledge stays on the AGENTS.md surface; only user/machine
@@ -313,7 +321,10 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             prompt,
         )
         self.assertIn("a fact stated outright in one of those is in Memory already", prompt)
-        self.assertIn("never queue a paraphrase of it", prompt)
+        self.assertIn(
+            "never queue a paraphrase of it, unless the user explicitly asked you to remember it",
+            prompt,
+        )
         self.assertIn("only for a conclusion automatic capture cannot reach", prompt)
         self.assertIn(
             "never restate a fact one of their plain text messages already carries on its own",
@@ -359,19 +370,33 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
                 context=context,
             )
 
-        # Proactive capture routes to Memory's managed lifecycle in one
-        # direction only; the preferences file stays explicit-request.
+        # With Memory admitted, Memory owns every user-fact write — explicit
+        # remember requests included — and the preferences file drops to
+        # read-only unless the user names it as the destination themselves.
         self.assertIn(
-            "anything you decide to record proactively goes through `vibe memory remember`",
+            "Anything you decide to record proactively goes through `vibe memory remember`",
             prompt,
         )
         self.assertIn("Everything you record proactively belongs here", prompt)
-        # Memory is project-scoped, so cross-project preferences are offered to
-        # the user-global preferences file — but only written on agreement.
-        self.assertIn("Memory is scoped to the current project", prompt)
-        self.assertIn("offer to save it to the shared user preferences file", prompt)
-        self.assertIn("write there only once the user agrees", prompt)
-        self.assertIn("You may also update it when explicitly asked", prompt)
+        self.assertIn(
+            "personal facts and stable user habits — including ones the user asks you to remember — "
+            "go to Avibe Memory through `vibe memory remember`",
+            prompt,
+        )
+        self.assertIn("do not write user facts or habits here while Memory is enabled", prompt)
+        self.assertIn(
+            "Write to this file only when the user explicitly names it as the destination",
+            prompt,
+        )
+        self.assertIn(
+            "a general request to remember something is fulfilled with `vibe memory remember`, never here",
+            prompt,
+        )
+        self.assertNotIn("You may also update it when explicitly asked", prompt)
+        self.assertNotIn("offer to save it to the shared user preferences file", prompt)
+        self.assertNotIn("write there only once the user agrees", prompt)
+        # Memory never routes through Avibe's own state files or SQLite.
+        self.assertIn("Never store memories by writing Avibe's SQLite state", prompt)
 
     def test_preferences_prompt_stays_passive_without_memory(self):
         context = MessageContext(
@@ -392,10 +417,19 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         # Memory section grants proactive writes would point the Agent at
         # behavior the injected guidance never authorized.
         self.assertIn("You may also update it when explicitly asked", prompt)
-        self.assertNotIn(
-            "anything you decide to record proactively goes through `vibe memory remember`",
+        self.assertIn(
+            "stable user habits the user asks you to keep go to the shared preferences file",
             prompt,
         )
+        self.assertIn(
+            "Use it only when stable cross-project user context would improve the decision",
+            prompt,
+        )
+        self.assertNotIn(
+            "Anything you decide to record proactively goes through `vibe memory remember`",
+            prompt,
+        )
+        self.assertNotIn("do not write user facts or habits here while Memory is enabled", prompt)
 
     def test_memory_cli_prompt_admission_is_turn_and_surface_scoped(self):
         controller = SimpleNamespace(
