@@ -4029,7 +4029,7 @@
       "section": "Organization",
       "organizationCount": "{{count}} organizations",
       "switchOrganization": "Switch Organization",
-      "cloudConnected": "Cloud connected",
+      "cloudConnected": "Avibe Cloud connected",
       "sessionRemaining": "{{minutes}}m",
       "openMenu": "Open Organization menu"
     },
