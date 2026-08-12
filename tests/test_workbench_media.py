@@ -139,6 +139,33 @@ def test_rewrite_in_place_image_file_and_external(tmp_path):
     assert all(r["source"] == "agent_reply" for r in rows)
 
 
+def test_rewrite_angle_wrapped_file_links(tmp_path):
+    db = tmp_path / "vibe.sqlite"
+    run_migrations(db)
+    engine = create_sqlite_engine(db)
+
+    image = tmp_path / "图片 文件.png"
+    image.write_bytes(b"image")
+    report = tmp_path / "My Report (最终).md"
+    report.write_text("report", encoding="utf-8")
+    text = f"![图片](<file://{image}>) and [下载报告](<file://{report}>)"
+
+    with engine.begin() as conn:
+        scope_id = _seed_scope_and_session(conn)
+        out = rewrite_agent_media(conn, scope_id=scope_id, session_id="sess_x", text=text)
+
+    assert "file://" not in out
+    assert out.startswith("![图片](/api/media/")
+    assert "and [下载报告](/api/media/" in out
+    with engine.connect() as conn:
+        rows = conn.execute(select(media_objects)).mappings().all()
+    assert {row["local_path"] for row in rows} == {
+        str(image.resolve()),
+        str(report.resolve()),
+    }
+    assert sorted(row["kind"] for row in rows) == ["file", "image"]
+
+
 def test_resolve_attachment_specs(tmp_path):
     db = tmp_path / "vibe.sqlite"
     run_migrations(db)

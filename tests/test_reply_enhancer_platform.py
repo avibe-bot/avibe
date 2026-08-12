@@ -1929,6 +1929,46 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             "/Users/test/SaveTwitter.Net_GABV3XNWYAARAZz(gif).mp4",
         )
 
+    def test_angle_wrapped_file_links_accept_commonmark_destinations(self):
+        enhanced = process_reply(
+            "[下载报告](<file:///tmp/My Report (最终).md>) and "
+            "![图片](<file:///tmp/图片 文件.png>)"
+        )
+
+        self.assertEqual(enhanced.text, "下载报告 and 图片")
+        self.assertEqual(
+            [(file.label, file.path, file.is_image) for file in enhanced.files],
+            [
+                ("下载报告", "/tmp/My Report (最终).md", False),
+                ("图片", "/tmp/图片 文件.png", True),
+            ],
+        )
+
+    def test_angle_wrapped_file_links_reject_malformed_markdown_and_code(self):
+        specimens = [
+            "[missing close](<file:///tmp/report.md)",
+            "[extra angle](<file:///tmp/report>copy.md>)",
+            "[extra open](<<file:///tmp/report.md>>)",
+            "[missing label close(<file:///tmp/report.md>)",
+            "`[inline](<file:///tmp/report.md>)`",
+            "```markdown\n[fenced](<file:///tmp/report.md>)\n```",
+        ]
+
+        for text in specimens:
+            with self.subTest(text=text):
+                enhanced = process_reply(text)
+                self.assertEqual(enhanced.text, text)
+                self.assertEqual(enhanced.files, [])
+
+    def test_unwrapped_file_link_parser_keeps_existing_destination_behavior(self):
+        enhanced = process_reply("[report](file:///tmp/report>draft.md)")
+
+        self.assertEqual(enhanced.text, "report")
+        self.assertEqual(
+            [file.path for file in enhanced.files],
+            ["/tmp/report>draft.md"],
+        )
+
     def test_windows_file_uri_is_normalized_before_absolute_check(self):
         with patch("core.reply_enhancer.os.name", "nt"), patch("core.reply_enhancer.os.path.isabs") as isabs:
             isabs.side_effect = lambda value: value == r"C:\Users\test\generated image.png"

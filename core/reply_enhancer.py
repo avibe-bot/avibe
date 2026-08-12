@@ -138,10 +138,21 @@ class EnhancedReply:
 # Regex patterns
 # ---------------------------------------------------------------------------
 
-# Matches markdown links with file:// URLs, including image links:
+# Matches markdown links with file:// URLs, including image links. CommonMark
+# permits angle brackets around destinations so paths containing spaces do not
+# need escaping:
 #   [label](file:///path)
-#   ![alt](file:///path)
-_FILE_LINK_RE = re.compile(r"(!?)\[([^\]]*)\]\((file://(?:[^()]+|\([^)]*\))+)\)")
+#   [label](<file:///path with spaces>)
+#   ![alt](<file:///path/(v1).png>)
+# The lookahead validates the complete destination form before the shared URL
+# capture consumes it, keeping malformed or half-paired brackets unmatched.
+_BARE_FILE_URI = r"file://(?:[^()]+|\([^)]*\))+"
+_ANGLE_FILE_URI = r"file://[^<>\r\n]+"
+_FILE_LINK_RE = re.compile(
+    rf"(!?)\[([^\]]*)\]\("
+    rf"(?=(?:<{_ANGLE_FILE_URI}>|{_BARE_FILE_URI})\))"
+    rf"(?:<)?((?<=<){_ANGLE_FILE_URI}|{_BARE_FILE_URI})(?:>)?\)"
+)
 
 # Matches the quick-reply button block at the end of the text.
 # A horizontal rule (``---``) on its own line, followed by bracket buttons.
