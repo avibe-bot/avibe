@@ -37,7 +37,6 @@ from config.v2_config import V2Config
 from core.scheduled_tasks import (
     AGENT_RUN_DELIVERY_QUEUE,
     AGENT_RUN_DELIVERY_STEER,
-    AGENT_RUN_DELIVERY_SEND_NOW,
     BINDING_FOLLOWS_SESSION_METADATA_KEY,
     ScheduledTaskStore,
     TaskExecutionStore,
@@ -76,6 +75,9 @@ from storage.db import create_sqlite_engine
 from storage.background import (
     DefinitionWriteConflict,
     SQLiteBackgroundTaskStore,
+    TASK_RETIREMENT_SCHEDULE_MISSED,
+    TaskResumeBlocked,
+    TaskScheduleRetired,
     compute_next_run_at,
     normalize_run_status,
 )
@@ -357,7 +359,7 @@ def _print_cli_payload(kind: str, **fields) -> None:
     print(json.dumps(_cli_payload(kind, **fields), indent=2))
 
 
-def _memory_cli_language() -> str:
+def _configured_cli_language() -> str:
     """Read an optional configured language without creating or migrating state."""
 
     try:
@@ -367,6 +369,52 @@ def _memory_cli_language() -> str:
         return normalize_language(language if isinstance(language, str) else None)
     except Exception:
         return "en"
+
+
+def _memory_cli_language() -> str:
+    return _configured_cli_language()
+
+
+_MEMORY_CLI_SOURCE_STATE_I18N_KEYS = {
+    "available": "memory.cli.sourceState.available",
+    "stale": "memory.cli.sourceState.stale",
+    "unavailable": "memory.cli.sourceState.unavailable",
+}
+_MEMORY_CLI_PROVIDER_STATE_I18N_KEYS = {
+    "ok": "memory.cli.providerState.ok",
+}
+_MEMORY_CLI_REASON_I18N_KEYS = {
+    "memory_disabled": "memory.cli.reason.memoryDisabled",
+    "memory_invalid_input": "memory.cli.reason.invalidInput",
+    "memory_access_denied": "memory.cli.reason.accessDenied",
+    "memory_input_too_large": "memory.cli.reason.inputTooLarge",
+    "memory_queue_full": "memory.cli.reason.queueFull",
+    "memory_low_disk_space": "memory.cli.reason.lowDiskSpace",
+    "memory_store_unavailable": "memory.cli.reason.storeUnavailable",
+    "memory_runtime_missing": "memory.cli.reason.runtimeMissing",
+    "memory_runtime_unsupported": "memory.cli.reason.runtimeUnsupported",
+    "memory_runtime_install_failed": "memory.cli.reason.runtimeInstallFailed",
+    "memory_reconcile_failed": "memory.cli.reason.reconcileFailed",
+    "memory_restart_failed": "memory.cli.reason.restartFailed",
+    "memory_sidecar_unavailable": "memory.cli.reason.sidecarUnavailable",
+    "memory_provider_timeout": "memory.cli.reason.providerTimeout",
+    "memory_provider_response_invalid": "memory.cli.reason.providerResponseInvalid",
+    "memory_capability_unavailable": "memory.cli.reason.capabilityUnavailable",
+    "memory_processing_failed": "memory.cli.reason.processingFailed",
+    "memory_clear_failed": "memory.cli.reason.clearFailed",
+    "memory_factory_reset_failed": "memory.cli.reason.factoryResetFailed",
+}
+
+
+def _memory_cli_label(
+    value: object,
+    *,
+    keys: dict[str, str],
+    fallback_key: str,
+    language: str,
+) -> str:
+    token = value.strip() if isinstance(value, str) else ""
+    return i18n_t(keys.get(token, fallback_key), language)
 
 
 def _print_memory_cli_error(operation: str, code: str, *, as_json: bool, language: str) -> int:
@@ -405,27 +453,52 @@ def _print_memory_cli_human(operation: str, result: dict, *, language: str) -> N
         print(i18n_t("memory.cli.remembered", language))
         return
     if operation == "status":
-        from core.memory.presentation import memory_status_buckets
-
-        buckets = memory_status_buckets(result)
-        print(i18n_t("memory.cli.status", language, state=result.get("state", "error")))
+        source = result.get("source")
+        source_state = source.get("status") if isinstance(source, dict) else None
+        source_state_label = _memory_cli_label(
+            source_state if source_state is not None else "unavailable",
+            keys=_MEMORY_CLI_SOURCE_STATE_I18N_KEYS,
+            fallback_key="memory.cli.sourceState.unknown",
+            language=language,
+        )
         print(
             i18n_t(
-                "memory.cli.counts",
+                "memory.cli.status",
                 language,
-                syncing=buckets.syncing,
-                succeeded=buckets.succeeded,
-                unknown=buckets.unknown,
-                failed=buckets.failed,
-                dead=buckets.dead,
-                missed=buckets.missed,
+                state=source_state_label,
             )
         )
-        fault_kind = result.get("processing_fault_kind")
-        if fault_kind in {"credential", "engine"}:
-            print(i18n_t(f"memory.cli.fault.{fault_kind}", language))
-        # Status is principal-less, so it no longer carries profile_warning.
-        # ``vibe memory profile`` reports an empty profile from its own result.
+        health = result.get("health")
+        if isinstance(health, dict):
+            version = health.get("version")
+            provider_state = health.get("status")
+            provider_state_label = _memory_cli_label(
+                provider_state,
+                keys=_MEMORY_CLI_PROVIDER_STATE_I18N_KEYS,
+                fallback_key="memory.cli.providerState.unknown",
+                language=language,
+            )
+            print(
+                i18n_t(
+                    "memory.cli.provider",
+                    language,
+                    version=(
+                        version
+                        if isinstance(version, str) and version
+                        else i18n_t("memory.cli.unknownVersion", language)
+                    ),
+                    state=provider_state_label,
+                )
+            )
+        reason = source.get("reason") if isinstance(source, dict) else None
+        if isinstance(reason, str) and reason:
+            reason_label = _memory_cli_label(
+                reason,
+                keys=_MEMORY_CLI_REASON_I18N_KEYS,
+                fallback_key="memory.cli.reason.unknown",
+                language=language,
+            )
+            print(i18n_t("memory.cli.sourceReason", language, reason=reason_label))
         return
 
     items = result.get("items")
@@ -1406,7 +1479,7 @@ def _agent_run_examples_text() -> str:
           Use --session-id to continue an existing Agent Session.
           The default is P1: steer an active native Turn, start when idle, or fall back to the durable P3 queue.
           Add --queue to persist this Run as P3 behind the active Turn.
-          Add --send-now to persist the new Run and steer the exact FIFO head into the active Turn.
+          --send-now explicitly selects the same P1 content delivery for an existing Session.
           To promote the exact existing P3 queue head without a new message, use: vibe session send-now <session-id>
           Inspect queued work with: vibe session queue list <session-id>
           Remove one exact queued row with: vibe session queue remove <session-id> <message-id>
@@ -1856,12 +1929,12 @@ def _task_display_name(task) -> str:
 
 
 def _task_state(task) -> str:
-    if task.enabled:
-        return "active"
     if _is_failed_one_shot(task):
         return "failed"
     if _is_completed_one_shot(task):
         return "completed"
+    if task.enabled:
+        return "active"
     return "paused"
 
 
@@ -1965,6 +2038,7 @@ def _task_payload(task, *, brief: bool = False):
 _CANONICAL_DEFINITION_FIELDS = (
     "lifecycle_state",
     "lifecycle_detail",
+    "lifecycle_finished_at",
     "next_run_at",
     "waiting_since",
     "running_since",
@@ -2000,6 +2074,7 @@ _DEFINITION_FAILURE_FIELDS = (
     "processing_recent_failures",
     # The one field that says WHY, dropped from the brief list payload before.
     "last_error",
+    "resume_blocked",
 )
 
 
@@ -2010,7 +2085,14 @@ def _task_projection_state(task: Mapping[str, object]) -> str:
     if lifecycle_state in {"waiting", "running"}:
         return "active"
     if lifecycle_state == "finished":
-        return "failed" if task.get("lifecycle_detail") in {"timeout", "error"} else "completed"
+        lifecycle_detail = task.get("lifecycle_detail")
+        if lifecycle_detail == "canceled":
+            return "canceled"
+        if lifecycle_detail in {"timeout", "error", "missed"}:
+            return "failed"
+        if lifecycle_detail == "normal":
+            return "completed"
+        return "unknown"
     if lifecycle_state == "paused":
         return "paused"
     return "unknown"
@@ -2173,18 +2255,21 @@ def _supported_task_platforms() -> set[str]:
 def _is_completed_one_shot(task) -> bool:
     return (
         task.schedule_type == "at"
-        and not task.enabled
+        and bool(task.retired_at)
         and bool(task.last_run_at)
         and not task.last_error
+        and task.retirement_reason != TASK_RETIREMENT_SCHEDULE_MISSED
     )
 
 
 def _is_failed_one_shot(task) -> bool:
     return (
         task.schedule_type == "at"
-        and not task.enabled
-        and bool(task.last_run_at)
-        and bool(task.last_error)
+        and bool(task.retired_at)
+        and (
+            task.retirement_reason == TASK_RETIREMENT_SCHEDULE_MISSED
+            or (bool(task.last_run_at) and bool(task.last_error))
+        )
     )
 
 
@@ -3137,6 +3222,12 @@ def _agent_payload(agent, *, brief: bool = False) -> dict:
 def _run_payload(run: dict, *, brief: bool = False) -> dict:
     normalized = dict(run)
     normalized["status"] = normalize_run_status(normalized.get("status"))
+    activity_at = normalized.get("last_activity_at") or normalized.get("started_at")
+    activity_basis = (
+        "output"
+        if normalized.get("last_activity_at")
+        else ("start" if activity_at else None)
+    )
     if brief:
         return {
             "id": normalized.get("id"),
@@ -3147,6 +3238,9 @@ def _run_payload(run: dict, *, brief: bool = False) -> dict:
             "definition_id": normalized.get("definition_id") or normalized.get("task_id"),
             "created_at": normalized.get("created_at"),
             "started_at": normalized.get("started_at"),
+            "last_activity_at": activity_at,
+            "activity_basis": activity_basis,
+            "activity_age_seconds": _seconds_since_iso(activity_at),
             "completed_at": normalized.get("completed_at"),
             "error": normalized.get("error"),
             "callback_session_id": normalized.get("callback_session_id"),
@@ -3156,11 +3250,95 @@ def _run_payload(run: dict, *, brief: bool = False) -> dict:
     return normalized
 
 
+def cmd_harness_status(_args) -> int:
+    """Print one bounded operational snapshot across Harness work types."""
+
+    from core.services.harness_status import build_harness_status
+    from vibe import internal_client
+
+    try:
+        language = _configured_cli_language()
+        request_store = _task_request_store()
+        sqlite_store = request_store.sqlite_backend
+        if sqlite_store is None:
+            raise RuntimeError(i18n_t("harness.cli.error.sqliteRequired", language))
+        fetch_limit = MAX_PAGE_LIMIT + 1
+        raw_runs = sqlite_store.list_active_runs(limit=fetch_limit)
+        raw_watches = sqlite_store.list_enabled_definitions(
+            "watch",
+            limit=fetch_limit,
+        )
+        raw_tasks = sqlite_store.list_enabled_definitions(
+            "scheduled",
+            limit=fetch_limit,
+        )
+        runs_truncated = len(raw_runs) > MAX_PAGE_LIMIT
+
+        try:
+            response = asyncio.run(
+                internal_client.list_running_agents(
+                    run_ids=[str(row.get("id")) for row in raw_runs if row.get("id")]
+                )
+            )
+            body = response.get("body") if isinstance(response, dict) else None
+            runtime_snapshot = dict(body) if isinstance(body, dict) else {}
+            status_code = response.get("status_code") if isinstance(response, dict) else None
+            runtime_snapshot["available"] = status_code == 200 and bool(
+                runtime_snapshot.get("ok")
+            )
+            if not runtime_snapshot["available"]:
+                runtime_snapshot["error"] = i18n_t(
+                    "harness.cli.error.controllerStatus",
+                    language,
+                    status=status_code,
+                )
+        except internal_client.InternalServerTimeout:
+            runtime_snapshot = {
+                "available": False,
+                "error": i18n_t("harness.cli.error.controllerTimeout", language),
+            }
+        except internal_client.InternalServerUnavailable:
+            runtime_snapshot = {
+                "available": False,
+                "error": i18n_t("harness.cli.error.controllerUnavailable", language),
+            }
+
+        # Ownership is a point-in-time controller fact. Keep only Runs that were
+        # active on both sides of that snapshot so a Run completing during the
+        # request cannot be mislabeled as owner-missing.
+        active_run_ids_after = sqlite_store.active_run_ids(
+            row.get("id") for row in raw_runs
+        )
+        raw_runs = [
+            row for row in raw_runs if str(row.get("id")) in active_run_ids_after
+        ]
+
+        snapshot = build_harness_status(
+            runs=raw_runs[:MAX_PAGE_LIMIT],
+            watches=raw_watches[:MAX_PAGE_LIMIT],
+            tasks=raw_tasks[:MAX_PAGE_LIMIT],
+            runtime_snapshot=runtime_snapshot,
+            truncated={
+                "runs": runs_truncated,
+                "watches": len(raw_watches) > MAX_PAGE_LIMIT,
+                "tasks": len(raw_tasks) > MAX_PAGE_LIMIT,
+            },
+        )
+        _print_cli_payload("harness_status", **snapshot)
+        return 0
+    except Exception as exc:
+        _print_task_error(exc, help_command="vibe harness status --help")
+        return 1
+
+
 def _seconds_since_iso(timestamp: object) -> float | None:
     if not isinstance(timestamp, str) or not timestamp.strip():
         return None
+    text = timestamp.strip()
+    if text.endswith(("Z", "z")):
+        text = f"{text[:-1]}+00:00"
     try:
-        started_at = datetime.fromisoformat(timestamp)
+        started_at = datetime.fromisoformat(text)
     except ValueError:
         return None
     if started_at.tzinfo is None:
@@ -3707,6 +3885,33 @@ def cmd_task_set_enabled(task_id: str, enabled: bool):
         return 1
     try:
         updated = store.set_enabled(task_id, enabled)
+    except TaskResumeBlocked as exc:
+        lang = _memory_cli_language()
+        _print_task_error(
+            TaskCliError(
+                i18n_t("error.taskOwnerUnavailable.message", lang),
+                code=exc.code,
+                hint=i18n_t("error.taskOwnerUnavailable.hint", lang, id=task_id),
+                help_command=f"vibe task remove {task_id}",
+                details={
+                    "task_id": task_id,
+                    "owner_session_id": exc.owner_session_id,
+                },
+            )
+        )
+        return 1
+    except TaskScheduleRetired as exc:
+        lang = _memory_cli_language()
+        _print_task_error(
+            TaskCliError(
+                i18n_t("error.taskScheduleRetired.message", lang),
+                code=exc.code,
+                hint=i18n_t("error.taskScheduleRetired.hint", lang, id=task_id),
+                help_command=f"vibe task update {task_id} --help",
+                details={"task_id": task_id},
+            )
+        )
+        return 1
     except DefinitionWriteConflict as exc:
         # Pause/resume is also a full-row write, so it is refused when a teardown
         # changed the definition first. Reporting the switch as flipped would be a lie
@@ -5811,13 +6016,11 @@ def cmd_agent_run(args):
         )
         session_policy = _validate_run_session_policy(args, help_command="vibe agent run --help")
         delivery_intent = (
-            AGENT_RUN_DELIVERY_SEND_NOW
-            if bool(getattr(args, "send_now", False))
-            else AGENT_RUN_DELIVERY_QUEUE
+            AGENT_RUN_DELIVERY_QUEUE
             if bool(getattr(args, "queue", False))
             else AGENT_RUN_DELIVERY_STEER
         )
-        if delivery_intent == AGENT_RUN_DELIVERY_SEND_NOW and session_policy != "existing":
+        if bool(getattr(args, "send_now", False)) and session_policy != "existing":
             raise TaskCliError(
                 "--send-now requires an existing Agent Session",
                 code="send_now_requires_existing_session",
@@ -6026,7 +6229,7 @@ def cmd_agent_run(args):
                 "parent_run_id": parent_run_id,
             },
         }
-        if delivery_intent != AGENT_RUN_DELIVERY_STEER:
+        if bool(getattr(args, "send_now", False)) or delivery_intent != AGENT_RUN_DELIVERY_STEER:
             payload["delivery_intent"] = delivery_intent
             payload["run"]["delivery_intent"] = delivery_intent
         if fork_result:
@@ -6206,6 +6409,17 @@ def _recorded_only_cancel_result(*, reason_code: str, detail: object | None = No
     return result
 
 
+def _record_live_cancel_fallback(
+    store: TaskExecutionStore,
+    run_id: str,
+    *,
+    reason_code: str,
+    detail: object | None = None,
+) -> dict:
+    store.cancel_run(run_id)
+    return _recorded_only_cancel_result(reason_code=reason_code, detail=detail)
+
+
 def _initial_cancel_result(run: dict | None) -> dict:
     if not isinstance(run, dict):
         return _recorded_only_cancel_result(reason_code="run_not_found")
@@ -6258,22 +6472,33 @@ def _live_cancel_was_confirmed(status_code: int | None, body: object) -> bool:
     return str(body.get("status") or "").strip() in {"cancel_requested", "stale_released"}
 
 
-async def _request_live_run_cancel(session_id: str) -> dict:
+async def _request_live_run_cancel(session_id: str, run_id: str) -> dict:
     from vibe import internal_client
 
-    return await internal_client.cancel_dispatch(session_id)
+    return await internal_client.cancel_dispatch(session_id, run_id=run_id)
 
 
 def _cancel_live_agent_run(store: TaskExecutionStore, run: dict) -> dict:
     session_id = _run_session_id(run)
+    run_id = str(run.get("id") or "").strip()
     from vibe import internal_client
 
     try:
-        controller_result = asyncio.run(_request_live_run_cancel(session_id))
+        controller_result = asyncio.run(_request_live_run_cancel(session_id, run_id))
     except internal_client.InternalServerUnavailable as exc:
-        return _recorded_only_cancel_result(reason_code="internal_unavailable", detail=str(exc))
+        return _record_live_cancel_fallback(
+            store,
+            run_id,
+            reason_code="internal_unavailable",
+            detail=str(exc),
+        )
     except Exception as exc:  # noqa: BLE001
-        return _recorded_only_cancel_result(reason_code="live_cancel_failed", detail=str(exc))
+        return _record_live_cancel_fallback(
+            store,
+            run_id,
+            reason_code="live_cancel_failed",
+            detail=str(exc),
+        )
 
     status_code = controller_result.get("status_code")
     try:
@@ -6281,8 +6506,43 @@ def _cancel_live_agent_run(store: TaskExecutionStore, run: dict) -> dict:
     except (TypeError, ValueError):
         normalized_status_code = None
     body = controller_result.get("body") or {}
+    if (
+        normalized_status_code is not None
+        and 200 <= normalized_status_code < 300
+        and isinstance(body, dict)
+        and str(body.get("status") or "").strip() == "run_detached"
+    ):
+        saved = store.get_run(run_id)
+        return {
+            "code": "run_canceled_without_live_stop",
+            "live_cancel_attempted": False,
+            "live_cancel_confirmed": False,
+            "run_terminalized": bool(
+                saved and normalize_run_status(saved.get("status")) == "canceled"
+            ),
+            "controller_status_code": normalized_status_code,
+            "controller_response": body,
+            "message": "Run was canceled without stopping the shared Session turn.",
+        }
+    if (
+        normalized_status_code is not None
+        and 200 <= normalized_status_code < 300
+        and isinstance(body, dict)
+        and str(body.get("status") or "").strip() == "run_settled"
+    ):
+        return {
+            "code": "run_already_settled",
+            "live_cancel_attempted": False,
+            "live_cancel_confirmed": False,
+            "run_terminalized": False,
+            "controller_status_code": normalized_status_code,
+            "controller_response": body,
+            "message": "Run had already settled before cancellation acquired ownership.",
+        }
     if not _live_cancel_was_confirmed(normalized_status_code, body):
-        return _recorded_only_cancel_result(
+        return _record_live_cancel_fallback(
+            store,
+            run_id,
             reason_code=_live_cancel_failure_code(normalized_status_code, body),
             detail={
                 "controller_status_code": normalized_status_code,
@@ -6290,7 +6550,7 @@ def _cancel_live_agent_run(store: TaskExecutionStore, run: dict) -> dict:
             },
         )
 
-    run_terminalized = store.mark_run_canceled(str(run.get("id") or ""))
+    run_terminalized = store.mark_run_canceled(run_id)
     return {
         "code": "live_cancel_confirmed",
         "live_cancel_attempted": True,
@@ -6308,13 +6568,14 @@ def cmd_runs_cancel(args):
     if existing is None:
         _print_task_error(TaskCliError(f"run '{args.run_id}' not found", code="run_not_found", details={"run_id": args.run_id}))
         return 1
-    canceled = store.cancel_run(args.run_id)
-    if not canceled:
-        _print_task_error(TaskCliError(f"run '{args.run_id}' not found", code="run_not_found", details={"run_id": args.run_id}))
-        return 1
-    cancel_result = _initial_cancel_result(existing)
     if _should_attempt_live_run_cancel(existing):
         cancel_result = _cancel_live_agent_run(store, existing)
+    else:
+        canceled = store.cancel_run(args.run_id)
+        if not canceled:
+            _print_task_error(TaskCliError(f"run '{args.run_id}' not found", code="run_not_found", details={"run_id": args.run_id}))
+            return 1
+        cancel_result = _initial_cancel_result(existing)
     run = store.get_run(args.run_id)
     _print_cli_payload(
         "agent_run",
@@ -10667,13 +10928,26 @@ def _doctor(*, deep: bool = False):
     config = None
     try:
         config = V2Config.load(config_path)
-        config_items.append(
-            {
-                "status": "pass",
-                "message": "Configuration loaded successfully",
-            }
-        )
-        summary["pass"] += 1
+        if config.load_warnings:
+            recovery_notice = api.config_recovery_notice(config)
+            if recovery_notice:
+                recovery_language = getattr(config, "language", "en") or "en"
+                _add_doctor_item(
+                    config_items,
+                    "warn",
+                    recovery_notice,
+                    i18n_t("error.configRecovery.action", recovery_language),
+                    code="config.recovery",
+                )
+                summary["warn"] += 1
+        else:
+            config_items.append(
+                {
+                    "status": "pass",
+                    "message": "Configuration loaded successfully",
+                }
+            )
+            summary["pass"] += 1
     except Exception as exc:
         config_items.append(
             {
@@ -13926,23 +14200,66 @@ def build_parser():
     subparsers.add_parser("version", help="Show version")
     subparsers.add_parser("check-update", help="Check for updates")
     subparsers.add_parser("upgrade", help="Upgrade to latest version")
-    memory_parser = subparsers.add_parser("memory", help="Use local Memory through the running controller")
+    memory_help_language = _memory_cli_language()
+    memory_parser = subparsers.add_parser(
+        "memory",
+        help=i18n_t("memory.cli.help.command", memory_help_language),
+    )
     memory_subparsers = memory_parser.add_subparsers(
         dest="memory_command",
         metavar="{status,profile,search,remember}",
     )
     memory_subparsers.required = True
-    memory_status_parser = memory_subparsers.add_parser("status", help="Show Memory status")
-    memory_status_parser.add_argument("--json", action="store_true", help="Print machine-readable output")
-    memory_profile_parser = memory_subparsers.add_parser("profile", help="Show the Memory profile")
-    memory_profile_parser.add_argument("--json", action="store_true", help="Print machine-readable output")
-    memory_search_parser = memory_subparsers.add_parser("search", help="Search local Memory")
-    memory_search_parser.add_argument("query", help="Search query")
-    memory_search_parser.add_argument("--limit", type=int, default=8, help="Maximum results (1-20)")
-    memory_search_parser.add_argument("--json", action="store_true", help="Print machine-readable output")
-    memory_remember_parser = memory_subparsers.add_parser("remember", help="Queue durable personal context")
-    memory_remember_parser.add_argument("text", help="Text to remember (maximum 4,000 characters)")
-    memory_remember_parser.add_argument("--json", action="store_true", help="Print machine-readable output")
+    memory_status_parser = memory_subparsers.add_parser(
+        "status",
+        help=i18n_t("memory.cli.help.status", memory_help_language),
+    )
+    memory_status_parser.add_argument(
+        "--json",
+        action="store_true",
+        help=i18n_t("memory.cli.help.json", memory_help_language),
+    )
+    memory_profile_parser = memory_subparsers.add_parser(
+        "profile",
+        help=i18n_t("memory.cli.help.profile", memory_help_language),
+    )
+    memory_profile_parser.add_argument(
+        "--json",
+        action="store_true",
+        help=i18n_t("memory.cli.help.json", memory_help_language),
+    )
+    memory_search_parser = memory_subparsers.add_parser(
+        "search",
+        help=i18n_t("memory.cli.help.search", memory_help_language),
+    )
+    memory_search_parser.add_argument(
+        "query",
+        help=i18n_t("memory.cli.help.query", memory_help_language),
+    )
+    memory_search_parser.add_argument(
+        "--limit",
+        type=int,
+        default=8,
+        help=i18n_t("memory.cli.help.limit", memory_help_language),
+    )
+    memory_search_parser.add_argument(
+        "--json",
+        action="store_true",
+        help=i18n_t("memory.cli.help.json", memory_help_language),
+    )
+    memory_remember_parser = memory_subparsers.add_parser(
+        "remember",
+        help=i18n_t("memory.cli.help.remember", memory_help_language),
+    )
+    memory_remember_parser.add_argument(
+        "text",
+        help=i18n_t("memory.cli.help.text", memory_help_language),
+    )
+    memory_remember_parser.add_argument(
+        "--json",
+        action="store_true",
+        help=i18n_t("memory.cli.help.json", memory_help_language),
+    )
     runtime_parser = subparsers.add_parser(
         "runtime",
         help="Inspect and prepare managed runtimes",
@@ -14196,7 +14513,7 @@ def build_parser():
     agent_run_delivery_group.add_argument(
         "--send-now",
         action="store_true",
-        help="Persist this Run, then steer the exact FIFO head without stopping the active Turn",
+        help="Explicitly deliver this Run as P1 to an existing Session (the default behavior)",
     )
     agent_run_delivery_group.add_argument(
         "--queue",
@@ -14285,6 +14602,24 @@ def build_parser():
     runs_cancel_parser = runs_subparsers.add_parser("cancel", help="Request best-effort cancellation for one run")
     runs_cancel_parser.add_argument("run_id")
     _add_json_noop(runs_cancel_parser)
+
+    harness_help_language = _configured_cli_language()
+    harness_parser = subparsers.add_parser(
+        "harness",
+        help=i18n_t("harness.cli.help.command", harness_help_language),
+        description=i18n_t("harness.cli.help.description", harness_help_language),
+        error_help_command="vibe harness --help",
+    )
+    harness_subparsers = harness_parser.add_subparsers(
+        dest="harness_command",
+        metavar="{status}",
+    )
+    harness_subparsers.required = True
+    harness_status_parser = harness_subparsers.add_parser(
+        "status",
+        help=i18n_t("harness.cli.help.status", harness_help_language),
+    )
+    _add_json_noop(harness_status_parser)
 
     session_parser = subparsers.add_parser(
         "session",
@@ -15578,6 +15913,10 @@ def main():
         if args.runs_command == "cancel":
             sys.exit(cmd_runs_cancel(args))
         parser.error("runs command is required")
+    if args.command == "harness":
+        if args.harness_command == "status":
+            sys.exit(cmd_harness_status(args))
+        parser.error("harness command is required")
     if args.command == "session":
         if args.session_command == "list":
             sys.exit(cmd_session_list(args))

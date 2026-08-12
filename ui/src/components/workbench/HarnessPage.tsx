@@ -4,6 +4,7 @@ import {
   ArrowLeft,
   Activity,
   Calendar,
+  ChevronRight,
   Eye,
   History,
   Plus,
@@ -63,7 +64,9 @@ import {
   DEFINITION_STATUS_FILTERS,
   definitionActiveCount,
   definitionChipLabel,
+  definitionExitCodeTone,
   definitionHealth,
+  definitionFailureSummaryKey,
   definitionProcessingHealth,
   definitionRowLine,
   definitionRowTitle,
@@ -1034,6 +1037,7 @@ export const HealthBadge: React.FC<{ row: HarnessTask | HarnessWatch }> = ({ row
   const { t } = useTranslation();
   const health = definitionHealth(row);
   if (health !== 'failing' && health !== 'degraded' && health !== 'unknown') return null;
+  const failureSummaryKey = definitionFailureSummaryKey(row);
   // No count on ``unknown``: both counters come from the same run history this
   // row could not read, so printing one would put a number on nothing.
   const count = health === 'unknown' ? 0 : health === 'failing' ? row.consecutive_failures : row.recent_failures;
@@ -1044,7 +1048,7 @@ export const HealthBadge: React.FC<{ row: HarnessTask | HarnessWatch }> = ({ row
         'shrink-0 font-mono text-[9px] uppercase',
         health === 'failing' ? 'text-pink' : health === 'degraded' ? 'text-amber' : 'text-muted',
       )}
-      title={row.last_error || undefined}
+      title={failureSummaryKey ? t(failureSummaryKey) : undefined}
     >
       {t(`harness.health.${health}`)}
       {count > 1 ? ` ${count}` : ''}
@@ -1454,24 +1458,24 @@ export const TaskDetail: React.FC<TaskDetailProps> = ({ task, agent, onToggleEna
           on the run row: a nightly command task's exit code is the one fact an
           operator wants without paging through the runs tab. Not gated on
           ``last_run_at`` — a stored exit code proves a run happened. */}
+      <FailureDetails row={task} />
       {task.last_exit_code != null && (
         <DetailField label={t('harness.detail.lastExitCode')}>
           <span
-            className={clsx('font-mono text-[11px]', task.last_exit_code === 0 ? 'text-muted' : 'text-pink')}
+            className={clsx(
+              'font-mono text-[11px]',
+              definitionExitCodeTone(task) === 'failure' ? 'text-pink' : 'text-muted',
+            )}
           >
             {task.last_exit_code}
           </span>
         </DetailField>
       )}
-      {/* Its own field, and no longer nested inside ``last_run_at``: a task can
-          carry a ``last_error`` with no ``last_run_at`` (a fire that failed before
-          it ever ran), and that case rendered nothing at all. ``harness.detail.lastError``
-          already existed and was used only by the watch pane. */}
-      {task.last_error && (
-        <DetailField label={t('harness.detail.lastError')}>
-          <pre className="max-h-32 overflow-auto whitespace-pre-wrap rounded-md border border-destructive/40 bg-destructive/[0.06] p-2 font-mono text-[11px] text-destructive">
-            {task.last_error}
-          </pre>
+      {task.resume_blocked?.code === 'task_owner_session_unavailable' && (
+        <DetailField label={t('harness.detail.pauseReason')}>
+          <span className="text-[12px] text-muted">
+            {t('harness.taskPauseReason.ownerSessionUnavailable')}
+          </span>
         </DetailField>
       )}
       <DetailField label={t('harness.detail.id')}>
@@ -1622,11 +1626,17 @@ export const WatchDetail: React.FC<WatchDetailProps> = ({ watch, agent, onToggle
           )}
         </DetailField>
       )}
-      {watch.last_error && (
-        <DetailField label={t('harness.detail.lastError')}>
-          <div className="rounded-md border border-destructive/40 bg-destructive/[0.06] px-2 py-1 text-[11px] text-destructive">
-            {watch.last_error}
-          </div>
+      <FailureDetails row={watch} />
+      {watch.last_exit_code != null && (
+        <DetailField label={t('harness.detail.lastExitCode')}>
+          <span
+            className={clsx(
+              'font-mono text-[11px]',
+              definitionExitCodeTone(watch) === 'failure' ? 'text-pink' : 'text-muted',
+            )}
+          >
+            {watch.last_exit_code}
+          </span>
         </DetailField>
       )}
       {visibleProcessingHealth(watch) && (
@@ -2144,6 +2154,52 @@ const DetailGroup: React.FC<{ label: string; children: React.ReactNode }> = ({ l
     {children}
   </div>
 );
+
+const FailureDetails: React.FC<{
+  row: HarnessTask | HarnessWatch;
+}> = ({ row }) => {
+  const { t } = useTranslation();
+  // The mapper uses structured facts only. A stored error without enough
+  // structure still proves an unclassified failure, so keep the default copy
+  // generic instead of letting raw stderr choose a category.
+  const summaryKey = definitionFailureSummaryKey(row, Boolean(row.last_error));
+  const circuitPaused = summaryKey === 'harness.failure.circuitPaused';
+  const disclosureKey = `${'retry_exit_codes' in row ? 'watch' : 'task'}:${row.id}`;
+  if (!summaryKey && !row.last_error) return null;
+  return (
+    <div className="flex flex-col gap-1.5">
+      {summaryKey && (
+        <>
+          <div className="font-mono text-[10px] font-bold uppercase tracking-[0.12em] text-muted">
+            {t(circuitPaused ? 'harness.detail.pauseReason' : 'harness.detail.failureSummary')}
+          </div>
+          <div
+            className={clsx(
+              'flex min-w-0 flex-wrap items-center gap-2 text-[12px]',
+              circuitPaused ? 'text-amber' : 'text-pink',
+            )}
+          >
+            <span>{t(summaryKey)}</span>
+          </div>
+        </>
+      )}
+      {row.last_error && (
+        <details
+          key={disclosureKey}
+          className="group min-w-0 rounded-md border border-border bg-surface-3 px-2 py-1.5"
+        >
+          <summary className="flex cursor-pointer list-none items-center gap-1.5 text-[10px] font-medium uppercase tracking-wide text-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-cyan/60">
+            <ChevronRight aria-hidden className="size-3 shrink-0 transition-transform group-open:rotate-90" />
+            {t('harness.detail.technicalDetails')}
+          </summary>
+          <pre className="mt-2 max-h-32 overflow-auto whitespace-pre-wrap break-words border-t border-border pt-2 font-mono text-[11px] text-muted">
+            {row.last_error}
+          </pre>
+        </details>
+      )}
+    </div>
+  );
+};
 
 const EmptyState: React.FC<{ i18nKey: string }> = ({ i18nKey }) => {
   const { t } = useTranslation();

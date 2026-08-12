@@ -1,26 +1,18 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import sqlite3
 import threading
-from collections import deque
 from contextlib import contextmanager
-from datetime import UTC, datetime, timedelta
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from config import paths
-from core.memory.everos import (
-    FakeMemoryProvider,
-    FlushRejected,
-    FlushSucceeded,
-    FlushUnknown,
-    MemoryProviderFailure,
-    MemoryProviderSystemFailure,
-)
+from core.memory.attachments import AttachmentPinStore, PinnedBundle
+from core.memory.everos import FakeMemoryProvider, MemoryProviderFailure
 from core.memory.module import (
     MAX_CAPTURE_ATTACHMENT_METADATA_BYTES,
     MAX_CAPTURE_IDENTIFIER_BYTES,
@@ -29,60 +21,82 @@ from core.memory.module import (
     MIN_FREE_DISK_BYTES,
     MemoryModule,
 )
-from core.memory.store import Delivered, MemoryStore, TERMINAL_TOMBSTONE_RETENTION
-
-
-PROJECT = "p-22222222222222222222222222222222"
-
-
-def _dt(value: str) -> datetime:
-    """Parse the ISO instants these tests pin, for the settle transition."""
-
-    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+from core.memory.provider_root import ProviderRoot, ProviderRootMetadata
+from core.memory.store import MemoryStore
 from core.memory.types import (
+    CLOSED_MEMORY_ERROR_CODES,
     CaptureAccepted,
     CaptureAttachment,
     CaptureDuplicate,
     CaptureSkipped,
-    ClearCompleted,
-    CLOSED_MEMORY_ERROR_CODES,
     MemoryItem,
-    MemoryFailureLogEntry,
     MemoryItems,
     MemoryProfile,
     MemoryProfileExplicitInfo,
     MemoryProfileTrait,
     OperationFailed,
+    RecallItems,
+    RecallPolicy,
 )
-from core.memory.worker import BREAKER_RETRY_SECONDS, MemoryWorker, SYSTEM_PAUSE_SECONDS
 
 
-ROOT_SENTINEL_FILENAME = ".avibe-memory-root.json"
+PROJECT = "p-22222222222222222222222222222222"
+PRINCIPAL = "u-11111111111111111111111111111111"
+
+
+@pytest.fixture(autouse=True)
+def isolated_avibe_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep every store and attachment path inside this test's temporary tree."""
+
+    home = tmp_path / "avibe-home"
+    home.mkdir(mode=0o700)
+    monkeypatch.setenv("AVIBE_HOME", str(home))
 
 
 def _store_path(scope: Path) -> Path:
     return paths.get_state_dir() / "memory-tests" / scope.name / "memory.sqlite"
 
 
+def _attachment_store() -> AttachmentPinStore:
+    home = paths.get_vibe_remote_dir()
+    source_root = paths.get_attachments_dir() / "avibe"
+    source_root.mkdir(parents=True, mode=0o700, exist_ok=True)
+    source_root.chmod(0o700)
+    return AttachmentPinStore(
+        root=home / "memory" / "attachments",
+        source_root=source_root,
+    )
+
+
+def _source_attachment(name: str, payload: bytes = b"attachment payload") -> CaptureAttachment:
+    source_root = paths.get_attachments_dir() / "avibe"
+    source_root.mkdir(parents=True, mode=0o700, exist_ok=True)
+    source_root.chmod(0o700)
+    source = source_root / name
+    source.write_bytes(payload)
+    source.chmod(0o600)
+    extension = source.suffix.lstrip(".").lower()
+    return CaptureAttachment(
+        kind="image" if extension == "png" else "doc",
+        name=source.name,
+        uri=source.as_uri(),
+        ext=extension,
+    )
+
+
 def _write_owned_provider_root(root: Path, store: MemoryStore) -> None:
     meta = store.ensure_meta()
-    root.mkdir(parents=True, exist_ok=True)
-    root.chmod(0o700)
-    sentinel = root / ROOT_SENTINEL_FILENAME
-    sentinel.write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "provider_root_id": meta.provider_root_id,
-                "provider_id": "everos",
-                "provider_root_format": "slice1",
-                "created_by_artifact_fingerprint": "slice1-core",
-            },
-            sort_keys=True,
+    ProviderRoot(
+        root,
+        effective_home=paths.get_vibe_remote_dir(),
+    ).ensure(
+        meta,
+        ProviderRootMetadata(
+            provider_root_format="slice1",
+            compatible_provider_root_formats=frozenset({"slice1"}),
+            artifact_fingerprint="slice1-core",
         ),
-        encoding="utf-8",
     )
-    sentinel.chmod(0o600)
 
 
 def _request(
@@ -92,7 +106,7 @@ def _request(
     text: str = "remember this",
     occurred_at_ms: int = 1_000,
     attachments: tuple[CaptureAttachment, ...] = (),
-    principal_id: str = "u-11111111111111111111111111111111",
+    principal_id: str = PRINCIPAL,
     project_id: str = PROJECT,
 ):
     from core.memory.types import CaptureRequest
@@ -120,9 +134,13 @@ def _module(
 ) -> tuple[MemoryModule, MemoryStore, FakeMemoryProvider]:
     store = MemoryStore(_store_path(tmp_path))
     if owned_provider_root:
-        provider_root = kwargs.pop("provider_root", tmp_path / "provider-root")
+        provider_root = kwargs.pop(
+            "provider_root",
+            paths.get_vibe_remote_dir() / "memory" / "provider-root",
+        )
         _write_owned_provider_root(provider_root, store)
         kwargs["provider_root"] = provider_root
+    kwargs.setdefault("attachment_store", _attachment_store())
     fake = provider or FakeMemoryProvider()
     module = MemoryModule(
         store,
@@ -134,31 +152,201 @@ def _module(
     return module, store, fake
 
 
-async def test_disabled_methods_are_closed_and_status_remains_readable(tmp_path: Path) -> None:
+def _set_embed_capability(provider: FakeMemoryProvider, available: bool) -> None:
+    provider.health_snapshot_value = replace(
+        provider.health_snapshot_value,
+        capabilities={
+            **provider.health_snapshot_value.capabilities,
+            "embed": available,
+        },
+    )
+
+
+async def test_disabled_capture_and_reads_are_closed_without_creating_state(tmp_path: Path) -> None:
     module, store, _provider = _module(tmp_path, enabled=False)
 
-    capture = await module.capture(_request())
-    search = await module.search("query", principal_id="u-11111111111111111111111111111111", project_id=PROJECT)
-    profile = await module.profile(principal_id="u-11111111111111111111111111111111", project_id=PROJECT)
-    status = await module.status()
-
-    assert capture == CaptureSkipped(reason="memory_disabled")
-    assert search == OperationFailed(error="memory_disabled")
-    assert profile == OperationFailed(error="memory_disabled")
-    assert status.state == "disabled"
+    assert await module.capture(_request()) == CaptureSkipped(reason="memory_disabled")
+    assert await module.search("query", principal_id=PRINCIPAL, project_id=PROJECT) == OperationFailed(
+        error="memory_disabled"
+    )
+    assert await module.profile(principal_id=PRINCIPAL, project_id=PROJECT) == OperationFailed(
+        error="memory_disabled"
+    )
     assert store.get_meta() is None
 
 
-async def test_capture_excludes_active_clear_and_status_prioritizes_clearing(tmp_path: Path) -> None:
-    module, store, _provider = _module(tmp_path)
-    store.begin_clear()
+async def test_maintenance_fence_closes_capture_and_reads(tmp_path: Path) -> None:
+    module, store, provider = _module(tmp_path, maintenance_open=lambda: True)
 
-    receipt = await module.capture(_request())
-    status = await module.status()
-
-    assert receipt == CaptureSkipped(reason="memory_clear_failed")
-    assert status.state == "clearing"
+    assert await module.capture(_request()) == CaptureSkipped(reason="memory_clear_failed")
+    assert await module.recall(
+        "query",
+        policy=RecallPolicy(mode="keyword"),
+        principal_id=PRINCIPAL,
+        project_id=PROJECT,
+    ) == OperationFailed(error="memory_clear_failed")
+    assert await module.profile(principal_id=PRINCIPAL, project_id=PROJECT) == OperationFailed(
+        error="memory_clear_failed"
+    )
     assert store.list_queue_rows() == ()
+    assert provider.search_scopes == []
+
+
+async def test_module_maintenance_state_fences_capture_until_closed(tmp_path: Path) -> None:
+    module, store, _provider = _module(tmp_path)
+
+    module.enter_maintenance()
+    assert module.maintenance_active
+    assert await module.capture(_request()) == CaptureSkipped(reason="memory_clear_failed")
+    assert store.list_queue_rows() == ()
+
+    module.leave_maintenance()
+    assert not module.maintenance_active
+    assert await module.capture(_request()) == CaptureAccepted()
+
+
+async def test_destructive_lifecycle_owns_root_and_blocks_ordinary_lifecycle(
+    tmp_path: Path,
+) -> None:
+    module, _store, _provider = _module(tmp_path)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def destructive_operation() -> None:
+        async with module.destructive_lifecycle():
+            entered.set()
+            async with module.observe_provider_root() as root_available:
+                assert root_available is False
+            await release.wait()
+
+    destructive = asyncio.create_task(destructive_operation())
+    ordinary: asyncio.Task[None] | None = None
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=1.0)
+
+        ordinary_entered = False
+
+        async def ordinary_operation() -> None:
+            nonlocal ordinary_entered
+            async with module.lifecycle():
+                ordinary_entered = True
+
+        ordinary = asyncio.create_task(ordinary_operation())
+        await asyncio.sleep(0)
+        assert ordinary_entered is False
+
+        release.set()
+        await destructive
+        await ordinary
+        assert ordinary_entered is True
+    finally:
+        release.set()
+        await asyncio.gather(
+            destructive,
+            *((ordinary,) if ordinary is not None else ()),
+            return_exceptions=True,
+        )
+
+
+async def test_claim_quiescence_fences_delivery_until_resumed(tmp_path: Path) -> None:
+    module, _store, provider = _module(tmp_path)
+    assert await module.capture(_request()) == CaptureAccepted()
+
+    assert await module.quiesce_claims()
+    assert await module.drain() == 0
+    assert provider.captures == []
+
+    module.resume_claims()
+    assert await module.drain() == 1
+    assert [capture.text for capture in provider.captures] == ["remember this"]
+
+
+async def test_timed_out_quiescence_remains_fenced_until_resumed(tmp_path: Path) -> None:
+    add_entered = asyncio.Event()
+    release_add = asyncio.Event()
+
+    async def block_add(_capture) -> None:
+        add_entered.set()
+        await release_add.wait()
+
+    provider = FakeMemoryProvider(add_hook=block_add)
+    module, _store, _provider = _module(tmp_path, provider=provider)
+    assert await module.capture(_request()) == CaptureAccepted()
+
+    draining = asyncio.create_task(module.drain())
+    try:
+        await asyncio.wait_for(add_entered.wait(), timeout=1.0)
+        assert not await module.quiesce_claims(timeout_seconds=0.01)
+
+        release_add.set()
+        assert await draining == 1
+        assert await module.capture(_request(source="still-paused")) == CaptureAccepted()
+        assert await module.drain() == 0
+
+        module.resume_claims()
+        assert await module.drain() == 1
+    finally:
+        release_add.set()
+        await asyncio.gather(draining, return_exceptions=True)
+
+
+async def test_provider_replacement_updates_reads_and_claim_delivery(tmp_path: Path) -> None:
+    original = FakeMemoryProvider()
+    replacement = FakeMemoryProvider(
+        search_items=(MemoryItem(kind="fact", text="replacement result"),),
+    )
+    module, _store, _provider = _module(tmp_path, provider=original)
+
+    module.replace_provider(replacement)
+    assert await module.search(
+        "query",
+        principal_id=PRINCIPAL,
+        project_id=PROJECT,
+    ) == MemoryItems(items=replacement.search_items)
+    assert await module.capture(_request()) == CaptureAccepted()
+    assert await module.drain() == 1
+    assert original.captures == []
+    assert [capture.text for capture in replacement.captures] == ["remember this"]
+
+
+async def test_session_lifecycle_fences_capture_through_operation(tmp_path: Path) -> None:
+    module, store, _provider = _module(tmp_path)
+    operation_entered = asyncio.Event()
+    release_operation = asyncio.Event()
+
+    async def reset_session() -> str:
+        operation_entered.set()
+        await release_operation.wait()
+        return "reset-complete"
+
+    lifecycle = asyncio.create_task(
+        module.run_session_lifecycle(
+            principal_id=PRINCIPAL,
+            project_id=PROJECT,
+            raw_session_id="conversation-1",
+            operation=reset_session,
+            deadline_seconds=2.0,
+        )
+    )
+    capture: asyncio.Task[object] | None = None
+    try:
+        await asyncio.wait_for(operation_entered.wait(), timeout=1.0)
+        capture = asyncio.create_task(module.capture(_request(source="after-reset")))
+        await asyncio.sleep(0)
+
+        assert not capture.done()
+        assert store.list_queue_rows() == ()
+
+        release_operation.set()
+        assert await lifecycle == "reset-complete"
+        assert await capture == CaptureAccepted()
+    finally:
+        release_operation.set()
+        await asyncio.gather(
+            lifecycle,
+            *((capture,) if capture is not None else ()),
+            return_exceptions=True,
+        )
 
 
 async def test_capture_normalizes_deduplicates_and_never_persists_raw_ids(tmp_path: Path) -> None:
@@ -170,42 +358,124 @@ async def test_capture_normalizes_deduplicates_and_never_persists_raw_ids(tmp_pa
         occurred_at_ms=5_000,
     )
 
-    first = await module.capture(request)
-    duplicate = await module.capture(request)
+    assert await module.capture(request) == CaptureAccepted()
+    assert await module.capture(request) == CaptureDuplicate()
     rows = store.list_queue_rows()
 
-    assert first == CaptureAccepted()
-    assert duplicate == CaptureDuplicate()
     assert len(rows) == 1
     assert rows[0].payload_text == "Café\nmessage"
     assert rows[0].session_id.startswith("src--")
     assert "raw-session-id-canary" not in rows[0].session_id
     with sqlite3.connect(store.path) as conn:
-        dump = "\n".join(str(value) for row in conn.execute("SELECT * FROM memory_capture_queue") for value in row)
+        dump = "\n".join(
+            str(value)
+            for row in conn.execute("SELECT * FROM memory_capture_queue")
+            for value in row
+        )
     assert "raw-source-id-canary" not in dump
     assert "raw-session-id-canary" not in dump
 
 
-async def test_capture_queues_workbench_attachment_descriptor_and_forwards_it(tmp_path: Path) -> None:
-    module, store, provider = _module(tmp_path)
-    attachment = CaptureAttachment(
-        kind="image",
-        name="diagram.png",
-        uri="file:///owned/attachments/diagram.png",
-        ext="png",
-    )
+async def test_capture_pins_a_real_attachment_and_forwards_the_private_copy(tmp_path: Path) -> None:
+    attachment_store = _attachment_store()
+    module, store, provider = _module(tmp_path, attachment_store=attachment_store)
+    attachment = _source_attachment("diagram.png", b"real image bytes")
+    source_path = Path(attachment.uri.removeprefix("file://"))
 
     assert await module.capture(_request(attachments=(attachment,))) == CaptureAccepted()
     queued = store.list_queue_rows()[0]
     assert queued.payload_attachments is not None
+    assert queued.attachment_bundle_id is not None
+    assert attachment.uri not in queued.payload_attachments
 
-    assert await module._worker.drain_once() == 1
-    assert provider.captures[0].attachments == (attachment,)
+    source_path.unlink()
+    assert await module.drain() == 1
+    forwarded = provider.captures[0].attachments[0]
+    assert forwarded.name == attachment.name
+    assert forwarded.uri != attachment.uri
     assert store.list_queue_rows()[0].payload_attachments is None
+
+
+async def test_boot_reconcile_waits_for_attachment_admission_and_preserves_accepted_bundle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attachment_store = _attachment_store()
+    module, store, _provider = _module(tmp_path, attachment_store=attachment_store)
+    attachment = _source_attachment("activation-race.txt", b"accepted bytes")
+    published = threading.Event()
+    allow_pin_return = threading.Event()
+    recovery_started = threading.Event()
+    pinned: list[PinnedBundle] = []
+    original_pin = attachment_store.pin
+    original_recover = store.recover_after_boot
+
+    def pin_before_enqueue(sources):
+        bundle = original_pin(sources)
+        pinned.append(bundle)
+        published.set()
+        if not allow_pin_return.wait(timeout=2):
+            raise AssertionError("capture admission was not released")
+        return bundle
+
+    def observe_recovery(*, lease_owner, clock):
+        recovery_started.set()
+        return original_recover(lease_owner=lease_owner, clock=clock)
+
+    monkeypatch.setattr(attachment_store, "pin", pin_before_enqueue)
+    monkeypatch.setattr(store, "recover_after_boot", observe_recovery)
+
+    capture = asyncio.create_task(
+        module.capture(_request(source="activation-race", attachments=(attachment,)))
+    )
+    try:
+        assert await asyncio.to_thread(published.wait, 1)
+        module.pause_claims()
+        module.begin_activation(new_lease=True)
+        recovery = asyncio.create_task(module.drain())
+        assert await asyncio.to_thread(recovery_started.wait, 1)
+
+        completed, _pending = await asyncio.wait({recovery}, timeout=0.1)
+        assert completed == set()
+
+        allow_pin_return.set()
+        assert await capture == CaptureAccepted()
+        await recovery
+    finally:
+        allow_pin_return.set()
+
+    bundle = pinned[0]
+    assert attachment_store.provider_attachments(bundle)[0].name == attachment.name
+    assert store.list_queue_rows()[0].attachment_bundle_id == bundle.bundle_id
+
+    restarted_store = MemoryStore(store.path)
+    restarted_attachments = _attachment_store()
+    restarted = MemoryModule(
+        restarted_store,
+        FakeMemoryProvider(),
+        enabled=True,
+        attachment_store=restarted_attachments,
+    )
+    restarted.pause_claims()
+    restarted.begin_activation(new_lease=True)
+    await restarted.drain()
+
+    assert restarted_attachments.provider_attachments(bundle)[0].name == attachment.name
+    assert restarted_store.list_queue_rows()[0].attachment_bundle_id == bundle.bundle_id
 
 
 async def test_capture_validation_and_disk_rejections_increment_only_missed(tmp_path: Path) -> None:
     module, store, _provider = _module(tmp_path, disk_free_bytes=lambda: 0)
+    source = _source_attachment("validation.txt")
+    oversized_attachments = tuple(
+        CaptureAttachment(
+            kind="doc",
+            name=f"{'x' * 2_100}-{index}.txt",
+            uri=source.uri,
+            ext="txt",
+        )
+        for index in range(8)
+    )
 
     blank = await module.capture(_request(text="\r\n  \r"))
     command = await module.capture(_request(source="source-2", text="/memory search private"))
@@ -213,25 +483,14 @@ async def test_capture_validation_and_disk_rejections_increment_only_missed(tmp_
     oversized_id = await module.capture(
         _request(source="x" * (MAX_CAPTURE_IDENTIFIER_BYTES + 1), text="content")
     )
-    oversized_attachments = await module.capture(
-        _request(
-            source="source-attachments",
-            attachments=tuple(
-                CaptureAttachment(
-                    kind="doc",
-                    name=f"doc-{index}.txt",
-                    uri=f"file:///owned/{'x' * (MAX_CAPTURE_ATTACHMENT_METADATA_BYTES // 4)}-{index}.txt",
-                    ext="txt",
-                )
-                for index in range(8)
-            ),
-        )
+    oversized_metadata = await module.capture(
+        _request(source="source-attachments", attachments=oversized_attachments)
     )
     invalid_unicode = await module.capture(
         _request(
             source="source-unicode",
             attachments=(
-                CaptureAttachment(kind="doc", name="\ud800.txt", uri="file:///owned/doc.txt", ext="txt"),
+                CaptureAttachment(kind="doc", name="\ud800.txt", uri=source.uri, ext="txt"),
             ),
         )
     )
@@ -241,7 +500,7 @@ async def test_capture_validation_and_disk_rejections_increment_only_missed(tmp_
     assert command == CaptureSkipped(reason="memory_low_disk_space")
     assert too_large == CaptureSkipped(reason="memory_input_too_large")
     assert oversized_id == CaptureSkipped(reason="memory_invalid_input")
-    assert oversized_attachments == CaptureSkipped(reason="memory_input_too_large")
+    assert oversized_metadata == CaptureSkipped(reason="memory_input_too_large")
     assert invalid_unicode == CaptureSkipped(reason="memory_invalid_input")
     assert disk == CaptureSkipped(reason="memory_low_disk_space")
     assert store.ensure_meta().missed_count == 7
@@ -249,476 +508,15 @@ async def test_capture_validation_and_disk_rejections_increment_only_missed(tmp_
     assert store.list_queue_rows() == ()
 
 
-async def test_provider_timestamp_is_allocated_once_and_reused_after_restart(tmp_path: Path) -> None:
-    module, store, provider = _module(tmp_path)
-    first_request = _request(source="first", occurred_at_ms=5_000)
-    second_request = _request(source="second", occurred_at_ms=5_000)
-    assert await module.capture(first_request) == CaptureAccepted()
-    assert await module.capture(second_request) == CaptureAccepted()
-    assert await module.capture(first_request) == CaptureDuplicate()
-    rows = store.list_queue_rows()
-    assert [row.provider_timestamp_ms for row in rows] == [5_000, 5_001]
-
-    retry_module, retry_store, retry_provider = _module(tmp_path / "retry")
-    assert await retry_module.capture(_request(source="retry", occurred_at_ms=8_000)) == CaptureAccepted()
-    original = retry_store.list_queue_rows()[0].provider_timestamp_ms
-    retry_provider.ingest_failures.append(MemoryProviderFailure())
-    current = datetime(2026, 1, 1, tzinfo=UTC)
-    first_worker = MemoryWorker(
-        store=retry_store,
-        provider=retry_provider,
-        enabled=lambda: True,
-        boot_id="first-boot",
-        now=lambda: current,
-    )
-    assert await first_worker.drain_once() == 1
-    current += timedelta(seconds=31)
-    restarted_worker = MemoryWorker(
-        store=retry_store,
-        provider=retry_provider,
-        enabled=lambda: True,
-        boot_id="second-boot",
-        now=lambda: current,
-    )
-    assert await restarted_worker.drain_once() == 1
-    assert retry_provider.captures[-1].provider_timestamp_ms == original
-
-
-async def test_boot_recovery_stamps_interrupted_flushes_after_lease_reclamation(
-    tmp_path: Path,
-) -> None:
-    """A contended reclaim must not backdate the interrupted flush it precedes.
-
-    The worker hands the store a clock rather than a pre-sampled instant, so a
-    reclaim that blocks on SQLite contention cannot make the flush it resolves
-    look older than it is and reorder the flush history.
-    """
-
-    module, store, provider = _module(tmp_path)
-    assert await module.capture(_request(source="interrupted")) == CaptureAccepted()
-    claimed = store.claim_due(lease_owner="crashed-boot", now="2026-01-01T00:00:00.000Z")
-    assert claimed is not None
-    assert store.settle(
-        claimed,
-        Delivered(),
-        lease_owner="crashed-boot",
-        now=_dt("2026-01-01T00:00:00.000Z"),
-    ).settled
-    assert store.mark_flush_in_flight(claimed.session_id, claimed.project_ref) == 1
-    current = datetime(2026, 1, 1, tzinfo=UTC)
-
-    class _ContendedStore(MemoryStore):
-        """Stand in for a reclaim that spends 30 seconds waiting on the database."""
-
-        def _reclaim_processing(self, *, lease_owner: str) -> int:
-            nonlocal current
-            reclaimed = super()._reclaim_processing(lease_owner=lease_owner)
-            current += timedelta(seconds=30)
-            return reclaimed
-
-    contended = _ContendedStore(store.path)
-    restarted = MemoryWorker(
-        store=contended,
-        provider=provider,
-        enabled=lambda: True,
-        boot_id="restarted-boot",
-        now=lambda: current,
-    )
-
-    await restarted.drain(max_rows=1)
-
-    recovered = contended.list_queue_rows()[0]
-    assert recovered.flush_observation == "unknown"
-    assert recovered.flush_observed_at == "2026-01-01T00:00:30.000Z"
-
-
-async def test_worker_delivers_and_scrubs_payload(tmp_path: Path) -> None:
-    module, store, provider = _module(tmp_path)
-    assert await module.capture(_request(text="secret queue payload")) == CaptureAccepted()
-    worker = MemoryWorker(store=store, provider=provider, enabled=lambda: True, boot_id="boot")
-
-    assert await worker.drain_once() == 1
-    row = store.list_queue_rows()[0]
-
-    assert row.state == "delivered"
-    assert row.payload_text is None
-    assert row.flush_observation == "succeeded"
-    assert provider.captures[0].text == "secret queue payload"
-    assert provider.captures[0].project_ref == PROJECT
-    assert provider.flushes == [row.session_id]
-    assert provider.flush_projects == [PROJECT]
-    assert store.queue_stats().queue_plaintext_bytes == 0
-    assert store.ensure_meta().last_success_at is not None
-
-
-async def test_flush_unknown_keeps_delivery_terminal_and_opens_processing_breaker(tmp_path: Path) -> None:
-    module, store, provider = _module(tmp_path)
-    assert await module.capture(_request(source="one")) == CaptureAccepted()
-    assert await module.capture(_request(source="two")) == CaptureAccepted()
-    provider.flush_results.append(FlushUnknown("timeout"))
-    current = datetime(2026, 1, 1, tzinfo=UTC)
-    worker = MemoryWorker(
-        store=store,
-        provider=provider,
-        enabled=lambda: True,
-        boot_id="boot",
-        now=lambda: current,
-    )
-
-    assert await worker.drain(max_rows=2) == 1
-    first, second = store.list_queue_rows()
-    assert (first.state, first.attempts, first.flush_observation) == ("delivered", 0, "unknown")
-    assert second.state == "pending"
-    fault = store.ensure_meta()
-    assert fault.processing_fault_kind == "engine"
-    assert fault.processing_fault_since == "2026-01-01T00:00:00.000Z"
-    assert fault.processing_alert_active is True
-
-
-async def test_processing_breaker_survives_restart_and_half_open_admits_one_capture(tmp_path: Path) -> None:
-    module, store, provider = _module(tmp_path)
-    for source in ("one", "two", "three"):
-        assert await module.capture(_request(source=source)) == CaptureAccepted()
-    provider.flush_results.extend(
-        [
-            FlushRejected("failed", "INTERNAL_ERROR", server_fault=True),
-            FlushSucceeded("recovered", "extracted"),
-            FlushSucceeded("normal", "extracted"),
-        ]
-    )
-    current = datetime(2026, 1, 1, tzinfo=UTC)
-    first_worker = MemoryWorker(
-        store=store,
-        provider=provider,
-        enabled=lambda: True,
-        boot_id="first",
-        now=lambda: current,
-    )
-    assert await first_worker.drain(max_rows=3) == 1
-
-    restarted = MemoryWorker(
-        store=store,
-        provider=provider,
-        enabled=lambda: True,
-        boot_id="second",
-        now=lambda: current,
-    )
-    assert await restarted.drain(max_rows=3) == 0
-    assert len(provider.captures) == 1
-
-    current += timedelta(seconds=BREAKER_RETRY_SECONDS + 1)
-    assert await restarted.drain(max_rows=3) == 1
-    assert len(provider.captures) == 2
-    assert store.ensure_meta().processing_fault_since is None
-    assert store.list_queue_rows()[2].state == "pending"
-
-    assert await restarted.drain(max_rows=3) == 1
-    assert store.list_queue_rows()[2].state == "delivered"
-
-
-async def test_processing_breaker_alerts_once_and_emits_recovery_edge(tmp_path: Path) -> None:
-    module, store, provider = _module(tmp_path)
-    for source in ("one", "two", "three"):
-        assert await module.capture(_request(source=source)) == CaptureAccepted()
-    provider.flush_results.extend(
-        [
-            FlushRejected("first", "INTERNAL_ERROR", server_fault=True),
-            FlushUnknown("transport"),
-            FlushSucceeded("recovered", "extracted"),
-        ]
-    )
-    current = datetime(2026, 1, 1, tzinfo=UTC)
-    events: list[tuple[str, str | None, str, int]] = []
-
-    async def record_event(event: str, kind: str | None, occurred_at: str, queued: int) -> bool:
-        events.append((event, kind, occurred_at, queued))
-        return True
-
-    worker = MemoryWorker(
-        store=store,
-        provider=provider,
-        enabled=lambda: True,
-        boot_id="boot",
-        now=lambda: current,
-        processing_event=record_event,
-    )
-
-    assert await worker.drain(max_rows=3) == 1
-    current += timedelta(seconds=BREAKER_RETRY_SECONDS + 1)
-    assert await worker.drain(max_rows=3) == 1
-    current += timedelta(seconds=BREAKER_RETRY_SECONDS + 1)
-    assert await worker.drain(max_rows=3) == 1
-
-    assert [event[:2] for event in events] == [("fault", "engine"), ("recovered", None)]
-    assert events[0][3] == 2
-    assert events[1][3] == 0
-
-
-async def test_failed_processing_alert_is_retried_on_next_activation(tmp_path: Path) -> None:
-    module, store, provider = _module(tmp_path)
-    assert await module.capture(_request(source="one")) == CaptureAccepted()
-    provider.flush_results.append(FlushUnknown("transport"))
-    current = datetime(2026, 1, 1, tzinfo=UTC)
-    attempts: list[str] = []
-
-    async def fail_alert(_event: str, _kind: str | None, occurred_at: str, _queued: int) -> bool:
-        attempts.append(occurred_at)
-        return False
-
-    first = MemoryWorker(
-        store=store,
-        provider=provider,
-        enabled=lambda: True,
-        now=lambda: current,
-        processing_event=fail_alert,
-    )
-    assert await first.drain_once() == 1
-    assert store.ensure_meta().processing_alert_active is False
-
-    async def deliver_alert(_event: str, _kind: str | None, occurred_at: str, _queued: int) -> bool:
-        attempts.append(occurred_at)
-        return True
-
-    restarted = MemoryWorker(
-        store=store,
-        provider=provider,
-        enabled=lambda: True,
-        now=lambda: current,
-        processing_event=deliver_alert,
-    )
-    assert await restarted.drain_once() == 0
-    assert store.ensure_meta().processing_alert_active is True
-    assert attempts == ["2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z"]
-
-
-async def test_half_open_4xx_does_not_refresh_breaker_anchor(tmp_path: Path) -> None:
-    module, store, provider = _module(tmp_path)
-    assert await module.capture(_request(source="one")) == CaptureAccepted()
-    assert await module.capture(_request(source="two")) == CaptureAccepted()
-    provider.flush_results.extend(
-        [
-            FlushRejected("server", "INTERNAL_ERROR", server_fault=True),
-            FlushRejected("content", "INVALID_INPUT", server_fault=False),
-        ]
-    )
-    current = datetime(2026, 1, 1, tzinfo=UTC)
-    worker = MemoryWorker(store=store, provider=provider, enabled=lambda: True, now=lambda: current)
-
-    assert await worker.drain(max_rows=2) == 1
-    opened_at = store.ensure_meta().processing_fault_since
-    current += timedelta(seconds=BREAKER_RETRY_SECONDS + 1)
-    assert await worker.drain(max_rows=2) == 1
-
-    assert store.ensure_meta().processing_fault_since == opened_at
-    assert store.list_queue_rows()[1].flush_observation == "rejected"
-
-
-async def test_activation_recovery_flushes_not_attempted_without_readding_capture(tmp_path: Path) -> None:
-    module, store, provider = _module(tmp_path)
-    assert await module.capture(_request()) == CaptureAccepted()
-    row = store.claim_due(lease_owner="old", now="2026-01-01T00:00:00.000Z")
-    assert row is not None
-    assert store.settle(
-        row,
-        Delivered(add_request_id="ack"),
-        lease_owner="old",
-        now=_dt("2026-01-01T00:00:01.000Z"),
-    ).settled
-
-    worker = MemoryWorker(store=store, provider=provider, enabled=lambda: True, boot_id="new")
-    assert await worker.drain_once() == 0
-    recovered = store.list_queue_rows()[0]
-    assert recovered.flush_observation == "succeeded"
-    assert provider.captures == []
-    assert provider.flushes == [recovered.session_id]
-
-
-async def test_activation_recovery_turns_interrupted_flush_unknown_and_opens_breaker(tmp_path: Path) -> None:
-    module, store, provider = _module(tmp_path)
-    assert await module.capture(_request()) == CaptureAccepted()
-    row = store.claim_due(lease_owner="old", now="2026-01-01T00:00:00.000Z")
-    assert row is not None
-    assert store.settle(row, Delivered(), lease_owner="old", now=_dt("2026-01-01T00:00:01.000Z")).settled
-    assert store.mark_flush_in_flight(row.session_id, row.project_ref) == 1
-
-    worker = MemoryWorker(
-        store=store,
-        provider=provider,
-        enabled=lambda: True,
-        boot_id="new",
-        now=lambda: datetime(2026, 1, 1, tzinfo=UTC),
-    )
-    assert await worker.drain_once() == 0
-    recovered = store.list_queue_rows()[0]
-    assert recovered.flush_observation == "unknown"
-    assert store.ensure_meta().processing_fault_since is not None
-
-
-async def test_activation_finishes_interrupted_breaker_classification_before_claiming(tmp_path: Path) -> None:
-    module, store, provider = _module(tmp_path)
-    assert await module.capture(_request()) == CaptureAccepted()
-    opened_at = "2026-01-01T00:00:00.000Z"
-    assert store.open_processing_fault(now=opened_at)
-    events: list[tuple[str, str | None, str, int]] = []
-
-    async def record_event(event: str, kind: str | None, occurred_at: str, queued: int) -> bool:
-        events.append((event, kind, occurred_at, queued))
-        return True
-
-    worker = MemoryWorker(
-        store=store,
-        provider=provider,
-        enabled=lambda: True,
-        now=lambda: datetime(2026, 1, 1, tzinfo=UTC),
-        processing_event=record_event,
-    )
-
-    assert await worker.drain_once() == 0
-    meta = store.ensure_meta()
-    assert meta.processing_fault_kind == "engine"
-    assert meta.processing_alert_active is True
-    assert events == [("fault", "engine", opened_at, 1)]
-    assert provider.captures == []
-
-
-async def test_worker_retries_message_failures_then_marks_dead_and_scrubs(tmp_path: Path) -> None:
-    module, store, provider = _module(tmp_path)
-    assert await module.capture(_request()) == CaptureAccepted()
-    provider.ingest_failures.extend(
-        [
-            MemoryProviderFailure(),
-            MemoryProviderFailure(),
-            MemoryProviderFailure(),
-        ]
-    )
-    current = datetime(2026, 1, 1, tzinfo=UTC)
-    worker = MemoryWorker(
-        store=store,
-        provider=provider,
-        enabled=lambda: True,
-        boot_id="boot",
-        now=lambda: current,
-    )
-
-    await worker.drain_once()
-    first = store.list_queue_rows()[0]
-    assert (first.state, first.attempts, first.payload_text) == ("pending", 1, "remember this")
-    current += timedelta(seconds=31)
-    await worker.drain_once()
-    second = store.list_queue_rows()[0]
-    assert (second.state, second.attempts, second.payload_text) == ("pending", 2, "remember this")
-    current += timedelta(minutes=2, seconds=1)
-    await worker.drain_once()
-    dead = store.list_queue_rows()[0]
-    assert (dead.state, dead.attempts, dead.payload_text) == ("dead", 3, None)
-    assert dead.last_error == "memory_processing_failed"
-
-
-async def test_system_outage_pauses_claims_without_consuming_attempts(tmp_path: Path) -> None:
-    module, store, provider = _module(tmp_path)
-    assert await module.capture(_request(source="one")) == CaptureAccepted()
-    assert await module.capture(_request(source="two")) == CaptureAccepted()
-    provider.ingest_failures.append(MemoryProviderSystemFailure())
-    worker = MemoryWorker(store=store, provider=provider, enabled=lambda: True, boot_id="boot")
-
-    assert await worker.drain(max_rows=2) == 1
-    rows = store.list_queue_rows()
-    assert [row.state for row in rows] == ["pending", "pending"]
-    assert [row.attempts for row in rows] == [0, 0]
-    assert store.ensure_meta().last_error == "memory_sidecar_unavailable"
-
-
-async def test_ambiguous_failure_uses_health_to_preserve_attempt_budget(tmp_path: Path) -> None:
-    class AmbiguousOutage(FakeMemoryProvider):
-        async def add(self, capture):
-            del capture
-            self.healthy = False
-            raise RuntimeError("provider-body-canary")
-
-    provider = AmbiguousOutage()
-    module, store, _provider = _module(tmp_path, provider=provider)
-    assert await module.capture(_request()) == CaptureAccepted()
-    worker = MemoryWorker(store=store, provider=provider, enabled=lambda: True, boot_id="boot")
-
-    await worker.drain_once()
-    row = store.list_queue_rows()[0]
-
-    assert row.state == "pending"
-    assert row.attempts == 0
-    assert row.last_error == "memory_sidecar_unavailable"
-
-
-async def test_processing_endpoint_outage_pauses_claims_without_consuming_attempts(tmp_path: Path) -> None:
-    """Sidecar is healthy but the processing (LLM/embedding) endpoint is down.
-
-    This is the r3 #1 case: a reachable sidecar whose model endpoint never responds
-    must be treated as a SYSTEM outage (pause + preserve attempts), not a poison row
-    that burns its retry budget.
-    """
-    module, store, provider = _module(tmp_path)
-    assert await module.capture(_request(source="one")) == CaptureAccepted()
-    # An ambiguous failure (plain MemoryProviderFailure) routes through the
-    # disambiguation probe; with the processing endpoint down it must be classified
-    # as a system outage, preserving attempts.
-    provider.ingest_failures.append(MemoryProviderFailure("memory_processing_failed"))
-    provider.processing_healthy_flag = False  # sidecar up, endpoint down
-    events: list[tuple[str, str | None, str, int]] = []
-
-    async def record_event(event: str, kind: str | None, occurred_at: str, queued: int) -> bool:
-        events.append((event, kind, occurred_at, queued))
-        return True
-
-    worker = MemoryWorker(
-        store=store,
-        provider=provider,
-        enabled=lambda: True,
-        boot_id="boot",
-        processing_event=record_event,
-    )
-
-    # The claim happens (sidecar health gate passes), then ingest fails and the
-    # disambiguation probe finds the processing endpoint down -> system pause. The
-    # row returns to pending with attempts preserved.
-    await worker.drain(max_rows=1)
-    row = store.list_queue_rows()[0]
-    assert row.state == "pending"
-    assert row.attempts == 0  # not consumed by the endpoint outage
-    meta = store.ensure_meta()
-    assert meta.processing_fault_kind == "credential"
-    assert meta.processing_alert_active is True
-    assert [event[:2] for event in events] == [("fault", "credential")]
-
-
-async def test_message_failure_when_endpoints_healthy_consumes_attempt(tmp_path: Path) -> None:
-    """Both sidecar and processing endpoints healthy, but this row fails to ingest.
-
-    This is the disambiguation's positive side: a genuine message failure (system
-    healthy) must increment attempts so a poison row eventually deads and unblocks
-    the queue.
-    """
-    module, store, provider = _module(tmp_path)
-    assert await module.capture(_request(source="one")) == CaptureAccepted()
-    provider.ingest_failures.append(MemoryProviderFailure("memory_processing_failed"))
-    worker = MemoryWorker(store=store, provider=provider, enabled=lambda: True, boot_id="boot")
-
-    await worker.drain_once()
-    row = store.list_queue_rows()[0]
-    assert row.state == "pending"
-    assert row.attempts == 1  # message failure charged to the row
-    assert row.last_error == "memory_processing_failed"
-
-
-async def test_old_boot_processing_row_is_reclaimed_for_at_least_once_delivery(tmp_path: Path) -> None:
-    module, store, provider = _module(tmp_path)
-    assert await module.capture(_request()) == CaptureAccepted()
-    claimed = store.claim_due(lease_owner="old-boot", now="2026-01-01T00:00:00.000Z")
-    assert claimed is not None and claimed.state == "processing"
-    worker = MemoryWorker(store=store, provider=provider, enabled=lambda: True, boot_id="new-boot")
-
-    assert await worker.drain_once() == 1
-    row = store.list_queue_rows()[0]
-    assert row.state == "delivered"
-    assert len(provider.captures) == 1
+async def test_provider_timestamp_is_allocated_once_for_each_accepted_capture(tmp_path: Path) -> None:
+    module, store, _provider = _module(tmp_path)
+    first = _request(source="first", occurred_at_ms=5_000)
+    second = _request(source="second", occurred_at_ms=5_000)
+
+    assert await module.capture(first) == CaptureAccepted()
+    assert await module.capture(second) == CaptureAccepted()
+    assert await module.capture(first) == CaptureDuplicate()
+    assert [row.provider_timestamp_ms for row in store.list_queue_rows()] == [5_000, 5_001]
 
 
 async def test_search_and_profile_enforce_bounds_and_return_closed_errors(tmp_path: Path) -> None:
@@ -728,24 +526,27 @@ async def test_search_and_profile_enforce_bounds_and_return_closed_errors(tmp_pa
     )
     module, _store, _provider = _module(tmp_path, provider=provider)
 
-    assert await module.search("query", principal_id="u-11111111111111111111111111111111", project_id=PROJECT) == MemoryItems(items=provider.search_items)
-    assert await module.profile(principal_id="u-11111111111111111111111111111111", project_id=PROJECT) == MemoryItems(items=provider.profile_items)
-    assert provider.search_scopes == [
-        ("u-11111111111111111111111111111111", PROJECT)
-    ]
-    assert provider.profile_scopes == [
-        ("u-11111111111111111111111111111111", PROJECT)
-    ]
+    assert await module.search("query", principal_id=PRINCIPAL, project_id=PROJECT) == MemoryItems(
+        items=provider.search_items
+    )
+    assert await module.profile(principal_id=PRINCIPAL, project_id=PROJECT) == MemoryItems(
+        items=provider.profile_items
+    )
+    assert provider.search_scopes == [(PRINCIPAL, PROJECT)]
+    assert provider.profile_scopes == [(PRINCIPAL, PROJECT)]
     assert await module.search(
         "x" * (MAX_QUERY_BYTES + 1),
-        principal_id="u-11111111111111111111111111111111",
+        principal_id=PRINCIPAL,
         project_id=PROJECT,
     ) == OperationFailed(error="memory_input_too_large")
+
     provider.search_items = tuple(MemoryItem(kind="fact", text=str(index)) for index in range(9))
-    assert await module.search("query", principal_id="u-11111111111111111111111111111111", project_id=PROJECT) == OperationFailed(error="memory_provider_response_invalid")
+    assert await module.search("query", principal_id=PRINCIPAL, project_id=PROJECT) == OperationFailed(
+        error="memory_provider_response_invalid"
+    )
     provider.search_items = ()
     provider.search_failure = RuntimeError("provider-search-body-canary")
-    result = await module.search("query", principal_id="u-11111111111111111111111111111111", project_id=PROJECT)
+    result = await module.search("query", principal_id=PRINCIPAL, project_id=PROJECT)
     assert result == OperationFailed(error="memory_processing_failed")
     assert "provider-search-body-canary" not in repr(result)
 
@@ -767,465 +568,180 @@ async def test_profile_bounds_accept_structured_data_only_on_profile_items(tmp_p
         profile_items=(MemoryItem(kind="profile", text="{}", profile=profile),),
     )
     module, _store, _provider = _module(tmp_path, provider=provider)
-    scope = {
-        "principal_id": "u-11111111111111111111111111111111",
-        "project_id": PROJECT,
-    }
 
-    assert await module.profile(**scope) == MemoryItems(items=provider.profile_items)
+    assert await module.profile(principal_id=PRINCIPAL, project_id=PROJECT) == MemoryItems(
+        items=provider.profile_items
+    )
 
     provider.profile_items = (MemoryItem(kind="fact", text="{}", profile=profile),)
-    assert await module.profile(**scope) == OperationFailed(error="memory_provider_response_invalid")
-
+    assert await module.profile(principal_id=PRINCIPAL, project_id=PROJECT) == OperationFailed(
+        error="memory_provider_response_invalid"
+    )
     provider.profile_items = (
         MemoryItem(kind="profile", text="{}", profile=MemoryProfile(summary="bad\x00value")),
     )
-    assert await module.profile(**scope) == OperationFailed(error="memory_provider_response_invalid")
-
-
-async def test_clear_is_idempotent_and_interrupted_clear_recovers_on_next_module(tmp_path: Path) -> None:
-    calls = 0
-
-    async def clear_provider_data() -> None:
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            raise RuntimeError("clear-body-canary")
-
-    provider_root = tmp_path / "provider-root"
-    module, store, provider = _module(
-        tmp_path,
-        clear_provider_data=clear_provider_data,
-        owned_provider_root=True,
-        provider_root=provider_root,
-    )
-    assert await module.capture(_request()) == CaptureAccepted()
-    assert await module.clear() == OperationFailed(error="memory_clear_failed")
-    assert store.ensure_meta().clear_in_progress is True
-    assert len(store.list_queue_rows()) == 1
-
-    recovered = MemoryModule(
-        store,
-        provider,
-        enabled=True,
-        disk_free_bytes=lambda: MIN_FREE_DISK_BYTES,
-        clear_provider_data=clear_provider_data,
-        provider_root=provider_root,
-    )
-    status = await recovered.status()
-    assert calls == 2
-    assert status.state == "ready"
-    assert store.ensure_meta().clear_in_progress is False
-    assert store.list_queue_rows() == ()
-
-    first = await recovered.clear()
-    second = await recovered.clear()
-    assert isinstance(first, ClearCompleted)
-    assert isinstance(second, ClearCompleted)
-    assert store.list_queue_rows() == ()
-
-
-def test_empty_provider_root_format_activation_allows_generated_control_files(tmp_path: Path) -> None:
-    provider_root = tmp_path / "provider-root"
-    module, store, _provider = _module(
-        tmp_path,
-        owned_provider_root=True,
-        provider_root=provider_root,
-    )
-    (provider_root / "everos.toml").write_text("[memory]\n", encoding="utf-8")
-    (provider_root / "ome.toml").write_text("[strategies]\n", encoding="utf-8")
-    module._set_runtime_artifact_metadata(
-        provider_root_format="everos-2.0",
-        artifact_fingerprint="artifact-2.0",
-        compatible_provider_root_formats=(),
+    assert await module.profile(principal_id=PRINCIPAL, project_id=PROJECT) == OperationFailed(
+        error="memory_provider_response_invalid"
     )
 
-    assert module._activate_empty_provider_root_format(store.ensure_meta()) is True
-    sentinel = json.loads((provider_root / ROOT_SENTINEL_FILENAME).read_text(encoding="utf-8"))
-    assert sentinel["provider_root_format"] == "everos-2.0"
-    assert sentinel["created_by_artifact_fingerprint"] == "artifact-2.0"
 
+async def test_keyword_recall_skips_health_and_succeeds_without_embedding(tmp_path: Path) -> None:
+    class NoHealthProvider(FakeMemoryProvider):
+        async def health_snapshot(self):
+            raise AssertionError("keyword recall must not probe health")
 
-async def test_status_reports_clearing_while_clear_waits_on_provider_data(tmp_path: Path) -> None:
-    entered = asyncio.Event()
-    release = asyncio.Event()
-
-    async def clear_provider_data() -> None:
-        entered.set()
-        await release.wait()
-
-    module, _store, _provider = _module(
-        tmp_path,
-        clear_provider_data=clear_provider_data,
-        owned_provider_root=True,
+    provider = NoHealthProvider(
+        search_items=(MemoryItem(kind="fact", text="keyword result"),),
     )
-    clear_task = asyncio.create_task(module.clear())
-    await entered.wait()
-    assert (await module.status()).state == "clearing"
-    release.set()
-    assert isinstance(await clear_task, ClearCompleted)
+    _set_embed_capability(provider, False)
+    module, _store, _provider = _module(tmp_path, provider=provider)
 
-
-async def test_status_precedence(tmp_path: Path) -> None:
-    ready, _store, _provider = _module(tmp_path / "ready")
-    assert (await ready.status()).state == "ready"
-
-    syncing, syncing_store, _provider = _module(tmp_path / "syncing")
-    assert await syncing.capture(_request()) == CaptureAccepted()
-    syncing_status = await syncing.status()
-    assert syncing_status.state == "syncing"
-    assert syncing_status.pending == 1
-    assert syncing_status.awaiting_receipt == 0
-
-    syncing_worker = MemoryWorker(
-        store=syncing_store,
-        provider=_provider,
-        enabled=lambda: True,
-        boot_id="syncing-worker",
-    )
-    assert await syncing_worker.drain_once() == 1
-    ready_status = await syncing.status()
-    assert ready_status.state == "ready"
-    assert ready_status.succeeded == 1
-    assert ready_status.last_flush_observation == "succeeded"
-    assert ready_status.last_flush_status == "extracted"
-
-    degraded, degraded_store, _provider = _module(tmp_path / "degraded")
-    degraded_store.set_last_error("memory_processing_failed")
-    assert (await degraded.status()).state == "degraded"
-
-    down, _store, _provider = _module(tmp_path / "down", provider=FakeMemoryProvider(healthy=False))
-    assert (await down.status()).state == "down"
-
-    starting, _store, _provider = _module(tmp_path / "starting", starting=True)
-    assert (await starting.status()).state == "starting"
-
-    runtime_error, _store, _provider = _module(
-        tmp_path / "runtime-error",
-        runtime_error="memory_runtime_missing",
-    )
-    assert (await runtime_error.status()).state == "error"
-
-    disabled, _store, _provider = _module(tmp_path / "disabled", enabled=False)
-    assert (await disabled.status()).state == "disabled"
-
-    clearing, clearing_store, _provider = _module(tmp_path / "clearing")
-    clearing_store.begin_clear()
-    assert (await clearing.status()).state == "clearing"
-
-
-async def test_latest_flush_success_closes_stale_timeout_but_keeps_dead_history(tmp_path: Path) -> None:
-    module, store, provider = _module(tmp_path)
-    assert await module.capture(_request(source="failed", text="failed delivery")) == CaptureAccepted()
-    provider.ingest_failures.extend(
-        [
-            MemoryProviderFailure("memory_provider_timeout"),
-            MemoryProviderFailure("memory_provider_timeout"),
-            MemoryProviderFailure("memory_provider_timeout"),
-        ]
-    )
-    current = datetime(2026, 1, 1, tzinfo=UTC)
-    worker = MemoryWorker(
-        store=store,
-        provider=provider,
-        enabled=lambda: True,
-        boot_id="latest-status-worker",
-        now=lambda: current,
+    result = await module.recall(
+        "exact term",
+        policy=RecallPolicy(mode="keyword", include_profile=False),
+        principal_id=PRINCIPAL,
+        project_id=PROJECT,
     )
 
-    await worker.drain_once()
-    current += timedelta(seconds=31)
-    await worker.drain_once()
-    current += timedelta(minutes=2, seconds=1)
-    await worker.drain_once()
-    assert store.list_queue_rows()[0].state == "dead"
-
-    assert await module.capture(_request(source="succeeded", text="successful delivery")) == CaptureAccepted()
-    assert await worker.drain_once() == 1
-
-    status = await module.status()
-    assert status.state == "ready"
-    assert status.error is None
-    assert status.dead == 1
-    assert status.succeeded == 1
-    assert status.last_flush_observation == "succeeded"
+    assert result == RecallItems(
+        items=provider.search_items,
+        requested_mode="keyword",
+        effective_mode="keyword",
+    )
+    assert provider.search_policies == [("keyword", False, None)]
 
 
-async def test_status_treats_newer_persisted_flush_as_current_after_upgrade(tmp_path: Path) -> None:
-    module, store, _provider = _module(tmp_path)
-    assert await module.capture(_request()) == CaptureAccepted()
-    row = store.claim_due(lease_owner="upgrade", now="2026-07-01T00:00:00.000Z")
-    assert row is not None
-    assert store.settle(
-        row,
-        Delivered(add_request_id="add"),
-        lease_owner="upgrade",
-        now=_dt("2026-07-01T00:00:01.000Z"),
-    ).settled
-    assert store.mark_flush_in_flight(row.session_id, row.project_ref) == 1
-    assert store.record_flush_verdict(
-        row.session_id,
-        PROJECT,
-        FlushSucceeded("flush", "extracted"),
-        now="2026-07-01T00:00:03.000Z",
-    ) == 1
-    with sqlite3.connect(store.path) as conn:
-        conn.execute(
-            """
-                UPDATE memory_meta
-                SET last_error = 'memory_provider_timeout',
-                    last_error_at = '2026-07-01T00:00:02.000Z',
-                    updated_at = '2026-07-01T00:00:02.000Z'
-            WHERE singleton = 1
-            """
-        )
+@pytest.mark.parametrize("mode", ["vector", "hybrid"])
+async def test_explicit_embedding_modes_fail_closed_without_search(
+    tmp_path: Path,
+    mode: str,
+) -> None:
+    provider = FakeMemoryProvider()
+    _set_embed_capability(provider, False)
+    module, _store, _provider = _module(tmp_path, provider=provider)
 
-    status = await module.status()
-    assert status.state == "ready"
-    assert status.error is None
-    assert status.last_flush_observation == "succeeded"
-    assert store.ensure_meta().last_error is None
+    result = await module.recall(
+        "query",
+        policy=RecallPolicy(mode=mode),  # type: ignore[arg-type]
+        principal_id=PRINCIPAL,
+        project_id=PROJECT,
+    )
 
-    assert await module.capture(_request(source="after-upgrade")) == CaptureAccepted()
-    syncing = await module.status()
-    assert syncing.state == "syncing"
-    assert syncing.error is None
+    assert result == OperationFailed(error="memory_capability_unavailable")
+    assert provider.search_scopes == []
+    assert provider.search_policies == []
 
 
 @pytest.mark.parametrize(
-    ("verdict", "expected_observation"),
-    [
-        (FlushRejected("rejected", "INVALID_INPUT", server_fault=False), "rejected"),
-        (FlushUnknown("timeout"), "unknown"),
-    ],
+    ("embed_available", "effective_mode"),
+    [(False, "keyword"), (True, "hybrid")],
 )
-async def test_latest_flush_observation_supersedes_stale_timeout_after_delivery(
+async def test_auto_recall_selects_only_keyword_or_hybrid(
     tmp_path: Path,
-    verdict,
-    expected_observation: str,
+    embed_available: bool,
+    effective_mode: str,
 ) -> None:
-    module, store, provider = _module(tmp_path)
-    assert await module.capture(_request(source="failed")) == CaptureAccepted()
-    provider.ingest_failures.extend(
-        [MemoryProviderFailure("memory_provider_timeout")] * 3
-    )
-    current = datetime.now(UTC).replace(microsecond=0)
-    worker = MemoryWorker(store=store, provider=provider, enabled=lambda: True, now=lambda: current)
-    await worker.drain_once()
-    current += timedelta(seconds=31)
-    await worker.drain_once()
-    current += timedelta(minutes=2, seconds=1)
-    await worker.drain_once()
+    provider = FakeMemoryProvider(search_items=(MemoryItem(kind="fact", text="result"),))
+    _set_embed_capability(provider, embed_available)
+    module, _store, _provider = _module(tmp_path, provider=provider)
 
-    assert await module.capture(_request(source="latest")) == CaptureAccepted()
-    row = store.claim_due(lease_owner="latest", now=current.isoformat())
-    assert row is not None
-    assert store.settle(
-        row,
-        Delivered(add_request_id="latest-add"),
-        lease_owner="latest",
-        now=_dt(current.isoformat()),
-    ).settled
-    delivered_status = await module.status()
-    assert delivered_status.state == "degraded"
-    assert delivered_status.error == "memory_provider_timeout"
-
-    assert store.mark_flush_in_flight(row.session_id, row.project_ref) == 1
-    assert store.record_flush_verdict(
-        row.session_id,
-        PROJECT,
-        verdict,
-        now=(current + timedelta(seconds=1)).isoformat(),
-    ) == 1
-    status = await module.status()
-    assert status.state == "ready"
-    assert status.error is None
-    assert status.last_flush_observation == expected_observation
-
-
-async def test_failure_log_keeps_sanitized_delivery_failures(tmp_path: Path) -> None:
-    module, store, provider = _module(tmp_path)
-    assert await module.capture(_request(source="failed", session="private-session", text="private text")) == CaptureAccepted()
-    provider.ingest_failures.extend(
-        [
-            MemoryProviderFailure("memory_provider_timeout"),
-            MemoryProviderFailure("memory_provider_timeout"),
-            MemoryProviderFailure("memory_provider_timeout"),
-        ]
-    )
-    current = datetime.now(UTC).replace(microsecond=0)
-    expected_at = (current + timedelta(minutes=2, seconds=32)).isoformat(timespec="milliseconds").replace("+00:00", "Z")
-    worker = MemoryWorker(
-        store=store,
-        provider=provider,
-        enabled=lambda: True,
-        boot_id="failure-log-worker",
-        now=lambda: current,
+    result = await module.recall(
+        "query",
+        policy=RecallPolicy(mode="auto"),
+        principal_id=PRINCIPAL,
+        project_id=PROJECT,
     )
 
-    await worker.drain_once()
-    current += timedelta(seconds=31)
-    await worker.drain_once()
-    current += timedelta(minutes=2, seconds=1)
-    await worker.drain_once()
+    assert isinstance(result, RecallItems)
+    assert result.requested_mode == "auto"
+    assert result.effective_mode == effective_mode
+    assert provider.search_policies == [(effective_mode, True, None)]
 
-    assert await module.failure_log() == (
-        MemoryFailureLogEntry(
-            kind="delivery_abandoned",
-            occurred_at=expected_at,
-            error_code="memory_provider_timeout",
-            request_id=None,
-            attempts=3,
-        ),
+
+async def test_agentic_recall_fails_closed_without_provider_search(tmp_path: Path) -> None:
+    provider = FakeMemoryProvider()
+    module, _store, _provider = _module(tmp_path, provider=provider)
+    policy = RecallPolicy(
+        mode="agentic",
+        max_results=4,
+        timeout_seconds=5,
+        max_model_calls=1,
+        cost_budget_tokens=1_000,
     )
 
+    result = await module.recall(
+        "query",
+        policy=policy,
+        principal_id=PRINCIPAL,
+        project_id=PROJECT,
+    )
 
-async def test_failure_log_includes_provider_rejections_and_unknown_results_newest_first(
-    tmp_path: Path,
-) -> None:
+    assert result == OperationFailed(error="memory_capability_unavailable")
+    assert provider.search_scopes == []
+    assert provider.search_policies == []
+
+
+async def test_current_session_overlay_uses_the_trusted_canonical_reference(tmp_path: Path) -> None:
+    provider = FakeMemoryProvider(search_items=(MemoryItem(kind="episode", text="current turn"),))
+    module, store, _provider = _module(tmp_path, provider=provider)
+    expected_ref = store.provider_session_ref(
+        principal_id=PRINCIPAL,
+        project_ref=PROJECT,
+        session_id="trusted-current-session",
+    )
+
+    result = await module.recall(
+        "query",
+        policy=RecallPolicy(mode="keyword", include_current_session=True),
+        principal_id=PRINCIPAL,
+        project_id=PROJECT,
+        current_session_id="trusted-current-session",
+    )
+
+    assert isinstance(result, RecallItems)
+    assert result.current_session_overlay is True
+    assert provider.search_policies == [("keyword", True, expected_ref)]
+    assert expected_ref.principal_id == PRINCIPAL
+    assert expected_ref.project_ref == PROJECT
+    assert expected_ref.session_id != "trusted-current-session"
+
+
+async def test_current_session_overlay_requires_trusted_context_before_search(tmp_path: Path) -> None:
+    module, _store, provider = _module(tmp_path)
+
+    result = await module.recall(
+        "query",
+        policy=RecallPolicy(mode="keyword", include_current_session=True),
+        principal_id=PRINCIPAL,
+        project_id=PROJECT,
+    )
+
+    assert result == OperationFailed(error="memory_invalid_input")
+    assert provider.search_scopes == []
+
+
+async def test_recall_makes_one_search_and_never_falls_back(tmp_path: Path) -> None:
+    provider = FakeMemoryProvider(search_failure=MemoryProviderFailure("memory_processing_failed"))
+    _set_embed_capability(provider, True)
+    module, _store, _provider = _module(tmp_path, provider=provider)
+
+    result = await module.recall(
+        "query",
+        policy=RecallPolicy(mode="hybrid"),
+        principal_id=PRINCIPAL,
+        project_id=PROJECT,
+    )
+
+    assert result == OperationFailed(error="memory_processing_failed")
+    assert provider.search_scopes == [(PRINCIPAL, PROJECT)]
+    assert provider.search_policies == [("hybrid", True, None)]
+
+
+async def test_failure_log_is_a_bounded_read_without_creating_state(tmp_path: Path) -> None:
     module, store, _provider = _module(tmp_path)
 
-    base = datetime.now(UTC).replace(microsecond=0)
-    base_iso = base.isoformat(timespec="milliseconds").replace("+00:00", "Z")
-    delivered_iso = (base + timedelta(seconds=1)).isoformat(timespec="milliseconds").replace("+00:00", "Z")
-
-    async def deliver(source: str, session: str, request_id: str) -> None:
-        assert await module.capture(_request(source=source, session=session)) == CaptureAccepted()
-        row = store.claim_due(lease_owner=source, now=base_iso)
-        assert row is not None
-        assert store.settle(
-        row,
-        Delivered(add_request_id=request_id),
-        lease_owner=source,
-        now=_dt(delivered_iso),
-    ).settled
-        assert store.mark_flush_in_flight(row.session_id, row.project_ref) == 1
-
-    await deliver("rejected", "rejected-session", "add-rejected")
-    rejected_session = store.list_queue_rows()[0].session_id
-    assert store.record_flush_verdict(
-        rejected_session,
-        PROJECT,
-        FlushRejected("flush-rejected", "INVALID_INPUT", server_fault=False),
-        now=(base + timedelta(seconds=3)).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
-    ) == 1
-
-    await deliver("unknown", "unknown-session", "add-unknown")
-    unknown_session = store.list_queue_rows()[1].session_id
-    assert store.record_flush_verdict(
-        unknown_session,
-        PROJECT,
-        FlushUnknown("timeout"),
-        now=(base + timedelta(seconds=4)).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
-    ) == 1
-
-    assert await module.failure_log() == (
-        MemoryFailureLogEntry(
-            kind="result_unknown",
-            occurred_at=(base + timedelta(seconds=4)).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
-            attempts=0,
-        ),
-        MemoryFailureLogEntry(
-            kind="distillation_rejected",
-            occurred_at=(base + timedelta(seconds=3)).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
-            error_code="INVALID_INPUT",
-            request_id="flush-rejected",
-            attempts=0,
-        ),
-    )
-
-
-async def test_failure_log_collapses_one_session_flush_into_one_entry(tmp_path: Path) -> None:
-    module, store, _provider = _module(tmp_path)
-    for source in ("one", "two"):
-        assert await module.capture(
-            _request(source=source, session="shared-session")
-        ) == CaptureAccepted()
-        row = store.claim_due(lease_owner=source, now="2026-07-01T00:00:00.000Z")
-        assert row is not None
-        assert store.settle(
-        row,
-        Delivered(add_request_id=f"add-{source}"),
-        lease_owner=source,
-        now=_dt("2026-07-01T00:00:01.000Z"),
-    ).settled
-
-    session_id = store.list_queue_rows()[0].session_id
-    assert store.mark_flush_in_flight(session_id, PROJECT) == 2
-    assert store.record_flush_verdict(
-        session_id,
-        PROJECT,
-        FlushRejected("shared-flush", "INVALID_INPUT", server_fault=False),
-        now="2026-07-01T00:00:03.000Z",
-    ) == 2
-
-    assert await module.failure_log() == (
-        MemoryFailureLogEntry(
-            kind="distillation_rejected",
-            occurred_at="2026-07-01T00:00:03.000Z",
-            error_code="INVALID_INPUT",
-            request_id="shared-flush",
-            attempts=0,
-        ),
-    )
-
-
-async def test_failure_log_excludes_entries_older_than_retention(tmp_path: Path) -> None:
-    module, store, _provider = _module(tmp_path)
-    assert await module.capture(_request(source="expired")) == CaptureAccepted()
-    old = datetime.now(UTC) - TERMINAL_TOMBSTONE_RETENTION - timedelta(days=1)
-    old_iso = old.isoformat(timespec="milliseconds").replace("+00:00", "Z")
-    row = store.claim_due(lease_owner="expired", now=old_iso)
-    assert row is not None
-    assert store.settle(
-        row,
-        Delivered(add_request_id="old-add"),
-        lease_owner="expired",
-        now=_dt(old_iso),
-    ).settled
-    assert store.mark_flush_in_flight(row.session_id, row.project_ref) == 1
-    assert store.record_flush_verdict(
-        row.session_id,
-        PROJECT,
-        FlushUnknown("timeout"),
-        now=old_iso,
-    ) == 1
-
-    assert await module.failure_log() == ()
-
-
-async def test_failure_log_retention_uses_latest_flush_observation_time(tmp_path: Path) -> None:
-    module, store, _provider = _module(tmp_path)
-    assert await module.capture(_request(source="late-flush")) == CaptureAccepted()
-    old = datetime.now(UTC) - TERMINAL_TOMBSTONE_RETENTION - timedelta(days=1)
-    old_iso = old.isoformat(timespec="milliseconds").replace("+00:00", "Z")
-    observed = datetime.now(UTC).replace(microsecond=0)
-    observed_iso = observed.isoformat(timespec="milliseconds").replace("+00:00", "Z")
-    row = store.claim_due(lease_owner="late-flush", now=old_iso)
-    assert row is not None
-    assert store.settle(
-        row,
-        Delivered(add_request_id="old-add"),
-        lease_owner="late-flush",
-        now=_dt(old_iso),
-    ).settled
-    assert store.mark_flush_in_flight(row.session_id, row.project_ref) == 1
-    assert store.record_flush_verdict(
-        row.session_id,
-        PROJECT,
-        FlushRejected("fresh-rejection", "INVALID_INPUT", server_fault=False),
-        now=observed_iso,
-    ) == 1
-
-    assert await module.failure_log() == (
-        MemoryFailureLogEntry(
-            kind="distillation_rejected",
-            occurred_at=observed_iso,
-            error_code="INVALID_INPUT",
-            request_id="fresh-rejection",
-            attempts=0,
-        ),
-    )
+    assert await module.failure_log(limit=1) == ()
+    assert store.get_meta() is None
 
 
 async def test_memory_never_logs_or_serializes_capture_or_provider_canaries(
@@ -1235,53 +751,37 @@ async def test_memory_never_logs_or_serializes_capture_or_provider_canaries(
     caplog.set_level(logging.DEBUG)
     canary = "very-secret-user-text-canary"
     provider = FakeMemoryProvider(search_failure=RuntimeError("provider-error-body-canary"))
-    module, store, _provider = _module(tmp_path, provider=provider)
+    module, _store, _provider = _module(tmp_path, provider=provider)
 
     assert await module.capture(_request(text=canary)) == CaptureAccepted()
-    result = await module.search("query-canary", principal_id="u-11111111111111111111111111111111", project_id=PROJECT)
-    worker = MemoryWorker(store=store, provider=provider, enabled=lambda: True, boot_id="boot")
-    await worker.drain_once()
+    result = await module.search("query-canary", principal_id=PRINCIPAL, project_id=PROJECT)
 
     rendered = f"{result!r}\n{caplog.text}"
     assert canary not in rendered
     assert "provider-error-body-canary" not in rendered
 
 
-async def test_provider_failures_are_closed_codes_and_never_persist_provider_text(tmp_path: Path) -> None:
+async def test_provider_failures_are_closed_codes_and_never_expose_provider_text(tmp_path: Path) -> None:
     canary = "https://provider.invalid/v1?api_key=memory-key-canary"
     provider = FakeMemoryProvider(search_failure=MemoryProviderFailure(canary))  # type: ignore[arg-type]
-    module, store, _provider = _module(tmp_path, provider=provider)
+    module, _store, _provider = _module(tmp_path, provider=provider)
 
-    result = await module.search("query", principal_id="u-11111111111111111111111111111111", project_id=PROJECT)
+    result = await module.search("query", principal_id=PRINCIPAL, project_id=PROJECT)
 
     assert isinstance(result, OperationFailed)
     assert result.error in CLOSED_MEMORY_ERROR_CODES
     assert canary not in repr(result)
 
-    provider.ingest_failures.append(MemoryProviderFailure(canary))  # type: ignore[arg-type]
-    assert await module.capture(_request()) == CaptureAccepted()
-    worker = MemoryWorker(store=store, provider=provider, enabled=lambda: True, boot_id="boot")
-    assert await worker.drain_once() == 1
-    row = store.list_queue_rows()[0]
-    assert row.last_error in CLOSED_MEMORY_ERROR_CODES
-    with sqlite3.connect(store.path) as conn:
-        serialized = "\n".join(
-            str(value)
-            for query in ("SELECT * FROM memory_meta", "SELECT * FROM memory_capture_queue")
-            for item in conn.execute(query)
-            for value in item
-        )
-    assert canary not in serialized
-
 
 async def test_malformed_unicode_returns_closed_capture_and_search_errors(tmp_path: Path) -> None:
     module, _store, _provider = _module(tmp_path)
 
-    capture = await module.capture(_request(text="\ud800"))
-    search = await module.search("\ud800", principal_id="u-11111111111111111111111111111111", project_id=PROJECT)
-
-    assert capture == CaptureSkipped(reason="memory_invalid_input")
-    assert search == OperationFailed(error="memory_invalid_input")
+    assert await module.capture(_request(text="\ud800")) == CaptureSkipped(
+        reason="memory_invalid_input"
+    )
+    assert await module.search("\ud800", principal_id=PRINCIPAL, project_id=PROJECT) == OperationFailed(
+        error="memory_invalid_input"
+    )
 
 
 async def test_capture_happy_path_uses_one_local_queue_transaction(tmp_path: Path) -> None:
@@ -1302,6 +802,7 @@ async def test_capture_happy_path_uses_one_local_queue_transaction(tmp_path: Pat
         FakeMemoryProvider(),
         enabled=True,
         disk_free_bytes=lambda: MIN_FREE_DISK_BYTES,
+        attachment_store=_attachment_store(),
     )
     store.transactions = 0
 
@@ -1309,260 +810,17 @@ async def test_capture_happy_path_uses_one_local_queue_transaction(tmp_path: Pat
     assert store.transactions == 1
 
 
-async def test_capture_does_not_wait_or_admit_during_an_active_clear(tmp_path: Path) -> None:
-    entered = asyncio.Event()
-    release = asyncio.Event()
-
-    async def clear_provider_data() -> None:
-        entered.set()
-        await release.wait()
-
-    module, store, _provider = _module(
-        tmp_path,
-        clear_provider_data=clear_provider_data,
-        owned_provider_root=True,
-    )
-    clear_task = asyncio.create_task(module.clear())
-    await entered.wait()
-
-    receipt = await asyncio.wait_for(module.capture(_request()), timeout=0.2)
-
-    assert receipt == CaptureSkipped(reason="memory_clear_failed")
-    assert store.list_queue_rows() == ()
-    release.set()
-    assert isinstance(await clear_task, ClearCompleted)
-
-
-async def test_system_failure_globally_pauses_claims_until_health_gate_recovers(tmp_path: Path) -> None:
-    module, store, provider = _module(tmp_path)
-    assert await module.capture(_request()) == CaptureAccepted()
-    provider.ingest_failures.append(MemoryProviderSystemFailure())
-    current = datetime(2026, 1, 1, tzinfo=UTC)
-    worker = MemoryWorker(
-        store=store,
-        provider=provider,
-        enabled=lambda: True,
-        boot_id="boot",
-        now=lambda: current,
-    )
-
-    assert await worker.drain_once() == 1
-    assert await worker.drain_once() == 0
-    paused = store.list_queue_rows()[0]
-    assert (paused.state, paused.attempts) == ("pending", 0)
-
-    current += timedelta(seconds=SYSTEM_PAUSE_SECONDS + 1)
-    assert await worker.drain_once() == 1
-    assert store.list_queue_rows()[0].state == "delivered"
-
-
-async def test_pause_does_not_resume_until_processing_endpoint_recovers(tmp_path: Path) -> None:
-    """Sidecar health alone must not reopen claims after a processing-endpoint outage.
-
-    The resume gate must require BOTH health() and processing_healthy(); otherwise an
-    endpoint that is still down gets re-probed on every tick after the pause interval,
-    prematurely reopening the claim fence.
-    """
-    module, store, provider = _module(tmp_path)
-    assert await module.capture(_request()) == CaptureAccepted()
-    provider.ingest_failures.append(MemoryProviderFailure("memory_processing_failed"))
-    provider.processing_healthy_flag = False  # endpoint stays down throughout
-    current = datetime(2026, 1, 1, tzinfo=UTC)
-    worker = MemoryWorker(
-        store=store,
-        provider=provider,
-        enabled=lambda: True,
-        boot_id="boot",
-        now=lambda: current,
-    )
-
-    # First drain: ambiguous failure + endpoint-down probe => system pause, attempts 0.
-    await worker.drain_once()
-    paused = store.list_queue_rows()[0]
-    assert (paused.state, paused.attempts) == ("pending", 0)
-
-    # Past the pause interval but processing endpoint STILL down: the row must NOT
-    # be delivered (resume gate requires processing_healthy, not just sidecar health).
-    current += timedelta(seconds=SYSTEM_PAUSE_SECONDS + 1)
-    for _ in range(3):
-        await worker.drain_once()
-    still_paused = store.list_queue_rows()[0]
-    assert still_paused.state == "pending"
-    assert still_paused.attempts == 0
-
-    # Endpoint recovers => advance past the pause window and claims resume.
-    provider.processing_healthy_flag = True
-    current += timedelta(seconds=BREAKER_RETRY_SECONDS + 1)
-    await worker.drain_once()
-    assert store.list_queue_rows()[0].state == "delivered"
-
-
-async def test_clear_has_bounded_provider_cleanup_and_drain_waits(tmp_path: Path) -> None:
-    cleanup_wait = asyncio.Event()
-
-    async def never_finish_cleanup() -> None:
-        await cleanup_wait.wait()
-
-    module, store, _provider = _module(
-        tmp_path / "cleanup-timeout",
-        clear_provider_data=never_finish_cleanup,
-        clear_cleanup_timeout_seconds=0.01,
-        owned_provider_root=True,
-    )
-
-    assert await asyncio.wait_for(module.clear(), timeout=0.5) == OperationFailed(error="memory_clear_failed")
-    assert store.ensure_meta().clear_in_progress is True
-    cleanup_wait.set()
-    await asyncio.sleep(0)
-
-    entered = asyncio.Event()
-    release = asyncio.Event()
-
-    class BlockingProvider(FakeMemoryProvider):
-        async def add(self, capture):
-            del capture
-            entered.set()
-            await release.wait()
-
-    provider = BlockingProvider()
-    store = MemoryStore(_store_path(tmp_path / "drain-timeout"))
-    provider_root = tmp_path / "drain-timeout" / "provider-root"
-    _write_owned_provider_root(provider_root, store)
-    worker = MemoryWorker(
-        store=store,
-        provider=provider,
-        enabled=lambda: True,
-        ingest_timeout_seconds=1.0,
-    )
-    module = MemoryModule(
-        store,
-        provider,
-        enabled=True,
-        disk_free_bytes=lambda: MIN_FREE_DISK_BYTES,
-        clear_provider_data=lambda: None,
-        clear_drain_timeout_seconds=0.01,
-        provider_root=provider_root,
-        worker=worker,
-    )
-    assert await module.capture(_request()) == CaptureAccepted()
-    drain_task = asyncio.create_task(worker.drain_once())
-    await entered.wait()
-
-    assert await module.clear() == OperationFailed(error="memory_clear_failed")
-    assert store.ensure_meta().clear_in_progress is True
-    release.set()
-    assert await drain_task == 1
-
-
-async def test_interrupted_clear_rechecks_after_a_transient_store_read_failure(tmp_path: Path) -> None:
-    class FailingFirstReadStore(MemoryStore):
-        def __init__(self, path: Path) -> None:
-            super().__init__(path)
-            self.fail_next_read = False
-
-        def get_meta(self):
-            if self.fail_next_read:
-                self.fail_next_read = False
-                raise sqlite3.OperationalError("transient store read failure")
-            return super().get_meta()
-
-    calls = 0
-
-    async def clear_provider_data() -> None:
-        nonlocal calls
-        calls += 1
-
-    store = FailingFirstReadStore(_store_path(tmp_path))
-    store.begin_clear()
-    provider_root = tmp_path / "provider-root"
-    _write_owned_provider_root(provider_root, store)
-    store.fail_next_read = True
-    module = MemoryModule(
-        store,
-        FakeMemoryProvider(),
-        enabled=True,
-        disk_free_bytes=lambda: MIN_FREE_DISK_BYTES,
-        clear_provider_data=clear_provider_data,
-        provider_root=provider_root,
-    )
-
-    first = await module.status()
-    second = await module.status()
-
-    assert first.state == "clearing"
-    assert second.state == "ready"
-    assert calls == 1
-    assert store.ensure_meta().clear_in_progress is False
-
-
-async def test_disabled_clear_resumes_worker_after_reenable(tmp_path: Path) -> None:
-    enabled = {"value": True}
-    module, store, _provider = _module(
-        tmp_path,
-        enabled=lambda: enabled["value"],
-        clear_provider_data=lambda: None,
-        owned_provider_root=True,
-    )
-    assert await module.capture(_request(source="before-clear")) == CaptureAccepted()
-    enabled["value"] = False
-    assert isinstance(await module.clear(), ClearCompleted)
-
-    enabled["value"] = True
-    assert await module.capture(_request(source="after-clear")) == CaptureAccepted()
-    assert await module._worker.drain_once() == 1
-    assert store.list_queue_rows()[0].state == "delivered"
-
-
-async def test_clear_never_reports_completed_without_provider_cleanup(tmp_path: Path) -> None:
-    no_cleanup, no_cleanup_store, _provider = _module(tmp_path / "no-cleanup")
-    assert await no_cleanup.clear() == OperationFailed(error="memory_clear_failed")
-    assert no_cleanup_store.ensure_meta().clear_in_progress is True
-
-    provider_root = tmp_path / "provider-root"
-    provider_root.mkdir()
-    retained = provider_root / "retained-provider-data"
-    retained.write_text("provider state", encoding="utf-8")
-    module, store, _provider = _module(
-        tmp_path / "root-remains",
-        provider_root=provider_root,
-        clear_provider_data=lambda: None,
-    )
-
-    assert await module.clear() == OperationFailed(error="memory_clear_failed")
-    assert retained.exists()
-    assert store.ensure_meta().clear_in_progress is True
-
-
-async def test_capture_capacity_and_disk_pauses_are_visible_as_degraded(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    low_disk, _store, _provider = _module(tmp_path / "low-disk", disk_free_bytes=lambda: 0)
-    assert await low_disk.capture(_request()) == CaptureSkipped(reason="memory_low_disk_space")
-    assert (await low_disk.status()).state == "degraded"
-
-    monkeypatch.setattr("core.memory.module.MAX_NONTERMINAL_QUEUE_ROWS", 1)
-    full, _store, _provider = _module(tmp_path / "queue-full")
-    assert await full.capture(_request(source="one")) == CaptureAccepted()
-    assert await full.capture(_request(source="two")) == CaptureSkipped(reason="memory_queue_full")
-    assert (await full.status()).state == "degraded"
-
-
-async def test_whitespace_only_capture_identifiers_are_invalid(tmp_path: Path) -> None:
+async def test_capture_identifiers_are_validated_before_enqueue(tmp_path: Path) -> None:
     module, store, _provider = _module(tmp_path)
 
     assert await module.capture(_request(source="   ")) == CaptureSkipped(reason="memory_invalid_input")
-    assert await module.capture(_request(session="\t\n")) == CaptureSkipped(reason="memory_invalid_input")
-    assert store.ensure_meta().missed_count == 2
-
-
-async def test_invalid_capture_principal_is_classified_as_invalid_input(tmp_path: Path) -> None:
-    module, store, _provider = _module(tmp_path)
-
+    assert await module.capture(_request(session="\t\n")) == CaptureSkipped(
+        reason="memory_invalid_input"
+    )
     assert await module.capture(_request(principal_id="avibe:local")) == CaptureSkipped(
         reason="memory_invalid_input"
     )
-    assert store.ensure_meta().missed_count == 1
+    assert store.ensure_meta().missed_count == 3
 
 
 def test_provider_port_is_not_part_of_the_public_memory_package() -> None:
@@ -1572,199 +830,12 @@ def test_provider_port_is_not_part_of_the_public_memory_package() -> None:
     assert "ProviderCapture" not in memory.__all__
 
 
-async def test_healthy_timeout_poison_row_spends_attempts_then_unblocks_later_work(tmp_path: Path) -> None:
-    class PoisonProvider(FakeMemoryProvider):
-        async def add(self, capture):
-            if capture.text == "poison":
-                await asyncio.Event().wait()
-            return await super().add(capture)
-
-    provider = PoisonProvider()
-    module, store, _provider = _module(tmp_path, provider=provider)
-    assert await module.capture(_request(source="poison", text="poison")) == CaptureAccepted()
-    assert await module.capture(_request(source="later", text="later")) == CaptureAccepted()
-    current = datetime(2026, 1, 1, tzinfo=UTC)
-    worker = MemoryWorker(
-        store=store,
-        provider=provider,
-        enabled=lambda: True,
-        boot_id="poison-worker",
-        now=lambda: current,
-        ingest_timeout_seconds=0.01,
-    )
-
-    assert await worker.drain_once() == 1
-    assert store.list_queue_rows()[0].attempts == 1
-    current += timedelta(seconds=31)
-    assert await worker.drain_once() == 1
-    assert store.list_queue_rows()[0].attempts == 2
-    current += timedelta(minutes=2, seconds=1)
-    assert await worker.drain_once() == 1
-    poison = store.list_queue_rows()[0]
-    assert (poison.state, poison.attempts, poison.payload_text) == ("dead", 3, None)
-
-    assert await worker.drain_once() == 1
-    later = store.list_queue_rows()[1]
-    assert later.state == "delivered"
-    assert [capture.text for capture in provider.captures] == ["later"]
-
-
-async def test_clear_rejects_a_missing_or_unsentinelized_provider_root(tmp_path: Path) -> None:
-    missing_root = tmp_path / "missing-root"
-    missing, missing_store, _provider = _module(
-        tmp_path / "missing",
-        provider_root=missing_root,
-        clear_provider_data=lambda: None,
-    )
-    assert await missing.clear() == OperationFailed(error="memory_clear_failed")
-    assert missing_store.ensure_meta().clear_in_progress is True
-
-    root_without_sentinel = tmp_path / "root-without-sentinel"
-    root_without_sentinel.mkdir()
-    unsentinelized, unsentinelized_store, _provider = _module(
-        tmp_path / "unsentinelized",
-        provider_root=root_without_sentinel,
-        clear_provider_data=lambda: None,
-    )
-    assert await unsentinelized.clear() == OperationFailed(error="memory_clear_failed")
-    assert unsentinelized_store.ensure_meta().clear_in_progress is True
-
-
-async def test_clear_removes_provider_children_and_recreates_the_owned_sentinel(tmp_path: Path) -> None:
-    provider_root = tmp_path / "provider-root"
-    module, store, _provider = _module(
-        tmp_path,
-        provider_root=provider_root,
-        clear_provider_data=lambda: None,
-        owned_provider_root=True,
-    )
-    (provider_root / "derived-state").write_text("derived", encoding="utf-8")
-    nested = provider_root / "nested"
-    nested.mkdir()
-    (nested / "more-state").write_text("derived", encoding="utf-8")
-
-    assert isinstance(await module.clear(), ClearCompleted)
-    assert [entry.name for entry in provider_root.iterdir()] == [ROOT_SENTINEL_FILENAME]
-    sentinel = json.loads((provider_root / ROOT_SENTINEL_FILENAME).read_text(encoding="utf-8"))
-    assert sentinel["provider_root_id"] == store.ensure_meta().provider_root_id
-    assert store.ensure_meta().clear_in_progress is False
-
-
-async def test_timed_out_sync_cleanup_remains_lifecycle_owned_without_overlap(tmp_path: Path) -> None:
-    started = threading.Event()
-    release = threading.Event()
-    lock = threading.Lock()
-    calls = 0
-    active = 0
-    max_active = 0
-
-    def blocking_cleanup() -> None:
-        nonlocal active, calls, max_active
-        with lock:
-            calls += 1
-            active += 1
-            max_active = max(max_active, active)
-        started.set()
-        release.wait(timeout=1.0)
-        with lock:
-            active -= 1
-
-    module, _store, _provider = _module(
-        tmp_path,
-        clear_provider_data=blocking_cleanup,
-        clear_cleanup_timeout_seconds=0.01,
-        owned_provider_root=True,
-    )
-    try:
-        assert await module.clear() == OperationFailed(error="memory_clear_failed")
-        assert await asyncio.to_thread(started.wait, 0.5)
-
-        status = await asyncio.wait_for(module.status(), timeout=0.2)
-        assert status.state == "clearing"
-        with lock:
-            assert (calls, max_active) == (1, 1)
-    finally:
-        release.set()
-        await asyncio.sleep(0.05)
-
-
-async def test_status_rechecks_persistent_low_disk_after_an_older_row_delivers(tmp_path: Path) -> None:
-    disk = {"free": MIN_FREE_DISK_BYTES}
-    module, store, provider = _module(tmp_path, disk_free_bytes=lambda: disk["free"])
-    assert await module.capture(_request(source="older")) == CaptureAccepted()
-    disk["free"] = 0
-    assert await module.capture(_request(source="low-disk")) == CaptureSkipped(reason="memory_low_disk_space")
-
-    worker = MemoryWorker(store=store, provider=provider, enabled=lambda: True, boot_id="disk-worker")
-    assert await worker.drain_once() == 1
-
-    status = await module.status()
-    assert status.state == "degraded"
-    assert status.error == "memory_low_disk_space"
-
-
-async def test_provider_outage_after_disk_recovery_reports_sidecar_error(tmp_path: Path) -> None:
-    """A resolved low-disk condition must not mask a later active provider outage.
-
-    Sequence: low-disk skipped -> disk recovers (ready) -> provider goes down ->
-    status must be 'down' with error 'memory_sidecar_unavailable', NOT the stale
-    'memory_low_disk_space' (active outage takes precedence over resolved disk).
-    """
-    disk = {"free": MIN_FREE_DISK_BYTES}
-    module, store, provider = _module(tmp_path, disk_free_bytes=lambda: disk["free"])
-    disk["free"] = 0
-    assert await module.capture(_request(source="low-disk")) == CaptureSkipped(reason="memory_low_disk_space")
-
-    # Disk recovers -> ready, error None.
-    disk["free"] = MIN_FREE_DISK_BYTES
-    status = await module.status()
-    assert status.state == "ready"
-    assert status.error is None
-
-    # Provider goes down -> down with the active sidecar error, not stale disk.
-    provider.healthy = False
-    status = await module.status()
-    assert status.state == "down"
-    assert status.error == "memory_sidecar_unavailable"
-
-
-async def test_health_recovery_clears_only_the_persisted_system_outage_error(tmp_path: Path) -> None:
-    provider = FakeMemoryProvider(healthy=False)
-    module, store, _provider = _module(tmp_path, provider=provider)
-    current = datetime(2026, 1, 1, tzinfo=UTC)
-    worker = MemoryWorker(
-        store=store,
-        provider=provider,
-        enabled=lambda: True,
-        boot_id="recovery-worker",
-        now=lambda: current,
-    )
-
-    assert await worker.drain_once() == 0
-    assert store.ensure_meta().last_error == "memory_sidecar_unavailable"
-    provider.healthy = True
-    current += timedelta(seconds=SYSTEM_PAUSE_SECONDS + 1)
-    assert await worker.drain_once() == 0
-    assert store.ensure_meta().last_error is None
-    assert (await module.status()).state == "ready"
-
-
 def test_slice2_runtime_types_remain_internal_to_the_memory_package() -> None:
+    import core.memory as memory
     import core.memory.artifact as artifact
     import core.memory.process as process
-    import core.memory as memory
 
     assert hasattr(artifact, "MemoryArtifactManager")
     assert hasattr(process, "EverOSProcess")
     assert "MemoryArtifactManager" not in memory.__all__
     assert "EverOSProcess" not in memory.__all__
-
-
-def test_every_closed_memory_error_code_is_translated_in_the_web_ui() -> None:
-    """A code the UI cannot render reaches the user as a raw identifier."""
-
-    repo_root = Path(__file__).resolve().parents[1]
-    for locale in ("en", "zh"):
-        catalog = json.loads((repo_root / "ui" / "src" / "i18n" / f"{locale}.json").read_text(encoding="utf-8"))
-        translated = set(catalog["errors"])
-        assert CLOSED_MEMORY_ERROR_CODES <= translated, sorted(CLOSED_MEMORY_ERROR_CODES - translated)

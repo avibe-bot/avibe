@@ -809,7 +809,8 @@ class ManagedWatchStore:
             return False
         expect = self._read_state(watch)
         watch.last_started_at = _utc_now_iso()
-        watch.last_error = None
+        if watch.retired_at is None:
+            watch.last_error = None
         watch.updated_at = _utc_now_iso()
         # A runtime stamp: a lost write is reported by the return value, not by an
         # exception through the supervisor loop.
@@ -852,8 +853,12 @@ class ManagedWatchStore:
         if was_enabled:
             watch.last_finished_at = now if disable or pause else None
             watch.retired_at = now if disable else None
-        watch.last_exit_code = exit_code
-        watch.last_error = error
+        # Once retirement commits, these fields describe that terminal outcome.
+        # A late cycle still owns its individual Run row, but it cannot replace
+        # the definition outcome written by the cycle that retired the Watch.
+        if was_enabled or watch.retired_at is None:
+            watch.last_exit_code = exit_code
+            watch.last_error = error
         if event_detected:
             watch.last_event_at = now
         if metadata_updates or (event_detected and acknowledge_event):

@@ -31,7 +31,7 @@ from vibe.message_types import build_partial_index_predicate
 pytestmark = pytest.mark.no_sqlite_template
 
 
-HEAD_REVISION = "20260811_0050"
+HEAD_REVISION = "20260812_0053"
 MESSAGE_PARTIAL_INDEX_PREDICATES = {
     "ix_messages_inbox_activity": (
         "session_id is not null and type in "
@@ -241,6 +241,85 @@ def test_accepted_steer_receipt_migration_preserves_upgrade_and_downgrade_invari
                 "update message_deliveries set current_receipt_outcome = 'accepted' "
                 "where id = 'msg_receipt_candidate'"
             )
+
+
+def test_callback_terminal_turn_identity_migration_preserves_rows_and_scope(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision="20260811_0050")
+    command.upgrade(migrations.alembic_config(db_path), "head")
+    now = "2026-08-11T00:00:00Z"
+
+    def insert_callback(
+        conn,
+        *,
+        run_id: str,
+        terminal_turn_id: str,
+        session_id: str,
+    ) -> None:
+        conn.execute(
+            """
+            insert into agent_runs (
+                id, run_type, status, source_kind, session_id,
+                callback_terminal_turn_id, cancel_requested,
+                created_at, updated_at, metadata_json
+            ) values (?, 'agent_run', 'queued', 'callback', ?, ?, 0, ?, ?, '{}')
+            """,
+            (run_id, session_id, terminal_turn_id, now, now),
+        )
+
+    with sqlite3.connect(db_path) as conn:
+        columns = {row[1] for row in conn.execute("pragma table_info('agent_runs')")}
+        assert "callback_terminal_turn_id" in columns
+        assert "where run_type = 'agent_run'" in _index_sql(
+            conn, "uq_agent_runs_callback_terminal_turn_session"
+        ).lower()
+        insert_callback(
+            conn,
+            run_id="callback-one",
+            terminal_turn_id="turn-one",
+            session_id="session-one",
+        )
+        conn.commit()
+
+    with pytest.raises(sqlite3.IntegrityError):
+        with sqlite3.connect(db_path) as conn:
+            insert_callback(
+                conn,
+                run_id="callback-duplicate",
+                terminal_turn_id="turn-one",
+                session_id="session-one",
+            )
+
+    with sqlite3.connect(db_path) as conn:
+        insert_callback(
+            conn,
+            run_id="callback-other-turn",
+            terminal_turn_id="turn-two",
+            session_id="session-one",
+        )
+        insert_callback(
+            conn,
+            run_id="callback-other-session",
+            terminal_turn_id="turn-one",
+            session_id="session-two",
+        )
+        conn.commit()
+
+    command.downgrade(migrations.alembic_config(db_path), "20260811_0050")
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute(
+            "select name from sqlite_master where type = 'index' and name = ?",
+            ("uq_agent_runs_callback_terminal_turn_session",),
+        ).fetchone() is None
+        assert conn.execute(
+            "select id from agent_runs where source_kind = 'callback' order by id"
+        ).fetchall() == [
+            ("callback-one",),
+            ("callback-other-session",),
+            ("callback-other-turn",),
+        ]
 
 
 def test_agent_lifecycle_message_index_migration_upgrades_and_downgrades(
@@ -1889,6 +1968,168 @@ def test_retirement_marker_migration_is_forward_only(tmp_path: Path) -> None:
     assert "retired_at" in columns
     assert row == ("2026-07-26T00:00:00+00:00", None)
     assert version == (HEAD_REVISION,)
+
+
+def test_retirement_reason_migration_preserves_legacy_unknowns(tmp_path: Path) -> None:
+    """0053 adds no inferred reason from clocks, edits, or run history."""
+
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision="20260811_0052")
+    with sqlite3.connect(db_path) as conn:
+        conn.executemany(
+            """
+            insert into run_definitions (
+                id, definition_type, schedule_type, run_at, enabled,
+                last_run_at, retired_at, created_at, updated_at, metadata_json
+            ) values (?, 'scheduled', 'at', ?, 0, ?, ?, ?, ?, '{}')
+            """,
+            (
+                (
+                    "legacy-ran",
+                    "2026-07-26T09:00:00+00:00",
+                    "2026-07-26T09:01:00+00:00",
+                    "2026-07-26T09:01:00+00:00",
+                    "2026-07-25T00:00:00+00:00",
+                    "2026-07-31T00:00:00+00:00",
+                ),
+                (
+                    "legacy-missed",
+                    "2026-07-26T10:00:00+00:00",
+                    None,
+                    "2026-07-26T10:00:01+00:00",
+                    "2026-07-25T00:00:00+00:00",
+                    "2026-07-31T00:00:00+00:00",
+                ),
+            ),
+        )
+        conn.commit()
+
+    run_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            "select id, retirement_reason from run_definitions order by id"
+        ).fetchall()
+        version = conn.execute("select version_num from alembic_version").fetchone()
+
+    assert rows == [("legacy-missed", None), ("legacy-ran", None)]
+    assert version == (HEAD_REVISION,)
+
+
+def test_orphaned_owner_task_migration_marks_unbound_definitions(tmp_path: Path) -> None:
+    """0052 blocks every resumable orphan and stops the ones still enabled."""
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision="20260811_0051")
+
+    with sqlite3.connect(db_path) as conn:
+        _insert_scope(conn, "sc1")
+        for session_id, anchor in (
+            ("ses-live-owner", "live-owner"),
+            ("ses-target", "target"),
+            ("ses-archived-owner", "archived-owner"),
+        ):
+            _insert_agent_session(
+                conn,
+                row_id=session_id,
+                scope_id="sc1",
+                anchor=anchor,
+                workdir="/tmp",
+                backend="codex",
+                native=f"native-{session_id}",
+                last_active="2026-08-11T00:00:00+00:00",
+            )
+        conn.execute(
+            "update agent_sessions set status = 'archived' where id = 'ses-archived-owner'"
+        )
+
+        def insert_task(
+            task_id: str,
+            owner_session_id: str | None,
+            *,
+            session_id: str | None = None,
+            session_policy: str | None = "create_per_run",
+            enabled: int = 1,
+            last_error: str | None = None,
+        ) -> None:
+            metadata = (
+                json.dumps({"created_by": {"caller": {"session_id": owner_session_id}}})
+                if owner_session_id is not None
+                else "{}"
+            )
+            conn.execute(
+                """
+                insert into run_definitions (
+                    id, definition_type, name, session_policy, session_id, enabled,
+                    last_error, created_at, updated_at, metadata_json
+                ) values (?, 'scheduled', ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    task_id,
+                    task_id,
+                    session_policy,
+                    session_id,
+                    enabled,
+                    last_error,
+                    "2026-08-11T00:00:00+00:00",
+                    "2026-08-11T00:00:00+00:00",
+                    metadata,
+                ),
+            )
+
+        insert_task("missing-owner", "ses-removed-owner")
+        insert_task("pure-command", "ses-removed-owner", session_policy=None)
+        insert_task("blank-target", "ses-removed-owner", session_id="   ")
+        insert_task("whitespace-target", "ses-removed-owner", session_id="\t\n\r")
+        insert_task("archived-owner", "ses-archived-owner")
+        insert_task("live-owner", "ses-live-owner")
+        insert_task("target-fallback", "ses-removed-owner", session_id="ses-target")
+        insert_task("legacy-unowned", None)
+        insert_task(
+            "already-paused",
+            "ses-removed-owner",
+            enabled=0,
+            last_error="manual pause",
+        )
+        conn.commit()
+
+    run_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        rows = {
+            row[0]: row[1:]
+            for row in conn.execute(
+                "select id, enabled, session_id, last_error, metadata_json from run_definitions"
+            )
+        }
+
+    def owner_marker(task_id: str) -> dict | None:
+        metadata = json.loads(rows[task_id][3])
+        return metadata.get("orphaned_task_owner")
+
+    expected_paused = {
+        "missing-owner": (None, "ses-removed-owner"),
+        "pure-command": (None, "ses-removed-owner"),
+        "blank-target": ("   ", "ses-removed-owner"),
+        "whitespace-target": ("\t\n\r", "ses-removed-owner"),
+        "archived-owner": (None, "ses-archived-owner"),
+    }
+    for task_id, (session_id, owner_session_id) in expected_paused.items():
+        assert rows[task_id][:3] == (0, session_id, None)
+        assert owner_marker(task_id) == {
+            "reason_code": "task_owner_session_unavailable",
+            "owner_session_id": owner_session_id,
+        }
+
+    assert rows["live-owner"][:3] == (1, None, None)
+    assert rows["target-fallback"][:3] == (1, "ses-target", None)
+    assert rows["legacy-unowned"][:3] == (1, None, None)
+    assert rows["already-paused"][:3] == (0, None, "manual pause")
+    assert owner_marker("already-paused") == {
+        "reason_code": "task_owner_session_unavailable",
+        "owner_session_id": "ses-removed-owner",
+    }
+    for task_id in ("live-owner", "target-fallback", "legacy-unowned"):
+        assert owner_marker(task_id) is None
 
 
 def test_show_annotation_migration_changes_only_the_user_send_index(
@@ -4883,10 +5124,12 @@ def test_ensure_sqlite_state_imports_background_json(tmp_path: Path) -> None:
                         "session_id": "sesk8m4q2p7x",
                         "session_key": "slack::channel::C123",
                         "prompt": "hello",
-                        "schedule_type": "cron",
-                        "cron": "0 * * * *",
+                        "schedule_type": "at",
+                        "run_at": "2026-05-15T01:00:00+00:00",
                         "timezone": "UTC",
-                        "enabled": True,
+                        "enabled": False,
+                        "retired_at": "2026-05-15T01:00:00+00:00",
+                        "retirement_reason": "schedule_consumed",
                         "created_at": "2026-05-15T00:00:00+00:00",
                         "updated_at": "2026-05-15T00:00:00+00:00",
                     }
@@ -4910,7 +5153,8 @@ def test_ensure_sqlite_state_imports_background_json(tmp_path: Path) -> None:
                         "lifetime_timeout_seconds": 3600,
                         "retry_exit_codes": [75],
                         "retry_delay_seconds": 30,
-                        "enabled": True,
+                        "enabled": False,
+                        "retired_at": "2026-05-15T02:00:00+00:00",
                         "created_at": "2026-05-15T00:00:00+00:00",
                         "updated_at": "2026-05-15T00:00:00+00:00",
                     }
@@ -4960,12 +5204,25 @@ def test_ensure_sqlite_state_imports_background_json(tmp_path: Path) -> None:
     assert report.counts["background_runs_imported"] == 2
     with sqlite3.connect(db_path) as conn:
         tasks = conn.execute(
-            "select definition_type, session_id, legacy_session_key from run_definitions order by id"
+            "select definition_type, session_id, legacy_session_key, retired_at, retirement_reason "
+            "from run_definitions order by id"
         ).fetchall()
         runs = conn.execute("select id, run_type, status, session_id, error from agent_runs order by id").fetchall()
     assert tasks == [
-        ("scheduled", "sesk8m4q2p7x", "slack::channel::C123"),
-        ("watch", "sesk8m4q2p7x", "slack::channel::C123"),
+        (
+            "scheduled",
+            "sesk8m4q2p7x",
+            "slack::channel::C123",
+            "2026-05-15T01:00:00+00:00",
+            "schedule_consumed",
+        ),
+        (
+            "watch",
+            "sesk8m4q2p7x",
+            "slack::channel::C123",
+            "2026-05-15T02:00:00+00:00",
+            None,
+        ),
     ]
     assert runs == [
         ("hook-1", "hook_send", "queued", "sesk8m4q2p7x", None),

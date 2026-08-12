@@ -280,6 +280,7 @@ run_definitions = Table(
     Column("last_started_at", String, nullable=True),
     Column("last_finished_at", String, nullable=True),
     Column("retired_at", String, nullable=True),
+    Column("retirement_reason", String, nullable=True),
     Column("last_event_at", String, nullable=True),
     Column("last_run_at", String, nullable=True),
     Column("last_error", Text, nullable=True),
@@ -324,6 +325,7 @@ agent_runs = Table(
     Column("callback_error", Text, nullable=True),
     Column("callback_run_id", String, nullable=True),
     Column("callback_completed_at", String, nullable=True),
+    Column("callback_terminal_turn_id", String, nullable=True),
     Column("cancel_requested", Integer, nullable=False, default=0),
     Column("cancel_requested_at", String, nullable=True),
     Column("pid", Integer, nullable=True),
@@ -348,6 +350,16 @@ agent_runs = Table(
     ),
     Index("ix_agent_runs_agent_created", "agent_name", "created_at"),
     Index("ix_agent_runs_callback_status", "callback_status", "completed_at"),
+    Index(
+        "uq_agent_runs_callback_terminal_turn_session",
+        "callback_terminal_turn_id",
+        "session_id",
+        unique=True,
+        sqlite_where=text(
+            "run_type = 'agent_run' and source_kind = 'callback' "
+            "and callback_terminal_turn_id is not null and session_id is not null"
+        ),
+    ),
     # Leading-timestamp index for the run-graph window scan: updated_at bumps on
     # every state change, so it is the single column that scan filters on.
     Index("ix_agent_runs_updated", "updated_at"),

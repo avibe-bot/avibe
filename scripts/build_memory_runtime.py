@@ -14,12 +14,14 @@ import sys
 import sysconfig
 import tarfile
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 
-EVEROS_VERSION = "1.2.1"
+EVEROS_VERSION = "1.2.3"
 PYTHON_VERSION = "3.12.12"
-LOCK_SHA256 = "e7b59ee874e5cb2bfcbcb87cbd1e9c2d6ca2df752cd8a1059ddd3badb8c0246f"
+LOCK_SHA256 = "e6acc17e4c0969563d380326e90134965af0822259bb4a9adb4d54433e9737fe"
 UV_VERSION = "0.9.18"
 BIN_PATH = "bin/python"
 MAX_ARCHIVE_BYTES = 1024 * 1024 * 1024
@@ -28,6 +30,10 @@ EXPECTED_PLATFORMS = {
     "linux-arm64",
     "linux-x64",
 }
+SYNC_BOOTSTRAP_REVISION = 1
+SYNC_ARGV = ("-I", "-m", "everos.entrypoints.cli.main", "cascade", "sync")
+SYNC_BOOTSTRAP_SOURCE = Path(__file__).with_name("memory_runtime_sitecustomize.py")
+SYNC_SCRUBBERS_SOURCE = Path(__file__).parents[1] / "core" / "memory" / "secret_scrubber.py"
 SMOKE_SCRIPT = (
     "from importlib.metadata import version\n"
     "import platform\n"
@@ -49,6 +55,24 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: file.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+@contextmanager
+def _temporary_directory(prefix: str) -> Iterator[Path]:
+    """Create scratch space beneath the canonical system temp directory."""
+
+    temp_root = Path(tempfile.gettempdir()).resolve(strict=True)
+    with tempfile.TemporaryDirectory(prefix=prefix, dir=temp_root) as temporary:
+        yield Path(temporary)
+
+
+@contextmanager
+def _short_socket_directory(prefix: str) -> Iterator[Path]:
+    """Create canonical scratch space short enough for Unix-domain sockets."""
+
+    temp_root = Path("/tmp").resolve(strict=True)
+    with tempfile.TemporaryDirectory(prefix=prefix, dir=temp_root) as temporary:
+        yield Path(temporary)
 
 
 def _platform_tag() -> str:
@@ -138,8 +162,8 @@ def create_archive(*, runtime_root: Path, output: Path, platform: str) -> dict[s
 def verify_archive(archive_path: Path, *, binary_sha256: str) -> None:
     """Extract and smoke the final bytes in a new directory."""
 
-    with tempfile.TemporaryDirectory(prefix="avibe-memory-runtime-verify-") as temporary_value:
-        destination = Path(temporary_value) / "runtime"
+    with _temporary_directory("avibe-memory-runtime-verify-") as temporary:
+        destination = temporary / "runtime"
         destination.mkdir()
         destination_resolved = destination.resolve()
         with tarfile.open(archive_path, "r:gz") as archive:
@@ -167,8 +191,8 @@ def verify_archive(archive_path: Path, *, binary_sha256: str) -> None:
         if _sha256(binary) != binary_sha256:
             raise SystemExit("Memory Runtime extracted Python checksum mismatch")
         _smoke(binary, cwd=destination.parent)
-        with tempfile.TemporaryDirectory(prefix="mrv-health-", dir="/tmp") as health_home:
-            _sidecar_health_smoke(binary, effective_home=Path(health_home))
+        with _short_socket_directory("mrv-") as health_home:
+            _sidecar_health_smoke(binary, effective_home=health_home)
 
 
 def prune_runtime(runtime_root: Path) -> None:
@@ -208,6 +232,26 @@ def prune_runtime(runtime_root: Path) -> None:
         with record.open("w", newline="", encoding="utf-8") as destination:
             writer = csv.writer(destination, lineterminator="\n")
             writer.writerows(retained)
+
+
+def install_sync_bootstrap(runtime_root: Path) -> tuple[str, str]:
+    """Install the gated sitecustomize and return its source digest."""
+
+    source = SYNC_BOOTSTRAP_SOURCE.read_bytes()
+    scrubbers = SYNC_SCRUBBERS_SOURCE.read_bytes()
+    site_packages = runtime_root / "lib" / "python3.12" / "site-packages"
+    site_packages.mkdir(parents=True, exist_ok=True)
+    module = site_packages / "avibe_memory_sync_bootstrap.py"
+    module.write_bytes(source)
+    module.chmod(0o644)
+    scrubber_module = site_packages / "avibe_memory_sync_scrubbers.py"
+    scrubber_module.write_bytes(scrubbers)
+    scrubber_module.chmod(0o644)
+    (site_packages / "avibe_memory_sync_bootstrap.pth").write_text(
+        "import avibe_memory_sync_bootstrap\n",
+        encoding="ascii",
+    )
+    return hashlib.sha256(source).hexdigest(), hashlib.sha256(scrubbers).hexdigest()
 
 
 def _run(command: list[str], *, cwd: Path, capture_output: bool = False) -> subprocess.CompletedProcess[str]:
@@ -305,8 +349,7 @@ def build_runtime(
     if uv_identity.split()[:2] != ["uv", UV_VERSION]:
         raise SystemExit(f"Memory Runtime builder requires uv {UV_VERSION}")
 
-    with tempfile.TemporaryDirectory(prefix="avibe-memory-runtime-") as temporary_value:
-        temporary = Path(temporary_value)
+    with _temporary_directory("avibe-memory-runtime-") as temporary:
         _run([uv_command, "python", "install", python_version], cwd=temporary)
         found = _run(
             [uv_command, "python", "find", "--no-project", "--managed-python", python_version],
@@ -361,6 +404,7 @@ def build_runtime(
         shutil.move(str(runtime_root), str(relocated_root))
         _smoke(relocated_root / BIN_PATH, cwd=temporary)
         prune_runtime(relocated_root)
+        bootstrap_sha256, scrubbers_sha256 = install_sync_bootstrap(relocated_root)
         _smoke(relocated_root / BIN_PATH, cwd=temporary)
 
         archive = output_dir / f"memory-runtime-{EVEROS_VERSION}-{platform}.tar.gz"
@@ -373,6 +417,10 @@ def build_runtime(
         ).stdout.strip()
         metadata["lock_sha256"] = lock_sha256
         metadata["uv_version"] = UV_VERSION
+        metadata["sync_bootstrap_revision"] = SYNC_BOOTSTRAP_REVISION
+        metadata["sync_bootstrap_sha256"] = bootstrap_sha256
+        metadata["sync_scrubbers_sha256"] = scrubbers_sha256
+        metadata["sync_argv"] = list(SYNC_ARGV)
     return archive, metadata
 
 

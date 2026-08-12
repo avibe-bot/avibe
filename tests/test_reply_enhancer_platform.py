@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -293,7 +294,21 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         # request; enabling Memory now grants the proactive contract directly.
         self.assertNotIn("explicitly requested by the user", prompt)
         self.assertIn("### When to remember", prompt)
-        self.assertIn("Call `remember` proactively, without being asked", prompt)
+        # Explicit requests use Memory only after the existing eligibility,
+        # safety, and surface filters, and success is acknowledged only after
+        # the CLI confirms that the queue accepted the write.
+        self.assertIn(
+            "When the user explicitly asks you to remember, note, or keep track of something",
+            prompt,
+        )
+        self.assertIn("first apply the same eligibility, safety, and surface rules below", prompt)
+        self.assertIn("a durable, non-secret personal fact or stable user habit", prompt)
+        self.assertIn("overrides only the plain-text no-paraphrase rule below", prompt)
+        self.assertIn("it never makes project knowledge, one-off task detail, transient state, or secrets eligible", prompt)
+        self.assertIn("After `remember` reports `accepted` or `duplicate`", prompt)
+        self.assertIn("If it returns any nonzero outcome, do not claim the fact was saved", prompt)
+        self.assertIn("do not start an unbounded retry loop", prompt)
+        self.assertIn("Also call `remember` proactively, without being asked", prompt)
         self.assertIn("a correction of your own behavior", prompt)
         self.assertIn("a decision, conclusion, or agreement the conversation arrived at", prompt)
         # Project knowledge stays on the AGENTS.md surface; only user/machine
@@ -313,7 +328,10 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             prompt,
         )
         self.assertIn("a fact stated outright in one of those is in Memory already", prompt)
-        self.assertIn("never queue a paraphrase of it", prompt)
+        self.assertIn(
+            "never queue a paraphrase of it, unless the user explicitly asked you to remember it",
+            prompt,
+        )
         self.assertIn("only for a conclusion automatic capture cannot reach", prompt)
         self.assertIn(
             "never restate a fact one of their plain text messages already carries on its own",
@@ -359,19 +377,36 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
                 context=context,
             )
 
-        # Proactive capture routes to Memory's managed lifecycle in one
-        # direction only; the preferences file stays explicit-request.
+        # With Memory admitted, eligible user-fact writes route to Memory, and
+        # the preferences file drops to read-only unless the user names it as
+        # the destination themselves.
         self.assertIn(
-            "anything you decide to record proactively goes through `vibe memory remember`",
+            "Anything you decide to record proactively goes through `vibe memory remember`",
             prompt,
         )
         self.assertIn("Everything you record proactively belongs here", prompt)
-        # Memory is project-scoped, so cross-project preferences are offered to
-        # the user-global preferences file — but only written on agreement.
-        self.assertIn("Memory is scoped to the current project", prompt)
-        self.assertIn("offer to save it to the shared user preferences file", prompt)
-        self.assertIn("write there only once the user agrees", prompt)
-        self.assertIn("You may also update it when explicitly asked", prompt)
+        self.assertIn(
+            "personal facts and stable user habits — including ones the user asks you to remember — "
+            "go to Avibe Memory through `vibe memory remember`",
+            prompt,
+        )
+        self.assertIn("do not write user facts or habits here while Memory is enabled", prompt)
+        self.assertIn(
+            "Write to this file only when the user explicitly names it as the destination",
+            prompt,
+        )
+        self.assertIn(
+            "a general request to remember something is fulfilled with `vibe memory remember`, never here",
+            prompt,
+        )
+        self.assertNotIn("You may also update it when explicitly asked", prompt)
+        self.assertNotIn("offer to save it to the shared user preferences file", prompt)
+        self.assertNotIn("write there only once the user agrees", prompt)
+        # Memory never routes through Avibe's runtime-owned state files or
+        # SQLite, while the explicitly named preferences file remains usable.
+        self.assertIn("Never store memories by writing Avibe's SQLite state", prompt)
+        self.assertIn("Memory's runtime-owned files under the Avibe state directory", prompt)
+        self.assertIn("The shared preferences file named above is the only file exception", prompt)
 
     def test_preferences_prompt_stays_passive_without_memory(self):
         context = MessageContext(
@@ -392,10 +427,19 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         # Memory section grants proactive writes would point the Agent at
         # behavior the injected guidance never authorized.
         self.assertIn("You may also update it when explicitly asked", prompt)
-        self.assertNotIn(
-            "anything you decide to record proactively goes through `vibe memory remember`",
+        self.assertIn(
+            "stable user habits the user asks you to keep go to the shared preferences file",
             prompt,
         )
+        self.assertIn(
+            "Use it only when stable cross-project user context would improve the decision",
+            prompt,
+        )
+        self.assertNotIn(
+            "Anything you decide to record proactively goes through `vibe memory remember`",
+            prompt,
+        )
+        self.assertNotIn("do not write user facts or habits here while Memory is enabled", prompt)
 
     def test_memory_cli_prompt_admission_is_turn_and_surface_scoped(self):
         controller = SimpleNamespace(
@@ -1595,7 +1639,11 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("--session-key", prompt)
         self.assertNotIn("Channel-level session key:", prompt)
         self.assertIn("### Inspecting Harness state", prompt)
-        self.assertIn("Use `vibe data query` to inspect Avibe state with guarded read-only SQL", prompt)
+        self.assertIn("Use `vibe harness status` first for active Runs", prompt)
+        self.assertIn(
+            "Use `vibe data query` for deeper guarded read-only SQL before changing a Harness",
+            prompt,
+        )
         self.assertIn("select name from sqlite_master where type='table' order by name", prompt)
         self.assertIn("schema discovery, current session lookup, existing task/watch inspection, Agent run history", prompt)
         self.assertIn("### Choosing the right Harness shape", prompt)
@@ -1648,7 +1696,7 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             prompt,
         )
         self.assertIn(
-            "Both forms work for Workbench and IM Sessions",
+            "Both commands work for Workbench and IM Sessions",
             prompt,
         )
         self.assertIn(
@@ -1672,19 +1720,19 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             prompt,
         )
         self.assertIn(
-            "persist the new Run at P3 and then promote the exact FIFO head through P1",
+            "explicitly selects that same content-bearing P1 behavior",
             prompt,
         )
         self.assertIn(
-            "the new message never leapfrogs it",
+            "it does not promote an older queued message",
             prompt,
         )
         self.assertIn(
-            "the same exact-head P1 promotion without adding a Message",
+            "this content-free P1 promotes the exact existing FIFO head",
             prompt,
         )
         self.assertIn(
-            "the promoted head steers that same logical/native Turn",
+            "that head steers the same logical/native Turn",
             prompt,
         )
         self.assertIn(
@@ -1927,6 +1975,327 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             enhanced.files[0].path,
             "/Users/test/SaveTwitter.Net_GABV3XNWYAARAZz(gif).mp4",
+        )
+
+    def test_angle_wrapped_file_links_accept_commonmark_destinations(self):
+        enhanced = process_reply(
+            "[下载报告](<file:///tmp/My Report (最终).md>) and "
+            "![图片](<file:///tmp/图片 文件.png>)"
+        )
+
+        self.assertEqual(enhanced.text, "下载报告 and 图片")
+        self.assertEqual(
+            [(file.label, file.path, file.is_image) for file in enhanced.files],
+            [
+                ("下载报告", "/tmp/My Report (最终).md", False),
+                ("图片", "/tmp/图片 文件.png", True),
+            ],
+        )
+
+    def test_legacy_bare_file_links_accept_ascii_spaces(self):
+        enhanced = process_reply(
+            "[download](file:///tmp/My Report.md) and "
+            '![image](file:///tmp/图片 文件.png "preview")'
+        )
+
+        self.assertEqual(enhanced.text, "download and image")
+        self.assertEqual(
+            [(file.path, file.is_image) for file in enhanced.files],
+            [
+                ("/tmp/My Report.md", False),
+                ("/tmp/图片 文件.png", True),
+            ],
+        )
+
+    def test_legacy_bare_file_link_extension_rejects_near_neighbors(self):
+        specimens = [
+            "[newline](file:///tmp/My\nReport.md)",
+            "[tab](file:///tmp/My\tReport.md)",
+            "[unclosed](file:///tmp/My Report.md",
+            "[upper](FILE:///tmp/My Report.md)",
+            "`[code](file:///tmp/My Report.md)`",
+            '<span title="[html](file:///tmp/My Report.md)">visible</span>',
+            '[outer](https://example.com "[inner](file:///tmp/My Report.md)")',
+            r"\[escaped](file:///tmp/My Report.md)",
+        ]
+
+        for text in specimens:
+            with self.subTest(text=text):
+                enhanced = process_reply(text)
+                self.assertEqual(enhanced.text, text)
+                self.assertEqual(enhanced.files, [])
+
+    def test_legacy_bare_file_link_recovers_after_malformed_prefix(self):
+        text = (
+            "[bad](file:///tmp/My Report "
+            "[ok](file:///tmp/Good Report.md)"
+        )
+
+        enhanced = process_reply(text)
+
+        self.assertEqual(enhanced.text, "[bad](file:///tmp/My Report ok")
+        self.assertEqual(
+            [(file.label, file.path) for file in enhanced.files],
+            [("ok", "/tmp/Good Report.md")],
+        )
+
+    def test_legacy_bare_file_link_recovers_after_multiple_malformed_prefixes(self):
+        text = (
+            "[bad1](file:///tmp/One Report "
+            "[bad2](file:///tmp/Two Report "
+            "[ok](file:///tmp/Good Report.md)"
+        )
+
+        enhanced = process_reply(text)
+
+        self.assertEqual(
+            enhanced.text,
+            "[bad1](file:///tmp/One Report [bad2](file:///tmp/Two Report ok",
+        )
+        self.assertEqual([file.path for file in enhanced.files], ["/tmp/Good Report.md"])
+
+    def test_legacy_bare_file_link_keeps_malformed_source_without_valid_tail(self):
+        text = "[bad](file:///tmp/My Report"
+
+        enhanced = process_reply(text)
+
+        self.assertEqual(enhanced.text, text)
+        self.assertEqual(enhanced.files, [])
+
+    def test_angle_wrapped_file_links_unescape_angle_brackets_in_paths(self):
+        enhanced = process_reply(r"[report](<file:///tmp/a\>b.md>)")
+
+        self.assertEqual(enhanced.text, "report")
+        self.assertEqual([file.path for file in enhanced.files], ["/tmp/a>b.md"])
+
+    def test_angle_wrapped_file_links_allow_unbalanced_parentheses(self):
+        enhanced = process_reply(r"[draft](<file:///tmp/draft (v1.txt>)")
+
+        self.assertEqual(enhanced.text, "draft")
+        self.assertEqual([file.path for file in enhanced.files], ["/tmp/draft (v1.txt"])
+
+    def test_angle_wrapped_file_links_unescape_before_percent_decoding(self):
+        enhanced = process_reply(r"[literal](<file:///tmp/a%5C%3Eb.txt>)")
+
+        self.assertEqual(enhanced.text, "literal")
+        self.assertEqual([file.path for file in enhanced.files], [r"/tmp/a\>b.txt"])
+
+    def test_angle_wrapped_file_links_unescape_all_commonmark_punctuation(self):
+        enhanced = process_reply(r"[report](<file:///tmp/a\(b\)\[c\]\#d.md> 'download')")
+
+        self.assertEqual(enhanced.text, "report")
+        self.assertEqual([file.path for file in enhanced.files], ["/tmp/a(b)[c]#d.md"])
+
+    def test_angle_wrapped_file_links_commonmark_source_matrix(self):
+        cases = {
+            r"[a\]b](<file:///tmp/report.md>)": "/tmp/report.md",
+            r"[double](<file:///tmp/a\\(b.txt>)": r"/tmp/a\(b.txt",
+            "[refs](<file:///tmp/a&amp;b.txt>)": "/tmp/a&b.txt",
+            "[upper](<FILE:///tmp/upper.txt>)": "/tmp/upper.txt",
+        }
+        for text, expected_path in cases.items():
+            with self.subTest(text=text):
+                enhanced = process_reply(text)
+                self.assertEqual(len(enhanced.files), 1)
+                self.assertEqual(enhanced.files[0].path, expected_path)
+
+    def test_file_link_parser_uses_commonmark_link_ownership(self):
+        nested = process_reply("[outer [inner](<file:///tmp/inner.txt>)]")
+        titled = process_reply(
+            '[outer](<file:///tmp/outer.txt> "fake [inner](<file:///tmp/inner.txt>)")'
+        )
+        image_label = process_reply(
+            "[outer ![inner](<file:///tmp/inner.png>)](<file:///tmp/outer.txt>)"
+        )
+
+        self.assertEqual(nested.text, "[outer inner]")
+        self.assertEqual([file.path for file in nested.files], ["/tmp/inner.txt"])
+        self.assertEqual(titled.text, "outer")
+        self.assertEqual([file.path for file in titled.files], ["/tmp/outer.txt"])
+        self.assertEqual(
+            image_label.text,
+            "outer ![inner](<file:///tmp/inner.png>)",
+        )
+        self.assertEqual(
+            [file.path for file in image_label.files],
+            ["/tmp/outer.txt"],
+        )
+
+    def test_file_link_parser_respects_commonmark_html_block_ownership(self):
+        html_block = "<script>\n[hidden](<file:///tmp/hidden.txt>)\n</script>"
+        escaped_tag = r"\<span>[visible](<file:///tmp/visible.txt>)</span>"
+
+        blocked = process_reply(html_block)
+        visible = process_reply(escaped_tag)
+
+        self.assertEqual(blocked.text, html_block)
+        self.assertEqual(blocked.files, [])
+        self.assertEqual(visible.text, r"\<span>visible</span>")
+        self.assertEqual([file.path for file in visible.files], ["/tmp/visible.txt"])
+
+    def test_file_link_parser_normalizes_strict_entities_before_acceptance(self):
+        valid = process_reply("[report](<f&#105;le:///tmp/a&amp;b.txt>)")
+        semicolonless = process_reply("[literal](<file:///tmp/a&amp.txt>)")
+
+        self.assertEqual([file.path for file in valid.files], ["/tmp/a&b.txt"])
+        self.assertEqual(
+            [file.path for file in semicolonless.files],
+            ["/tmp/a&amp.txt"],
+        )
+
+    def test_file_link_parser_keeps_rejected_relative_links_verbatim(self):
+        text = "[draft](<file:relative/report.md>)"
+
+        enhanced = process_reply(text)
+
+        self.assertEqual(enhanced.text, text)
+        self.assertEqual(enhanced.files, [])
+
+    def test_file_link_parser_keeps_malformed_authority_verbatim(self):
+        text = "[bad](<file://[bad/path>)"
+
+        enhanced = process_reply(text)
+
+        self.assertEqual(enhanced.text, text)
+        self.assertEqual(enhanced.files, [])
+
+    def test_file_link_parser_skips_offset_maps_without_captures(self):
+        with patch.object(
+            reply_enhancer,
+            "_inline_source_offsets",
+            wraps=reply_enhancer._inline_source_offsets,
+        ) as source_offsets:
+            enhanced = process_reply("ordinary reply " + "x" * 100000)
+
+        self.assertEqual(enhanced.files, [])
+        source_offsets.assert_not_called()
+
+    def test_file_link_parser_maps_captured_inline_source(self):
+        with patch.object(
+            reply_enhancer,
+            "_inline_source_offsets",
+            wraps=reply_enhancer._inline_source_offsets,
+        ) as source_offsets:
+            enhanced = process_reply("> [report](<file:///tmp/report.md>)")
+
+        self.assertEqual(enhanced.text, "> report")
+        self.assertEqual([file.path for file in enhanced.files], ["/tmp/report.md"])
+        self.assertGreaterEqual(source_offsets.call_count, 1)
+
+    def test_angle_wrapped_file_links_require_whitespace_before_title(self):
+        text = '[report](<file:///tmp/report.md>"download")'
+
+        enhanced = process_reply(text)
+
+        self.assertEqual(enhanced.text, text)
+        self.assertEqual(enhanced.files, [])
+
+    def test_angle_wrapped_file_links_support_titles_and_reject_bad_titles(self):
+        valid = [
+            '[double](<file:///tmp/report.md> "download")',
+            r"[single](<file:///tmp/report.md> 'download')",
+            r"[paren](<file:///tmp/report.md> (download))",
+            '[line](<file:///tmp/report.md>\n "download")',
+        ]
+        for text in valid:
+            with self.subTest(text=text):
+                self.assertEqual(len(process_reply(text).files), 1)
+
+        invalid = [
+            '[unclosed](<file:///tmp/report.md> "download)',
+            r"[nested](<file:///tmp/report.md> (download (copy)))",
+            '[marker](<file:///tmp/report.md> `download`)',
+            '[no-space](<file:///tmp/report.md>"download")',
+            '[blank](<file:///tmp/report.md>\n\n"download")',
+        ]
+        for text in invalid:
+            with self.subTest(text=text):
+                enhanced = process_reply(text)
+                self.assertEqual(enhanced.text, text)
+                self.assertEqual(enhanced.files, [])
+
+    def test_angle_wrapped_file_links_ignore_escaped_openers(self):
+        escaped = process_reply(r"\[example](<file:///tmp/report.txt>)")
+        even_escaped = process_reply(r"\\[example](<file:///tmp/report.txt>)")
+
+        self.assertEqual(escaped.text, r"\[example](<file:///tmp/report.txt>)")
+        self.assertEqual(escaped.files, [])
+        self.assertEqual(even_escaped.text, r"\\example")
+        self.assertEqual([file.path for file in even_escaped.files], ["/tmp/report.txt"])
+
+        escaped_image = process_reply(r"\![preview](<file:///tmp/preview.png>)")
+        even_escaped_image = process_reply(r"\\![preview](<file:///tmp/preview.png>)")
+        self.assertEqual(escaped_image.text, r"\!preview")
+        self.assertEqual([file.is_image for file in escaped_image.files], [False])
+        self.assertEqual(even_escaped_image.text, r"\\preview")
+        self.assertEqual([file.is_image for file in even_escaped_image.files], [True])
+
+    def test_angle_wrapped_file_links_ignore_raw_html_attributes(self):
+        text = '<span title="[hidden](<file:///tmp/hidden.txt>)">visible</span>'
+
+        enhanced = process_reply(text)
+
+        self.assertEqual(enhanced.text, text)
+        self.assertEqual(enhanced.files, [])
+
+    def test_angle_wrapped_file_links_reject_malformed_markdown_and_code(self):
+        specimens = [
+            "[missing close](<file:///tmp/report.md)",
+            "[extra angle](<file:///tmp/report>copy.md>)",
+            "[extra open](<<file:///tmp/report.md>>)",
+            "[missing label close(<file:///tmp/report.md>)",
+            "[missing close](<file://" + "a" * 100000,
+            "`[inline](<file:///tmp/report.md>)`",
+            "```markdown\n[fenced](<file:///tmp/report.md>)\n```",
+        ]
+
+        for text in specimens:
+            with self.subTest(text=text):
+                enhanced = process_reply(text)
+                self.assertEqual(enhanced.text, text)
+                self.assertEqual(enhanced.files, [])
+
+    def test_file_link_parser_handles_many_openers_in_bounded_time(self):
+        text = "[" * 100000 + "[report](<file:///tmp/report.md>)"
+
+        started = time.perf_counter()
+        enhanced = process_reply(text)
+        elapsed = time.perf_counter() - started
+
+        self.assertEqual([file.path for file in enhanced.files], ["/tmp/report.md"])
+        self.assertLess(elapsed, 10.0)
+
+    def test_legacy_bare_file_link_scans_malformed_destination_in_bounded_time(self):
+        text = "[missing](file:///tmp/" + "a " * 50000 + "tail"
+
+        started = time.perf_counter()
+        enhanced = process_reply(text)
+        elapsed = time.perf_counter() - started
+
+        self.assertEqual(enhanced.text, text)
+        self.assertEqual(enhanced.files, [])
+        self.assertLess(elapsed, 10.0)
+
+    def test_legacy_bare_file_link_scans_many_malformed_candidates_linearly(self):
+        text = (
+            "[bad](file:///tmp/My Report " * 4000
+            + "[ok](file:///tmp/Good Report.md)"
+        )
+
+        started = time.perf_counter()
+        enhanced = process_reply(text)
+        elapsed = time.perf_counter() - started
+
+        self.assertEqual([file.path for file in enhanced.files], ["/tmp/Good Report.md"])
+        self.assertLess(elapsed, 10.0)
+
+    def test_unwrapped_file_link_parser_keeps_existing_destination_behavior(self):
+        enhanced = process_reply("[report](file:///tmp/report>draft.md)")
+
+        self.assertEqual(enhanced.text, "report")
+        self.assertEqual(
+            [file.path for file in enhanced.files],
+            ["/tmp/report>draft.md"],
         )
 
     def test_windows_file_uri_is_normalized_before_absolute_check(self):

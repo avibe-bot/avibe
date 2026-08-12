@@ -1,8 +1,8 @@
 // 迁移对话框 · 接入模型中枢 (frame 03). Non-destructive: a per-backend checklist of
 // detected native configs. Actions follow migration-scan.schema (spec v1.1,
-// Option 1): API keys / base URLs → import; Claude account OAuth → keep_native
-// (sanctioned as-is); Codex auth.json → controlled_import behind the
-// experimental flag, else keep_native. Originals are never modified or deleted.
+// Option 1): API keys / base URLs → import; subscription OAuth → keep_native.
+// controlled_import is reserved and not applicable in v3. Originals are never
+// modified or deleted.
 // Scans via POST /migration/scan; applies the selection via /migration/apply.
 import * as React from 'react';
 import { ArrowDownToLine, Bot, KeyRound, ShieldCheck, Sparkles } from 'lucide-react';
@@ -170,7 +170,7 @@ export const MigrationDialog: React.FC<{
         <DialogHeader>
           <DialogTitle className="flex items-center gap-3 text-[18px] font-bold">
             <span className="flex size-10 shrink-0 items-center justify-center rounded-[12px] bg-mint-soft">
-              <ArrowDownToLine className="size-5 text-mint" />
+              <ArrowDownToLine className="model-hub-ink-mint size-5" />
             </span>
             {t('settings.models.migration.title')}
           </DialogTitle>
@@ -185,7 +185,7 @@ export const MigrationDialog: React.FC<{
           <div className="flex flex-col gap-4">
             {grouped.map((group) => (
               <div key={group.backend} className="flex flex-col gap-2">
-                <span className="px-1 font-mono text-[11px] font-semibold uppercase tracking-[0.08em] text-muted">
+                <span className="px-1 font-mono text-[11px] font-semibold uppercase tracking-normal text-muted">
                   {t(`settings.models.backends.${group.backend}`, { defaultValue: group.backend })}
                 </span>
                 {group.rows.map((item) => (
@@ -196,7 +196,7 @@ export const MigrationDialog: React.FC<{
           </div>
         )}
 
-        <p className="flex items-start gap-2 text-[12px] leading-relaxed text-mint">
+        <p className="model-hub-ink-mint flex items-start gap-2 text-[12px] leading-relaxed">
           <ShieldCheck className="mt-0.5 size-4 shrink-0" />
           {t('settings.models.migration.nonDestructive')}
         </p>

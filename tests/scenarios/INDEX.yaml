@@ -8,6 +8,40 @@ navigation:
   - Read that capability's observations.yaml.
   - Read the listed scenario test files before changing production code.
 capabilities:
+  - id: memory_rebuild_recovery
+    name: Confirmed Memory embedding rebuild recovery
+    status: active
+    catalog: tests/scenarios/memory_rebuild_recovery/catalog.yaml
+    observations: tests/scenarios/memory_rebuild_recovery/observations.yaml
+    scenario_tests:
+      - tests/test_ui_memory_routes.py
+    unit_or_contract_tests:
+      - tests/test_memory_config.py
+      - tests/test_memory_runtime.py
+      - tests/test_internal_client.py
+      - tests/test_internal_server.py
+  - id: memory_factory_reset
+    name: Memory factory reset recovery floor
+    status: active
+    catalog: tests/scenarios/memory_factory_reset/catalog.yaml
+    observations: tests/scenarios/memory_factory_reset/observations.yaml
+    scenario_tests:
+      - tests/scenarios/memory_factory_reset/test_memory_factory_reset_scenarios.py
+    unit_or_contract_tests:
+      - ui/src/components/settings/SettingsDependenciesPage.test.tsx
+      - ui/src/components/settings/SettingsMemoryPage.test.tsx
+      - ui/src/components/settings/memory/MemorySettingsPanel.test.tsx
+  - id: memory_repair
+    name: Live Memory index repair via admitted artifact sync
+    status: active
+    catalog: tests/scenarios/memory_repair/catalog.yaml
+    observations: tests/scenarios/memory_repair/observations.yaml
+    scenario_tests:
+      - tests/scenarios/memory_repair/test_memory_repair_scenarios.py
+    harness:
+      - tests/scenario_harness/memory_repair.py
+    unit_or_contract_tests:
+      - ui/src/components/settings/memory/MemoryStatusPanel.test.tsx
   - id: model_hub
     name: Model Hub source resolution and supply configuration
     status: active

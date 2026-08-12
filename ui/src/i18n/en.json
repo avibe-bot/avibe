@@ -112,9 +112,7 @@
       "minutes": "m",
       "hours": "h",
       "days": "d"
-    },
-    "none": "None",
-    "locked": "Locked"
+    }
   },
   "nav": {
     "dashboard": "Dashboard",
@@ -134,8 +132,7 @@
     "more": "More",
     "apps": "Apps",
     "workbench": "Workbench",
-    "models": "Models",
-    "organization": "Organization"
+    "models": "Models"
   },
   "more": {
     "title": "More",
@@ -632,26 +629,252 @@
       "subtitle": "See whether each agent model can run now and which source serves it; set a route for one model when needed.",
       "addSource": "Add source",
       "loadError": "Failed to load: {{detail}}",
+      "tabs": {
+        "sources": "Sources & gateway",
+        "usage": "Usage & quota"
+      },
+      "sourceKind": {
+        "api_key": "API key",
+        "subscription": "Subscription"
+      },
+      "shell": {
+        "title": "Models",
+        "running": "Gateway running",
+        "stopped": "Gateway stopped · click to start",
+        "degraded": "Gateway running degraded",
+        "unread": "Gateway status unavailable",
+        "notStarted": "Gateway not started · click to start",
+        "notInstalled": "Gateway component not installed · click to install",
+        "allDirect_one": "The only backend is direct",
+        "allDirect_other": "All {{count}} backends are direct",
+        "starting": "Starting…",
+        "unsupported": "No gateway component for this platform yet",
+        "gatewayInfo": {
+          "label": "What the gateway is",
+          "body": "The gateway is a dispatch layer on this machine: it holds the sources you add and supplies them to your Agents in the order you configure."
+        },
+        "tab": {
+          "hub": "Sources & gateway",
+          "usage": "Usage & quota"
+        }
+      },
+      "direct": {
+        "card": {
+          "current": "Currently: direct",
+          "current.sub": "Each agent backend uses its own login and connects to the vendor directly."
+        },
+        "pill": {
+          "direct": "Direct"
+        },
+        "backend": {
+          "claude": {
+            "detail": "Uses its own Claude login"
+          },
+          "codex": {
+            "detail": "Uses its own ChatGPT login"
+          },
+          "opencode": {
+            "detail": "Uses its own model configuration"
+          }
+        },
+        "action": {
+          "switchToGateway": "Switch to gateway"
+        },
+        "benefits": {
+          "title": "Switch to the gateway and you gain three things",
+          "1": "Your session survives a quota running out",
+          "1.detail": "When your Claude subscription is exhausted, it moves to the next source you added and the conversation continues.",
+          "2": "One key supplies several backends",
+          "2.detail": "The same API key can serve Claude Code, Codex and OpenCode at once.",
+          "3": "Decide per backend and per model",
+          "3.detail": "You can specify which source each model on each backend uses."
+        },
+        "note": {
+          "perBackend": "Switch one backend at a time — the others stay direct. You can switch back at any time."
+        },
+        "empty": {
+          "title": "No agent backend was found on this machine",
+          "body": "Install Claude Code, Codex or OpenCode, come back to this page, and they will appear here.",
+          "install": "Install a backend CLI, then reload this page."
+        }
+      },
+      "adopt": {
+        "title": "Switch {{backend}} to the gateway",
+        "subtitle": "Affects {{backend}} only; the other backends are unchanged.",
+        "vendor": {
+          "claude": "Claude",
+          "chatgpt": "ChatGPT"
+        },
+        "section": {
+          "effects": "What will happen",
+          "undo": "You can undo this"
+        },
+        "effects": {
+          "1": "Your current {{vendor}} login becomes the first source and keeps priority",
+          "2": "Once you add other sources, it moves to them when this login is exhausted",
+          "1.opencode": "OpenCode's own model configuration is kept as it is; this switch does not change it",
+          "2.opencode": "Its models are supplied from the sources on this page; if there are none yet, add one first",
+          "3": "The model menu does not change",
+          "4": "Conversations in progress are unaffected; the change applies from the next request",
+          "install": "The gateway component ({{component}}, about {{duration}}) is installed first, then the switch happens"
+        },
+        "undo": {
+          "1": "You can switch back to direct at any time",
+          "2": "Where to undo: the {{backend}} card on this page → Switch to direct",
+          "3": "If you switch back, the sources you added stay; they just stop supplying {{backend}}"
+        },
+        "cancel": "Cancel",
+        "confirm": "Switch to gateway",
+        "confirm.install": "Install and switch",
+        "fail": {
+          "title": "The switch to the gateway did not go through",
+          "detail": "{{request}} · {{status}} · {{reason}}",
+          "reason": {
+            "transport": "The gateway could not be reached",
+            "refused": "The gateway did not accept the switch",
+            "notReady": "The gateway started but did not become ready",
+            "unknown": "No reason was given"
+          }
+        }
+      },
+      "install": {
+        "duration": "1 minute",
+        "title": "Install the gateway component",
+        "subtitle": "Installs the component only; the backends keep working the way they do now",
+        "section": {
+          "effects": "What will happen"
+        },
+        "effects": {
+          "1": "{{component}} is downloaded and installed, about {{duration}}",
+          "2": "The gateway starts automatically once it is installed",
+          "3": "No backend is switched and the model menu does not change"
+        },
+        "confirm": "Install and start",
+        "cancel": "Cancel",
+        "progress": "Installing…",
+        "fail": {
+          "title": "The install did not finish",
+          "detail": "The install did not finish, and the component may be left incomplete. Retrying installs it again from scratch."
+        },
+        "retry": "Try again"
+      },
+      "gateway": {
+        "heading": "Gateway",
+        "sourceOrder": "Source order",
+        "switchToGateway": "Switch to gateway",
+        "switchToDirect": "Switch to direct",
+        "fail": {
+          "switchToDirect": "The switch back to direct did not go through"
+        },
+        "modelCount_one": "{{count}} model",
+        "modelCount_other": "{{count}} models",
+        "moreModels_one": "{{count}} more model",
+        "moreModels_other": "{{count}} more models",
+        "collapse_one": "{{count}} more model",
+        "collapse_other": "{{count}} more models",
+        "retry": "Retry",
+        "supply": {
+          "none": "No usable source",
+          "unread": "Could not read this backend's supply · the gateway itself is fine"
+        },
+        "row": {
+          "current": "Now: {{source}}",
+          "currentTakeover": "Now: {{source}} (takeover)"
+        },
+        "group": {
+          "subtitle": {
+            "direct": "{{mode}}",
+            "gateway": "{{mode}} · {{health}}"
+          },
+          "mode": {
+            "direct": "Direct",
+            "gateway": "Gateway"
+          },
+          "status": {
+            "ok": "Healthy",
+            "degraded": "Degraded",
+            "waiting": "All sources are cooling down",
+            "interrupted": "No source is available",
+            "noSelection": "No model selected"
+          },
+          "emptyModels": "This backend has no models"
+        }
+      },
+      "takeover": {
+        "pill_one": "{{count}} takeover active",
+        "pill_other": "{{count}} takeovers active",
+        "chip": "Taken over"
+      },
+      "legend": {
+        "native": "Native",
+        "viaGateway": "Gateway supply",
+        "connectedUnused": "Enabled · not currently used",
+        "takeover": "Taken over · temporarily rerouted",
+        "unavailable": "Supply paused",
+        "note": "Route chains are each backend's configured source order."
+      },
+      "usageTab": {
+        "title": "Usage and quota",
+        "detail": "Usage appears after a gateway source serves a request."
+      },
       "status": {
         "allHealthy": "All healthy",
-        "needsAction": "{{count}} model(s) need attention",
+        "needsAction_one": "{{count}} model needs attention",
+        "needsAction_other": "{{count}} models need attention",
         "noIssues": "No models need attention"
       },
       "statusPill": {
-        "ok": "All good · {{count}} on the Hub",
-        "none": "No agent is on the Hub yet",
-        "engineDown": "Supply engine isn't ready · the Hub can't serve",
-        "interrupted": "{{count}} with no supply · needs attention",
-        "waiting": "{{count}} awaiting source recovery",
+        "ok_one": "All good · {{count}} on the gateway",
+        "ok_other": "All good · {{count}} on the gateway",
+        "none": "No Agent is using the gateway yet",
+        "engineDown": "The gateway isn't ready to serve",
+        "interrupted_one": "{{count}} with no supply · needs attention",
+        "interrupted_other": "{{count}} with no supply · needs attention",
+        "waiting_one": "{{count}} awaiting source recovery",
+        "waiting_other": "{{count}} awaiting source recovery",
         "needsAction": "{{source}} — {{detail}}",
         "cooldown": "{{source}} — {{detail}} · switched over, will switch back",
-        "andMore": "{{count}} more"
+        "andMore_one": "{{count}} more",
+        "andMore_other": "{{count}} more"
+      },
+      "upstream": {
+        "heading": "Sources",
+        "count_one": "{{count}} source",
+        "count_other": "{{count}} sources",
+        "group": {
+          "native": "Native · on this machine",
+          "hub": "Held by the gateway"
+        },
+        "kind": {
+          "nativeCredential": "Native · local credential",
+          "subscription": "Subscription",
+          "apiKey": "API key"
+        },
+        "empty": "No sources yet. Add a subscription or an API key first.",
+        "unread": "Could not read the source list · the gateway itself is fine",
+        "retry": "Retry",
+        "addSubscription": "Add subscription",
+        "addApiKey": "Add API key",
+        "state": {
+          "supplyingNative": "Supplying {{backend}} (native)",
+          "supplying": "Supplying {{backends}}",
+          "standby": "Standby",
+          "unavailableRetry": "Unavailable · retrying automatically after {{delay}}",
+          "unavailableDue": "Unavailable · the retry is due"
+        }
       },
       "sources": {
         "title": "Sources",
+        "info": "Accounts and credentials available to gateway routes",
+        "count_one": "{{count}} source",
+        "count_other": "{{count}} sources",
+        "group": {
+          "native": "Native · on this machine",
+          "hub": "Held by the gateway"
+        },
         "subtitle": "Manage shared accounts and model inventories; source order is set on each agent card",
-        "empty": "No sources yet — use “Add source” to connect a subscription or API key.",
-        "modelCount": "{{count}} model(s)",
+        "modelCount_one": "{{count}} model",
+        "modelCount_other": "{{count}} models",
         "lastDiscovery": "Last fetched {{time}}",
         "neverDiscovered": "Not fetched yet",
         "addModel": "Add model",
@@ -660,7 +883,7 @@
       },
       "source": {
         "nativeSupply": "Native supply",
-        "hubHosted": "Hub-hosted",
+        "hubHosted": "Gateway-held",
         "officialEndpoint": "Official endpoint",
         "customEndpoint": "Custom endpoint",
         "retryIn": "retry in {{minutes}} min",
@@ -668,20 +891,36 @@
         "oauthSignedOut": "CLI subscription is signed out"
       },
       "order": {
-        "title": "Source order · {{backend}}",
-        "subtitle": "Used top to bottom; a failure switches to the next one and switches back once it recovers. This order only affects {{backend}}.",
-        "subtitleShort": "Used top to bottom; failures switch over and back. Affects {{backend}} only.",
-        "groupEnabled": "Enabled · {{count}}",
-        "groupDisabled": "Not enabled · {{count}}",
-        "groupIneligible": "Not applicable · {{count}}",
-        "customized": "Changed manually",
-        "restore": "Restore default",
-        "enable": "Enable",
-        "enableAria": "Enable {{name}}",
-        "disable": "Disable",
-        "enabledEmpty": "{{backend}} has no source enabled, so its next turn will fail. Enable one from the list below.",
-        "ineligibleUnknown": "Cannot supply {{backend}}",
-        "ineligibleClientUnknown": "{{vendor}} subscriptions only work in their own official client"
+        "title": "{{backend}} · Source order",
+        "subtitle": "The Source order this backend stores. Changing it changes no configured Route chain.",
+        "reorder": "Reorder source",
+        "section": {
+          "ordered": "In this order",
+          "ordered.note": "Drag to reorder",
+          "heldOut": "Not in this order"
+        },
+        "action": {
+          "include": "Add to order",
+          "exclude": "Remove from order"
+        },
+        "empty": {
+          "noEligible": "No source is available to this backend yet.",
+          "ordered": "This order is empty. Add a source from below."
+        },
+        "cancel": "Cancel",
+        "save": "Save order",
+        "fail": {
+          "read": "The source list could not be read",
+          "save": "The order was not saved"
+        },
+        "retry": "Retry",
+        "grabbed_one": "Grabbed {{source}}, position {{position}} of {{count}}.",
+        "grabbed_other": "Grabbed {{source}}, position {{position}} of {{count}}.",
+        "moved_one": "Moved {{source}} to position {{position}} of {{count}}.",
+        "moved_other": "Moved {{source}} to position {{position}} of {{count}}.",
+        "dropped_one": "Dropped {{source}} at position {{position}} of {{count}}.",
+        "dropped_other": "Dropped {{source}} at position {{position}} of {{count}}.",
+        "grabCancelled": "Cancelled moving {{source}} and restored its original position."
       },
       "billing": {
         "monthly": "Subscription",
@@ -701,7 +940,7 @@
         "label": "Supplies: "
       },
       "mode": {
-        "hub": "Hub",
+        "hub": "Gateway",
         "direct": "Direct"
       },
       "errors": {
@@ -718,22 +957,20 @@
         "title": "Agent",
         "subtitle": "Each agent picks its own sources and order; a failure moves to the next one",
         "backendSettings": "Backend settings",
-        "connectHub": "Connect to Hub",
-        "modelCount": "{{count}} model(s)",
-        "hubNoSupply": "On Hub · no source enabled, the next turn will fail",
-        "directNote": "Still supplied by the CLI's own config — not connected to the Hub",
+        "connectHub": "Switch to gateway",
+        "modelCount_one": "{{count}} model",
+        "modelCount_other": "{{count}} models",
+        "hubNoSupply": "On the gateway · no source enabled, the next turn will fail",
+        "directNote": "Uses the CLI's native configuration",
         "sourceOrder": "Source order",
-        "modelListCount": "{{count}} model(s)",
+        "modelListCount_one": "{{count}} model",
+        "modelListCount_other": "{{count}} models",
         "enableManaged": "Manage centrally",
         "emptyModels": "This agent has no models yet.",
         "manageModels": "Manage models",
         "menuKind": {
           "fixed": "Fixed menu",
           "open": "Open menu"
-        },
-        "policy": {
-          "follow": "Recommended",
-          "custom": "Custom"
         },
         "attribution": {
           "interrupted": "No supply for {{names}}",
@@ -751,41 +988,22 @@
         "blocked": "Current source unavailable",
         "currentSwitched": "Currently switched to {{source}}",
         "currentSource": "Currently served by {{source}}",
+        "takeover": "Now: {{source}} (takeover)",
+        "waiting": "Waiting for a source to recover",
         "source": "Served by {{source}}",
         "unknown": "Unable to confirm",
         "retry": "Retry",
         "runtime": "Model service is not ready",
         "runtimeAction": "Resolve"
       },
-      "routes": {
-        "title": "Supply method",
-        "global": "Follow {{backend}}'s source order",
-        "manual": "Set route",
-        "liveSource": "Currently served by {{source}} · {{model}}",
-        "globalPending": "Restoring {{backend}}'s source order…",
-        "globalActual": "{{backend}}'s source order currently resolves to {{source}}.",
-        "globalUnavailable": "No source in {{backend}}'s source order can serve right now.",
-        "chooseTarget": "Choose target model",
-        "searchPlaceholder": "Search sources or models",
-        "empty": "No matching models",
-        "availableCount": "{{count}} available",
-        "manualBadge": "Manual",
-        "addManual": "Enter a model manually",
-        "multipleSources": "{{model}} · sources available: {{count}}",
-        "orderDecidesSource": "Actual source follows {{backend}}'s source order",
-        "compatibility": "Reasoning, cache, and tool semantics may differ from the original model.",
-        "openMenuGlobal": "Open models use {{backend}}'s source order; {{source}} currently serves this one.",
-        "none": "no source",
-        "expand": "Expand supply method"
-      },
-      "probe": {
-        "action": "Try it",
-        "running": "Testing",
-        "nativeReady": "{{source}} is ready and can run directly.",
-        "hubOk": "{{source}} responded successfully · {{ms}} ms",
-        "failed": "{{source}} failed: {{detail}}",
-        "unknown": "Source did not pass the test",
-        "error": "Test failed, please retry"
+      "routeDialog": {
+        "title": "{{model}} · Route chain",
+        "open": "Open {{model}} route chain",
+        "label": "Route chain for this model",
+        "removeHop": "Remove hop",
+        "addHop": "Add a hop",
+        "reseed": "Reorder by source order",
+        "hint": "This chain is stored configuration. Later source-order changes do not change it."
       },
       "recent": {
         "title": "Recent switches",
@@ -803,53 +1021,107 @@
         "detail": "Cross-vendor auto-substitution (off) · Request log · Diagnostics",
         "comingSoon": "Advanced settings are coming soon"
       },
-      "addMenu": {
-        "claude": {
-          "title": "Connect Claude subscription",
-          "subtitle": "Pro / Max · browser sign-in"
-        },
-        "chatgpt": {
-          "title": "Connect ChatGPT subscription",
-          "subtitle": "Plus / Pro · browser sign-in"
-        },
-        "apiKey": {
-          "title": "Add API Key…",
-          "subtitle": "Any vendor or compatible service, editable URL"
-        },
-        "sheetTitle": "Add source",
-        "sheetSubtitle": "There are only two kinds: a subscription account, or a key. A relay is just a key with a different URL.",
-        "vendorTitle": "Connect a subscription",
-        "vendorSubtitle": "Uses the CLI's own sign-in; the credential stays on this machine.",
-        "apiKeySheetSubtitle": "Official or third-party URLs both work; filling in a custom URL makes it a relay.",
-        "subscription": {
-          "title": "Subscription account",
-          "subtitle": "Claude Pro, ChatGPT Plus and the like. Uses the CLI's own sign-in; the credential stays in the local CLI.",
-          "recommended": "Recommended"
-        }
-      },
       "addKey": {
-        "title": "Add API Key",
-        "subtitle": "Any vendor or compatible service; connect once, shared by every agent.",
-        "vendorLabel": "Vendor",
-        "vendorHint": "Choosing Anthropic / OpenAI / Zhipu / Kimi etc. prefills the official URL.",
-        "keyLabel": "API KEY",
-        "baseUrlLabel": "SERVICE URL (BASE URL)",
-        "baseUrlHint": "Official vendors are prefilled and editable; for a compatible service (relay, self-hosted gateway) enter the URL it gives you.",
-        "discovered": "Connected · discovered {{count}} model(s), added to the supply list",
-        "failed": "Connection failed: {{detail}}",
-        "testing": "Connecting…",
-        "vendors": {
-          "custom": "Custom · OpenAI / Anthropic compatible",
-          "anthropic": "Anthropic",
-          "openai": "OpenAI",
-          "zhipuai": "Zhipu",
-          "kimi": "Kimi",
-          "xai": "xAI"
-        }
+        "title": "Add API key",
+        "subtitle": "Add connects once: it identifies the interface and fetches the model list",
+        "field": {
+          "name": "Name (optional)",
+          "baseUrl": "Base URL",
+          "baseUrl.hint": "Paste any relay, aggregator or self-hosted address — Avibe identifies the interface itself",
+          "apiKey": "API key",
+          "apiKey.reveal": "Show API key",
+          "apiKey.conceal": "Hide API key"
+        },
+        "test": "Fetch models",
+        "test.hint": "Optional · Add fetches once anyway",
+        "pull": {
+          "result_one": "Fetched {{count}} model",
+          "result_other": "Fetched {{count}} models",
+          "empty": "Connected, but this source lists no models"
+        },
+        "submit": "Add",
+        "adding": "Connecting…",
+        "adding.detail": "Connect, identify the interface, fetch the model list · usually 1–3s",
+        "fail": {
+          "subtitle": "Identifying the interface is a precondition of Add · fix what the line below names, then retry",
+          "auth": "Authentication failed: 401 Unauthorized",
+          "auth.detail": "Check whether the API key is valid",
+          "address": "Wrong address: 404 Not Found",
+          "network": "Could not connect to this address (unreachable or timed out)",
+          "unclassified": "It did not connect, and the cause could not be identified",
+          "engineDown": "The gateway is not responding — try again",
+          "save": "The source is not confirmed saved"
+        },
+        "retry": "Retry",
+        "undetermined": {
+          "title": "Connected and authenticated — but we cannot tell which interface it speaks",
+          "detail": "The response shape matches no interface we know",
+          "label": "Interface type · you hint it this once",
+          "hint": "The hint only reorders the probe · it still has to really connect before anything is saved, and it cannot be changed afterwards"
+        },
+        "protocol": {
+          "anthropicMessages": "Anthropic Messages",
+          "openaiResponses": "OpenAI Responses",
+          "openaiChatCompletions": "OpenAI Chat Completions"
+        },
+        "inventory": {
+          "title": "The interface is identified — but its model list did not come back this time"
+        },
+        "addAnyway": "Add anyway",
+        "success": {
+          "title": "Done → the dialog closes and you land on Source details · Models",
+          "detail": "The model list, refetch and reasoning tiers are all maintained there"
+        },
+        "cancel": "Cancel"
       },
       "field": {
         "apiKeyPlaceholder": "sk-…",
         "baseUrlPlaceholder": "https://api.example.com/v1"
+      },
+      "addSub": {
+        "title": "Add {{vendor}} subscription",
+        "subtitle": {
+          "claude": "claude.ai / Max · Pro",
+          "chatgpt": "chatgpt.com / Plus · Pro"
+        },
+        "opt": {
+          "added": "Already added",
+          "native": {
+            "label": "Use natively",
+            "desc": {
+              "claude": "Claude Code uses this subscription directly; the credential stays on this machine.",
+              "chatgpt": "Codex signs in with this ChatGPT account directly."
+            }
+          },
+          "hub": {
+            "label": "Sign in as a gateway source",
+            "desc": {
+              "claude": "Hand this subscription to the gateway so it can supply Codex, OpenCode and other Agents.",
+              "chatgpt": "The gateway supplies it to Codex and other Agents, with usage, quota and takeover all visible."
+            }
+          }
+        },
+        "badge": {
+          "recommended": "Recommended",
+          "secondary": "Second choice",
+          "supportedNotRecommended": "Supported, not recommended"
+        },
+        "tos": {
+          "claude": "The subscription terms authorize only you, inside Claude's official clients. Supplying it to other Agents is out-of-scope use and the account may be restricted."
+        },
+        "hint": {
+          "claude": "You can have both — add them one at a time.",
+          "chatgpt": "Nothing takes over when the quota runs out, and usage stays invisible."
+        },
+        "signIn": "Sign in",
+        "cancel": "Cancel",
+        "retry": "Retry",
+        "error": {
+          "oauthFailed": "Sign-in did not complete. You can retry.",
+          "startFailed": "Could not confirm the sign-in started — you can retry",
+          "engineDown": "The gateway is not responding. Please retry.",
+          "alreadyBound": "This backend's native login slot is already taken. Add it as a gateway-held source instead."
+        }
       },
       "oauth": {
         "title": {
@@ -884,142 +1156,70 @@
           "timeout": "Authorization timed out, please reconnect",
           "generic": "Connection failed, please retry",
           "finalize": "Authorized, but couldn't create the source — please retry",
-          "finalizeReauth": "Signed in, but this source still isn't working — please retry",
-          "consent": "A hub-hosted subscription needs experimental consent — restart the connect and enable the hub option."
-        },
-        "hubOption": {
-          "title": "Let the Hub hold this subscription (experimental)",
-          "subtitle": "The Hub stores and forwards the credential; may violate vendor terms",
-          "on": "On",
-          "off": "Off"
+          "finalizeReauth": "Signed in, but this source still isn't working — please retry"
         }
-      },
-      "consent": {
-        "title": "Hub-held subscription · risk notice",
-        "subtitle": "Please confirm you understand the risks before enabling.",
-        "points": [
-          "This source uses your own subscription login. Vendor terms generally intend a subscription for personal use inside the official client; routing it through the hub proxy is an unofficial use that may violate those terms.",
-          "There is a real risk of rate-limiting, review, or account suspension (Claude subscriptions used via proxies have been auto-disabled). Enabling this is your choice and at your own risk.",
-          "For the safest setup, use Direct mode for subscriptions (official client, direct connection), or add an API Key source instead — vendors explicitly permit programmatic / proxied use of API keys."
-        ],
-        "confirm": "I understand the risks, continue"
       },
       "toast": {
         "reorderFailed": "Couldn't save the new order",
-        "connected": "Connected to the Hub",
+        "connected": "Connected to the gateway",
         "connectFailed": "Couldn't connect, please retry",
         "refreshFailed": "Couldn't refresh, please retry"
       },
       "supply": {
-        "degraded": "On the Hub · a source is down, already switched to the next one",
-        "waiting": "On the Hub · every source is cooling down; turns fail until one recovers",
-        "interrupted": "On the Hub · supply interrupted, the next turn will fail",
-        "noSources": "On the Hub · no source enabled yet, the next turn will fail",
-        "nothingRunnable": "On the Hub · no enabled source can serve right now, the next turn will fail"
+        "degraded": "On the gateway · a source is down, already switched to the next one",
+        "waiting": "On the gateway · every source is cooling down; turns fail until one recovers",
+        "interrupted": "On the gateway · supply interrupted, the next turn will fail",
+        "noSources": "On the gateway · no source enabled yet, the next turn will fail",
+        "nothingRunnable": "On the gateway · no enabled source can serve right now, the next turn will fail"
       },
       "adoption": {
-        "enabled": "Added to the source order of {{list}}",
-        "entry": "{{name}} (#{{position}})",
-        "none": "No agent has enabled it yet · add it to an agent's source order for it to be used",
-        "noneSkipped": "No agent has enabled it yet · skipped for {{skipped}} (hand-picked order) — add it there to use it",
-        "partlySkipped": "Added to the source order of {{list}} · skipped for {{skipped}} (hand-picked order) — add it there to use it"
-      },
-      "menus": {
-        "done": "Done",
-        "resetAll": "Reset all to default",
-        "saveFailed": "Couldn't save your changes, please retry",
-        "enrolled": "Added {{sources}} to {{backend}}’s source order so your selection has a supplier",
-        "mapping": {
-          "title": "{{backend}} · Model menu",
-          "subtitle": "Fixed menu: {{backend}} only recognizes these built-in model IDs. Each ID can be redirected to another model — this affects {{backend}} only.",
-          "builtinCol": "Built-in model ID",
-          "supplyCol": "Actual supply",
-          "followNative": "Follow native · supply by source order",
-          "candidates": "Source order · {{sources}}",
-          "candidatesUnavailable": "No source can supply this model yet",
-          "warning": "Reasoning, cache and tool semantics aren't fully equivalent after remapping",
-          "resetRow": "Reset to default",
-          "footnote": "Remapping affects only this ID in {{backend}}; the Hub converts protocols automatically."
-        },
-        "opencode": {
-          "title": "OpenCode · Model menu",
-          "subtitle": "Open menu: grouped by provider prefix. Prefix + model ID = the full identifier, identical to native OpenCode. Checked = shown in the model picker.",
-          "viewLabel": "Menu scope",
-          "featured": "Featured · {{count}}",
-          "full": "All · {{count}}",
-          "addCustom": "Custom model",
-          "empty": "No models here yet.",
-          "footnote": "Prefix = the standard vendor ID (identical to native OpenCode; unrecognized vendors fall under custom/). Switching Hub/Direct never changes the identifier; dots = supplying sources.",
-          "customBadge": "Custom",
-          "provider": {
-            "anthropic": "Anthropic protocol · Claude family",
-            "openai": "OpenAI protocol · GPT family",
-            "zhipuai": "OpenAI-compatible · GLM family",
-            "custom": "Custom endpoints"
-          }
-        },
-        "custom": {
-          "title": "Add model manually",
-          "subtitle": "Register a model missing from this source so it can be selected or used as a route target.",
-          "sourceLabel": "Source (able to supply this model)",
-          "modelIdLabel": "Model ID",
-          "modelIdPlaceholder": "glm-5.2-air",
-          "displayNameLabel": "Display name (optional)",
-          "displayNamePlaceholder": "GLM 5.2 Air",
-          "previewLabel": "OpenCode identifier · generated",
-          "previewEmpty": "Enter a model ID to preview",
-          "previewHint": "The provider segment is chosen automatically: a recognized vendor uses its standard ID (identical to native OpenCode), otherwise it falls under custom/. Adding or removing sources and switching modes never change the identifier.",
-          "add": "Add model",
-          "failed": "Couldn't add the model, please retry",
-          "delete": "Remove model",
-          "deleteConfirmTitle": "Remove custom model?",
-          "deleteConfirmBody": "This removes {{model}} from “{{source}}”.",
-          "deleted": "Custom model removed",
-          "deleteFailed": "Couldn't remove the model, please retry",
-          "deleteInUse": "This model is still selected by an agent — unselect it in that menu/mapping first."
-        }
+        "enabled": "Added to {{list}}",
+        "route": "{{backend}} · {{model}} · hop {{position}}",
+        "none": "Connected. Add it to a model's route when you want to use it."
       },
       "supplyMode": {
         "title": "Supply mode",
-        "currentHub": "Current: Hub",
+        "currentHub": "Current: Gateway",
         "currentDirect": "Current: Direct",
-        "switchedHub": "Switched to Hub",
+        "switchedHub": "Switched to Gateway",
         "switchedDirect": "Switched to Direct",
         "switchFailed": "Couldn't switch mode, please retry",
         "hub": {
-          "title": "Hub mode",
+          "title": "Gateway mode",
           "recommended": "Recommended · default",
           "openModels": "Open Models page",
-          "description": "Model tokens are supplied from Settings → Models: sign-ins, API keys, source order and mappings all live there. {{backend}}'s native config is left untouched, and you can switch away anytime."
+          "description": "Sign-ins, API keys and per-model Routes are managed in Settings → Models. {{backend}}'s native config is left untouched, and you can switch away anytime."
         },
         "direct": {
           "title": "Direct mode",
           "description": "{{backend}} uses its own native config (settings.json / CLI sign-in); Avibe only launches the process and doesn't manage models. Good for troubleshooting or fully self-managed setups.",
-          "detected": "Existing direct config detected: {{detail}} — import it into the Hub in one click",
-          "import": "Import to Hub…"
+          "detected": "Existing direct config detected: {{detail}} — import it into the gateway in one click",
+          "import": "Import to gateway…"
         },
         "fixHint": "Add or enable a source on the Models page to bring it back."
       },
       "migration": {
-        "title": "Connect to the Model Hub",
-        "subtitle": "Move your existing sign-ins and API keys into the Models Hub in one pass — each agent then picks its own sources and their order.",
+        "title": "Connect to the model gateway",
+        "subtitle": "Move your existing sign-ins and API keys into the gateway in one pass — each Agent then keeps its own sources and order.",
         "empty": "No native configuration detected to migrate.",
         "scanFailed": "Couldn't scan native configs, please retry",
         "applyFailed": "Import failed, please retry",
-        "applied": "Imported {{count}} item(s)",
+        "applied_one": "Imported {{count}} item",
+        "applied_other": "Imported {{count}} items",
         "later": "Maybe later",
-        "apply": "Import {{count}} & enable Hub",
+        "apply_one": "Import {{count}} item and enable the gateway",
+        "apply_other": "Import {{count}} items and enable the gateway",
         "nonDestructive": "Non-destructive: native configs are never changed or deleted — importing only copies them; you can switch back to Direct on the Backends page anytime.",
         "action": {
           "import": "Import as source",
-          "controlledImport": "Controlled import · experimental",
+          "controlledImport": "Controlled import · reserved",
           "keepNative": "Keep native",
           "reauth": "Re-authorize · one-click in browser"
         },
         "notes": {
           "customBaseUrl": "Includes a custom Base URL",
           "keepNativeSanctioned": "Stays in the CLI's own store (sanctioned)",
-          "keepNativeReauthHint": "Kept native; re-authorize inside the hub to make it hub-held (experimental)",
+          "keepNativeReauthHint": "Kept native; add a separate gateway-held subscription explicitly",
           "fromOpencode": "From the opencode config"
         }
       },
@@ -1028,33 +1228,94 @@
         "codex": "Codex",
         "opencode": "OpenCode"
       },
-      "sourceActions": {
-        "more": "More actions",
-        "rename": "Rename",
-        "refresh": "Refresh models",
-        "refreshing": "Refreshing models",
-        "reauth": "Sign in again",
-        "replaceKey": "Replace API key",
-        "delete": "Delete source",
-        "renameTitle": "Rename source",
-        "renameLabel": "Display name",
-        "renamePlaceholder": "e.g. Production key",
-        "renamed": "Renamed",
-        "renameFailed": "Couldn't rename, please retry",
-        "refreshed": "Updated {{count}} model(s)",
-        "refreshFailed": "Couldn't fetch the latest models. The last successful list is still shown.",
-        "deleteTitle": "Delete source?",
-        "deleteBody": "This removes “{{name}}” from the Hub and revokes its credential. This can't be undone.",
-        "deleteConfirm": "Delete",
-        "deleteForceTitle": "Delete this source anyway?",
-        "deleteForceBody": "“{{name}}” is the only supplier of a selected model; deleting it leaves that agent with no source. Force delete?",
-        "deleteForceConfirm": "Force delete",
-        "deleted": "Source deleted",
-        "deleteFailed": "Couldn't delete, please retry",
-        "renameHint": "Changes the display name only — the credential is untouched",
-        "deleteHint": "You'll be asked to confirm first",
-        "reauthHint": "The old sign-in stops working right away",
-        "replaceKeyHint": "Enter a new key — the endpoint and name stay"
+      "sourceDetail": {
+        "back": "Back to sources",
+        "status": {
+          "inUse": "In use",
+          "needsAction": {
+            "oauthExpired": "Sign in again",
+            "balanceExhausted": "Out of balance",
+            "credentialRevoked": "Credential revoked",
+            "accountBanned": "Account restricted"
+          },
+          "error": "Error",
+          "listUpdated": "· model list updated {{time}}"
+        },
+        "summary_one": "{{host}} · {{count}} model",
+        "summary_other": "{{host}} · {{count}} models",
+        "action": {
+          "refetch": "Refetch",
+          "addModel": "Add model"
+        },
+        "refetch": {
+          "added": "New",
+          "removed_one": "This fetch removed {{count}} model: {{models}}",
+          "removed_other": "This fetch removed {{count}} models: {{models}}",
+          "unchangedOnly": "Nothing changed in this fetch"
+        },
+        "row": {
+          "remove": "Remove"
+        },
+        "fail": {
+          "refetch": "The fetch did not come back. The list below is the last one this page actually read",
+          "tier": "The tier was not saved",
+          "addModel": "The model was not added",
+          "removeModel": "The model was not removed"
+        },
+        "retry": "Try again",
+        "search": "Search model IDs",
+        "col": {
+          "id": "Model ID",
+          "entry": "Entry",
+          "tiers": "Reasoning tiers"
+        },
+        "entry": {
+          "auto": "Auto-fetched",
+          "manual": "Added manually"
+        },
+        "tiers": {
+          "empty": "No tiers set",
+          "addFirst": "+ Add tier",
+          "add": "+ Tier",
+          "inputHint": "Enter to add · any text",
+          "remove": "Remove {{tier}}"
+        },
+        "addRow": {
+          "hint": "Use this when a model is not discoverable, or when you only want one of them"
+        },
+        "empty": "This source returned no models. Add one by hand, or refetch.",
+        "emptyNeverFetched": "This source's model list has never come back. Deal with the status above, fetch again, or add a model by hand.",
+        "footnote": "This page answers only \"which models does this source have\". Which routing chain a model takes is set in the gateway module. Tiers are yours to type, the same for both entry kinds. The interface type is identified when the source is added and fixed there — it is neither shown on this page nor editable."
+      },
+      "guard": {
+        "label": "Hops that will be removed",
+        "count_one": "{{count}} hop",
+        "count_other": "{{count}} hops",
+        "hop": {
+          "position": "Order #{{n}}"
+        },
+        "hint": {
+          "safe": "These models still have another source available.",
+          "interrupt": "Some models will be left with no usable source."
+        },
+        "gap": {
+          "label": "Models that will be left with no source",
+          "subject": "{{backend}} · {{menuModel}}",
+          "agents": "Agents pinned to it: {{agents}}"
+        },
+        "cancel": "Cancel",
+        "title": {
+          "refetch": "Refetch models from {{source}}",
+          "removeModel": "Remove {{model}} from {{source}}"
+        },
+        "subtitle": {
+          "refetch": "This refetch drops models from this source's inventory.",
+          "removeModel": "This model disappears from this source's inventory."
+        },
+        "confirm": {
+          "refetch": "Refetch anyway",
+          "removeModel": "Remove anyway"
+        }
       },
       "repair": {
         "reauth": "Sign in",
@@ -1082,19 +1343,11 @@
         "unresolved": "Still not working",
         "failed": "Couldn't do that, please retry"
       },
-      "dryRun": {
-        "action": "Run a test turn",
-        "running": "Testing…",
-        "ok": "{{name}} is reachable · {{ms}} ms",
-        "okNoLatency": "{{name}} is reachable",
-        "failed": "{{name}} didn't go through · {{detail}}",
-        "failedUnknown": "{{name}} didn't go through",
-        "error": "Couldn't run the test, please retry"
-      },
       "migrationBanner": {
         "title": "Native configs ready to import",
-        "body": "Found {{count}} native sign-in(s) / API key(s) you can move into the Hub — each agent then picks its own sources and their order.",
-        "import": "Import to Hub",
+        "body_one": "Found {{count}} native sign-in or API key you can move into the gateway.",
+        "body_other": "Found {{count}} native sign-ins or API keys you can move into the gateway.",
+        "import": "Import to gateway",
         "dismiss": "Dismiss"
       }
     }
@@ -1200,8 +1453,7 @@
     "diagnosticUnknown": "Not observed",
     "diagnosticQuicInactive": "Unverified · {{protocol}} active",
     "diagnosticQuicInactiveHelp": "Avibe confirms QUIC only after the active Connector demonstrates it. The Connector is currently using {{protocol}}.",
-    "diagnosticVersion": "{{version}}",
-    "rttUnavailable": "Unavailable"
+    "diagnosticVersion": "{{version}}"
   },
   "models": {
     "eligibility": {
@@ -1224,11 +1476,12 @@
     },
     "source": {
       "cooldown": {
-        "network": "Network unreachable",
-        "timeout": "Repeated timeouts",
         "rate_limited": "Rate limited",
         "quota_exhausted": "Cycle quota used up",
         "server_error": "Upstream server error"
+      },
+      "backoff": {
+        "connection_failed": "Connection failed, retrying shortly"
       },
       "needs_action": {
         "oauth_expired": "Needs a new sign-in",
@@ -1249,6 +1502,7 @@
     "retry": "Retry"
   },
   "errors": {
+    "task_owner_session_unavailable": "This Task's managing Session is no longer available. Create a replacement Task from an available Agent Session.",
     "share_id_taken": "That custom link is already taken. Pick another.",
     "invalid_share_id": "A custom link may use only 3–64 letters, numbers, dash, or underscore, starting and ending with a letter or number.",
     "missing_share_id": "Enter a custom link first.",
@@ -1294,9 +1548,10 @@
     "edge_bind_address_family_mismatch": "The selected outbound address does not match the chosen IP family.",
     "remote_access_diagnostics_failed": "Connectivity diagnostics could not finish.",
     "bind_code_limit_reached": "Too many active bind codes. Revoke an unused code before creating another.",
-    "project_access_denied": "You don't have permission to start a session in this project.",
     "memory_disabled": "Memory is disabled, or this connection can't reach it.",
     "memory_invalid_input": "That Memory request wasn't valid.",
+    "memory_log_entry_not_found": "That Memory processing entry is no longer available.",
+    "memory_access_denied": "This caller isn't allowed to read that Memory data.",
     "memory_input_too_large": "That input is too large for Memory.",
     "memory_queue_full": "The Memory queue is full right now.",
     "memory_low_disk_space": "There isn't enough free disk space for Memory right now.",
@@ -1304,20 +1559,23 @@
     "memory_runtime_missing": "The memory-runtime dependency isn't installed yet.",
     "memory_runtime_unsupported": "The memory-runtime dependency isn't supported on this platform.",
     "memory_runtime_install_failed": "The memory-runtime dependency failed to install.",
+    "memory_reconcile_failed": "Avibe couldn't apply the Memory settings. Check the runtime logs for the failing step.",
     "memory_sidecar_unavailable": "The Memory sidecar isn't reachable right now.",
     "memory_provider_timeout": "The Memory request timed out.",
     "memory_provider_response_invalid": "Memory returned an invalid response.",
     "memory_processing_failed": "Memory processing failed.",
     "memory_clear_failed": "Clearing Memory data failed.",
+    "memory_restart_failed": "Restarting the Memory engine failed.",
     "memory_runtime_unpublished": "This Avibe version hasn't published a memory runtime yet.",
     "memory_runtime_manifest_missing": "The memory runtime manifest is missing.",
     "memory_runtime_manifest_unavailable": "The memory runtime manifest couldn't be downloaded.",
     "memory_runtime_archive_unavailable": "The memory runtime download isn't available right now.",
-    "remote_execution_disabled": "Remote access is read-only for Agent, Harness, terminal, and file execution in this release. Open Avibe on the machine to run this action.",
-    "memory_log_entry_not_found": "That Memory processing entry is no longer available.",
-    "memory_access_denied": "This caller isn't allowed to read that Memory data.",
-    "memory_reconcile_failed": "Avibe couldn't apply the Memory settings. Check the runtime logs for the failing step.",
-    "memory_restart_failed": "Restarting the Memory engine failed."
+    "memory_rebuild_failed": "Rebuilding the Memory index failed. Retry when ready; your markdown memory is still kept.",
+    "memory_repair_failed": "Repairing the Memory index failed. Check the current health and try again when ready.",
+    "memory_rebuild_root_busy": "Another process is using the Memory root. Wait and retry the rebuild.",
+    "memory_operation_in_progress": "A Memory operation is already in progress. Wait for it to finish.",
+    "memory_factory_reset_failed": "Reinitializing Memory could not finish. Memory data may be partially deleted; retry from Settings → Dependencies.",
+    "memory_embedding_rebuild_required": "Changing the embedding endpoint or model rebuilds the Memory index. Confirm to continue."
   },
   "apps": {
     "title": "Apps",
@@ -1576,6 +1834,11 @@
       "newFolderName": "Folder name"
     }
   },
+  "configRecovery": {
+    "title": "Configuration repair required",
+    "body": "Avibe recovered part of the configuration and preserved the original file. Repair it before changing settings.",
+    "action": "Diagnostics"
+  },
   "appShell": {
     "title": "Avibe",
     "subtitle": "Agent OS · Workbench",
@@ -1723,7 +1986,6 @@
       "notifications": {
         "checking": "Checking notifications",
         "unsupported": "Notifications unavailable",
-        "localOnly": "Enable notifications on this device locally",
         "installFirst": "Add to Home Screen first",
         "enable": "Enable notifications",
         "enabled": "Notifications on",
@@ -2552,8 +2814,6 @@
   "agents": {
     "title": "Agents",
     "subtitle": "{{count}} agents registered across all backends.",
-    "remoteReadOnly": "Read-only",
-    "remoteReadOnlyHint": "Agent definitions are read-only over remote access. Open Avibe on the machine to edit them.",
     "tabs": {
       "definitions": "Definitions",
       "running": "Runs"
@@ -2731,8 +2991,7 @@
       "systemPromptEditorHint": "Write the full system prompt with live Markdown preview.",
       "systemLocked": "System agents cannot be deleted. You can still adjust model, effort, and system prompt.",
       "run": "Run",
-      "nameLocked": "Used as the reference id · locked after create",
-      "modelDefault": "Backend default"
+      "nameLocked": "Used as the reference id · locked after create"
     },
     "runDialog": {
       "title": "Open a chat with this agent",
@@ -2758,32 +3017,7 @@
       "systemPromptHint": "Optional",
       "systemPromptPlaceholder": "Optional. Prepended to every conversation that uses this agent.",
       "submit": "Create agent"
-    },
-    "onboarding": {
-      "title": "Organization access",
-      "summary": "{{total}} Agents · {{custom}} custom · {{system}} system",
-      "inventory": "Agent inventory ({{count}})",
-      "notOnboardedCount": "{{count}} not onboarded",
-      "privateCount": "{{count}} private",
-      "publishedCount": "{{count}} published",
-      "conflictCount": "{{count}} unavailable",
-      "onboardPrivate": "Onboard privately",
-      "onboarded": "Onboarded",
-      "manageAccess": "Manage access",
-      "system": "system",
-      "custom": "custom",
-      "saved": "{{count}} Agents onboarded privately.",
-      "savedPending": "Agents are private locally; publication is pending.",
-      "failed": "Could not onboard Agents: {{error}}",
-      "status": {
-        "not_onboarded": "Not onboarded",
-        "private": "Private",
-        "published": "Published",
-        "managed_elsewhere": "Unavailable"
-      }
-    },
-    "renameKeptOld": "Agent renamed (old one kept due to references)",
-    "deleteInUse": "Agent \"{{name}}\" is currently in use by one or more channels and cannot be deleted."
+    }
   },
   "editor": {
     "modeLabel": "Editor mode",
@@ -2839,8 +3073,6 @@
     "discardConfirm": "You have unsaved changes. Close and discard them?"
   },
   "skills": {
-    "remoteReadOnly": "Read-only",
-    "remoteReadOnlyHint": "The Skill catalog is read-only over remote access. Open Avibe on the machine to add, update, or remove Skills.",
     "title": "Skills",
     "subtitle": "Manage global and project skills across your agent backends · powered by askill.",
     "scopeGlobal": "Global",
@@ -2932,9 +3164,7 @@
       "waiting": "Waiting",
       "running": "Running",
       "paused": "Paused",
-      "finished": "Finished",
-      "enabled": "Enabled only",
-      "disabled": "Disabled only"
+      "finished": "Finished"
     },
     "runStatus": {
       "all": "All",
@@ -2980,8 +3210,7 @@
     "tabs": {
       "tasks": "Tasks",
       "watches": "Watches",
-      "runs": "Runs",
-      "webhooks": "Webhooks"
+      "runs": "Runs"
     },
     "detail": {
       "schedule": "Schedule",
@@ -2994,7 +3223,9 @@
       "mode": "Mode",
       "followUp": "Follow-up message",
       "runtime": "Runtime",
+      "eventProcessing": "Event processing",
       "lastError": "Last error",
+      "pauseReason": "Pause reason",
       "type": "Type",
       "triggeredBy": "Triggered by",
       "result": "Result",
@@ -3019,15 +3250,18 @@
       "timeoutNone": "No timeout",
       "timeoutDefault": "{{duration}} (default)",
       "lastExitCode": "Last exit code",
+      "failureSummary": "Failure",
+      "technicalDetails": "Technical details",
       "escalation": "On failure → escalation",
       "triagePrompt": "Triage prompt",
       "cwdFromSession": "Bound session, else runtime default or Avibe state dir",
-      "cwdRuntimeDefault": "Runtime default, else Avibe state dir",
-      "definition": "Definition",
-      "eventProcessing": "Event processing"
+      "cwdRuntimeDefault": "Runtime default, else Avibe state dir"
     },
     "taskKind": {
       "command": "Command"
+    },
+    "taskPauseReason": {
+      "ownerSessionUnavailable": "The Session that managed this Task is no longer available. Create a replacement Task from an available Agent Session."
     },
     "onFailure": {
       "none": "Notice only (no Agent)",
@@ -3083,6 +3317,11 @@
       "degraded": "degraded",
       "unknown": "health unknown"
     },
+    "processingHealth": {
+      "failing": "processing failed",
+      "degraded": "recent processing failure",
+      "unknown": "processing status unknown"
+    },
     "lifecycle": {
       "running": "Running",
       "waiting": "Waiting",
@@ -3091,7 +3330,14 @@
       "normal": "Finished",
       "timeout": "Timed out",
       "error": "Failed",
+      "missed": "Missed",
+      "canceled": "Canceled",
       "unknown": "Unknown"
+    },
+    "failure": {
+      "timeout": "The last run timed out.",
+      "generic": "The last run failed.",
+      "circuitPaused": "This Watch was paused after repeated events."
     },
     "kind": {
       "task": "Scheduled task",
@@ -3119,25 +3365,6 @@
         "sat": "Sat"
       },
       "weekdaySeparator": ", "
-    },
-    "soon": "soon",
-    "webhooksSoon": "Webhooks are coming soon",
-    "webhooksSoonBody": "Inbound HTTP triggers will land in a follow-up release. Tasks and watches cover scheduled and event-driven runs today.",
-    "schedule": {
-      "cron": "cron · {{value}}",
-      "oneShot": "one-shot · {{value}}"
-    },
-    "runtime": {
-      "running": "Running",
-      "paused": "Paused",
-      "idle": "Idle",
-      "enabled": "Enabled",
-      "disabled": "Disabled"
-    },
-    "processingHealth": {
-      "failing": "processing failed",
-      "degraded": "recent processing failure",
-      "unknown": "processing status unknown"
     }
   },
   "chat": {
@@ -3273,14 +3500,14 @@
       "showIntent": "Page action",
       "harness": "From agent",
       "from": "From",
-      "agentFallback": "agent",
       "vault": "From Vault",
       "vaultProvided": "Secret provided",
       "vaultAccessApproved": "Access approved",
       "vaultSigned": "Signature complete",
       "vaultDenied": "Denied",
       "vaultFailed": "Failed",
-      "vaultExpired": "Expired"
+      "vaultExpired": "Expired",
+      "agentFallback": "agent"
     },
     "annotation": {
       "titleUser": "User annotation",
@@ -3320,6 +3547,7 @@
       "voice": "Voice input",
       "stopRecording": "Finish recording",
       "cancelRecording": "Cancel recording",
+      "voicePreview": "Live transcription preview",
       "voiceProcessing": "Processing recording",
       "voiceRetry": "Retry transcription",
       "voiceCopyTranscript": "Copy recovered transcript",
@@ -3340,8 +3568,7 @@
       "attachmentFailed": "The file could not be uploaded. Try again.",
       "retryAttachment": "Retry upload",
       "removeAttachment": "Remove",
-      "dropOverlay": "Drop files to attach",
-      "voicePreview": "Live transcription preview"
+      "dropOverlay": "Drop files to attach"
     },
     "media": {
       "preview": "Preview",
@@ -3412,8 +3639,6 @@
     }
   },
   "vaults": {
-    "remoteReadOnly": "Read-only",
-    "remoteReadOnlyHint": "The Vault is read-only over remote access. Open Avibe on the machine to add, edit, reveal, or approve secrets.",
     "title": "Vaults",
     "subtitle": "Give your AI agents secrets — their values never enter the context.",
     "add": "Add secret",
@@ -3692,23 +3917,16 @@
   "memory": {
     "title": "Memory",
     "betaTitle": "Memory · Beta",
-    "subtitle": "A personal memory distilled from your Workbench and private-IM messages — plus durable facts your Agent records while working for you. Review it, search it, or clear it here.",
+    "subtitle": "Avibe builds a personal memory from your conversations and your Agent's work, so it understands you better over time. Review, search, or clear it here.",
     "setup": {
       "runtimeRequired": "Install the Memory runtime first",
-      "runtimeRequiredHint": "Install or repair Memory from Dependencies. You can still disable Memory or clear stored data below.",
-      "remoteOwner": {
-        "title": "Finish setup on the local machine",
-        "body": "This instance still needs a local setup pass. Remote owners can't use the wizard here because it needs direct access to the machine.",
-        "hint": "Open the Control Panel to keep working, or complete setup on the machine itself.",
-        "action": "Open Control Panel"
-      }
+      "runtimeRequiredHint": "Install or repair Memory from Dependencies. You can still disable Memory or clear stored data below."
     },
     "tabs": {
-      "status": "Status",
+      "processingRecord": "Processing Record",
       "profile": "Profile",
       "search": "Search",
-      "settings": "Settings",
-      "log": "Log"
+      "settings": "Settings"
     },
     "remoteUnavailable": {
       "title": "Memory unavailable on this connection",
@@ -3732,71 +3950,237 @@
       "syncing": "Syncing",
       "succeeded": "Succeeded",
       "receiptUnknown": "Result unknown",
-      "receiptUnknownHint": "Delivered, but the distillation receipt was lost.",
+      "receiptUnknownHint": "The message was sent, but the result couldn't be confirmed.",
       "distillFailed": "Failed",
-      "dead": "Dead",
-      "deadHint": "Delivery was not acknowledged by the Memory engine.",
+      "dead": "Given up",
+      "deadHint": "The Memory engine never confirmed receiving this message.",
       "missed": "Missed",
       "fault": {
         "credential": "The Memory engine cannot call the configured model endpoint. Check API key balance and permissions.",
         "engine": "The Memory engine reported an internal error. Restarting it usually clears the fault."
       },
       "faultAction": {
-        "credential": "Open credential settings",
-        "engine": "Restart Memory engine"
+        "credential": "Open credential settings"
       },
       "dismissFault": "Dismiss processing alert",
-      "engineRestartStarted": "Memory engine restart started.",
+      "restartEngine": "Restart engine",
+      "engineRestartCompleted": "Memory engine restarted.",
       "engineRestartFailed": "Memory engine restart failed.",
       "providerTitle": "Memory engine (EverOS)",
-      "providerSubtitle": "Latest provider observation",
+      "providerSubtitle": "Latest processing result",
       "observation": {
         "succeeded": "Succeeded",
         "rejected": "Rejected",
         "unknown": "Unknown"
       },
-      "flushStatus": "Provider status",
+      "flushStatus": "Processing status",
       "flushError": "Error code",
       "flushAt": "Observed at",
       "requestId": "Request ID",
       "copyRequestId": "Copy request ID",
-      "queueBytes": "Queued text",
+      "queueBytes": "Text waiting to process",
       "storageUsed": "Local storage used",
-      "lastSuccess": "Last successful distillation",
+      "lastSuccess": "Last successful processing",
       "lastSuccessNever": "Never",
       "failureLog": {
         "title": "Failure log",
-        "subtitle": "Sanitized delivery and distillation failures retained for {{days}} days.",
-        "empty": "No retained failures.",
+        "subtitle": "Processing failures from the last {{days}} days (sensitive content removed).",
+        "empty": "No failures recorded.",
         "loadFailed": "Couldn't load the Memory failure log.",
         "errorCode": "Error code",
         "attempts": "Attempts",
         "kind": {
-          "delivery_abandoned": "Delivery abandoned",
-          "distillation_rejected": "Distillation rejected",
+          "boot_recovery": "Startup recovery",
+          "delivery_abandoned": "Send failed (given up)",
+          "distillation_rejected": "Processing rejected",
+          "recorder_degraded": "Call log issue",
           "result_unknown": "Result unknown"
         }
+      }
+    },
+    "processingRecord": {
+      "title": "Processing Record",
+      "description": "How the Memory engine is running, how fresh its data is, and any issues it hit while processing.",
+      "refresh": "Refresh",
+      "runtime": {
+        "title": "Engine status",
+        "help": "The Memory engine runs in the background on this machine and turns your messages into memories. This shows how it's doing.",
+        "helpLabel": "About engine status",
+        "loading": "Reading engine status…",
+        "unavailable": "Engine status is temporarily unavailable.",
+        "healthStatus": {
+          "ok": "Healthy"
+        },
+        "version": "Version",
+        "capabilities": "Available capabilities",
+        "capabilitiesHelp": "The engine capabilities available right now, including models, file parsing, search, and knowledge features. \"Yes\" means the capability is configured and ready.",
+        "capabilitiesHelpLabel": "About available capabilities",
+        "noCapabilities": "No capability information yet.",
+        "disabledFeatures": "Features not enabled",
+        "disabledFeaturesHelp": "Engine features that aren't turned on. This usually doesn't affect everyday use.",
+        "disabledFeaturesHelpLabel": "About features not enabled",
+        "noneDisabled": "No separately disabled features reported.",
+        "cascade": "Processing queue",
+        "cascadeHelp": "Messages wait in a queue and the engine turns them into memories one by one. This shows the queue's progress and failure counts; retryable failures retry automatically, while permanently failed items do not.",
+        "cascadeHelpLabel": "About the processing queue",
+        "repair": {
+          "action": "Repair index",
+          "running": "Repairing…",
+          "confirmTitle": "Repair the Memory index?",
+          "confirmDescription": "Repair rescans Markdown memory and drains pending work while the live Memory sidecar stays available. Embedding work may use API quota.",
+          "confirmLabel": "Repair index",
+          "healthResult": "Health after repair",
+          "healthy": "Healthy",
+          "completed": "Memory index repair completed.",
+          "completedWithWarnings": "Memory index repair completed with health warnings.",
+          "failed": "Memory index repair failed."
+        },
+        "recorder": "Call log",
+        "recorderHelp": "When recording is active, the call log keeps model-call details for troubleshooting. Degraded or off recording may omit new calls.",
+        "recorderHelpLabel": "About the call log",
+        "noFacts": "Nothing to show yet.",
+        "fact": {
+          "capability": {
+            "llm": "Language model",
+            "embed": "Embedding model",
+            "rerank": "Reranking",
+            "multimodalLlm": "Multimodal model",
+            "parser": "File parsing",
+            "agenticSearch": "Agentic search",
+            "knowledge": "Knowledge base"
+          },
+          "cascade": {
+            "healthy": "Running normally",
+            "reasons": "Issue reasons",
+            "pending": "Waiting to process",
+            "failedPermanent": "Failed (won't retry)",
+            "failedRetryable": "Failed (will retry)",
+            "drainConsecutiveFailures": "Consecutive failures",
+            "unrecoverableTotal": "Total given up",
+            "optimizeFailureStreak": "Consecutive optimization failures",
+            "pruneStaleSeconds": "Remove data older than"
+          },
+          "recorder": {
+            "state": "Status",
+            "reason": "Reason"
+          },
+          "boolean": {
+            "true": "Yes",
+            "false": "No"
+          },
+          "duration": {
+            "hoursMinutes": "{{hours}}h {{minutes}}m",
+            "minutesSeconds": "{{minutes}}m {{seconds}}s",
+            "seconds": "{{seconds}}s"
+          },
+          "cascadeReason": {
+            "drainFailures": "Queue processing failed",
+            "optimizeStuck": "Optimization task stuck",
+            "pruneStale": "Old-data cleanup stuck",
+            "healthProbeFailed": "Health check failed",
+            "unknown": "Unknown"
+          },
+          "recorderState": {
+            "active": "Recording normally",
+            "degraded": "Partial issues",
+            "disabled": "Off"
+          },
+          "recorderReason": {
+            "writerFailures": "Write failures",
+            "serializationFailed": "Couldn't save data",
+            "callLogCorrupt": "Call log corrupt"
+          }
+        }
       },
-      "restartEngine": "Restart engine",
-      "engineRestartCompleted": "Memory engine restarted."
+      "source": {
+        "health": "Engine health"
+      },
+      "sourceState": {
+        "available": "Available",
+        "partial": "Partial",
+        "stale": "Stale",
+        "unknown": "Unknown",
+        "unavailable": "Unavailable"
+      },
+      "sourceReason": "Reason: {{reason}}",
+      "sourceNotObserved": "Not observed",
+      "sources": {
+        "title": "Data sources",
+        "help": "Each part of this page gets its data from a different source. This shows when each source was last checked.",
+        "helpLabel": "About data sources",
+        "description": "One source being temporarily unavailable doesn't mean Memory is broken."
+      },
+      "anomalies": {
+        "title": "Issue log",
+        "help": "Problems that came up during processing are recorded here. Check each entry's state: Dead, Rejected, and Manual review required entries won't recover automatically.",
+        "helpLabel": "About the issue log",
+        "description": "Problems that came up during processing are recorded here.",
+        "loading": "Reading issue log…",
+        "empty": "No issues recorded.",
+        "loadFailed": "Couldn't load the issue log."
+      },
+      "manualRequiredReadOnly": "This record needs manual review; there's no action to take here.",
+      "anomalyState": {
+        "dead": "Dead",
+        "degraded": "Degraded",
+        "manualRequired": "Manual review required",
+        "rejected": "Rejected"
+      },
+      "anomalyOperation": {
+        "add": "Add",
+        "flush": "Flush",
+        "record": "Record"
+      },
+      "field": {
+        "operation": "Operation",
+        "operationId": "Operation ID",
+        "state": "State",
+        "occurredAt": "Occurred at",
+        "errorCode": "Error code",
+        "attempts": "Attempts",
+        "generation": "Data version",
+        "requestId": "Request ID"
+      },
+      "clearRecovery": {
+        "title": "An unfinished Clear needs your decision",
+        "description": "The last Clear was interrupted. You can finish the deletion, or abort and restore everything to how it was before.",
+        "state": {
+          "preparing": "Preparing snapshot",
+          "prepared": "Snapshot prepared",
+          "deleting": "Deleting Memory data",
+          "recoveryNeeded": "Recovery required"
+        },
+        "resume": "Resume Clear",
+        "abort": "Abort and restore",
+        "abortUnavailable": "Abort is unavailable until the initial snapshot is complete.",
+        "resumeSuccess": "Clear resumed and completed.",
+        "abortSuccess": "Clear aborted and the snapshot was restored.",
+        "actionFailed": "Couldn't update Clear recovery.",
+        "loadFailed": "Couldn't load Clear maintenance state."
+      },
+      "timeline": {
+        "title": "Recent processing",
+        "help": "How recent messages were turned into memories, step by step.",
+        "helpLabel": "About recent processing"
+      }
     },
     "profile": {
-      "description": "The provider's current distilled profile of you, built from captured messages.",
+      "description": "A profile of you, built from your conversations.",
       "loading": "Loading profile…",
       "empty": "No profile yet — keep chatting, then check back once messages have been processed.",
       "loadFailed": "Couldn't load your profile.",
       "warningUnavailable": "A profile isn't available from this provider yet. This is expected, not an error — try Search instead, or check back later.",
       "disabledHint": "Enable Memory to view your profile.",
       "refresh": "Refresh",
-      "sourceNote": "Distilled from your conversation history, plus any notes your Agent recorded.",
       "summary": "Summary",
       "explicitInfo": "Explicit information",
       "implicitTraits": "Inferred traits",
       "basis": "Basis",
-      "evidence": "Evidence"
+      "evidence": "Evidence",
+      "sourceNote": "Distilled from your conversation history, plus any notes your Agent recorded."
     },
     "search": {
-      "description": "Search your distilled profile, episodes, and facts.",
+      "description": "Search your profile, episodes, and facts.",
       "placeholder": "Search your memory…",
       "button": "Search",
       "searching": "Searching…",
@@ -3805,79 +4189,8 @@
       "disabledHint": "Enable Memory to search.",
       "sourceNote": "Distilled from your conversation history, plus any notes your Agent recorded."
     },
-    "settings": {
-      "loading": "Loading settings…",
-      "loadFailed": "Couldn't load Memory settings.",
-      "enableLabel": "Memory",
-      "enableHint": "Distill eligible Workbench messages and bound, enabled private-IM messages into a per-user searchable memory. Durable facts your Agent records while working for you are included as well.",
-      "dependencyNotReady": "The memory-runtime dependency isn't ready yet. Install or repair it from Settings → Dependencies, then try enabling Memory again.",
-      "goToDependencies": "Open Dependencies",
-      "llmTitle": "LLM endpoint",
-      "embeddingTitle": "Embedding endpoint",
-      "baseUrl": "Base URL",
-      "baseUrlPlaceholder": "https://api.example.com/v1",
-      "model": "Model",
-      "modelPlaceholder": "model name",
-      "apiKey": "API key",
-      "apiKeySet": "A key is set — leave blank to keep it.",
-      "apiKeyNotSet": "No key set.",
-      "apiKeyPlaceholder": "sk-…",
-      "apiKeyClearHint": "Keys are write-only — Avibe never shows a saved key back to you.",
-      "embeddingLocked": "Changing the embedding endpoint or model is disabled while memory data exists. Run Clear all first.",
-      "embeddingStatusPending": "Confirming Memory state… the embedding endpoint unlocks once it's confirmed no data exists.",
-      "save": "Save settings",
-      "saving": "Saving…",
-      "saveFailed": "Couldn't save Memory settings.",
-      "saved": "Memory settings saved.",
-      "disclosureTitle": "Before you enable Memory",
-      "disclosure": [
-        "Eligible Workbench and bound, enabled private-IM text is copied into a bounded local queue for processing.",
-        "Your Agent also records durable conclusions it distills from your conversations and from work on your machine — such as preferences, corrections, decisions, and lasting environment or account facts it encounters in files or tool output — into the same queue without an explicit request.",
-        "Once a message succeeds or exhausts its retries, its text is scrubbed immediately; a content-free tombstone may remain for up to 90 days, bounded to the newest 100,000 rows.",
-        "The Memory LLM and embedding endpoints are separate from your agent's model subscriptions.",
-        "These remote endpoints receive captured text or search queries and may retain them under their own policy.",
-        "Private-IM text has already traveled over that platform before capture and remains subject to that platform's own retention and sync.",
-        "The local runtime retains unflushed raw messages and extracted data in local state in addition to the visible profile.",
-        "Memory processing retains scrubbed, bounded provider request and response diagnostics for every user and project on this installation for up to 14 days or until Clear all.",
-        "Disabling Memory freezes local data rather than deleting it — use Clear all to remove it.",
-        "Clear all removes this install's local Memory data but cannot retract copies already sent to a remote endpoint or your original chat history.",
-        "Delivery to the Memory endpoints is at-least-once — a rare duplicate derived memory is possible after a timeout or crash.",
-        "Each platform user has a separate memory scope; identities are not linked across platforms."
-      ],
-      "clearKeyLabel": "Clear the saved key"
-    },
-    "clear": {
-      "button": "Clear all",
-      "confirmTitle": "Clear all local Memory data?",
-      "confirmDescription": "This removes your distilled profile, episodes, facts, pending queued text, and retained provider-call diagnostics on this install.",
-      "removesTitle": "This removes:",
-      "removes": [
-        "Your visible distilled profile",
-        "Hidden local buffers and indexes used to build it",
-        "Pending and finished items in the local processing queue",
-        "Retained provider request and response diagnostics"
-      ],
-      "keepsTitle": "This does not remove:",
-      "keeps": [
-        "Your original Avibe chat history",
-        "Copies already sent to a remote Memory endpoint",
-        "Copies or snapshots you created yourself",
-        "Any data stored outside the dedicated Memory folder",
-        "Existing logs, crash reports, or backups",
-        "Physical traces on the storage device — this is not a secure wipe"
-      ],
-      "confirmLabel": "Clear all",
-      "clearing": "Clearing…",
-      "cleared": "Memory data cleared.",
-      "failed": "Clear failed."
-    },
-    "kind": {
-      "profile": "Profile",
-      "episode": "Episode",
-      "fact": "Fact"
-    },
     "log": {
-      "description": "Trace captured messages across every project and user.",
+      "description": "See the processing history for created Memory entries across every user and project on this installation.",
       "loading": "Loading processing log…",
       "loadFailed": "Couldn't load the processing log.",
       "detailLoading": "Loading processing details…",
@@ -3896,20 +4209,22 @@
       "projectId": "Project ID",
       "userId": "User ID",
       "noPreview": "No text preview available.",
-      "recorderDegraded": "New provider calls aren't being recorded. Existing rows remain readable.",
-      "recorderCorrupt": "The provider call log is corrupt. Clear all Memory data to remove it before recording can resume.",
-      "clearAction": "Open Clear all",
+      "recorderDegraded": "New model calls aren't being logged right now. Existing entries are still readable.",
+      "recorderCorrupt": "The model call log is corrupt. Use Clear Memory Data to remove it before logging can resume.",
+      "clearAction": "Open Clear Memory Data",
       "sectionUnavailable": "{{section}} is unavailable ({{reason}}). Other sections may still be complete.",
       "sectionPartial": "{{section}} is partially available ({{reason}}).",
+      "sectionStale": "{{section}} is stale ({{reason}}).",
+      "sectionUnknown": "{{section}} availability is unknown ({{reason}}).",
       "section": {
         "everos": "Timeline data",
-        "capture": "Capture attribution",
-        "calls": "Provider calls"
+        "capture": "Message tracking",
+        "calls": "Model calls"
       },
       "timeline": "Processing timeline",
       "step": {
-        "capture": "Capture and delivery",
-        "memcell": "Memcell created",
+        "capture": "Collected and sent",
+        "memcell": "Memory snippet created",
         "strategy": "Memory strategy"
       },
       "reason": {
@@ -3941,34 +4256,150 @@
         "indexed": "Indexed"
       },
       "callKind": {
-        "llm": "LLM",
-        "multimodalLlm": "Multimodal LLM",
-        "embedding": "Embedding"
+        "llm": "Language model",
+        "multimodalLlm": "Multimodal model",
+        "embedding": "Embedding model"
       },
       "callStage": {
-        "boundary": "Request boundary",
+        "boundary": "Request preparation",
         "strategy": "Strategy",
-        "cascade": "Cascade",
+        "cascade": "Building memories",
         "episodeExtract": "Episode extraction",
-        "parse": "Multimodal parsing"
+        "parse": "Image/file parsing"
       },
       "callSummary": "{{kind}} · {{status}}",
       "profileTrigger": "Triggered profile run",
       "unavailable": "Unavailable: {{reason}}",
       "omittedSteps": "{{count}} older timeline steps omitted.",
-      "callDetails": "Provider calls",
-      "callsNotRecorded": "Provider calls were not recorded or have expired.",
-      "omittedCalls": "{{count}} older provider calls omitted.",
-      "droppedCalls": "{{count}} provider calls were dropped before this row.",
+      "callDetails": "Model calls",
+      "callsNotRecorded": "Model calls weren't logged or have expired.",
+      "omittedCalls": "{{count}} older model calls omitted.",
+      "droppedCalls": "{{count}} model calls before this row weren't kept.",
       "copyCall": "Copy request and response",
       "finishReason": "Finish reason",
-      "usage": "Prompt / completion tokens",
+      "usage": "Input / output tokens",
       "request": "Request",
       "response": "Response",
       "currentState": "Current Memory state",
       "currentProfile": "Profile",
       "currentIndexing": "Indexing",
       "currentStateOnly": "This is current state, not a historical snapshot of this processing run."
+    },
+    "settings": {
+      "loading": "Loading settings…",
+      "loadFailed": "Couldn't load Memory settings.",
+      "enableLabel": "Memory",
+      "enableHint": "When on, Avibe distills your conversations and your Agent's work notes into a searchable personal memory. Each user's memory stays separate.",
+      "dependencyNotReady": "The memory-runtime dependency isn't ready yet. Install or repair it from Settings → Dependencies, then try enabling Memory again.",
+      "goToDependencies": "Open Dependencies",
+      "llmTitle": "Language model (LLM)",
+      "llmHelp": "Memory uses this model to read your messages and summarize them into memories. Enter an OpenAI-compatible base URL, model name, and API key.",
+      "llmHelpLabel": "About the language model",
+      "embeddingTitle": "Embedding model",
+      "embeddingHelp": "Memory uses this model to index memories so you can search them. Changing the embedding endpoint or model requires rebuilding the index.",
+      "embeddingHelpLabel": "About the embedding model",
+      "baseUrl": "Base URL",
+      "baseUrlPlaceholder": "https://api.example.com/v1",
+      "model": "Model",
+      "modelPlaceholder": "model name",
+      "apiKey": "API key",
+      "apiKeySet": "Key set",
+      "apiKeyNotSet": "No key",
+      "apiKeyPlaceholder": "sk-…",
+      "apiKeyPlaceholderSet": "sk-***** (leave blank to keep)",
+      "embeddingStatusPending": "Checking local data… the embedding model unlocks once it's confirmed no data exists.",
+      "maintenanceLoadFailed": "Couldn't load local Memory maintenance state.",
+      "save": "Save settings",
+      "saving": "Saving…",
+      "saveFailed": "Couldn't save Memory settings.",
+      "saved": "Memory settings saved.",
+      "disclosureTitle": "About Memory",
+      "disclosure": [
+        "When on, your Workbench messages and authorized users' private messages are distilled into memories. Your Agent can also proactively save durable notes without being asked, including preferences, corrections, decisions, and lasting facts about your machine or accounts found in files, forwarded or shared content, or other non-plain content.",
+        "The local Memory queue keeps raw messages and attachment copies while they wait to process. If a submission needs manual recovery, those copies can remain after processing stops.",
+        "To build memories, message content is sent to the model endpoints configured above, and Search sends queries there too. These endpoints are separate from your Agent's models, and their providers handle the data under their own policies.",
+        "Avibe's local Memory store stays on this machine and includes scrubbed model-call diagnostics for every user and project on this installation. Diagnostics can contain sensitive conversation text and are kept for up to 14 days or 5,000 calls. Copies sent to model endpoints are outside this local store. Turning Memory off pauses it — it doesn't delete anything.",
+        "Clear Memory Data deletes Avibe-managed Memory data for every user and project on this machine, including profiles, memories, and messages waiting to process. It can't take back content already sent to model endpoints or touch original chat histories.",
+        "Accounts on different platforms each have their own separate memory; they aren't linked."
+      ],
+      "clearKeyLabel": "Clear the saved key",
+      "rebuildRequiredTitle": "Memory index rebuild required",
+      "rebuildRequiredDescription": "Your embedding endpoint or model change is saved. The Memory engine can't restart until the rebuild finishes.",
+      "rebuildConfirmTitle": "Rebuild Memory index?",
+      "rebuildConfirmDescription": "Changing the embedding endpoint or model requires rebuilding the index. Your memories are kept, but the rebuild can take a while and may use embedding API credit.",
+      "rebuildConfirmLabel": "Save and rebuild",
+      "retryRebuild": "Retry rebuild",
+      "retryingRebuild": "Rebuilding…",
+      "rebuildCompleted": "Memory index rebuild completed.",
+      "rebuildFailed": "Memory index rebuild failed.",
+      "embeddingIdentityHint": "Changing the embedding endpoint or model rebuilds the local index. Your memories are kept."
+    },
+    "clear": {
+      "button": "Clear Memory Data",
+      "confirmTitle": "Clear Memory Data for this installation?",
+      "confirmDescription": "This deletes Avibe-managed Memory data for every user and project on this machine, including profiles, distilled memories, and messages waiting to process.",
+      "removesTitle": "This deletes:",
+      "removes": [
+        "Profiles and all memory entries for every user and project",
+        "Local search indexes and caches",
+        "Everything in the processing queue",
+        "Model-call diagnostic logs"
+      ],
+      "keepsTitle": "This does not delete:",
+      "keeps": [
+        "Original chat histories",
+        "Content already sent to the model endpoints",
+        "Copies or backups you made yourself",
+        "Anything outside the Memory folder (like logs and backups)",
+        "Physical traces on the disk (this is not a secure wipe)"
+      ],
+      "confirmLabel": "Clear Memory Data",
+      "clearing": "Clearing…",
+      "cleared": "Memory data cleared.",
+      "failed": "Clear failed."
+    },
+    "factoryReset": {
+      "button": "Reinitialize Memory",
+      "retry": "Retry initialization",
+      "artifactRepairRequired": "Reinitializing Memory is unavailable until the pinned Memory artifact is installed and ready. Repair it first.",
+      "dependenciesHint": "Permanently deletes local Memory data and related operational state. Settings and the installed runtime are retained.",
+      "settingsUnavailable": "Memory settings are unavailable. Re-check before reinitializing.",
+      "confirmTitle": "Reinitialize Memory?",
+      "confirmDescription": "This permanently deletes local Memory data and related operational state, then attempts to start a brand-new Memory engine. Even if deletion succeeds, the new engine may fail to start and the old data will not be restored. Memory settings, credentials, the installed runtime, and original chats are kept.",
+      "confirmLabel": "Reinitialize Memory",
+      "deletesTitle": "This attempts to permanently delete:",
+      "roots": {
+        "primaryStorage": {
+          "label": "Primary Memory storage",
+          "description": "May include profiles, facts, indexes, call diagnostics, and runtime files"
+        },
+        "memoryStateStorage": {
+          "label": "Memory state storage",
+          "description": "May include processing queues, recovery progress, and coordination state"
+        }
+      },
+      "technicalPath": "Technical path: {{path}}",
+      "retainsTitle": "This keeps:",
+      "retains": [
+        "Memory settings and credentials",
+        "The pinned, installed Memory artifact",
+        "Original Avibe chats and data outside these storage locations"
+      ],
+      "resultTitle": "Memory initialization result",
+      "resultCompleted": "The new Memory engine is ready. The storage-location report below is authoritative.",
+      "rootOutcome": "{{label}}: {{deleted}}",
+      "unknownRoot": "unknown root",
+      "deleted": "deleted",
+      "partial": "partially deleted",
+      "absent": "absent",
+      "retained": "retained",
+      "completed": "Memory initialization completed.",
+      "failed": "Memory initialization failed. Check the result and retry when ready."
+    },
+    "kind": {
+      "profile": "Profile",
+      "episode": "Episode",
+      "fact": "Fact"
     }
   },
   "organization": {

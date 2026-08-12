@@ -48,6 +48,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.exc import IntegrityError
 
 from config import paths
+from core.memory.blocking import run_blocking
 from core.services.dispatch import SOURCE_HUMAN, SOURCE_SCHEDULED
 from modules.im.base import MessageContext
 from storage.db import get_cached_sqlite_engine
@@ -211,9 +212,9 @@ def create_app(
     ) -> Any:
         """Run a Harness input through the same durable owner as interactive Chat.
 
-        The explicit source intent decides whether it queues or steers. Send-now
-        persists the new input at P3, then promotes the exact FIFO head through
-        empty P1; it never stops the active Turn or jumps older queued work.
+        The explicit source intent decides whether this content queues or steers.
+        Content-bearing P1 targets this Delivery; content-free P1 promotion is
+        exposed separately through ``SessionTurnManager.send_now``.
         The submission remains a Delivery until exact native acceptance materializes
         the harness Message.
         """
@@ -222,6 +223,7 @@ def create_app(
             return submission.route
 
         from core.message_mirror import _scope_id_for_session
+        from core.message_priority import normalize_delivery_intent
         from core.session_turns import (
             DeliveryRequest,
             SCHEDULED_PROVENANCE_KEY,
@@ -249,6 +251,8 @@ def create_app(
         scope_id: str | None = None
         delivery_owner_transferred = False
         target_was_busy = False
+        legacy_send_now = str(delivery_intent or "").strip().lower() == "send_now"
+        delivery_intent = normalize_delivery_intent(delivery_intent)
         effective_delivery_intent = delivery_intent
         execution_id = str(
             (context.platform_specific or {}).get("task_execution_id") or ""
@@ -317,10 +321,36 @@ def create_app(
                                 target_was_busy=target_was_busy,
                                 delivery_status="canceled",
                             )
-                        if not (
-                            delivery_intent == "send_now"
+                        if (
+                            legacy_send_now
                             and existing_state == "queued"
+                            and existing.get("priority") == "p3"
+                            and message_deliveries.delivery_has_history_event(
+                                existing,
+                                kind="admission",
+                            )
+                            and not message_deliveries.delivery_has_history_event(
+                                existing,
+                                kind="steer",
+                            )
                         ):
+                            existing = message_deliveries.cas_delivery(
+                                conn,
+                                str(existing["id"]),
+                                expected_version=int(existing["version"]),
+                                expected_states=("queued",),
+                                values={"priority": "p1", "state": "reserved"},
+                                history_event={
+                                    "kind": "legacy_send_now_re_admission",
+                                    "from_priority": "p3",
+                                },
+                            )
+                            if existing is None:
+                                raise RuntimeError(
+                                    "legacy send-now Delivery re-admission lost"
+                                )
+                            delivery_owner_transferred = True
+                        else:
                             return TurnSubmissionResult(
                                 route=(
                                     "enqueued"
@@ -338,7 +368,6 @@ def create_app(
                                 delivery_status=existing_state,
                                 delivery_owner_transferred=True,
                             )
-                        delivery_owner_transferred = True
                 if not delivery_owner_transferred:
                     return "duplicate"
             if legacy_accepted:
@@ -357,16 +386,7 @@ def create_app(
                 persisted_intent = delivery_intent_for_priority(
                     delivery_request.priority
                 )
-                effective_delivery_intent = (
-                    "send_now"
-                    if delivery_intent == "send_now"
-                    and delivery_request.priority == "p3"
-                    else persisted_intent
-                )
-                delivery_request = replace(
-                    delivery_request,
-                    admission_only=effective_delivery_intent == "send_now",
-                )
+                effective_delivery_intent = persisted_intent
                 provenance = (delivery_request.metadata or {}).get(
                     SCHEDULED_PROVENANCE_KEY
                 )
@@ -384,11 +404,7 @@ def create_app(
 
                 delivery_id = message_deliveries.new_delivery_id()
                 admitted_state = "reserved"
-                priority = (
-                    "p3"
-                    if delivery_intent == "send_now"
-                    else priority_for_delivery_intent(delivery_intent)
-                )
+                priority = priority_for_delivery_intent(delivery_intent)
                 message_deliveries.insert_delivery(
                     conn,
                     delivery_id=delivery_id,
@@ -452,11 +468,7 @@ def create_app(
 
             delivery_request = DeliveryRequest(
                 session_id=session_id,
-                priority=(
-                    "p3"
-                    if delivery_intent == "send_now"
-                    else priority_for_delivery_intent(delivery_intent)
-                ),
+                priority=priority_for_delivery_intent(delivery_intent),
                 content=text,
                 delivery_id=delivery_id,
                 scope_id=scope_id,
@@ -471,7 +483,6 @@ def create_app(
                     SCHEDULED_PROVENANCE_KEY: capture_scheduled_provenance(context)
                 },
                 native_message_id=native_message_id or None,
-                admission_only=delivery_intent == "send_now",
             )
 
         if context.platform_specific is None:
@@ -540,25 +551,6 @@ def create_app(
                 delivery_owner_transferred=True,
             )
         delivery_state = str(result.state)
-        if effective_delivery_intent == "send_now":
-            with get_cached_sqlite_engine().connect() as conn:
-                admitted = message_deliveries.get_delivery(conn, delivery_id)
-                observed_head = message_deliveries.ordering_head(conn, session_id)
-            if (
-                admitted is not None
-                and admitted["state"] == "queued"
-                and observed_head is not None
-                and observed_head["state"] == "queued"
-            ):
-                await manager.send_now(
-                    session_id,
-                    expected_delivery_id=str(observed_head["id"]),
-                )
-                with get_cached_sqlite_engine().connect() as conn:
-                    latest = message_deliveries.get_delivery(conn, delivery_id)
-                if latest is not None:
-                    delivery_state = str(latest["state"])
-
         route = "enqueued" if delivery_state in {
             "queued",
             "pending_steer",
@@ -571,39 +563,36 @@ def create_app(
             route=route,
             queue_persisted=True,
             target_was_busy=target_was_busy,
-            delivery_status=(
-                delivery_state if effective_delivery_intent == "send_now" else None
-            ),
+            delivery_status=delivery_state,
             delivery_owner_transferred=delivery_owner_transferred,
         )
         _publish_scheduled_queue_growth(session_id, delivery_state)
-        if effective_delivery_intent == "send_now":
+        if delivery_owner_transferred and execution_id:
             try:
                 with run_update_event_transaction(get_cached_sqlite_engine()) as conn:
                     recorded = record_agent_run_delivery_outcome_in_connection(
                         conn,
                         execution_id,
                         {
-                            "intent": "send_now",
+                            "intent": effective_delivery_intent,
                             "status": delivery_state,
                             "target_was_busy": submission.target_was_busy,
                         },
                     )
                 if not recorded:
                     logger.warning(
-                        "send-now Agent Run outcome lost its exact CAS after Delivery "
-                        "ownership transfer: run=%s delivery=%s",
+                        "Agent Run Delivery outcome lost its exact CAS after ownership "
+                        "transfer: run=%s delivery=%s",
                         execution_id,
                         delivery_id,
                     )
             except Exception:
                 logger.exception(
-                    "send-now Agent Run outcome persistence deferred after Delivery "
-                    "ownership transfer: run=%s delivery=%s",
+                    "Agent Run Delivery outcome persistence deferred after ownership "
+                    "transfer: run=%s delivery=%s",
                     execution_id,
                     delivery_id,
                 )
-            return submission
         return submission if delivery_owner_transferred else route
 
     @app.get("/internal/health")
@@ -630,6 +619,28 @@ def create_app(
         from core.services.running_agents import snapshot_running_agents
 
         return await asyncio.to_thread(snapshot_running_agents, controller)
+
+    @app.post("/internal/running-agents/snapshot")
+    async def _running_agents_snapshot(request: Request) -> Any:
+        """Return live agents plus ownership for one bounded Run candidate set."""
+
+        from core.services.running_agents import (
+            HARNESS_OWNERSHIP_CANDIDATE_LIMIT,
+            snapshot_running_agents,
+        )
+
+        payload = await _safe_json(request)
+        run_ids = payload.get("run_ids") if isinstance(payload, dict) else None
+        if not isinstance(run_ids, list) or len(run_ids) > HARNESS_OWNERSHIP_CANDIDATE_LIMIT:
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": "invalid_run_candidates"},
+            )
+        return await asyncio.to_thread(
+            snapshot_running_agents,
+            controller,
+            ownership_candidate_run_ids=run_ids,
+        )
 
     @app.post("/internal/running-agents/end")
     async def _running_agents_end(request: Request) -> Any:
@@ -869,6 +880,11 @@ def create_app(
     def _memory_runtime():
         return getattr(controller, "memory_runtime", None)
 
+    def _memory_factory_reset_running() -> bool:
+        task = getattr(controller, "_memory_factory_reset_task", None)
+        done = getattr(task, "done", None)
+        return task is not None and callable(done) and not done()
+
     @app.post("/internal/reconcile-memory")
     async def _reconcile_memory() -> Any:
         """Hot-apply persisted Memory configuration on the controller loop."""
@@ -895,6 +911,11 @@ def create_app(
     async def _memory_restart() -> Any:
         """Replace the live Memory sidecar through the Runtime lifecycle."""
 
+        if _memory_factory_reset_running():
+            return JSONResponse(
+                status_code=409,
+                content={"ok": False, "error": "memory_operation_in_progress"},
+            )
         runtime = _memory_runtime()
         if runtime is None:
             return JSONResponse(
@@ -911,10 +932,150 @@ def create_app(
                 content={"ok": False, "error": "memory_restart_failed"},
             )
 
+    @app.post("/internal/memory/rebuild")
+    async def _memory_rebuild(request: Request) -> Any:
+        """Run one retained Memory rebuild and wait for the closed result."""
+
+        if _verified_memory_ui_user_key(request) is None:
+            return JSONResponse(
+                status_code=403,
+                content={"ok": False, "error": "memory_access_denied", "result": "failed"},
+            )
+        payload = await _safe_json(request)
+        if payload != {"confirm": True}:
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": "memory_invalid_input", "result": "failed"},
+            )
+        if _memory_factory_reset_running():
+            return JSONResponse(
+                status_code=409,
+                content={"ok": False, "error": "memory_operation_in_progress", "result": "failed"},
+            )
+        runtime = _memory_runtime()
+        if runtime is None:
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": "memory_runtime_missing", "result": "failed"},
+            )
+        if getattr(runtime, "factory_reset_pending", False):
+            return JSONResponse(
+                status_code=409,
+                content={"ok": False, "error": "memory_operation_in_progress", "result": "failed"},
+            )
+        try:
+            result = await runtime.rebuild()
+        except Exception:
+            logger.exception("internal memory rebuild failed")
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": "memory_rebuild_failed", "result": "failed"},
+            )
+        status_code = 200 if result.get("ok") is True else 409
+        return JSONResponse(status_code=status_code, content=result)
+
+    @app.post("/internal/memory/factory-reset")
+    async def _memory_factory_reset(request: Request) -> Any:
+        """Run the Controller-owned factory reset and await its final result."""
+
+        if _verified_memory_ui_user_key(request) is None:
+            return JSONResponse(
+                status_code=403,
+                content={"ok": False, "error": "memory_access_denied", "result": "failed"},
+            )
+        payload = await _safe_json(request)
+        if payload != {"confirm": True}:
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": "memory_invalid_input", "result": "failed"},
+            )
+        runtime = _memory_runtime()
+        if runtime is None:
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": "memory_runtime_missing", "result": "failed"},
+            )
+        rebuild_running = getattr(runtime, "_rebuild_running", None)
+        repair_running = getattr(runtime, "_repair_running", None)
+        if (callable(rebuild_running) and rebuild_running()) or (callable(repair_running) and repair_running()):
+            return JSONResponse(
+                status_code=409,
+                content={"ok": False, "error": "memory_operation_in_progress", "result": "failed"},
+            )
+        reset = getattr(controller, "factory_reset_memory", None)
+        if not callable(reset):
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": "memory_runtime_missing", "result": "failed"},
+            )
+        try:
+            result = await reset()
+        except Exception:
+            logger.exception("internal memory factory reset failed")
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": "memory_factory_reset_failed", "result": "failed"},
+            )
+        status_code = 200 if result.get("ok") is True else (
+            409 if result.get("error") == "memory_operation_in_progress" else 503
+        )
+        return JSONResponse(status_code=status_code, content=result)
+
+    @app.post("/internal/memory/repair")
+    async def _memory_repair(request: Request) -> Any:
+        """Run one retained live cascade sync and return its final health."""
+
+        if _verified_memory_ui_user_key(request) is None:
+            return JSONResponse(
+                status_code=403,
+                content={"ok": False, "error": "memory_access_denied", "result": "failed"},
+            )
+        payload = await _safe_json(request)
+        if payload != {"confirm": True}:
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": "memory_invalid_input", "result": "failed"},
+            )
+        if _memory_factory_reset_running():
+            return JSONResponse(
+                status_code=409,
+                content={"ok": False, "error": "memory_operation_in_progress", "result": "failed"},
+            )
+        runtime = _memory_runtime()
+        if runtime is None:
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": "memory_runtime_missing", "result": "failed"},
+            )
+        try:
+            result = await runtime.repair()
+        except Exception:
+            logger.exception("internal memory repair failed")
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": "memory_repair_failed", "result": "failed"},
+            )
+        if result.get("ok") is True:
+            status_code = 200
+        elif result.get("error") in {
+            "memory_disabled",
+            "memory_operation_in_progress",
+            "memory_runtime_unsupported",
+        }:
+            status_code = 409
+        else:
+            status_code = 503
+        return JSONResponse(status_code=status_code, content=result)
+
     @app.post("/internal/memory/install-runtime")
     async def _memory_install_runtime() -> Any:
         """Install or repair the managed runtime on the controller lifecycle."""
 
+        if _memory_factory_reset_running():
+            return JSONResponse(
+                status_code=409,
+                content={"ok": False, "reason": "memory_operation_in_progress"},
+            )
         runtime = _memory_runtime()
         if runtime is None:
             return JSONResponse(status_code=503, content={"ok": False, "reason": "memory_runtime_missing"})
@@ -943,6 +1104,105 @@ def create_app(
         ):
             return scope
         return None
+
+    @app.post("/internal/memory/final-flush")
+    async def _memory_final_flush(request: Request) -> Any:
+        """Flush one admitted Workbench session before terminal archive."""
+
+        payload = await _safe_json(request)
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != {"session_id"}
+            or not isinstance(payload.get("session_id"), str)
+            or not payload["session_id"].strip()
+        ):
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": "memory_invalid_input"},
+            )
+        session_id = payload["session_id"].strip()
+        final_flush = getattr(controller, "final_flush_memory_cli_session", None)
+        if not callable(final_flush):
+            return {"ok": True, "flushed": False}
+        try:
+            flushed = await final_flush(
+                session_id,
+                deadline_seconds=5.0,
+            )
+        except Exception:
+            logger.debug(
+                "internal Memory final flush failed for %s",
+                session_id,
+                exc_info=True,
+            )
+            flushed = False
+        return {"ok": True, "flushed": bool(flushed)}
+
+    @app.post("/internal/memory/archive-session")
+    async def _memory_archive_session(request: Request) -> Any:
+        """Archive one Workbench session through the controller lifecycle."""
+
+        payload = await _safe_json(request)
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != {"session_id"}
+            or not isinstance(payload.get("session_id"), str)
+            or not payload["session_id"]
+            or payload["session_id"] != payload["session_id"].strip()
+        ):
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": "memory_invalid_input"},
+            )
+        archive_session = getattr(controller, "archive_memory_cli_session", None)
+        if not callable(archive_session):
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": "session_archive_unavailable"},
+            )
+        try:
+            session = await archive_session(
+                payload["session_id"],
+                deadline_seconds=5.0,
+            )
+        except LookupError:
+            return JSONResponse(
+                status_code=404,
+                content={"ok": False, "error": "session_not_found"},
+            )
+        except PermissionError as error:
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "ok": False,
+                    "error": getattr(error, "code", "forbidden"),
+                },
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            from core.memory.runtime import MemorySessionLifecycleBusyError
+
+            code = (
+                error.code
+                if isinstance(error, MemorySessionLifecycleBusyError)
+                else "session_archive_unavailable"
+            )
+            logger.debug(
+                "internal Workbench session archive failed for %s",
+                payload["session_id"],
+                exc_info=True,
+            )
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": code},
+            )
+        if not isinstance(session, dict):
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": "session_archive_unavailable"},
+            )
+        return {"ok": True, "session": session}
 
     def _verified_memory_ui_user_key(request: Request) -> str | None:
         from core.memory.http_headers import (
@@ -1018,16 +1278,50 @@ def create_app(
             logger.warning("internal memory status failed")
             return JSONResponse(status_code=503, content={"error": "memory_store_unavailable"})
 
-    @app.get("/internal/memory/failures")
-    async def _memory_failures() -> Any:
+    @app.get("/internal/memory/processing-record")
+    async def _memory_processing_record(request: Request) -> Any:
         runtime = _memory_runtime()
         if runtime is None:
             return JSONResponse(status_code=503, content={"error": "memory_runtime_missing"})
         try:
-            return await runtime.failure_log_payload()
+            return await runtime.processing_record_payload(
+                verified_user_key=_verified_memory_ui_user_key(request)
+            )
+        except Exception:
+            logger.warning("internal memory Processing Record read failed")
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": "memory_store_unavailable"},
+            )
+
+    @app.get("/internal/memory/failures")
+    async def _memory_failures(request: Request) -> Any:
+        runtime = _memory_runtime()
+        if runtime is None:
+            return JSONResponse(status_code=503, content={"error": "memory_runtime_missing"})
+        try:
+            return await runtime.failure_log_payload(
+                verified_user_key=_verified_memory_ui_user_key(request)
+            )
         except Exception:
             logger.warning("internal memory failure log failed")
             return JSONResponse(status_code=503, content={"error": "memory_store_unavailable"})
+
+    @app.get("/internal/memory/maintenance")
+    async def _memory_maintenance(request: Request) -> Any:
+        runtime = _memory_runtime()
+        if runtime is None:
+            return JSONResponse(status_code=503, content={"error": "memory_runtime_missing"})
+        try:
+            return await runtime.maintenance_payload(
+                verified_user_key=_verified_memory_ui_user_key(request)
+            )
+        except Exception:
+            logger.warning("internal memory maintenance read failed")
+            return JSONResponse(
+                status_code=503,
+                content={"status": "failed", "error": "memory_store_unavailable"},
+            )
 
     @app.get("/internal/memory/profile")
     async def _memory_profile(request: Request) -> Any:
@@ -1170,15 +1464,26 @@ def create_app(
         payload = await _safe_json(request)
         if (
             not isinstance(payload, dict)
-            or set(payload) != {"query", "limit"}
+            or set(payload) != {"query", "policy"}
             or not isinstance(payload.get("query"), str)
         ):
             return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
-        limit = payload.get("limit")
-        if not isinstance(limit, int) or isinstance(limit, bool):
-            return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
+        from core.memory.http_headers import CALLER_SESSION_HEADER
+        from core.memory.types import RecallPolicy
+
         try:
-            return await runtime.search_payload(payload["query"], limit, principal_id, project_id)
+            policy = RecallPolicy.from_payload(payload.get("policy"))
+        except (TypeError, ValueError):
+            return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
+        current_session_id = str(request.headers.get(CALLER_SESSION_HEADER) or "").strip() or None
+        try:
+            return await runtime.search_payload(
+                payload["query"],
+                policy,
+                principal_id,
+                project_id,
+                current_session_id=current_session_id,
+            )
         except Exception:
             logger.warning("internal memory search failed")
             return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_processing_failed"})
@@ -1190,8 +1495,7 @@ def create_app(
             return JSONResponse(status_code=403, content={"status": "failed", "error": "memory_access_denied"})
         principal_id, project_id = scope
         runtime = _memory_runtime()
-        module = getattr(runtime, "module", None) if runtime is not None else None
-        if module is None:
+        if runtime is None:
             return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_runtime_missing"})
         payload = await _safe_json(request)
         if (
@@ -1211,7 +1515,13 @@ def create_app(
         source_digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
 
         try:
-            receipt = await module.capture(
+            capture = getattr(controller, "capture_memory", None)
+            if not callable(capture):
+                return JSONResponse(
+                    status_code=503,
+                    content={"status": "failed", "error": "memory_runtime_missing"},
+                )
+            receipt = await capture(
                 CaptureRequest(
                     source_message_id=(
                         f"agent:{principal_id}:{project_id}:{session_id}:{source_digest}"
@@ -1238,8 +1548,14 @@ def create_app(
 
     @app.post("/internal/memory/clear")
     async def _memory_clear(request: Request) -> Any:
-        if _verified_memory_ui_user_key(request) is None:
+        user_key = _verified_memory_ui_user_key(request)
+        if user_key is None:
             return JSONResponse(status_code=403, content={"status": "failed", "error": "memory_access_denied"})
+        if _memory_factory_reset_running():
+            return JSONResponse(
+                status_code=409,
+                content={"status": "failed", "error": "memory_operation_in_progress"},
+            )
         runtime = _memory_runtime()
         if runtime is None:
             return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_runtime_missing"})
@@ -1247,7 +1563,9 @@ def create_app(
         if payload != {"confirm": True}:
             return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
         try:
-            return await runtime.clear()
+            return await runtime.clear(
+                operator_ref=runtime.principal_for_user_key(user_key)
+            )
         except MemoryStoreUnavailableError:
             return JSONResponse(
                 status_code=503,
@@ -1256,6 +1574,46 @@ def create_app(
         except Exception:
             logger.warning("internal memory clear failed")
             return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_clear_failed"})
+
+    async def _memory_clear_recovery(request: Request, *, abort: bool) -> Any:
+        user_key = _verified_memory_ui_user_key(request)
+        if user_key is None:
+            return JSONResponse(status_code=403, content={"status": "failed", "error": "memory_access_denied"})
+        if _memory_factory_reset_running():
+            return JSONResponse(
+                status_code=409,
+                content={"status": "failed", "error": "memory_operation_in_progress"},
+            )
+        runtime = _memory_runtime()
+        if runtime is None:
+            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_runtime_missing"})
+        payload = await _safe_json(request)
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != {"operation_id"}
+            or not isinstance(payload.get("operation_id"), str)
+            or not 1 <= len(payload["operation_id"]) <= 128
+        ):
+            return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
+        try:
+            operator_ref = runtime.principal_for_user_key(user_key)
+            operation = runtime.abort_clear if abort else runtime.resume_clear
+            return await operation(payload["operation_id"], operator_ref=operator_ref)
+        except (TypeError, ValueError):
+            return JSONResponse(status_code=400, content={"status": "failed", "error": "memory_invalid_input"})
+        except MemoryStoreUnavailableError:
+            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_store_unavailable"})
+        except Exception:
+            logger.warning("internal memory clear recovery failed")
+            return JSONResponse(status_code=503, content={"status": "failed", "error": "memory_clear_failed"})
+
+    @app.post("/internal/memory/clear/resume")
+    async def _memory_clear_resume(request: Request) -> Any:
+        return await _memory_clear_recovery(request, abort=False)
+
+    @app.post("/internal/memory/clear/abort")
+    async def _memory_clear_abort(request: Request) -> Any:
+        return await _memory_clear_recovery(request, abort=True)
 
     @app.post("/internal/model-hub")
     async def _model_hub(request: Request) -> Any:
@@ -1376,15 +1734,17 @@ def create_app(
         return {"ok": True, "queued": True}
 
     @app.post("/internal/cancel/{session_id}")
-    async def _cancel(session_id: str) -> Any:
+    async def _cancel(session_id: str, run_id: str | None = None) -> Any:
         """HTTP adapter: delegate Stop to the turn owner (FSM, Phase 1b) and map its
         result ``code`` to a status — ``not_in_flight`` -> 404, ``stop_failed`` ->
         409. ``session_id`` is the dispatch key the turn registered under, so the UI
         Stop button works with just the URL it already has."""
-        result = await manager.cancel(session_id)
+        result = await manager.cancel(session_id, agent_run_id=run_id)
         code = result.get("code")
         if code == "not_in_flight":
             return JSONResponse(status_code=404, content=result)
+        if code == "invalid_run_id":
+            return JSONResponse(status_code=400, content=result)
         if code in {"stop_failed", "stop_unknown"}:
             return JSONResponse(status_code=409, content=result)
         return result
@@ -1475,7 +1835,9 @@ def _bind_socket(socket_path: Optional[Path] = None) -> tuple[socket.socket, Pat
     uvicorn's path chmod while keeping the endpoint local-only.
     """
 
-    target = (socket_path or default_socket_path()).expanduser()
+    # Bind and report the canonical path so platform aliases (for example
+    # macOS ``/var`` -> ``/private/var``) do not produce a mismatched endpoint.
+    target = (socket_path or default_socket_path()).expanduser().resolve()
     target.parent.mkdir(parents=True, exist_ok=True)
     _remove_stale_owned_socket(target)
 
@@ -1688,8 +2050,6 @@ async def _build_dispatch_payload(payload: dict[str, Any]) -> tuple[str, Message
         thread_id=payload.get("thread_id"),
         message_id=payload.get("message_id") or payload.get("user_message_id"),
         files=files,
-        memory_cli_admitted=payload.get("memory_cli_admitted") is True,
-        is_ordinary_text=payload.get("is_ordinary_text") is True,
     )
     if context.platform_specific is None:
         context.platform_specific = {}
@@ -1716,8 +2076,6 @@ def _build_session_context(
     thread_id: Optional[str] = None,
     message_id: Optional[str] = None,
     files: Optional[list] = None,
-    memory_cli_admitted: bool = False,
-    is_ordinary_text: bool = False,
 ) -> MessageContext:
     """Rebuild a Session's routing context from its durable scope and target.
 
@@ -1760,8 +2118,6 @@ def _build_session_context(
     }
     if resolved_platform == "avibe":
         platform_specific["workbench_session_id"] = session_id
-    if memory_cli_admitted:
-        platform_specific["memory_cli_admitted"] = True
     session_row = _lookup_session(session_id)
     if session_row is not None:
         target = {
@@ -1794,7 +2150,6 @@ def _build_session_context(
         message_id=message_id,
         platform_specific=platform_specific,
         files=files,
-        is_ordinary_text=is_ordinary_text,
     )
 
 

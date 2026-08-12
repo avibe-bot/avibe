@@ -28,10 +28,6 @@ import { isProxyMediaUrl } from '../../lib/mediaProxy';
 import {
   isVaultApprovalRequest,
   placeVaultProvisionRequests,
-  vaultRequestSourceMessageId,
-  vaultRequestSourcePlatform,
-  vaultRequestSourceRunId,
-  vaultRequestSourceTurnId,
 } from '../../lib/vaultRequestPlacement';
 import { localPath, type ShowPageLinkInfo } from '../../lib/showPageLinks';
 import {
@@ -71,10 +67,8 @@ import { useFileDrop } from '../../lib/useFileDrop';
 import { quoteText } from '../../lib/quoteText';
 import {
   isTranscriptWindowDisjoint,
-  mergeAnchorWindow,
   mergeById,
   insertMessageOrdered,
-  transcriptWindowsOverlap,
 } from '../../lib/transcriptOrder';
 import { AgentRoutePicker } from './AgentRoutePicker';
 import {
@@ -185,7 +179,6 @@ const emptyRuntimeState = (): SessionRuntimeState => ({
 // detach the live tail (historical-window) instead of growing the DOM with rows
 // below the viewport.
 const MAX_RETAINED_MESSAGES = 300;
-const VAULT_ANCHOR_RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000] as const;
 
 // Display label for the archive chord (⇧⌘D / Ctrl+Shift+D). Resolved once at
 // module load — the platform can't change mid-session — and shown as the archive
@@ -215,7 +208,6 @@ export const ChatPage: React.FC = () => {
   // re-render / visibility gap-recovery can't re-trigger the jump.
   const [searchParams, setSearchParams] = useSearchParams();
   const deepLinkMessageId = searchParams.get('msg');
-  const deepLinkMessageIdRef = useLatestRef(deepLinkMessageId);
   // A "show me the chat" navigation carries ?view=chat (see sessionChatPath({ showChat:
   // true })) — a general signal that this navigation must leave Show Page mode.
   const showChatSignal = searchParams.get('view') === 'chat';
@@ -349,7 +341,6 @@ export const ChatPage: React.FC = () => {
   // the chat surface still hidden and the iframe already gone — a blank chat.
   const showPageAccessDenied = showPageRestoreAccess === 'deny';
   const showPageActive = isShowPageActive(readOnly, showPageMode, showPageAccessDenied);
-  const showPageActiveRef = useLatestRef(showPageActive);
   // True while the share popover is open. The popover floats over the Show Page
   // iframe; making the iframe inert lets an outside tap there reach the parent
   // document so the (non-modal) popover dismisses, without modal-blocking the
@@ -512,49 +503,26 @@ export const ChatPage: React.FC = () => {
   const [agents, setAgents] = useState<VibeAgentBrief[]>([]);
   const [defaultAgentName, setDefaultAgentName] = useState<string | null>(null);
   const [messages, setMessages] = useState<WorkbenchMessage[]>([]);
-  const [vaultResolvedSourceIds, setVaultResolvedSourceIds] = useState<Map<string, string>>(
-    () => new Map(),
-  );
   const provisionPlacement = useMemo(
-    () => placeVaultProvisionRequests(messages, vaultRequests, vaultResolvedSourceIds),
-    [messages, vaultRequests, vaultResolvedSourceIds],
+    () => placeVaultProvisionRequests(messages, vaultRequests),
+    [messages, vaultRequests],
   );
-  const provisionPlacementRef = useLatestRef(provisionPlacement);
-  const vaultRequestsRef = useLatestRef(vaultRequests);
-  const hiddenVaultRequestIdsRef = useRef<Set<string>>(new Set());
-  const transcriptTailVaultRequests = useMemo(
-    () => [...pendingApprovals, ...provisionPlacement.unanchored],
-    [pendingApprovals, provisionPlacement],
-  );
+  // Provision cards belong beside the Agent reply that owns them. Requests whose
+  // owning message is outside the retained window stay unanchored here; they are
+  // intentionally not moved into the transcript footer, so opening a Session
+  // never turns a historical form into a bottom-fixed card or a scroll target.
   // Mirror the latest messages into a ref (updated every render) so effects that
   // must NOT re-run on every message change — chiefly the deep-link jump effect,
   // whose around-fetch would otherwise be cancelled by an SSE/reconcile update —
   // can still read the current transcript without listing ``messages`` as a dep.
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
-  const vaultAnchorFetchesRef = useRef<Set<string>>(new Set());
-  const vaultAnchorRetryAttemptsRef = useRef<Map<string, number>>(new Map());
-  const vaultAnchorRetryExhaustedRef = useRef<Set<string>>(new Set());
-  const vaultAnchorRetryWaitingRef = useRef<Set<string>>(new Set());
-  const vaultAnchorInFlightRef = useRef(false);
-  const vaultAnchorMergeRef = useRef<{
-    anchorMessageId: string;
-    nextBeforeId: string | null;
-    result: ReturnType<typeof mergeAnchorWindow>;
-  } | null>(null);
   const deepLinkWindowHandledRef = useRef(false);
-  const [vaultAnchorCycle, setVaultAnchorCycle] = useState(0);
-  const markVaultRequestHidden = useCallback((requestId: string) => {
-    hiddenVaultRequestIdsRef.current.add(requestId);
-    // A user dismissal is an explicit retry boundary for deferred or exhausted
-    // anchors, so a later request can try again immediately.
-    vaultAnchorRetryAttemptsRef.current.clear();
-    vaultAnchorRetryExhaustedRef.current.clear();
-    vaultAnchorRetryWaitingRef.current.clear();
-    // A deferred request is intentionally left un-fetched while another card
-    // owns the visible historical window. Hiding that card is the state change
-    // that makes the deferred request eligible for its next anchor attempt.
-    setVaultAnchorCycle((cycle) => cycle + 1);
+  const markVaultRequestHidden = useCallback((_requestId: string) => {
+    // The merged provision flow keeps inline provision cards beside their
+    // owning replies, so hiding a request no longer needs extra local anchor
+    // bookkeeping. Keep the provider hook for compatibility and future
+    // extension, but make the callback a stable no-op here.
   }, []);
   const denyVaultProvisionRequest = useCallback(
     async (requestId: string) => {
@@ -600,7 +568,6 @@ export const ChatPage: React.FC = () => {
   // scroll to once its window is in the DOM, the id to highlight (~3s fade), and
   // the last ``msg`` value already handled so the jump effect runs once per value.
   const [jumpTarget, setJumpTarget] = useState<string | null>(null);
-  const jumpTargetRef = useLatestRef(jumpTarget);
   const [highlightedId, setHighlightedId] = useState<string | null>(null);
   const handledJumpRef = useRef<string | null>(null);
   const highlightTimerRef = useRef<number | null>(null);
@@ -823,252 +790,6 @@ export const ChatPage: React.FC = () => {
   const sessionIdRef = useRef(sessionId);
   sessionIdRef.current = sessionId;
 
-  // Legacy provision rows may be created after their Agent reply and therefore
-  // cannot be placed from `created_at` alone. When the originating user message
-  // is outside the retained tail, fetch a small around-window once so the card
-  // can join its real turn instead of falling back to a fixed-looking footer.
-  useEffect(() => {
-    if (
-      !sessionId ||
-      loading ||
-      session?.id !== sessionId ||
-      deepLinkMessageId ||
-      jumpTarget ||
-      showPageActive ||
-      deepLinkWindowHandledRef.current ||
-      provisionPlacement.unanchored.length === 0
-    ) return;
-    if (vaultAnchorInFlightRef.current) return;
-    const request = provisionPlacement.unanchored.find((candidate) => {
-      const sourceMessageId = vaultRequestSourceMessageId(candidate);
-      const requestMessageId = typeof candidate.message_id === 'string' && candidate.message_id.trim()
-        ? candidate.message_id
-        : null;
-      const sourceTurnId = vaultRequestSourceTurnId(candidate);
-      const sourceRunId = vaultRequestSourceRunId(candidate);
-      const messageAnchorId = requestMessageId ?? sourceMessageId;
-      const anchorKey = messageAnchorId
-        ? `message:${messageAnchorId}`
-        : sourceTurnId
-          ? `turn:${sourceTurnId}`
-          : sourceRunId
-            ? `run:${sourceRunId}`
-            : null;
-      return (
-        Boolean(anchorKey) &&
-        !hiddenVaultRequestIdsRef.current.has(candidate.id) &&
-        !vaultAnchorRetryExhaustedRef.current.has(`${candidate.id}:${anchorKey}`) &&
-        !vaultAnchorRetryWaitingRef.current.has(`${candidate.id}:${anchorKey}`) &&
-        !vaultAnchorFetchesRef.current.has(`${candidate.id}:${anchorKey}`)
-      );
-    });
-    if (!request) return;
-    const sourceMessageId = vaultRequestSourceMessageId(request);
-    const requestMessageId = typeof request.message_id === 'string' && request.message_id.trim()
-      ? request.message_id
-      : null;
-    const sourceTurnId = vaultRequestSourceTurnId(request);
-    const sourceRunId = vaultRequestSourceRunId(request);
-    const sourcePlatform = vaultRequestSourcePlatform(request);
-    const messageAnchorId = requestMessageId ?? sourceMessageId;
-    const anchorKey = messageAnchorId
-      ? `message:${messageAnchorId}`
-      : sourceTurnId
-        ? `turn:${sourceTurnId}`
-        : sourceRunId
-          ? `run:${sourceRunId}`
-          : null;
-    if (!anchorKey) return;
-    const fetchKey = `${request.id}:${anchorKey}`;
-    vaultAnchorFetchesRef.current.add(fetchKey);
-    vaultAnchorInFlightRef.current = true;
-    let retryDelayMs: number | null = null;
-    let deferredByVisibleAnchor = false;
-    let deferredByMissingReply = false;
-    let deferredByHiddenSurface = false;
-    const loadedSource = messageAnchorId
-      ? messagesRef.current.find(
-        (message) => message.id === messageAnchorId || (
-          message.native_message_id === messageAnchorId &&
-          (!sourcePlatform || message.platform === sourcePlatform)
-        ),
-      )
-      : undefined;
-    const fetchAnchorWindow = async () => {
-      const first = await api.listSessionMessages(sessionId, {
-        ...(loadedSource
-          ? { aroundId: loadedSource.id }
-          : requestMessageId
-            ? { aroundId: requestMessageId }
-            : sourceMessageId
-              ? {
-                aroundNativeId: sourceMessageId,
-                ...(sourcePlatform ? { aroundNativePlatform: sourcePlatform } : {}),
-              }
-              : sourceTurnId
-                ? { aroundTurnId: sourceTurnId }
-                : { aroundRunId: sourceRunId! }),
-        limit: 50,
-        cache: false,
-      });
-      if (first.messages.length > 0 || loadedSource || requestMessageId || !sourceMessageId) return first;
-      // A legacy request may already carry the durable id. Keep that compatibility
-      // path after the native lookup so IM requests resolve before window fetch.
-      return api.listSessionMessages(sessionId, {
-        aroundId: sourceMessageId,
-        limit: 50,
-        cache: false,
-      });
-    };
-    void fetchAnchorWindow()
-      .then((res) => {
-        if (
-          sessionId !== sessionIdRef.current ||
-          deepLinkMessageIdRef.current ||
-          jumpTargetRef.current
-        ) {
-          vaultAnchorFetchesRef.current.delete(fetchKey);
-          return;
-        }
-        if (showPageActiveRef.current) {
-          // The request may resolve after the user switches to Show Page. Release
-          // the key so leaving that surface re-arms the fetch without committing a
-          // historical transcript window into the hidden chat view.
-          deferredByHiddenSurface = true;
-          vaultAnchorFetchesRef.current.delete(fetchKey);
-          return;
-        }
-        const requestStillPending = vaultRequestsRef.current.some(
-          (candidate) => candidate.id === request.id && candidate.status === 'pending',
-        );
-        const requestStillUnanchored = provisionPlacementRef.current.unanchored.some(
-          (candidate) => candidate.id === request.id,
-        );
-        if (
-          !requestStillPending ||
-          !requestStillUnanchored ||
-          hiddenVaultRequestIdsRef.current.has(request.id)
-        ) {
-          vaultAnchorFetchesRef.current.delete(fetchKey);
-          return;
-        }
-        vaultAnchorRetryAttemptsRef.current.delete(fetchKey);
-        vaultAnchorRetryExhaustedRef.current.delete(fetchKey);
-        vaultAnchorRetryWaitingRef.current.delete(fetchKey);
-        const resolvedAnchorId = res.anchor_id;
-        if (resolvedAnchorId) {
-          setVaultResolvedSourceIds((previous) => {
-            if (previous.get(request.id) === resolvedAnchorId) return previous;
-            const next = new Map(previous);
-            next.set(request.id, resolvedAnchorId);
-            return next;
-          });
-        }
-        const incoming = res.messages.filter(isTranscriptMessage);
-        if (incoming.length === 0) {
-          // A Turn anchor can be known before its initial Delivery is accepted.
-          // Release the key and wait for the next transcript update to retry once
-          // the around-turn lookup can resolve a durable message.
-          deferredByMissingReply = true;
-          vaultAnchorFetchesRef.current.delete(fetchKey);
-          return;
-        }
-        const existing = messagesRef.current;
-        const disjoint = existing.length > 0 && !transcriptWindowsOverlap(existing, incoming);
-        const preservesVisibleAnchor = [...provisionPlacementRef.current.byMessageId.values()].some(
-          (candidates) => candidates.some(
-            (candidate) => candidate.id !== request.id &&
-              candidate.status === 'pending' &&
-              !hiddenVaultRequestIdsRef.current.has(candidate.id),
-          ),
-        );
-        if (disjoint && preservesVisibleAnchor) {
-          // Another request currently owns the visible historical window. Let
-          // the next placement cycle retry this request once that anchor is
-          // fulfilled or dismissed.
-          deferredByVisibleAnchor = true;
-          vaultAnchorFetchesRef.current.delete(fetchKey);
-          return;
-        }
-        // An around-fetch can land wholly outside the retained live tail. Do
-        // not union those ranges: the missing rows would be rendered as if
-        // they were adjacent. Replace the tail with a historical window,
-        // matching the existing deep-link behavior, so the anchor stays in a
-        // coherent transcript and the user gets an explicit latest reload.
-        const anchorWindow = disjoint ? incoming : mergeById(existing, incoming);
-        const sourceMessageIds = res.anchor_id
-          ? new Map([[request.id, res.anchor_id]])
-          : undefined;
-        const placement = placeVaultProvisionRequests(anchorWindow, [request], sourceMessageIds);
-        if (!placement.byMessageId.size) {
-          // The source turn may be visible before its Agent reply is persisted.
-          // Release the key and wait for the next transcript update to retry;
-          // cycling immediately here would spin on the same incomplete window.
-          deferredByMissingReply = true;
-          vaultAnchorFetchesRef.current.delete(fetchKey);
-          return;
-        }
-        const anchorMessageId = placement.byMessageId.keys().next().value;
-        if (typeof anchorMessageId !== 'string') return;
-        if (disjoint) {
-          const incomingBeforeExisting = isTranscriptWindowDisjoint(incoming[incoming.length - 1], existing[0]);
-          const nextHistoricalWindow = Boolean(res.next_after_id) || incomingBeforeExisting;
-          if (nextHistoricalWindow) historicalWindowRef.current = true;
-          setMessages(incoming);
-          setOlderCursor(res.next_before_id ?? null);
-          setHistoricalWindow(nextHistoricalWindow);
-          setJumpTarget(anchorMessageId);
-        } else {
-          setMessages((previous) => {
-            const result = mergeAnchorWindow(
-              previous,
-              incoming,
-              anchorMessageId,
-              MAX_RETAINED_MESSAGES,
-              followingTailRef.current,
-            );
-            if (result.replaced || result.detachedTail) historicalWindowRef.current = true;
-            vaultAnchorMergeRef.current = {
-              anchorMessageId,
-              nextBeforeId: res.next_before_id ?? null,
-              result,
-            };
-            return result.messages;
-          });
-        }
-        // A completed anchor is gated by placement itself. Release the fetch key
-        // so a later retained-window trim can re-arm the request and recover it.
-        vaultAnchorFetchesRef.current.delete(fetchKey);
-      })
-      .catch(() => {
-        // Retry transient failures with bounded exponential backoff. Once the
-        // budget is exhausted, wait for an explicit reload/dismissal boundary
-        // instead of polling an unavailable backend for the life of the chat.
-        const attempt = vaultAnchorRetryAttemptsRef.current.get(fetchKey) ?? 0;
-        if (attempt < VAULT_ANCHOR_RETRY_DELAYS_MS.length) {
-          vaultAnchorRetryAttemptsRef.current.set(fetchKey, attempt + 1);
-          vaultAnchorRetryWaitingRef.current.add(fetchKey);
-          retryDelayMs = VAULT_ANCHOR_RETRY_DELAYS_MS[attempt];
-        } else {
-          vaultAnchorRetryAttemptsRef.current.delete(fetchKey);
-          vaultAnchorRetryExhaustedRef.current.add(fetchKey);
-        }
-        vaultAnchorFetchesRef.current.delete(fetchKey);
-      })
-      .finally(() => {
-        if (sessionId !== sessionIdRef.current) return;
-        vaultAnchorInFlightRef.current = false;
-        if (retryDelayMs !== null) {
-          window.setTimeout(() => {
-            vaultAnchorRetryWaitingRef.current.delete(fetchKey);
-            if (sessionId === sessionIdRef.current) setVaultAnchorCycle((cycle) => cycle + 1);
-          }, retryDelayMs);
-        } else if (!deferredByVisibleAnchor && !deferredByMissingReply && !deferredByHiddenSurface) {
-          setVaultAnchorCycle((cycle) => cycle + 1);
-        }
-      });
-  }, [api, deepLinkMessageId, jumpTarget, loading, provisionPlacement.unanchored, session?.id, sessionId, showPageActive, vaultAnchorCycle]);
-
   const appendMessage = useCallback((msg: WorkbenchMessage) => {
     setMessages((prev) => {
       // Ordered single-row insert (deduped, no full re-sort) so an out-of-order
@@ -1175,7 +896,8 @@ export const ChatPage: React.FC = () => {
   // subscription, including the ones issued by components this page owns rather
   // than by the page itself. ``sendMessage`` is the exception by construction: it
   // uses a raw ``apiFetch`` so it can read ``queued``/``already_answered`` off a
-  // non-2xx-aware response, so it calls the same converger directly.
+  // non-2xx-aware response, so it reports the terminal state back through the
+  // ApiContext converger explicitly.
   useEffect(() => api.onSessionArchived(convergeSessionArchived), [api, convergeSessionArchived]);
 
   useEffect(() => {
@@ -1191,19 +913,6 @@ export const ChatPage: React.FC = () => {
     if (trimmedOldestRef.current) {
       trimmedOldestRef.current = false;
       setOlderCursor(messages[0]?.id ?? null);
-    }
-    const anchorMerge = vaultAnchorMergeRef.current;
-    if (anchorMerge) {
-      vaultAnchorMergeRef.current = null;
-      if (messages.some((message) => message.id === anchorMerge.anchorMessageId)) {
-        if (anchorMerge.result.replaced || anchorMerge.result.detachedTail) setHistoricalWindow(true);
-        setJumpTarget(anchorMerge.anchorMessageId);
-        setOlderCursor(
-          anchorMerge.result.trimmedOldest
-            ? messages[0]?.id ?? null
-            : anchorMerge.nextBeforeId,
-        );
-      }
     }
   }, [messages]);
 
@@ -1331,12 +1040,6 @@ export const ChatPage: React.FC = () => {
       setMessages(tailMessages);
       setOlderCursor(res.next_before_id ?? null);
       setHistoricalWindow(false);
-      // A deliberate return to the live tail is the retry boundary for requests
-      // deferred while another disjoint anchor window was visible.
-      vaultAnchorFetchesRef.current.clear();
-      vaultAnchorRetryAttemptsRef.current.clear();
-      vaultAnchorRetryExhaustedRef.current.clear();
-      vaultAnchorRetryWaitingRef.current.clear();
       deepLinkWindowHandledRef.current = false;
       // Returning to the live tail from a historical window: activity ingestion was
       // suppressed while scrolled away, so resync groups from storage — a turn that
@@ -1348,12 +1051,12 @@ export const ChatPage: React.FC = () => {
     }
   }, [api, sessionId, scheduleActivityRefresh]);
 
-  // Persist the composer's unsent text server-side (debounced) so it survives a
-  // reload / device switch. The send path clears it server-side; this only
-  // saves while typing.
+  // Cache every edit synchronously so navigation, a tab close, or a disconnected
+  // network cannot lose it. Cloud persistence remains debounced and serialized.
   const onDraftChange = useCallback(
     (text: string) => {
       if (!sessionId) return;
+      api.cacheSessionDraft(sessionId, text);
       // Tag the pending save with THIS session so the timer (and the
       // session-change flush) save to the right session even if the user has
       // since navigated away.
@@ -1540,14 +1243,7 @@ export const ChatPage: React.FC = () => {
     setSession(null);
     setSessionCanChat(false);
     setMessages([]);
-    setVaultResolvedSourceIds(new Map());
-    vaultAnchorFetchesRef.current.clear();
-    vaultAnchorRetryAttemptsRef.current.clear();
-    vaultAnchorRetryExhaustedRef.current.clear();
-    vaultAnchorRetryWaitingRef.current.clear();
-    vaultAnchorInFlightRef.current = false;
     deepLinkWindowHandledRef.current = false;
-    hiddenVaultRequestIdsRef.current.clear();
     setOlderCursor(null);
     setHistoricalWindow(false);
     oldestLoadedIdRef.current = null;
@@ -1569,7 +1265,7 @@ export const ChatPage: React.FC = () => {
     setWorking(false);
     setRuntimeState(emptyRuntimeState());
     setQueue([]);
-    setInitialDraft(null);
+    setInitialDraft(sessionId ? api.getCachedSessionDraft(sessionId) : null);
     // Clear all Agent Activity state so the previous session's groups / live buffer
     // never leak into the new chat (refresh re-reads the toggle + summary).
     setActivityGroups([]);
@@ -1590,7 +1286,7 @@ export const ChatPage: React.FC = () => {
       window.clearTimeout(graceResyncRef.current);
       graceResyncRef.current = null;
     }
-  }, [sessionId]);
+  }, [api, sessionId]);
 
   // Persistent per-session subscription: append every transcript-visible
   // ``message.new`` for THIS session for as long as the page is open. An agent
@@ -1863,42 +1559,62 @@ export const ChatPage: React.FC = () => {
           body: JSON.stringify(requestBody),
         });
         const body = await response.json().catch(() => null);
+        if (isSessionArchivedConflict(response.status, body)) {
+          // Archive is terminal. Clear the original session's draft even when
+          // this response settles after navigation, and do not return false:
+          // false tells Composer to restore a retryable submission.
+          api.convergeSessionArchived(sessionId);
+          if (sessionId === sessionIdRef.current) {
+            setWorking(false);
+            setError(t('chat.archived.sendBlocked'));
+          }
+          return;
+        }
+        if (!response.ok) {
+          // A reserved ordinary message may already have cleared the server
+          // draft. Start recovery for its original session before any page
+          // staleness decision; the old Composer will then persist its restore
+          // even if navigation unmounted it. Quick replies never advance drafts.
+          if (!metadata?.quick_reply_for && body?.draft_advanced !== false) {
+            void api.recoverSessionDraftAfterRejectedSend(sessionId);
+          }
+          if (sessionId === sessionIdRef.current) {
+            void syncTurnStateRef.current?.();
+            setWorking(false);
+            // Routes answer either the flat ``{"error": "<sentence>"}`` or the shared
+            // CODED shape (``{"error": {code, message}, code, message}``) — the
+            // runtime-owned session's ``403 reserved_session`` is the latter, and
+            // ``String(body.error)`` renders that object as literal "[object Object]".
+            const parsed = body ? selectApiErrorFields(body, `HTTP ${response.status}`) : null;
+            setError(
+              parsed
+                ? parsed.code
+                  ? t(`errors.${parsed.code}`, { defaultValue: parsed.fallback })
+                  : parsed.fallback
+                : body?.detail
+                  ? String(body.detail)
+                  : `HTTP ${response.status}`,
+            );
+          }
+          return false;
+        }
+        // Reserving an accepted message advances the server draft to a blank
+        // revision. Apply that exact causal revision before handling this chat's
+        // UI response, so text typed while the POST was in flight is rebased and
+        // synced even if the user has already navigated to another session.
+        if (
+          response.ok
+          && body?.draft_advanced === true
+          && body?.draft
+          && typeof body.draft === 'object'
+        ) {
+          void api.reconcileSessionDraftAfterSend(sessionId, body.draft);
+        }
         // If the user switched chats while this POST was in flight, the response
         // belongs to the previous session — don't append it / mutate working /
         // error on the chat they moved to (Codex P2). The turn still ran for the
         // original session; its rows live there.
         if (sessionId !== sessionIdRef.current) return;
-        if (isSessionArchivedConflict(response.status, body)) {
-          // Archive is terminal, so this is not a retryable failure — it is state
-          // this tab missed. Raw ``apiFetch`` never reaches ``handleApiError``, so
-          // the shared subscription can't see this one: call the same converger
-          // directly. Only the turn state and the message are send-specific.
-          setWorking(false);
-          setError(t('chat.archived.sendBlocked'));
-          convergeSessionArchived(sessionId);
-          return false;
-        }
-        if (!response.ok) {
-          setWorking(false);
-          // Routes answer either the flat ``{"error": "<sentence>"}`` or the shared
-          // CODED shape (``{"error": {code, message}, code, message}``) — the
-          // runtime-owned session's ``403 reserved_session`` is the latter, and
-          // ``String(body.error)`` renders that object as literal "[object Object]".
-          // This is a raw ``apiFetch``, so ``handleApiError`` never runs; reuse its own
-          // selector instead of re-deriving the precedence, and localize by code the
-          // same way, so a coded refusal reads as a sentence here too. ``detail`` is
-          // only FastAPI's own validation shape.
-          const parsed = body ? selectApiErrorFields(body, `HTTP ${response.status}`) : null;
-          throw new Error(
-            parsed
-              ? parsed.code
-                ? t(`errors.${parsed.code}`, { defaultValue: parsed.fallback })
-                : parsed.fallback
-              : body?.detail
-                ? String(body.detail)
-                : `HTTP ${response.status}`,
-          );
-        }
         if (body?.already_answered) {
           // A duplicate quick-reply the backend already had (stale tab / missed
           // event): no turn started HERE. Reconcile authoritatively rather than
@@ -1932,19 +1648,23 @@ export const ChatPage: React.FC = () => {
           }
         }
       } catch (err) {
+        if (!metadata?.quick_reply_for) {
+          void api.recoverSessionDraftAfterRejectedSend(sessionId);
+        }
         if (sessionId === sessionIdRef.current) {
           // The request may have raced a turn owned by another tab or source.
           // Reconcile rather than clearing that turn's Stop state optimistically.
           void syncTurnStateRef.current?.();
           setWorking(false);
           setError(errorMessage(err) ?? String(err));
-          // Signal the composer the send didn't start so it restores the text +
-          // uploaded chips — the user can retry without re-uploading (Codex r5).
-          return false;
         }
+        // Recovery belongs to the original session, while UI mutation is gated
+        // above. Returning false also lets an unmounted old Composer persist its
+        // submitted text after navigation.
+        return false;
       }
     },
-    [sessionId, appendMessage, refreshQueue, markWorking, reloadLatestMessages, convergeSessionArchived, t, writable],
+    [sessionId, api, appendMessage, refreshQueue, markWorking, reloadLatestMessages, t, writable],
   );
 
   // @ mention source: all enabled Agents, filtered client-side (the set is small
@@ -2251,10 +1971,6 @@ export const ChatPage: React.FC = () => {
     // the loaded session matches the route) — before that the loaded-vs-around
     // decision and the scroll target wouldn't be meaningful.
     if (loading || session?.id !== sessionId) return;
-    // A vault anchor swap may already be in flight. Let it finish first, then
-    // re-run this effect from the cycle tick so two centered windows cannot race.
-    if (vaultAnchorInFlightRef.current) return;
-
     handledJumpRef.current = targetMsg;
     const requestSessionId = sessionId;
 
@@ -2331,7 +2047,7 @@ export const ChatPage: React.FC = () => {
     // window is dropped and ``?msg`` stays unhandled (Codex P2). The closure
     // still reads ``session`` for the ``!session`` / ``session.id !== sessionId``
     // readiness checks; it only needs to re-run when the id changes.
-  }, [api, deepLinkMessageId, loading, selectChatView, session?.id, sessionId, setSearchParams, startHighlight, vaultAnchorCycle]);
+  }, [api, deepLinkMessageId, loading, selectChatView, session?.id, sessionId, setSearchParams, startHighlight]);
 
   // Re-arm the jump guard once ``?msg=`` is gone. ``clearParam`` (above) nulls
   // the param after handling, so without this re-selecting the SAME search hit
@@ -2781,7 +2497,7 @@ export const ChatPage: React.FC = () => {
             // approve/deny buttons would write to a session that can't accept it.
             sessionId && !readOnly && (capabilities.can_manage_instance || canUseRuntime) ? (
               <VaultChatRequests
-                requests={transcriptTailVaultRequests}
+                requests={pendingApprovals}
                 onResolved={refreshVaultRequests}
                 onOffscreenApprovalsChange={setOffscreenApprovals}
               />

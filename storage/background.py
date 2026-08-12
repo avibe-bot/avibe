@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import heapq
 import json
 import logging
 from contextlib import contextmanager, nullcontext
@@ -60,6 +61,30 @@ from storage.session_reclaim import (
 )
 
 logger = logging.getLogger(__name__)
+
+CALLBACK_TERMINAL_TURN_ID_METADATA_KEY = "callback_terminal_turn_id"
+RUN_LAST_ACTIVITY_METADATA_KEY = "last_activity_at"
+TASK_RETIREMENT_SCHEDULE_CONSUMED = "schedule_consumed"
+TASK_RETIREMENT_SCHEDULE_MISSED = "schedule_missed"
+TASK_SCHEDULE_CONSUMED_METADATA_KEY = "task_schedule_consumed"
+
+
+def task_schedule_generation(metadata: Any) -> Optional[dict[str, str]]:
+    """Return the exact one-shot generation owned by a scheduler Run.
+
+    Older Runs used a boolean marker. That proves only that some schedule was
+    consumed, not which generation owned the result, so it deliberately remains
+    unknown instead of being reconstructed from mutable definition history.
+    """
+
+    if not isinstance(metadata, dict):
+        return None
+    raw = metadata.get(TASK_SCHEDULE_CONSUMED_METADATA_KEY)
+    if not isinstance(raw, dict):
+        return None
+    fields = ("run_at", "timezone", "updated_at", "job_id", "retired_at")
+    generation = {field: str(raw.get(field) or "").strip() for field in fields}
+    return generation if all(generation.values()) else None
 
 
 def _json_dumps(value: Any) -> str:
@@ -276,6 +301,25 @@ def compute_next_run_at(
         return None
 
 
+def _scheduled_next_fire_sort_key(row: dict[str, Any]) -> tuple[bool, datetime, str]:
+    """Project and sort one enabled Task by its actual next fire instant."""
+
+    next_run_at = compute_next_run_at(
+        enabled=bool(row.get("enabled")),
+        schedule_type=row.get("schedule_type"),
+        cron=row.get("cron"),
+        run_at=row.get("run_at"),
+        timezone_name=row.get("timezone"),
+    )
+    row["next_run_at"] = next_run_at
+    instant = _parse_iso_instant(next_run_at)
+    return (
+        instant is None,
+        instant or datetime.max.replace(tzinfo=timezone.utc),
+        str(row.get("id") or ""),
+    )
+
+
 RUN_STATUS_ALIASES: dict[str, str] = {
     "pending": "queued",
     "queued": "queued",
@@ -332,6 +376,127 @@ _BLANK_DEFINITION_SUMMARY: dict[str, Any] = {
 # Where a definition's session binding hides when it has no ``session_id``: a
 # legacy IM binding, then a ``create_per_run`` delivery target. Precedence order.
 _DEFINITION_SESSION_KEY_FIELDS = ("session_key", "deliver_key")
+ORPHANED_TASK_OWNER_METADATA_KEY = "orphaned_task_owner"
+TASK_OWNER_UNAVAILABLE_REASON_CODE = "task_owner_session_unavailable"
+_SQLITE_TRIM_WHITESPACE = " \t\n\r\f\v"
+
+
+def definition_owner_session_id(metadata: Any) -> Optional[str]:
+    """Return a valid creation-owner Session ID from definition metadata."""
+
+    if not isinstance(metadata, dict):
+        return None
+    created_by = metadata.get("created_by")
+    if not isinstance(created_by, dict):
+        return None
+    caller = created_by.get("caller")
+    if not isinstance(caller, dict):
+        return None
+    raw_owner = caller.get("session_id")
+    if not isinstance(raw_owner, str):
+        return None
+    return raw_owner.strip() or None
+
+
+def task_resume_block(metadata: Any, session_id: Any) -> Optional[dict[str, str]]:
+    """Return the durable reason an orphaned Task cannot be resumed yet."""
+
+    if str(session_id or "").strip() or not isinstance(metadata, dict):
+        return None
+    marker = metadata.get(ORPHANED_TASK_OWNER_METADATA_KEY)
+    if not isinstance(marker, dict):
+        return None
+    if marker.get("reason_code") != TASK_OWNER_UNAVAILABLE_REASON_CODE:
+        return None
+    owner_session_id = str(marker.get("owner_session_id") or "").strip()
+    if not owner_session_id:
+        return None
+    return {
+        "code": TASK_OWNER_UNAVAILABLE_REASON_CODE,
+        "owner_session_id": owner_session_id,
+    }
+
+
+def definition_owner_session_id_expression() -> Any:
+    """Return the durable Session that manages a scheduled definition, when known.
+
+    Definitions created from an Avibe Agent shell preserve their creation
+    provenance under ``metadata_json.created_by.caller.session_id``. That is
+    the owner used by user-facing Session projections: the execution target may
+    be a newly-created Session, or absent for a pure command / per-run task.
+    Invalid and legacy metadata deliberately resolve to ``NULL`` so callers can
+    fall back to the historical bound ``run_definitions.session_id``. A recorded
+    owner that has since been archived or removed is treated the same way for
+    projections, preserving visibility for pre-upgrade orphaned definitions.
+    """
+
+    metadata_json = run_definitions.c.metadata_json
+    raw_owner = func.json_extract(
+        metadata_json,
+        "$.created_by.caller.session_id",
+    )
+    return case(
+        (
+            func.json_valid(metadata_json) == 1,
+            case(
+                (
+                    func.json_type(metadata_json, "$.created_by.caller.session_id")
+                    == "text",
+                    func.nullif(func.trim(raw_owner, _SQLITE_TRIM_WHITESPACE), ""),
+                ),
+                else_=None,
+            ),
+        ),
+        else_=None,
+    )
+
+
+def scheduled_definition_owned_by_session_expression(session_id: str) -> Any:
+    """Return the owner-first Session predicate for scheduled Task projections.
+
+    Creation ownership wins while that owner Session still exists and is not
+    archived. Once the owner is gone, the execution target resumes the legacy
+    fallback so persisted Tasks remain visible instead of becoming orphaned.
+    """
+
+    owner_session_id = definition_owner_session_id_expression()
+    owner_session_is_live = exists(
+        select(literal(1))
+        .select_from(agent_sessions)
+        .where(
+            agent_sessions.c.id == owner_session_id,
+            agent_sessions.c.status != "archived",
+        )
+    )
+    return or_(
+        and_(owner_session_id == session_id, owner_session_is_live),
+        and_(
+            or_(owner_session_id.is_(None), ~owner_session_is_live),
+            run_definitions.c.session_id == session_id,
+        ),
+    )
+
+
+def scheduled_definition_reclaimable_by_session_expression(session_id: str) -> Any:
+    """Return the teardown predicate for scheduled Tasks touching a Session.
+
+    Teardown is broader than banner projection: removing an execution target must
+    also stop a Task created by a different Session from firing into that dead
+    target. Owner-first remains the projection rule; this expression is only for
+    reclaim and archive accounting.
+    """
+
+    # Teardown must retain the raw provenance match even after the owner row is
+    # archived; that is the event that caused this cleanup. Projection uses the
+    # liveness-aware owner-first expression above, while teardown covers both
+    # owner identity and execution target identity.
+    owner_session_id = definition_owner_session_id_expression()
+    return or_(
+        owner_session_id == session_id,
+        run_definitions.c.session_id == session_id,
+    )
+
+
 # The exit code a waiter that ran out of lifetime carries. Written by
 # ``core/watches.py`` (the ``timeout`` convention), read here to tell an ending
 # that ran out of time from one that failed.
@@ -415,6 +580,101 @@ class DefinitionWriteConflict(RuntimeError):
         )
         self.definition_id = str(definition_id)
         self.definition_type = str(definition_type)
+
+
+class TaskResumeBlocked(RuntimeError):
+    """A paused Task has neither a surviving owner nor an execution target."""
+
+    code = TASK_OWNER_UNAVAILABLE_REASON_CODE
+
+    def __init__(self, definition_id: str, owner_session_id: str) -> None:
+        super().__init__(
+            f"task {definition_id} cannot be resumed because its owner Session "
+            f"{owner_session_id} is unavailable and it has no execution target"
+        )
+        self.definition_id = str(definition_id)
+        self.owner_session_id = str(owner_session_id)
+
+
+class TaskScheduleRetired(RuntimeError):
+    """A consumed or missed one-shot needs a new schedule before re-enabling."""
+
+    code = "task_schedule_retired"
+
+    def __init__(self, definition_id: str) -> None:
+        super().__init__(
+            f"task {definition_id} cannot be resumed because its one-shot schedule "
+            "has already retired"
+        )
+        self.definition_id = str(definition_id)
+
+
+def require_task_resumable(
+    definition_id: str,
+    *,
+    metadata: Any,
+    session_id: Any,
+    schedule_type: Any = None,
+    retired_at: Any = None,
+) -> None:
+    if str(schedule_type or "") == "at" and retired_at:
+        raise TaskScheduleRetired(definition_id)
+    blocked = task_resume_block(metadata, session_id)
+    if blocked is not None:
+        raise TaskResumeBlocked(definition_id, blocked["owner_session_id"])
+
+
+def clear_task_resume_blocks_for_available_owner(
+    conn: Any,
+    owner_session_id: str,
+) -> int:
+    """Clear stale orphan markers when a refused teardown leaves the owner live."""
+
+    sid = str(owner_session_id or "").strip()
+    if not sid:
+        return 0
+    owner_is_live = conn.execute(
+        select(literal(1))
+        .select_from(agent_sessions)
+        .where(agent_sessions.c.id == sid, agent_sessions.c.status != "archived")
+        .limit(1)
+    ).first()
+    if owner_is_live is None:
+        return 0
+
+    rows = (
+        conn.execute(
+            select(
+                run_definitions.c.id,
+                run_definitions.c.session_id,
+                run_definitions.c.metadata_json,
+            )
+            .where(run_definitions.c.definition_type == "scheduled")
+            .where(run_definitions.c.deleted_at.is_(None))
+        )
+        .mappings()
+        .all()
+    )
+    cleared = 0
+    now = _utc_now_iso()
+    for row in rows:
+        metadata = _json_loads(row["metadata_json"], {})
+        if definition_owner_session_id(metadata) != sid:
+            continue
+        blocked = task_resume_block(metadata, row["session_id"])
+        if blocked is None or blocked["owner_session_id"] != sid:
+            continue
+        metadata = dict(metadata)
+        metadata.pop(ORPHANED_TASK_OWNER_METADATA_KEY, None)
+        result = conn.execute(
+            update(run_definitions)
+            .where(run_definitions.c.id == row["id"])
+            .where(run_definitions.c.deleted_at.is_(None))
+            .where(run_definitions.c.metadata_json == row["metadata_json"])
+            .values(metadata_json=_json_dumps(metadata), updated_at=now)
+        )
+        cleared += int(result.rowcount or 0)
+    return cleared
 
 
 @dataclass(frozen=True)
@@ -562,6 +822,106 @@ def definition_state_unchanged(expect: DefinitionWriteExpectation) -> list[Any]:
     ]
 
 
+def definition_binding_authority_unchanged(
+    expect: DefinitionWriteExpectation,
+) -> list[Any]:
+    """Predicates proving a definition still grants the same delivery authority.
+
+    Unlike a full-row write, an outbox-only enqueue does not own the definition's
+    enabled switch. It still must refuse deletion, rebinding, reclaim snapshot
+    replacement, and Agent rename/archive so an old fire cannot start a turn under
+    authority the definition no longer grants.
+    """
+
+    return [
+        unchanged_text(run_definitions.c.session_id, expect.session_id),
+        unchanged_text(run_definitions.c.deleted_at, expect.deleted_at),
+        unchanged_text(_RECLAIM_SNAPSHOT_MARKER_SQL, expect.snapshot_captured_at),
+        unchanged_text(_AGENT_BINDING_REVISION_SQL, expect.agent_binding_revision),
+    ]
+
+
+def task_schedule_owner_unchanged(
+    generation: dict[str, str], run_id: str
+) -> list[Any]:
+    """Predicates proving a result still owns the consumed one-shot row."""
+
+    marker_path = f"$.{TASK_SCHEDULE_CONSUMED_METADATA_KEY}"
+    exact_owner_run = (
+        select(agent_runs.c.id)
+        .where(agent_runs.c.id == run_id)
+        .where(agent_runs.c.definition_id == run_definitions.c.id)
+        .where(agent_runs.c.source_kind == "scheduler")
+        .where(func.json_valid(agent_runs.c.metadata_json) == 1)
+        .where(func.json_type(agent_runs.c.metadata_json, marker_path) == "object")
+        .where(
+            func.json_extract(agent_runs.c.metadata_json, f"{marker_path}.run_at")
+            == generation["run_at"]
+        )
+        .where(
+            func.json_extract(agent_runs.c.metadata_json, f"{marker_path}.timezone")
+            == generation["timezone"]
+        )
+        .where(
+            func.json_extract(agent_runs.c.metadata_json, f"{marker_path}.updated_at")
+            == generation["updated_at"]
+        )
+        .where(
+            func.json_extract(agent_runs.c.metadata_json, f"{marker_path}.job_id")
+            == generation["job_id"]
+        )
+        .where(
+            func.json_extract(agent_runs.c.metadata_json, f"{marker_path}.retired_at")
+            == generation["retired_at"]
+        )
+        .exists()
+    )
+    return [
+        run_definitions.c.definition_type == "scheduled",
+        run_definitions.c.schedule_type == "at",
+        run_definitions.c.enabled == 0,
+        unchanged_text(run_definitions.c.run_at, generation["run_at"]),
+        unchanged_text(run_definitions.c.timezone, generation["timezone"]),
+        unchanged_text(run_definitions.c.retired_at, generation["retired_at"]),
+        run_definitions.c.retirement_reason == TASK_RETIREMENT_SCHEDULE_CONSUMED,
+        run_definitions.c.last_run_id == run_id,
+        exact_owner_run,
+    ]
+
+
+def task_schedule_generation_matches_definition() -> list[Any]:
+    """SQL predicates accepting only a complete owner marker for this row."""
+
+    marker_path = f"$.{TASK_SCHEDULE_CONSUMED_METADATA_KEY}"
+    return [
+        func.json_type(agent_runs.c.metadata_json, marker_path) == "object",
+        func.json_extract(agent_runs.c.metadata_json, f"{marker_path}.run_at")
+        == run_definitions.c.run_at,
+        func.json_extract(agent_runs.c.metadata_json, f"{marker_path}.timezone")
+        == run_definitions.c.timezone,
+        func.json_extract(agent_runs.c.metadata_json, f"{marker_path}.retired_at")
+        == run_definitions.c.retired_at,
+        func.trim(
+            func.coalesce(
+                func.json_extract(
+                    agent_runs.c.metadata_json, f"{marker_path}.updated_at"
+                ),
+                "",
+            )
+        )
+        != "",
+        func.trim(
+            func.coalesce(
+                func.json_extract(
+                    agent_runs.c.metadata_json, f"{marker_path}.job_id"
+                ),
+                "",
+            )
+        )
+        != "",
+    ]
+
+
 def definition_lifecycle_expression(definition_type: str):
     """The single declaration of a task/watch lifecycle state, as SQL.
 
@@ -578,10 +938,9 @@ def definition_lifecycle_expression(definition_type: str):
     without giving it anything left to do, and reading the switch first parked
     such a row in the default Active view forever.
 
-    Both ``ended`` branches read a fact written by whatever ends the definition,
-    never a proxy for one: a watch retires when its supervisor says so, and a
-    one-shot when the clock passes the instant it names. A history column —
-    "it has run at least once" — looks like either and is neither.
+    Both ``ended`` branches read ``retired_at``, the fact written by whoever
+    ends the definition. A history column or a deadline whose clock passed can
+    look like retirement, but neither proves that the schedule was consumed.
     """
 
     in_flight = (
@@ -606,27 +965,14 @@ def definition_lifecycle_expression(definition_type: str):
             run_definitions.c.retired_at.is_not(None),
         )
     else:
-        # A cron task cannot retire itself, so a disabled one is always someone
-        # having paused it. A one-shot is over when the instant it names has
-        # passed — not when it last ran. ``vibe task run`` executes an armed
-        # task early and records ``last_run_at`` without consuming the schedule,
-        # so reading history here retired a task that was still going to fire.
-        #
-        # This is the same question ``compute_next_run_at`` answers — it returns
-        # ``None`` exactly when the instant is behind us — so the state and the
-        # time printed beside it cannot contradict each other.
-        #
-        # SQLite cannot resolve an IANA timezone and treats a naive timestamp as
-        # UTC. The connection UDF delegates that resolution to the same stdlib
-        # rule the scheduler uses, then compares two epoch values in UTC.
+        # A cron task cannot retire itself, so a disabled one without this marker
+        # is paused. For a one-shot, the scheduler stamps the marker either in the
+        # same transaction that queues its Run or from a real APScheduler misfire
+        # event. A manual early run writes only history and cannot consume the
+        # future schedule; wall-clock passage alone proves no outcome at all.
         ended = and_(
             run_definitions.c.schedule_type == "at",
-            run_definitions.c.run_at.is_not(None),
-            func.avibe_run_at_epoch(
-                run_definitions.c.run_at,
-                run_definitions.c.timezone,
-            )
-            <= (func.julianday("now") - literal(2440587.5)) * literal(86400.0),
+            run_definitions.c.retired_at.is_not(None),
         )
     return case(
         (in_flight, "running"),
@@ -660,11 +1006,26 @@ def _successful_finished_definition_expression(definition_type: str, lifecycle: 
             no_error,
         )
     else:
+        consumed_run_status = (
+            select(agent_runs.c.status)
+            .where(agent_runs.c.id == run_definitions.c.last_run_id)
+            .where(agent_runs.c.definition_id == run_definitions.c.id)
+            .where(agent_runs.c.source_kind == "scheduler")
+            .where(func.json_valid(agent_runs.c.metadata_json) == 1)
+            .where(*task_schedule_generation_matches_definition())
+            .limit(1)
+            .scalar_subquery()
+        )
         successful_one_shot = and_(
             run_definitions.c.schedule_type == "at",
-            run_definitions.c.enabled == 0,
-            run_definitions.c.last_run_at.is_not(None),
-            no_error,
+            run_definitions.c.retired_at.is_not(None),
+            run_definitions.c.retirement_reason
+            == TASK_RETIREMENT_SCHEDULE_CONSUMED,
+            run_definitions.c.last_run_id.is_not(None),
+            func.coalesce(
+                consumed_run_status.in_(_status_query_values("succeeded")),
+                False,
+            ),
         )
     return and_(lifecycle == "finished", successful_one_shot)
 
@@ -673,12 +1034,14 @@ def _successful_finished_definition_expression(definition_type: str, lifecycle: 
 # went, and what it caught.
 DEFINITION_RETIREMENT_COLUMNS = (
     "retired_at",
+    "retirement_reason",
     "last_finished_at",
     "last_exit_code",
     "last_error",
 )
 DEFINITION_CYCLE_COLUMNS = (
     "retired_at",
+    "retirement_reason",
     "last_started_at",
     "last_finished_at",
     "last_event_at",
@@ -753,32 +1116,54 @@ def definition_lifecycle_detail(
     last_exit_code: Any = None,
     last_error: Any = None,
     timed_out: Optional[bool] = None,
+    retirement_reason: Optional[str] = None,
+    terminal_run_status: Optional[str] = None,
+    terminal_run_exit_code: Any = None,
+    terminal_run_timed_out: Optional[bool] = None,
 ) -> Optional[str]:
-    """How a finished task/watch ended: ``normal``, ``timeout``, or ``error``.
+    """How a finished task/watch ended.
 
     Non-null only for ``finished``; the other three states are still in play and
     have no ending to report yet. Python rather than SQL because it has exactly
     one consumer — the row — and never a ``GROUP BY``: the filter groups by
-    state, and the row alone says which of the three endings it was.
+    state, and the row alone says how the definition ended.
 
-    ``timed_out`` is THE ANSWER when the row has one, and the three states are
-    distinct on purpose. 124 is the code the runner synthesizes for a limit it
-    enforced itself, but it is also an exit status a command is free to return —
-    ``timeout 5 ...`` inside a ``--shell`` script returns exactly that — so reading
-    the code alone told a user their backup had been cut short by Avibe when it had
-    in fact cut itself short. ``False`` therefore SUPPRESSES the old inference rather
-    than merely not triggering it; ``None`` means the row never recorded the fact
-    (a watch, or a task stamped before this key existed) and keeps the inference,
-    which is still the best guess available for those rows.
+    ``timed_out`` is THE ANSWER for scheduled tasks when the row has one. 124 is
+    the code the runner synthesizes for a limit it enforced itself, but it is also
+    an exit status a command is free to return — ``timeout 5 ...`` inside a
+    ``--shell`` script returns exactly that. Inferring a Task timeout from the
+    code therefore mislabels rows written before the explicit fact existed. Watch
+    rows retain their legacy code inference because their waiter contract owns
+    that exit code; ``False`` suppresses it when the scheduler explicitly records
+    that its limit was not reached.
     """
 
     if lifecycle_state != "finished":
         return None
-    if definition_type == "scheduled" and last_run_at is None:
-        return None
+    if definition_type == "scheduled":
+        if retirement_reason == TASK_RETIREMENT_SCHEDULE_MISSED:
+            return "missed"
+        if retirement_reason != TASK_RETIREMENT_SCHEDULE_CONSUMED:
+            # A legacy retirement has no owner. Prior manual history cannot prove
+            # what consumed this schedule or how that terminal execution ended.
+            return None
+        status = normalize_run_status(terminal_run_status)
+        if status == "succeeded":
+            return "normal"
+        if status == "canceled":
+            return "canceled"
+        if status != "failed":
+            return None
+        if terminal_run_timed_out:
+            return "timeout"
+        if terminal_run_timed_out is None and terminal_run_exit_code == _TIMEOUT_EXIT_CODE:
+            return "timeout"
+        # The owning Run's terminal status is the outcome even when a damaged or
+        # legacy writer omitted its human-readable error text.
+        return "error"
     if timed_out:
         return "timeout"
-    if timed_out is None and last_exit_code == _TIMEOUT_EXIT_CODE:
+    if definition_type != "scheduled" and timed_out is None and last_exit_code == _TIMEOUT_EXIT_CODE:
         return "timeout"
     # 64 is a completion, not a failure: the waiter finished its cycle and decided
     # it had nothing worth an Agent turn. Reading it as an ending that "went wrong"
@@ -881,6 +1266,7 @@ _RUN_PROJECTIONS: tuple[_RunProjection, ...] = (
     ),
 )
 _DEFERRED_RUN_EVENT_ROWS_KEY = "avibe.deferred_run_event_rows"
+_DEFERRED_QUEUE_UPDATED_SESSION_IDS_KEY = "avibe.deferred_queue_updated_session_ids"
 _TERMINAL_STATUS_PRIORITY = {
     "succeeded": 0,
     "canceled": 1,
@@ -1046,6 +1432,12 @@ COMMAND_WORKER_REAP_ATTEMPTS_KEY = "reap_attempts"
 #: absent on every row that predates it -- see ``definition_lifecycle_detail``, which
 #: needs those three states apart.
 COMMAND_TIMED_OUT_METADATA_KEY = "last_command_timed_out"
+
+#: The terminal Run status most recently projected onto a scheduled definition.
+#: This reuses the Run ledger's existing status vocabulary; it lets read surfaces
+#: distinguish a user-canceled fire from an arbitrary ``last_error`` without parsing
+#: localized diagnostic text.
+TASK_LAST_RESULT_STATUS_METADATA_KEY = "last_result_status"
 
 
 def command_snapshot_from_definition_row(row: Any) -> Optional[dict[str, Any]]:
@@ -2092,6 +2484,21 @@ def _publish_queue_updated(session_id: str) -> None:
         )
 
 
+def _defer_queue_updated_from_connection(conn: Any, session_id: str) -> None:
+    normalized_session_id = str(session_id or "").strip()
+    if not normalized_session_id:
+        return
+    pending = conn.info.setdefault(_DEFERRED_QUEUE_UPDATED_SESSION_IDS_KEY, set())
+    pending.add(normalized_session_id)
+
+
+def _pop_deferred_queue_updated_session_ids_from_connection(conn: Any) -> list[str]:
+    pending = conn.info.pop(_DEFERRED_QUEUE_UPDATED_SESSION_IDS_KEY, set())
+    if not isinstance(pending, set):
+        return []
+    return sorted(str(session_id) for session_id in pending if session_id)
+
+
 def _defer_run_rows_updated_from_connection(conn: Any, rows: list[Any]) -> None:
     if not rows:
         return
@@ -2117,14 +2524,21 @@ def run_update_event_transaction(engine: Any):
     """Commit DB writes before publishing deferred ``runs.updated`` snapshots."""
 
     pending_rows: list[dict[str, Any]] = []
+    pending_queue_session_ids: list[str] = []
     with engine.begin() as conn:
         try:
             yield conn
             pending_rows = pop_deferred_run_event_rows_from_connection(conn)
+            pending_queue_session_ids = (
+                _pop_deferred_queue_updated_session_ids_from_connection(conn)
+            )
         except Exception:
             conn.info.pop(_DEFERRED_RUN_EVENT_ROWS_KEY, None)
+            conn.info.pop(_DEFERRED_QUEUE_UPDATED_SESSION_IDS_KEY, None)
             raise
     _publish_run_rows_updated(pending_rows)
+    for session_id in pending_queue_session_ids:
+        _publish_queue_updated(session_id)
 
 
 def _run_rows_for_ids(conn: Any, run_ids: list[str]) -> list[Any]:
@@ -2401,10 +2815,16 @@ def attach_agent_run_delivery_in_connection(
         metadata = {}
     if bool(row["cancel_requested"]):
         return False
-    if str(row["session_id"] or "").strip() != normalized_session_id:
+    existing_session_id = str(row["session_id"] or "").strip()
+    session_policy = str(row["session_policy"] or "").strip()
+    can_adopt_session = not existing_session_id and session_policy == "create_per_run"
+    if existing_session_id != normalized_session_id and not can_adopt_session:
         return False
     existing_delivery_id = str(row["delivery_id"] or "").strip()
-    if existing_delivery_id == normalized_delivery_id:
+    if (
+        existing_delivery_id == normalized_delivery_id
+        and existing_session_id == normalized_session_id
+    ):
         return True
     if existing_delivery_id:
         return False
@@ -2414,7 +2834,18 @@ def attach_agent_run_delivery_in_connection(
     result = conn.execute(
         update(agent_runs)
         .where(agent_runs.c.id == normalized_run_id)
-        .where(agent_runs.c.session_id == normalized_session_id)
+        .where(
+            or_(
+                agent_runs.c.session_id == normalized_session_id,
+                and_(
+                    agent_runs.c.session_policy == "create_per_run",
+                    or_(
+                        agent_runs.c.session_id.is_(None),
+                        agent_runs.c.session_id == "",
+                    ),
+                ),
+            )
+        )
         .where(
             agent_runs.c.status.in_(
                 _status_query_values("running") + _status_query_values("queued")
@@ -2423,6 +2854,7 @@ def attach_agent_run_delivery_in_connection(
         .where(agent_runs.c.cancel_requested == 0)
         .where(agent_runs.c.delivery_id.is_(None))
         .values(
+            session_id=normalized_session_id,
             delivery_id=normalized_delivery_id,
             updated_at=now,
             metadata_json=_json_dumps(metadata),
@@ -2432,6 +2864,85 @@ def attach_agent_run_delivery_in_connection(
         return False
     _defer_run_ids_updated_from_connection(conn, [normalized_run_id])
     return True
+
+
+def apply_live_agent_run_cancellation_in_connection(
+    conn: Any,
+    run_id: str,
+    *,
+    session_id: str,
+    detach: bool,
+    updated_at: Optional[str] = None,
+) -> str:
+    """Record one live Run cancellation inside the Turn owner's transaction.
+
+    ``detach`` is the outcome of the shared-Turn ownership check made under the
+    same SQLite writer reservation. A detached participant becomes terminal,
+    retires its exact input when the Delivery state proves no native side effect,
+    and suppresses its callback before any terminal writer or callback drain can
+    run; an exclusive owner only records the cancellation request before P0 Stop.
+    """
+
+    normalized_run_id = str(run_id or "").strip()
+    normalized_session_id = str(session_id or "").strip()
+    if not normalized_run_id or not normalized_session_id:
+        return "missing_run_identity"
+    row = conn.execute(
+        select(agent_runs)
+        .where(agent_runs.c.id == normalized_run_id)
+        .limit(1)
+    ).mappings().first()
+    if row is None:
+        return "run_not_found"
+    if str(row["session_id"] or "").strip() != normalized_session_id:
+        return "run_session_mismatch"
+    status = normalize_run_status(row["status"])
+    if status in TERMINAL_RUN_STATUSES:
+        return "run_already_terminal"
+    if status not in {"queued", "running"}:
+        return "run_not_cancelable"
+
+    now = updated_at or _utc_now_iso()
+    values: dict[str, Any] = {
+        "cancel_requested": 1,
+        "cancel_requested_at": row["cancel_requested_at"] or now,
+        "updated_at": now,
+    }
+    if detach:
+        delivery_id = str(row["delivery_id"] or "").strip()
+        if delivery_id:
+            from storage import message_deliveries as delivery_store
+
+            if delivery_store.retire_for_run_cancellation(
+                conn,
+                normalized_session_id,
+                delivery_id,
+            ):
+                _defer_queue_updated_from_connection(conn, normalized_session_id)
+        values.update(status="canceled", completed_at=now)
+        callback_session_id = str(row["callback_session_id"] or "").strip()
+        callback_status = str(row["callback_status"] or "").strip()
+        if callback_session_id and callback_status not in {"sent", "skipped"}:
+            values.update(
+                callback_status="skipped",
+                callback_error=None,
+                callback_completed_at=now,
+            )
+    result = conn.execute(
+        update(agent_runs)
+        .where(agent_runs.c.id == normalized_run_id)
+        .where(agent_runs.c.session_id == normalized_session_id)
+        .where(
+            agent_runs.c.status.in_(
+                _status_query_values("queued") + _status_query_values("running")
+            )
+        )
+        .values(**values)
+    )
+    if not result.rowcount:
+        return "run_transition_lost"
+    _defer_run_ids_updated_from_connection(conn, [normalized_run_id])
+    return "run_detached" if detach else "cancel_requested"
 
 
 def agent_run_cancellation_won_in_connection(conn: Any, run_id: str) -> bool:
@@ -2643,6 +3154,7 @@ def upsert_definition_in_connection(
     *,
     expect: DefinitionWriteExpectation | None,
     definition_type: str,
+    extra_predicates: Sequence[Any] = (),
 ) -> bool:
     """The one full-row ``run_definitions`` write, guarded, in a CALLER'S transaction.
 
@@ -2666,6 +3178,8 @@ def upsert_definition_in_connection(
         # (pysqlite emits no ``BEGIN`` for a bare SELECT), so the lock is first taken
         # here.
         stmt = stmt.where(*definition_state_unchanged(expect))
+    if extra_predicates:
+        stmt = stmt.where(*extra_predicates)
     result = conn.execute(stmt.values(**values))
     if result.rowcount:
         return True
@@ -2833,6 +3347,8 @@ class SQLiteBackgroundTaskStore:
         expect: DefinitionWriteExpectation | None = None,
         expected_enabled_agent_id: Optional[str] = None,
         expected_reference_agent_id: Optional[str] = None,
+        expected_schedule_generation: Optional[dict[str, str]] = None,
+        expected_terminal_run_id: Optional[str] = None,
     ) -> bool:
         """Write a whole scheduled-task row. ``False`` means the write was REFUSED.
 
@@ -2848,6 +3364,14 @@ class SQLiteBackgroundTaskStore:
             definition_type="scheduled task",
             expected_enabled_agent_id=expected_enabled_agent_id,
             expected_reference_agent_id=expected_reference_agent_id,
+            extra_predicates=(
+                task_schedule_owner_unchanged(
+                    expected_schedule_generation, expected_terminal_run_id
+                )
+                if expected_schedule_generation is not None
+                and expected_terminal_run_id is not None
+                else ()
+            ),
         )
 
     def upsert_scheduled_task_with_binding_notice(
@@ -2893,6 +3417,11 @@ class SQLiteBackgroundTaskStore:
         definition_type: Optional[str] = None,
     ) -> bool:
         with self.engine.begin() as conn:
+            if enabled:
+                # The resumability decision and enabling UPDATE are one atomic
+                # transition. Without the writer reservation, /new can stamp an
+                # orphan-owner block after the SELECT and before this UPDATE.
+                reserve_write_lock(conn)
             values: dict[str, Any] = {"enabled": 1 if enabled else 0, "updated_at": _utc_now_iso()}
             if enabled:
                 # Resuming may start a new lifecycle, and the old one must stop
@@ -2906,7 +3435,10 @@ class SQLiteBackgroundTaskStore:
                         select(
                             run_definitions.c.definition_type,
                             run_definitions.c.mode,
+                            run_definitions.c.schedule_type,
+                            run_definitions.c.retired_at,
                             run_definitions.c.enabled,
+                            run_definitions.c.session_id,
                             run_definitions.c.metadata_json,
                         )
                         .where(run_definitions.c.id == definition_id)
@@ -2916,6 +3448,14 @@ class SQLiteBackgroundTaskStore:
                     .first()
                 )
                 if current is not None and not current["enabled"]:
+                    if current["definition_type"] == "scheduled":
+                        require_task_resumable(
+                            definition_id,
+                            metadata=_json_loads(current["metadata_json"], {}),
+                            session_id=current["session_id"],
+                            schedule_type=current["schedule_type"],
+                            retired_at=current["retired_at"],
+                        )
                     clear_columns = definition_resume_clear_columns(
                         current["definition_type"], current["mode"]
                     )
@@ -2938,6 +3478,59 @@ class SQLiteBackgroundTaskStore:
                 stmt = stmt.where(run_definitions.c.definition_type == definition_type)
             result = conn.execute(stmt)
             return bool(result.rowcount)
+
+    def retire_missed_one_shot(
+        self,
+        definition_id: str,
+        *,
+        expected_run_at: str,
+        expected_timezone: str,
+        expected_updated_at: str,
+        retired_at: Optional[str] = None,
+    ) -> bool:
+        """Persist one APScheduler-owned missed ``at`` transition.
+
+        The schedule identity is part of the compare-and-set. A stale misfire
+        event from a job that was edited cannot retire the replacement schedule.
+        """
+
+        now = retired_at or _utc_now_iso()
+        metadata_without_result = case(
+            (
+                func.json_valid(run_definitions.c.metadata_json) == 1,
+                func.json_remove(
+                    run_definitions.c.metadata_json,
+                    f"$.{COMMAND_TIMED_OUT_METADATA_KEY}",
+                    f"$.{TASK_LAST_RESULT_STATUS_METADATA_KEY}",
+                ),
+            ),
+            else_=run_definitions.c.metadata_json,
+        )
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                update(run_definitions)
+                .where(run_definitions.c.id == definition_id)
+                .where(run_definitions.c.definition_type == "scheduled")
+                .where(run_definitions.c.schedule_type == "at")
+                .where(run_definitions.c.enabled != 0)
+                .where(run_definitions.c.deleted_at.is_(None))
+                .where(run_definitions.c.retired_at.is_(None))
+                .where(run_definitions.c.run_at == expected_run_at)
+                .where(run_definitions.c.timezone == expected_timezone)
+                .where(run_definitions.c.updated_at == expected_updated_at)
+                .values(
+                    enabled=0,
+                    retired_at=now,
+                    retirement_reason=TASK_RETIREMENT_SCHEDULE_MISSED,
+                    last_run_at=None,
+                    last_run_id=None,
+                    last_error=None,
+                    last_exit_code=None,
+                    metadata_json=metadata_without_result,
+                    updated_at=now,
+                )
+            )
+        return bool(result.rowcount)
 
     def list_watches(self) -> list[dict[str, Any]]:
         stmt = self._definitions_query("watch").order_by(
@@ -3032,6 +3625,7 @@ class SQLiteBackgroundTaskStore:
         definition_type: str,
         expected_enabled_agent_id: Optional[str] = None,
         expected_reference_agent_id: Optional[str] = None,
+        extra_predicates: Sequence[Any] = (),
     ) -> bool:
         """The one full-row ``run_definitions`` write, guarded once for both types."""
 
@@ -3051,7 +3645,11 @@ class SQLiteBackgroundTaskStore:
                 )
                 values["agent_name"] = identity["name"]
             return upsert_definition_in_connection(
-                conn, values, expect=expect, definition_type=definition_type
+                conn,
+                values,
+                expect=expect,
+                definition_type=definition_type,
+                extra_predicates=extra_predicates,
             )
 
     def upsert_watch_with_queued_run(
@@ -3122,6 +3720,8 @@ class SQLiteBackgroundTaskStore:
         expect: DefinitionWriteExpectation | None,
         run_payload: dict[str, Any],
         expected_uncanceled_run_id: Optional[str] = None,
+        expected_schedule_generation: Optional[dict[str, str]] = None,
+        expected_terminal_run_id: Optional[str] = None,
     ) -> bool:
         """A guarded task stamp and the outbox row it authorises, ONE transaction.
 
@@ -3174,11 +3774,90 @@ class SQLiteBackgroundTaskStore:
                 values,
                 expect=expect,
                 definition_type="scheduled task",
+                extra_predicates=(
+                    task_schedule_owner_unchanged(
+                        expected_schedule_generation, expected_terminal_run_id
+                    )
+                    if expected_schedule_generation is not None
+                    and expected_terminal_run_id is not None
+                    else ()
+                ),
             ):
                 return False
             _pin_run_to_definition_agent(
                 conn, run_values, agent_name=values.get("agent_name")
             )
+            enqueue_run_in_connection(conn, run_values)
+        return True
+
+    def enqueue_task_escalation_without_definition_write(
+        self,
+        definition_id: str,
+        *,
+        expect: DefinitionWriteExpectation,
+        expected_session_key: str,
+        run_payload: dict[str, Any],
+        expected_uncanceled_run_id: str,
+    ) -> bool:
+        """Atomically enqueue a non-owner failure escalation, never its definition.
+
+        A manual or legacy Run of a retired one-shot owns its Run history and this
+        outbox decision, but owns no definition projection. The write lock makes the
+        authority check and enqueue one decision while allowing a concurrent schedule
+        replacement to survive byte-for-byte.
+        """
+
+        parent_run_id = str(expected_uncanceled_run_id or "").strip()
+        if not parent_run_id:
+            return False
+        run_values = self._run_values(run_payload)
+        with run_update_event_transaction(self.engine) as conn:
+            reserve_write_lock(conn)
+            parent = conn.execute(
+                select(agent_runs.c.status, agent_runs.c.cancel_requested)
+                .where(agent_runs.c.id == parent_run_id)
+                .limit(1)
+            ).mappings().first()
+            if parent is None or bool(parent["cancel_requested"]) or normalize_run_status(
+                parent["status"]
+            ) == "canceled":
+                return False
+            definition = conn.execute(
+                select(run_definitions.c.agent_name)
+                .where(run_definitions.c.id == definition_id)
+                .where(run_definitions.c.definition_type == "scheduled")
+                .where(
+                    unchanged_text(
+                        run_definitions.c.legacy_session_key,
+                        expected_session_key,
+                    )
+                )
+                .where(*definition_binding_authority_unchanged(expect))
+                .limit(1)
+            ).mappings().first()
+            if definition is None:
+                return False
+            _pin_run_to_definition_agent(
+                conn,
+                run_values,
+                agent_name=definition["agent_name"],
+            )
+            pinned_agent_id = str(run_values.get("agent_id") or "").strip()
+            current_agent_name = str(definition["agent_name"] or "").strip()
+            if current_agent_name and not pinned_agent_id:
+                return False
+            if pinned_agent_id:
+                try:
+                    identity = _require_agent_reference_identity(
+                        conn,
+                        expected_agent_id=pinned_agent_id,
+                    )
+                except ValueError:
+                    return False
+                if current_agent_name and identity["name"] != current_agent_name:
+                    return False
+                run_values["agent_id"] = identity["id"]
+                run_values["agent_name"] = identity["name"]
             enqueue_run_in_connection(conn, run_values)
         return True
 
@@ -3229,15 +3908,29 @@ class SQLiteBackgroundTaskStore:
             ).mappings().first()
             if parent is None:
                 raise ValueError(f"callback parent Run not found: {parent_run_id}")
-            callback_run_id = conn.execute(
-                select(agent_runs.c.id)
-                .where(agent_runs.c.run_type == "agent_run")
-                .where(agent_runs.c.source_kind == "callback")
-                .where(agent_runs.c.parent_run_id == parent_run_id)
-                .where(agent_runs.c.source_actor == source_actor)
-                .order_by(agent_runs.c.created_at, agent_runs.c.id)
-                .limit(1)
-            ).scalar_one_or_none()
+            terminal_turn_id = str(values.get("callback_terminal_turn_id") or "").strip()
+            callback_session_id = str(values.get("session_id") or "").strip()
+            callback_run_id = None
+            if terminal_turn_id and callback_session_id:
+                callback_run_id = conn.execute(
+                    select(agent_runs.c.id)
+                    .where(agent_runs.c.run_type == "agent_run")
+                    .where(agent_runs.c.source_kind == "callback")
+                    .where(agent_runs.c.callback_terminal_turn_id == terminal_turn_id)
+                    .where(agent_runs.c.session_id == callback_session_id)
+                    .order_by(agent_runs.c.created_at, agent_runs.c.id)
+                    .limit(1)
+                ).scalar_one_or_none()
+            if callback_run_id is None:
+                callback_run_id = conn.execute(
+                    select(agent_runs.c.id)
+                    .where(agent_runs.c.run_type == "agent_run")
+                    .where(agent_runs.c.source_kind == "callback")
+                    .where(agent_runs.c.parent_run_id == parent_run_id)
+                    .where(agent_runs.c.source_actor == source_actor)
+                    .order_by(agent_runs.c.created_at, agent_runs.c.id)
+                    .limit(1)
+                ).scalar_one_or_none()
             parent_status = normalize_run_status(parent["status"])
             parent_refuses_new_child = bool(parent["cancel_requested"]) and (
                 parent_status != "canceled"
@@ -3268,38 +3961,32 @@ class SQLiteBackgroundTaskStore:
         payload: dict[str, Any],
         *,
         suppress_scheduler_successor: bool = False,
+        expected_run_at: Optional[str] = None,
+        expected_timezone: Optional[str] = None,
+        expected_updated_at: Optional[str] = None,
+        expected_job_id: Optional[str] = None,
+        terminal_error: Optional[str] = None,
     ) -> Optional[dict[str, Any]]:
         """Enqueue one internally consistent snapshot of a live definition."""
 
+        if (expected_run_at is None) != (expected_timezone is None):
+            raise ValueError("expected run_at and timezone must be supplied together")
+        if (expected_run_at is None) != (expected_updated_at is None):
+            raise ValueError(
+                "expected run_at and definition updated_at must be supplied together"
+            )
+        if (expected_run_at is None) != (expected_job_id is None):
+            raise ValueError(
+                "expected run_at and scheduler job id must be supplied together"
+            )
+        if terminal_error is not None and expected_run_at is None:
+            raise ValueError("a terminal enqueue error requires a one-shot identity")
         values = self._run_values(payload)
         definition_id = str(values.get("definition_id") or "").strip()
         if not definition_id:
             raise ValueError("definition id is required")
         with run_update_event_transaction(self.engine) as conn:
             reserve_write_lock(conn)
-            if suppress_scheduler_successor:
-                unstarted = conn.execute(
-                    select(agent_runs.c.id)
-                    .where(agent_runs.c.definition_id == definition_id)
-                    .where(agent_runs.c.source_kind == "scheduler")
-                    .where(
-                        or_(
-                            agent_runs.c.status.in_(_status_query_values("queued")),
-                            and_(
-                                agent_runs.c.status.in_(_status_query_values("running")),
-                                agent_runs.c.delivery_id.is_(None),
-                                agent_runs.c.pid.is_(None),
-                                func.json_extract(
-                                    agent_runs.c.metadata_json,
-                                    f"$.{COMMAND_WORKER_METADATA_KEY}",
-                                ).is_(None),
-                            ),
-                        )
-                    )
-                    .limit(1)
-                ).scalar_one_or_none()
-                if unstarted is not None:
-                    return None
             definition = conn.execute(
                 select(
                     run_definitions.c.definition_type,
@@ -3315,6 +4002,11 @@ class SQLiteBackgroundTaskStore:
                     run_definitions.c.metadata_json,
                     run_definitions.c.command_json,
                     run_definitions.c.shell_command,
+                    run_definitions.c.schedule_type,
+                    run_definitions.c.run_at,
+                    run_definitions.c.timezone,
+                    run_definitions.c.updated_at,
+                    run_definitions.c.retired_at,
                     run_definitions.c.enabled,
                     run_definitions.c.deleted_at,
                 )
@@ -3324,8 +4016,43 @@ class SQLiteBackgroundTaskStore:
             if definition is not None:
                 if definition["deleted_at"] is not None:
                     raise ValueError(f"definition '{definition_id}' not found")
-                if not bool(definition["enabled"]):
+                scheduled_one_shot = bool(
+                    values.get("source_kind") == "scheduler"
+                    and definition["definition_type"] == "scheduled"
+                    and definition["schedule_type"] == "at"
+                )
+                expects_one_shot = expected_run_at is not None
+                if expects_one_shot and not scheduled_one_shot:
+                    # The caller is an APScheduler DateTrigger generation. If the
+                    # definition now names cron (or another kind), that generation
+                    # is stale and owns no enqueue at all.
+                    return None
+                if scheduled_one_shot and expected_run_at is None:
+                    raise ValueError(
+                        "scheduler one-shot enqueue requires its expected run_at and timezone"
+                    )
+                if (
+                    scheduled_one_shot and definition["retired_at"] is not None
+                ):
+                    return None
+                manual_retired_one_shot = bool(
+                    values.get("source_kind") in {"cli", "manual"}
+                    and definition["definition_type"] == "scheduled"
+                    and definition["schedule_type"] == "at"
+                    and definition["retired_at"] is not None
+                )
+                if not bool(definition["enabled"]) and not manual_retired_one_shot:
                     raise ValueError(f"definition '{definition_id}' is disabled")
+                if (
+                    scheduled_one_shot
+                    and expected_run_at is not None
+                    and (
+                        definition["run_at"] != expected_run_at
+                        or definition["timezone"] != expected_timezone
+                        or definition["updated_at"] != expected_updated_at
+                    )
+                ):
+                    return None
 
                 current_name = str(definition["agent_name"] or "").strip() or None
                 identity = _resolve_agent_identity_by_name(conn, current_name)
@@ -3333,6 +4060,9 @@ class SQLiteBackgroundTaskStore:
                 metadata = _json_loads(definition["metadata_json"], {})
                 if not isinstance(metadata, dict):
                     metadata = {}
+                # Internal Run provenance: a definition's free-form metadata
+                # cannot claim that this enqueue owned the lifecycle transition.
+                metadata.pop(TASK_SCHEDULE_CONSUMED_METADATA_KEY, None)
                 # A run is an immutable record of one execution, so WHAT it executed
                 # belongs on it -- the definition it came from is editable and
                 # deletable, and the failure-notice drain reads long after the fire.
@@ -3359,6 +4089,118 @@ class SQLiteBackgroundTaskStore:
                     message_payload_json=definition["message_payload_json"],
                     metadata_json=_json_dumps(metadata),
                 )
+            if suppress_scheduler_successor:
+                unstarted_stmt = (
+                    select(agent_runs.c.id)
+                    .where(agent_runs.c.definition_id == definition_id)
+                    .where(agent_runs.c.source_kind == "scheduler")
+                    .where(
+                        or_(
+                            agent_runs.c.status.in_(_status_query_values("queued")),
+                            and_(
+                                agent_runs.c.status.in_(_status_query_values("running")),
+                                agent_runs.c.delivery_id.is_(None),
+                                agent_runs.c.pid.is_(None),
+                                func.json_extract(
+                                    agent_runs.c.metadata_json,
+                                    f"$.{COMMAND_WORKER_METADATA_KEY}",
+                                ).is_(None),
+                            ),
+                        )
+                    )
+                )
+                if expected_run_at is not None:
+                    marker_path = f"$.{TASK_SCHEDULE_CONSUMED_METADATA_KEY}"
+                    unstarted_stmt = (
+                        unstarted_stmt.where(func.json_valid(agent_runs.c.metadata_json) == 1)
+                        .where(func.json_type(agent_runs.c.metadata_json, marker_path) == "object")
+                        .where(
+                            func.json_extract(
+                                agent_runs.c.metadata_json, f"{marker_path}.run_at"
+                            )
+                            == expected_run_at
+                        )
+                        .where(
+                            func.json_extract(
+                                agent_runs.c.metadata_json, f"{marker_path}.timezone"
+                            )
+                            == expected_timezone
+                        )
+                        .where(
+                            func.json_extract(
+                                agent_runs.c.metadata_json, f"{marker_path}.updated_at"
+                            )
+                            == expected_updated_at
+                        )
+                        .where(
+                            func.json_extract(
+                                agent_runs.c.metadata_json, f"{marker_path}.job_id"
+                            )
+                            == expected_job_id
+                        )
+                    )
+                if conn.execute(unstarted_stmt.limit(1)).scalar_one_or_none() is not None:
+                    return None
+            schedule_consumed = bool(
+                definition is not None
+                and scheduled_one_shot
+                and expected_run_at is not None
+            )
+            if schedule_consumed:
+                now = _utc_now_iso()
+                consumed = conn.execute(
+                    update(run_definitions)
+                    .where(run_definitions.c.id == definition_id)
+                    .where(run_definitions.c.enabled != 0)
+                    .where(run_definitions.c.definition_type == "scheduled")
+                    .where(run_definitions.c.schedule_type == "at")
+                    .where(run_definitions.c.deleted_at.is_(None))
+                    .where(run_definitions.c.retired_at.is_(None))
+                    .where(
+                        and_(
+                            run_definitions.c.run_at == expected_run_at,
+                            run_definitions.c.timezone == expected_timezone,
+                            run_definitions.c.updated_at == expected_updated_at,
+                        )
+                    )
+                    .values(
+                        enabled=0,
+                        retired_at=now,
+                        retirement_reason=TASK_RETIREMENT_SCHEDULE_CONSUMED,
+                        last_run_id=values["id"],
+                        updated_at=now,
+                    )
+                )
+                if not consumed.rowcount:
+                    return None
+                run_metadata = _json_loads(values["metadata_json"], {})
+                if not isinstance(run_metadata, dict):
+                    run_metadata = {}
+                run_metadata[TASK_SCHEDULE_CONSUMED_METADATA_KEY] = {
+                    "run_at": expected_run_at,
+                    "timezone": expected_timezone,
+                    "updated_at": expected_updated_at,
+                    "job_id": expected_job_id,
+                    "retired_at": now,
+                }
+                values["metadata_json"] = _json_dumps(run_metadata)
+                if terminal_error is not None:
+                    values.update(
+                        status="failed",
+                        error=terminal_error,
+                        completed_at=now,
+                        updated_at=now,
+                    )
+                    _merge_owed_failure_notice(
+                        values,
+                        conn=conn,
+                        run_id=str(values["id"]),
+                        status=values["status"],
+                        source_kind=values.get("source_kind"),
+                        parent_run_id=values.get("parent_run_id"),
+                        row_metadata_json=values["metadata_json"],
+                        now=now,
+                    )
             enqueue_run_in_connection(conn, values)
         return {
             "agent_name": values["agent_name"],
@@ -3475,6 +4317,110 @@ class SQLiteBackgroundTaskStore:
                 [self._run_from_row(row) for row in conn.execute(stmt).mappings()], conn
             )
         return page_result_from_limit_plus_one(rows, page_request)
+
+    def list_active_runs(self, *, limit: int) -> list[dict[str, Any]]:
+        """Return a bounded anomaly-first snapshot of operator-visible Runs."""
+
+        stmt = (
+            self._runs_query(exclude_run_type=(_WATCH_RUNTIME_RUN_TYPE,))
+            .where(
+                agent_runs.c.status.in_(
+                    _status_query_values("queued") + _status_query_values("running")
+                )
+            )
+            .order_by(
+                case(
+                    (
+                        agent_runs.c.status.in_(_status_query_values("running")),
+                        0,
+                    ),
+                    else_=1,
+                ),
+                agent_runs.c.updated_at.desc(),
+                agent_runs.c.id.desc(),
+            )
+            .limit(max(0, int(limit)))
+        )
+        with self.engine.connect() as conn:
+            return self._enrich_runs(
+                [self._run_from_row(row) for row in conn.execute(stmt).mappings()], conn
+            )
+
+    def active_run_ids(self, run_ids: Iterable[str]) -> set[str]:
+        """Revalidate a bounded Run snapshot without admitting newer rows."""
+
+        normalized = {str(run_id) for run_id in run_ids if str(run_id or "").strip()}
+        if not normalized:
+            return set()
+        stmt = (
+            select(agent_runs.c.id)
+            .where(agent_runs.c.id.in_(normalized))
+            .where(
+                agent_runs.c.status.in_(
+                    _status_query_values("queued") + _status_query_values("running")
+                )
+            )
+        )
+        with self.engine.connect() as conn:
+            return {str(run_id) for run_id in conn.execute(stmt).scalars()}
+
+    def list_enabled_definitions(
+        self,
+        definition_type: str,
+        *,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        """Return a bounded snapshot of armed Tasks or Watches."""
+
+        if definition_type not in {"scheduled", "watch"}:
+            raise ValueError("definition_type must be scheduled or watch")
+        row_limit = max(0, int(limit))
+        stmt = self._definitions_query(definition_type).where(
+            run_definitions.c.enabled != 0
+        )
+        converter = (
+            self._scheduled_task_from_row
+            if definition_type == "scheduled"
+            else self._watch_from_row
+        )
+        with self.engine.connect() as conn:
+            if definition_type == "scheduled":
+                # Cron next-fire instants are computed by APScheduler, so SQLite
+                # cannot order them correctly. Keep the response/enrichment bounded
+                # while selecting the true earliest rows from the enabled live set.
+                rows = heapq.nsmallest(
+                    row_limit,
+                    (converter(row) for row in conn.execute(stmt).mappings()),
+                    key=_scheduled_next_fire_sort_key,
+                )
+            else:
+                runtime_status = (
+                    select(agent_runs.c.status)
+                    .where(agent_runs.c.run_type == _WATCH_RUNTIME_RUN_TYPE)
+                    .where(agent_runs.c.definition_id == run_definitions.c.id)
+                    .order_by(agent_runs.c.updated_at.desc(), agent_runs.c.id.desc())
+                    .limit(1)
+                    .scalar_subquery()
+                )
+                dead_waiter_rank = case(
+                    (
+                        runtime_status.is_not(None)
+                        & ~runtime_status.in_(_status_query_values("running")),
+                        0,
+                    ),
+                    else_=1,
+                )
+                stmt = stmt.order_by(
+                    dead_waiter_rank,
+                    run_definitions.c.updated_at.desc(),
+                    run_definitions.c.id.desc(),
+                ).limit(row_limit)
+                rows = [converter(row) for row in conn.execute(stmt).mappings()]
+            return self._enrich_definitions(
+                rows,
+                conn,
+                definition_type=definition_type,
+            )
 
     def count_runs(
         self,
@@ -3734,10 +4680,20 @@ class SQLiteBackgroundTaskStore:
             stmt.where(run_definitions.c.definition_type == definition_type)
             .where(run_definitions.c.deleted_at.is_(None))
         )
-        # Precise bound-session filter (ix_run_definitions_session) — powers the
-        # Harness "只看本会话" chip that background-work banner rows navigate into.
+        # This Session filter powers the Harness "只看本会话" chip that the
+        # background-work banner navigates into. Scheduled Tasks use creation
+        # provenance as the authoritative owner: a create-per-run or pure command
+        # definition may have no bound execution Session at all. Legacy Task rows
+        # without provenance retain the historical bound-session behavior.
         if session_id:
-            stmt = stmt.where(run_definitions.c.session_id == session_id)
+            if definition_type == "scheduled":
+                stmt = stmt.where(
+                    scheduled_definition_owned_by_session_expression(session_id)
+                )
+            else:
+                # A Watch is an event callback surface: its callback target, not
+                # the Session that created the definition, owns its banner row.
+                stmt = stmt.where(run_definitions.c.session_id == session_id)
         if status and status != "all":
             states = DEFINITION_STATUS_FILTERS.get(status)
             if not states:
@@ -3786,6 +4742,52 @@ class SQLiteBackgroundTaskStore:
                 )
             stmt = stmt.where(or_(*(field.like(pattern, escape=_LIKE_ESCAPE) for field in fields)))
         return stmt
+
+    @staticmethod
+    def _schedule_consuming_runs(
+        conn: Any,
+        definition_ids: Iterable[str],
+    ) -> dict[str, dict[str, Any]]:
+        """Exact Run that atomically consumed each one-shot schedule generation."""
+
+        ids = [str(value or "").strip() for value in dict.fromkeys(definition_ids)]
+        ids = [value for value in ids if value]
+        owners: dict[str, dict[str, Any]] = {}
+        for batch in _id_batches(ids):
+            rows = conn.execute(
+                select(
+                    agent_runs.c.id,
+                    run_definitions.c.id.label("definition_id"),
+                    agent_runs.c.status,
+                    agent_runs.c.completed_at,
+                    agent_runs.c.exit_code,
+                    agent_runs.c.error,
+                    agent_runs.c.metadata_json,
+                )
+                .select_from(
+                    run_definitions.join(
+                        agent_runs,
+                        agent_runs.c.id == run_definitions.c.last_run_id,
+                    )
+                )
+                .where(run_definitions.c.id.in_(batch))
+                .where(agent_runs.c.definition_id == run_definitions.c.id)
+                .where(agent_runs.c.source_kind == "scheduler")
+                .where(func.json_valid(agent_runs.c.metadata_json) == 1)
+                .where(*task_schedule_generation_matches_definition())
+            ).mappings()
+            for row in rows:
+                definition_id = str(row["definition_id"] or "")
+                metadata = _json_loads(row["metadata_json"], {})
+                owners[definition_id] = {
+                    "id": row["id"],
+                    "status": normalize_run_status(row["status"]),
+                    "completed_at": row["completed_at"],
+                    "exit_code": row["exit_code"],
+                    "error": row["error"],
+                    "timed_out": _definition_timed_out(metadata),
+                }
+        return owners
 
     def _definition_counts(
         self,
@@ -4026,6 +5028,80 @@ class SQLiteBackgroundTaskStore:
                     payload = self._run_from_row(row)
         _publish_run_rows_updated([row_to_publish])
         return payload
+
+    def record_run_activity(
+        self,
+        run_ids: Sequence[str],
+        *,
+        observed_at: Optional[str] = None,
+    ) -> list[str]:
+        """Advance the persisted activity fact for active Runs, monotonically.
+
+        Activity is output observed at the dispatcher, not a synthetic heartbeat.
+        A writer reservation keeps the read/compare/write decision atomic without
+        replacing any lifecycle or ownership state.
+        """
+
+        normalized_ids = list(
+            dict.fromkeys(
+                run_id
+                for value in run_ids
+                if (run_id := str(value or "").strip())
+            )
+        )
+        if not normalized_ids:
+            return []
+        now = observed_at or _utc_now_iso()
+        observed_instant = _parse_iso_instant(now)
+        if observed_instant is None:
+            raise ValueError("observed_at must be an ISO-8601 timestamp")
+
+        touched: list[str] = []
+        with self.engine.begin() as conn:
+            reserve_write_lock(conn)
+            rows = conn.execute(
+                select(
+                    agent_runs.c.id,
+                    agent_runs.c.status,
+                    agent_runs.c.updated_at,
+                    agent_runs.c.metadata_json,
+                ).where(agent_runs.c.id.in_(normalized_ids))
+            ).mappings()
+            for row in rows:
+                if normalize_run_status(row["status"]) != "running":
+                    continue
+                try:
+                    metadata = json.loads(str(row["metadata_json"] or "{}"))
+                except (TypeError, ValueError):
+                    metadata = None
+                if not isinstance(metadata, dict):
+                    logger.warning(
+                        "Run activity metadata is unreadable; preserving Run %s unchanged",
+                        row["id"],
+                    )
+                    continue
+                current = str(metadata.get(RUN_LAST_ACTIVITY_METADATA_KEY) or "").strip()
+                if current:
+                    current_instant = _parse_iso_instant(current)
+                    if current_instant is not None:
+                        if current_instant >= observed_instant:
+                            continue
+                updated_at = str(row["updated_at"] or "").strip()
+                if updated_at:
+                    updated_instant = _parse_iso_instant(updated_at)
+                    if updated_instant is not None:
+                        if updated_instant > observed_instant:
+                            continue
+                metadata[RUN_LAST_ACTIVITY_METADATA_KEY] = now
+                result = conn.execute(
+                    update(agent_runs)
+                    .where(agent_runs.c.id == row["id"])
+                    .where(agent_runs.c.status.in_(_status_query_values("running")))
+                    .values(metadata_json=_json_dumps(metadata), updated_at=now)
+                )
+                if result.rowcount:
+                    touched.append(str(row["id"]))
+        return touched
 
     def mark_run_execution_started(
         self,
@@ -4881,6 +5957,7 @@ class SQLiteBackgroundTaskStore:
                                 "turn_id",
                                 "turn_failure_notification",
                                 TURN_PARTICIPANT_RUN_IDS_METADATA_KEY,
+                                "interrupt_reason",
                             )
                             if provenance and (value := provenance.get(key)) is not None
                         }
@@ -5128,6 +6205,7 @@ class SQLiteBackgroundTaskStore:
                     "turn_id",
                     "turn_failure_notification",
                     TURN_PARTICIPANT_RUN_IDS_METADATA_KEY,
+                    "interrupt_reason",
                 )
                 if (value := terminal_provenance.get(key)) is not None
             }
@@ -5162,6 +6240,184 @@ class SQLiteBackgroundTaskStore:
                     _conn=conn,
                 )
         return results
+
+    def reconcile_resultless_turn_failure_notices(
+        self,
+        run_ids: Sequence[str],
+        *,
+        turn_id: str,
+        settled_by: str,
+        updated_at: Optional[str] = None,
+    ) -> list[str]:
+        """Attach one exact Turn owner to legacy per-Run interruption notices.
+
+        Releases before HFR-474 lost the notification contract from Run metadata,
+        but accepted Delivery ownership still retained the exact Turn. Startup calls
+        this before the notice lane activates. A sent notice is authoritative;
+        otherwise one pending participant is elected deterministically. Notice state,
+        attempts, errors, and retry timing remain unchanged.
+        """
+
+        from core import failure_notices
+
+        normalized_turn_id = str(turn_id or "").strip()
+        normalized_reason = str(settled_by or "").strip()
+        normalized_run_ids = list(
+            dict.fromkeys(
+                run_id
+                for value in run_ids
+                if (run_id := str(value or "").strip())
+            )
+        )
+        if not normalized_turn_id or not normalized_reason or not normalized_run_ids:
+            return []
+
+        now = updated_at or _utc_now_iso()
+        changed_ids: list[str] = []
+        with run_update_event_transaction(self.engine) as conn:
+            reserve_write_lock(conn)
+            rows: dict[str, Any] = {}
+            for batch in _id_batches(normalized_run_ids):
+                rows.update(
+                    {
+                        str(row["id"]): row
+                        for row in conn.execute(
+                            select(agent_runs).where(agent_runs.c.id.in_(batch))
+                        ).mappings()
+                    }
+                )
+            participant_ids = [
+                run_id for run_id in normalized_run_ids if run_id in rows
+            ]
+            notice_rows: dict[str, tuple[Any, dict[str, Any], dict[str, Any]]] = {}
+            for run_id in participant_ids:
+                row = rows[run_id]
+                if normalize_run_status(row["status"]) != "failed":
+                    continue
+                metadata = _decoded_failure_notice_metadata(row["metadata_json"])
+                if metadata is None:
+                    continue
+                notice = metadata.get(OWED_FAILURE_NOTICE_KEY)
+                if not isinstance(notice, dict) or notice.get("state") not in {
+                    NOTICE_PENDING,
+                    NOTICE_SENT,
+                }:
+                    continue
+                notice_turn_id = failure_notices.notice_turn_id(notice)
+                if notice_turn_id and notice_turn_id != normalized_turn_id:
+                    continue
+                reason = str(
+                    notice.get("interrupt_reason")
+                    or metadata.get("interrupt_reason")
+                    or ""
+                ).strip()
+                if reason != normalized_reason:
+                    continue
+                notice_rows[run_id] = (row, metadata, dict(notice))
+            if not notice_rows:
+                return []
+
+            ordered_ids = sorted(
+                notice_rows,
+                key=lambda run_id: (
+                    str(notice_rows[run_id][0]["created_at"] or ""),
+                    run_id,
+                ),
+            )
+            sent_ids = [
+                run_id
+                for run_id in ordered_ids
+                if notice_rows[run_id][2].get("state") == NOTICE_SENT
+            ]
+            pending_ids = [
+                run_id
+                for run_id in ordered_ids
+                if notice_rows[run_id][2].get("state") == NOTICE_PENDING
+            ]
+            existing_owner = ""
+            for run_id in ordered_ids:
+                _row, metadata, notice = notice_rows[run_id]
+                notification = metadata.get("turn_failure_notification")
+                notification = notification if isinstance(notification, dict) else {}
+                candidate = str(
+                    notification.get("fallback_run_id")
+                    or notice.get("turn_fallback_run_id")
+                    or ""
+                ).strip()
+                if candidate in notice_rows:
+                    existing_owner = candidate
+                    break
+
+            if sent_ids:
+                owner_id = sent_ids[0]
+            elif existing_owner in pending_ids:
+                owner_id = existing_owner
+            else:
+                owner_id = next(
+                    (
+                        run_id
+                        for run_id in pending_ids
+                        if not _callback_parent_owns_failure_notice(
+                            conn,
+                            source_kind=notice_rows[run_id][0]["source_kind"],
+                            parent_run_id=notice_rows[run_id][0]["parent_run_id"],
+                        )
+                    ),
+                    pending_ids[0] if pending_ids else "",
+                )
+            if not owner_id:
+                return []
+
+            delivered = bool(sent_ids)
+            ack_evidence = None
+            if sent_ids:
+                evidence_values = [
+                    str(notice_rows[run_id][2].get("ack_evidence") or "")
+                    for run_id in sent_ids
+                ]
+                ack_evidence = max(
+                    evidence_values,
+                    key=lambda value: _ACK_EVIDENCE_PRIORITY.get(value, 0),
+                ) or None
+            failure_id = f"turn:{normalized_turn_id}"
+            notification: dict[str, Any] = {
+                "failure_id": failure_id,
+                "delivered": delivered,
+                "fallback_run_id": owner_id,
+            }
+            if ack_evidence:
+                notification["ack_evidence"] = ack_evidence
+
+            for run_id in ordered_ids:
+                _row, metadata, notice = notice_rows[run_id]
+                updated_metadata = dict(metadata)
+                updated_notice = dict(notice)
+                updated_metadata["turn_id"] = normalized_turn_id
+                updated_metadata["turn_failure_notification"] = dict(notification)
+                updated_notice.update(
+                    {
+                        "failure_id": failure_id,
+                        "turn_id": normalized_turn_id,
+                        "turn_notification_delivered": delivered,
+                        "turn_notification_ack_evidence": ack_evidence,
+                        "turn_fallback_run_id": owner_id,
+                        TURN_PARTICIPANT_RUN_IDS_METADATA_KEY: participant_ids,
+                    }
+                )
+                updated_metadata[OWED_FAILURE_NOTICE_KEY] = updated_notice
+                if updated_metadata == metadata:
+                    continue
+                conn.execute(
+                    update(agent_runs)
+                    .where(agent_runs.c.id == run_id)
+                    .values(
+                        metadata_json=_json_dumps(updated_metadata),
+                        updated_at=now,
+                    )
+                )
+                changed_ids.append(run_id)
+            _defer_run_ids_updated_from_connection(conn, changed_ids)
+        return changed_ids
 
     def settle_run_terminal(
         self,
@@ -5641,10 +6897,41 @@ class SQLiteBackgroundTaskStore:
         *,
         parent_run_id: str,
         source_actor: str,
+        terminal_turn_id: Optional[str] = None,
+        callback_session_id: Optional[str] = None,
     ) -> Optional[dict[str, Any]]:
-        """Return the callback Run for one parent callback identity."""
+        """Return the callback Run referenced by one parent callback ledger."""
 
         with self.engine.connect() as conn:
+            callback_run_id = conn.execute(
+                select(agent_runs.c.callback_run_id)
+                .where(agent_runs.c.id == parent_run_id)
+                .limit(1)
+            ).scalar_one_or_none()
+            if callback_run_id:
+                row = conn.execute(
+                    select(agent_runs)
+                    .where(agent_runs.c.id == callback_run_id)
+                    .where(agent_runs.c.run_type == "agent_run")
+                    .where(agent_runs.c.source_kind == "callback")
+                    .limit(1)
+                ).mappings().first()
+                if row is not None:
+                    return self._run_from_row(row)
+            normalized_turn_id = str(terminal_turn_id or "").strip()
+            normalized_session_id = str(callback_session_id or "").strip()
+            if normalized_turn_id and normalized_session_id:
+                row = conn.execute(
+                    select(agent_runs)
+                    .where(agent_runs.c.run_type == "agent_run")
+                    .where(agent_runs.c.source_kind == "callback")
+                    .where(agent_runs.c.callback_terminal_turn_id == normalized_turn_id)
+                    .where(agent_runs.c.session_id == normalized_session_id)
+                    .order_by(agent_runs.c.created_at, agent_runs.c.id)
+                    .limit(1)
+                ).mappings().first()
+                if row is not None:
+                    return self._run_from_row(row)
             row = conn.execute(
                 select(agent_runs)
                 .where(agent_runs.c.run_type == "agent_run")
@@ -6014,7 +7301,10 @@ class SQLiteBackgroundTaskStore:
                 # Restricted to ``agent_run`` on purpose: when ``scheduled``/``watch``
                 # rows settle is owned by a separate plan. Widen only alongside it.
                 if str(row["run_type"] or "") == "agent_run" and _older_than(
-                    row["started_at"] or row["created_at"], orphan_grace_seconds
+                    metadata.get(RUN_LAST_ACTIVITY_METADATA_KEY)
+                    or row["started_at"]
+                    or row["created_at"],
+                    orphan_grace_seconds,
                 ):
                     reason = SWEEP_REASON_ORPHANED
             elif status == "queued":
@@ -7348,7 +8638,8 @@ class SQLiteBackgroundTaskStore:
             "updated_at": payload.get("updated_at") or payload.get("created_at"),
             "last_started_at": None,
             "last_finished_at": None,
-            "retired_at": None,
+            "retired_at": payload.get("retired_at"),
+            "retirement_reason": payload.get("retirement_reason"),
             "last_event_at": None,
             "last_run_at": payload.get("last_run_at"),
             "last_run_id": payload.get("last_run_id"),
@@ -7394,6 +8685,7 @@ class SQLiteBackgroundTaskStore:
             "last_started_at": payload.get("last_started_at"),
             "last_finished_at": payload.get("last_finished_at"),
             "retired_at": payload.get("retired_at"),
+            "retirement_reason": None,
             "last_event_at": payload.get("last_event_at"),
             "last_run_at": None,
             "last_run_id": None,
@@ -7405,6 +8697,8 @@ class SQLiteBackgroundTaskStore:
     def _run_values(self, payload: dict[str, Any]) -> dict[str, Any]:
         created_at = payload.get("created_at") or payload.get("updated_at")
         message = payload.get("message") or payload.get("prompt")
+        raw_metadata = payload.get("metadata")
+        metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
         return {
             "id": payload["id"],
             "definition_id": payload.get("definition_id") or payload.get("task_id"),
@@ -7435,6 +8729,10 @@ class SQLiteBackgroundTaskStore:
             "callback_error": payload.get("callback_error"),
             "callback_run_id": payload.get("callback_run_id"),
             "callback_completed_at": payload.get("callback_completed_at"),
+            "callback_terminal_turn_id": str(
+                metadata.get(CALLBACK_TERMINAL_TURN_ID_METADATA_KEY) or ""
+            ).strip()
+            or None,
             "cancel_requested": 1 if payload.get("cancel_requested") else 0,
             "cancel_requested_at": payload.get("cancel_requested_at"),
             "pid": payload.get("pid"),
@@ -7446,11 +8744,12 @@ class SQLiteBackgroundTaskStore:
             "started_at": payload.get("started_at"),
             "completed_at": payload.get("completed_at"),
             "updated_at": payload.get("updated_at") or created_at,
-            "metadata_json": _json_dumps(payload.get("metadata") or {}),
+            "metadata_json": _json_dumps(raw_metadata or {}),
         }
 
     @staticmethod
     def _scheduled_task_from_row(row: Any) -> dict[str, Any]:
+        metadata = _json_loads(row["metadata_json"], {})
         return {
             "id": row["id"],
             "name": row["name"],
@@ -7477,8 +8776,11 @@ class SQLiteBackgroundTaskStore:
             "updated_at": row["updated_at"],
             "last_run_at": row["last_run_at"],
             "last_run_id": row["last_run_id"],
+            "retired_at": row["retired_at"],
+            "retirement_reason": row["retirement_reason"],
             "last_error": row["last_error"],
-            "metadata": _json_loads(row["metadata_json"], {}),
+            "metadata": metadata,
+            "resume_blocked": task_resume_block(metadata, row["session_id"]),
             "lifecycle_state": _row_lifecycle_state(row),
         }
 
@@ -7510,6 +8812,7 @@ class SQLiteBackgroundTaskStore:
             "last_started_at": row["last_started_at"],
             "last_finished_at": row["last_finished_at"],
             "retired_at": row["retired_at"],
+            "retirement_reason": row["retirement_reason"],
             "last_event_at": row["last_event_at"],
             "last_error": row["last_error"],
             "last_exit_code": row["last_exit_code"],
@@ -7520,6 +8823,11 @@ class SQLiteBackgroundTaskStore:
     @staticmethod
     def _run_from_row(row: Any) -> dict[str, Any]:
         metadata = _json_loads(row["metadata_json"], {})
+        last_activity_at = (
+            metadata.get(RUN_LAST_ACTIVITY_METADATA_KEY)
+            if isinstance(metadata, dict)
+            else None
+        )
         return {
             "id": row["id"],
             "request_type": row["run_type"],
@@ -7560,6 +8868,7 @@ class SQLiteBackgroundTaskStore:
             "callback_error": row["callback_error"],
             "callback_run_id": row["callback_run_id"],
             "callback_completed_at": row["callback_completed_at"],
+            "callback_terminal_turn_id": row["callback_terminal_turn_id"],
             "cancel_requested": bool(row["cancel_requested"]),
             "cancel_requested_at": row["cancel_requested_at"],
             "pid": row["pid"],
@@ -7571,6 +8880,7 @@ class SQLiteBackgroundTaskStore:
             "started_at": row["started_at"],
             "completed_at": row["completed_at"],
             "updated_at": row["updated_at"],
+            "last_activity_at": last_activity_at,
             "metadata": metadata,
             "session_fork": metadata.get("session_fork") if isinstance(metadata, dict) else None,
             "ok": None if row["completed_at"] is None else normalize_run_status(row["status"]) == "succeeded",
@@ -7655,6 +8965,20 @@ class SQLiteBackgroundTaskStore:
                 conn=conn,
             ),
         )
+        consuming_runs: dict[str, dict[str, Any]] = {}
+        if definition_type == "scheduled":
+            consuming_runs = _lookup(
+                "schedule-consuming runs",
+                lambda: self._schedule_consuming_runs(
+                    conn,
+                    [
+                        row.get("id")
+                        for row in rows
+                        if row.get("retirement_reason")
+                        == TASK_RETIREMENT_SCHEDULE_CONSUMED
+                    ],
+                ),
+            )
         if any(row.get("lifecycle_state") == "running" for row in rows):
             started = _lookup(
                 "in-flight run starts",
@@ -7726,6 +9050,18 @@ class SQLiteBackgroundTaskStore:
                 row["consecutive_failures"] = row_health["consecutive_failures"]
                 row["recent_failures"] = row_health["recent_failures"]
             state = row.get("lifecycle_state")
+            consuming_run = consuming_runs.get(row.get("id") or "")
+            if (
+                definition_type == "scheduled"
+                and row.get("retirement_reason")
+                == TASK_RETIREMENT_SCHEDULE_CONSUMED
+            ):
+                # Once consumed, this definition's terminal outcome is the exact
+                # Run the enqueue transaction named in last_run_id. Earlier manual
+                # history remains on its own Run rows but cannot describe this ending.
+                row["last_run_at"] = (consuming_run or {}).get("completed_at")
+                row["last_exit_code"] = (consuming_run or {}).get("exit_code")
+                row["last_error"] = (consuming_run or {}).get("error")
             row["lifecycle_detail"] = definition_lifecycle_detail(
                 lifecycle_state=state,
                 definition_type=definition_type,
@@ -7733,7 +9069,20 @@ class SQLiteBackgroundTaskStore:
                 last_exit_code=row.get("last_exit_code"),
                 last_error=row.get("last_error"),
                 timed_out=_definition_timed_out(row.get("metadata")),
+                retirement_reason=row.get("retirement_reason"),
+                terminal_run_status=(consuming_run or {}).get("status"),
+                terminal_run_exit_code=(consuming_run or {}).get("exit_code"),
+                terminal_run_timed_out=(consuming_run or {}).get("timed_out"),
             )
+            if definition_type == "scheduled":
+                if row.get("retirement_reason") == TASK_RETIREMENT_SCHEDULE_CONSUMED:
+                    row["lifecycle_finished_at"] = (consuming_run or {}).get(
+                        "completed_at"
+                    )
+                else:
+                    row["lifecycle_finished_at"] = row.get("retired_at")
+            else:
+                row["lifecycle_finished_at"] = row.get("last_finished_at")
             row["next_run_at"] = compute_next_run_at(
                 enabled=bool(row.get("enabled")),
                 schedule_type=row.get("schedule_type"),

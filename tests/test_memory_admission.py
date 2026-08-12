@@ -222,6 +222,10 @@ def test_workbench_attachment_only_turn_is_captured(monkeypatch, tmp_path: Path)
     attachment = tmp_path / "attachments" / "avibe" / "receipt.pdf"
     attachment.parent.mkdir(parents=True)
     attachment.write_bytes(b"pdf")
+    ordinary = is_ordinary_workbench_text(
+        {"content": {"attachments": [{"token": "receipt"}]}},
+        None,
+    )
 
     request = _admission().decide(
         _facts(
@@ -229,6 +233,7 @@ def test_workbench_attachment_only_turn_is_captured(monkeypatch, tmp_path: Path)
             user_id="local",
             is_dm=False,
             text="",
+            is_ordinary_text=ordinary,
             files=[
                 SimpleNamespace(
                     name="receipt.pdf",
@@ -287,6 +292,10 @@ def test_only_extensions_the_provider_can_parse_become_attachments(monkeypatch, 
 
 def test_workbench_turn_of_only_unparseable_uploads_is_not_captured(monkeypatch, tmp_path: Path) -> None:
     uploads = _uploads_dir(monkeypatch, tmp_path)
+    ordinary = is_ordinary_workbench_text(
+        {"content": {"attachments": [{"token": "export"}]}},
+        None,
+    )
 
     decision = _admission().decide(
         _facts(
@@ -294,6 +303,7 @@ def test_workbench_turn_of_only_unparseable_uploads_is_not_captured(monkeypatch,
             user_id="local",
             is_dm=False,
             text="",
+            is_ordinary_text=ordinary,
             files=[_upload(uploads, "export.json", "application/json")],
         )
     )
@@ -323,7 +333,14 @@ def test_unparseable_upload_does_not_cost_its_turn_the_text(monkeypatch, tmp_pat
 def test_workbench_submits_are_classified_beside_their_im_siblings() -> None:
     assert is_ordinary_workbench_text({"text": "hello"}, None) is True
     assert is_ordinary_workbench_text({"text": "hello"}, "msg-7") is False
-    assert is_ordinary_workbench_text({"files": [{"name": "a.png"}]}, None) is False
+    assert (
+        is_ordinary_workbench_text(
+            {"content": {"attachments": [{"token": "upload-1"}]}},
+            None,
+        )
+        is True
+    )
+    assert is_ordinary_workbench_text({"files": [{"name": "a.png"}]}, None) is True
     assert is_ordinary_workbench_text({"metadata": {"forwarded": True}}, None) is False
     assert is_ordinary_workbench_text({"metadata": {"forward_origin": "chat"}}, None) is False
     assert is_ordinary_workbench_text("not a payload", None) is False

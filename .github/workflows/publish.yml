@@ -137,11 +137,13 @@ jobs:
           python-version: "3.12"
 
       - name: Build Memory Runtime bundle
+        env:
+          TMPDIR: ${{ runner.temp }}
         run: |
           python scripts/build_memory_runtime.py \
             --output-dir runtime-artifacts \
             --platform "${{ matrix.artifact }}" \
-            --metadata-output "runtime-artifacts/memory-runtime-1.2.1-${{ matrix.artifact }}.json"
+            --metadata-output "runtime-artifacts/memory-runtime-1.2.3-${{ matrix.artifact }}.json"
 
       - name: Upload Memory Runtime bundle
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
@@ -311,6 +313,16 @@ jobs:
           if "vibe/memory_runtime_manifest.json" not in names:
               raise SystemExit("Wheel is missing vibe/memory_runtime_manifest.json")
           PY
+
+      - name: Run Memory Runtime release guard before publication
+        run: |
+          rm -rf memory-release-guard-assets
+          mkdir -p memory-release-guard-assets
+          cp vibe/memory_runtime_manifest.json memory-release-guard-assets/memory-runtime-manifest.json
+          cp runtime-artifacts/memory-runtime-*.tar.gz memory-release-guard-assets/
+          python scripts/memory_runtime_release_guard.py \
+            --manifest vibe/memory_runtime_manifest.json \
+            verify --asset-dir memory-release-guard-assets
 
       - name: Run release install and upgrade regressions
         run: |

@@ -158,11 +158,12 @@ def is_ordinary_feishu_text(
 def is_ordinary_workbench_text(payload: object, quick_reply_for: object) -> bool:
     """Classify a Workbench submit the same way the IM adapters classify events.
 
-    The Workbench is a surface like any other here: a quick-reply click, an
-    upload, or forwarded metadata is not ordinary human text.
+    Quick replies and forwarded messages are not ordinary human turns. Uploads
+    remain eligible here so Memory admission can decide from the attachments it
+    can actually convert.
     """
 
-    if not isinstance(payload, dict) or quick_reply_for or payload.get("files"):
+    if not isinstance(payload, dict) or quick_reply_for:
         return False
     metadata = payload.get("metadata")
     if isinstance(metadata, dict) and any(

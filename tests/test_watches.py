@@ -589,6 +589,67 @@ def test_managed_watch_store_uses_sqlite_when_path_is_default(tmp_path: Path, mo
     assert sqlite.get_watch(watch.id)["command"] == ["python3", "wait.py"]
 
 
+def test_hfr_479_late_cycle_cannot_replace_committed_watch_terminal_outcome(
+    tmp_path: Path,
+) -> None:
+    """HFR-479 -- the retiring cycle owns definition terminal fields forever."""
+
+    sqlite = SQLiteBackgroundTaskStore(tmp_path / "state" / "vibe.sqlite")
+    winner = ManagedWatchStore(tmp_path / "winner.json")
+    winner._sqlite = sqlite
+    late = ManagedWatchStore(tmp_path / "late.json")
+    late._sqlite = sqlite
+    watch = winner.add_watch(
+        name="ordered retirement",
+        session_key="",
+        command=[],
+        shell_command="true",
+        prefix=None,
+        cwd=None,
+        mode="forever",
+        timeout_seconds=0,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=0,
+        post_to=None,
+        deliver_key=None,
+    )
+    late.load()
+    late.maybe_reload()  # establish the invalidation baseline before retirement
+    requests = TaskExecutionStore(tmp_path / "requests")
+    requests._sqlite = sqlite
+
+    assert winner.mark_cycle_result(
+        watch.id,
+        exit_code=7,
+        error="terminal cycle failed",
+        disable=True,
+    )
+    late_run = requests.build_hook_send(
+        session_key="",
+        prompt="late cycle evidence",
+        run_type="watch",
+        definition_id=watch.id,
+        source_kind="watch",
+    )
+    assert late.mark_cycle_result(
+        watch.id,
+        exit_code=0,
+        error=None,
+        event_detected=True,
+        disable=False,
+        queued_run=late_run.to_dict(),
+    )
+
+    stored = sqlite.get_watch(watch.id)
+    assert stored is not None
+    assert stored["retired_at"] is not None
+    assert stored["last_finished_at"] == stored["retired_at"]
+    assert stored["last_exit_code"] == 7
+    assert stored["last_error"] == "terminal cycle failed"
+    assert sqlite.get_run(late_run.id) is not None
+
+
 def test_sqlite_remove_watch_soft_deletes_watch_but_keeps_runtime(tmp_path: Path) -> None:
     sqlite = SQLiteBackgroundTaskStore(tmp_path / "state" / "vibe.sqlite")
     store = ManagedWatchStore(tmp_path / "watches.json")
@@ -3848,12 +3909,12 @@ _HOOK_BRANCHES: dict[str, dict] = {
         "expect_hook": "exited with code 2",
         "expect_exit_code": 2,
     },
-    # the supervisor's own deadline. Cycle 1 retries (75 IS a retry code) and its
-    # ``retry_delay_seconds`` sleep pushes the loop past the lifetime, so iteration 2
-    # takes the lifetime branch BEFORE it ever reaches ``mark_cycle_start``. Writes in
-    # order: start #1, retry result #2, lifetime result #3.
+    # The supervisor's own deadline. The shared fixture arms the lifetime only after
+    # cycle 1's retry result has landed, then expires it after iteration 2 reloads the
+    # live mirror. The lifetime branch runs BEFORE ``mark_cycle_start``. Writes in order:
+    # start #1, retry result #2, lifetime result #3.
     "lifetime_expiry": {
-        "overrides": {"mode": "forever", "lifetime_timeout_seconds": 0.02, "retry_delay_seconds": 0.15},
+        "overrides": {"mode": "forever", "lifetime_timeout_seconds": 0},
         "cycles": [_CycleResult(exit_code=75, stdout="", stderr="not yet", timed_out=False)],
         "occurrence": 3,
         "expect_hook": "reached its lifetime timeout",
@@ -3948,6 +4009,32 @@ def _hook_branch_service(tmp_path: Path, branch: str, *, request_store=None) -> 
         return results[min(len(calls) - 1, len(results) - 1)]
 
     service._run_cycle = _spy_cycle  # type: ignore[method-assign]
+    if branch == "lifetime_expiry":
+        # Production reaches _sleep_before_retry only after the guarded retry-result
+        # stamp commits. Use that boundary as the condition; no wall-clock wait needed.
+        retry_result_landed = False
+        wait_for_follow_up_slot = service._wait_for_follow_up_slot
+
+        async def _mark_retry_result_landed(watch_arg, *, lifetime_started):  # noqa: ANN001
+            nonlocal retry_result_landed
+            assert calls == [watch_arg.id], "lifetime expiry must follow exactly one retry cycle"
+            retry_result_landed = True
+
+        async def _expire_after_next_reload(watch_id, *, lifetime_started):  # noqa: ANN001
+            slot = await wait_for_follow_up_slot(
+                watch_id,
+                lifetime_started=lifetime_started,
+            )
+            if retry_result_landed:
+                live_watch = store.get_watch(watch_id)
+                assert live_watch is not None
+                elapsed = asyncio.get_running_loop().time() - lifetime_started
+                assert elapsed > 0, "the retry result landed before the lifetime clock advanced"
+                live_watch.lifetime_timeout_seconds = elapsed
+            return slot
+
+        service._sleep_before_retry = _mark_retry_result_landed  # type: ignore[method-assign]
+        service._wait_for_follow_up_slot = _expire_after_next_reload  # type: ignore[method-assign]
     return store, service, watch, request_store, session_id, calls
 
 
@@ -3959,38 +4046,9 @@ def test_run_watch_enqueues_the_branch_hook_when_the_result_stamp_lands(tmp_path
     reached at all. Here the same wiring, minus the reclaim, must enqueue exactly one
     hook carrying that branch's own text.
     """
-    store, service, watch, request_store, _session_id, calls = _hook_branch_service(tmp_path, branch)
+    _store, service, watch, request_store, _session_id, calls = _hook_branch_service(tmp_path, branch)
 
-    async def _run() -> None:
-        if branch != "lifetime_expiry":
-            await service._run_watch(watch.id)
-            return
-
-        # The lifetime now begins when the Watch is created, so a tiny real-time
-        # deadline can expire during fixture setup on a busy CI runner. Hold a wide
-        # deadline until the retry result has landed, then expire it from the exact
-        # monotonic origin that _run_watch is using.
-        watch.lifetime_timeout_seconds = 60
-        store.upsert_watch(watch)
-        cycle_completed = asyncio.Event()
-        release_cycle = asyncio.Event()
-
-        async def _expire_after_completed_cycle(watch_arg, *, lifetime_started):  # noqa: ANN001
-            cycle_completed.set()
-            await release_cycle.wait()
-            watch_arg.lifetime_timeout_seconds = max(
-                asyncio.get_running_loop().time() - lifetime_started,
-                sys.float_info.min,
-            )
-            store.upsert_watch(watch_arg)
-
-        service._sleep_before_retry = _expire_after_completed_cycle  # type: ignore[method-assign]
-        task = asyncio.create_task(service._run_watch(watch.id))
-        await asyncio.wait_for(cycle_completed.wait(), timeout=2)
-        release_cycle.set()
-        await asyncio.wait_for(task, timeout=2)
-
-    asyncio.run(_run())
+    asyncio.run(service._run_watch(watch.id))
 
     _assert_branch_was_reached(branch, calls)
     pending = request_store.list_pending()

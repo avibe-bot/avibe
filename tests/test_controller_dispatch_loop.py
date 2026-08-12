@@ -366,8 +366,12 @@ def test_cleanup_sync_stops_watch_service_on_stopped_loop() -> None:
             await super().stop()
 
     class _MemoryRuntime:
+        def __init__(self) -> None:
+            self.closed = False
+
         async def close(self) -> None:
             assert stopped["capture"] is True
+            self.closed = True
             stopped["runtime"] = True
             stop_order.append("memory-runtime")
 
@@ -381,7 +385,16 @@ def test_cleanup_sync_stops_watch_service_on_stopped_loop() -> None:
     controller.watch_service = _WatchStopper("watch")
     controller.runtime_command_watcher = _Stopper("runtime")
     controller.message_handler = _MessageHandler()
-    controller.memory_runtime = _MemoryRuntime()
+    old_memory_runtime = _MemoryRuntime()
+    fresh_memory_runtime = _MemoryRuntime()
+    controller.memory_runtime = old_memory_runtime
+
+    async def retained_factory_reset() -> None:
+        await asyncio.sleep(0)
+        stop_order.append("factory-reset")
+        controller.memory_runtime = fresh_memory_runtime
+
+    controller._memory_factory_reset_task = loop.create_task(retained_factory_reset())
     controller.update_checker = type("UpdateChecker", (), {"stop": lambda self: None})()
     controller.receiver_tasks = {}
     controller.im_client = None
@@ -397,10 +410,46 @@ def test_cleanup_sync_stops_watch_service_on_stopped_loop() -> None:
     assert stopped["supervisor"] is True
     assert stopped["runtime"] is True
     assert stopped["capture"] is True
-    assert stop_order[0] == "quiesce"
-    assert set(stop_order[1:3]) == {"tasks", "watch"}
-    assert stop_order[3] == "supervisor"
+    assert old_memory_runtime.closed is False
+    assert fresh_memory_runtime.closed is True
+    runtime_work_order = [
+        event for event in stop_order if event != "factory-reset"
+    ]
+    assert runtime_work_order[0] == "quiesce"
+    assert set(runtime_work_order[1:3]) == {"tasks", "watch"}
+    assert runtime_work_order[3] == "supervisor"
+    assert stop_order.index("factory-reset") < stop_order.index("capture")
     assert stop_order[-2:] == ["capture", "memory-runtime"]
+
+
+@pytest.mark.asyncio
+async def test_controller_joins_retained_factory_reset_task() -> None:
+    controller = Controller.__new__(Controller)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def retained_reset() -> None:
+        entered.set()
+        await release.wait()
+
+    task = asyncio.create_task(retained_reset())
+    controller._memory_factory_reset_task = task
+    await entered.wait()
+
+    joining = asyncio.create_task(controller._join_memory_factory_reset_task())
+    await asyncio.sleep(0)
+    assert joining.done() is False
+
+    joining.cancel()
+    await asyncio.sleep(0)
+    assert task.done() is False
+
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await joining
+
+    assert task.done() is True
+    assert controller._memory_factory_reset_task is None
 
 
 @pytest.mark.anyio
@@ -485,6 +534,43 @@ async def test_hfr_284_runtime_work_stack_joins_controller_lanes_before_service_
     assert set(stopped[2:4]) == {"tasks", "watch"}
     assert stopped[4] == "supervisor"
     assert controller._runtime_work_tokens == []
+
+
+@pytest.mark.anyio
+async def test_runtime_work_stack_drains_run_activity_before_executor_stop() -> None:
+    controller = Controller.__new__(Controller)
+    controller._shutdown_tainted = False
+    controller._runtime_work_tokens = []
+    stopped: list[str] = []
+
+    class _Dispatcher:
+        async def drain_agent_run_activity(self) -> None:
+            stopped.append("activity")
+
+    class _Service:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        async def stop(self) -> None:
+            stopped.append(self.name)
+
+    class _Supervisor:
+        def quiesce(self) -> None:
+            stopped.append("quiesce")
+
+        async def stop(self) -> None:
+            stopped.append("supervisor")
+
+    controller.message_dispatcher = _Dispatcher()
+    controller.scheduled_task_service = _Service("tasks")
+    controller.watch_service = _Service("watch")
+    controller.runtime_work_supervisor = _Supervisor()
+
+    await controller._stop_runtime_work_stack()
+
+    assert stopped[0:2] == ["quiesce", "activity"]
+    assert set(stopped[2:4]) == {"tasks", "watch"}
+    assert stopped[4] == "supervisor"
 
 
 def test_request_shutdown_keeps_loop_owned_supervisor_join_alive_after_grace() -> None:

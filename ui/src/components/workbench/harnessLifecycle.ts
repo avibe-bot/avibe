@@ -10,7 +10,7 @@ import { formatElapsed } from '../../lib/agentGraph';
 // ---------------------------------------------------------------------------
 
 export type HarnessLifecycleState = 'running' | 'waiting' | 'paused' | 'finished';
-export type HarnessLifecycleDetail = 'normal' | 'timeout' | 'error';
+export type HarnessLifecycleDetail = 'normal' | 'timeout' | 'error' | 'missed' | 'canceled';
 
 // The filter chips, and the lifecycle states each one selects.
 //
@@ -107,7 +107,7 @@ export function lifecycleLabel(
 }
 
 const STATES = new Set<string>(['running', 'waiting', 'paused', 'finished']);
-export const LIFECYCLE_DETAILS = ['normal', 'timeout', 'error'] as const;
+export const LIFECYCLE_DETAILS = ['normal', 'timeout', 'error', 'missed', 'canceled'] as const;
 const DETAILS = new Set<string>(LIFECYCLE_DETAILS);
 
 // ---------------------------------------------------------------------------
@@ -322,6 +322,8 @@ export type HarnessDefinitionFacts = {
   last_run_at?: string | null;
   last_started_at?: string | null;
   last_finished_at?: string | null;
+  retired_at?: string | null;
+  lifecycle_finished_at?: string | null;
   last_error?: string | null;
   updated_at?: string | null;
   // Derived server-side from the definition's own run history, because
@@ -346,7 +348,102 @@ export type HarnessDefinitionFacts = {
   // Decoded server-side (key is ``metadata``, not ``metadata_json``). Holds the
   // command-task-only ``on_failure`` policy; see ``taskOnFailure``.
   metadata?: Record<string, unknown> | null;
+  retry_exit_codes?: number[] | null;
 };
+
+export type HarnessFailureSummaryKey =
+  | 'harness.failure.timeout'
+  | 'harness.failure.generic'
+  | 'harness.failure.circuitPaused';
+
+export function definitionHasNeutralWatchExit(
+  row: Pick<
+    HarnessDefinitionFacts,
+    'health' | 'lifecycle_detail' | 'lifecycle_state' | 'last_exit_code' | 'retired_at' | 'retry_exit_codes'
+  >,
+): boolean {
+  if (!Array.isArray(row.retry_exit_codes)) return false;
+  // A terminal pre-cycle failure (for example a missing cwd) can reuse the
+  // configured code, but its projected health must remain visible. A manually
+  // paused Watch preserves its most recent healthy cycle even though disabled
+  // rows project failing health; paused + explicitly unretired is the durable
+  // evidence that separates that history from supervisor retirement.
+  const preservedManualPause = row.lifecycle_state === 'paused' && row.retired_at === null;
+  if (row.health !== 'healthy' && !preservedManualPause) return false;
+  if (row.lifecycle_detail != null && row.lifecycle_detail !== 'normal') return false;
+  const exitCode = row.last_exit_code;
+  return exitCode === 64 || (typeof exitCode === 'number' && row.retry_exit_codes.includes(exitCode));
+}
+
+function definitionIsCircuitPaused(
+  row: Pick<HarnessDefinitionFacts, 'lifecycle_state' | 'metadata'>,
+): boolean {
+  return (
+    row.lifecycle_state === 'paused' &&
+    row.metadata?.watch_circuit_breaker != null &&
+    typeof row.metadata.watch_circuit_breaker === 'object' &&
+    (row.metadata.watch_circuit_breaker as { status?: unknown }).status === 'tripped'
+  );
+}
+
+function definitionLastResultWasCanceled(
+  row: Pick<HarnessDefinitionFacts, 'metadata' | 'retry_exit_codes'>,
+): boolean {
+  return !Array.isArray(row.retry_exit_codes) && row.metadata?.last_result_status === 'canceled';
+}
+
+// The UI can only name a timeout when the scheduler's structured fact or the
+// already-projected lifecycle detail proves it. The remaining structured
+// failure facts collapse to one generic category; last_error is deliberately
+// absent from this mapper and remains technical disclosure content only.
+export function definitionFailureSummaryKey(
+  row: Pick<
+    HarnessDefinitionFacts,
+    | 'health'
+    | 'lifecycle_detail'
+    | 'lifecycle_state'
+    | 'last_exit_code'
+    | 'metadata'
+    | 'retired_at'
+    | 'retry_exit_codes'
+  >,
+  technicalErrorPresent = false,
+): HarnessFailureSummaryKey | null {
+  if (definitionIsCircuitPaused(row)) return 'harness.failure.circuitPaused';
+  if (definitionLastResultWasCanceled(row)) return null;
+  // A lifecycle timeout is insufficient for a Task because legacy rows can carry
+  // exit code 124 from the command itself. Only the scheduler's explicit fact
+  // proves a run timed out; Watch lifetime expiry also remains generic.
+  const timedOut = row.metadata?.last_command_timed_out === true;
+  const exitCode = row.last_exit_code;
+  const successfulWatchExit = definitionHasNeutralWatchExit(row);
+  const lifecycleFailure =
+    row.lifecycle_detail != null && row.lifecycle_detail !== 'normal' && !successfulWatchExit;
+  const failed =
+    timedOut ||
+    (row.health === 'failing' && !successfulWatchExit) ||
+    lifecycleFailure ||
+    (typeof exitCode === 'number' && exitCode !== 0 && !successfulWatchExit);
+  if (!failed && technicalErrorPresent && !successfulWatchExit) return 'harness.failure.generic';
+  if (!failed) return null;
+  return timedOut ? 'harness.failure.timeout' : 'harness.failure.generic';
+}
+
+export function definitionExitCodeTone(
+  row: Pick<
+    HarnessDefinitionFacts,
+    | 'health'
+    | 'lifecycle_detail'
+    | 'lifecycle_state'
+    | 'last_exit_code'
+    | 'metadata'
+    | 'retired_at'
+    | 'retry_exit_codes'
+  >,
+): 'neutral' | 'failure' {
+  if (definitionHasNeutralWatchExit(row)) return 'neutral';
+  return row.last_exit_code != null && row.last_exit_code !== 0 ? 'failure' : 'neutral';
+}
 
 // ``failing`` = the newest verdict failed; ``degraded`` = the newest succeeded but
 // a failure is still in the window; ``unknown`` = health could not be computed,
@@ -533,12 +630,18 @@ export function definitionStateSince(
     // can prove when the pause began.
     case 'paused':
       return null;
-    // Prefer the most specific recorded event. A one-shot deadline is only the
-    // fallback when neither a stored finish nor an actual run exists.
+    // A missed one-shot may carry results from an earlier manual run. Its
+    // retirement transition is the only clock that owns the Missed state.
     case 'finished':
+      if (row.lifecycle_detail === 'missed') return row.lifecycle_finished_at ?? row.retired_at ?? null;
+      if (row.schedule_type === 'at') {
+        return row.lifecycle_finished_at ?? null;
+      }
       return (
+        row.lifecycle_finished_at ??
         row.last_finished_at ??
         row.last_run_at ??
+        row.retired_at ??
         (row.schedule_type === 'at' ? (row.run_at ?? null) : null) ??
         definitionActivityAt(row)
       );
@@ -644,7 +747,7 @@ export function definitionRowLine(
     return {
       primary: lifecycleLabel('finished', detail, t),
       secondary: humanizeTime(since, t, now),
-      alert: detail === 'error' || detail === 'timeout' ? detail : unhealthy,
+      alert: detail === 'error' || detail === 'timeout' ? detail : detail === 'missed' ? 'error' : unhealthy,
     };
   }
 

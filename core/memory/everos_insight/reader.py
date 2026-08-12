@@ -12,6 +12,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TypeAlias
 
+from core.memory.processing_record import (
+    ProcessingSourceObservations,
+    SourceObservation,
+)
+
 from .recorder import _scrub_json, _scrub_text
 
 MemoryReadScope: TypeAlias = tuple[str, str]
@@ -88,6 +93,21 @@ class _Unavailable(Exception):
     reason: str
 
 
+@dataclass(frozen=True, slots=True)
+class _ScopedMemcellFilter:
+    principal_id: str
+    project_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class _AdminMemcellFilter:
+    pass
+
+
+_MemcellFilter: TypeAlias = _ScopedMemcellFilter | _AdminMemcellFilter
+_ADMIN_MEMCELL_FILTER = _AdminMemcellFilter()
+
+
 class MemoryInsightReader:
     """Synchronous projections over pinned EverOS diagnostics."""
 
@@ -116,6 +136,32 @@ class MemoryInsightReader:
             )
         )
 
+    def source_observation(self) -> ProcessingSourceObservations:
+        """Perform compact representative reads for each Processing Record source."""
+
+        system_section = self._memcell_status()
+        _, runs_section = self._read_run_summaries([])
+        capture_section = self._capture_status()
+        _, calls_section = self._read_call_counts(
+            [],
+            capture_available=False,
+            runs_available=False,
+        )
+        observed_at = _utc_observed_at()
+        sections = _observed_sections(
+            {
+                "everos": _combine_everos_section(system_section, runs_section),
+                "capture": capture_section,
+                "calls": calls_section,
+            },
+            observed_at=observed_at,
+        )
+        return ProcessingSourceObservations(
+            everos=_source_observation(sections["everos"]),
+            capture=_source_observation(sections["capture"]),
+            calls=_source_observation(sections["calls"]),
+        )
+
     def list_entries(
         self,
         scope: MemoryReadScope,
@@ -128,8 +174,10 @@ class MemoryInsightReader:
         cursor_key = _decode_cursor(cursor) if cursor is not None else None
 
         memcells, everos_section = self._read_memcell_page(
-            principal_id=principal_id,
-            project_id=project_id,
+            query_filter=_ScopedMemcellFilter(
+                principal_id=principal_id,
+                project_id=project_id,
+            ),
             cursor_key=cursor_key,
             limit=limit + 1,
         )
@@ -141,11 +189,14 @@ class MemoryInsightReader:
             capture_available=capture_section["status"] == "available",
             runs_available=runs_section["status"] == "available",
         )
-        sections = {
-            "everos": _combine_everos_section(everos_section, runs_section),
-            "capture": capture_section,
-            "calls": call_section,
-        }
+        sections = _observed_sections(
+            {
+                "everos": _combine_everos_section(everos_section, runs_section),
+                "capture": capture_section,
+                "calls": call_section,
+            },
+            observed_at=_utc_observed_at(),
+        )
         if memcells is None:
             return {
                 "status": "ok",
@@ -193,7 +244,8 @@ class MemoryInsightReader:
             raise ValueError("limit must be between 1 and 50")
         cursor_key = _decode_cursor(cursor) if cursor is not None else None
 
-        memcells, everos_section = self._read_admin_memcell_page(
+        memcells, everos_section = self._read_memcell_page(
+            query_filter=_ADMIN_MEMCELL_FILTER,
             cursor_key=cursor_key,
             limit=limit + 1,
         )
@@ -206,11 +258,14 @@ class MemoryInsightReader:
             runs_available=runs_section["status"] == "available",
         )
 
-        sections = {
-            "everos": _combine_everos_section(everos_section, runs_section),
-            "capture": capture_section,
-            "calls": call_section,
-        }
+        sections = _observed_sections(
+            {
+                "everos": _combine_everos_section(everos_section, runs_section),
+                "capture": capture_section,
+                "calls": call_section,
+            },
+            observed_at=_utc_observed_at(),
+        )
         if memcells is None:
             return {
                 "status": "ok",
@@ -248,8 +303,10 @@ class MemoryInsightReader:
             raise ValueError("invalid memcell id")
 
         row, everos_section = self._read_detail_memcell(
-            principal_id=principal_id,
-            project_id=project_id,
+            query_filter=_ScopedMemcellFilter(
+                principal_id=principal_id,
+                project_id=project_id,
+            ),
             memcell_id=memcell_id,
         )
         return self._entry_detail_result(
@@ -262,7 +319,10 @@ class MemoryInsightReader:
     def admin_entry_detail(self, memcell_id: str) -> dict[str, Any]:
         if not isinstance(memcell_id, str) or not _ID_RE.fullmatch(memcell_id):
             raise ValueError("invalid memcell id")
-        row, everos_section = self._read_admin_detail_memcell(memcell_id=memcell_id)
+        row, everos_section = self._read_detail_memcell(
+            query_filter=_ADMIN_MEMCELL_FILTER,
+            memcell_id=memcell_id,
+        )
         scope = _memcell_scope(row) if row is not None else None
         if scope is None:
             row = None
@@ -289,11 +349,14 @@ class MemoryInsightReader:
                 return {"status": "not_found"}
             return {
                 "status": "not_found",
-                "sections": {
-                    "everos": everos_section,
-                    "capture": _source_status(self._paths.capture_db_path),
-                    "calls": _source_status(self._paths.call_log_db_path),
-                },
+                "sections": _observed_sections(
+                    {
+                        "everos": everos_section,
+                        "capture": _source_status(self._paths.capture_db_path),
+                        "calls": _source_status(self._paths.call_log_db_path),
+                    },
+                    observed_at=_utc_observed_at(),
+                ),
             }
         queues, capture_section = self._read_detail_capture_rows(
             row,
@@ -325,7 +388,6 @@ class MemoryInsightReader:
         )
         steps = _steps_projection(
             row,
-            capture,
             selected_runs,
             base_urls=self._provider_base_urls,
             exact_values=self._exact_redaction_values,
@@ -351,11 +413,14 @@ class MemoryInsightReader:
             "omitted_call_count": max(0, owned_call_count - len(selected_calls)),
             "omitted_step_count": max(0, owned_run_count - len(selected_runs)),
             "current_state": current_state,
-            "sections": {
-                "everos": _combine_everos_section(everos_section, runs_section),
-                "capture": capture_section,
-                "calls": call_section,
-            },
+            "sections": _observed_sections(
+                {
+                    "everos": _combine_everos_section(everos_section, runs_section),
+                    "capture": capture_section,
+                    "calls": call_section,
+                },
+                observed_at=_utc_observed_at(),
+            ),
         }
         if _encoded_size(result) > _MAX_RESPONSE_BYTES:
             raise AssertionError("memory insight detail exceeded its fixed response budget")
@@ -438,13 +503,13 @@ class MemoryInsightReader:
     def _read_memcell_page(
         self,
         *,
-        principal_id: str,
-        project_id: str,
+        query_filter: _MemcellFilter,
         cursor_key: tuple[int, str] | None,
         limit: int,
     ) -> tuple[list[sqlite3.Row] | None, dict[str, str]]:
         try:
             with _read_only(self._paths.system_db_path) as conn:
+                project_sql, sender_sql, scope_args = _memcell_scope_sql(query_filter)
                 sql = f"""
                     SELECT memcell_id, app_id, project_id, message_ids_json,
                            sender_ids_json, payload_json, timestamp, timestamp_ms
@@ -462,18 +527,18 @@ class MemoryInsightReader:
                                timestamp,
                                {_MEMCELL_TIMESTAMP_SQL} AS timestamp_ms
                         FROM memcell
-                        WHERE app_id = ? AND project_id = ?
+                        WHERE app_id = ? AND {project_sql}
                           AND length(CAST(sender_ids_json AS BLOB))
                                 <= {_MAX_MEMCELL_SENDER_IDS_JSON_BYTES}
                           AND CASE WHEN json_valid(sender_ids_json) THEN
                                 json_type(sender_ids_json) = 'array'
                                 AND json_array_length(sender_ids_json) = 1
                                 AND json_type(sender_ids_json, '$[0]') = 'text'
-                                AND json_extract(sender_ids_json, '$[0]') = ?
+                                AND {sender_sql}
                               ELSE 0 END
                     )
                 """
-                args: list[object] = [_APP_ID, project_id, principal_id]
+                args: list[object] = [_APP_ID, *scope_args]
                 if cursor_key is not None:
                     sql += " WHERE timestamp_ms < ? OR (timestamp_ms = ? AND memcell_id < ?)"
                     args.extend((cursor_key[0], cursor_key[0], cursor_key[1]))
@@ -483,58 +548,46 @@ class MemoryInsightReader:
         except _Unavailable as unavailable:
             return None, {"status": "unavailable", "reason": unavailable.reason}
 
-    def _read_admin_memcell_page(
-        self,
-        *,
-        cursor_key: tuple[int, str] | None,
-        limit: int,
-    ) -> tuple[list[sqlite3.Row] | None, dict[str, str]]:
+    def _memcell_status(self) -> dict[str, str]:
         try:
             with _read_only(self._paths.system_db_path) as conn:
-                sql = f"""
+                conn.execute(
+                    """
                     SELECT memcell_id, app_id, project_id, message_ids_json,
-                           sender_ids_json, payload_json, timestamp, timestamp_ms
-                    FROM (
-                        SELECT memcell_id, app_id, project_id,
-                               CASE WHEN length(CAST(message_ids_json AS BLOB))
-                                             <= {_MAX_MEMCELL_MESSAGE_IDS_JSON_BYTES}
-                                    THEN message_ids_json ELSE '[]' END AS message_ids_json,
-                               CASE WHEN length(CAST(sender_ids_json AS BLOB))
-                                             <= {_MAX_MEMCELL_SENDER_IDS_JSON_BYTES}
-                                    THEN sender_ids_json ELSE '[]' END AS sender_ids_json,
-                               CASE WHEN length(CAST(payload_json AS BLOB))
-                                             <= {_MAX_MEMCELL_PAYLOAD_JSON_BYTES}
-                                    THEN payload_json ELSE NULL END AS payload_json,
-                               timestamp,
-                               {_MEMCELL_TIMESTAMP_SQL} AS timestamp_ms
-                        FROM memcell
-                        WHERE app_id = ? AND project_id GLOB ?
-                          AND length(CAST(sender_ids_json AS BLOB))
-                                <= {_MAX_MEMCELL_SENDER_IDS_JSON_BYTES}
-                          AND CASE WHEN json_valid(sender_ids_json) THEN
-                                json_type(sender_ids_json) = 'array'
-                                AND json_array_length(sender_ids_json) = 1
-                                AND json_type(sender_ids_json, '$[0]') = 'text'
-                                AND json_extract(sender_ids_json, '$[0]') GLOB ?
-                              ELSE 0 END
-                    )
-                """
-                args: list[object] = [_APP_ID, _PROJECT_GLOB, _PRINCIPAL_GLOB]
-                if cursor_key is not None:
-                    sql += " WHERE timestamp_ms < ? OR (timestamp_ms = ? AND memcell_id < ?)"
-                    args.extend((cursor_key[0], cursor_key[0], cursor_key[1]))
-                sql += " ORDER BY timestamp_ms DESC, memcell_id DESC LIMIT ?"
-                args.append(limit)
-                return list(conn.execute(sql, args)), {"status": "available"}
+                           sender_ids_json, payload_json, timestamp
+                    FROM memcell
+                    LIMIT 1
+                    """
+                ).fetchone()
+                conn.execute(
+                    """
+                    SELECT md_path, status, last_changed_at, error
+                    FROM md_change_state
+                    LIMIT 1
+                    """
+                ).fetchone()
+            return {"status": "available"}
         except _Unavailable as unavailable:
-            return None, {"status": "unavailable", "reason": unavailable.reason}
+            return {"status": "unavailable", "reason": unavailable.reason}
 
     def _capture_status(self) -> dict[str, str]:
         try:
             with _read_only(self._paths.capture_db_path) as conn:
                 conn.execute(
-                    "SELECT session_id, principal_id, project_ref, provider_timestamp_ms, "
-                    "add_request_id, flush_request_id FROM memory_capture_queue LIMIT 1"
+                    """
+                    SELECT queue.session_id, queue.provider_session_ref, queue.epoch,
+                           queue.generation, queue.principal_id, queue.project_ref,
+                           queue.provider_timestamp_ms, queue.state,
+                           queue.occurred_at_ms, queue.add_request_id,
+                           settlement.request_id
+                    FROM memory_capture_queue AS queue
+                    LEFT JOIN memory_flush_settlements AS settlement
+                      ON settlement.provider_session_ref = queue.provider_session_ref
+                     AND settlement.epoch = queue.epoch
+                     AND settlement.generation = queue.generation
+                     AND settlement.operation_kind = 'flush'
+                    LIMIT 1
+                    """
                 ).fetchone()
             return {"status": "available"}
         except _Unavailable as unavailable:
@@ -547,7 +600,7 @@ class MemoryInsightReader:
         try:
             with _read_only(self._paths.ome_db_path) as conn:
                 if not memcells:
-                    conn.execute("SELECT 1 FROM run_record LIMIT 1").fetchone()
+                    _validate_run_record_source(conn)
                     return {}, {"status": "available"}
                 page = [
                     {
@@ -559,7 +612,7 @@ class MemoryInsightReader:
                     if (scope := _memcell_scope(row)) is not None
                 ]
                 if not page:
-                    conn.execute("SELECT 1 FROM run_record LIMIT 1").fetchone()
+                    _validate_run_record_source(conn)
                     return {}, {"status": "available"}
                 page_json = json.dumps(page, separators=(",", ":"))
                 status_columns = ", ".join(
@@ -630,7 +683,7 @@ class MemoryInsightReader:
                 if runs_available:
                     _attach_read_only(conn, self._paths.ome_db_path, "ome")
                 if not memcells:
-                    conn.execute("SELECT 1 FROM provider_call LIMIT 1").fetchone()
+                    _validate_provider_call_source(conn)
                     return {}, {"status": "available"}
 
                 page_json = json.dumps(
@@ -674,15 +727,17 @@ class MemoryInsightReader:
                     """,
                 ]
                 if capture_available:
-                    capture_links = " UNION ".join(
-                        f"""
-                        SELECT page.memcell_id, owned_queue.{request_column} AS request_id
+                    ctes.append(
+                        """
+                        capture_candidates AS MATERIALIZED (
+                        SELECT page.memcell_id, page.owner_id, page.project_id,
+                               owned_queue.add_request_id AS request_id
                         FROM page
                         JOIN capture.memory_capture_queue AS owned_queue
                           ON owned_queue.principal_id = page.owner_id
                          AND owned_queue.project_ref = page.project_id
-                        WHERE typeof(owned_queue.{request_column}) = 'text'
-                          AND owned_queue.{request_column} != ''
+                        WHERE typeof(owned_queue.add_request_id) = 'text'
+                          AND owned_queue.add_request_id != ''
                           AND EXISTS (
                               SELECT 1 FROM json_each(page.message_ids_json) AS message_id
                               WHERE message_id.type = 'text'
@@ -690,20 +745,60 @@ class MemoryInsightReader:
                                     'm_' || owned_queue.session_id || '_'
                                     || CAST(owned_queue.provider_timestamp_ms AS TEXT) || '_000'
                           )
-                          AND NOT EXISTS (
+
+                        UNION
+
+                        SELECT page.memcell_id, page.owner_id, page.project_id,
+                               owned_settlement.request_id AS request_id
+                        FROM page
+                        JOIN capture.memory_capture_queue AS owned_queue
+                          ON owned_queue.principal_id = page.owner_id
+                         AND owned_queue.project_ref = page.project_id
+                        JOIN capture.memory_flush_settlements AS owned_settlement
+                          ON owned_settlement.provider_session_ref =
+                                owned_queue.provider_session_ref
+                         AND owned_settlement.epoch = owned_queue.epoch
+                         AND owned_settlement.generation = owned_queue.generation
+                         AND owned_settlement.operation_kind = 'flush'
+                        WHERE typeof(owned_settlement.request_id) = 'text'
+                          AND owned_settlement.request_id != ''
+                          AND EXISTS (
+                              SELECT 1 FROM json_each(page.message_ids_json) AS message_id
+                              WHERE message_id.type = 'text'
+                                AND message_id.value =
+                                    'm_' || owned_queue.session_id || '_'
+                                    || CAST(owned_queue.provider_timestamp_ms AS TEXT) || '_000'
+                          )
+                        ),
+                        capture_links AS MATERIALIZED (
+                        SELECT candidate.memcell_id, candidate.request_id
+                        FROM capture_candidates AS candidate
+                        WHERE NOT EXISTS (
                               SELECT 1 FROM capture.memory_capture_queue AS any_queue
-                              WHERE (
-                                  any_queue.add_request_id = owned_queue.{request_column}
-                                  OR any_queue.flush_request_id = owned_queue.{request_column}
-                              ) AND (
-                                  any_queue.principal_id IS NOT page.owner_id
-                                  OR any_queue.project_ref IS NOT page.project_id
+                              WHERE any_queue.add_request_id = candidate.request_id
+                                AND (
+                                  any_queue.principal_id IS NOT candidate.owner_id
+                                  OR any_queue.project_ref IS NOT candidate.project_id
                               )
                           )
+                          AND NOT EXISTS (
+                              SELECT 1
+                              FROM capture.memory_flush_settlements AS any_settlement
+                              JOIN capture.memory_capture_queue AS any_queue
+                                ON any_queue.provider_session_ref =
+                                      any_settlement.provider_session_ref
+                               AND any_queue.epoch = any_settlement.epoch
+                               AND any_queue.generation = any_settlement.generation
+                              WHERE any_settlement.operation_kind = 'flush'
+                                AND any_settlement.request_id = candidate.request_id
+                                AND (
+                                    any_queue.principal_id IS NOT candidate.owner_id
+                                    OR any_queue.project_ref IS NOT candidate.project_id
+                                )
+                          )
+                        )
                         """
-                        for request_column in ("add_request_id", "flush_request_id")
                     )
-                    ctes.append(f"capture_links AS MATERIALIZED ({capture_links})")
                     call_branches.append(
                         """
                         SELECT capture_links.memcell_id, pc.id AS call_id
@@ -830,30 +925,68 @@ class MemoryInsightReader:
                     """,
                 ]
                 if capture_available:
-                    capture_links = " UNION ".join(
-                        f"""
-                        SELECT owned_queue.{column} AS request_id
+                    ctes.append(
+                        """
+                        capture_candidates AS MATERIALIZED (
+                        SELECT owned_queue.add_request_id AS request_id
                         FROM page JOIN capture.memory_capture_queue AS owned_queue
                           ON owned_queue.principal_id = :owner_id
                          AND owned_queue.project_ref = :project_id
-                        WHERE typeof(owned_queue.{column}) = 'text' AND owned_queue.{column} != ''
+                        WHERE typeof(owned_queue.add_request_id) = 'text'
+                          AND owned_queue.add_request_id != ''
                           AND EXISTS (
                               SELECT 1 FROM json_each(page.message_ids_json) AS message_id
                               WHERE message_id.type = 'text' AND message_id.value =
                                   'm_' || owned_queue.session_id || '_'
                                   || CAST(owned_queue.provider_timestamp_ms AS TEXT) || '_000'
                           )
-                          AND NOT EXISTS (
+
+                        UNION
+
+                        SELECT owned_settlement.request_id AS request_id
+                        FROM page JOIN capture.memory_capture_queue AS owned_queue
+                          ON owned_queue.principal_id = :owner_id
+                         AND owned_queue.project_ref = :project_id
+                        JOIN capture.memory_flush_settlements AS owned_settlement
+                          ON owned_settlement.provider_session_ref =
+                                owned_queue.provider_session_ref
+                         AND owned_settlement.epoch = owned_queue.epoch
+                         AND owned_settlement.generation = owned_queue.generation
+                         AND owned_settlement.operation_kind = 'flush'
+                        WHERE typeof(owned_settlement.request_id) = 'text'
+                          AND owned_settlement.request_id != ''
+                          AND EXISTS (
+                              SELECT 1 FROM json_each(page.message_ids_json) AS message_id
+                              WHERE message_id.type = 'text' AND message_id.value =
+                                  'm_' || owned_queue.session_id || '_'
+                                  || CAST(owned_queue.provider_timestamp_ms AS TEXT) || '_000'
+                          )
+                        ),
+                        capture_links AS MATERIALIZED (
+                        SELECT candidate.request_id
+                        FROM capture_candidates AS candidate
+                        WHERE NOT EXISTS (
                               SELECT 1 FROM capture.memory_capture_queue AS any_queue
-                              WHERE (any_queue.add_request_id = owned_queue.{column}
-                                     OR any_queue.flush_request_id = owned_queue.{column})
+                              WHERE any_queue.add_request_id = candidate.request_id
                                 AND (any_queue.principal_id IS NOT :owner_id
                                      OR any_queue.project_ref IS NOT :project_id)
                           )
+                          AND NOT EXISTS (
+                              SELECT 1
+                              FROM capture.memory_flush_settlements AS any_settlement
+                              JOIN capture.memory_capture_queue AS any_queue
+                                ON any_queue.provider_session_ref =
+                                      any_settlement.provider_session_ref
+                               AND any_queue.epoch = any_settlement.epoch
+                               AND any_queue.generation = any_settlement.generation
+                              WHERE any_settlement.operation_kind = 'flush'
+                                AND any_settlement.request_id = candidate.request_id
+                                AND (any_queue.principal_id IS NOT :owner_id
+                                     OR any_queue.project_ref IS NOT :project_id)
+                          )
+                        )
                         """
-                        for column in ("add_request_id", "flush_request_id")
                     )
-                    ctes.append(f"capture_links AS MATERIALIZED ({capture_links})")
                     branches.append(
                         """
                         SELECT pc.id AS call_id FROM capture_links
@@ -944,47 +1077,14 @@ class MemoryInsightReader:
             return None, 0, {"status": "unavailable", "reason": unavailable.reason}
 
     def _read_detail_memcell(
-        self, *, principal_id: str, project_id: str, memcell_id: str
-    ) -> tuple[sqlite3.Row | None, dict[str, str]]:
-        try:
-            with _read_only(self._paths.system_db_path) as conn:
-                row = conn.execute(
-                    f"""
-                    SELECT memcell_id, app_id, project_id,
-                           CASE WHEN length(CAST(message_ids_json AS BLOB))
-                                         <= {_MAX_MEMCELL_MESSAGE_IDS_JSON_BYTES}
-                                THEN message_ids_json ELSE '[]' END AS message_ids_json,
-                           CASE WHEN length(CAST(sender_ids_json AS BLOB))
-                                         <= {_MAX_MEMCELL_SENDER_IDS_JSON_BYTES}
-                                THEN sender_ids_json ELSE '[]' END AS sender_ids_json,
-                           CASE WHEN length(CAST(payload_json AS BLOB))
-                                         <= {_MAX_MEMCELL_PAYLOAD_JSON_BYTES}
-                                THEN payload_json ELSE NULL END AS payload_json,
-                           timestamp
-                    FROM memcell
-                    WHERE memcell_id = ? AND app_id = ? AND project_id = ?
-                      AND length(CAST(sender_ids_json AS BLOB))
-                            <= {_MAX_MEMCELL_SENDER_IDS_JSON_BYTES}
-                      AND CASE WHEN json_valid(sender_ids_json) THEN
-                            json_type(sender_ids_json) = 'array'
-                            AND json_array_length(sender_ids_json) = 1
-                            AND json_type(sender_ids_json, '$[0]') = 'text'
-                            AND json_extract(sender_ids_json, '$[0]') = ?
-                          ELSE 0 END
-                    """,
-                    (memcell_id, _APP_ID, project_id, principal_id),
-                ).fetchone()
-                return row, {"status": "available"}
-        except _Unavailable as unavailable:
-            return None, {"status": "unavailable", "reason": unavailable.reason}
-
-    def _read_admin_detail_memcell(
         self,
         *,
+        query_filter: _MemcellFilter,
         memcell_id: str,
     ) -> tuple[sqlite3.Row | None, dict[str, str]]:
         try:
             with _read_only(self._paths.system_db_path) as conn:
+                project_sql, sender_sql, scope_args = _memcell_scope_sql(query_filter)
                 row = conn.execute(
                     f"""
                     SELECT memcell_id, app_id, project_id,
@@ -999,17 +1099,17 @@ class MemoryInsightReader:
                                 THEN payload_json ELSE NULL END AS payload_json,
                            timestamp
                     FROM memcell
-                    WHERE memcell_id = ? AND app_id = ? AND project_id GLOB ?
+                    WHERE memcell_id = ? AND app_id = ? AND {project_sql}
                       AND length(CAST(sender_ids_json AS BLOB))
                             <= {_MAX_MEMCELL_SENDER_IDS_JSON_BYTES}
                       AND CASE WHEN json_valid(sender_ids_json) THEN
                             json_type(sender_ids_json) = 'array'
                             AND json_array_length(sender_ids_json) = 1
                             AND json_type(sender_ids_json, '$[0]') = 'text'
-                            AND json_extract(sender_ids_json, '$[0]') GLOB ?
+                            AND {sender_sql}
                           ELSE 0 END
                     """,
-                    (memcell_id, _APP_ID, _PROJECT_GLOB, _PRINCIPAL_GLOB),
+                    (memcell_id, _APP_ID, *scope_args),
                 ).fetchone()
                 return row, {"status": "available"}
         except _Unavailable as unavailable:
@@ -1023,7 +1123,7 @@ class MemoryInsightReader:
                 rows = list(conn.execute(
                     """
                     SELECT session_id, principal_id, project_ref, provider_timestamp_ms,
-                           state, occurred_at_ms, add_request_id, flush_request_id
+                           state, occurred_at_ms, add_request_id
                     FROM memory_capture_queue
                     WHERE principal_id = :owner_id AND project_ref = :project_id
                       AND EXISTS (
@@ -1086,6 +1186,52 @@ class MemoryInsightReader:
         except _Unavailable as unavailable:
             return None, 0, {"status": "unavailable", "reason": unavailable.reason}
 
+def _validate_run_record_source(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        SELECT run_id, strategy_name, status, attempt, started_at, finished_at,
+               error, event_topic, event_payload
+        FROM run_record
+        LIMIT 1
+        """
+    ).fetchone()
+
+
+def _validate_provider_call_source(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        SELECT id, started_at_ms, duration_ms, kind, stage, model, status, error,
+               finish_reason, prompt_tokens, completion_tokens, request_json,
+               response_json, request_bytes, response_bytes, request_id, run_id,
+               memcell_id, app_id, project_id, owner_id, parent_type, parent_id,
+               dropped_before
+        FROM provider_call INDEXED BY provider_call_memcell_id_idx
+        LIMIT 1
+        """
+    ).fetchone()
+    conn.execute(
+        """
+        SELECT id, request_id
+        FROM provider_call INDEXED BY provider_call_request_id_idx
+        LIMIT 1
+        """
+    ).fetchone()
+    conn.execute(
+        """
+        SELECT id, run_id
+        FROM provider_call INDEXED BY provider_call_run_id_idx
+        LIMIT 1
+        """
+    ).fetchone()
+    conn.execute(
+        """
+        SELECT id, parent_type, parent_id
+        FROM provider_call INDEXED BY provider_call_parent_idx
+        LIMIT 1
+        """
+    ).fetchone()
+
+
 @contextmanager
 def _read_only(path: Path) -> Iterator[sqlite3.Connection]:
     if not path.is_file():
@@ -1136,6 +1282,43 @@ def _combine_everos_section(
     return {"status": "available"}
 
 
+def _observed_sections(
+    sections: dict[str, dict[str, str]],
+    *,
+    observed_at: str,
+) -> dict[str, dict[str, str | None]]:
+    return {
+        name: {
+            **section,
+            "observed_at": (
+                observed_at
+                if section["status"] in {"available", "partial"}
+                else None
+            ),
+        }
+        for name, section in sections.items()
+    }
+
+
+def _source_observation(section: dict[str, str | None]) -> SourceObservation:
+    status = section["status"]
+    if status not in {"available", "partial", "unavailable"}:
+        status = "unavailable"
+    return SourceObservation(
+        status=status,
+        observed_at=section.get("observed_at"),
+        reason=section.get("reason"),
+    )
+
+
+def _utc_observed_at() -> str:
+    return (
+        datetime.now(timezone.utc)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
+    )
+
+
 def _validated_scope(scope: MemoryReadScope) -> MemoryReadScope:
     if not isinstance(scope, tuple) or len(scope) != 2:
         raise ValueError("invalid memory scope")
@@ -1145,6 +1328,24 @@ def _validated_scope(scope: MemoryReadScope) -> MemoryReadScope:
     if not isinstance(project_id, str) or not _PROJECT_RE.fullmatch(project_id):
         raise ValueError("invalid memory project")
     return principal_id, project_id
+
+
+def _memcell_scope_sql(
+    query_filter: _MemcellFilter,
+) -> tuple[str, str, tuple[str, str]]:
+    if isinstance(query_filter, _ScopedMemcellFilter):
+        return (
+            "project_id = ?",
+            "json_extract(sender_ids_json, '$[0]') = ?",
+            (query_filter.project_id, query_filter.principal_id),
+        )
+    if isinstance(query_filter, _AdminMemcellFilter):
+        return (
+            "project_id GLOB ?",
+            "json_extract(sender_ids_json, '$[0]') GLOB ?",
+            (_PROJECT_GLOB, _PRINCIPAL_GLOB),
+        )
+    raise TypeError("unsupported memcell query filter")
 
 
 def _decode_json(value: object) -> Any:
@@ -1389,24 +1590,12 @@ def _capture_projection(
 
 def _steps_projection(
     memcell: sqlite3.Row,
-    capture: dict[str, Any],
     runs: list[sqlite3.Row],
     *,
     base_urls: tuple[str, ...],
     exact_values: tuple[str, ...],
 ) -> list[dict[str, Any]]:
-    steps: list[dict[str, Any]] = []
-    if capture.get("status") == "available":
-        delivery_states = capture.get("delivery_states")
-        capture_status = (
-            delivery_states[0]
-            if isinstance(delivery_states, list) and len(delivery_states) == 1
-            else "mixed"
-        )
-        steps.append({"type": "capture", "status": capture_status})
-    else:
-        steps.append({"type": "capture", **capture})
-    steps.append(
+    steps: list[dict[str, Any]] = [
         {
             "type": "memcell",
             "status": "created",
@@ -1416,7 +1605,7 @@ def _steps_projection(
                 _MAX_MEMCELL_ID_BYTES,
             ),
         }
-    )
+    ]
     steps.extend(
         _run_projection(
             run,

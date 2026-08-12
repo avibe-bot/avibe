@@ -102,6 +102,95 @@ def test_disabled_agent_cannot_run(tmp_path: Path) -> None:
     assert payload["error"] == "agent 'worker' is disabled"
 
 
+def test_task_resume_rejects_orphaned_owner_without_execution_target(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """A migrated orphan cannot resume into an invisible firing state."""
+
+    from storage.importer import ensure_sqlite_state
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    store = cli.ScheduledTaskStore()
+    task = store.add_task(
+        name="Orphaned command",
+        session_key="",
+        prompt="",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        shell_command="true",
+        metadata={
+            "orphaned_task_owner": {
+                "reason_code": "task_owner_session_unavailable",
+                "owner_session_id": "ses-removed",
+            }
+        },
+    )
+    task.enabled = False
+    store.upsert_task(task)
+
+    with (
+        patch("vibe.cli._task_store", return_value=store),
+        patch("vibe.cli._memory_cli_language", return_value="zh"),
+    ):
+        result, payload = _capture_stderr_json(
+            cli.cmd_task_set_enabled,
+            task.id,
+            True,
+        )
+
+    assert result == 1
+    assert payload["code"] == "task_owner_session_unavailable"
+    assert payload["error"] == "这个 Task 的管理 Session 已不可用。"
+    assert payload["hint"] == (
+        "请从可用的 Agent Session 创建替代 Task，再用 "
+        f"`vibe task remove {task.id}` 删除这条失去管理者的定义。"
+    )
+    assert payload["details"] == {
+        "task_id": task.id,
+        "owner_session_id": "ses-removed",
+    }
+    assert cli.ScheduledTaskStore().get_task(task.id).enabled is False
+
+
+def test_task_resume_rejects_retired_one_shot_until_schedule_changes(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from storage.importer import ensure_sqlite_state
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    store = cli.ScheduledTaskStore()
+    task = store.add_task(
+        session_key="",
+        prompt="send digest",
+        schedule_type="at",
+        run_at="2026-08-11T00:00:00+00:00",
+        timezone_name="UTC",
+    )
+    task.enabled = False
+    task.retired_at = "2026-08-11T00:00:01+00:00"
+    task.retirement_reason = "schedule_missed"
+    store.upsert_task(task)
+
+    with patch("vibe.cli._task_store", return_value=store):
+        result, payload = _capture_stderr_json(
+            cli.cmd_task_set_enabled,
+            task.id,
+            True,
+        )
+
+    assert result == 1
+    assert payload["code"] == "task_schedule_retired"
+    assert payload["details"] == {"task_id": task.id}
+    saved = cli.ScheduledTaskStore().get_task(task.id)
+    assert saved is not None
+    assert saved.enabled is False
+    assert saved.retirement_reason == "schedule_missed"
+
+
 def test_task_update_preserves_archived_agent_reference(capsys) -> None:
     db_path = cli.paths.get_sqlite_state_path()
     agent_store = cli.VibeAgentStore(db_path)
@@ -1184,6 +1273,7 @@ def test_task_run_missing_id_returns_guidance(tmp_path: Path) -> None:
 
 def test_task_list_hides_completed_one_shots_by_default(tmp_path: Path, capsys) -> None:
     store = cli.ScheduledTaskStore()
+    requests = cli.TaskExecutionStore()
     store.add_task(
         session_key="slack::channel::C123",
         prompt="recurring",
@@ -1198,7 +1288,18 @@ def test_task_list_hides_completed_one_shots_by_default(tmp_path: Path, capsys) 
         run_at="2026-03-31T09:00:00+08:00",
         timezone_name="Asia/Shanghai",
     )
-    store.mark_task_result(done.id, error=None)
+    done_run = requests.enqueue_task_run(
+        done.id,
+        source_kind="scheduler",
+        task=done,
+        expected_run_at=done.run_at,
+        expected_timezone=done.timezone,
+        expected_job_id="done-job",
+    )
+    assert done_run is not None
+    claimed_done = requests.claim(done_run.id)
+    assert claimed_done is not None
+    assert requests.complete(claimed_done, ok=True) == "succeeded"
     failed = store.add_task(
         session_key="slack::channel::C123",
         prompt="failed one-shot",
@@ -1206,7 +1307,20 @@ def test_task_list_hides_completed_one_shots_by_default(tmp_path: Path, capsys) 
         run_at="2026-03-31T10:00:00+08:00",
         timezone_name="Asia/Shanghai",
     )
-    store.mark_task_result(failed.id, error="delivery failed")
+    failed_run = requests.enqueue_task_run(
+        failed.id,
+        source_kind="scheduler",
+        task=failed,
+        expected_run_at=failed.run_at,
+        expected_timezone=failed.timezone,
+        expected_job_id="failed-job",
+    )
+    assert failed_run is not None
+    claimed_failed = requests.claim(failed_run.id)
+    assert claimed_failed is not None
+    assert requests.complete(
+        claimed_failed, ok=False, error="delivery failed"
+    ) == "failed"
 
     with patch("vibe.cli._task_store", return_value=store):
         result = cli.cmd_task_list()
@@ -1504,6 +1618,48 @@ def test_task_run_enqueues_request(tmp_path: Path, capsys) -> None:
     assert payload["ok"] is True
     assert payload["task_id"] == task.id
     assert (request_root / "pending" / f"{payload['execution_id']}.json").exists()
+
+
+def test_task_run_enqueues_manual_rerun_for_retired_one_shot(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store = cli.ScheduledTaskStore()
+    requests = cli.TaskExecutionStore()
+    task = store.add_task(
+        session_key="slack::channel::C123",
+        prompt="hello",
+        schedule_type="at",
+        run_at="2026-03-31T09:00:00+08:00",
+        timezone_name="Asia/Shanghai",
+    )
+    owner = requests.enqueue_task_run(
+        task.id,
+        source_kind="scheduler",
+        task=task,
+        expected_run_at=task.run_at,
+        expected_timezone=task.timezone,
+        expected_job_id="generation-a",
+    )
+    assert owner is not None
+    store.load()
+    retired = store.get_task(task.id)
+    terminal = (retired.retired_at, retired.retirement_reason, retired.last_run_id)
+
+    with (
+        patch("vibe.cli._task_store", return_value=store),
+        patch("vibe.cli._task_request_store", return_value=requests),
+    ):
+        result = cli.cmd_task_run(task.id)
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    manual = requests.get_run(payload["execution_id"])
+    assert manual is not None and manual["source_kind"] == "cli"
+    assert "task_schedule_consumed" not in manual["metadata"]
+    current = cli.ScheduledTaskStore().get_task(task.id)
+    assert current is not None and current.enabled is False
+    assert (current.retired_at, current.retirement_reason, current.last_run_id) == terminal
 
 
 def test_task_update_requires_at_least_one_change(tmp_path: Path) -> None:
@@ -2495,7 +2651,7 @@ def test_runs_cancel_running_agent_run_stops_live_turn_and_marks_canceled(
         result = cli.cmd_runs_cancel(_parse_runs_cancel([request.id]))
 
     assert result == 0
-    cancel_dispatch.assert_awaited_once_with("ses_live_cancel")
+    cancel_dispatch.assert_awaited_once_with("ses_live_cancel", run_id=request.id)
     saved = request_store.get_run(request.id)
     assert saved is not None
     assert saved["status"] == "canceled"
@@ -2510,6 +2666,55 @@ def test_runs_cancel_running_agent_run_stops_live_turn_and_marks_canceled(
     assert payload["cancel_result"]["live_cancel_confirmed"] is True
     assert payload["cancel_result"]["run_terminalized"] is True
     assert payload["run"]["status"] == "canceled"
+
+
+def test_runs_cancel_shared_turn_detaches_only_the_requested_run(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = cli.TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_id="ses_shared_turn",
+        message="one shared participant",
+        agent_name="worker",
+        callback_session_id="ses_callback",
+    )
+    assert request_store.claim(request.id) is not None
+    async def detach_in_controller(*_args, **_kwargs):
+        request_store.update_callback_status(request.id, status="skipped")
+        request_store.mark_run_canceled(request.id)
+        return {
+            "status_code": 200,
+            "body": {
+                "ok": True,
+                "session_id": "ses_shared_turn",
+                "status": "run_detached",
+                "reason": "turn_has_other_participants",
+            },
+        }
+
+    cancel_dispatch = AsyncMock(side_effect=detach_in_controller)
+
+    with (
+        patch("vibe.cli._task_request_store", return_value=request_store),
+        patch("vibe.internal_client.cancel_dispatch", cancel_dispatch),
+    ):
+        result = cli.cmd_runs_cancel(_parse_runs_cancel([request.id]))
+
+    assert result == 0
+    cancel_dispatch.assert_awaited_once_with("ses_shared_turn", run_id=request.id)
+    saved = request_store.get_run(request.id)
+    assert saved is not None
+    assert saved["status"] == "canceled"
+    assert saved["callback_status"] == "skipped"
+    assert saved["callback_completed_at"] is not None
+    assert request_store.list_pending_callbacks() == []
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["cancel_code"] == "run_canceled_without_live_stop"
+    assert payload["cancel_result"]["live_cancel_confirmed"] is False
+    assert payload["cancel_result"]["run_terminalized"] is True
 
 
 def test_runs_cancel_running_agent_run_reports_recorded_only_when_controller_unavailable(
@@ -2536,7 +2741,7 @@ def test_runs_cancel_running_agent_run_reports_recorded_only_when_controller_una
         result = cli.cmd_runs_cancel(_parse_runs_cancel([request.id]))
 
     assert result == 0
-    cancel_dispatch.assert_awaited_once_with("ses_controller_down")
+    cancel_dispatch.assert_awaited_once_with("ses_controller_down", run_id=request.id)
     saved = request_store.get_run(request.id)
     assert saved is not None
     assert saved["status"] == "running"
@@ -2576,7 +2781,7 @@ def test_runs_cancel_running_agent_run_reports_recorded_only_when_backend_refuse
         result = cli.cmd_runs_cancel(_parse_runs_cancel([request.id]))
 
     assert result == 0
-    cancel_dispatch.assert_awaited_once_with("ses_stop_failed")
+    cancel_dispatch.assert_awaited_once_with("ses_stop_failed", run_id=request.id)
     saved = request_store.get_run(request.id)
     assert saved is not None
     assert saved["status"] == "running"
@@ -2614,7 +2819,7 @@ def test_runs_cancel_running_agent_run_reports_recorded_only_when_no_live_turn(
         result = cli.cmd_runs_cancel(_parse_runs_cancel([request.id]))
 
     assert result == 0
-    cancel_dispatch.assert_awaited_once_with("ses_no_live_turn")
+    cancel_dispatch.assert_awaited_once_with("ses_no_live_turn", run_id=request.id)
     saved = request_store.get_run(request.id)
     assert saved is not None
     assert saved["status"] == "running"
@@ -2638,12 +2843,22 @@ def test_runs_cancel_running_agent_run_does_not_overwrite_already_finished_turn(
         agent_name="worker",
     )
     assert request_store.claim(request.id) is not None
-    cancel_dispatch = AsyncMock(
-        return_value={
+    async def settle_before_cancel(*_args, **_kwargs):
+        assert request_store.settle_without_result(
+            request.id,
+            terminal_status="succeeded",
+        ) == "succeeded"
+        return {
             "status_code": 200,
-            "body": {"ok": True, "session_id": "ses_already_finished", "status": "already_finished"},
+            "body": {
+                "ok": True,
+                "session_id": "ses_already_finished",
+                "status": "run_settled",
+                "reason": "run_already_terminal",
+            },
         }
-    )
+
+    cancel_dispatch = AsyncMock(side_effect=settle_before_cancel)
 
     with (
         patch("vibe.cli._task_request_store", return_value=request_store),
@@ -2652,17 +2867,16 @@ def test_runs_cancel_running_agent_run_does_not_overwrite_already_finished_turn(
         result = cli.cmd_runs_cancel(_parse_runs_cancel([request.id]))
 
     assert result == 0
-    cancel_dispatch.assert_awaited_once_with("ses_already_finished")
+    cancel_dispatch.assert_awaited_once_with("ses_already_finished", run_id=request.id)
     saved = request_store.get_run(request.id)
     assert saved is not None
-    assert saved["status"] == "running"
-    assert saved["completed_at"] is None
-    assert saved["cancel_requested"] is True
+    assert saved["status"] == "succeeded"
+    assert saved["completed_at"] is not None
+    assert saved["cancel_requested"] is False
     payload = json.loads(capsys.readouterr().out)
-    assert payload["cancel_code"] == "cancel_request_recorded_only"
-    assert payload["cancel_result"]["reason_code"] == "already_finished"
+    assert payload["cancel_code"] == "run_already_settled"
     assert payload["cancel_result"]["live_cancel_confirmed"] is False
-    assert payload["run"]["status"] == "running"
+    assert payload["run"]["status"] == "succeeded"
 
 
 def test_runs_cancel_queued_agent_run_does_not_call_live_controller(

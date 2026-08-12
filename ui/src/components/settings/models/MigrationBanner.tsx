@@ -77,7 +77,7 @@ export const MigrationBanner: React.FC<{
           title line where it reads as "close this strip". */}
       <div className="flex flex-col gap-2.5 rounded-xl border border-gold/40 bg-gold/[0.08] px-4 py-3 sm:flex-row sm:items-center sm:gap-3">
         <div className="flex min-w-0 flex-1 items-center gap-3">
-          <span className="flex size-9 shrink-0 items-center justify-center rounded-[10px] bg-gold/15 text-gold">
+          <span className="model-hub-ink-gold flex size-9 shrink-0 items-center justify-center rounded-[10px] bg-gold/15">
             <ArrowDownToLine className="size-[18px]" />
           </span>
           <div className="flex min-w-0 flex-1 flex-col gap-0.5">
@@ -98,7 +98,7 @@ export const MigrationBanner: React.FC<{
         <Button
           variant="outline"
           size="sm"
-          className="h-10 shrink-0 border-gold/40 text-gold hover:bg-gold/10 hover:text-gold sm:h-9"
+          className="model-hub-ink-gold h-10 shrink-0 border-gold/40 hover:bg-gold/10 sm:h-9"
           onClick={() => setDialogOpen(true)}
         >
           <ArrowDownToLine className="size-3.5" />

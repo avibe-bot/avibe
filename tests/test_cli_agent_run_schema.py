@@ -419,7 +419,7 @@ def test_agent_run_async_defaults_callback_from_caller_env(tmp_path: Path, capsy
     assert stored["metadata"]["caller_context"]["session_id"] == caller_session["id"]
 
 
-def test_agent_run_send_now_is_durable_on_an_existing_session(
+def test_agent_run_send_now_is_explicit_p1_on_an_existing_session(
     tmp_path: Path,
     capsys,
 ) -> None:
@@ -489,12 +489,12 @@ def test_agent_run_send_now_is_durable_on_an_existing_session(
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["delivery_intent"] == "send_now"
-    assert payload["run"]["delivery_intent"] == "send_now"
+    assert payload["delivery_intent"] == "steer"
+    assert payload["run"]["delivery_intent"] == "steer"
     stored = request_store.get_run(payload["run_id"])
     assert stored is not None
     assert stored["session_id"] == session_id
-    assert stored["metadata"]["delivery_intent"] == "send_now"
+    assert stored["metadata"]["delivery_intent"] == "steer"
 
 
 def test_agent_run_send_now_rejects_a_new_session(capsys) -> None:
@@ -667,10 +667,10 @@ def test_agent_run_send_now_accepts_an_im_backed_session(
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["session_id"] == session["id"]
-    assert payload["delivery_intent"] == "send_now"
+    assert payload["delivery_intent"] == "steer"
     stored = request_store.get_run(payload["run_id"])
     assert stored is not None
-    assert stored["metadata"]["delivery_intent"] == "send_now"
+    assert stored["metadata"]["delivery_intent"] == "steer"
 
 
 def test_agent_run_async_self_target_defaults_to_no_callback(
@@ -1847,6 +1847,28 @@ def test_runs_list_current_session_filters_from_caller_env(tmp_path: Path, capsy
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
     assert [run["session_id"] for run in payload["runs"]] == ["ses-current"]
+
+
+@pytest.mark.parametrize(
+    "activity_at",
+    (
+        "2099-01-01T00:00:00Z",
+        "2099-01-01T00:00:00z",
+        "2099-01-01T00:00:00",
+        "2099-01-01T08:00:00+08:00",
+    ),
+)
+def test_brief_run_payload_parses_supported_iso_instants(activity_at: str) -> None:
+    payload = cli._run_payload(
+        {
+            "id": "run-live",
+            "status": "running",
+            "last_activity_at": activity_at,
+        },
+        brief=True,
+    )
+
+    assert payload["activity_age_seconds"] == 0.0
 
 
 def test_runs_list_current_session_conflicts_with_session_id(capsys) -> None:

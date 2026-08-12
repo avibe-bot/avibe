@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useEffect, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
+import { requestMemoryRuntimeRepair } from '../lib/memoryRepair';
 import { useToast } from './ToastContext';
 import { apiFetch, recoverRemoteAuthFromSessionProbe } from '../lib/apiFetch';
 import { isAuthorizationSensitiveReadPath } from '../lib/authorizationCache';
@@ -22,6 +23,14 @@ import {
 } from '../lib/workbenchEventConnection';
 import type { DockDoc } from './dockDoc';
 import { archivedConflictSessionId, selectApiErrorFields } from './apiErrorParse';
+import { parseMemoryFactoryResetResult } from '../lib/memoryFactoryReset';
+import type { MemoryFactoryResetResult } from '../lib/memoryFactoryReset';
+import {
+  SessionDraftPersistence,
+  type SessionDraftSaveResult,
+  type SessionDraftServerState,
+  type SessionDraftWrite,
+} from '../lib/sessionDraftPersistence';
 
 export type { InstanceCapabilities, SessionInfo };
 export type { ShowPageAccess };
@@ -551,14 +560,21 @@ export type ApiContextType = {
   installDependency: (dep: string) => Promise<InstallResult>;
   getMemorySettings: () => Promise<MemorySettingsResult>;
   saveMemorySettings: (patch: MemorySettingsPatch) => Promise<MemorySettingsResult>;
+  getMemoryProcessingRecord: () => Promise<MemoryProcessingRecordResult>;
   getMemoryStatus: () => Promise<MemoryStatusResult>;
   getMemoryFailures: () => Promise<MemoryFailureLogResult>;
+  getMemoryMaintenance: () => Promise<MemoryMaintenanceResult>;
   getMemoryProfile: () => Promise<MemoryItemsResult>;
-  searchMemory: (query: string, limit?: number) => Promise<MemoryItemsResult>;
+  searchMemory: (query: string, limit?: number) => Promise<MemoryRecallResult>;
   getMemoryLog: (cursor?: string | null, limit?: number) => Promise<MemoryLogListResult>;
   getMemoryLogEntry: (memcellId: string) => Promise<MemoryLogDetailResult>;
   clearMemory: () => Promise<MemoryClearResult>;
+  resumeMemoryClear: (operationId: string) => Promise<MemoryClearRecoveryResult>;
+  abortMemoryClear: (operationId: string) => Promise<MemoryClearRecoveryResult>;
+  factoryResetMemory: () => Promise<MemoryFactoryResetResult>;
   restartMemoryRuntime: () => Promise<MemoryRuntimeRestartResult>;
+  rebuildMemoryRuntime: () => Promise<MemoryRuntimeRebuildResult>;
+  repairMemoryIndex: () => Promise<MemoryRuntimeRepairResult>;
   getBackendRuntime: (name: string) => Promise<BackendRuntimeInfo>;
   restartBackend: (name: string) => Promise<BackendRestartResult>;
   getCodexAuth: () => Promise<CodexAuthState>;
@@ -695,6 +711,9 @@ export type ApiContextType = {
   getSessionBootstrap: (sessionId: string) => Promise<WorkbenchSessionBootstrap>;
   updateSession: (sessionId: string, payload: Partial<WorkbenchSessionUpdate>) => Promise<WorkbenchSession>;
   archiveSession: (sessionId: string) => Promise<WorkbenchSession>;
+  /** Apply the terminal archived state for raw request paths that intentionally
+   *  bypass the shared JSON error handler. */
+  convergeSessionArchived: (sessionId: string) => void;
   /** Subscribe to "the server just refused a write because that session is
    *  archived". Fires for EVERY request whose error body carries
    *  ``session_archived``, whatever the verb — the messages POST, the sessions
@@ -738,8 +757,15 @@ export type ApiContextType = {
   removeQueuedMessage: (sessionId: string, messageId: string) => Promise<{ removed: boolean }>;
   sendQueuedNow: (sessionId: string, messageId: string) => Promise<{ ok: boolean; status?: string; code?: string; detail?: string }>;
   getTurnState: (sessionId: string, options?: { handleError?: boolean }) => Promise<SessionRuntimeState>;
+  getCachedSessionDraft: (sessionId: string) => string | null;
+  cacheSessionDraft: (sessionId: string, text: string) => void;
   getSessionDraft: (sessionId: string) => Promise<{ text: string }>;
   setSessionDraft: (sessionId: string, text: string) => Promise<{ ok: boolean }>;
+  reconcileSessionDraftAfterSend: (
+    sessionId: string,
+    draft: { text: string; updated_at: string | null },
+  ) => Promise<void>;
+  recoverSessionDraftAfterRejectedSend: (sessionId: string) => Promise<void>;
   listInbox: (params?: { platform?: string; unreadOnly?: boolean; limit?: number; before?: string; onlySession?: string; cache?: boolean; handleError?: boolean }) => Promise<InboxFeedResult>;
   connectWorkbenchEvents: (handlers: WorkbenchEventHandlers) => () => void;
   listVibeAgents: (params?: {
@@ -1315,9 +1341,22 @@ export type WorkbenchSessionBootstrap = {
   next_after_id: string | null;
   next_before_id?: string | null;
   queued: WorkbenchMessage[];
-  draft: { text: string };
+  draft: { text: string; updated_at: string | null };
   turn_state: SessionRuntimeState;
 };
+
+function sessionDraftServerState(payload: unknown): SessionDraftServerState {
+  const draft = payload && typeof payload === 'object'
+    ? payload as { text?: unknown; updated_at?: unknown }
+    : {};
+  return {
+    text: typeof draft.text === 'string' ? draft.text : '',
+    updatedAt: typeof draft.updated_at === 'string' ? draft.updated_at : null,
+  };
+}
+
+const SESSION_DRAFT_WRITE_TIMEOUT_MS = 12_000;
+const SESSION_DRAFT_RECONCILE_TIMEOUT_MS = 5_000;
 
 // One row of the per-session ("Slack-like") inbox feed from ``GET /api/inbox``.
 // Aggregated per session at query time: ``preview_text`` is the session's latest
@@ -1377,7 +1416,7 @@ export type HarnessSessionSummary = {
 // one-shot that finished on its own indistinguishable from one the user paused.
 // ``lifecycle_detail`` is set only on ``finished`` rows and says how they ended.
 export type HarnessLifecycleState = 'running' | 'waiting' | 'paused' | 'finished';
-export type HarnessLifecycleDetail = 'normal' | 'timeout' | 'error';
+export type HarnessLifecycleDetail = 'normal' | 'timeout' | 'error' | 'missed' | 'canceled';
 export type HarnessDefinitionHealth = 'failing' | 'degraded' | 'healthy' | 'unknown';
 
 // The fields every task/watch row reads to describe its state.
@@ -1394,6 +1433,8 @@ export type HarnessDefinitionState = {
   // "how long has this been running" must come from the run that is running,
   // not from whenever the row last did anything.
   running_since: string | null;
+  retired_at?: string | null;
+  lifecycle_finished_at?: string | null;
   // Derived from this definition's own settled run outcomes, never from
   // ``last_run_at``/``last_error``: those are overwritten on every fire, so one
   // success used to erase days of failure and a daily-failing cron rendered
@@ -1437,6 +1478,10 @@ export type HarnessTask = HarnessSessionSummary & HarnessDefinitionState & {
   last_run_at: string | null;
   last_run_id: string | null;
   last_error: string | null;
+  resume_blocked?: {
+    code: string;
+    owner_session_id: string;
+  } | null;
   // Command tasks: a scheduled definition that runs a subprocess instead of
   // prompting an Agent. Non-null ``shell_command`` OR a non-empty ``command``
   // argv is what makes a row one (see ``taskIsCommand``); its ``prompt`` is
@@ -1494,6 +1539,10 @@ export type HarnessWatch = HarnessSessionSummary & HarnessDefinitionState & {
   last_event_at: string | null;
   last_error: string | null;
   last_exit_code: number | null;
+  // Decoded server-side metadata includes durable Watch admission facts such as
+  // the circuit-breaker incident; it is troubleshooting evidence, not a new UI
+  // lifecycle state.
+  metadata: Record<string, unknown> | null;
   runtime: HarnessWatchRuntime;
   // Whether the waiter process is alive. ``null`` means we have never seen a
   // heartbeat for it, which is not the same as having seen it exit — the row
@@ -1801,7 +1850,11 @@ export type MemoryProcessingConfig = {
 export type MemorySettings = {
   status: 'ok';
   enabled: boolean;
+  repair_available?: boolean;
   processing: MemoryProcessingConfig;
+  rebuild_required?: boolean;
+  /** Derived recovery state; raw durable intent never crosses the UI contract. */
+  factory_reset_required?: boolean;
 };
 
 // Omitting a field keeps its current value; an explicit `api_key: null` clears it
@@ -1818,6 +1871,7 @@ export type MemorySettingsPatch = {
     llm?: MemoryEndpointPatch;
     embedding?: MemoryEndpointPatch;
   };
+  confirm_rebuild?: boolean;
 };
 
 export type MemoryFailure = { status: 'failed'; error: string };
@@ -1826,56 +1880,21 @@ export type MemorySettingsResult =
   | (MemorySettings & { runtime?: { ok?: boolean; [key: string]: unknown } })
   | MemoryFailure;
 
-export type MemoryStatusState =
-  | 'disabled'
-  | 'starting'
-  | 'ready'
-  | 'syncing'
-  | 'degraded'
-  | 'down'
-  | 'clearing'
-  | 'error';
-
-// The six display buckets the backend derives from the counters below, so this
-// rule lives in exactly one place (`core/memory/presentation.py`).
-export type MemoryStatusBuckets = {
-  syncing: number;
-  succeeded: number;
-  unknown: number;
-  failed: number;
-  dead: number;
-  missed: number;
-};
-
 export type MemoryStatus = {
   status: 'ok';
-  state: MemoryStatusState;
-  buckets: MemoryStatusBuckets;
-  pending: number;
-  processing: number;
-  awaiting_receipt: number;
-  succeeded: number;
-  receipt_unknown: number;
-  distill_failed: number;
-  dead: number;
-  missed: number;
-  queue_plaintext_bytes: number;
-  provider_disk_bytes: number;
-  last_success_at: string | null;
-  last_flush_observation: 'succeeded' | 'rejected' | 'unknown' | null;
-  last_flush_status: 'extracted' | 'no_extraction' | null;
-  last_flush_error_code: string | null;
-  last_flush_request_id: string | null;
-  last_flush_at: string | null;
-  processing_fault_kind: 'credential' | 'engine' | null;
-  processing_fault_since: string | null;
-  processing_alert_active: boolean;
-  recorder?: {
-    state: 'active' | 'degraded' | 'disabled';
+  source: {
+    status: 'available' | 'stale' | 'unknown' | 'unavailable';
+    observed_at: string | null;
     reason: string | null;
   };
-  error: string | null;
-  data_exists: boolean;
+  health: null | {
+    status: string;
+    version: string | null;
+    capabilities: Record<string, unknown>;
+    disabled_features: string[];
+    cascade: Record<string, unknown>;
+    recorder: Record<string, unknown>;
+  };
 };
 
 // A dependency-missing failure from the internal handler omits `status` and
@@ -1883,15 +1902,67 @@ export type MemoryStatus = {
 export type MemoryStatusResult = MemoryStatus | MemoryFailure | { error: string };
 
 export type MemoryFailureLogEntry = {
-  kind: 'delivery_abandoned' | 'distillation_rejected' | 'result_unknown';
+  id: string;
+  kind: string;
+  state: string;
+  operation: string;
   occurred_at: string;
   error_code: string | null;
-  request_id: string | null;
   attempts: number;
+  generation: number;
+  request_id: string | null;
+};
+
+export type MemoryClearRecovery = {
+  operation_id: string;
+  state: string;
+  can_resume: boolean;
+  can_abort: boolean;
+  occurred_at?: string | null;
+  error_code?: string | null;
+};
+
+export type MemoryFailureLog = {
+  status: 'ok';
+  items: MemoryFailureLogEntry[];
+  recovery: MemoryClearRecovery | null;
 };
 
 export type MemoryFailureLogResult =
-  | { items: MemoryFailureLogEntry[]; retention_days: number }
+  | MemoryFailureLog
+  | MemoryFailure
+  | { error: string };
+
+export type MemoryMaintenance = {
+  status: 'ok';
+  data_exists: boolean;
+  can_clear: boolean;
+  clear_recovery: MemoryClearRecovery | null;
+};
+
+export type MemoryMaintenanceResult = MemoryMaintenance | MemoryFailure | { error: string };
+
+export type MemoryProcessingRecordSummary = {
+  status: 'ok';
+  runtime: {
+    source: MemoryStatus['source'];
+    health: MemoryStatus['health'];
+  };
+  sources: MemoryLogSections;
+  anomalies: {
+    source: MemoryLogSourceStatus;
+    items: MemoryFailureLogEntry[];
+  };
+  maintenance: {
+    source: MemoryLogSourceStatus;
+    data_exists: boolean;
+    can_clear: boolean;
+    clear_recovery: MemoryClearRecovery | null;
+  };
+};
+
+export type MemoryProcessingRecordResult =
+  | MemoryProcessingRecordSummary
   | MemoryFailure
   | { error: string };
 
@@ -1928,9 +1999,24 @@ export type MemoryItemsResult =
   | { status: 'ok'; items: MemoryItem[]; warnings: string[]; profile_warning?: 'empty' | null }
   | MemoryFailure;
 
+export type MemoryRecallResult =
+  | {
+      status: 'ok';
+      items: MemoryItem[];
+      warnings: string[];
+      requested_mode: 'auto' | 'keyword' | 'vector' | 'hybrid' | 'agentic';
+      effective_mode: 'keyword' | 'vector' | 'hybrid' | 'agentic';
+      source: 'everos';
+      current_session_overlay: boolean;
+      watermark_ms: number | null;
+      freshness: 'unknown';
+    }
+  | MemoryFailure;
+
 export type MemoryLogSourceStatus = {
-  status: 'available' | 'partial' | 'unavailable';
-  reason?: string;
+  status: 'available' | 'partial' | 'stale' | 'unknown' | 'unavailable';
+  observed_at: string | null;
+  reason?: string | null;
 };
 
 export type MemoryLogSections = {
@@ -2020,11 +2106,46 @@ export type MemoryLogDetailResult =
     }
   | MemoryFailure;
 
-export type MemoryClearResult = { status: 'completed'; epoch: number } | MemoryFailure;
+export type MemoryClearResult =
+  | { status: 'completed'; operation_id: string; epoch: number }
+  | (MemoryFailure & { recovery?: MemoryClearRecovery | null });
+
+export type MemoryClearRecoveryResult =
+  | { status: 'completed' | 'aborted'; operation_id: string }
+  | MemoryFailure;
 
 // Reconciliation answers the controller's ok/error shape rather than the
 // status/error one the read routes use.
 export type MemoryRuntimeRestartResult = { ok: true; state?: string } | { ok: false; error?: string };
+
+export type MemoryRuntimeRebuildResult =
+  | { ok: true; result?: string; state?: string }
+  | { ok: false; error?: string; result?: string };
+
+export type MemoryRuntimeRepairResult =
+  | {
+      ok: true;
+      result: 'completed' | 'completed_with_warnings';
+      health: MemoryCascadeHealth;
+    }
+  | {
+      ok: false;
+      error: string;
+      result: 'failed' | 'interrupted' | 'timed_out';
+    }
+  | MemoryFailure;
+
+export type MemoryCascadeHealth = {
+  healthy: boolean;
+  reasons: string[];
+  pending: number;
+  failed_permanent: number;
+  failed_retryable: number;
+  drain_consecutive_failures: number;
+  unrecoverable_total: number;
+  optimize_failure_streak: number;
+  prune_stale_seconds: number;
+};
 
 export type BackendRuntimeInfo = {
   ok: boolean;
@@ -2410,8 +2531,21 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const eventConnectionStateRef = useRef<WorkbenchEventConnectionState>('reconnecting');
   const eventReconnectLoopRef = useRef<WorkbenchEventReconnectLoop | null>(null);
   const wakeWorkbenchEventsRef = useRef<() => void>(() => {});
+  const syncSessionDraftsRef = useRef<() => void>(() => {});
   const stopWorkbenchEventsRef = useRef<() => void>(() => {});
   const sessionArchivedHandlersRef = useRef(new Set<(sessionId: string) => void>());
+  const sessionDraftPersistence = useMemo(() => new SessionDraftPersistence(), []);
+
+  const convergeSessionArchived = (sessionId: string) => {
+    sessionDraftPersistence.clearSession(sessionId);
+    for (const handler of Array.from(sessionArchivedHandlersRef.current)) {
+      try {
+        handler(sessionId);
+      } catch (err) {
+        console.error('[API] session-archived subscriber failed', err);
+      }
+    }
+  };
 
   const handleApiError = async (res: Response, path: string) => {
     let errorMessage = `Request failed: ${path} (${res.status})`;
@@ -2451,13 +2585,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // must never change whether/what this handler throws.
     const archivedSessionId = archivedConflictSessionId(errorCode, path);
     if (archivedSessionId) {
-      for (const handler of Array.from(sessionArchivedHandlersRef.current)) {
-        try {
-          handler(archivedSessionId);
-        } catch (err) {
-          console.error('[API] session-archived subscriber failed', err);
-        }
-      }
+      convergeSessionArchived(archivedSessionId);
     }
 
     throw new ApiError(errorMessage, res.status, errorCode);
@@ -2656,6 +2784,9 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (!envelope) return;
       if (envelope.data.session_id) {
         clearSessionReadCache(envelope.data.session_id);
+        if (envelope.data.event === 'archived') {
+          sessionDraftPersistence.clearSession(envelope.data.session_id);
+        }
       } else {
         clearReadCacheMatching((path) => path.startsWith('/api/inbox') || path.startsWith('/api/sessions'));
       }
@@ -2812,11 +2943,14 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   useEffect(() => {
     const wakeIfVisible = () => {
-      if (document.visibilityState === 'visible') wakeWorkbenchEventsRef.current();
+      if (document.visibilityState !== 'visible') return;
+      wakeWorkbenchEventsRef.current();
+      syncSessionDraftsRef.current();
     };
     document.addEventListener('visibilitychange', wakeIfVisible);
     window.addEventListener('online', wakeIfVisible);
     window.addEventListener('focus', wakeIfVisible);
+    if (document.visibilityState === 'visible') syncSessionDraftsRef.current();
     return () => {
       document.removeEventListener('visibilitychange', wakeIfVisible);
       window.removeEventListener('online', wakeIfVisible);
@@ -2840,6 +2974,95 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       clearReadCache();
     }
     return { res, payloadJson };
+  };
+
+  const readSessionDraftServer = async (
+    sessionId: string,
+    timeoutMs = SESSION_DRAFT_RECONCILE_TIMEOUT_MS,
+  ): Promise<SessionDraftServerState | null> => {
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await apiFetch(
+        `/api/sessions/${encodeURIComponent(sessionId)}/draft`,
+        { signal: controller.signal },
+      );
+      if (!res.ok) return null;
+      return sessionDraftServerState(await res.json().catch(() => null));
+    } catch {
+      return null;
+    } finally {
+      window.clearTimeout(timeout);
+    }
+  };
+
+  const writeSessionDraft = async (
+    sessionId: string,
+    draft: SessionDraftWrite,
+  ): Promise<SessionDraftSaveResult> => {
+    const controller = new AbortController();
+    let timedOut = false;
+    const timeout = window.setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, SESSION_DRAFT_WRITE_TIMEOUT_MS);
+    try {
+      const { res, payloadJson } = await requestJson(
+        `/api/sessions/${encodeURIComponent(sessionId)}/draft`,
+        {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            text: draft.text,
+            expected_updated_at: draft.expectedUpdatedAt,
+          }),
+          signal: controller.signal,
+        },
+        `/api/sessions/${sessionId}/draft`,
+        { handleError: false },
+      );
+      const hasServerDraft = payloadJson?.draft && typeof payloadJson.draft === 'object';
+      const server = sessionDraftServerState(payloadJson?.draft);
+      if (res.status === 409 && payloadJson?.code === 'draft_conflict') {
+        return { ok: false, conflict: true, server };
+      }
+      return res.ok
+        ? { ok: true, ...(hasServerDraft ? { server } : {}) }
+        : { ok: false };
+    } catch (error) {
+      if (!timedOut) throw error;
+      // The request may have committed before its response stalled. Reconcile
+      // once before releasing queued successors so they inherit the actual
+      // cloud revision instead of manufacturing a conflict from uncertainty.
+      const server = await readSessionDraftServer(sessionId);
+      if (!server) return { ok: false };
+      if (server.text === draft.text) return { ok: true, server };
+      return server.updatedAt !== draft.expectedUpdatedAt
+        ? { ok: false, conflict: true, server }
+        : {
+            ok: false,
+            server,
+            // The abort only stops waiting for the response; the synchronous
+            // server transaction may still commit. If the queued successor
+            // conflicts specifically with this text, rebase and retry once.
+            retryConflictIfServerText: draft.text,
+          };
+    } finally {
+      window.clearTimeout(timeout);
+    }
+  };
+  const rebaseAndRetrySessionDraft = async (
+    sessionId: string,
+    server: SessionDraftServerState,
+  ): Promise<void> => {
+    sessionDraftPersistence.rebase(sessionId, server);
+    await sessionDraftPersistence.retry(
+      sessionId,
+      (draft) => writeSessionDraft(sessionId, draft),
+    );
+  };
+  syncSessionDraftsRef.current = () => {
+    void sessionDraftPersistence.retryAll(writeSessionDraft);
   };
 
   const postJson = async (path: string, payload: any, opts?: { handleError?: boolean }) => {
@@ -3078,10 +3301,20 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // thrown ApiError/toast) so the Memory page can render its own inline state per code.
     getMemorySettings: () => getJson('/api/memory/settings', { handleError: false }),
     saveMemorySettings: (patch) => patchJson('/api/memory/settings', patch, { handleError: false }),
+    getMemoryProcessingRecord: () => getJson('/api/memory/processing-record', { handleError: false }),
     getMemoryStatus: () => getJson('/api/memory/status', { handleError: false }),
     getMemoryFailures: () => getJson('/api/memory/failures', { handleError: false }),
+    getMemoryMaintenance: () => getJson('/api/memory/maintenance', { handleError: false }),
     getMemoryProfile: () => getJson('/api/memory/profile', { handleError: false }),
-    searchMemory: (query, limit = 20) => postJson('/api/memory/search', { query, limit }, { handleError: false }),
+    searchMemory: (query, limit = 20) => postJson('/api/memory/search', {
+      query,
+      policy: {
+        mode: 'hybrid',
+        max_results: limit,
+        include_profile: true,
+        include_current_session: false,
+      },
+    }, { handleError: false }),
     getMemoryLog: (cursor = null, limit = 20) => {
       const query = new URLSearchParams({ limit: String(limit) });
       if (cursor) query.set('cursor', cursor);
@@ -3090,7 +3323,17 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     getMemoryLogEntry: (memcellId) =>
       getJson(`/api/memory/log/entry?memcell_id=${encodeURIComponent(memcellId)}`, { handleError: false }),
     clearMemory: () => postJson('/api/memory/clear', { confirm: true }, { handleError: false }),
+    resumeMemoryClear: (operationId) =>
+      postJson('/api/memory/clear/resume', { operation_id: operationId }, { handleError: false }),
+    abortMemoryClear: (operationId) =>
+      postJson('/api/memory/clear/abort', { operation_id: operationId }, { handleError: false }),
+    factoryResetMemory: async () => parseMemoryFactoryResetResult(
+      await postJson('/api/memory/runtime/factory-reset', { confirm: true }, { handleError: false }),
+    ),
     restartMemoryRuntime: () => postJson('/api/memory/runtime/restart', {}, { handleError: false }),
+    rebuildMemoryRuntime: () =>
+      postJson('/api/memory/runtime/rebuild', { confirm: true }, { handleError: false }),
+    repairMemoryIndex: () => requestMemoryRuntimeRepair(postJson),
     getBackendRuntime: (name) => getJson(`/api/backend/${encodeURIComponent(name)}/runtime`),
     restartBackend: (name) => postJson(`/api/backend/${encodeURIComponent(name)}/restart`, {}),
     getCodexAuth: () => getJson('/api/backend/codex/auth'),
@@ -3258,8 +3501,28 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         session: res.ok && payload && typeof payload.id === 'string' ? payload : null,
       };
     },
-    getSessionBootstrap: (sessionId) =>
-      getJson(`/api/sessions/${encodeURIComponent(sessionId)}/bootstrap`),
+    getSessionBootstrap: async (sessionId) => {
+      const read = sessionDraftPersistence.beginRead(sessionId);
+      try {
+        const payload = await getJson(`/api/sessions/${encodeURIComponent(sessionId)}/bootstrap`);
+        if (payload?.session?.status === 'archived') {
+          sessionDraftPersistence.clearSession(sessionId);
+          return payload;
+        }
+        const server = sessionDraftServerState(payload?.draft);
+        const text = sessionDraftPersistence.reconcileRead(sessionId, read, server);
+        void sessionDraftPersistence.retry(
+          sessionId,
+          (draft) => writeSessionDraft(sessionId, draft),
+        );
+        return text === server.text
+          ? payload
+          : { ...payload, draft: { ...(payload.draft ?? {}), text } };
+      } catch (error) {
+        sessionDraftPersistence.releaseRead(sessionId, read);
+        throw error;
+      }
+    },
     updateSession: async (sessionId, payload) => {
       const { payloadJson } = await requestJson(`/api/sessions/${encodeURIComponent(sessionId)}`, {
         method: 'PATCH',
@@ -3268,7 +3531,12 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }, `PATCH /api/sessions/${sessionId}`);
       return payloadJson;
     },
-    archiveSession: (sessionId) => deleteJson(`/api/sessions/${encodeURIComponent(sessionId)}`),
+    archiveSession: async (sessionId) => {
+      const payload = await deleteJson(`/api/sessions/${encodeURIComponent(sessionId)}`);
+      sessionDraftPersistence.clearSession(sessionId);
+      return payload;
+    },
+    convergeSessionArchived,
     onSessionArchived,
     getArchivePreview: (sessionId) =>
       getJson(`/api/sessions/${encodeURIComponent(sessionId)}/archive-preview`),
@@ -3358,14 +3626,40 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
       return res.json();
     },
-    getSessionDraft: (sessionId) => getCachedJson(`/api/sessions/${encodeURIComponent(sessionId)}/draft`),
-    setSessionDraft: async (sessionId, text) => {
-      const { res, payloadJson } = await requestJson(`/api/sessions/${encodeURIComponent(sessionId)}/draft`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text }),
-      }, `/api/sessions/${sessionId}/draft`, { handleError: false });
-      return res.ok ? payloadJson : { ok: false };
+    getCachedSessionDraft: (sessionId) => sessionDraftPersistence.peek(sessionId),
+    cacheSessionDraft: (sessionId, text) => sessionDraftPersistence.cache(sessionId, text),
+    getSessionDraft: async (sessionId) => {
+      const read = sessionDraftPersistence.beginRead(sessionId);
+      try {
+        const payload = await getJson(`/api/sessions/${encodeURIComponent(sessionId)}/draft`);
+        const server = sessionDraftServerState(payload);
+        const text = sessionDraftPersistence.reconcileRead(sessionId, read, server);
+        void sessionDraftPersistence.retry(
+          sessionId,
+          (draft) => writeSessionDraft(sessionId, draft),
+        );
+        return { text };
+      } catch (error) {
+        sessionDraftPersistence.releaseRead(sessionId, read);
+        throw error;
+      }
+    },
+    setSessionDraft: (sessionId, text) => sessionDraftPersistence.save(
+      sessionId,
+      text,
+      (draft) => writeSessionDraft(sessionId, draft),
+    ),
+    reconcileSessionDraftAfterSend: (sessionId, draft) => (
+      rebaseAndRetrySessionDraft(sessionId, sessionDraftServerState(draft))
+    ),
+    recoverSessionDraftAfterRejectedSend: async (sessionId) => {
+      // The message reservation clears the cloud draft before dispatch. A
+      // rejected/unknown dispatch therefore needs an authoritative revision
+      // before the composer's optimistic text restoration is replayed.
+      sessionDraftPersistence.markRejectedSend(sessionId);
+      const server = await readSessionDraftServer(sessionId);
+      if (!server) return;
+      await rebaseAndRetrySessionDraft(sessionId, server);
     },
     listInbox: (params) => {
       const search = new URLSearchParams();
@@ -3660,7 +3954,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     getAuthSession: () => getJson('/api/session').then(normalizeSessionInfo),
     signOut: () => postJson('/auth/logout', {}),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [showToast, t]);
+  }), [sessionDraftPersistence, showToast, t]);
 
   return <ApiContext.Provider value={value}>{children}</ApiContext.Provider>;
 };

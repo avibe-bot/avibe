@@ -33,6 +33,7 @@ from core.runtime_activation import (
 from core.session_turns import (
     SCHEDULED_PROVENANCE_KEY,
     SOURCE_SCHEDULED,
+    TURN_LIFECYCLE_ADMISSION_KEY,
     DeliveryRequest,
     SessionTurnManager,
     Turn,
@@ -100,6 +101,15 @@ def _context(session_id: str = "ses_fsm") -> MessageContext:
             },
         },
     )
+
+
+def _complete_capture_admission(context: MessageContext) -> None:
+    admission = (context.platform_specific or {}).pop(
+        TURN_LIFECYCLE_ADMISSION_KEY,
+        None,
+    )
+    if admission is not None:
+        admission.release()
 
 
 def _agentless_context(session_id: str = "ses_fsm") -> MessageContext:
@@ -170,12 +180,69 @@ def managers(tmp_path: Path):
     async def fake_run(_session_id, _context_value, text, **kwargs):
         with starts_lock:
             starts.append((str(kwargs.get("logical_turn_id") or ""), text))
+        _complete_capture_admission(_context_value)
 
     manager_a._run = fake_run
     manager_b._run = fake_run
     yield manager_a, manager_b, engine_a, engine_b, starts
     engine_a.dispose()
     engine_b.dispose()
+
+
+@pytest.mark.anyio
+async def test_session_lifecycle_waits_for_admitted_turn_capture(managers) -> None:
+    manager, _other, _engine, _engine_b, _starts = managers
+    handler = MessageHandler.__new__(MessageHandler)
+    handler._memory_capture_tasks = set()
+    capture_entered = asyncio.Event()
+    release_capture = asyncio.Event()
+    lifecycle_entered = asyncio.Event()
+
+    async def run_turn(_session_id, context, _text, **_kwargs):
+        admission = context.platform_specific.pop(
+            TURN_LIFECYCLE_ADMISSION_KEY
+        )
+
+        async def capture() -> None:
+            capture_entered.set()
+            await release_capture.wait()
+
+        capture_task = asyncio.create_task(capture())
+        handler._track_memory_capture_task(
+            capture_task,
+            lifecycle_admission=admission,
+        )
+
+    async def lifecycle_operation() -> str:
+        lifecycle_entered.set()
+        return "reset"
+
+    manager._run = run_turn
+    delivery = asyncio.create_task(
+        manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="remember this",
+            ),
+            context=_context(),
+        )
+    )
+    await asyncio.wait_for(capture_entered.wait(), timeout=1.0)
+    lifecycle = asyncio.create_task(
+        manager.run_session_lifecycle(
+            "ses_fsm",
+            lifecycle_operation,
+            deadline_seconds=1.0,
+        )
+    )
+    await asyncio.sleep(0)
+
+    assert not lifecycle_entered.is_set()
+    release_capture.set()
+    await delivery
+    assert await lifecycle == "reset"
+    assert lifecycle_entered.is_set()
 
 
 async def _activate(
@@ -727,6 +794,7 @@ def test_persisted_start_attempt_reaches_dispatch_context(managers) -> None:
 
     async def capture_run(_session_id, context, _text, **_kwargs):
         captured.update(context.platform_specific or {})
+        _complete_capture_admission(context)
 
     manager._run = capture_run
     admitted = asyncio.run(
@@ -1635,6 +1703,7 @@ def test_delivery_admission_context_restores_route_without_message_metadata(
     payload = manager._hydrate_delivery_context(context, delivery)
 
     assert payload["metadata"] == {"visible": "record metadata"}
+    assert context.user_id is None
     assert context.platform_specific["delivery_admission_context"] == {
         "message_handler_route": {
             "base_session_id": "slack_C1:reviewer",
@@ -1642,6 +1711,292 @@ def test_delivery_admission_context_restores_route_without_message_metadata(
             "routing_subagent": True,
         }
     }
+
+
+@pytest.mark.parametrize("launch_path", ["immediate", "fifo", "recovery"])
+def test_durable_workbench_turn_restores_memory_admission_facts(
+    managers,
+    launch_path: str,
+) -> None:
+    from core.controller import Controller
+    from core.system_prompt_injection import memory_cli_prompt_admitted
+
+    manager, _other, engine, _engine_b, _starts = managers
+    classifications: list[bool | None] = []
+    hydrated_users: list[str | None] = []
+    memory_cli_observations: list[tuple[bool, bool, tuple[str, str] | None]] = []
+    principal_id = "u-" + ("1" * 32)
+    project_id = "p-" + ("2" * 32)
+    admission = SimpleNamespace(
+        principal_for=lambda _facts: principal_id,
+        project_for=lambda _facts: project_id,
+        admits=lambda _facts: True,
+    )
+    prompt_controller = SimpleNamespace(
+        config=SimpleNamespace(platform="avibe", memory=SimpleNamespace(enabled=True)),
+        _memory_scopes_by_session={},
+        _memory_cli_facts_by_session={},
+        _memory_turn_facts=lambda _context: object(),
+        _memory_admission=lambda: admission,
+    )
+    prompt_controller.configure_memory_cli_session = (
+        Controller.configure_memory_cli_session.__get__(prompt_controller)
+    )
+    prompt_controller.memory_scope_for_cli_session = (
+        Controller.memory_scope_for_cli_session.__get__(prompt_controller)
+    )
+
+    async def capture_start(_session_id, context, _text, **_kwargs):
+        classifications.append(context.is_ordinary_text)
+        hydrated_users.append(context.user_id)
+        prompt_admitted = memory_cli_prompt_admitted(prompt_controller, context)
+        payload = context.platform_specific or {}
+        memory_cli_observations.append(
+            (
+                payload.get("memory_cli_admitted") is True,
+                prompt_admitted,
+                prompt_controller.memory_scope_for_cli_session("ses_fsm"),
+            )
+        )
+        _complete_capture_admission(context)
+
+    manager._run = capture_start
+    if launch_path == "immediate":
+        asyncio.run(
+            manager.deliver(
+                DeliveryRequest(
+                    session_id="ses_fsm",
+                    priority="p3",
+                    content="remember this",
+                    metadata={
+                        "_memory_user_id": "local",
+                        "_memory_cli_admitted": True,
+                        "_memory_ordinary_text": True,
+                    },
+                ),
+                context=_context(),
+            )
+        )
+    else:
+        delivery_id = delivery_store.new_delivery_id()
+        with engine.begin() as conn:
+            delivery_store.insert_delivery(
+                conn,
+                delivery_id=delivery_id,
+                session_id="ses_fsm",
+                priority="p3",
+                state="queued",
+                snapshot=delivery_store.message_snapshot(
+                    scope_id=None,
+                    session_id="ses_fsm",
+                    platform="avibe",
+                    author="user",
+                    source="user",
+                    text="remember this",
+                    metadata={
+                        "_memory_user_id": "local",
+                        "_memory_cli_admitted": True,
+                        "_memory_ordinary_text": True,
+                    },
+                ),
+                dispatch_text="remember this",
+            )
+        if launch_path == "fifo":
+            asyncio.run(manager.drain_delivery_queue("ses_fsm"))
+        else:
+            asyncio.run(manager.recover_durable_delivery_state(service_restart=True))
+
+    assert classifications == [True]
+    assert hydrated_users == ["local"]
+    assert memory_cli_observations == [
+        (True, True, (principal_id, project_id)),
+    ]
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {},
+        {"_memory_cli_admitted": False},
+        {"_memory_cli_admitted": "true"},
+        {"_memory_cli_admitted": 1},
+    ],
+)
+def test_durable_memory_cli_admission_fails_closed(
+    managers,
+    metadata: dict[str, object],
+) -> None:
+    manager, _other, _engine, _engine_b, _starts = managers
+    admissions: list[object] = []
+
+    def stale_context(_session_id: str) -> MessageContext:
+        context = _context()
+        context.platform_specific["memory_cli_admitted"] = True
+        return context
+
+    async def capture_start(_session_id, context, _text, **_kwargs):
+        admissions.append((context.platform_specific or {}).get("memory_cli_admitted"))
+        _complete_capture_admission(context)
+
+    manager.bind_context(stale_context)
+    manager._run = capture_start
+    asyncio.run(
+        manager.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="do not admit",
+                metadata=metadata,
+            ),
+            context=_context(),
+        )
+    )
+
+    assert admissions == [None]
+
+
+@pytest.mark.parametrize("launch_path", ["immediate", "fifo", "recovery"])
+@pytest.mark.parametrize("reverse_order", [False, True], ids=["listed-order", "reverse-order"])
+@pytest.mark.parametrize(
+    ("other_label", "ordinary_marker", "cli_marker", "extra_metadata"),
+    [
+        pytest.param(
+            "quick-reply",
+            False,
+            True,
+            {"quick_reply_for": "agent-message-1"},
+            id="ordinary-vs-quick-reply",
+        ),
+        pytest.param(
+            "forwarded",
+            False,
+            True,
+            {"forwarded": True},
+            id="ordinary-vs-forwarded",
+        ),
+        pytest.param(
+            "cli-not-admitted",
+            True,
+            False,
+            {},
+            id="cli-admission-difference",
+        ),
+        pytest.param(
+            "cli-malformed",
+            True,
+            1,
+            {},
+            id="cli-admission-strict-bool",
+        ),
+        pytest.param(
+            "ordinary-malformed",
+            1,
+            True,
+            {},
+            id="ordinary-classification-strict-bool",
+        ),
+    ],
+)
+def test_durable_batch_preserves_each_delivery_memory_admission_facts(
+    managers,
+    launch_path: str,
+    reverse_order: bool,
+    other_label: str,
+    ordinary_marker: object,
+    cli_marker: object,
+    extra_metadata: dict[str, object],
+) -> None:
+    manager, _other, _engine, _engine_b, _starts = managers
+    ordinary_facts = (
+        "ordinary",
+        {
+            "_memory_ordinary_text": True,
+            "_memory_cli_admitted": True,
+        },
+    )
+    other_facts = (
+        other_label,
+        {
+            **extra_metadata,
+            "_memory_ordinary_text": ordinary_marker,
+            "_memory_cli_admitted": cli_marker,
+        },
+    )
+    fact_pair = [ordinary_facts, other_facts]
+    ordered_facts = list(reversed(fact_pair)) if reverse_order else fact_pair
+    starts: list[tuple[str, str, bool | None, bool, tuple[str, ...]]] = []
+    started_contexts: list[MessageContext] = []
+
+    async def capture_start(_session_id, context, text, **kwargs):
+        payload = context.platform_specific or {}
+        started_contexts.append(context)
+        starts.append(
+            (
+                str(kwargs.get("logical_turn_id") or ""),
+                text,
+                context.is_ordinary_text,
+                payload.get("memory_cli_admitted") is True,
+                tuple(payload.get("delivery_ids") or ()),
+            )
+        )
+        _complete_capture_admission(context)
+
+    manager._run = capture_start
+
+    async def run() -> list[str]:
+        delivery_ids: list[str] = []
+        for index, (label, metadata) in enumerate(ordered_facts):
+            result = await manager.deliver(
+                DeliveryRequest(
+                    session_id="ses_fsm",
+                    priority="p3",
+                    content=f"text-{label}",
+                    metadata=metadata,
+                    admission_only=(launch_path != "immediate" or index == 0),
+                ),
+                context=_context(),
+            )
+            assert result.delivery_id is not None
+            delivery_ids.append(result.delivery_id)
+
+        if launch_path == "fifo":
+            assert await manager.drain_delivery_queue("ses_fsm")
+        elif launch_path == "recovery":
+            await manager.recover_durable_delivery_state(service_restart=True)
+
+        assert len(starts) == 1
+        first_context = started_contexts[0]
+        turn_id = starts[0][0]
+        first_context.platform_specific["agent_runtime_turn_token"] = f"runtime-{turn_id}"
+        manager._active_identity = lambda _backend, _session_id, logical_id: (
+            logical_id,
+            f"native-{logical_id}",
+        )
+        manager.on_native_start(
+            first_context,
+            backend="codex",
+            runtime_key=f"runtime-key-{turn_id}",
+            runtime_turn_id=f"runtime-{turn_id}",
+        )
+        assert await manager.terminalize_turn(turn_id)
+        return delivery_ids
+
+    delivery_ids = asyncio.run(run())
+
+    assert [start[1:] for start in starts] == [
+        (
+            f"text-{label}",
+            metadata.get("_memory_ordinary_text") is True,
+            metadata.get("_memory_cli_admitted") is True,
+            (delivery_id,),
+        )
+        for (label, metadata), delivery_id in zip(ordered_facts, delivery_ids)
+    ]
+    assert [start[1] for start in starts if start[2] is True] == [
+        f"text-{label}"
+        for label, metadata in ordered_facts
+        if metadata.get("_memory_ordinary_text") is True
+    ]
 
 
 def test_dispatch_uses_current_session_route_without_mutating_delivery_provenance(
@@ -1666,6 +2021,7 @@ def test_dispatch_uses_current_session_route_without_mutating_delivery_provenanc
 
     async def capture_run(_session_id, context, _text, **_kwargs):
         captured.update(context.platform_specific or {})
+        _complete_capture_admission(context)
 
     manager._run = capture_run
     admitted = asyncio.run(
@@ -2845,6 +3201,50 @@ def test_definitive_p0_refusal_leaves_backlog_behind_the_active_turn(managers) -
     assert _row(engine, queued_id)["state"] == "queued"
 
 
+def test_refused_replacement_releases_its_control_ownership(managers) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+
+    async def run() -> tuple[str, str]:
+        turn_id, context = await _activate(manager)
+        holder = asyncio.create_task(asyncio.Event().wait())
+        manager.in_flight["ses_fsm"] = Turn(
+            task=holder,
+            context=context,
+            logical_turn_id=turn_id,
+        )
+
+        async def refused(stop_context):
+            stop_context.platform_specific["stop_failure_reason"] = "refused"
+            return False
+
+        manager.controller.command_handler.handle_stop = AsyncMock(side_effect=refused)
+        try:
+            result = await manager.deliver(
+                DeliveryRequest(
+                    session_id="ses_fsm",
+                    priority="p0",
+                    content="replacement",
+                ),
+                context=_context(),
+            )
+        finally:
+            holder.cancel()
+            await asyncio.gather(holder, return_exceptions=True)
+        assert result.state == "queued"
+        return turn_id, str(result.delivery_id)
+
+    turn_id, replacement_delivery_id = asyncio.run(run())
+    with engine.connect() as conn:
+        active = delivery_store.get_turn(conn, turn_id)
+    assert active is not None
+    assert active["state"] == "active"
+    assert active["control_state"] == "refused"
+    assert active["control_mode"] is None
+    assert active["control_successor_turn_id"] is None
+    assert active["control_successor_delivery_id"] is None
+    assert _row(engine, replacement_delivery_id)["state"] == "queued"
+
+
 def test_empty_p0_uses_the_control_slot_without_creating_a_message_delivery(managers) -> None:
     manager, _other, engine, _engine_b, _starts = managers
 
@@ -3242,6 +3642,7 @@ def test_adapter_not_active_runner_cleanup_starts_linked_successor_once(
                 context=start_context,
                 logical_turn_id=logical_turn_id,
             )
+            _complete_capture_admission(start_context)
 
         manager._run = record_successor_start
         admitted = await manager.deliver(
@@ -3956,6 +4357,7 @@ def test_second_unknown_start_retires_delivery_and_unblocks_fifo(managers) -> No
 
     async def succeeds(_session_id, _context_value, text, **kwargs):
         starts.append((str(kwargs.get("logical_turn_id") or ""), text))
+        _complete_capture_admission(_context_value)
 
     first._run = succeeds
     first._active_identity = lambda *_args: None
@@ -4075,6 +4477,51 @@ def test_pre_dispatch_hydration_failure_is_definitively_recoverable(managers) ->
 
     assert [text for _turn_id, text in starts] == ["retry safely"]
     assert _row(engine, str(admitted.delivery_id))["state"] == "claimed"
+
+
+def test_persisted_start_revalidation_failure_releases_lifecycle_admission(
+    managers,
+    monkeypatch,
+) -> None:
+    manager, _other, _engine, _engine_b, _starts = managers
+    original_begin = manager._sqlite_engine().begin
+    acquired = False
+
+    original_acquire = manager.acquire_lifecycle_admission
+
+    async def track_acquire(raw_session_id):
+        nonlocal acquired
+        admission = await original_acquire(raw_session_id)
+        acquired = True
+        return admission
+
+    monkeypatch.setattr(manager, "acquire_lifecycle_admission", track_acquire)
+
+    def failing_begin():
+        if acquired:
+            raise OSError("temporary sqlite outage")
+        return original_begin()
+
+    engine = manager._sqlite_engine()
+    monkeypatch.setattr(
+        manager,
+        "_sqlite_engine",
+        lambda: SimpleNamespace(connect=engine.connect, begin=failing_begin),
+    )
+    with pytest.raises(OSError, match="temporary sqlite outage"):
+        asyncio.run(
+            manager.deliver(
+                DeliveryRequest(
+                    session_id="ses_fsm",
+                    priority="p3",
+                    content="release the lock",
+                ),
+                context=_context(),
+            )
+        )
+
+    assert acquired
+    assert not manager._session_lifecycle_locks["ses_fsm"].locked()
 
 
 @pytest.mark.parametrize(
@@ -4795,6 +5242,7 @@ def test_reserved_attachment_only_submission_recovers_exact_dispatch_inputs(
                 [str(item.local_path) for item in (context.files or [])],
             )
         )
+        _complete_capture_admission(context)
 
     manager._run = capture
     asyncio.run(manager.recover_durable_delivery_state())
@@ -5691,6 +6139,7 @@ def test_open_backlog_starts_oldest_before_new_idle_p3(managers) -> None:
     async def capture_start(_session_id, context, text, **kwargs):
         starts.append((str(kwargs.get("logical_turn_id") or ""), text))
         started_contexts.append(dict(context.platform_specific or {}))
+        _complete_capture_admission(context)
 
     manager._run = capture_start
     with engine.begin() as conn:
@@ -6120,12 +6569,201 @@ def test_owned_run_sweep_retries_terminal_turn_settlement_before_orphaning(
             select(agent_runs.c.status).where(agent_runs.c.id == run_id)
         ).scalar_one() == "running"
 
+    assert run_id not in manager.snapshot_owned_agent_run_ids({run_id})
+    assert settlement.calls == 1
     assert run_id not in manager.owned_agent_run_ids()
     assert settlement.calls == 2
     with engine.connect() as conn:
         assert conn.execute(
             select(agent_runs.c.status).where(agent_runs.c.id == run_id)
         ).scalar_one() == "succeeded"
+
+
+def test_snapshot_retains_pre_turn_delivery_ownership(managers) -> None:
+    manager, _restarted, engine, _engine_b, _starts = managers
+    run_id = "run-queued-delivery-owner"
+    delivery_id = delivery_store.new_delivery_id()
+    now = "2026-08-01T00:00:00Z"
+    with engine.begin() as conn:
+        delivery_store.insert_delivery(
+            conn,
+            delivery_id=delivery_id,
+            session_id="ses_fsm",
+            priority="p3",
+            state="queued",
+            snapshot=delivery_store.message_snapshot(
+                scope_id=None,
+                session_id="ses_fsm",
+                platform="avibe",
+                author="harness",
+                source="harness",
+                message_type="harness",
+                text="queued owner",
+            ),
+            dispatch_text="queued owner",
+            now=now,
+        )
+        conn.execute(
+            agent_runs.insert().values(
+                id=run_id,
+                definition_id=None,
+                run_type="agent_run",
+                status="running",
+                cancel_requested=0,
+                session_id="ses_fsm",
+                callback_session_id="ses_callback",
+                callback_status="pending",
+                delivery_id=delivery_id,
+                created_at=now,
+                started_at=now,
+                updated_at=now,
+                metadata_json="{}",
+            )
+        )
+
+    assert manager.snapshot_owned_agent_run_ids({run_id}) == {run_id}
+
+
+@pytest.mark.parametrize("sent_before_recovery", [False, True])
+def test_hfr_474_startup_collapses_legacy_restart_notices_by_durable_turn(
+    managers,
+    tmp_path: Path,
+    sent_before_recovery: bool,
+) -> None:
+    """Upgrade recovery uses exact Delivery ownership before notices can drain."""
+
+    from core import failure_notices
+    from core.scheduled_tasks import ScheduledTaskService, TaskExecutionStore
+    from storage.background import SQLiteBackgroundTaskStore
+
+    manager, _restarted, engine, _engine_b, _starts = managers
+    turn_id, _context_value = asyncio.run(_activate(manager))
+    run_ids = [f"run-legacy-restart-{index}" for index in range(3)]
+    now = "2026-08-01T00:00:00Z"
+    with engine.begin() as conn:
+        initial = delivery_store.initial_deliveries_for_turn(conn, turn_id)[0]
+        assert initial["state"] == "accepted"
+        initial_row = delivery_store.get_delivery(conn, str(initial["id"]))
+        assert initial_row is not None
+        delivery_ids = [str(initial["id"])]
+        for index in range(1, len(run_ids)):
+            delivery_id = delivery_store.new_delivery_id()
+            values = dict(initial_row)
+            values.update(
+                id=delivery_id,
+                priority="p1",
+                dedupe_key=None,
+                turn_role="steer",
+                turn_position=index,
+                submitted_at=now,
+                updated_at=now,
+                version=1,
+            )
+            conn.execute(message_deliveries.insert().values(**values))
+            delivery_ids.append(delivery_id)
+        for run_id, delivery_id in zip(run_ids, delivery_ids, strict=True):
+            conn.execute(
+                agent_runs.insert().values(
+                    id=run_id,
+                    definition_id=None,
+                    run_type="agent_run",
+                    status="running",
+                    cancel_requested=0,
+                    session_id="ses_fsm",
+                    callback_status="pending",
+                    delivery_id=delivery_id,
+                    created_at=now,
+                    started_at=now,
+                    updated_at=now,
+                    metadata_json="{}",
+                )
+            )
+
+    db_path = Path(str(engine.url.database))
+    run_store = SQLiteBackgroundTaskStore(db_path)
+    request_store = TaskExecutionStore(root=tmp_path / "legacy-restart-requests")
+    request_store._sqlite = run_store
+    scheduled = ScheduledTaskService.__new__(ScheduledTaskService)
+    scheduled.controller = manager.controller
+    scheduled.request_store = request_store
+    scheduled._drain_dirty = False
+    manager.controller.scheduled_task_service = scheduled
+    try:
+        # Reproduce the old release: each failed Run independently receives a
+        # restart notice although all rows retain the same exact durable Turn.
+        for run_id in run_ids:
+            assert run_store.settle_run_terminal(
+                run_id,
+                terminal_status="failed",
+                error="service restarted",
+                metadata={"interrupt_reason": SETTLED_BY_RESTARTED},
+                updated_at=now,
+            ) == "failed"
+        sent_id = run_ids[0]
+        if sent_before_recovery:
+            run_store.update_owed_failure_notice(
+                sent_id,
+                state="sent",
+                ack_evidence="receipt",
+            )
+
+        # Match an upgrade: the old process wrote the terminal Turn and per-Run
+        # notices; the new process owns startup reconciliation.
+        with engine.begin() as conn:
+            terminal = manager._write_terminal_snapshot(
+                conn,
+                turn_id,
+                outcome="failed",
+                settled_by=SETTLED_BY_RESTARTED,
+                evidence_kind="service_shutdown",
+                evidence={"reason": "scheduled_service_shutdown"},
+            )
+        assert terminal["changed"] is True
+
+        asyncio.run(manager.recover_durable_delivery_state(service_restart=True))
+
+        notices = {
+            run_id: run_store.owed_failure_notice(run_id) for run_id in run_ids
+        }
+        assert all(notice is not None for notice in notices.values())
+        assert {
+            notice["turn_id"] for notice in notices.values() if notice is not None
+        } == {turn_id}
+        assert {
+            notice["turn_fallback_run_id"]
+            for notice in notices.values()
+            if notice is not None
+        } == {sent_id}
+        assert {
+            tuple(notice["turn_participant_run_ids"])
+            for notice in notices.values()
+            if notice is not None
+        } == {tuple(run_ids)}
+
+        deliverable = [
+            run_id
+            for run_id, notice in notices.items()
+            if notice is not None
+            and notice["state"] == "pending"
+            and failure_notices.decide(
+                run_id=run_id,
+                definition_id=None,
+                notice=notice,
+                streak_facts=None,
+                earlier_unsettled=None,
+            ).action
+            == failure_notices.ACTION_DELIVER
+        ]
+        assert deliverable == ([] if sent_before_recovery else [sent_id])
+        if sent_before_recovery:
+            assert notices[sent_id]["state"] == "sent"
+            assert all(
+                notice["turn_notification_delivered"] is True
+                for notice in notices.values()
+                if notice is not None
+            )
+    finally:
+        run_store.close()
 
 
 def test_restored_opencode_generation_rebinds_turn_control_and_steer(

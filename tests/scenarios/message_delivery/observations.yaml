@@ -35,3 +35,14 @@ observations:
       - derive callback payloads only from the parent Run terminal result
       - keep directed child Runs as separate durable queue objects with their own callback policy
       - preserve intermediate assistant and tool activity in the target Session only
+  - id: OBS-MESSAGE-DELIVERY-004
+    source: live_local_diagnosis
+    related_scenarios:
+      - MESSAGE-DELIVERY-314
+    summary: Four Agent Runs accepted into one callee Turn produced four identical callbacks to one callback Session.
+    previous_assumption: Callback idempotency belonged to each parent Run and its source actor.
+    observed_behavior: The four parent Runs settled from the same terminal Turn and each created a separate callback Run carrying the same terminal result.
+    required_updates:
+      - identify callback events by callee terminal Turn and callback Session
+      - point every participating parent Run ledger to the shared callback Run
+      - keep callbacks for different terminal Turns or callback Sessions independent

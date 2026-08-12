@@ -3,10 +3,9 @@
 //
 // This replaces `isSourceEligible` in `menus/identifiers.ts`, a UI mirror of the
 // backend predicate that was escalated at review time and is deleted with this
-// module. The mirror could not be right: eligibility depends on the
-// `subscription_hub_experimental` flag and on recorded consent, neither of which
-// the UI can see, so it was guaranteed to drift and to offer rows the live API
-// rejects. Contract v3 publishes `sources.eligibility` on
+// module. The mirror could not be right: eligibility is server-owned inventory
+// state, so a client reconstruction was guaranteed to drift and offer rows the
+// live API rejects. Contract v5 publishes `sources.eligibility` on
 // `GET /api/models/agents`, and this file is the only place the UI reads it.
 import type { AgentSupply, EligibilityReasonKey, ProcessAvailabilityReason, Source } from './types';
 
@@ -20,7 +19,7 @@ const INELIGIBLE: Eligibility = { eligible: false, reasonKey: null };
  *
  * Total over every id, including one the payload does not mention:
  * - `sources === null` — Direct mode. Hub eligibility is undefined there and no
- *   Hub surface (order drawer, model menu, mapping targets) is reachable.
+ *   Hub surface (order drawer, model menu, route targets) is reachable.
  * - listed in `eligibility` — the server's answer, verbatim.
  * - absent from `eligibility` but present in `order` — the server validated it
  *   into the order and §4.4 forbids an ineligible id there, so it is eligible
@@ -93,7 +92,7 @@ export function offCurrentModelChain(agent: Pick<AgentSupply, 'sources'>, source
   return entry?.in_current_model_chain === false;
 }
 
-/** The subset of `sources` this Agent may use — the menu/mapping surfaces' input. */
+/** The subset of `sources` this Agent may use — the menu/route surfaces' input. */
 export function eligibleSources(sources: Source[], agent: Pick<AgentSupply, 'sources'>): Source[] {
   return sources.filter((s) => eligibilityOf(agent, s.id).eligible);
 }

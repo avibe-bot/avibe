@@ -91,7 +91,7 @@ instead of claiming equivalent durability.
 | --- | --- | --- |
 | Web composer | P3 | Starts when idle; otherwise joins the FIFO backlog. |
 | Ordinary IM message | P1 | Steers the active Turn or starts when idle; a definitive refusal falls back to P3. |
-| Existing-Session Agent Run | P1 | Same as ordinary IM. `--queue` selects P3. `--send-now` first persists the new Run at P3, then promotes the exact FIFO head through P1; it never stops the active Turn or jumps older work. |
+| Existing-Session Agent Run | P1 | Same as ordinary IM. `--queue` selects P3. `--send-now` explicitly selects the same content-bearing P1 behavior and never promotes older queued work. |
 | Watch, Hook, Webhook | P1 | Continues the target Session without interrupting it. |
 | Show annotation | P1 | Delivers the annotation to the current Turn when possible. |
 | Session callback | P1 | Delivers each completed child Run independently. |

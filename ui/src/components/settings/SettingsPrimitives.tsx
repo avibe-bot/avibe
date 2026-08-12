@@ -154,6 +154,7 @@ type SettingsResourceRowProps = {
   badges?: React.ReactNode;
   detail?: React.ReactNode;
   actions?: React.ReactNode;
+  footer?: React.ReactNode;
   className?: string;
 };
 
@@ -169,11 +170,13 @@ export const SettingsResourceRow: React.FC<SettingsResourceRowProps> = ({
   badges,
   detail,
   actions,
+  footer,
   className,
 }) => (
   <div
     className={clsx(
-      'flex flex-col gap-4 rounded-xl border border-border bg-background px-5 py-4 transition-colors hover:border-border-strong md:flex-row md:items-center',
+      'flex flex-col gap-4 rounded-xl border border-border bg-background px-5 py-4 transition-colors hover:border-border-strong',
+      footer ? 'md:grid md:grid-cols-[minmax(0,1fr)_auto] md:items-center' : 'md:flex-row md:items-center',
       className
     )}
   >
@@ -190,5 +193,6 @@ export const SettingsResourceRow: React.FC<SettingsResourceRowProps> = ({
       </div>
     </div>
     {actions && <div className="flex flex-wrap items-center gap-3 md:shrink-0 md:justify-end">{actions}</div>}
+    {footer && <div className="md:col-span-2">{footer}</div>}
   </div>
 );

@@ -1242,7 +1242,14 @@ async def end_running_agent(
     return result
 
 
-def snapshot_running_agents(controller: "Controller") -> dict[str, Any]:
+HARNESS_OWNERSHIP_CANDIDATE_LIMIT = 101
+
+
+def snapshot_running_agents(
+    controller: "Controller",
+    *,
+    ownership_candidate_run_ids: Optional[list[str]] = None,
+) -> dict[str, Any]:
     """Return a read-only snapshot of all currently-running agent instances.
 
     Shape::
@@ -1282,9 +1289,40 @@ def snapshot_running_agents(controller: "Controller") -> dict[str, Any]:
         states[r["state"]] = states.get(r["state"], 0) + 1
         by_backend[r["backend"]] = by_backend.get(r["backend"], 0) + 1
 
+    ownership_requested = ownership_candidate_run_ids is not None
+    candidates = {
+        str(run_id)
+        for run_id in (ownership_candidate_run_ids or [])
+        if str(run_id or "").strip()
+    }
+    ownership_available = not ownership_requested
+    ownership_error = None if not ownership_requested else "ownership_provider_unavailable"
+    owned_run_ids: list[str] = []
+    scheduled_tasks = getattr(controller, "scheduled_task_service", None)
+    ownership_provider = getattr(
+        scheduled_tasks,
+        "snapshot_owned_agent_run_ids",
+        None,
+    )
+    if ownership_requested and callable(ownership_provider):
+        try:
+            owned_run_ids = sorted(
+                str(run_id)
+                for run_id in ownership_provider(candidates)
+                if str(run_id or "").strip()
+            )
+            ownership_available = True
+            ownership_error = None
+        except Exception:
+            logger.warning("running-agents ownership snapshot failed", exc_info=True)
+            ownership_error = "ownership_probe_failed"
+
     return {
         "ok": True,
         "agents": rows,
+        "owned_run_ids": owned_run_ids,
+        "ownership_available": ownership_available,
+        "ownership_error": ownership_error,
         "counts": {
             "total": len(rows),
             "active": states["active"],

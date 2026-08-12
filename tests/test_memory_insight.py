@@ -8,8 +8,11 @@ from pathlib import Path
 
 import pytest
 
+from config import paths as config_paths
 from core.memory.everos_insight import MemoryInsightPaths, MemoryInsightReader
 from core.memory.everos_insight import reader as reader_module
+from core.memory.store import MemoryStore
+from core.memory.types import ProviderSessionRef
 
 
 ALICE = "u-" + "a" * 32
@@ -83,38 +86,8 @@ def insight_paths(tmp_path: Path) -> MemoryInsightPaths:
             """
         )
 
-    capture_db = tmp_path / "capture.db"
-    with _connect(capture_db) as conn:
-        conn.executescript(
-            """
-            CREATE TABLE memory_capture_queue (
-                source_message_digest TEXT PRIMARY KEY,
-                epoch INTEGER NOT NULL,
-                session_id TEXT NOT NULL,
-                principal_id TEXT NOT NULL,
-                project_ref TEXT NOT NULL,
-                provenance TEXT NOT NULL,
-                payload_text TEXT,
-                payload_attachments TEXT,
-                occurred_at_ms INTEGER NOT NULL,
-                provider_timestamp_ms INTEGER NOT NULL,
-                state TEXT NOT NULL,
-                attempts INTEGER NOT NULL,
-                next_retry_at TEXT,
-                lease_owner TEXT,
-                lease_at TEXT,
-                last_error TEXT,
-                add_request_id TEXT,
-                flush_observation TEXT,
-                flush_status TEXT,
-                flush_error_code TEXT,
-                flush_request_id TEXT,
-                flush_observed_at TEXT,
-                created_at TEXT NOT NULL,
-                completed_at TEXT
-            );
-            """
-        )
+    capture_db = config_paths.get_state_dir() / "memory-insight" / "capture.db"
+    MemoryStore(capture_db)
 
     call_db = tmp_path / "call-log.db"
     with _connect(call_db) as conn:
@@ -203,29 +176,96 @@ def _insert_queue(
     timestamp_ms: int,
     project: str = PROJECT,
     add_request_id: str | None = None,
-    flush_request_id: str | None = None,
+    flush_settlement_request_id: str | None = None,
+    generation: int = 1,
 ) -> None:
+    provider_session_ref = ProviderSessionRef(
+        principal_id=owner,
+        epoch=1,
+        project_ref=project,
+        session_id=f"provider-{session}",
+    ).serialize()
     with sqlite3.connect(paths.capture_db_path) as conn:
         conn.execute(
             """
             INSERT INTO memory_capture_queue (
-                source_message_digest, epoch, session_id, principal_id,
-                project_ref, provenance, occurred_at_ms, provider_timestamp_ms,
-                state, attempts, add_request_id, flush_request_id, created_at,
-                completed_at
-            ) VALUES (?, 1, ?, ?, ?, 'user_input', ?, ?, 'delivered', 1, ?, ?, ?, ?)
+                source_message_digest, epoch, session_id, provider_session_ref,
+                generation, principal_id, project_ref, provenance, occurred_at_ms,
+                provider_timestamp_ms, state, attempts, add_request_id, add_status,
+                created_at, completed_at
+            ) VALUES (?, 1, ?, ?, ?, ?, ?, 'user_input', ?, ?, 'delivered', 1,
+                      ?, 'accumulated', ?, ?)
             """,
             (
                 digest,
                 session,
+                provider_session_ref,
+                generation,
                 owner,
                 project,
                 timestamp_ms,
                 timestamp_ms,
                 add_request_id,
-                flush_request_id,
                 "2026-08-04T00:00:00Z",
                 "2026-08-04T00:00:01Z",
+            ),
+        )
+        if flush_settlement_request_id is not None:
+            conn.execute(
+                """
+                INSERT INTO memory_flush_settlements (
+                    provider_session_ref, epoch, generation, operation_kind,
+                    operation_token, observation, request_id,
+                    confirmed_watermark_ms, observed_at, error_code
+                ) VALUES (?, 1, ?, 'flush', ?, 'settled', ?, ?, ?, NULL)
+                """,
+                (
+                    provider_session_ref,
+                    generation,
+                    f"flush:{digest}",
+                    flush_settlement_request_id,
+                    timestamp_ms,
+                    "2026-08-04T00:00:02Z",
+                ),
+            )
+
+
+def _insert_settlement(
+    paths: MemoryInsightPaths,
+    owner: str,
+    *,
+    session: str,
+    request_id: str,
+    token: str,
+    project: str = PROJECT,
+    generation: int = 1,
+    operation_kind: str = "flush",
+    settlement_epoch: int = 1,
+    provider_session: str | None = None,
+) -> None:
+    provider_session_ref = ProviderSessionRef(
+        principal_id=owner,
+        epoch=1,
+        project_ref=project,
+        session_id=f"provider-{provider_session or session}",
+    ).serialize()
+    with sqlite3.connect(paths.capture_db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO memory_flush_settlements (
+                provider_session_ref, epoch, generation, operation_kind,
+                operation_token, observation, request_id,
+                confirmed_watermark_ms, observed_at, error_code
+            ) VALUES (?, ?, ?, ?, ?, 'settled', ?, 0, ?, NULL)
+            """,
+            (
+                provider_session_ref,
+                settlement_epoch,
+                generation,
+                operation_kind,
+                token,
+                request_id,
+                "2026-08-04T00:00:02Z",
             ),
         )
 
@@ -366,6 +406,121 @@ def test_admin_log_spans_projects_and_principals_with_explicit_scope(
     assert detail["entry"]["project_id"] == OTHER_PROJECT
     assert detail["entry"]["principal_id"] == BOB
     assert [call["id"] for call in detail["calls"]] == ["call_bob"]
+
+
+def test_scoped_and_admin_memcell_queries_match_for_one_scope_at_page_boundaries(
+    insight_paths: MemoryInsightPaths,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        reader_module,
+        "_utc_observed_at",
+        lambda: "2026-08-10T00:00:00.000Z",
+    )
+    for memcell_id, timestamp_ms in (
+        ("mc_newest", 3_000),
+        ("mc_middle", 2_000),
+        ("mc_oldest", 1_000),
+    ):
+        _insert_memcell(insight_paths, memcell_id, ALICE, timestamp_ms=timestamp_ms)
+    _insert_memcell(insight_paths, "mc_multi", [ALICE, BOB], timestamp_ms=5_000)
+    _insert_memcell(insight_paths, "mc_missing_owner", [], timestamp_ms=4_000)
+
+    reader = MemoryInsightReader(insight_paths)
+    scoped_first = reader.list_entries((ALICE, PROJECT), None, 2)
+    admin_first = reader.list_admin_entries(None, 2)
+    scoped_second = reader.list_entries(
+        (ALICE, PROJECT), scoped_first["next_cursor"], 2
+    )
+    admin_second = reader.list_admin_entries(admin_first["next_cursor"], 2)
+
+    assert scoped_first == admin_first
+    assert scoped_second == admin_second
+    assert [entry["memcell_id"] for entry in scoped_first["entries"]] == [
+        "mc_newest",
+        "mc_middle",
+    ]
+    assert [entry["memcell_id"] for entry in scoped_second["entries"]] == [
+        "mc_oldest"
+    ]
+    for memcell_id in ("mc_newest", "mc_middle", "mc_oldest"):
+        assert reader.entry_detail((ALICE, PROJECT), memcell_id) == (
+            reader.admin_entry_detail(memcell_id)
+        )
+
+
+def test_scoped_and_admin_memcell_queries_keep_distinct_fail_closed_authorization(
+    insight_paths: MemoryInsightPaths,
+) -> None:
+    _insert_memcell(insight_paths, "mc_alice", ALICE, timestamp_ms=6_000)
+    _insert_memcell(insight_paths, "mc_foreign", BOB, timestamp_ms=5_000)
+    _insert_memcell(insight_paths, "mc_multi", [ALICE, BOB], timestamp_ms=4_000)
+    _insert_memcell(insight_paths, "mc_missing_owner", [], timestamp_ms=3_000)
+    _insert_memcell(
+        insight_paths,
+        "mc_bad_project",
+        ALICE,
+        timestamp_ms=2_000,
+        project="missing-provenance",
+    )
+    _insert_memcell(insight_paths, "mc_bad_owner", ALICE, timestamp_ms=1_000)
+    with sqlite3.connect(insight_paths.system_db_path) as conn:
+        conn.execute(
+            "UPDATE memcell SET sender_ids_json = 'not-json' "
+            "WHERE memcell_id = 'mc_bad_owner'"
+        )
+
+    reader = MemoryInsightReader(insight_paths)
+    scoped = reader.list_entries((ALICE, PROJECT), None, 50)
+    admin = reader.list_admin_entries(None, 50)
+
+    assert [entry["memcell_id"] for entry in scoped["entries"]] == ["mc_alice"]
+    assert [entry["memcell_id"] for entry in admin["entries"]] == [
+        "mc_alice",
+        "mc_foreign",
+    ]
+    assert reader.entry_detail((ALICE, PROJECT), "mc_foreign") == {
+        "status": "not_found"
+    }
+    assert reader.admin_entry_detail("mc_foreign")["entry"]["principal_id"] == BOB
+    for memcell_id in (
+        "mc_multi",
+        "mc_missing_owner",
+        "mc_bad_project",
+        "mc_bad_owner",
+    ):
+        assert reader.entry_detail((ALICE, PROJECT), memcell_id) == {
+            "status": "not_found"
+        }
+        assert reader.admin_entry_detail(memcell_id) == {"status": "not_found"}
+
+
+def test_scoped_and_admin_memcell_queries_degrade_same_on_malformed_schema(
+    insight_paths: MemoryInsightPaths,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        reader_module,
+        "_utc_observed_at",
+        lambda: "2026-08-10T00:00:00.000Z",
+    )
+    _insert_memcell(insight_paths, "mc_alice", ALICE, timestamp_ms=1_000)
+    with sqlite3.connect(insight_paths.system_db_path) as conn:
+        conn.execute("ALTER TABLE memcell DROP COLUMN payload_json")
+
+    reader = MemoryInsightReader(insight_paths)
+
+    assert reader.list_entries((ALICE, PROJECT), None, 10) == (
+        reader.list_admin_entries(None, 10)
+    )
+    assert reader.entry_detail((ALICE, PROJECT), "mc_alice") == (
+        reader.admin_entry_detail("mc_alice")
+    )
+
+
+def test_memcell_query_core_has_no_admin_specific_private_twins() -> None:
+    assert not hasattr(MemoryInsightReader, "_read_admin_memcell_page")
+    assert not hasattr(MemoryInsightReader, "_read_admin_detail_memcell")
 
 
 def test_admin_log_aggregates_many_scopes_in_four_queries(
@@ -552,14 +707,15 @@ def test_list_page_bounds_history_before_python_projection(
     assert "SCAN pc" not in query_plan
 
 
-def test_exact_capture_and_request_group_authorization(insight_paths: MemoryInsightPaths) -> None:
-    message_id = "m_session-a_5000_000"
+def test_exact_add_and_flush_attribution_fails_closed_on_request_id_collisions(
+    insight_paths: MemoryInsightPaths,
+) -> None:
     _insert_memcell(
         insight_paths,
         "mc_capture",
         ALICE,
         timestamp_ms=5_100,
-        message_ids=[message_id],
+        message_ids=["m_session-a_5000_000", "m_session-c_5002_000"],
     )
     _insert_queue(
         insight_paths,
@@ -568,7 +724,54 @@ def test_exact_capture_and_request_group_authorization(insight_paths: MemoryInsi
         session="session-a",
         timestamp_ms=5_000,
         add_request_id="request-good",
-        flush_request_id="flush-mixed",
+        flush_settlement_request_id="flush-good",
+    )
+    _insert_settlement(
+        insight_paths,
+        ALICE,
+        session="session-a",
+        request_id="flush-mixed",
+        token="flush:alice:mixed",
+    )
+    _insert_settlement(
+        insight_paths,
+        ALICE,
+        session="session-a",
+        request_id="flush-wrong-generation",
+        token="flush:alice:wrong-generation",
+        generation=2,
+    )
+    _insert_settlement(
+        insight_paths,
+        ALICE,
+        session="session-a",
+        request_id="flush-wrong-epoch",
+        token="flush:alice:wrong-epoch",
+        settlement_epoch=2,
+    )
+    _insert_settlement(
+        insight_paths,
+        ALICE,
+        session="session-a",
+        request_id="flush-wrong-provider-session",
+        token="flush:alice:wrong-provider-session",
+        provider_session="session-other",
+    )
+    _insert_settlement(
+        insight_paths,
+        ALICE,
+        session="session-a",
+        request_id="settlement-add-kind",
+        token="add:alice",
+        operation_kind="add",
+    )
+    _insert_queue(
+        insight_paths,
+        "alice-cross-kind",
+        ALICE,
+        session="session-c",
+        timestamp_ms=5_002,
+        add_request_id="add-mixed",
     )
     _insert_queue(
         insight_paths,
@@ -576,19 +779,58 @@ def test_exact_capture_and_request_group_authorization(insight_paths: MemoryInsi
         BOB,
         session="session-b",
         timestamp_ms=5_001,
-        flush_request_id="flush-mixed",
+        flush_settlement_request_id="flush-mixed",
+    )
+    _insert_queue(
+        insight_paths,
+        "bob-cross-kind",
+        BOB,
+        session="session-d",
+        timestamp_ms=5_003,
+        flush_settlement_request_id="add-mixed",
     )
     _insert_call(insight_paths, "good", request_id="request-good", stage="boundary")
+    _insert_call(insight_paths, "flush-good", request_id="flush-good", stage="boundary")
     _insert_call(insight_paths, "mixed", request_id="flush-mixed", stage="boundary")
+    _insert_call(insight_paths, "add-mixed", request_id="add-mixed", stage="boundary")
+    _insert_call(
+        insight_paths,
+        "wrong-generation",
+        request_id="flush-wrong-generation",
+        stage="boundary",
+    )
+    _insert_call(
+        insight_paths,
+        "wrong-operation-kind",
+        request_id="settlement-add-kind",
+        stage="boundary",
+    )
+    _insert_call(
+        insight_paths,
+        "wrong-epoch",
+        request_id="flush-wrong-epoch",
+        stage="boundary",
+    )
+    _insert_call(
+        insight_paths,
+        "wrong-provider-session",
+        request_id="flush-wrong-provider-session",
+        stage="boundary",
+    )
     _insert_call(insight_paths, "unlinked", request_id="request-other", stage="boundary")
 
     detail = MemoryInsightReader(insight_paths).entry_detail((ALICE, PROJECT), "mc_capture")
-    assert [call["id"] for call in detail["calls"]] == ["good"]
+    assert {call["id"] for call in detail["calls"]} == {"good", "flush-good"}
     assert detail["capture"]["status"] == "available"
     listed = MemoryInsightReader(insight_paths).list_entries((ALICE, PROJECT), None, 10)
-    assert listed["entries"][0]["authorized_call_count"] == 1
+    assert listed["entries"][0]["authorized_call_count"] == 2
     encoded = json.dumps(detail)
     assert "flush-mixed" not in encoded
+    assert "add-mixed" not in encoded
+    assert "flush-wrong-generation" not in encoded
+    assert "flush-wrong-epoch" not in encoded
+    assert "flush-wrong-provider-session" not in encoded
+    assert "settlement-add-kind" not in encoded
     assert "request-other" not in encoded
 
 
@@ -616,6 +858,51 @@ def test_capture_message_id_collision_with_foreign_scope_fails_closed(
     detail = MemoryInsightReader(insight_paths).entry_detail((ALICE, PROJECT), "mc_collision")
     assert detail["capture"] == {"status": "unavailable", "reason": "expired"}
     assert detail["calls"] == []
+
+
+def test_mutable_capture_state_is_not_projected_as_timeline_history(
+    insight_paths: MemoryInsightPaths,
+) -> None:
+    _insert_memcell(
+        insight_paths,
+        "mc_mutable_capture",
+        ALICE,
+        timestamp_ms=6_300,
+        message_ids=["m_mutable-session_6200_000"],
+    )
+    _insert_queue(
+        insight_paths,
+        "mutable-capture",
+        ALICE,
+        session="mutable-session",
+        timestamp_ms=6_200,
+    )
+    reader = MemoryInsightReader(insight_paths)
+
+    with sqlite3.connect(insight_paths.capture_db_path) as conn:
+        conn.execute(
+            """
+            UPDATE memory_capture_queue
+            SET state = 'processing', payload_text = 'retained until settled',
+                completed_at = NULL
+            WHERE source_message_digest = 'mutable-capture'
+            """
+        )
+    processing = reader.entry_detail((ALICE, PROJECT), "mc_mutable_capture")
+    with sqlite3.connect(insight_paths.capture_db_path) as conn:
+        conn.execute(
+            """
+            UPDATE memory_capture_queue
+            SET state = 'manual_required', completed_at = '2026-08-04T00:00:02Z'
+            WHERE source_message_digest = 'mutable-capture'
+            """
+        )
+    uncertain = reader.entry_detail((ALICE, PROJECT), "mc_mutable_capture")
+
+    assert processing["capture"]["delivery_states"] == ["processing"]
+    assert uncertain["capture"]["delivery_states"] == ["manual_required"]
+    assert processing["steps"] == uncertain["steps"]
+    assert [step["type"] for step in processing["steps"]] == ["memcell"]
 
 
 def test_oversized_memcell_json_is_not_decoded_or_used_for_capture_attribution(
@@ -1095,6 +1382,180 @@ def test_configured_provider_keys_are_scrubbed_from_run_and_current_state_errors
     assert embedding_key not in encoded
 
 
+def test_source_sections_include_query_observation_time(
+    insight_paths: MemoryInsightPaths,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed_at = "2026-08-09T15:15:00.000Z"
+    monkeypatch.setattr(reader_module, "_utc_observed_at", lambda: observed_at)
+    _insert_memcell(insight_paths, "mc_observed", ALICE, timestamp_ms=10_900)
+    reader = MemoryInsightReader(insight_paths)
+
+    listed = reader.list_entries((ALICE, PROJECT), None, 10)
+    detail = reader.entry_detail((ALICE, PROJECT), "mc_observed")
+
+    expected = {
+        "everos": {"status": "available", "observed_at": observed_at},
+        "capture": {"status": "available", "observed_at": observed_at},
+        "calls": {"status": "available", "observed_at": observed_at},
+    }
+    assert listed["sections"] == expected
+    assert detail["sections"] == expected
+
+
+def test_processing_record_source_observation_uses_representative_safe_reads(
+    insight_paths: MemoryInsightPaths,
+) -> None:
+    observation = MemoryInsightReader(insight_paths).source_observation()
+
+    assert observation.everos.status == "available"
+    assert observation.capture.status == "available"
+    assert observation.calls.status == "available"
+    assert observation.everos.observed_at is not None
+
+
+def test_processing_record_source_observation_avoids_timeline_query(
+    insight_paths: MemoryInsightPaths,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    statements: list[str] = []
+    original_connect = sqlite3.connect
+
+    def traced_connect(*args, **kwargs):
+        connection = original_connect(*args, **kwargs)
+        connection.set_trace_callback(statements.append)
+        return connection
+
+    monkeypatch.setattr(sqlite3, "connect", traced_connect)
+
+    observation = MemoryInsightReader(insight_paths).source_observation()
+
+    assert observation.everos.status == "available"
+    memcell_queries = [
+        statement
+        for statement in statements
+        if "FROM memcell" in statement and statement.lstrip().upper().startswith("SELECT")
+    ]
+    assert len(memcell_queries) == 1
+    query = memcell_queries[0]
+    for column in (
+        "memcell_id",
+        "app_id",
+        "project_id",
+        "message_ids_json",
+        "sender_ids_json",
+        "payload_json",
+        "timestamp",
+    ):
+        assert column in query
+    assert "LIMIT 1" in query
+    assert "ORDER BY" not in query
+    assert "json_" not in query.casefold()
+    indexing_queries = [
+        statement
+        for statement in statements
+        if "FROM md_change_state" in statement
+        and statement.lstrip().upper().startswith("SELECT")
+    ]
+    assert len(indexing_queries) == 1
+    indexing_query = indexing_queries[0]
+    for column in ("md_path", "status", "last_changed_at", "error"):
+        assert column in indexing_query
+    assert "LIMIT 1" in indexing_query
+    assert "ORDER BY" not in indexing_query
+
+
+def test_processing_record_source_observation_degrades_sources_independently(
+    insight_paths: MemoryInsightPaths,
+) -> None:
+    with sqlite3.connect(insight_paths.capture_db_path) as connection:
+        connection.execute("DROP TABLE memory_capture_queue")
+
+    observation = MemoryInsightReader(insight_paths).source_observation()
+
+    assert observation.everos.status == "available"
+    assert observation.capture.status == "unavailable"
+    assert observation.capture.reason == "malformed"
+    assert observation.calls.status == "available"
+
+
+def test_processing_record_source_observation_validates_capture_detail_columns(
+    insight_paths: MemoryInsightPaths,
+) -> None:
+    with sqlite3.connect(insight_paths.capture_db_path) as connection:
+        connection.execute(
+            "ALTER TABLE memory_capture_queue DROP COLUMN occurred_at_ms"
+        )
+
+    observation = MemoryInsightReader(insight_paths).source_observation()
+
+    assert observation.everos.status == "available"
+    assert observation.capture.status == "unavailable"
+    assert observation.capture.reason == "malformed"
+    assert observation.calls.status == "available"
+
+
+def test_processing_record_source_observation_validates_memcell_columns(
+    insight_paths: MemoryInsightPaths,
+) -> None:
+    with sqlite3.connect(insight_paths.system_db_path) as connection:
+        connection.execute("ALTER TABLE memcell DROP COLUMN payload_json")
+
+    observation = MemoryInsightReader(insight_paths).source_observation()
+
+    assert observation.everos.status == "unavailable"
+    assert observation.everos.reason == "malformed"
+    assert observation.capture.status == "available"
+    assert observation.calls.status == "available"
+
+
+@pytest.mark.parametrize("damage", ["missing_table", "missing_required_column"])
+def test_processing_record_source_observation_validates_indexing_state_schema(
+    insight_paths: MemoryInsightPaths,
+    damage: str,
+) -> None:
+    with sqlite3.connect(insight_paths.system_db_path) as connection:
+        if damage == "missing_table":
+            connection.execute("DROP TABLE md_change_state")
+        else:
+            connection.execute("ALTER TABLE md_change_state DROP COLUMN error")
+
+    observation = MemoryInsightReader(insight_paths).source_observation()
+
+    assert observation.everos.status == "unavailable"
+    assert observation.everos.reason == "malformed"
+    assert observation.capture.status == "available"
+    assert observation.calls.status == "available"
+
+
+def test_processing_record_source_observation_validates_run_columns(
+    insight_paths: MemoryInsightPaths,
+) -> None:
+    with sqlite3.connect(insight_paths.ome_db_path) as connection:
+        connection.execute("ALTER TABLE run_record DROP COLUMN event_payload")
+
+    observation = MemoryInsightReader(insight_paths).source_observation()
+
+    assert observation.everos.status == "partial"
+    assert observation.everos.reason == "runs_malformed"
+    assert observation.capture.status == "available"
+    assert observation.calls.status == "available"
+
+
+def test_processing_record_source_observation_validates_call_indexes(
+    insight_paths: MemoryInsightPaths,
+) -> None:
+    with sqlite3.connect(insight_paths.call_log_db_path) as connection:
+        connection.execute("DROP INDEX provider_call_parent_idx")
+
+    observation = MemoryInsightReader(insight_paths).source_observation()
+
+    assert observation.everos.status == "available"
+    assert observation.capture.status == "available"
+    assert observation.calls.status == "unavailable"
+    assert observation.calls.reason == "malformed"
+
+
 def test_missing_sources_degrade_independently(tmp_path: Path) -> None:
     root = tmp_path / "missing"
     reader = MemoryInsightReader(
@@ -1104,9 +1565,9 @@ def test_missing_sources_degrade_independently(tmp_path: Path) -> None:
     assert result["status"] == "ok"
     assert result["entries"] == []
     assert result["sections"] == {
-        "everos": {"status": "unavailable", "reason": "missing"},
-        "capture": {"status": "unavailable", "reason": "missing"},
-        "calls": {"status": "unavailable", "reason": "missing"},
+        "everos": {"status": "unavailable", "reason": "missing", "observed_at": None},
+        "capture": {"status": "unavailable", "reason": "missing", "observed_at": None},
+        "calls": {"status": "unavailable", "reason": "missing", "observed_at": None},
     }
 
 
@@ -1121,7 +1582,11 @@ def test_locked_optional_db_does_not_fail_everos_result(insight_paths: MemoryIns
         lock.rollback()
         lock.close()
     assert [entry["memcell_id"] for entry in result["entries"]] == ["mc_locked"]
-    assert result["sections"]["capture"] == {"status": "unavailable", "reason": "busy"}
+    assert result["sections"]["capture"] == {
+        "status": "unavailable",
+        "reason": "busy",
+        "observed_at": None,
+    }
 
 
 def test_list_keeps_direct_call_count_when_run_table_is_unavailable(
@@ -1134,7 +1599,9 @@ def test_list_keeps_direct_call_count_when_run_table_is_unavailable(
 
     result = MemoryInsightReader(insight_paths).list_entries((ALICE, PROJECT), None, 10)
 
-    assert result["sections"]["everos"] == {"status": "partial", "reason": "runs_malformed"}
+    assert result["sections"]["everos"]["status"] == "partial"
+    assert result["sections"]["everos"]["reason"] == "runs_malformed"
+    assert result["sections"]["everos"]["observed_at"] is not None
     assert result["entries"][0]["run_summary"] is None
     assert result["entries"][0]["authorized_call_count"] == 1
 
@@ -1150,8 +1617,13 @@ def test_list_keeps_direct_call_count_when_capture_table_is_malformed(
 
     result = MemoryInsightReader(insight_paths).list_entries((ALICE, PROJECT), None, 10)
 
-    assert result["sections"]["capture"] == {"status": "unavailable", "reason": "malformed"}
-    assert result["sections"]["calls"] == {"status": "available"}
+    assert result["sections"]["capture"] == {
+        "status": "unavailable",
+        "reason": "malformed",
+        "observed_at": None,
+    }
+    assert result["sections"]["calls"]["status"] == "available"
+    assert result["sections"]["calls"]["observed_at"] is not None
     assert result["entries"][0]["authorized_call_count"] == 1
 
 

@@ -3936,23 +3936,30 @@ def test_public_show_page_events_require_login(monkeypatch, tmp_path):
     _save_config(tmp_path)
     _create_agent_session("ses123")
     share_id = _create_show_page("ses123", "public")
+    dispatches = []
 
-    response = app.test_client().post(
-        f"/p/{share_id}/__show/events",
-        base_url="https://alex.avibe.bot",
-        environ_base=_remote_peer(),
-        headers={
-            "Origin": "https://alex.avibe.bot",
-            "Content-Type": "application/json",
-        },
-        json={
-            "type": "human.annotation.created",
-            "annotation": {"comment": "Anonymous review."},
-        },
-    )
+    async def unexpected_dispatch(payload, **kwargs):
+        dispatches.append(payload)
+        return {"status_code": 202, "body": {"ok": True}}
+
+    with patch("vibe.internal_client.dispatch_async", unexpected_dispatch):
+        response = app.test_client().post(
+            f"/p/{share_id}/__show/events",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+            headers={
+                "Origin": "https://alex.avibe.bot",
+                "Content-Type": "application/json",
+            },
+            json={
+                "type": "human.annotation.created",
+                "annotation": {"comment": "Anonymous review.", "dispatch": True},
+            },
+        )
 
     assert response.status_code == 403
     assert response.get_json()["code"] == "public_show_events_login_required"
+    assert dispatches == []
 
 
 def test_public_show_page_events_require_share_token(monkeypatch, tmp_path):
@@ -4361,12 +4368,13 @@ def test_public_show_page_intent_fallback_does_not_expose_author_email(monkeypat
     assert "member@example.com" not in listed.content.decode("utf-8")
 
 
-def test_public_show_page_events_ignore_client_event_id_and_dispatch(monkeypatch, tmp_path):
+def test_public_show_page_events_preserve_dispatch_for_authorized_user(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
     _create_agent_session("ses123")
     share_id = _create_show_page("ses123", "public")
     published = []
+    dispatches = []
     monkeypatch.setattr("vibe.ui_server._publish_show_session_event", published.append)
     client = app.test_client()
     client.set_cookie(
@@ -4375,24 +4383,33 @@ def test_public_show_page_events_ignore_client_event_id_and_dispatch(monkeypatch
         domain="alex.avibe.bot",
     )
 
-    response = client.post(
-        f"/p/{share_id}/__show/events",
-        base_url="https://alex.avibe.bot",
-        environ_base=_remote_peer(),
-        headers=_public_show_write_headers(share_id),
-        json={
-            "id": "forged\nid: injected",
-            "type": "human.annotation.created",
-            "annotation": {"comment": "Review this.", "dispatch": True},
-        },
-    )
+    async def fake_dispatch_async(payload, **kwargs):
+        dispatches.append(payload)
+        _accept_dispatch(payload)
+        return {"status_code": 202, "body": {"ok": True}}
+
+    with patch("vibe.internal_client.dispatch_async", fake_dispatch_async):
+        response = client.post(
+            f"/p/{share_id}/__show/events",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+            headers=_public_show_write_headers(share_id),
+            json={
+                "id": "forged\nid: injected",
+                "type": "human.annotation.created",
+                "annotation": {"comment": "Review this.", "dispatch": True},
+            },
+        )
 
     assert response.status_code == 201
     event = response.get_json()["event"]
     assert event["id"] != "forged\nid: injected"
     assert "\n" not in event["id"]
-    assert "dispatch" not in event["payload"]
-    assert "dispatch" not in published[0]["payload"]
+    assert event["payload"]["dispatch"] is True
+    assert "delivery_id" not in event
+    assert published[0]["delivery_id"] == dispatches[0]["user_message_id"]
+    assert published[0]["payload"]["dispatch"] is True
+    assert dispatches[0]["session_id"] == "ses123"
 
 
 @pytest.mark.parametrize("event_type", ["assistant.mark.created", "system.annotation.control"])

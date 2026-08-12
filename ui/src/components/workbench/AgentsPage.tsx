@@ -796,9 +796,15 @@ const AgentRow: React.FC<AgentRowProps> = ({ agent, isSelected, isDefault, onSel
       <div className="flex flex-1 flex-col gap-1">
         <div className="flex items-center gap-2">
           <span className="text-[14px] font-semibold text-foreground">{agent.name}</span>
-          {isDefault && <Badge variant="success" className="px-1.5 py-0 text-[9px] font-mono uppercase">DEFAULT</Badge>}
+          {isDefault && (
+            <Badge variant="success" className="px-1.5 py-0 text-[9px] font-mono uppercase">
+              {t('common.default')}
+            </Badge>
+          )}
           {isSystemAgent(agent) && (
-            <Badge variant="secondary" className="px-1.5 py-0 text-[9px] font-mono uppercase">SYSTEM</Badge>
+            <Badge variant="secondary" className="px-1.5 py-0 text-[9px] font-mono uppercase">
+              {t('common.systemSession')}
+            </Badge>
           )}
         </div>
         {description && <div className="text-[11px] text-muted">{description}</div>}

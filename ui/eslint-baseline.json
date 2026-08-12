@@ -35,9 +35,6 @@
     "src/components/settings/SettingsServicePage.tsx": {
       "@typescript-eslint/no-explicit-any": 4
     },
-    "src/components/settings/models/modelsApi.ts": {
-      "@typescript-eslint/no-explicit-any": 1
-    },
     "src/components/settings/providers/ClaudeProviderConfig.tsx": {
       "@typescript-eslint/no-explicit-any": 1
     },
@@ -165,15 +162,6 @@
       "react-hooks/exhaustive-deps": 2
     },
     "src/components/settings/SettingsBackendsPage.tsx": {
-      "react-hooks/exhaustive-deps": 1
-    },
-    "src/components/settings/models/SourceOrderDrawer.tsx": {
-      "react-hooks/exhaustive-deps": 1
-    },
-    "src/components/settings/models/menus/AddCustomModelDialog.tsx": {
-      "react-hooks/exhaustive-deps": 1
-    },
-    "src/components/settings/models/menus/OpenCodeMenuDrawer.tsx": {
       "react-hooks/exhaustive-deps": 1
     },
     "src/components/settings/providers/OpencodeProviderConfig.tsx": {

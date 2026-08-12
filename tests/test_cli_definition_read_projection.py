@@ -5,7 +5,11 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select, update
 
-from storage.background import SQLiteBackgroundTaskStore
+from storage.background import (
+    SQLiteBackgroundTaskStore,
+    TASK_RETIREMENT_SCHEDULE_CONSUMED,
+    TASK_SCHEDULE_CONSUMED_METADATA_KEY,
+)
 from storage.models import agent_runs, run_definitions
 from storage.pagination import PageRequest
 from vibe import cli
@@ -17,6 +21,7 @@ PAST = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
 CANONICAL_FIELDS = (
     "lifecycle_state",
     "lifecycle_detail",
+    "lifecycle_finished_at",
     "next_run_at",
     "waiting_since",
     "running_since",
@@ -287,7 +292,7 @@ def test_task_list_pagination_is_stable_across_run_at_boundary(capsys) -> None:
         store.close()
 
 
-def test_task_list_does_not_hide_an_enabled_one_shot_after_manual_run(capsys) -> None:
+def test_task_list_and_show_keep_unverifiable_retirements_unknown(capsys) -> None:
     store = SQLiteBackgroundTaskStore()
     try:
         _task(
@@ -301,18 +306,84 @@ def test_task_list_does_not_hide_an_enabled_one_shot_after_manual_run(capsys) ->
         )
         _task(
             store,
-            "scheduler-completed",
+            "legacy-ownerless",
             schedule_type="at",
             cron=None,
             run_at=PAST,
             enabled=False,
             last_run_at=NOW,
+            retired_at=NOW,
+        )
+        _task(
+            store,
+            "consumed-owner-missing",
+            schedule_type="at",
+            cron=None,
+            run_at=PAST,
+            enabled=False,
+            last_run_at=NOW,
+            last_run_id="missing-owner",
+            retired_at=NOW,
+            retirement_reason=TASK_RETIREMENT_SCHEDULE_CONSUMED,
+        )
+        _task(
+            store,
+            "consumed-owner-success",
+            schedule_type="at",
+            cron=None,
+            run_at=PAST,
+            enabled=False,
+            last_run_id="successful-owner",
+            retired_at=NOW,
+            retirement_reason=TASK_RETIREMENT_SCHEDULE_CONSUMED,
+        )
+        store.enqueue_run(
+            {
+                "id": "successful-owner",
+                "definition_id": "consumed-owner-success",
+                "request_type": "scheduled",
+                "source_kind": "scheduler",
+                "status": "succeeded",
+                "created_at": NOW,
+                "updated_at": NOW,
+                "completed_at": NOW,
+                "metadata": {
+                    TASK_SCHEDULE_CONSUMED_METADATA_KEY: {
+                        "run_at": PAST,
+                        "timezone": "UTC",
+                        "updated_at": "registered-generation",
+                        "job_id": "successful-job",
+                        "retired_at": NOW,
+                    }
+                },
+            }
         )
 
-        assert cli.cmd_task_list(page_request=PageRequest(limit=20)) == 0
+        assert cli.cmd_task_list(
+            include_finished=True,
+            page_request=PageRequest(limit=20),
+        ) == 0
         rows = json.loads(capsys.readouterr().out)["definitions"]
 
-        assert [row["id"] for row in rows] == ["manual-run"]
-        assert rows[0]["lifecycle_state"] == "finished"
+        by_id = {row["id"]: row for row in rows}
+        assert set(by_id) == {
+            "manual-run",
+            "legacy-ownerless",
+            "consumed-owner-missing",
+            "consumed-owner-success",
+        }
+        assert by_id["manual-run"]["lifecycle_state"] == "waiting"
+        for task_id in ("legacy-ownerless", "consumed-owner-missing"):
+            assert by_id[task_id]["lifecycle_state"] == "finished"
+            assert by_id[task_id]["lifecycle_detail"] is None
+            assert by_id[task_id]["state"] == "unknown"
+            assert cli.cmd_task_show(task_id) == 0
+            shown = json.loads(capsys.readouterr().out)["definition"]
+            assert (shown["lifecycle_detail"], shown["state"]) == (None, "unknown")
+        assert by_id["consumed-owner-success"]["lifecycle_detail"] == "normal"
+        assert by_id["consumed-owner-success"]["state"] == "completed"
+        assert cli.cmd_task_show("consumed-owner-success") == 0
+        shown = json.loads(capsys.readouterr().out)["definition"]
+        assert (shown["lifecycle_detail"], shown["state"]) == ("normal", "completed")
     finally:
         store.close()

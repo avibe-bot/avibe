@@ -150,7 +150,7 @@ jobs:
       - name: Provision pinned Memory Runtime
         run: uv sync --frozen --project scripts/memory_runtime
 
-      - name: Run Memory Insight real-wheel contract
+      - name: Run Memory Runtime real-wheel contracts
         env:
           AVIBE_REQUIRE_MEMORY_RUNTIME_CONTRACT: "1"
         run: |
@@ -160,9 +160,10 @@ jobs:
             --with 'pytest==9.0.3' --with 'pytest-asyncio==1.4.0' \
             python -m pytest \
             tests/test_memory_everos_insight_patches.py::test_pinned_everos_patch_contract \
+            tests/test_memory_sync_bootstrap.py::test_pinned_everos_pathless_sync_scans_and_drains \
             -ra | tee "$output"
           if grep -Eq '(^|[[:space:]])[0-9]+ skipped|SKIPPED' "$output"; then
-            echo "Memory Insight contract tests must not skip."
+            echo "Memory Runtime contract tests must not skip."
             exit 1
           fi
 

@@ -284,6 +284,41 @@ def test_doctor_reports_degraded_show_checkpoints_without_git(monkeypatch):
     ]
 
 
+def test_doctor_surfaces_configuration_recovery_warnings(monkeypatch, tmp_path):
+    config_path = tmp_path / "config.json"
+    config_path.write_text("{}", encoding="utf-8")
+    doctor_path = tmp_path / "doctor.json"
+    warning = "Recovered invalid config section 'platforms': sk-leaked-platform-token"
+    config = cli.V2Config.default()
+    config.language = "zh"
+    config.load_warnings = (warning,)
+
+    monkeypatch.setattr(paths, "get_config_path", lambda: config_path)
+    monkeypatch.setattr(paths, "get_runtime_doctor_path", lambda: doctor_path)
+    monkeypatch.setattr(cli.V2Config, "load", lambda _path: config)
+    monkeypatch.setattr(cli, "_home_migration_items", lambda: [])
+    monkeypatch.setattr(cli, "_service_lifecycle_items", lambda **_kwargs: [])
+    monkeypatch.setattr(cli, "_service_install_family_items", lambda **_kwargs: [])
+    monkeypatch.setattr(cli, "_restart_state_items", lambda: [])
+    monkeypatch.setattr(cli, "_runtime_architecture_items", lambda: [])
+    monkeypatch.setattr(cli, "_show_git_checkpoint_items", lambda: [])
+    monkeypatch.setattr(cli, "_managed_dependencies_doctor_items", lambda **_kwargs: [])
+    monkeypatch.setattr(cli, "_show_runtime_doctor_items", lambda **_kwargs: [])
+    monkeypatch.setattr(cli, "_local_cli_installation_items", lambda: [])
+    monkeypatch.setattr(cli.api, "detect_cli", lambda _path: {})
+
+    result = cli._doctor()
+
+    config_group = next(group for group in result["groups"] if group["name"] == "Configuration")
+    recovery_item = next(item for item in config_group["items"] if item.get("code") == "config.recovery")
+    assert recovery_item["status"] == "warn"
+    assert recovery_item["code"] == "config.recovery"
+    assert recovery_item["message"] != warning
+    assert recovery_item["action"] == cli.i18n_t("error.configRecovery.action", "zh")
+    assert "sk-leaked-platform-token" not in json.dumps(result)
+    assert result["summary"]["warn"] >= 1
+
+
 def test_status_and_doctor_use_running_checkpoint_service_state(monkeypatch):
     monkeypatch.setattr(runtime, "resolve_service_owner_pid", lambda **_kwargs: 1234)
     monkeypatch.setattr("core.show_git.show_git_checkpointing_active", lambda: False)

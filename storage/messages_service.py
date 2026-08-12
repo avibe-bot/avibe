@@ -14,7 +14,7 @@ import re
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Mapping, Optional
 
 from sqlalchemy import and_, case, delete, func, or_, select, update
 from sqlalchemy.engine import Connection
@@ -34,6 +34,7 @@ from storage.models import (
 )
 from storage.pagination import PageRequest, PageResult, page_result_from_limit_plus_one
 from storage.sessions_service import session_agent_display_label
+from vibe.authorization import AuthorizationContext, require_instance_role
 from vibe.message_identity import HARNESS_TYPE, INPUT_TURN_AUTHOR_TYPES, NOTIFY_TYPE, VAULT_TYPE
 from vibe.message_types import types_with
 
@@ -156,7 +157,10 @@ def _native_harness_provenance(native_message_id: Any) -> tuple[str | None, str 
 
 
 def _attach_harness_provenance(
-    conn: Connection, payloads: list[dict[str, Any]]
+    conn: Connection,
+    payloads: list[dict[str, Any]],
+    *,
+    authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Read-side provenance for every durable Harness chat message.
 
@@ -188,6 +192,7 @@ def _attach_harness_provenance(
             exec_by_msg[payload["id"]] = native_id[len(_AGENT_RUN_NATIVE_PREFIX):]
     if not exec_by_msg:
         return payloads
+    context = require_instance_role(authorization_context, "viewer")
 
     # execution_id == agent_runs.id. The source SESSION differs by run kind:
     #  - source_kind='agent'   → source_actor IS the caller session id.
@@ -257,9 +262,12 @@ def _attach_harness_provenance(
 
     meta_by_session: dict[str, dict[str, Optional[str]]] = {}
     if source_by_exec:
+        from storage import project_access_service
+
         for row in conn.execute(
             select(
                 agent_sessions.c.id,
+                agent_sessions.c.scope_id,
                 agent_sessions.c.title,
                 agent_sessions.c.agent_name,
                 agent_sessions.c.agent_backend,
@@ -278,11 +286,20 @@ def _attach_harness_provenance(
                         ),
                     ),
                 )
-            )
+                )
             .where(
                 agent_sessions.c.id.in_(set(source_by_exec.values()))
             )
         ).mappings():
+            project_id = project_access_service.project_id_from_scope_id(row["scope_id"])
+            if (
+                not context.is_instance_owner
+                and (
+                    project_id is None
+                    or not project_access_service.can_read_project(conn, context, project_id)
+                )
+            ):
+                continue
             meta_by_session[row["id"]] = {
                 "title": row["title"],
                 "agent_name": session_agent_display_label(row),
@@ -777,6 +794,7 @@ def list_session_messages(
     limit: int = 50,
     types: Optional[Iterable[str]] = None,
     include_private_metadata: bool = False,
+    authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
     tail: bool = False,
 ) -> dict[str, Any]:
     """Return messages for one session in chronological order with cursor pagination.
@@ -933,7 +951,11 @@ def list_session_messages(
         has_newer = len(newer) > effective_limit
         newer = newer[:effective_limit]
 
-        merged = _attach_harness_provenance(conn, older + anchor_rows + newer)
+        merged = _attach_harness_provenance(
+            conn,
+            older + anchor_rows + newer,
+            authorization_context=authorization_context,
+        )
         return {
             "messages": merged,
             "next_after_id": newer[-1]["id"] if has_newer and newer else None,
@@ -954,6 +976,7 @@ def list_session_messages(
                 )
                 for row in conn.execute(query).mappings().all()
             ],
+            authorization_context=authorization_context,
         )
         has_older = len(rows) > effective_limit
         rows = rows[:effective_limit]
@@ -986,6 +1009,7 @@ def list_session_messages(
                 )
                 for row in conn.execute(query).mappings().all()
             ],
+            authorization_context=authorization_context,
         )
         has_older = len(rows) > effective_limit
         rows = rows[:effective_limit]
@@ -1019,6 +1043,7 @@ def list_session_messages(
             )
             for row in conn.execute(query).mappings().all()
         ],
+        authorization_context=authorization_context,
     )
     # Probe one extra row against the clamped page size: a full page alone does
     # not prove there is another page, but the extra row does.

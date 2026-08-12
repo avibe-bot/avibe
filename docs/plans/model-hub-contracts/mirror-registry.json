@@ -61,18 +61,6 @@
         "ui/src/i18n/*.json",
         "vibe/i18n/*.json"
       ]
-    },
-    {
-      "value": "source_model_managed_upstream",
-      "contract_file": "docs/plans/model-hub-contracts/api.md",
-      "negative_test_file": "tests/test_model_hub_api.py",
-      "negative_test": "test_discovered_source_model_delete_is_rejected_as_upstream_managed",
-      "forbidden_ui_globs": [
-        "ui/src/components/settings/models/**/*.ts",
-        "ui/src/components/settings/models/**/*.tsx",
-        "ui/src/i18n/*.json",
-        "vibe/i18n/*.json"
-      ]
     }
   ],
   "repo_absence_checks": [
@@ -109,7 +97,10 @@
           "schema": "probe-result.schema.json",
           "paths": ["/properties/error"],
           "exclude": [null],
-          "extras": ["models.probe.native_cli_unavailable"]
+          "extras": [
+            "models.probe.native_cli_unavailable",
+            "models.source.backoff.connection_failed"
+          ]
         }
       ]
     },
@@ -123,7 +114,8 @@
       },
       "target": {
         "schema": "agent-chain.schema.json",
-        "path": "/properties/chain/items/properties/health"
+        "path": "/properties/chain/items/properties/health",
+        "exclude": ["backoff"]
       },
       "mapping": {
         "active": "healthy",
@@ -224,6 +216,10 @@
           "paths": ["/properties/backend"]
         },
         {
+          "schema": "source.schema.json",
+          "paths": ["/properties/adopted_by/items/properties/backend"]
+        },
+        {
           "schema": "probe-result.schema.json",
           "paths": ["/properties/backend"]
         },
@@ -289,8 +285,7 @@
           "path": "/properties/error",
           "exclude": [
             null,
-            "models.source.cooldown.network",
-            "models.source.cooldown.timeout",
+            "models.source.backoff.connection_failed",
             "models.source.cooldown.rate_limited",
             "models.source.cooldown.quota_exhausted",
             "models.source.cooldown.server_error",
@@ -424,6 +419,11 @@
           "kind": "marker_tail",
           "file": "docs/plans/model-hub-contracts/api.md",
           "marker": "authority-consumer: protocol "
+        },
+        {
+          "kind": "schema_vocabulary",
+          "schema": "source-create.schema.json",
+          "paths": ["/properties/protocol_order/items"]
         }
       ]
     },
@@ -499,6 +499,260 @@
           "kind": "marker_tail",
           "file": "docs/plans/model-hub-contracts/api.md",
           "marker": "authority-consumer: observation.discovery "
+        }
+      ]
+    },
+    {
+      "id": "D9",
+      "domain": "runtime dependency health schema",
+      "authority": {
+        "kind": "markdown_table",
+        "file": "docs/plans/model-hub.md",
+        "heading": "Runtime dependency state matrix",
+        "column": "Decision"
+      },
+      "consumers": [
+        {
+          "kind": "schema_vocabulary",
+          "schema": "runtime-dependency.schema.json",
+          "paths": ["/properties/status/properties/health"]
+        }
+      ]
+    },
+    {
+      "id": "D10",
+      "domain": "runtime dependency health API",
+      "authority": {
+        "kind": "markdown_table",
+        "file": "docs/plans/model-hub.md",
+        "heading": "Runtime dependency state matrix",
+        "column": "Decision"
+      },
+      "consumers": [
+        {
+          "kind": "marker_tail",
+          "file": "docs/plans/model-hub-contracts/api.md",
+          "marker": "authority-consumer: runtime.health "
+        }
+      ]
+    },
+    {
+      "id": "D11",
+      "domain": "runtime install failure presentation keys",
+      "authority": {
+        "kind": "schema_vocabulary",
+        "schema": "runtime-dependency.schema.json",
+        "paths": ["/properties/status/properties/error_key"],
+        "exclude": [null]
+      },
+      "consumers": [
+        {
+          "kind": "marker",
+          "file": "ui/src/components/settings/models/types.ts",
+          "prefix": "settings.models.install.fail."
+        }
+      ]
+    },
+    {
+      "id": "D12",
+      "domain": "runtime install synchronous refusals",
+      "authority": {
+        "kind": "markdown_table",
+        "file": "docs/plans/model-hub.md",
+        "heading": "Runtime install refusal matrix",
+        "column": "Decision"
+      },
+      "consumers": [
+        {
+          "kind": "marker_tail",
+          "file": "docs/plans/model-hub-contracts/api.md",
+          "marker": "authority-consumer: runtime.install_error "
+        }
+      ]
+    },
+    {
+      "id": "D13",
+      "domain": "Source-create nonce claim states",
+      "authority": {
+        "kind": "markdown_table",
+        "file": "docs/plans/model-hub.md",
+        "heading": "Source-create nonce state machine",
+        "column": "Decision"
+      },
+      "consumers": [
+        {
+          "kind": "marker",
+          "file": "docs/plans/model-hub-contracts/api.md",
+          "prefix": "nonce."
+        }
+      ]
+    },
+    {
+      "id": "D15",
+      "domain": "guard refusal error codes",
+      "authority": {
+        "kind": "schema_vocabulary",
+        "schema": "guard-refusal.schema.json",
+        "paths": ["/properties/error"]
+      },
+      "consumers": [
+        {
+          "kind": "marker_tail",
+          "file": "docs/plans/model-hub-contracts/api.md",
+          "marker": "authority-consumer: guard.error "
+        }
+      ]
+    },
+    {
+      "id": "D16",
+      "domain": "guard confirmation totality",
+      "authority": {
+        "kind": "markdown_table",
+        "file": "docs/plans/model-hub.md",
+        "heading": "Guard confirmation totality matrix",
+        "column": "Decision"
+      },
+      "consumers": [
+        {
+          "kind": "marker",
+          "file": "docs/plans/model-hub-contracts/api.md",
+          "prefix": "guard_decision."
+        }
+      ]
+    },
+    {
+      "id": "D17",
+      "domain": "OAuth-start nonce claim states",
+      "authority": {
+        "kind": "markdown_table",
+        "file": "docs/plans/model-hub.md",
+        "heading": "OAuth-start nonce state machine",
+        "column": "Decision"
+      },
+      "consumers": [
+        {
+          "kind": "marker",
+          "file": "docs/plans/model-hub-contracts/api.md",
+          "prefix": "oauth_nonce."
+        }
+      ]
+    },
+    {
+      "id": "D18",
+      "domain": "guard refusal error-to-plan relation",
+      "authority": {
+        "kind": "markdown_table",
+        "file": "docs/plans/model-hub.md",
+        "heading": "Guard error-plan relation",
+        "column": "Decision"
+      },
+      "consumers": [
+        {
+          "kind": "marker_tail",
+          "file": "docs/plans/model-hub-contracts/guard-refusal.schema.json",
+          "marker": "authority-consumer: guard.error_plan "
+        }
+      ]
+    },
+    {
+      "id": "D19",
+      "domain": "network failure phase totality",
+      "authority": {
+        "kind": "markdown_table",
+        "file": "docs/plans/model-hub.md",
+        "heading": "Network-failure totality matrix",
+        "column": "Decision"
+      },
+      "consumers": [
+        {
+          "kind": "marker",
+          "file": "docs/plans/model-hub-contracts/api.md",
+          "prefix": "network_failure."
+        }
+      ]
+    },
+    {
+      "id": "D20",
+      "domain": "live connection backoff health",
+      "authority": {
+        "kind": "markdown_table",
+        "file": "docs/plans/model-hub.md",
+        "heading": "Live connection-backoff projection",
+        "column": "Decision"
+      },
+      "consumers": [
+        {
+          "kind": "schema_vocabulary",
+          "schema": "agent-chain.schema.json",
+          "paths": ["/properties/chain/items/properties/health"],
+          "exclude": ["healthy", "cooldown", "needs_action", "error"]
+        },
+        {
+          "kind": "marker_tail",
+          "file": "docs/plans/model-hub-contracts/api.md",
+          "marker": "authority-consumer: live_backoff.health "
+        }
+      ]
+    },
+    {
+      "id": "D21",
+      "domain": "live connection backoff reason",
+      "authority": {
+        "kind": "schema_vocabulary",
+        "schema": "agent-chain.schema.json",
+        "paths": ["/properties/chain/items/properties/reason/anyOf/1"]
+      },
+      "consumers": [
+        {
+          "kind": "marker_tail",
+          "file": "docs/plans/model-hub-contracts/api.md",
+          "marker": "authority-consumer: live_backoff.reason "
+        },
+        {
+          "kind": "schema_vocabulary",
+          "schema": "probe-result.schema.json",
+          "paths": ["/properties/error"],
+          "exclude": [
+            null,
+            "models.source.cooldown.rate_limited",
+            "models.source.cooldown.quota_exhausted",
+            "models.source.cooldown.server_error",
+            "models.source.needs_action.oauth_expired",
+            "models.source.needs_action.balance_exhausted",
+            "models.source.needs_action.credential_revoked",
+            "models.source.needs_action.account_banned",
+            "models.source.error.unclassified",
+            "models.probe.native_cli_unavailable"
+          ]
+        },
+        {
+          "kind": "json_object_keys",
+          "file": "ui/src/i18n/en.json",
+          "path": "/models/source/backoff",
+          "prefix": "models.source.backoff."
+        },
+        {
+          "kind": "json_object_keys",
+          "file": "ui/src/i18n/zh.json",
+          "path": "/models/source/backoff",
+          "prefix": "models.source.backoff."
+        }
+      ]
+    },
+    {
+      "id": "D22",
+      "domain": "OAuth terminal response and materialization-error totality",
+      "authority": {
+        "kind": "markdown_table",
+        "file": "docs/plans/model-hub.md",
+        "heading": "OAuth terminal response and materialization-error matrix",
+        "column": "Decision"
+      },
+      "consumers": [
+        {
+          "kind": "marker",
+          "file": "docs/plans/model-hub-contracts/api.md",
+          "prefix": "oauth_terminal."
         }
       ]
     }
