@@ -211,6 +211,15 @@ def _memory_embedding_configuration_changed(current: V2Config, candidate: V2Conf
     )
 
 
+def _memory_preflight_required(candidate: V2Config) -> bool:
+    """Require live admission unless a disabled candidate is still incomplete."""
+
+    memory = candidate.memory
+    return memory.enabled or (
+        memory.processing.llm.complete() and memory.processing.embedding.complete()
+    )
+
+
 def _memory_api_key_only_patch(patch_payload: object) -> bool:
     """Return whether this patch changes only one or both provider API keys."""
 
@@ -783,7 +792,7 @@ async def _apply_memory_settings_patch(
 
         recovery_intent = "rebuild" if pending_marker or identity_changed else None
 
-        if identity_changed and confirm_rebuild:
+        if identity_changed and confirm_rebuild and _memory_preflight_required(candidate):
             from config.v2_config import memory_config_to_payload
             preflight = await _memory_internal_result(
                 lambda: internal_client.memory_preflight(

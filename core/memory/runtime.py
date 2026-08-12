@@ -2179,11 +2179,21 @@ class MemoryRuntime:
         self._config = deepcopy(candidate)
         self._restart_config = deepcopy(candidate)
         self._configure_insight_reader(self._config)
-        preflight = await self.preflight(candidate)
+        if candidate.enabled or _memory_processing_complete(candidate):
+            preflight = await self.preflight(candidate)
+        else:
+            # A disabled, incomplete candidate can be persisted while the
+            # operator fills in its providers. An empty root needs no network
+            # admission check; data-bearing roots are rejected below.
+            preflight = {"ok": True}
         if preflight.get("ok") is not True:
-            self._config = active_config
-            self._restart_config = active_config
+            # Keep the durable candidate and recovery fence visible to every
+            # later restart, while the retained sidecar and its reader keep
+            # using the active settings until Retry succeeds.
+            self._config = deepcopy(candidate)
+            self._restart_config = deepcopy(candidate)
             self._configure_insight_reader(active_config)
+            self.module.pause_claims()
             return {**preflight, "result": "failed"}
         self.module.pause_claims()
         rebuild_settings = _process_settings(
@@ -2244,10 +2254,13 @@ class MemoryRuntime:
                         "result": "failed",
                     }
 
-            try:
-                candidate_healthy = await self._probe_processing(python, candidate)
-            except Exception:
-                candidate_healthy = False
+            if _memory_processing_complete(candidate):
+                try:
+                    candidate_healthy = await self._probe_processing(python, candidate)
+                except Exception:
+                    candidate_healthy = False
+            else:
+                candidate_healthy = True
             if not candidate_healthy:
                 self._runtime_error = "memory_rebuild_failed"
                 return {
@@ -3009,6 +3022,12 @@ def _rebuild_settings_usable(settings: EverOSProcessSettings) -> bool:
             settings.embedding_api_key,
         )
     )
+
+
+def _memory_processing_complete(config: MemoryConfig) -> bool:
+    """Return whether both configured processing providers can be contacted."""
+
+    return config.processing.llm.complete() and config.processing.embedding.complete()
 
 
 def _rebuild_public_result(result: RebuildProcessResult) -> dict[str, Any]:

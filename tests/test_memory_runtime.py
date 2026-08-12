@@ -103,6 +103,16 @@ def _installed_artifact(**overrides) -> FakeMemoryArtifactManager:
     return FakeMemoryArtifactManager(**defaults)
 
 
+@pytest.fixture(autouse=True)
+def _preflight_passes_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep runtime lifecycle tests hermetic unless they exercise preflight."""
+
+    async def preflight(self: MemoryRuntime, config: MemoryConfig | None = None):
+        return {"ok": True}
+
+    monkeypatch.setattr(MemoryRuntime, "preflight", preflight)
+
+
 async def test_memory_drain_task_reactivates_recovery_after_an_unexpected_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -3075,6 +3085,60 @@ async def test_runtime_preflight_failure_keeps_existing_sidecar_running(
     assert len(instances) == 1
     assert instances[0].stopped is False
     assert runtime._config is initial
+    await memory_runtime_factory.close(runtime)
+
+
+async def test_runtime_rebuild_preflight_failure_keeps_candidate_fence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    memory_runtime_factory,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    active = MemoryConfig(enabled=True, processing=_processing_config())
+    candidate = replace(
+        active,
+        processing=replace(
+            active.processing,
+            embedding=replace(active.processing.embedding, model="embed-v2"),
+        ),
+        recovery_intent="rebuild",
+    )
+    V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+        memory=candidate,
+    ).save()
+    runtime = memory_runtime_factory(
+        active,
+        artifact_manager=_installed_artifact(),
+        effective_home=tmp_path,
+    )
+    old = FakeEverOSProcess(settings=_settings())
+    runtime._process = old
+
+    async def reject_preflight(_config: MemoryConfig | None = None) -> dict[str, object]:
+        return {"ok": False, "error": "memory_embedding_unavailable"}
+
+    monkeypatch.setattr(runtime, "preflight", reject_preflight)
+
+    assert await runtime.rebuild() == {
+        "ok": False,
+        "error": "memory_embedding_unavailable",
+        "result": "failed",
+    }
+    assert runtime._config == candidate
+    assert runtime._restart_config == candidate
+    assert runtime._process is old
+    assert runtime.module._worker._claims_paused is True
+    assert runtime._insight_reader is not None
+    assert runtime._insight_reader._provider_base_urls == (
+        active.processing.llm.base_url,
+        active.processing.embedding.base_url,
+    )
+    assert V2Config.load().memory == candidate
     await memory_runtime_factory.close(runtime)
 
 

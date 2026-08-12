@@ -1252,6 +1252,11 @@ def test_memory_confirmed_first_embedding_identity_runs_retained_rebuild(
     _save_config(tmp_path)
     observed: list[tuple[str | None, str | None, str | None]] = []
 
+    async def unexpected_preflight(*, payload: dict, user_key: str):
+        raise AssertionError("incomplete disabled candidates do not need live preflight")
+
+    monkeypatch.setattr(internal_client, "memory_preflight", unexpected_preflight)
+
     async def rebuild(*, user_key: str):
         persisted = V2Config.load().memory
         observed.append(
