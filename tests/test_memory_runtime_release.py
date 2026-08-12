@@ -4,12 +4,14 @@ import hashlib
 import io
 import json
 import os
+import sys
 import tarfile
 import tempfile
 from pathlib import Path
 
 import pytest
 
+from scripts import build_memory_runtime as runtime_builder
 from scripts import generate_memory_runtime_manifest as manifest_generator
 from scripts.build_memory_runtime import (
     EVEROS_VERSION,
@@ -176,6 +178,49 @@ def test_generate_memory_runtime_manifest_records_verified_platform_archives(tmp
             "size": archive.stat().st_size,
             "bin_path": "bin/python",
         }
+
+
+def test_build_outputs_metadata_accepted_by_manifest_generator(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    for platform in PLATFORMS:
+        archive, _ = _write_archive(tmp_path, platform)
+        metadata_path = archive.with_suffix("").with_suffix(".json")
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata_path.unlink()
+
+        monkeypatch.setattr(runtime_builder, "build_runtime", lambda **kwargs: (archive, metadata))
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "build_memory_runtime.py",
+                "--output-dir",
+                str(tmp_path),
+                "--platform",
+                platform,
+                "--metadata-output",
+                str(metadata_path),
+            ],
+        )
+
+        assert runtime_builder.main() == 0
+        output = json.loads(capsys.readouterr().out)
+
+        assert set(output) == {"ok", "archive", "metadata"}
+        assert output["metadata"] == metadata
+        assert json.loads(metadata_path.read_text(encoding="utf-8")) == output["metadata"]
+
+    manifest = manifest_generator.build_manifest(
+        archive_dir=tmp_path,
+        tag="v3.1.0",
+        repo="avibe-bot/avibe",
+        output=tmp_path / "manifest.json",
+    )
+
+    assert set(manifest["archives"]) == set(PLATFORMS)
 
 
 def test_generate_memory_runtime_manifest_fails_when_platform_archive_missing(tmp_path: Path) -> None:
