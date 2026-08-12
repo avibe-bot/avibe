@@ -3234,6 +3234,8 @@
       "timeoutNone": "No timeout",
       "timeoutDefault": "{{duration}} (default)",
       "lastExitCode": "Last exit code",
+      "failureSummary": "Failure",
+      "technicalDetails": "Technical details",
       "escalation": "On failure → escalation",
       "triagePrompt": "Triage prompt",
       "cwdFromSession": "Bound session, else runtime default or Avibe state dir",
@@ -3313,6 +3315,11 @@
       "timeout": "Timed out",
       "error": "Failed",
       "unknown": "Unknown"
+    },
+    "failure": {
+      "timeout": "The last run timed out.",
+      "generic": "The last run failed.",
+      "circuitPaused": "This Watch was paused after repeated events."
     },
     "kind": {
       "task": "Scheduled task",

@@ -1469,6 +1469,10 @@ export type HarnessWatch = HarnessSessionSummary & HarnessDefinitionState & {
   last_event_at: string | null;
   last_error: string | null;
   last_exit_code: number | null;
+  // Decoded server-side metadata includes durable Watch admission facts such as
+  // the circuit-breaker incident; it is troubleshooting evidence, not a new UI
+  // lifecycle state.
+  metadata: Record<string, unknown> | null;
   runtime: HarnessWatchRuntime;
   // Whether the waiter process is alive. ``null`` means we have never seen a
   // heartbeat for it, which is not the same as having seen it exit — the row

@@ -92,6 +92,7 @@ from storage.background import (
     COMMAND_TIMED_OUT_METADATA_KEY,
     DefinitionWriteConflict,
     SQLiteBackgroundTaskStore,
+    TASK_LAST_RESULT_STATUS_METADATA_KEY,
     definition_lifecycle_detail,
 )
 from storage.models import (
@@ -3057,8 +3058,12 @@ def test_task_definition_projection_follows_the_exact_terminal_cas_winner(
     assert task.id not in service.scheduler.jobs
     if settlement_winner == "natural_terminal":
         assert "interrupt_reason" not in settled["metadata"]
+        assert TASK_LAST_RESULT_STATUS_METADATA_KEY not in (projected.metadata or {})
     elif settlement_winner == "user_stop":
         assert settled["metadata"]["interrupt_reason"] == SETTLED_BY_STOPPED
+        assert projected.metadata[TASK_LAST_RESULT_STATUS_METADATA_KEY] == "canceled"
+    else:
+        assert projected.metadata[TASK_LAST_RESULT_STATUS_METADATA_KEY] == "failed"
 
 
 @pytest.mark.parametrize("shutdown_entrypoint", ["stop", "lease_loss"])
