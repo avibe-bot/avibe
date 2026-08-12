@@ -37,7 +37,7 @@ import { getEnabledPlatforms, platformSupportsChannels } from '../lib/platforms'
 import { useViewportHeightVar } from '../lib/useViewportHeightVar';
 import {
   adminLandingPath,
-  filterLocalSystemNavItems,
+  filterRuntimeAccessNavItems,
   isAdvancedSettingsPath,
   isLocalSystemPathForAccess,
   isMemorySettingsPath,
@@ -504,9 +504,9 @@ export const AppShell: React.FC = () => {
   // must not still be advertised, or a remote owner taps a nav entry and lands
   // back on the Workbench. With the temporary Organization rollout every admin
   // surface except remote-access pairing is admitted, so the nav stays full.
-  const visibleAdminItems = canUseRuntimeSurfaces || capabilities.can_use_system
+  const visibleAdminItems = capabilities.can_use_system
     ? adminItems
-    : filterLocalSystemNavItems(adminItems);
+    : filterRuntimeAccessNavItems(adminItems, canUseRuntimeSurfaces);
 
   const items: ShellNavItem[] = shellMode === 'admin' ? visibleAdminItems : [];
 
@@ -528,9 +528,9 @@ export const AppShell: React.FC = () => {
       match: (pathname) => isAdvancedSettingsPath(pathname, memoryNavVisible),
     },
   ];
-  const adminMobileTabs = canUseRuntimeSurfaces || capabilities.can_use_system
+  const adminMobileTabs = capabilities.can_use_system
     ? adminMobileTabsAll
-    : filterLocalSystemNavItems(adminMobileTabsAll);
+    : filterRuntimeAccessNavItems(adminMobileTabsAll, canUseRuntimeSurfaces);
   // The More sheet shows the overflow: admin sections not already on the bottom
   // bar. Keep its filtering aligned with the currently visible primary tabs.
   const adminBottomBarPaths = new Set(

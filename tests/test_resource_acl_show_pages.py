@@ -940,6 +940,8 @@ def test_untrusted_dock_context_fails_closed(monkeypatch, tmp_path) -> None:
 
 
 def test_remote_member_archive_is_denied_under_resource_acl(monkeypatch, tmp_path) -> None:
+    from unittest.mock import AsyncMock
+
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
     project_dir = tmp_path / "project"
@@ -970,6 +972,12 @@ def test_remote_member_archive_is_denied_under_resource_acl(monkeypatch, tmp_pat
         finally:
             store.close()
 
+        archive_session = AsyncMock()
+        monkeypatch.setattr(
+            "vibe.internal_client.memory_archive_session",
+            archive_session,
+        )
+
         # Show Page archive of another owner's page stays reserved to
         # owner/admin Organization roles under the Resource ACL boundary
         # (see #1343); a plain active Organization member is denied.
@@ -992,6 +1000,7 @@ def test_remote_member_archive_is_denied_under_resource_acl(monkeypatch, tmp_pat
         )
 
         assert response.status_code in {403, 404}
+        archive_session.assert_not_awaited()
         with engine.connect() as connection:
             assert connection.execute(
                 select(agent_sessions.c.status).where(agent_sessions.c.id == session_id)

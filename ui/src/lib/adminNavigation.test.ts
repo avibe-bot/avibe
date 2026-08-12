@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   adminLandingPath,
   filterLocalSystemNavItems,
+  filterRuntimeAccessNavItems,
   isAdvancedSettingsPath,
   isLocalOnlyMessagingField,
   isLocalSystemPath,
@@ -95,6 +96,33 @@ describe('filterLocalSystemNavItems', () => {
         children: [{ to: '/admin/settings/messaging' }],
       },
       { onClick: expect.any(Function) },
+      { to: '/admin/settings/messaging' },
+    ]);
+  });
+});
+
+describe('filterRuntimeAccessNavItems', () => {
+  const navItems = [
+    { to: '/admin/dashboard' },
+    {
+      children: [
+        { to: '/admin/remote-access' },
+        { to: '/admin/settings/models' },
+      ],
+    },
+    { to: '/admin/settings/messaging' },
+  ];
+
+  it('withholds only Remote Access during the temporary Organization rollout', () => {
+    expect(filterRuntimeAccessNavItems(navItems, true)).toEqual([
+      { to: '/admin/dashboard' },
+      { children: [{ to: '/admin/settings/models' }] },
+      { to: '/admin/settings/messaging' },
+    ]);
+  });
+
+  it('keeps the baseline local-system filter outside the temporary rollout', () => {
+    expect(filterRuntimeAccessNavItems(navItems, false)).toEqual([
       { to: '/admin/settings/messaging' },
     ]);
   });

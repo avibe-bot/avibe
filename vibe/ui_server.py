@@ -9520,7 +9520,10 @@ async def sessions_archive(session_id: str):
     writes into hidden history rather than re-surfacing the session.
     """
     from core.services import sessions as workbench_sessions_service
+    from core.show_pages import ShowPageError, require_show_page_management
+    from sqlalchemy import select
     from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID
+    from storage.models import show_pages
     from vibe.sse_broker import broker
 
     engine = _projects_engine()
@@ -9536,8 +9539,21 @@ async def sessions_archive(session_id: str):
                 session_id,
                 authorization_context=getattr(g, "authorization_context", None),
             )
+            page_exists = conn.execute(
+                select(show_pages.c.session_id).where(
+                    show_pages.c.session_id == session_id
+                )
+            ).scalar_one_or_none()
+            if page_exists is not None:
+                require_show_page_management(
+                    conn,
+                    session_id,
+                    user_context=getattr(g, "authorization_context", None),
+                )
     except LookupError as err:
         return jsonify({"error": str(err)}), 404
+    except ShowPageError as err:
+        return _coded_error_response(err.code, str(err), 403)
     if existing_session.get("status") == "archived":
         try:
             with engine.begin() as conn:
