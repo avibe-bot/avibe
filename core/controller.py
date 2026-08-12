@@ -486,10 +486,19 @@ class Controller:
         return result
 
     def get_native_session_service(self):
+        config = getattr(self, "config", None)
         if self.native_session_service is None:
             from modules.agents.native_sessions.service import AgentNativeSessionService
 
-            self.native_session_service = AgentNativeSessionService()
+            self.native_session_service = AgentNativeSessionService(
+                reply_enhancements=getattr(config, "reply_enhancements", True),
+            )
+        else:
+            self.native_session_service.reply_enhancements = getattr(
+                config,
+                "reply_enhancements",
+                True,
+            )
         return self.native_session_service
 
     def _create_formatter(self, platform: str):

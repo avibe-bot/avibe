@@ -20,9 +20,12 @@ class AgentNativeSessionService:
         self,
         providers: list[NativeSessionProvider] | None = None,
         provider_specs: tuple[NativeSessionProviderSpec, ...] = DEFAULT_PROVIDER_SPECS,
+        *,
+        reply_enhancements: bool = True,
     ):
         self._providers = providers
         self._provider_specs = provider_specs
+        self.reply_enhancements = reply_enhancements
 
     @property
     def providers(self) -> list[NativeSessionProvider]:
@@ -60,7 +63,12 @@ class AgentNativeSessionService:
                 hydrated.append(item)
                 continue
             try:
-                hydrated.append(provider.hydrate_preview(item))
+                hydrated.append(
+                    provider.hydrate_preview(
+                        item,
+                        strip_quick_replies=self.reply_enhancements,
+                    )
+                )
             except Exception as exc:
                 logger.warning("Failed to hydrate %s session %s: %s", item.agent, item.native_session_id, exc)
                 hydrated.append(item)
@@ -123,7 +131,10 @@ class AgentNativeSessionService:
             if item.native_session_id != native_session_id:
                 continue
             try:
-                return provider.hydrate_preview(item)
+                return provider.hydrate_preview(
+                    item,
+                    strip_quick_replies=self.reply_enhancements,
+                )
             except Exception as exc:
                 logger.warning("Failed to hydrate %s session %s: %s", agent, native_session_id, exc)
                 return item

@@ -60,7 +60,12 @@ class CodexNativeSessionProvider(NativeSessionProvider):
             logger.warning("Failed to list Codex sessions for %s: %s", working_path, exc)
         return items
 
-    def hydrate_preview(self, item: NativeResumeSession) -> NativeResumeSession:
+    def hydrate_preview(
+        self,
+        item: NativeResumeSession,
+        *,
+        strip_quick_replies: bool = True,
+    ) -> NativeResumeSession:
         preview = ""
         rollout_path_raw = str(item.locator.get("rollout_path") or "").strip()
         rollout_path = Path(rollout_path_raw) if rollout_path_raw else None
@@ -89,8 +94,9 @@ class CodexNativeSessionProvider(NativeSessionProvider):
         item.last_agent_message = preview
         item.last_agent_tail = build_tail_preview(
             preview or item.native_session_id,
-            strip_quick_replies=assistant_preview,
+            strip_quick_replies=assistant_preview and strip_quick_replies,
         )
+        item.strip_quick_replies = assistant_preview and strip_quick_replies
         return item
 
     @classmethod

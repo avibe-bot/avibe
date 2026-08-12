@@ -197,9 +197,13 @@ _BUTTON_TOKEN_RE = re.compile(
 # (Detection matches the whole block instead of scanning for ``|``, which a URL
 # may itself contain.)
 _PLAIN_LINKS_ONLY_RE = re.compile(r"(?:\s*\[[^\]]+\]\(" + _PLAIN_URL + r"\)\s*)+")
-_PLAIN_LINK_ROW_ONLY_RE = re.compile(
-    r"\s*\[[^\]]+\]\(" + _PLAIN_URL + r"\)\s*"
-    r"(?:[|｜]\s*\[[^\]]+\]\(" + _PLAIN_URL + r"\)\s*)+"
+_LINK_ONLY_BUTTON_ROW_RE = re.compile(
+    r"\s*(?:\[[^\]\r\n]+\]\((?:<https?://[^>\r\n]+>|"
+    + _PLAIN_URL
+    + r")\)|<https?://[^|>\r\n]+\|[^>\r\n]+>)\s*"
+    r"(?:[|｜]\s*(?:\[[^\]\r\n]+\]\((?:<https?://[^>\r\n]+>|"
+    + _PLAIN_URL
+    + r")\)|<https?://[^|>\r\n]+\|[^>\r\n]+>)\s*)+"
 )
 
 
@@ -215,7 +219,10 @@ def _is_markdown_table_delimiter_line(line: str) -> bool:
 
 def _is_markdown_table_delimiter_before(text: str, start: int) -> bool:
     """Return whether a separator-free row belongs to the preceding table."""
-    lines = text[:start].splitlines()
+    prefix = text[:start]
+    if prefix.endswith("\n"):
+        return False
+    lines = prefix.splitlines()
     if not lines or "|" not in lines[-1]:
         return False
 
@@ -978,7 +985,7 @@ def _extract_buttons(
         return [], text
 
     block = m.group(1)
-    if pattern is _UNSEPARATED_BUTTON_ROW_RE and _PLAIN_LINK_ROW_ONLY_RE.fullmatch(
+    if pattern is _UNSEPARATED_BUTTON_ROW_RE and _LINK_ONLY_BUTTON_ROW_RE.fullmatch(
         block.strip()
     ):
         return [], text

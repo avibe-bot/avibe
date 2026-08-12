@@ -48,6 +48,7 @@ def test_claude_provider_falls_back_to_history_jsonl(tmp_path: Path) -> None:
     hydrated = provider.hydrate_preview(items[0])
     assert hydrated.last_agent_message == "latest prompt"
     assert hydrated.last_agent_tail == "latest prompt"
+    assert hydrated.strip_quick_replies is False
 
 
 def test_claude_project_path_encoding_handles_windows_paths() -> None:
@@ -226,6 +227,47 @@ def test_codex_provider_skips_empty_rollout_path(monkeypatch) -> None:
     assert called is False
     assert hydrated.last_agent_message == "Fallback title"
     assert hydrated.last_agent_tail == "Fallback title"
+    assert hydrated.strip_quick_replies is False
+
+
+def test_native_session_service_propagates_reply_enhancement_setting() -> None:
+    item = NativeResumeSession(
+        agent="codex",
+        agent_prefix="cx",
+        native_session_id="thread_1",
+        working_path="/tmp/project",
+        created_at=None,
+        updated_at=None,
+        sort_ts=1.0,
+    )
+
+    class _Provider:
+        agent_name = "codex"
+
+        def list_metadata(self, working_path: str) -> list[NativeResumeSession]:
+            return [item]
+
+        def hydrate_preview(
+            self,
+            session: NativeResumeSession,
+            *,
+            strip_quick_replies: bool = True,
+        ) -> NativeResumeSession:
+            session.strip_quick_replies = strip_quick_replies
+            return session
+
+    service = AgentNativeSessionService(
+        providers=[_Provider()],
+        reply_enhancements=False,
+    )
+
+    assert service.list_recent_sessions("/tmp/project")[0].strip_quick_replies is False
+
+
+def test_build_resume_preview_can_preserve_metadata_controls() -> None:
+    text = "Compare:\n[A] | [B]"
+
+    assert build_resume_preview(text, strip_quick_replies=False) == "Compare:\n[A] | [B]"
 
 
 def test_opencode_title_provider_ignores_default_title(tmp_path: Path) -> None:
@@ -540,7 +582,12 @@ def test_native_session_service_loads_default_providers_lazily(monkeypatch) -> N
         def list_metadata(self, working_path: str) -> list[NativeResumeSession]:
             return []
 
-        def hydrate_preview(self, item: NativeResumeSession) -> NativeResumeSession:
+        def hydrate_preview(
+            self,
+            item: NativeResumeSession,
+            *,
+            strip_quick_replies: bool = True,
+        ) -> NativeResumeSession:
             return item
 
     def _fake_import_module(module_path: str):

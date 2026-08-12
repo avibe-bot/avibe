@@ -1142,7 +1142,10 @@ class SessionHandler(BaseHandler):
             return ""
         if item is None:
             return ""
-        return build_resume_preview(item.last_agent_message or item.last_agent_tail)
+        return build_resume_preview(
+            item.last_agent_message or item.last_agent_tail,
+            strip_quick_replies=item.strip_quick_replies,
+        )
 
     def _claude_runtime_generation_lock(self, composite_key: str) -> asyncio.Lock:
         return self.claude_runtime_generation_locks.setdefault(

@@ -19,7 +19,12 @@ class NativeSessionProvider(Protocol):
     def list_metadata(self, working_path: str) -> list[NativeResumeSession]:
         """Return lightweight session metadata for a working path."""
 
-    def hydrate_preview(self, item: NativeResumeSession) -> NativeResumeSession:
+    def hydrate_preview(
+        self,
+        item: NativeResumeSession,
+        *,
+        strip_quick_replies: bool = True,
+    ) -> NativeResumeSession:
         """Fill in the assistant preview text for one item."""
 
     def get_title(
@@ -53,11 +58,16 @@ def normalize_title_text(text: str, *, limit: int | None = None) -> str:
     return cleaned[:limit] if limit is not None else cleaned
 
 
-def normalize_multiline_preview_text(text: str) -> str:
+def normalize_multiline_preview_text(
+    text: str,
+    *,
+    strip_quick_replies: bool = True,
+) -> str:
     if not text:
         return ""
     cleaned = text.replace("\r\n", "\n").replace("\r", "\n")
-    cleaned = strip_quick_reply_buttons(cleaned)
+    if strip_quick_replies:
+        cleaned = strip_quick_reply_buttons(cleaned)
     if "\n---\n" in cleaned:
         cleaned = cleaned.split("\n---\n", 1)[0]
 
@@ -118,8 +128,16 @@ def build_tail_preview(
     )
 
 
-def build_resume_preview(text: str, limit: int = 200) -> str:
-    cleaned = normalize_multiline_preview_text(text)
+def build_resume_preview(
+    text: str,
+    limit: int = 200,
+    *,
+    strip_quick_replies: bool = True,
+) -> str:
+    cleaned = normalize_multiline_preview_text(
+        text,
+        strip_quick_replies=strip_quick_replies,
+    )
     if not cleaned:
         return ""
     excerpt = cleaned if len(cleaned) <= limit else cleaned[-limit:]

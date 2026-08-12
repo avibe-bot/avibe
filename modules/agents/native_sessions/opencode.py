@@ -69,7 +69,12 @@ class OpenCodeNativeSessionProvider(NativeSessionProvider):
             logger.warning("Failed to list OpenCode sessions for %s: %s", working_path, exc)
         return rows
 
-    def hydrate_preview(self, item: NativeResumeSession) -> NativeResumeSession:
+    def hydrate_preview(
+        self,
+        item: NativeResumeSession,
+        *,
+        strip_quick_replies: bool = True,
+    ) -> NativeResumeSession:
         preview = ""
         if not self.db_path.exists():
             return item
@@ -103,8 +108,9 @@ class OpenCodeNativeSessionProvider(NativeSessionProvider):
         fallback = str(item.locator.get("title") or item.native_session_id)
         item.last_agent_tail = build_tail_preview(
             preview or fallback,
-            strip_quick_replies=assistant_preview,
+            strip_quick_replies=assistant_preview and strip_quick_replies,
         )
+        item.strip_quick_replies = assistant_preview and strip_quick_replies
         return item
 
     def running_fork_point_before_latest_user(

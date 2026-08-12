@@ -1467,6 +1467,12 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             ["查看冲突", "继续修复"],
         )
 
+    def test_process_reply_accepts_buttons_after_blank_line(self):
+        reply = process_reply("Table | Value\n\n[A] | [B]")
+
+        self.assertEqual(reply.text, "Table | Value")
+        self.assertEqual([button.text for button in reply.buttons], ["A", "B"])
+
     def test_process_reply_accepts_fullwidth_pipe_without_rule(self):
         reply = process_reply("Done.\n[A] ｜ [B]")
 
@@ -1494,6 +1500,18 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             "Links\n"
             "[Documentation](https://example.com/docs) | "
             "[Issues](https://example.com/issues)"
+        )
+
+        reply = process_reply(text)
+
+        self.assertEqual(reply.text, text)
+        self.assertEqual(reply.buttons, [])
+
+    def test_process_reply_preserves_separator_free_slack_link_list(self):
+        text = (
+            "Links\n"
+            "[Documentation](<https://example.com/docs>) | "
+            "<https://example.com/issues|Issues>"
         )
 
         reply = process_reply(text)
