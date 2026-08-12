@@ -2330,6 +2330,7 @@ def _prepare_memory_child_directories(
         memory_dir / ".child-home",
         memory_dir / ".child-home" / ".cache",
         memory_dir / ".child-home" / ".config",
+        memory_dir / ".child-home" / ".local",
         memory_dir / ".child-home" / ".local" / "share",
         memory_dir / ".child-home" / ".local" / "state",
         memory_dir / "generated",
