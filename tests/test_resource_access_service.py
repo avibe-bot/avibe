@@ -230,7 +230,7 @@ def test_http_resource_services_reuse_the_parsed_authorization_context() -> None
         assert resource_access_service.resolve_resource_access_context() is context
 
 
-def test_deferred_remote_context_expires_at_authorization_refresh_boundary() -> None:
+def test_deferred_remote_context_remains_valid_past_authorization_refresh_boundary() -> None:
     from vibe import remote_access
 
     issued_at = 1_700_000_000
@@ -250,17 +250,21 @@ def test_deferred_remote_context_expires_at_authorization_refresh_boundary() -> 
     metadata = resource_access_service.metadata_with_resource_user_context({}, context)
     expires_at = issued_at + remote_access.SESSION_AUTHORIZATION_REFRESH_SECONDS
 
-    restored = resource_access_service.resource_user_context_from_metadata(
+    # The refresh boundary is recorded for audit but is no longer a hard
+    # execution cutoff: durable Harness automation must keep running past the
+    # creating browser session's refresh window. Active Organization membership
+    # is re-derived from the signed claims at execution time (avibe#1343 P1).
+    before = resource_access_service.resource_user_context_from_metadata(
         metadata,
         now=expires_at - 1,
     )
-    assert restored is not None
-    assert restored.subject == "member-1"
-    with pytest.raises(resource_access_service.ResourceAccessError, match="resource_authorization_expired"):
-        resource_access_service.resource_user_context_from_metadata(
-            metadata,
-            now=expires_at,
-        )
+    after = resource_access_service.resource_user_context_from_metadata(
+        metadata,
+        now=expires_at + 86_400,  # well past the 12h refresh window
+    )
+    assert before is not None and after is not None
+    assert before.subject == after.subject == "member-1"
+    assert after.is_active_organization_member is True
 
 
 def test_personal_resources_cannot_use_organization_access_levels(tmp_path) -> None:

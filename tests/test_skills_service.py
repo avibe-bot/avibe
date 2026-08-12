@@ -65,6 +65,19 @@ def _organization_context(
     )
 
 
+def _non_member_context(
+    *,
+    instance_role: str = "owner",
+) -> resource_access_service.ResourceUserContext:
+    return resource_access_service.ResourceUserContext(
+        subject="legacy-owner",
+        email="legacy-owner@example.com",
+        instance_role=instance_role,
+        instance_access_source="owner",
+        is_remote=True,
+    )
+
+
 def _skills_engine(monkeypatch, tmp_path):
     engine = create_sqlite_engine(tmp_path / "skills_acl.sqlite")
     metadata.create_all(engine)
@@ -263,7 +276,7 @@ def test_skill_resource_id_is_stable_and_backend_scoped(tmp_path) -> None:
     assert stable_project_id != legacy_project_id
 
 
-def test_list_skills_filters_private_public_scope_and_missing_group_context(monkeypatch, tmp_path) -> None:
+def test_active_org_members_list_all_skills_without_resource_acl_filtering(monkeypatch, tmp_path) -> None:
     engine = _skills_engine(monkeypatch, tmp_path)
     try:
         with engine.begin() as connection:
@@ -293,13 +306,14 @@ def test_list_skills_filters_private_public_scope_and_missing_group_context(monk
     finally:
         engine.dispose()
 
-    assert [skill["name"] for skill in owner["skills"]] == ["private-skill", "public-skill", "scoped-skill"]
-    assert [skill["name"] for skill in member["skills"]] == ["public-skill", "scoped-skill"]
-    assert [skill["name"] for skill in missing_groups["skills"]] == ["public-skill"]
-    assert missing_groups["summary"] == {"global": 1, "project": 0}
+    expected_names = ["private-skill", "public-skill", "scoped-skill"]
+    assert [skill["name"] for skill in owner["skills"]] == expected_names
+    assert [skill["name"] for skill in member["skills"]] == expected_names
+    assert [skill["name"] for skill in missing_groups["skills"]] == expected_names
+    assert missing_groups["summary"] == {"global": 3, "project": 0}
 
 
-def test_check_skills_filters_acl_rows_and_recomputes_summary(monkeypatch, tmp_path) -> None:
+def test_active_org_members_check_all_skills_without_resource_acl_filtering(monkeypatch, tmp_path) -> None:
     engine = _skills_engine(monkeypatch, tmp_path)
     try:
         with engine.begin() as connection:
@@ -335,13 +349,15 @@ def test_check_skills_filters_acl_rows_and_recomputes_summary(monkeypatch, tmp_p
     finally:
         engine.dispose()
 
-    assert [skill["name"] for skill in member["skills"]] == ["public-skill", "scoped-skill"]
-    assert member["summary"] == {"total": 2, "updateAvailable": 1, "upToDate": 1, "uncheckable": 0}
-    assert [skill["name"] for skill in missing_groups["skills"]] == ["public-skill"]
-    assert missing_groups["summary"] == {"total": 1, "updateAvailable": 0, "upToDate": 1, "uncheckable": 0}
+    expected_names = ["private-skill", "public-skill", "scoped-skill"]
+    expected_summary = {"total": 3, "updateAvailable": 2, "upToDate": 1, "uncheckable": 0}
+    assert [skill["name"] for skill in member["skills"]] == expected_names
+    assert member["summary"] == expected_summary
+    assert [skill["name"] for skill in missing_groups["skills"]] == expected_names
+    assert missing_groups["summary"] == expected_summary
 
 
-def test_project_skill_use_requires_editor_access_to_the_project(monkeypatch, tmp_path) -> None:
+def test_active_org_members_list_project_skills_without_project_acl(monkeypatch, tmp_path) -> None:
     engine = _skills_engine(monkeypatch, tmp_path)
     project_dir = tmp_path / "project"
     project_dir.mkdir()
@@ -417,63 +433,62 @@ def test_project_skill_use_requires_editor_access_to_the_project(monkeypatch, tm
         )
         assert [item["name"] for item in allowed_all["skills"]] == ["project-skill"]
 
-        denied_recorder = _Recorder(listing)
-        monkeypatch.setattr(skills, "_run_askill", denied_recorder)
-        with pytest.raises(skills.SkillAccessError):
-            _run(
-                skills.list_skills(
-                    "askill",
-                    scope="project",
-                    project_dir=str(project_dir),
-                    project_id=project["id"],
-                    user_context=_organization_context(
-                        "member-2",
-                        group_ids=frozenset({"group-sales"}),
-                    ),
-                )
+        unmatched_group_recorder = _Recorder(listing)
+        monkeypatch.setattr(skills, "_run_askill", unmatched_group_recorder)
+        unmatched_group = _run(
+            skills.list_skills(
+                "askill",
+                scope="project",
+                project_dir=str(project_dir),
+                project_id=project["id"],
+                user_context=_organization_context(
+                    "member-2",
+                    group_ids=frozenset({"group-sales"}),
+                ),
             )
-        assert denied_recorder.calls == []
+        )
+        assert [item["name"] for item in unmatched_group["skills"]] == ["project-skill"]
+        assert [call["args"] for call in unmatched_group_recorder.calls] == [["list", "-p"]]
 
-        denied_all_recorder = _Recorder(listing)
-        monkeypatch.setattr(skills, "_run_askill", denied_all_recorder)
-        with pytest.raises(skills.SkillAccessError):
-            _run(
-                skills.list_skills(
-                    "askill",
-                    scope="all",
-                    project_dir=str(project_dir),
-                    project_id=project["id"],
-                    user_context=_organization_context(
-                        "member-2",
-                        group_ids=frozenset({"group-sales"}),
-                    ),
-                )
+        unmatched_group_all_recorder = _Recorder(listing)
+        monkeypatch.setattr(skills, "_run_askill", unmatched_group_all_recorder)
+        unmatched_group_all = _run(
+            skills.list_skills(
+                "askill",
+                scope="all",
+                project_dir=str(project_dir),
+                project_id=project["id"],
+                user_context=_organization_context(
+                    "member-2",
+                    group_ids=frozenset({"group-sales"}),
+                ),
             )
-        assert denied_all_recorder.calls == []
+        )
+        assert [item["name"] for item in unmatched_group_all["skills"]] == ["project-skill"]
+        assert [call["args"] for call in unmatched_group_all_recorder.calls] == [["list"]]
     finally:
         engine.dispose()
 
 
-def test_remote_skill_listing_uses_explicit_safe_projection(monkeypatch, tmp_path) -> None:
+def test_active_org_skill_listing_returns_complete_runtime_payload(monkeypatch, tmp_path) -> None:
     engine = _skills_engine(monkeypatch, tmp_path)
+    raw_skill = {
+        **_skill_row("public-skill"),
+        "description": "safe description",
+        "sourceUrl": "file:///Users/alex/private-skill",
+        "installSource": "/Users/alex/private-skill",
+        "unknownLocalField": "secret",
+        "agents": [
+            {"id": "codex", "name": "Codex", "path": "/Users/alex/.codex"}
+        ],
+    }
     try:
         with engine.begin() as connection:
             _seed_skill_policy(connection, "public-skill", access_level="public")
         recorder = _Recorder(
             {
                 "ok": True,
-                "skills": [
-                    {
-                        **_skill_row("public-skill"),
-                        "description": "safe description",
-                        "sourceUrl": "file:///Users/alex/private-skill",
-                        "installSource": "/Users/alex/private-skill",
-                        "unknownLocalField": "secret",
-                        "agents": [
-                            {"id": "codex", "name": "Codex", "path": "/Users/alex/.codex"}
-                        ],
-                    }
-                ],
+                "skills": [raw_skill],
             }
         )
         monkeypatch.setattr(skills, "_run_askill", recorder)
@@ -488,116 +503,94 @@ def test_remote_skill_listing_uses_explicit_safe_projection(monkeypatch, tmp_pat
     finally:
         engine.dispose()
 
-    assert result["skills"] == [
-        {
-            "name": "public-skill",
-            "scope": "global",
-            "description": "safe description",
-            "path": "",
-            "agents": [{"id": "codex", "name": "Codex"}],
-        }
-    ]
+    assert result["skills"] == [raw_skill]
 
 
-def test_remote_skill_mutations_require_instance_owner_and_resource_management(monkeypatch, tmp_path) -> None:
+def test_active_org_members_mutate_skills_without_owner_preflight(monkeypatch, tmp_path) -> None:
     engine = _skills_engine(monkeypatch, tmp_path)
-    listing = {"ok": True, "skills": [_skill_row("private-skill")]}
     try:
         with engine.begin() as connection:
             _seed_skill_policy(connection, "private-skill", access_level="private")
 
-        member_recorder = _SequenceRecorder([listing])
+        member_recorder = _Recorder({"ok": True})
         monkeypatch.setattr(skills, "_run_askill", member_recorder)
-        with pytest.raises(skills.SkillAccessError) as member_error:
-            _run(
-                skills.remove_skill(
-                    "askill",
-                    "private-skill",
-                    scope="global",
-                    user_context=_organization_context("member-1"),
-                )
-            )
-        assert member_error.value.code == "resource_access_forbidden"
-        assert member_recorder.calls == []
-
-        admin_editor_recorder = _SequenceRecorder([listing])
-        monkeypatch.setattr(skills, "_run_askill", admin_editor_recorder)
-        with pytest.raises(skills.SkillAccessError):
-            _run(
-                skills.update(
-                    "askill",
-                    "private-skill",
-                    scope="global",
-                    user_context=_organization_context("member-2", role="admin"),
-                )
-            )
-        assert admin_editor_recorder.calls == []
-
-        owner_recorder = _SequenceRecorder([listing, {"ok": True}])
-        monkeypatch.setattr(skills, "_run_askill", owner_recorder)
         assert _run(
             skills.remove_skill(
                 "askill",
                 "private-skill",
                 scope="global",
-                user_context=_organization_context("owner-1", instance_role="owner"),
+                user_context=_organization_context("member-1"),
             )
         ) == {"ok": True}
-        assert [call["args"] for call in owner_recorder.calls] == [["list", "-g"], ["remove", "private-skill", "-g"]]
+        assert [call["args"] for call in member_recorder.calls] == [
+            ["remove", "private-skill", "-g"]
+        ]
         with engine.connect() as connection:
             assert resource_access_service.get_resource_policy(
                 "skill",
-                skills.skill_resource_id("codex", scope="global", project_dir=None, name="private-skill"),
+                skills.skill_resource_id(
+                    "codex",
+                    scope="global",
+                    project_dir=None,
+                    name="private-skill",
+                ),
                 connection=connection,
             ) is None
 
         with engine.begin() as connection:
             _seed_skill_policy(connection, "private-skill", access_level="private")
 
-        admin_recorder = _SequenceRecorder([listing, {"ok": True}])
-        monkeypatch.setattr(skills, "_run_askill", admin_recorder)
+        admin_editor_recorder = _Recorder({"ok": True})
+        monkeypatch.setattr(skills, "_run_askill", admin_editor_recorder)
         assert _run(
             skills.update(
                 "askill",
                 "private-skill",
                 scope="global",
-                user_context=_organization_context("member-2", role="admin", instance_role="owner"),
+                user_context=_organization_context("member-2", role="admin"),
             )
         ) == {"ok": True}
-        assert [call["args"] for call in admin_recorder.calls] == [["list", "-g"], ["update", "private-skill", "-g", "-y"]]
+        assert [call["args"] for call in admin_editor_recorder.calls] == [
+            ["update", "private-skill", "-g", "-y"]
+        ]
 
-        add_recorder = _Recorder({"ok": True, "action": "install", "summary": {"skills": 1}})
+        add_result = {
+            "ok": True,
+            "action": "install",
+            "summary": {"skills": 1},
+            "selectedAgents": ["codex"],
+            "results": [{"skill": "private-skill", "success": True}],
+        }
+        add_recorder = _Recorder(add_result)
         monkeypatch.setattr(skills, "_run_askill", add_recorder)
-        with pytest.raises(skills.SkillAccessError):
-            _run(
-                skills.add_skill(
-                    "askill",
-                    "gh:owner/repo",
-                    scope="global",
-                    skill="private-skill",
-                    backends=["codex"],
-                    user_context=_organization_context("member-1"),
-                )
+        assert _run(
+            skills.add_skill(
+                "askill",
+                "gh:owner/repo",
+                scope="global",
+                skill="private-skill",
+                backends=["codex"],
+                user_context=_organization_context("member-1"),
             )
-        assert add_recorder.calls == []
+        ) == add_result
+        assert [call["args"] for call in add_recorder.calls] == [
+            [
+                "add",
+                "gh:owner/repo",
+                "-g",
+                "-a",
+                "codex",
+                "--skill",
+                "private-skill",
+                "-y",
+            ]
+        ]
     finally:
         engine.dispose()
 
 
 def test_remove_skill_deletes_only_policies_for_removed_backends(monkeypatch, tmp_path) -> None:
     engine = _skills_engine(monkeypatch, tmp_path)
-    listing = {
-        "ok": True,
-        "skills": [
-            {
-                **_skill_row("shared-skill"),
-                "agents": [
-                    {"id": "codex", "name": "Codex"},
-                    {"id": "claude", "name": "Claude"},
-                ],
-            }
-        ],
-    }
     try:
         with engine.begin() as connection:
             codex_id = _seed_skill_policy(connection, "shared-skill", access_level="private")
@@ -607,15 +600,12 @@ def test_remove_skill_deletes_only_policies_for_removed_backends(monkeypatch, tm
                 access_level="private",
                 backend="claude",
             )
-        recorder = _SequenceRecorder(
-            [
-                listing,
-                {
-                    "ok": True,
-                    "selectedAgents": ["codex", "claude"],
-                    "removedAgents": ["codex"],
-                },
-            ]
+        recorder = _Recorder(
+            {
+                "ok": True,
+                "selectedAgents": ["codex", "claude"],
+                "removedAgents": ["codex"],
+            }
         )
         monkeypatch.setattr(skills, "_run_askill", recorder)
 
@@ -625,7 +615,7 @@ def test_remove_skill_deletes_only_policies_for_removed_backends(monkeypatch, tm
                 "shared-skill",
                 scope="global",
                 backends=["codex", "claude"],
-                user_context=_organization_context("owner-1", instance_role="owner"),
+                user_context=_organization_context("member-1"),
             )
         )
         with engine.connect() as connection:
@@ -635,6 +625,9 @@ def test_remove_skill_deletes_only_policies_for_removed_backends(monkeypatch, tm
         engine.dispose()
 
     assert result["ok"] is True
+    assert [call["args"] for call in recorder.calls] == [
+        ["remove", "shared-skill", "-g", "-a", "codex", "claude-code"]
+    ]
     assert codex_policy is None
     assert claude_policy is not None
 
@@ -648,7 +641,7 @@ def test_remove_skill_deletes_only_policies_for_removed_backends(monkeypatch, tm
         {"ok": True, "skills": "invalid"},
     ],
 )
-def test_remote_skill_mutations_fail_closed_when_preflight_cannot_resolve_target(
+def test_non_member_skill_mutations_fail_closed_when_preflight_cannot_resolve_target(
     monkeypatch,
     tmp_path,
     operation: str,
@@ -663,14 +656,14 @@ def test_remote_skill_mutations_fail_closed_when_preflight_cannot_resolve_target
                 "askill",
                 "missing-skill",
                 scope="global",
-                user_context=_organization_context("owner-1", instance_role="owner"),
+                user_context=_non_member_context(),
             )
         else:
             mutation = skills.update(
                 "askill",
                 "missing-skill",
                 scope="global",
-                user_context=_organization_context("owner-1", instance_role="owner"),
+                user_context=_non_member_context(),
             )
         with pytest.raises(skills.SkillAccessError):
             _run(mutation)
@@ -722,37 +715,18 @@ def test_remote_skill_add_registers_private_policy(monkeypatch, tmp_path) -> Non
     assert policy["access_level"] == "private"
 
 
-def test_remote_skill_add_requires_instance_owner_for_installed_legacy_skill(monkeypatch, tmp_path) -> None:
+def test_active_org_member_can_replace_installed_legacy_skill(monkeypatch, tmp_path) -> None:
     engine = _skills_engine(monkeypatch, tmp_path)
-    listing = {"ok": True, "skills": [_skill_row("legacy-skill")]}
-    member_recorder = _SequenceRecorder([listing])
+    install_result = {
+        "ok": True,
+        "action": "install",
+        "summary": {"skills": 1},
+        "selectedAgents": ["codex"],
+        "results": [{"skill": "legacy-skill", "success": True}],
+    }
+    member_recorder = _Recorder(install_result)
     monkeypatch.setattr(skills, "_run_askill", member_recorder)
     try:
-        with pytest.raises(skills.SkillAccessError):
-            _run(
-                skills.add_skill(
-                    "askill",
-                    "gh:owner/repo",
-                    scope="global",
-                    skill="legacy-skill",
-                    backends=["codex"],
-                    user_context=_organization_context("member-1"),
-                )
-            )
-
-        owner_recorder = _SequenceRecorder(
-            [
-                listing,
-                {
-                    "ok": True,
-                    "action": "install",
-                    "summary": {"skills": 1},
-                    "selectedAgents": ["codex"],
-                    "results": [{"skill": "legacy-skill", "success": True}],
-                },
-            ]
-        )
-        monkeypatch.setattr(skills, "_run_askill", owner_recorder)
         result = _run(
             skills.add_skill(
                 "askill",
@@ -760,21 +734,32 @@ def test_remote_skill_add_requires_instance_owner_for_installed_legacy_skill(mon
                 scope="global",
                 skill="legacy-skill",
                 backends=["codex"],
-                user_context=_organization_context("owner-1", instance_role="owner"),
+                user_context=_organization_context("member-1"),
             )
         )
+        with engine.connect() as connection:
+            policy = resource_access_service.get_resource_policy(
+                "skill",
+                skills.skill_resource_id(
+                    "codex",
+                    scope="global",
+                    project_dir=None,
+                    name="legacy-skill",
+                ),
+                connection=connection,
+            )
     finally:
         engine.dispose()
 
-    assert member_recorder.calls == []
-    assert [call["args"] for call in owner_recorder.calls] == [
-        ["list", "-g", "-a", "codex"],
+    assert [call["args"] for call in member_recorder.calls] == [
         ["add", "gh:owner/repo", "-g", "-a", "codex", "--skill", "legacy-skill", "-y"],
     ]
-    assert result["ok"] is True
+    assert result == install_result
+    assert policy is not None
+    assert policy["owner_user_id"] == "member-1"
 
 
-def test_remote_skill_add_fails_closed_for_unresolved_installed_backend(monkeypatch, tmp_path) -> None:
+def test_non_member_skill_add_fails_closed_for_unresolved_installed_backend(monkeypatch, tmp_path) -> None:
     engine = _skills_engine(monkeypatch, tmp_path)
     recorder = _SequenceRecorder(
         [
@@ -794,7 +779,7 @@ def test_remote_skill_add_fails_closed_for_unresolved_installed_backend(monkeypa
                     scope="global",
                     skill="legacy-skill",
                     backends=["codex"],
-                    user_context=_organization_context("member-1", instance_role="owner"),
+                    user_context=_non_member_context(),
                 )
             )
     finally:
@@ -803,25 +788,41 @@ def test_remote_skill_add_fails_closed_for_unresolved_installed_backend(monkeypa
     assert [call["args"] for call in recorder.calls] == [["list", "-g", "-a", "codex"]]
 
 
-def test_skill_zip_upload_rejects_editor_before_filesystem_work(monkeypatch) -> None:
+def test_active_org_editor_can_upload_skill_zip(monkeypatch, tmp_path) -> None:
+    import base64
+    import io
     import tempfile
+    import zipfile
+    from pathlib import Path
 
     from vibe import api
-    from vibe.authorization import InstanceAuthorizationError
 
-    monkeypatch.setattr(
-        tempfile,
-        "gettempdir",
-        lambda: pytest.fail("upload touched the filesystem before authorization"),
+    archive_bytes = io.BytesIO()
+    with zipfile.ZipFile(archive_bytes, "w") as archive:
+        archive.writestr("uploaded-skill/SKILL.md", "# Uploaded Skill\n")
+
+    async def preview_uploaded_skill(_callback):
+        return {"ok": True, "skills": [{"name": "uploaded-skill"}]}
+
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
+    monkeypatch.setattr(api, "_skills_guarded", preview_uploaded_skill)
+
+    result = _run(
+        api.upload_skill_zip(
+            {
+                "content_base64": base64.b64encode(archive_bytes.getvalue()).decode(
+                    "ascii"
+                )
+            },
+            user_context=_organization_context("member-1"),
+        )
     )
 
-    with pytest.raises(InstanceAuthorizationError):
-        _run(
-            api.upload_skill_zip(
-                {},
-                user_context=_organization_context("member-1"),
-            )
-        )
+    unpack_dir = Path(result["dir"])
+    assert result["ok"] is True
+    assert result["skills"] == [{"name": "uploaded-skill"}]
+    assert unpack_dir.parent.parent == tmp_path
+    assert (unpack_dir / "uploaded-skill" / "SKILL.md").read_text() == "# Uploaded Skill\n"
 
 
 def test_invalid_backend_raises(monkeypatch):

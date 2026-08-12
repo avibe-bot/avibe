@@ -292,11 +292,17 @@ def resource_user_context_from_metadata(
     *,
     now: int | None = None,
 ) -> ResourceUserContext | None:
-    """Restore unexpired remote provenance for deferred authorization checks.
+    """Restore remote provenance for deferred authorization checks.
 
     The returned context retains the real signed Organization identity. Deferred
     runtime executors still apply ``metadata_allows_temporary_unrestricted_runtime``
-    before doing work, so malformed, expired, and non-member snapshots fail closed.
+    before doing work, so malformed and non-member snapshots fail closed.
+
+    The ``authorization_expires_at`` snapshot is recorded for audit but is no
+    longer a hard execution cutoff: durable automation (Harness tasks/watches)
+    must not be permanently suspended just because the creating browser session's
+    refresh window elapsed. Active Organization membership is re-derived from the
+    signed claims at execution time instead (avibe#1343 P1).
     """
 
     if not isinstance(metadata, Mapping):
@@ -304,9 +310,6 @@ def resource_user_context_from_metadata(
     snapshot = metadata.get(RESOURCE_USER_CONTEXT_METADATA_KEY)
     if not isinstance(snapshot, Mapping):
         return None
-    expires_at = _clean_positive_int(snapshot.get("authorization_expires_at"))
-    if expires_at is None or expires_at <= (now if now is not None else int(time.time())):
-        raise ResourceAccessError("resource_authorization_expired")
     return current_resource_context(snapshot, is_remote=True, is_trusted_local=False)
 
 
