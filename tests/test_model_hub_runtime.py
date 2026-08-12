@@ -75,18 +75,24 @@ def test_stream_prelude_does_not_charge_released_keepalives_to_frame_budget() ->
         prefix="keepalive",
     )
 
-    prelude, state, outcome = asyncio.run(
-        client_module._read_stream_prelude(
+    async def run() -> tuple[bytes, object, object]:
+        prelude = client_module._StreamPrelude()
+        state, outcome = await client_module._read_stream_prelude(
             response=response,
             first=first,
+            prelude=prelude,
             source=source,
             model_id="claude-sonnet-4-5",
             protocol="anthropic",
             timeout=1,
         )
-    )
+        payload = b"".join([chunk async for chunk in prelude.chunks()])
+        prelude.close()
+        return payload, state, outcome
 
-    assert prelude == first + output
+    payload, state, outcome = asyncio.run(run())
+
+    assert payload == first + output
     assert state.model_output_started is True
     assert outcome is None
 
@@ -2078,10 +2084,12 @@ def test_downstream_close_after_chat_finish_reason_does_not_fabricate_success() 
             prefix="source-fixture123",
         )
         outcome_future = asyncio.get_running_loop().create_future()
+        prelude = client_module._StreamPrelude()
+        prelude.write(first)
         stream = client_module._response_stream(
             response=Response(),
             session=Session(),
-            first=first,
+            prelude=prelude,
             source=source,
             model_id="model-a",
             protocol="openai_chat",
@@ -2500,6 +2508,128 @@ def test_engine_client_cancellation_closes_pre_handle_resources(
 
         assert session.close_calls == 1
         assert response.close_calls == (1 if phase == "first_byte" else 0)
+
+    asyncio.run(run())
+
+
+def test_slow_source_prelude_is_bounded_without_blocking_other_routes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> None:
+        blocked = asyncio.Event()
+        never = asyncio.Event()
+        preludes: list[TrackingPrelude] = []
+        slow_keepalive = b":" + b"k" * 256 + b"\n\n"
+        fast_output = b'event: response.output_text.delta\ndata: {"type":"response.output_text.delta"}\n\n'
+        fast_terminal = b'event: response.completed\ndata: {"type":"response.completed"}\n\n'
+
+        class TrackingPrelude(client_module._StreamPrelude):
+            def __init__(self) -> None:
+                super().__init__(memory_limit=64)
+                self.physical_close_calls = 0
+                preludes.append(self)
+
+            def close(self) -> None:
+                if not self.closed:
+                    self.physical_close_calls += 1
+                super().close()
+
+        class Content:
+            def __init__(self, source_id: str) -> None:
+                self.source_id = source_id
+                self.reads = 0
+
+            async def read(self, _size: int) -> bytes:
+                self.reads += 1
+                if self.source_id == "src_slow0001":
+                    if self.reads == 1:
+                        return slow_keepalive
+                    blocked.set()
+                    await never.wait()
+                    return b""
+                return fast_output
+
+            async def iter_chunked(self, _size: int):
+                yield fast_terminal
+
+        class Response:
+            status = 200
+            headers = {"Content-Type": "text/event-stream"}
+
+            def __init__(self, source_id: str) -> None:
+                self.content = Content(source_id)
+
+            def close(self) -> None:
+                return None
+
+        class Session:
+            async def post(self, *_args, json=None, **_kwargs):
+                source_id = "src_slow0001" if str(json["model"]).startswith("slow/") else "src_fast0001"
+                return Response(source_id)
+
+            async def close(self) -> None:
+                return None
+
+        class Store:
+            def __init__(self, sources: tuple[SourceRecord, ...]) -> None:
+                self.sources = {source.source_id: source for source in sources}
+
+            def get_source(self, source_id: str) -> SourceRecord | None:
+                return self.sources.get(source_id)
+
+        class Supervisor:
+            def __init__(self, client: EngineClient) -> None:
+                self._client = client
+
+            def client(self) -> EngineClient:
+                return self._client
+
+        slow = SourceRecord(
+            source_id="src_slow0001",
+            vendor="custom",
+            protocol="openai_responses",
+            base_url="https://slow.example.test/v1",
+            credential_ref="cred_slow0001",
+            allowed_origins=("codex",),
+            model_ids=("model-a",),
+            prefix="slow",
+        )
+        fast = SourceRecord(
+            source_id="src_fast0001",
+            vendor="custom",
+            protocol="openai_responses",
+            base_url="https://fast.example.test/v1",
+            credential_ref="cred_fast0001",
+            allowed_origins=("codex",),
+            model_ids=("model-a",),
+            prefix="fast",
+        )
+        monkeypatch.setattr(client_module, "_StreamPrelude", TrackingPrelude)
+        monkeypatch.setattr(client_module.aiohttp, "ClientSession", lambda **_: Session())
+        client = EngineClient(EngineConnection("http://127.0.0.1:15220", "management", "gateway"))
+        adapter = CLIProxyEngineAdapter(
+            supervisor=Supervisor(client),  # type: ignore[arg-type]
+            state_store=Store((slow, fast)),  # type: ignore[arg-type]
+        )
+
+        slow_task = asyncio.create_task(adapter.invoke(slow.source_id, "model-a", {}, True, "codex"))
+        await asyncio.wait_for(blocked.wait(), timeout=1)
+        assert preludes[0].spilled is True
+        assert preludes[0].in_memory_bytes == 0
+
+        fast_handle = await asyncio.wait_for(
+            adapter.invoke(fast.source_id, "model-a", {}, True, "codex"),
+            timeout=1,
+        )
+        assert fast_handle.stream is not None
+        chunks = [chunk async for chunk in fast_handle.stream]
+        assert b"".join(chunks) == fast_output + fast_terminal
+        assert b"".join([chunk async for chunk in preludes[0].chunks()]) == slow_keepalive
+
+        slow_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await slow_task
+        assert preludes[0].physical_close_calls == 1
 
     asyncio.run(run())
 

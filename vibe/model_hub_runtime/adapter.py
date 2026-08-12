@@ -1088,18 +1088,18 @@ class CLIProxyEngineAdapter:
                         source_id=source_id,
                     )
                 )
-            request_protocol = {
-                "claude": "anthropic",
-                "codex": "openai_responses",
-            }.get(origin, getattr(request, "protocol", None) or source.protocol)
-            return await client.invoke(
-                source,
-                model_id,
-                request,
-                stream=stream,
-                request_protocol=request_protocol,
-                request_headers=getattr(request, "headers", None),
-            )
+        request_protocol = {
+            "claude": "anthropic",
+            "codex": "openai_responses",
+        }.get(origin, getattr(request, "protocol", None) or source.protocol)
+        return await client.invoke(
+            source,
+            model_id,
+            request,
+            stream=stream,
+            request_protocol=request_protocol,
+            request_headers=getattr(request, "headers", None),
+        )
 
     async def _complete_oauth(self, flow: _OAuthFlow, client: EngineClient) -> None:
         flow.grant_write_possible = True

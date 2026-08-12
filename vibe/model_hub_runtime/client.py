@@ -4,12 +4,13 @@ import asyncio
 import json
 import logging
 import socket
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Mapping
+from typing import Any, AsyncIterator, BinaryIO, Mapping
 
 import aiohttp
 
@@ -24,6 +25,7 @@ from core.handlers.model_hub.stream_wire import (
     ErrorEnvelopePath,
     ProtocolObservation,
     ProtocolSSEState,
+    SSE_MAX_FRAME_BYTES,
     SSEFrameLimitError,
     observe_protocol_response,
 )
@@ -33,6 +35,7 @@ from vibe.model_hub_runtime.state import SourceRecord
 _MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 _STREAM_CHUNK_BYTES = 64 * 1024
 _MODEL_PROBE_BYTES = 4 * 1024 * 1024
+_PRELUDE_MEMORY_BYTES = SSE_MAX_FRAME_BYTES
 _OFFICIAL_BASE_URLS = {
     "anthropic": "https://api.anthropic.com/v1",
     "openai": "https://api.openai.com/v1",
@@ -61,6 +64,60 @@ class EngineClientError(RuntimeError):
 
 class _ResponseTooLargeError(RuntimeError):
     pass
+
+
+class _StreamPrelude:
+    """Per-invocation byte owner that spills pre-output data out of memory."""
+
+    def __init__(self, *, memory_limit: int | None = None) -> None:
+        self._memory_limit = _PRELUDE_MEMORY_BYTES if memory_limit is None else memory_limit
+        self._memory = bytearray()
+        self._file: BinaryIO | None = None
+        self._closed = False
+
+    @property
+    def in_memory_bytes(self) -> int:
+        return len(self._memory)
+
+    @property
+    def spilled(self) -> bool:
+        return self._file is not None
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    def write(self, data: bytes) -> None:
+        if self._closed:
+            raise RuntimeError("stream prelude is closed")
+        if self._file is None and len(self._memory) + len(data) <= self._memory_limit:
+            self._memory.extend(data)
+            return
+        if self._file is None:
+            self._file = tempfile.TemporaryFile()
+            self._file.write(self._memory)
+            self._memory.clear()
+        self._file.write(data)
+
+    async def chunks(self) -> AsyncIterator[bytes]:
+        if self._closed:
+            return
+        if self._file is None:
+            if self._memory:
+                yield bytes(self._memory)
+            return
+        self._file.seek(0)
+        while chunk := self._file.read(_STREAM_CHUNK_BYTES):
+            yield chunk
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._memory.clear()
+        if self._file is not None:
+            self._file.close()
+            self._file = None
 
 
 @dataclass(frozen=True)
@@ -197,6 +254,7 @@ class EngineClient:
         first_received = False
         model_output_started = False
         ownership_transferred = False
+        prelude: _StreamPrelude | None = None
         try:
             response = await asyncio.wait_for(
                 session.post(
@@ -301,9 +359,11 @@ class EngineClient:
                     else completed_handle(outcome)
                 )
 
-            prelude, wire_state, prelude_outcome = await _read_stream_prelude(
+            prelude = _StreamPrelude()
+            wire_state, prelude_outcome = await _read_stream_prelude(
                 response=response,
                 first=first,
+                prelude=prelude,
                 source=source,
                 model_id=model_id,
                 protocol=request_protocol,
@@ -313,18 +373,19 @@ class EngineClient:
             if prelude_outcome is not None:
                 response.close()
                 await session.close()
-                return (
-                    buffered_handle(prelude, prelude_outcome)
-                    if prelude_outcome.kind == RawOutcomeKind.SUCCESS
-                    else completed_handle(prelude_outcome)
-                )
+                if prelude_outcome.kind == RawOutcomeKind.SUCCESS:
+                    handle = buffered_prelude_handle(prelude, prelude_outcome)
+                    ownership_transferred = True
+                    return handle
+                prelude.close()
+                return completed_handle(prelude_outcome)
 
             loop = asyncio.get_running_loop()
             outcome_future: asyncio.Future[RawCallOutcome] = loop.create_future()
             response_stream = _response_stream(
                 response=response,
                 session=session,
-                first=prelude,
+                prelude=prelude,
                 source=source,
                 model_id=model_id,
                 protocol=request_protocol,
@@ -333,6 +394,7 @@ class EngineClient:
             )
 
             async def close_response_stream() -> None:
+                prelude.close()
                 response.close()
                 await session.close()
 
@@ -387,6 +449,8 @@ class EngineClient:
             )
         finally:
             if not ownership_transferred:
+                if prelude is not None:
+                    prelude.close()
                 if response is not None:
                     response.close()
                 await session.close()
@@ -528,15 +592,16 @@ async def _read_stream_prelude(
     *,
     response: aiohttp.ClientResponse,
     first: bytes,
+    prelude: _StreamPrelude,
     source: SourceRecord,
     model_id: str,
     protocol: str,
     timeout: float,
-) -> tuple[bytes, ProtocolSSEState, RawCallOutcome | None]:
+) -> tuple[ProtocolSSEState, RawCallOutcome | None]:
     """Buffer transport metadata until the sole first-model-output fact."""
 
     wire_state = ProtocolSSEState(protocol)
-    payload = bytearray(first)
+    prelude.write(first)
     wire_state.observe(first)
     while not wire_state.model_output_started:
         outcome = _observed_stream_terminal_outcome(
@@ -546,7 +611,7 @@ async def _read_stream_prelude(
             response.status,
         )
         if outcome is not None:
-            return bytes(payload), wire_state, outcome
+            return wire_state, outcome
         chunk = await asyncio.wait_for(
             response.content.read(_STREAM_CHUNK_BYTES),
             timeout=timeout,
@@ -559,9 +624,8 @@ async def _read_stream_prelude(
                 response.status,
             )
             if completion is not None:
-                return bytes(payload), wire_state, completion
+                return wire_state, completion
             return (
-                b"",
                 wire_state,
                 _outcome(
                     kind=RawOutcomeKind.NETWORK_ERROR,
@@ -571,16 +635,16 @@ async def _read_stream_prelude(
                     message="upstream stream ended before model output",
                 ),
             )
-        payload.extend(chunk)
+        prelude.write(chunk)
         wire_state.observe(chunk)
-    return bytes(payload), wire_state, None
+    return wire_state, None
 
 
 async def _response_stream(
     *,
     response: aiohttp.ClientResponse,
     session: aiohttp.ClientSession,
-    first: bytes,
+    prelude: _StreamPrelude,
     source: SourceRecord,
     model_id: str,
     protocol: str,
@@ -589,7 +653,9 @@ async def _response_stream(
 ) -> AsyncIterator[bytes]:
     outcome: RawCallOutcome | None = None
     try:
-        yield first
+        async for chunk in prelude.chunks():
+            yield chunk
+        prelude.close()
         async for chunk in response.content.iter_chunked(_STREAM_CHUNK_BYTES):
             if chunk:
                 wire_state.observe(chunk)
@@ -660,6 +726,7 @@ async def _response_stream(
                 model_id,
                 response.status,
             )
+        prelude.close()
         response.close()
         await session.close()
         if outcome is not None and not outcome_future.done():
@@ -759,6 +826,25 @@ def buffered_handle(payload: bytes, outcome: RawCallOutcome) -> EngineInvokeHand
     future = asyncio.get_running_loop().create_future()
     future.set_result(outcome)
     return EngineInvokeHandle(stream=body(), outcome=future)
+
+
+def buffered_prelude_handle(
+    prelude: _StreamPrelude,
+    outcome: RawCallOutcome,
+) -> EngineInvokeHandle:
+    async def body() -> AsyncIterator[bytes]:
+        try:
+            async for chunk in prelude.chunks():
+                yield chunk
+        finally:
+            prelude.close()
+
+    async def close() -> None:
+        prelude.close()
+
+    future = asyncio.get_running_loop().create_future()
+    future.set_result(outcome)
+    return EngineInvokeHandle(stream=body(), outcome=future, stream_closer=close)
 
 
 def _outcome(

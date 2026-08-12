@@ -2630,6 +2630,52 @@ def test_streamed_fallback_reports_an_unpersisted_recovery_transition_honestly(
     asyncio.run(exercise())
 
 
+def test_streamed_blocker_rejected_by_generation_reports_unpersisted(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        source = _source("src_stalegen01", "Stale settlement")
+        service = _service(tmp_path, sources=[source])
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        older_generation = service._reserve_settlement_generation(source.id)
+        service._reserve_settlement_generation(source.id)
+        resolved = ResolvedInvocation(
+            backend="codex",
+            requested_model_id=requested_model,
+            source_id=source.id,
+            source_label=source.display_name,
+            model_id="shared-model",
+            handle=None,
+            outcome=None,
+            credential_ref=source.credential_ref,
+            settlement_generation=older_generation,
+        )
+        outcome = _outcome(
+            RawOutcomeKind.HTTP_ERROR,
+            status=401,
+            code="authentication_error",
+            source_id=source.id,
+            stream_started=True,
+        )
+
+        settlement = await service.settle_handle_outcome(
+            resolved,
+            outcome,
+            termination_origin="upstream_terminal",
+            record_attempt=Mock(),
+        )
+
+        projection = settlement.turn_outcome
+        assert projection is not None
+        assert projection.source_transition_persisted is False
+        assert projection.next_current_changed is False
+        assert projection.supply_facts is None
+        assert service.store.load().sources[0].state.status == "standby"
+        assert service.events.list() == []
+
+    asyncio.run(exercise())
+
+
 @pytest.mark.parametrize(
     ("failure_phase", "expected_outcome_calls"),
     [("prepare", 0), ("write", 1)],
@@ -5603,21 +5649,22 @@ def test_shared_source_cooldown_emits_only_on_state_transition(
         )
     )
 
-    async def cool_twice() -> None:
-        await service._cooldown(
+    async def cool_twice() -> tuple[bool, bool]:
+        first_persisted = await service._cooldown(
             source,
             decision,
             agent="claude",
             model_id=menu_models["claude"],
         )
-        await service._cooldown(
+        repeated_persisted = await service._cooldown(
             source,
             decision,
             agent="codex",
             model_id=menu_models["codex"],
         )
+        return first_persisted, repeated_persisted
 
-    asyncio.run(cool_twice())
+    assert asyncio.run(cool_twice()) == (True, False)
 
     events = service.list_events(limit=20)
     assert len(events) == 1
@@ -5704,8 +5751,8 @@ def test_late_equal_priority_blocker_preserves_the_newer_reason(
     older_generation = service._reserve_settlement_generation(source.id)
     newer_generation = service._reserve_settlement_generation(source.id)
 
-    async def settle_in_completion_order() -> None:
-        await service._set_source_blocker(
+    async def settle_in_completion_order() -> tuple[bool, bool]:
+        newer_persisted = await service._set_source_blocker(
             source.id,
             backend="claude",
             model_id=menu_models["claude"],
@@ -5713,7 +5760,7 @@ def test_late_equal_priority_blocker_preserves_the_newer_reason(
             reason="account_banned",
             settlement_generation=newer_generation,
         )
-        await service._set_source_blocker(
+        older_persisted = await service._set_source_blocker(
             source.id,
             backend="codex",
             model_id=menu_models["codex"],
@@ -5721,8 +5768,9 @@ def test_late_equal_priority_blocker_preserves_the_newer_reason(
             reason="credential_expired",
             settlement_generation=older_generation,
         )
+        return newer_persisted, older_persisted
 
-    asyncio.run(settle_in_completion_order())
+    assert asyncio.run(settle_in_completion_order()) == (True, False)
 
     persisted = service.store.load().sources[0]
     assert persisted.state.status == "needs_action"

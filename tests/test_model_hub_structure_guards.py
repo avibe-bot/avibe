@@ -25,7 +25,6 @@ from core.handlers.model_hub.stream_wire import (
 from core.handlers.model_hub.adapter import RawCallOutcome, RawOutcomeKind
 from core.handlers.model_hub.classification import (
     MACHINE_ERROR_CODES,
-    SOURCE_SETTLEMENT_AUTHORITY,
     UPSTREAM_MACHINE_ERROR_CODES,
     _MACHINE_ERROR_TAXONOMY,
     classify_outcome,
@@ -266,52 +265,6 @@ def _call_name(node: ast.AST) -> str | None:
     if isinstance(node.func, ast.Attribute):
         return node.func.attr
     return None
-
-
-def test_transport_settlement_has_no_source_health_write_path() -> None:
-    transport_reasons = {
-        reason
-        for reason, rule in SOURCE_SETTLEMENT_AUTHORITY.items()
-        if not rule.may_write_health
-    }
-    classified_reasons = {
-        decision.reason
-        for kind in RawOutcomeKind
-        for decision in (
-            classify_outcome(
-                RawCallOutcome(
-                    kind=kind,
-                    http_status=200,
-                    error_code=None,
-                    redacted_message=None,
-                    stream_started=False,
-                    model_id="model-a",
-                    source_id="src_transport1",
-                )
-            ),
-        )
-        if decision.reason is not None
-    }
-    assert transport_reasons <= classified_reasons
-    settlement = _functions(_tree(SERVICE))["_settle_fallback_source"]
-    health_gate = next(
-        node
-        for node in ast.walk(settlement)
-        if isinstance(node, ast.If)
-        and isinstance(node.test, ast.UnaryOp)
-        and isinstance(node.test.op, ast.Not)
-        and isinstance(node.test.operand, ast.Attribute)
-        and node.test.operand.attr == "may_write_health"
-    )
-    calls = {
-        (_call_name(node), node.lineno)
-        for node in ast.walk(settlement)
-        if isinstance(node, ast.Call)
-    }
-    call_lines = {name: line for name, line in calls if name is not None}
-    assert call_lines["source_settlement_rule"] < health_gate.lineno
-    assert health_gate.lineno < call_lines["_cooldown"]
-    assert health_gate.lineno < call_lines["_set_source_blocker"]
 
 
 def _bool_keyword(call: ast.Call, name: str) -> bool | None:

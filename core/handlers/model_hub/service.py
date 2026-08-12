@@ -3247,16 +3247,16 @@ class ModelHubService:
             try:
                 source = self._source(config, source_id)
             except ModelHubError:
-                return True
+                return False
             if not source_settlement_allowed(source.state.status, reason):
-                return True
+                return False
             settlement_rule = source_settlement_rule(reason)
             latest_generation = self._latest_source_attempt_generation.get(
                 source.id,
                 generation,
             )
             if generation < latest_generation:
-                return True
+                return False
             status: Literal["error", "needs_action"] = (
                 "error"
                 if reason == "unclassified_error"
@@ -3266,6 +3266,8 @@ class ModelHubService:
                 source.state.status == status
                 and source.state.detail_key == detail_key
             )
+            if unchanged:
+                return False
             source.state = ModelHubSourceStateConfig(
                 status=status,
                 detail_key=detail_key,
@@ -3921,19 +3923,19 @@ class ModelHubService:
             try:
                 current = self._source(config, source.id)
             except ModelHubError:
-                return True
+                return False
             if decision.reason is not None and not source_settlement_allowed(
                 current.state.status,
                 decision.reason,
             ):
-                return True
+                return False
             retry_at = self.now() + timedelta(seconds=decision.cooldown_seconds)
             if (
                 current.state.status == "cooldown"
                 and current.state.retry_at is not None
                 and _parse_datetime(current.state.retry_at) >= retry_at
             ):
-                return True
+                return False
             already_cooling = current.state.status == "cooldown"
             current.state = ModelHubSourceStateConfig(
                 status="cooldown",
@@ -3971,7 +3973,7 @@ class ModelHubService:
         event_reason = cast(EventReason, decision.reason)
         settlement_rule = source_settlement_rule(event_reason)
         if not settlement_rule.may_write_health:
-            return event_reason, True
+            return event_reason, False
         if settlement_rule.status == "cooldown":
             persisted = await self._cooldown(
                 source,
@@ -4156,6 +4158,7 @@ class ModelHubService:
             raise AssertionError("consumed streams cannot retry or fall through")
         source_transition_persisted: bool | None = None
         if decision.reason is not None:
+            source_transition_persisted = False
             config = self.store.load()
             source = next(
                 (item for item in config.sources if item.id == resolved.source_id),
@@ -4528,6 +4531,7 @@ class ModelHubService:
             if decision.action == "surface":
                 source_transition_persisted: bool | None = None
                 if outcome.stream_started and decision.reason is not None:
+                    source_transition_persisted = False
                     _reason, source_transition_persisted = await self._settle_fallback_source(
                         source,
                         decision,
