@@ -13,6 +13,7 @@ import {
   definitionStateSince,
   definitionStatusCount,
   definitionSurvivesToggle,
+  definitionFailureSummaryKey,
   formatWallTime,
   humanizeCron,
   humanizeGap,
@@ -112,6 +113,64 @@ describe('lifecycleLabel', () => {
       'error',
       'unknown',
     ]);
+  });
+});
+
+describe('definitionFailureSummaryKey', () => {
+  // SCT-061 final UI contract:
+  // timeout -> translated timeout summary + optional exit code;
+  // nonzero exit -> translated generic failure summary + exit code;
+  // unknown -> translated generic failure summary;
+  // raw technical details -> present but collapsed by default.
+  const cases = [
+    [
+      'task timeout',
+      { metadata: { last_command_timed_out: true }, last_exit_code: 124, last_error: 'permission denied' },
+      'harness.failure.timeout',
+    ],
+    [
+      'watch timeout',
+      { lifecycle_detail: 'timeout', last_exit_code: 124, last_error: 'permission denied' },
+      'harness.failure.timeout',
+    ],
+    [
+      'task nonzero exit',
+      { last_exit_code: 7, last_error: 'timed out while opening stderr' },
+      'harness.failure.generic',
+    ],
+    [
+      'watch nonzero exit',
+      { last_exit_code: 2, last_error: 'timed out while opening stderr' },
+      'harness.failure.generic',
+    ],
+    ['task unknown failure', { lifecycle_detail: 'error', last_error: null }, 'harness.failure.generic'],
+    ['watch unknown failure', { health: 'failing', last_error: null }, 'harness.failure.generic'],
+  ] as const;
+
+  it.each(cases)('maps %s without classifying stderr prose', (_name, row, expected) => {
+    expect(definitionFailureSummaryKey(row)).toBe(expected);
+  });
+
+  it('does not let stderr wording change the category', () => {
+    const facts = { last_exit_code: 9, lifecycle_detail: 'error' };
+    expect(definitionFailureSummaryKey({ ...facts, last_error: 'timed out' })).toBe(
+      definitionFailureSummaryKey({ ...facts, last_error: 'command not found' }),
+    );
+  });
+
+  it('does not turn technical text into a failure when structured facts say healthy', () => {
+    expect(definitionFailureSummaryKey({ health: 'healthy', last_exit_code: null })).toBeNull();
+  });
+
+  it('keeps the summary key set translated and in parity', () => {
+    expect(Object.keys(en.harness.failure).sort()).toEqual(['generic', 'timeout']);
+    expect(Object.keys(zh.harness.failure).sort()).toEqual(Object.keys(en.harness.failure).sort());
+    for (const detailKey of ['failureSummary', 'technicalDetails', 'lastExitCode'] as const) {
+      expect(typeof en.harness.detail[detailKey]).toBe('string');
+      expect(typeof zh.harness.detail[detailKey]).toBe('string');
+    }
+    expect(zh.harness.failure.timeout).toBe('最近一次运行已超时。');
+    expect(zh.harness.failure.generic).toBe('最近一次运行失败。');
   });
 });
 

@@ -434,6 +434,18 @@ describe('HealthBadge', () => {
     expect(html).toContain(`>${i18n.t('harness.health.failing')} 4<`);
     expect(html).toContain('text-pink');
   });
+
+  it('never exposes raw stderr through the default badge tooltip', () => {
+    const raw = 'database password rejected';
+    const html = render(
+      <HealthBadge
+        row={watch({ health: 'failing', consecutive_failures: 1, recent_failures: 1, last_error: raw })}
+      />,
+    );
+
+    expect(html).toContain(`title="${en.harness.failure.generic}"`);
+    expect(html).not.toContain(raw);
+  });
 });
 
 describe('ProcessingHealthBadge', () => {
@@ -752,6 +764,26 @@ describe('TaskDetail command task', () => {
     );
   });
 
+  it('shows a translated failure summary and keeps raw diagnostics collapsed', () => {
+    const raw = 'pg_dump: connection refused';
+    const html = detail(
+      task({
+        shell_command: 'pg_dump app',
+        last_exit_code: 7,
+        last_error: raw,
+        lifecycle_detail: 'error',
+      }),
+    );
+
+    expect(html).toContain(en.harness.failure.generic);
+    expect(html).toContain(`>${en.harness.detail.lastExitCode}<`);
+    expect(html).toContain('>7<');
+    expect(html).toContain(`>${en.harness.detail.technicalDetails}<`);
+    expect(html).toContain(raw);
+    expect(html).toMatch(/<details(?![^>]*\bopen\b)[^>]*>/);
+    expect(html.indexOf(en.harness.failure.generic)).toBeLessThan(html.indexOf(raw));
+  });
+
   it('leaves a message task rendering exactly as it does today', () => {
     const html = detail(task({ name: 'Nightly digest', prompt: 'Summarize #ops', message: 'Summarize #ops' }));
 
@@ -837,6 +869,29 @@ describe('WatchDetail runtime', () => {
 
     expect(html).toContain(`>${i18n.t('harness.detail.eventProcessing')}<`);
     expect(html).toContain(`>${i18n.t('harness.processingHealth.unknown')}<`);
+  });
+
+  it('shows timeout as translated copy and keeps raw diagnostics collapsed', () => {
+    const raw = 'localized-looking stderr must stay technical';
+    const html = render(
+      <WatchDetail
+        watch={watch({
+          lifecycle_state: 'finished',
+          lifecycle_detail: 'timeout',
+          last_exit_code: 124,
+          last_error: raw,
+        })}
+        onToggleEnabled={() => undefined}
+        pending={false}
+      />,
+    );
+
+    expect(html).toContain(en.harness.failure.timeout);
+    expect(html).toContain(`>${en.harness.detail.lastExitCode}<`);
+    expect(html).toContain('>124<');
+    expect(html).toContain(`>${en.harness.detail.technicalDetails}<`);
+    expect(html).toContain(raw);
+    expect(html).toMatch(/<details(?![^>]*\bopen\b)[^>]*>/);
   });
 });
 

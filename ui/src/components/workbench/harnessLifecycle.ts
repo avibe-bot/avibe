@@ -348,6 +348,26 @@ export type HarnessDefinitionFacts = {
   metadata?: Record<string, unknown> | null;
 };
 
+export type HarnessFailureSummaryKey = 'harness.failure.timeout' | 'harness.failure.generic';
+
+// The UI can only name a timeout when the scheduler's structured fact or the
+// already-projected lifecycle detail proves it. The remaining structured
+// failure facts collapse to one generic category; last_error is deliberately
+// absent from this mapper and remains technical disclosure content only.
+export function definitionFailureSummaryKey(
+  row: Pick<HarnessDefinitionFacts, 'health' | 'lifecycle_detail' | 'last_error' | 'last_exit_code' | 'metadata'>,
+): HarnessFailureSummaryKey | null {
+  if (row.health === 'healthy') return null;
+  const timedOut = row.metadata?.last_command_timed_out === true || row.lifecycle_detail === 'timeout';
+  const failed =
+    timedOut ||
+    row.health === 'failing' ||
+    (row.lifecycle_detail != null && row.lifecycle_detail !== 'normal') ||
+    (typeof row.last_exit_code === 'number' && row.last_exit_code !== 0);
+  if (!failed) return null;
+  return timedOut ? 'harness.failure.timeout' : 'harness.failure.generic';
+}
+
 // ``failing`` = the newest verdict failed; ``degraded`` = the newest succeeded but
 // a failure is still in the window; ``unknown`` = health could not be computed,
 // which is deliberately not the same as ``healthy``.
