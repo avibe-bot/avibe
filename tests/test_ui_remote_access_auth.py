@@ -2345,14 +2345,9 @@ def test_active_org_event_stream_keeps_runtime_details() -> None:
         }
     )
 
-    assert (
-        ui_server._workbench_event_payload_for_context(
-            context,
-            "show.event",
-            show_frame,
-        )
-        == show_frame
-    )
+    # Vaults.updated keeps the runtime data; only the host path on
+    # show.event frames is redacted (display-layer redaction is preserved
+    # under the temporary full-access rollout — see #1343).
     assert (
         ui_server._workbench_event_payload_for_context(
             context,
@@ -2361,6 +2356,15 @@ def test_active_org_event_stream_keeps_runtime_details() -> None:
         )
         == vault_frame
     )
+    show_projection = ui_server._workbench_event_payload_for_context(
+        context,
+        "show.event",
+        show_frame,
+    )
+    assert show_projection is not None
+    show_data = json.loads(show_projection)["data"]
+    assert show_data["payload"]["screenshot"].get("path") is None
+    assert "med_1" in show_data["transcript_text"]
 
 
 def test_remote_show_event_stream_drops_unprojectable_frame() -> None:
@@ -3356,8 +3360,11 @@ def test_non_org_remote_identity_cannot_use_runtime_apis(monkeypatch, tmp_path):
     manage_response = client.get("/api/remote-access/status", base_url="https://alex.avibe.bot")
     session_response = client.get("/api/session", base_url="https://alex.avibe.bot")
 
-    assert read_response.status_code == 403
-    assert read_response.get_json()["error"] == "instance_access_forbidden"
+    # /api/version is a baseline read (origin/org viewer-allowed) and stays
+    # available to a signed non-Organization viewer; runtime management
+    # endpoints (/api/remote-access/status) are denied under the active-Org
+    # admission gate.
+    assert read_response.status_code == 200
     assert manage_response.status_code == 403
     assert manage_response.get_json()["error"] == "instance_access_forbidden"
     assert session_response.status_code == 200

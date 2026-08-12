@@ -24,13 +24,14 @@ def _organization_context(
     *,
     group_ids: frozenset[str] | None = frozenset({"group-engineering"}),
     instance_role: str = "editor",
+    organization_role: str = "member",
 ) -> resource_access_service.ResourceUserContext:
     return resource_access_service.ResourceUserContext(
         subject=subject,
         email=f"{subject}@example.com",
         organization_id="org-1",
         organization_member_id=f"member-{subject}",
-        organization_role="member",
+        organization_role=organization_role,
         group_ids=group_ids,
         instance_role=instance_role,
         instance_access_source="organization_group",
@@ -44,6 +45,7 @@ def _organization_cookie(
     subject: str,
     groups: list[str] | None = None,
     instance_role: str = "viewer",
+    organization_role: str = "member",
 ) -> str:
     claims = {
         "vibe_instance_id": "inst_123",
@@ -51,7 +53,7 @@ def _organization_cookie(
         "vibe_instance_access_source": "organization_group",
         "vibe_organization_id": "org-1",
         "vibe_organization_member_id": f"member-{subject}",
-        "vibe_organization_role": "member",
+        "vibe_organization_role": organization_role,
         "vibe_membership_version": "membership-v2",
     }
     if groups is not None:
@@ -189,14 +191,32 @@ def test_active_org_agent_creation_is_allowed_without_trusted_local_identity(mon
 def test_active_org_agent_management_is_allowed_inside_the_store(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     store, agents = _seed_agents_with_policies()
-    editor = _organization_context("member-1")
+    # Resource ACL management stays reserved to owner/admin Organization roles
+    # under the temporary full-access rollout (see #1343); a plain member has
+    # no management authority.
+    member = _organization_context("member-1")
+    admin = resource_access_service.ResourceUserContext(
+        subject="admin-1",
+        email="admin-1@example.com",
+        organization_id="org-1",
+        organization_member_id="member-admin-1",
+        organization_role="admin",
+        group_ids=frozenset({"group-engineering"}),
+        instance_role="owner",
+        instance_access_source="organization_group",
+        is_remote=True,
+    )
     owner = _organization_context("owner-1", instance_role="owner")
     try:
-        updated = store.update(agents["public"].name, description="member update", user_context=editor)
-        assert updated.description == "member update"
-        store.set_default_agent_name(agents["private"].name, user_context=editor)
+        with pytest.raises(VibeAgentAccessError):
+            store.update(agents["public"].name, description="member update", user_context=member)
+        with pytest.raises(VibeAgentAccessError):
+            store.remove(agents["public"].name, user_context=member)
+        updated = store.update(agents["public"].name, description="admin update", user_context=admin)
+        assert updated.description == "admin update"
+        store.set_default_agent_name(agents["private"].name, user_context=admin)
         assert store.get_default_agent_name() == agents["private"].name
-        assert store.remove(agents["public"].name, user_context=editor) is True
+        assert store.remove(agents["public"].name, user_context=admin) is True
         owner_updated = store.update(
             agents["private"].name,
             description="owner update",
@@ -312,6 +332,9 @@ def test_active_org_agent_selection_and_harness_bindings_are_allowed(monkeypatch
     store.close()
     context = _organization_context("member-1")
 
+    # Agent management stays reserved to admin/owner Organization roles under
+    # the temporary full-access rollout (see #1343). The reads and catalog
+    # remain open to all active members.
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
@@ -329,9 +352,31 @@ def test_active_org_agent_selection_and_harness_bindings_are_allowed(monkeypatch
     assert {"private-agent", "public-agent", "scope-agent"}.issubset(
         {agent["name"] for agent in catalog.get_json()["agents"]}
     )
-    mutation = client.patch(
+    # A plain active Organization member is denied mutations under the
+    # Resource ACL boundary.
+    denied_mutation = client.patch(
         "/api/agents/public-agent",
         json={"description": "member update"},
+        headers=csrf_headers(client, "https://alex.avibe.bot"),
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+    assert denied_mutation.status_code == 403
+    # An active Organization admin/owner can manage.
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        _organization_cookie(
+            config,
+            subject="admin-1",
+            groups=[],
+            instance_role="owner",
+            organization_role="admin",
+        ),
+        domain="alex.avibe.bot",
+    )
+    mutation = client.patch(
+        "/api/agents/public-agent",
+        json={"description": "admin update"},
         headers=csrf_headers(client, "https://alex.avibe.bot"),
         base_url="https://alex.avibe.bot",
         environ_base=_remote_peer(),

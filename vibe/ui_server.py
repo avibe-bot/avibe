@@ -2473,11 +2473,11 @@ def enforce_instance_role_capabilities():
             raise InstanceAuthorizationError(minimum_role)
         # The temporary Organization rollout admits active members. Other remote
         # principals on API runtime routes fail the active-Organization admission
-        # check here, before role rank; a signed Instance owner retains its
-        # origin/org admission to viewer/editor-allowed reads.
+        # check here, before role rank. Viewer-allowed reads already have
+        # origin/org admission and are not subject to this gate.
         if (
             context.is_remote
-            and context.instance_role != "owner"
+            and minimum_role == "owner"
             and request.path.startswith("/api/")
             and not has_temporary_unrestricted_org_access(context)
         ):
@@ -8243,6 +8243,19 @@ def _skills_project_id_kwargs(project_dir: str | None, project_id: str | None) -
     return {"project_id": project_id}
 
 
+def _skills_user_context_kwargs(context: Any) -> dict[str, Any]:
+    """Pass authorization context only to remote skill API calls.
+
+    Local callers historically invoke the skill API with its compact legacy
+    signature. Remote requests need the real context for Org ACL enforcement,
+    so include it only when the request actually crossed the remote boundary.
+    """
+
+    if getattr(context, "is_remote", False):
+        return {"user_context": context}
+    return {}
+
+
 @app.route("/api/projects/<project_id>/agents-md", methods=["GET"])
 def project_agents_md_get(project_id: str):
     """Read the project's AGENTS.md (falling back to CLAUDE.md) for the editor."""
@@ -8341,7 +8354,7 @@ async def skills_list():
         result = await api.list_skills(
             scope="global",
             backends=backends or None,
-            user_context=user_context,
+            **_skills_user_context_kwargs(user_context),
             **_skills_project_id_kwargs(None, project_id),
         )
         if isinstance(result, dict) and result.get("ok"):
@@ -8352,7 +8365,7 @@ async def skills_list():
             scope=scope,
             project_dir=project_dir,
             backends=backends or None,
-            user_context=user_context,
+            **_skills_user_context_kwargs(user_context),
             **_skills_project_id_kwargs(project_dir, project_id),
         )
     )
@@ -8375,7 +8388,7 @@ async def skills_preview():
         await api.preview_skill_source(
             str(payload.get("source") or ""),
             project_dir=project_dir,
-            user_context=user_context,
+            **_skills_user_context_kwargs(user_context),
             **_skills_project_id_kwargs(project_dir, project_id),
         )
     )
@@ -8404,7 +8417,7 @@ async def skills_add():
             all_skills=bool(payload.get("all")),
             skill=payload.get("skill") or None,
             copy=bool(payload.get("copy")),
-            user_context=user_context,
+            **_skills_user_context_kwargs(user_context),
         )
     )
 
@@ -8429,7 +8442,7 @@ async def skills_remove(name):
             project_dir=project_dir,
             project_id=project_id,
             backends=backends or None,
-            user_context=user_context,
+            **_skills_user_context_kwargs(user_context),
         )
     )
 
@@ -8441,7 +8454,7 @@ async def skills_find():
     return jsonify(
         await api.find_skills(
             request.args.get("q") or "",
-            user_context=getattr(g, "authorization_context", None),
+            **_skills_user_context_kwargs(getattr(g, "authorization_context", None)),
         )
     )
 
@@ -8465,7 +8478,7 @@ async def skills_check():
             scope=scope,
             project_dir=project_dir,
             project_id=project_id,
-            user_context=user_context,
+            **_skills_user_context_kwargs(user_context),
         )
     )
 
@@ -8489,7 +8502,7 @@ async def skills_update():
             scope=payload.get("scope") or "project",
             project_dir=project_dir,
             project_id=project_id,
-            user_context=user_context,
+            **_skills_user_context_kwargs(user_context),
         )
     )
 
@@ -8513,7 +8526,7 @@ async def skills_upload():
         await api.upload_skill_zip(
             payload,
             project_dir=project_dir,
-            user_context=user_context,
+            **_skills_user_context_kwargs(user_context),
             **_skills_project_id_kwargs(project_dir, project_id),
         )
     )
@@ -11356,12 +11369,14 @@ def _workbench_event_payload_for_context(context, event_type: str, payload: str)
         event_type == "show.event"
         and context is not None
         and context.is_remote
-        and not _has_temporary_runtime_access(context)
     ):
         # A Show annotation event carries the absolute host path of its
-        # materialized screenshot. Remote subscribers read the image by
-        # attachment id, so drop the path rather than stream the host layout —
-        # and drop the whole frame if it cannot be projected.
+        # materialized screenshot. Every remote recipient reads the image by
+        # attachment id, so the path is useless to them and only discloses
+        # the host's directory layout — drop it for every remote reader
+        # (active Organization members included) and drop the whole frame
+        # if it cannot be projected. Display-layer redaction is preserved
+        # under the temporary full-access rollout (see #1343).
         try:
             envelope = json.loads(payload)
         except (TypeError, json.JSONDecodeError):

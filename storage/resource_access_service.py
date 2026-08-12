@@ -614,8 +614,16 @@ def _policy_allows(
         return False
     if policy is None:
         # A legacy no-policy resource is local-private. The paired instance's
-        # owner retains legacy access, while remote organization members do not.
-        return context.is_instance_owner
+        # owner retains legacy access only when it carries an admitted remote
+        # identity (active Organization member or signed Instance owner with an
+        # accepted access source); a remote non-member owner claim must not
+        # bypass the Resource ACL boundary.
+        if context.is_trusted_local:
+            return True
+        return bool(
+            context.instance_role == "owner"
+            and context._has_admitted_remote_identity()
+        )
 
     owner_user_id = _clean_optional_string(policy.get("owner_user_id"))
     if policy.get("access_level") == "private":

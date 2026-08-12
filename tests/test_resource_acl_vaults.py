@@ -532,32 +532,42 @@ def test_vault_secret_removal_deletes_resource_policy_and_groups(vault) -> None:
     assert groups == []
 
 
-def test_active_org_member_can_manage_public_vault_secret(vault) -> None:
+def test_active_org_admin_can_manage_public_vault_secret(vault) -> None:
     with vault.begin() as conn:
         _create_secret(conn, "PUBLIC_MANAGEMENT")
         _set_policy(conn, "PUBLIC_MANAGEMENT", access_level="public")
 
+        # Reads stay open to every active Organization member.
         assert vault_service.get_secret_meta(
             conn,
             "PUBLIC_MANAGEMENT",
             user_context=_context("member-1"),
         )["name"] == "PUBLIC_MANAGEMENT"
+        # Writes stay reserved to admin/owner Organization roles under the
+        # Resource ACL boundary (see #1343).
+        with pytest.raises(vault_service.VaultSecretAccessError):
+            vault_service.update_secret_metadata(
+                conn,
+                "PUBLIC_MANAGEMENT",
+                description="member update",
+                user_context=_context("member-1"),
+            )
         updated = vault_service.update_secret_metadata(
             conn,
             "PUBLIC_MANAGEMENT",
-            description="member update",
-            user_context=_context("member-1"),
+            description="admin update",
+            user_context=_context("admin-1", role="admin", instance_role="owner"),
         )
         vault_service.delete_secret(
             conn,
             "PUBLIC_MANAGEMENT",
-            user_context=_context("member-1"),
+            user_context=_context("admin-1", role="admin", instance_role="owner"),
         )
         stored = conn.execute(
             select(vault_secrets).where(vault_secrets.c.name == "PUBLIC_MANAGEMENT")
         ).first()
 
-    assert updated["description"] == "member update"
+    assert updated["description"] == "admin update"
     assert stored is None
 
 

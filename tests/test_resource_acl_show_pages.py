@@ -834,7 +834,7 @@ def test_show_page_email_grant_change_requires_authorization_revision(monkeypatc
         )
 
 
-def test_remote_org_dock_temporarily_bypasses_show_page_acl(monkeypatch, tmp_path) -> None:
+def test_remote_org_dock_requires_admin_owner_role(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
     store = _seed_show_pages_with_policies()
@@ -847,7 +847,10 @@ def test_remote_org_dock_temporarily_bypasses_show_page_acl(monkeypatch, tmp_pat
         organization_role="admin",
         instance_role="owner",
     )
-    api.pin_dock_show_page("ses-public", user_context=member)
+    # Show Page dock/pin stays reserved to owner/admin Organization roles
+    # under the Resource ACL boundary (see #1343); a plain member is denied.
+    with pytest.raises(ShowPageError):
+        api.pin_dock_show_page("ses-public", user_context=member)
     api.pin_dock_show_page("ses-scope", user_context=admin)
     for session_id in ("ses-private", "ses-public", "ses-scope"):
         api.pin_dock_show_page(session_id, user_context=owner)
@@ -856,9 +859,14 @@ def test_remote_org_dock_temporarily_bypasses_show_page_acl(monkeypatch, tmp_pat
     visible_ids = {pin["session_id"] for pin in dock["pins"]}
     assert visible_ids == {"ses-private", "ses-public", "ses-scope"}
     assert "show:ses-private" in dock["order"]
-    api.pin_dock_show_page("ses-private", user_context=member)
-    api.unpin_dock_show_page("ses-public", user_context=member)
-    api.set_dock_order([], user_context=member)
+    # Pinning additional pages (require_management) stays denied for a plain
+    # member; unpin and reorder are also dock mutations and stay denied.
+    with pytest.raises(ShowPageError):
+        api.pin_dock_show_page("ses-private", user_context=member)
+    with pytest.raises(ShowPageError):
+        api.unpin_dock_show_page("ses-public", user_context=member)
+    with pytest.raises(ShowPageError):
+        api.set_dock_order([], user_context=member)
 
     client = app.test_client()
     client.set_cookie(
@@ -867,7 +875,7 @@ def test_remote_org_dock_temporarily_bypasses_show_page_acl(monkeypatch, tmp_pat
             config,
             subject="member-1",
             groups=["group-engineering"],
-            instance_role="owner",
+            instance_role="viewer",
         ),
         domain="alex.avibe.bot",
     )
@@ -877,11 +885,9 @@ def test_remote_org_dock_temporarily_bypasses_show_page_acl(monkeypatch, tmp_pat
         base_url="https://alex.avibe.bot",
         environ_base=_remote_peer(),
     )
-    assert response.status_code == 200
-    assert {pin["session_id"] for pin in response.get_json()["dock"]["pins"]} == {
-        "ses-private",
-        "ses-scope",
-    }
+    # A plain active Organization member is denied dock mutations under the
+    # Resource ACL boundary (see #1343).
+    assert response.status_code == 403
 
 
 def test_remote_admin_dock_order_preserves_hidden_private_pins(monkeypatch, tmp_path) -> None:
@@ -933,7 +939,7 @@ def test_untrusted_dock_context_fails_closed(monkeypatch, tmp_path) -> None:
         )
 
 
-def test_remote_member_can_archive_session_with_another_owners_page_temporarily(monkeypatch, tmp_path) -> None:
+def test_remote_member_archive_is_denied_under_resource_acl(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
     project_dir = tmp_path / "project"
@@ -964,6 +970,9 @@ def test_remote_member_can_archive_session_with_another_owners_page_temporarily(
         finally:
             store.close()
 
+        # Show Page archive of another owner's page stays reserved to
+        # owner/admin Organization roles under the Resource ACL boundary
+        # (see #1343); a plain active Organization member is denied.
         client = app.test_client()
         client.set_cookie(
             remote_access.SESSION_COOKIE_NAME,
@@ -982,14 +991,11 @@ def test_remote_member_can_archive_session_with_another_owners_page_temporarily(
             environ_base=_remote_peer(),
         )
 
-        assert response.status_code in {200, 204}
+        assert response.status_code in {403, 404}
         with engine.connect() as connection:
             assert connection.execute(
                 select(agent_sessions.c.status).where(agent_sessions.c.id == session_id)
-            ).scalar_one() == "archived"
-            assert connection.execute(
-                select(show_pages.c.visibility).where(show_pages.c.session_id == session_id)
-            ).scalar_one() == "offline"
+            ).scalar_one() != "archived"
     finally:
         engine.dispose()
 

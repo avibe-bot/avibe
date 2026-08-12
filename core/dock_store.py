@@ -206,13 +206,10 @@ def _require_show_page_management(
     user_context: Any,
     db_path: Path | None,
 ) -> None:
-    from vibe.authorization import has_temporary_unrestricted_org_access
-
-    if (
-        user_context.is_trusted_local
-        or has_temporary_unrestricted_org_access(user_context)
-        or not session_ids
-    ):
+    # Dock pin/unpin/reorder stay reserved to owner/admin Organization roles
+    # under the Resource ACL boundary (see #1343); the temporary Organization
+    # rollout does not bypass Show Page management.
+    if user_context.is_trusted_local or not session_ids:
         return
     store = ShowPageStore(db_path)
     try:
