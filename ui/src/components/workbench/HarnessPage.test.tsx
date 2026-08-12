@@ -784,6 +784,16 @@ describe('TaskDetail command task', () => {
     expect(html.indexOf(en.harness.failure.generic)).toBeLessThan(html.indexOf(raw));
   });
 
+  it('uses the generic summary when only an opaque technical error is available', () => {
+    const raw = 'command not found: localized stderr';
+    const html = detail(task({ shell_command: 'missing-tool', last_error: raw }));
+
+    expect(html).toContain(en.harness.failure.generic);
+    expect(html).toContain(`>${en.harness.detail.technicalDetails}<`);
+    expect(html).toContain(raw);
+    expect(html).toMatch(/<details(?![^>]*\bopen\b)[^>]*>/);
+  });
+
   it('leaves a message task rendering exactly as it does today', () => {
     const html = detail(task({ name: 'Nightly digest', prompt: 'Summarize #ops', message: 'Summarize #ops' }));
 

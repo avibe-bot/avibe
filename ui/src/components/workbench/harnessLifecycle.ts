@@ -355,7 +355,7 @@ export type HarnessFailureSummaryKey = 'harness.failure.timeout' | 'harness.fail
 // failure facts collapse to one generic category; last_error is deliberately
 // absent from this mapper and remains technical disclosure content only.
 export function definitionFailureSummaryKey(
-  row: Pick<HarnessDefinitionFacts, 'health' | 'lifecycle_detail' | 'last_error' | 'last_exit_code' | 'metadata'>,
+  row: Pick<HarnessDefinitionFacts, 'health' | 'lifecycle_detail' | 'last_exit_code' | 'metadata'>,
 ): HarnessFailureSummaryKey | null {
   if (row.health === 'healthy') return null;
   const timedOut = row.metadata?.last_command_timed_out === true || row.lifecycle_detail === 'timeout';

@@ -2152,7 +2152,10 @@ const FailureDetails: React.FC<{
   row: HarnessTask | HarnessWatch;
 }> = ({ row }) => {
   const { t } = useTranslation();
-  const summaryKey = definitionFailureSummaryKey(row);
+  // The mapper uses structured facts only. A stored error without enough
+  // structure still proves an unclassified failure, so keep the default copy
+  // generic instead of letting raw stderr choose a category.
+  const summaryKey = definitionFailureSummaryKey(row) ?? (row.last_error ? 'harness.failure.generic' : null);
   if (!summaryKey && !row.last_error) return null;
   return (
     <div className="flex flex-col gap-1.5">
