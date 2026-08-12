@@ -1493,8 +1493,14 @@ def test_memory_confirmed_rebuild_failure_keeps_candidate(monkeypatch, tmp_path)
             "status_code": 409,
             "body": {
                 "ok": False,
-                "error": "memory_rebuild_root_busy",
-                "result": "root_busy",
+                "error": "memory_embedding_unavailable",
+                "result": "failed",
+                "diagnostic": {
+                    "side": "embedding",
+                    "http_status": 404,
+                    "provider_error_code": "model_not_supported",
+                    "message": "provider_error",
+                },
             },
         }
 
@@ -1513,7 +1519,13 @@ def test_memory_confirmed_rebuild_failure_keeps_candidate(monkeypatch, tmp_path)
 
     assert response.status_code == 409
     body = response.get_json()
-    assert body["error"] == "memory_rebuild_root_busy"
+    assert body["error"] == "memory_embedding_unavailable"
+    assert body["diagnostic"] == {
+        "side": "embedding",
+        "http_status": 404,
+        "provider_error_code": "model_not_supported",
+        "message": "provider_error",
+    }
     assert body["rebuild_required"] is True
     persisted = V2Config.load().memory
     assert persisted.processing.embedding.model == "embed-v2"

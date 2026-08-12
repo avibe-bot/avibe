@@ -3139,6 +3139,17 @@ async def test_runtime_rebuild_preflight_failure_keeps_candidate_fence(
         active.processing.embedding.base_url,
     )
     assert V2Config.load().memory == candidate
+
+    assert await runtime.rebuild() == {
+        "ok": False,
+        "error": "memory_embedding_unavailable",
+        "result": "failed",
+    }
+    assert runtime._insight_reader is not None
+    assert runtime._insight_reader._provider_base_urls == (
+        active.processing.llm.base_url,
+        active.processing.embedding.base_url,
+    )
     await memory_runtime_factory.close(runtime)
 
 

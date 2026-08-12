@@ -2175,10 +2175,8 @@ class MemoryRuntime:
 
         # Publish the durable fence before any further await. Every preflight
         # failure must leave restart fenced against the same candidate.
-        active_config = deepcopy(self._config)
         self._config = deepcopy(candidate)
         self._restart_config = deepcopy(candidate)
-        self._configure_insight_reader(self._config)
         if candidate.enabled or _memory_processing_complete(candidate):
             preflight = await self.preflight(candidate)
         else:
@@ -2192,7 +2190,6 @@ class MemoryRuntime:
             # using the active settings until Retry succeeds.
             self._config = deepcopy(candidate)
             self._restart_config = deepcopy(candidate)
-            self._configure_insight_reader(active_config)
             self.module.pause_claims()
             return {**preflight, "result": "failed"}
         self.module.pause_claims()

@@ -845,6 +845,9 @@ async def _apply_memory_settings_patch(
                 )
                 payload["status"] = "failed"
                 payload["error"] = error
+                diagnostic = _memory_preflight_projection(runtime_payload)
+                if diagnostic:
+                    payload["diagnostic"] = diagnostic
                 # Keep the durable marker projection from latest config. Do not
                 # re-arm Retry after settlement if only activation failed later.
                 return _memory_response(payload, status_code=status_code if status_code >= 400 else 409)
