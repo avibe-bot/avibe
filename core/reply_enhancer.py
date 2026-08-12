@@ -217,9 +217,9 @@ def _is_markdown_table_delimiter_line(line: str) -> bool:
     )
 
 
-def _is_markdown_table_delimiter_before(text: str, start: int) -> bool:
+def _is_markdown_table_delimiter_before(markdown_mask: str, start: int) -> bool:
     """Return whether a separator-free row belongs to the preceding table."""
-    prefix = text[:start]
+    prefix = markdown_mask[:start]
     if prefix.endswith("\n"):
         return False
     lines = prefix.splitlines()
@@ -262,7 +262,11 @@ _SECRET_REQUEST_RE = re.compile(r"\$<([A-Za-z_][A-Za-z0-9_]*)>")
 
 
 def process_reply(
-    text: str, *, include_quick_replies: bool = True, keep_file_links: bool = False
+    text: str,
+    *,
+    include_quick_replies: bool = True,
+    allow_unseparated_quick_replies: bool = True,
+    keep_file_links: bool = False,
 ) -> EnhancedReply:
     """Parse *text* and return an ``EnhancedReply``.
 
@@ -274,6 +278,9 @@ def process_reply(
     workbench needs the links in place so it can rewrite them to media-proxy URLs
     for inline rendering; IM keeps the default (links stripped to plain labels and
     uploaded to the platform separately).
+
+    ``allow_unseparated_quick_replies`` gates only the compatibility syntax;
+    explicit ``---`` button blocks retain their existing behavior.
     """
     text, markdown_mask = _strip_silent_blocks_with_mask(text)
     visible_text = text
@@ -288,7 +295,11 @@ def process_reply(
             markdown_mask,
         )
     if include_quick_replies:
-        buttons, text_clean = _extract_buttons(text_no_files, mask_no_files)
+        buttons, text_clean = _extract_buttons(
+            text_no_files,
+            mask_no_files,
+            allow_unseparated=allow_unseparated_quick_replies,
+        )
     else:
         buttons, text_clean = [], text_no_files
     return EnhancedReply(
@@ -961,16 +972,18 @@ def _raw_html_end(
 def _extract_buttons(
     text: str,
     markdown_mask: str | None = None,
+    *,
+    allow_unseparated: bool = True,
 ) -> Tuple[List[QuickReplyButton], str]:
     """Extract trailing quick-reply buttons and return ``(buttons, cleaned_text)``."""
     mask = markdown_mask if markdown_mask is not None else _mask_markdown_code(text)
     pattern = _BUTTON_BLOCK_RE
     masked_match = pattern.search(mask)
-    if masked_match is None:
+    if masked_match is None and allow_unseparated:
         pattern = _UNSEPARATED_BUTTON_ROW_RE
         masked_match = pattern.search(mask)
-        if masked_match is None:
-            return [], text
+    if masked_match is None:
+        return [], text
     m = pattern.fullmatch(
         text,
         masked_match.start(),
@@ -980,7 +993,7 @@ def _extract_buttons(
         return [], text
 
     if pattern is _UNSEPARATED_BUTTON_ROW_RE and _is_markdown_table_delimiter_before(
-        text, m.start()
+        mask, m.start()
     ):
         return [], text
 
