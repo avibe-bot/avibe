@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, replace
-from typing import Literal, Mapping, Optional
+from typing import Final, Literal, Mapping, Optional
 
 from .adapter import RawCallOutcome, RawOutcomeKind
 
 ResolutionAction = Literal["return", "surface", "refresh", "fallback"]
+MachineErrorFamily = Literal["auth", "request", "server", "transient", "terminal"]
 TerminalOutcomeCategory = Literal[
     "served",
     "request_nonfallback",
@@ -52,10 +53,7 @@ SOURCE_SETTLEMENT_AUTHORITY: Mapping[str, SourceSettlementRule] = {
 _SOURCE_STATE_PRIORITY = {
     "active": 0,
     "standby": 0,
-    **{
-        rule.status: rule.priority
-        for rule in SOURCE_SETTLEMENT_AUTHORITY.values()
-    },
+    **{rule.status: rule.priority for rule in SOURCE_SETTLEMENT_AUTHORITY.values()},
 }
 
 
@@ -71,6 +69,7 @@ def source_settlement_allowed(existing_status: str, reason: str) -> bool:
 
     incoming = source_settlement_rule(reason)
     return incoming.priority >= _SOURCE_STATE_PRIORITY.get(existing_status, 0)
+
 
 _SURFACE_PATTERNS = re.compile(
     r"(?:invalid[_ -]?(?:request|parameter)|validation[_ -]?error|context[_ -]?length|"
@@ -91,6 +90,8 @@ _MODEL_NOT_FOUND_ERROR_CODES = frozenset({"not_found_error"})
 class _MachineErrorRule:
     """One machine-code row, including the downstream status projection."""
 
+    family: MachineErrorFamily
+    upstream_visible: bool
     specificity: int
     action: ResolutionAction | None
     reason: ResolutionReason | None
@@ -100,16 +101,40 @@ class _MachineErrorRule:
 
 
 # This table is the sole owner of machine-code specificity and projection.
-_MACHINE_ERROR_TAXONOMY: Mapping[str, _MachineErrorRule] = {
-    "permission_error": _MachineErrorRule(100, "surface", None, "request_incompatible", 0, 403),
-    "engine_down": _MachineErrorRule(100, "surface", None, "engine_down", 0, 502),
-    "request_too_large": _MachineErrorRule(80, "surface", None, "upstream_request_invalid", 0, 400),
-    "rate_limit_error": _MachineErrorRule(80, "fallback", "rate_limited", None, 60, None),
-    "rate_limit_exceeded": _MachineErrorRule(80, "fallback", "rate_limited", None, 60, None),
-    "overloaded_error": _MachineErrorRule(80, "fallback", "server_error", None, 30, None),
-    "server_error": _MachineErrorRule(80, "fallback", "server_error", None, 30, None),
-    "api_error": _MachineErrorRule(0, None, None, None, 0, None),
+_MACHINE_ERROR_TAXONOMY: Final[Mapping[str, _MachineErrorRule]] = {
+    "permission_error": _MachineErrorRule("terminal", True, 100, "surface", None, "request_incompatible", 0, 403),
+    "engine_down": _MachineErrorRule("terminal", False, 100, "surface", None, "engine_down", 0, 502),
+    "authentication_error": _MachineErrorRule("auth", True, 90, "refresh", None, None, 0, None),
+    "invalid_api_key": _MachineErrorRule("auth", True, 90, "refresh", None, None, 0, None),
+    "account_banned": _MachineErrorRule("auth", True, 90, "fallback", "account_banned", None, 0, None),
+    "account_disabled": _MachineErrorRule("auth", True, 90, "fallback", "account_banned", None, 0, None),
+    "account_suspended": _MachineErrorRule("auth", True, 90, "fallback", "account_banned", None, 0, None),
+    "request_too_large": _MachineErrorRule("request", True, 80, "surface", None, "upstream_request_invalid", 0, 400),
+    "invalid_parameter": _MachineErrorRule("request", True, 80, "surface", None, "upstream_request_invalid", 0, 400),
+    "invalid_request_error": _MachineErrorRule(
+        "request", True, 80, "surface", None, "upstream_request_invalid", 0, 400
+    ),
+    "validation_error": _MachineErrorRule("request", True, 80, "surface", None, "upstream_request_invalid", 0, 400),
+    "context_length_exceeded": _MachineErrorRule(
+        "request", True, 80, "surface", None, "upstream_request_invalid", 0, 400
+    ),
+    "model_not_found": _MachineErrorRule("request", True, 80, "surface", None, "upstream_request_invalid", 0, 400),
+    "not_found_error": _MachineErrorRule("request", True, 80, "surface", None, "upstream_request_invalid", 0, 400),
+    "rate_limit_error": _MachineErrorRule("transient", True, 80, "fallback", "rate_limited", None, 60, None),
+    "rate_limit_exceeded": _MachineErrorRule("transient", True, 80, "fallback", "rate_limited", None, 60, None),
+    "quota_exceeded": _MachineErrorRule("transient", True, 80, "fallback", "quota_exhausted", None, 300, None),
+    "insufficient_quota": _MachineErrorRule("transient", True, 80, "fallback", "quota_exhausted", None, 300, None),
+    "billing_error": _MachineErrorRule("transient", True, 80, "fallback", "balance_exhausted", None, 0, None),
+    "overloaded": _MachineErrorRule("transient", True, 80, "fallback", "server_error", None, 30, None),
+    "overloaded_error": _MachineErrorRule("transient", True, 80, "fallback", "server_error", None, 30, None),
+    "server_error": _MachineErrorRule("server", True, 70, "fallback", "server_error", None, 30, None),
+    "internal_error": _MachineErrorRule("server", True, 70, "fallback", "server_error", None, 30, None),
+    "api_error": _MachineErrorRule("server", True, 10, "fallback", "server_error", None, 30, None),
 }
+MACHINE_ERROR_CODES: Final = frozenset(_MACHINE_ERROR_TAXONOMY)
+UPSTREAM_MACHINE_ERROR_CODES: Final = frozenset(
+    code for code, rule in _MACHINE_ERROR_TAXONOMY.items() if rule.upstream_visible
+)
 _QUOTA_PATTERNS = re.compile(
     r"(?:quota[_ -]?(?:exhausted|exceeded)|insufficient[_ -]?(?:quota|credits)|"
     r"billing[_ -]?(?:limit|exhausted)|usage[_ -]?limit|credit[_ -]?balance)",
@@ -170,11 +195,7 @@ def machine_error_codes(outcome: RawCallOutcome) -> tuple[str, ...]:
         return row.specificity if row is not None else -1
 
     raw_values = (*outcome.error_candidates, outcome.error_type, outcome.error_code)
-    candidates = {
-        value.strip().lower()
-        for value in raw_values
-        if isinstance(value, str) and value.strip()
-    }
+    candidates = {value.strip().lower() for value in raw_values if isinstance(value, str) and value.strip()}
     return tuple(
         sorted(
             candidates,
@@ -196,6 +217,11 @@ def _classify_unstreamed(
     )
     for machine_row, _machine_code in machine_rows:
         if machine_row.action is not None:
+            if machine_row.action == "refresh" and refresh_attempted:
+                return ResolutionDecision(
+                    "fallback",
+                    reason="credential_expired",
+                )
             return ResolutionDecision(
                 machine_row.action,
                 reason=machine_row.reason,
@@ -227,10 +253,7 @@ def _classify_unstreamed(
         outcome.http_status == 404
         and any(code in _MODEL_NOT_FOUND_ERROR_CODES for code in machine_error_codes(outcome))
     )
-    if (
-        _SURFACE_PATTERNS.search(error_text)
-        or model_not_found
-    ):
+    if _SURFACE_PATTERNS.search(error_text) or model_not_found:
         return ResolutionDecision("surface", error_code="upstream_request_invalid")
 
     if _QUOTA_PATTERNS.search(error_text):
@@ -242,11 +265,7 @@ def _classify_unstreamed(
     if outcome.http_status == 403:
         return ResolutionDecision(
             "fallback",
-            reason=(
-                "account_banned"
-                if _BANNED_PATTERNS.search(error_text)
-                else "credential_revoked"
-            ),
+            reason=("account_banned" if _BANNED_PATTERNS.search(error_text) else "credential_revoked"),
         )
     if outcome.http_status == 429:
         return ResolutionDecision(
@@ -285,6 +304,12 @@ def classify_outcome(
         return replace(
             decision,
             action="surface",
+            error_code="stream_interrupted",
+        )
+    if decision.action == "refresh":
+        return ResolutionDecision(
+            "surface",
+            reason="credential_revoked",
             error_code="stream_interrupted",
         )
     return decision

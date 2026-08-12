@@ -130,33 +130,65 @@ def _chat_terminal_event(
 
 @dataclass(frozen=True)
 class ProtocolStreamTaxonomy:
-    success_types: frozenset[str]
-    success_literal: bytes | None
-    error_types: frozenset[str]
+    success_events: frozenset[tuple[str | None, str]]
+    success_literal: tuple[str | None, bytes] | None
+    error_events: frozenset[tuple[str | None, str]]
+    terminal_event_name: str | None
     render_terminal_event: Callable[[str, str, int], dict[str, object]]
 
 
 PROTOCOL_STREAM_TAXONOMY: Final[Mapping[str, ProtocolStreamTaxonomy]] = {
-    # https://platform.claude.com/docs/en/build-with-claude/streaming
     "anthropic": ProtocolStreamTaxonomy(
-        success_types=frozenset({"message_stop"}),
+        success_events=frozenset(
+            {
+                # https://platform.claude.com/docs/en/build-with-claude/streaming
+                ("message_stop", "message_stop"),
+            }
+        ),
         success_literal=None,
-        error_types=frozenset({"error"}),
+        error_events=frozenset(
+            {
+                # https://platform.claude.com/docs/en/build-with-claude/streaming
+                ("error", "error"),
+            }
+        ),
+        terminal_event_name="error",
         render_terminal_event=_anthropic_terminal_event,
     ),
-    # https://platform.openai.com/docs/api-reference/responses-streaming
-    # https://platform.openai.com/docs/api-reference/realtime-server-events/response/done
     "openai_responses": ProtocolStreamTaxonomy(
-        success_types=frozenset({"response.completed", "response.done"}),
+        success_events=frozenset(
+            {
+                # https://platform.openai.com/docs/api-reference/responses-streaming/response/completed
+                ("response.completed", "response.completed"),
+                # https://platform.openai.com/docs/api-reference/realtime-server-events/response/done
+                ("response.done", "response.done"),
+            }
+        ),
         success_literal=None,
-        error_types=frozenset({"error", "response.failed", "response.incomplete"}),
+        error_events=frozenset(
+            {
+                # https://platform.openai.com/docs/api-reference/responses-streaming/error
+                ("error", "error"),
+                # https://platform.openai.com/docs/api-reference/responses-streaming/response/failed
+                ("response.failed", "response.failed"),
+                # https://platform.openai.com/docs/api-reference/responses-streaming/response/incomplete
+                ("response.incomplete", "response.incomplete"),
+            }
+        ),
+        terminal_event_name="error",
         render_terminal_event=_responses_terminal_event,
     ),
-    # https://platform.openai.com/docs/api-reference/chat/create#chat-create-stream
     "openai_chat": ProtocolStreamTaxonomy(
-        success_types=frozenset(),
-        success_literal=b"[DONE]",
-        error_types=frozenset({"error"}),
+        success_events=frozenset(),
+        # https://platform.openai.com/docs/api-reference/chat/create#chat-create-stream
+        success_literal=(None, b"[DONE]"),
+        error_events=frozenset(
+            {
+                # https://platform.openai.com/docs/api-reference/chat/create#chat-create-stream
+                (None, "error"),
+            }
+        ),
+        terminal_event_name=None,
         render_terminal_event=_chat_terminal_event,
     ),
 }
@@ -196,11 +228,11 @@ class ProtocolSSEState:
         if self.terminal_outcome is not None:
             self.invalid_after_terminal = True
             return
-        _event_name, data = parse_sse_frame(frame)
+        event_name, data = parse_sse_frame(frame)
         if data is None:
             return
         taxonomy = PROTOCOL_STREAM_TAXONOMY[self.protocol]
-        if taxonomy.success_literal is not None and data == taxonomy.success_literal:
+        if taxonomy.success_literal == (event_name, data):
             self.terminal_outcome = "served"
             return
         try:
@@ -210,9 +242,10 @@ class ProtocolSSEState:
         if not isinstance(payload, dict):
             return
         event_type = payload["type"] if "type" in payload else None
-        if isinstance(event_type, str) and event_type in taxonomy.success_types:
+        event_identity = (event_name, event_type)
+        if event_identity in taxonomy.success_events:
             self.terminal_outcome = "served"
-        elif isinstance(event_type, str) and event_type in taxonomy.error_types:
+        elif event_identity in taxonomy.error_events:
             self.terminal_outcome = "failed_terminal"
             self.error_payload = data
         sequence_number = payload.get("sequence_number")
@@ -233,3 +266,14 @@ def render_protocol_terminal_event(
     except KeyError as exc:
         raise ValueError(f"unsupported terminal event protocol: {protocol}") from exc
     return taxonomy.render_terminal_event(key, message, next_sequence_number)
+
+
+def render_protocol_terminal_frame(protocol: str, payload: bytes) -> bytes:
+    """Frame one locally projected terminal in the protocol's native SSE form."""
+
+    try:
+        event_name = PROTOCOL_STREAM_TAXONOMY[protocol].terminal_event_name
+    except KeyError as exc:
+        raise ValueError(f"unsupported terminal event protocol: {protocol}") from exc
+    event_line = b"" if event_name is None else b"event: " + event_name.encode() + b"\n"
+    return event_line + b"data: " + payload + b"\n\n"

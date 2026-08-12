@@ -38,6 +38,7 @@ from .stream_wire import (
     ProtocolSSEState,
     StreamTerminalOutcome,
     render_protocol_terminal_event,
+    render_protocol_terminal_frame,
 )
 from .service import (
     HandleSettlement,
@@ -629,10 +630,7 @@ class ModelHubTurnGateway:
         ).encode("utf-8")
         await self._downstream_io(
             response.write(
-                frame_prefix
-                + b"event: error\ndata: "
-                + payload
-                + b"\n\n"
+                frame_prefix + render_protocol_terminal_frame(protocol, payload)
             )
         )
 

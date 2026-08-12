@@ -19,6 +19,7 @@ from core.handlers.model_hub.adapter import (
     RawCallOutcome,
     RawOutcomeKind,
 )
+from core.handlers.model_hub.classification import UPSTREAM_MACHINE_ERROR_CODES
 from core.handlers.model_hub.stream_wire import ProtocolSSEState, SSEFrameLimitError
 from vibe.model_hub_runtime.state import SourceRecord
 
@@ -26,31 +27,6 @@ from vibe.model_hub_runtime.state import SourceRecord
 _MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 _STREAM_CHUNK_BYTES = 64 * 1024
 _MODEL_PROBE_BYTES = 4 * 1024 * 1024
-_SAFE_ERROR_CODES = frozenset(
-    {
-        "api_error",
-        # Closed mirror of classification._BANNED_PATTERNS account-status
-        # tokens; the runtime preserves only exact machine codes.
-        "account_banned",
-        "account_disabled",
-        "account_suspended",
-        "authentication_error",
-        "billing_error",
-        "context_length_exceeded",
-        "insufficient_quota",
-        "invalid_api_key",
-        "invalid_request_error",
-        "model_not_found",
-        "not_found_error",
-        "overloaded_error",
-        "permission_error",
-        "quota_exceeded",
-        "rate_limit_error",
-        "rate_limit_exceeded",
-        "request_too_large",
-        "server_error",
-    }
-)
 _OFFICIAL_BASE_URLS = {
     "anthropic": "https://api.anthropic.com/v1",
     "openai": "https://api.openai.com/v1",
@@ -193,9 +169,7 @@ class EngineClient:
         body["model"] = f"{source.prefix}/{model_id}"
         body["stream"] = stream
         headers = {
-            key.lower(): value
-            for key, value in (request_headers or {}).items()
-            if key.lower() in _PROTOCOL_HEADERS
+            key.lower(): value for key, value in (request_headers or {}).items() if key.lower() in _PROTOCOL_HEADERS
         }
         headers.update(
             {
@@ -248,6 +222,19 @@ class EngineClient:
                 response.close()
                 await session.close()
                 return completed_handle(outcome)
+
+            if stream and not _is_event_stream_response(response):
+                response.close()
+                await session.close()
+                return completed_handle(
+                    _outcome(
+                        kind=RawOutcomeKind.PROTOCOL_ERROR,
+                        source=source,
+                        model_id=model_id,
+                        http_status=response.status,
+                        message="upstream streaming response is not text/event-stream",
+                    )
+                )
 
             first = await asyncio.wait_for(
                 response.content.read(_STREAM_CHUNK_BYTES),
@@ -623,9 +610,7 @@ def _observed_stream_terminal_outcome(
             stream_started=True,
         )
     if wire_state.terminal_outcome == "failed_terminal":
-        error_type, error_code, candidates = _raw_error_fields(
-            wire_state.error_payload or b""
-        )
+        error_type, error_code, candidates = _raw_error_fields(wire_state.error_payload or b"")
         return _outcome(
             kind=RawOutcomeKind.HTTP_ERROR,
             source=source,
@@ -721,9 +706,14 @@ def _raw_error_fields(payload: bytes) -> tuple[str | None, str | None, tuple[str
 
 
 def _safe_error_code(value: object) -> str | None:
-    if not isinstance(value, str) or value not in _SAFE_ERROR_CODES:
+    if not isinstance(value, str) or value not in UPSTREAM_MACHINE_ERROR_CODES:
         return None
     return value
+
+
+def _is_event_stream_response(response: aiohttp.ClientResponse) -> bool:
+    content_type = str(response.headers.get("Content-Type", ""))
+    return content_type.split(";", 1)[0].strip().lower() == "text/event-stream"
 
 
 def _is_json(payload: bytes) -> bool:
