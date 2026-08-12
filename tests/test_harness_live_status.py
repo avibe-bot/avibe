@@ -407,6 +407,68 @@ def test_harness_status_cli_preserves_pre_snapshot_run_truncation(
     assert payload["truncated"]["runs"] is True
 
 
+def test_harness_status_prioritizes_running_run_before_bounded_probe(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    store = SQLiteBackgroundTaskStore(tmp_path / "state.sqlite")
+    try:
+        _enqueue_running(store, "run-owner-missing")
+        for index in range(101):
+            minute, second = divmod(index, 60)
+            observed_at = f"2026-08-12T06:{minute:02d}:{second:02d}+00:00"
+            if index >= 99:
+                observed_at = "2026-08-12T06:02:00+00:00"
+            store.enqueue_run(
+                {
+                    "id": f"run-queued-{index:03d}",
+                    "request_type": "agent_run",
+                    "status": "queued",
+                    "agent_name": "codex",
+                    "agent_backend": "codex",
+                    "session_id": "ses-live",
+                    "message": "continue",
+                    "created_at": observed_at,
+                    "updated_at": observed_at,
+                }
+            )
+
+        monkeypatch.setattr(
+            cli,
+            "_task_request_store",
+            lambda: SimpleNamespace(sqlite_backend=store),
+        )
+        probed_run_ids = []
+
+        async def _controller_snapshot(*, run_ids):
+            probed_run_ids.extend(run_ids)
+            return {
+                "status_code": 200,
+                "body": {
+                    "ok": True,
+                    "agents": [],
+                    "owned_run_ids": [],
+                    "ownership_available": True,
+                },
+            }
+
+        monkeypatch.setattr(internal_client, "list_running_agents", _controller_snapshot)
+
+        assert cli.cmd_harness_status(SimpleNamespace()) == 0
+        payload = json.loads(capsys.readouterr().out)
+
+        assert probed_run_ids[:3] == [
+            "run-owner-missing",
+            "run-queued-100",
+            "run-queued-099",
+        ]
+        assert "run-owner-missing" in {row["id"] for row in payload["runs"]}
+        assert payload["truncated"]["runs"] is True
+        assert payload["anomalies"][0]["code"] == "run_owner_missing"
+        assert payload["anomalies"][0]["run_id"] == "run-owner-missing"
+    finally:
+        store.close()
+
+
 def test_harness_cli_help_uses_configured_language(monkeypatch, capsys) -> None:
     monkeypatch.setattr(cli, "_configured_cli_language", lambda: "zh")
 

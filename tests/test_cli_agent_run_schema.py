@@ -1849,6 +1849,28 @@ def test_runs_list_current_session_filters_from_caller_env(tmp_path: Path, capsy
     assert [run["session_id"] for run in payload["runs"]] == ["ses-current"]
 
 
+@pytest.mark.parametrize(
+    "activity_at",
+    (
+        "2099-01-01T00:00:00Z",
+        "2099-01-01T00:00:00z",
+        "2099-01-01T00:00:00",
+        "2099-01-01T08:00:00+08:00",
+    ),
+)
+def test_brief_run_payload_parses_supported_iso_instants(activity_at: str) -> None:
+    payload = cli._run_payload(
+        {
+            "id": "run-live",
+            "status": "running",
+            "last_activity_at": activity_at,
+        },
+        brief=True,
+    )
+
+    assert payload["activity_age_seconds"] == 0.0
+
+
 def test_runs_list_current_session_conflicts_with_session_id(capsys) -> None:
     parser = cli.build_parser()
     args = parser.parse_args(["runs", "list", "--current-session", "--session-id", "ses-explicit"])

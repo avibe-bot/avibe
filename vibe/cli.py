@@ -3302,8 +3302,11 @@ def cmd_harness_status(_args) -> int:
 def _seconds_since_iso(timestamp: object) -> float | None:
     if not isinstance(timestamp, str) or not timestamp.strip():
         return None
+    text = timestamp.strip()
+    if text.endswith(("Z", "z")):
+        text = f"{text[:-1]}+00:00"
     try:
-        started_at = datetime.fromisoformat(timestamp)
+        started_at = datetime.fromisoformat(text)
     except ValueError:
         return None
     if started_at.tzinfo is None:

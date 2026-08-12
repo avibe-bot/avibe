@@ -3827,7 +3827,7 @@ class SQLiteBackgroundTaskStore:
         return page_result_from_limit_plus_one(rows, page_request)
 
     def list_active_runs(self, *, limit: int) -> list[dict[str, Any]]:
-        """Return a bounded newest-activity-first snapshot of operator-visible Runs."""
+        """Return a bounded anomaly-first snapshot of operator-visible Runs."""
 
         stmt = (
             self._runs_query(exclude_run_type=(_WATCH_RUNTIME_RUN_TYPE,))
@@ -3836,7 +3836,17 @@ class SQLiteBackgroundTaskStore:
                     _status_query_values("queued") + _status_query_values("running")
                 )
             )
-            .order_by(agent_runs.c.updated_at.desc(), agent_runs.c.id.desc())
+            .order_by(
+                case(
+                    (
+                        agent_runs.c.status.in_(_status_query_values("running")),
+                        0,
+                    ),
+                    else_=1,
+                ),
+                agent_runs.c.updated_at.desc(),
+                agent_runs.c.id.desc(),
+            )
             .limit(max(0, int(limit)))
         )
         with self.engine.connect() as conn:
