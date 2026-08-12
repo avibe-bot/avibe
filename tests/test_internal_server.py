@@ -4003,6 +4003,135 @@ def test_scheduled_gate_idle_runs_turn_with_lifecycle(monkeypatch, tmp_path):
     assert session_id not in app.state.in_flight_dispatches, "slot released after the turn"
 
 
+def test_hfr_482_create_per_run_delivery_adopts_reserved_session(monkeypatch, tmp_path):
+    """A create-per-run Run adopts its freshly reserved Session at admission."""
+    from core.scheduled_tasks import TaskExecutionStore
+    from core.services import sessions as sessions_service
+    from storage.background import attach_agent_run_delivery_in_connection
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session = _create_test_session(
+        tmp_path,
+        native_id="proj_create_per_run_delivery",
+    )
+    session_id = session["id"]
+    request_store = TaskExecutionStore()
+    run = request_store.enqueue_definition_run(
+        definition_id="scheduled-create-per-run",
+        run_type="scheduled",
+        source_kind="scheduler",
+        session_key="",
+        session_id=None,
+        post_to=None,
+        deliver_key=None,
+        prompt="fresh session prompt",
+        agent_name="worker",
+        session_policy="create_per_run",
+    )
+    assert request_store.claim(run.id) is not None
+
+    started = asyncio.Event()
+
+    async def _fake_dispatch_turn(ctrl, ctx, text, *, source=SOURCE_HUMAN, on_chunk=None):
+        started.set()
+        return TurnDispatchOutcome(error=None, settled_by=SETTLED_BY_TERMINAL_RESULT)
+
+    monkeypatch.setattr(session_turns, "dispatch_turn_with_outcome", _fake_dispatch_turn)
+
+    controller = _build_controller_double()
+    internal_server.create_app(controller)
+    ctx = MessageContext(
+        user_id="workbench",
+        channel_id=session_id,
+        platform="avibe",
+        message_id=f"scheduled:scheduled-create-per-run:{run.id}",
+        platform_specific={
+            "agent_session_id": session_id,
+            "agent_session_target": {"agent_backend": "claude"},
+            "task_execution_id": run.id,
+            "task_trigger_kind": "scheduled",
+            "task_definition_id": "scheduled-create-per-run",
+        },
+    )
+
+    async def _go():
+        result = await controller.session_turn_gate.submit_scheduled(
+            session_id,
+            ctx,
+            "fresh session prompt",
+            delivery_intent="queue",
+        )
+        await asyncio.wait_for(started.wait(), timeout=3)
+        return result
+
+    result = asyncio.run(_go())
+
+    assert result.delivery_owner_transferred is True
+    stored = request_store.get_run(run.id)
+    assert stored is not None
+    assert stored["session_id"] == session_id
+    assert stored["delivery_id"]
+    assert stored["metadata"]["delivery_outcome"] == {
+        "intent": "queue",
+        "status": "claimed",
+        "target_was_busy": False,
+    }
+    with engine.connect() as conn:
+        delivery = message_deliveries.get_delivery(conn, stored["delivery_id"])
+    assert delivery is not None
+    assert delivery["session_id"] == session_id
+
+    unbound_existing = request_store.enqueue_definition_run(
+        definition_id="scheduled-existing",
+        run_type="scheduled",
+        source_kind="scheduler",
+        session_key="",
+        session_id=None,
+        post_to=None,
+        deliver_key=None,
+        prompt="must not adopt",
+        agent_name="worker",
+        session_policy="existing",
+    )
+    bound_create_per_run = request_store.enqueue_definition_run(
+        definition_id="scheduled-bound-create-per-run",
+        run_type="scheduled",
+        source_kind="scheduler",
+        session_key="",
+        session_id=session_id,
+        post_to=None,
+        deliver_key=None,
+        prompt="must not rebind",
+        agent_name="worker",
+        session_policy="create_per_run",
+    )
+    with engine.begin() as conn:
+        other_session = sessions_service.create_session(
+            conn,
+            scope_id=session["scope_id"],
+            agent_backend="claude",
+            agent_name="worker",
+        )
+        other_delivery = _reserve_submission(
+            conn,
+            scope_id=session["scope_id"],
+            session_id=other_session["id"],
+            text="foreign delivery",
+        )
+        assert not attach_agent_run_delivery_in_connection(
+            conn,
+            unbound_existing.id,
+            session_id=other_session["id"],
+            delivery_id=other_delivery["id"],
+        )
+        assert not attach_agent_run_delivery_in_connection(
+            conn,
+            bound_create_per_run.id,
+            session_id=other_session["id"],
+            delivery_id=other_delivery["id"],
+        )
+
+
 def test_scheduled_gate_busy_enqueues_and_leaves_chat_turn_untouched(monkeypatch, tmp_path):
     """A scheduled run for a session that already has a turn in flight ENQUEUES a
     harness-attributed ``queued`` row (so it runs AFTER the active turn via the

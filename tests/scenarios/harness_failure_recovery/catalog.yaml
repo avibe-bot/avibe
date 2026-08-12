@@ -4305,6 +4305,16 @@ scenarios:
     # blocked, while dead Watch supervision and upcoming Task inventory remain in
     # the same bounded operator response.
     test: tests/test_harness_live_status.py::test_hfr_481_unified_view_marks_workdir_conflict_and_watch_failure
+  - id: HFR-482
+    name: create-per-run Delivery binding adopts its freshly reserved Session
+    status: covered
+    kind: lifecycle
+    layer: scenario
+    backend: shared
+    # A create-per-run row starts without a Session. Its first durable Delivery
+    # atomically records the runtime reservation while mismatched bound Runs stay
+    # protected by the existing hard refusal.
+    test: tests/test_internal_server.py::test_hfr_482_create_per_run_delivery_adopts_reserved_session
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor
