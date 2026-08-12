@@ -574,6 +574,37 @@ unavailable for a recoverable quota/cooldown or live connection-backoff reason. 
 position on the next turn without changing `C`. Every switch is recorded for pull
 surfaces; a successful handoff emits no conversation notice or setting.
 
+**Wire observation contract (authoritative and exhaustive; owner ruling 2026-08-12).**
+Observation is not validation. Model Hub observes upstream wire data only to settle
+health, provenance, and fallback. It is a byte-transparent intermediary: bytes delivered
+to the caller are identical to the bytes received from upstream, and it does not act as a
+protocol conformance validator.
+
+The complete observation surface is limited to these facts:
+
+1. An official error envelope at a terminal position is `failed_terminal`; machine-code
+   extraction reads only the protocol's declared C12 trust roots.
+2. An official success terminal is `served` when its discriminator identity matches. For
+   named SSE events this is the minimal `(event name, data.type)` match. This is
+   discriminator-only observation, not validation of the remaining envelope members or
+   event lifecycle.
+3. EOF without a recognized terminal is the existing network family and is
+   non-punitive to durable Source health.
+4. `stream_started` flips only when content, refusal, or tool-call model output crosses
+   the caller boundary. Role metadata, transport frames, and error frames do not flip it.
+5. The observer performs only the framing normalization required to see those facts:
+   stripping an initial UTF-8 BOM and splitting bounded SSE lines and events across CRLF,
+   LF, or CR boundaries.
+
+Everything else is forwarded and ignored for settlement. Model Hub does not judge
+`sequence_number` presence or order; completeness of the event vocabulary; lifecycle
+ordering such as `created` before `completed`; envelope members beyond the terminal
+discriminator and declared error trust roots; malformed data payloads; duplicate JSON
+keys; non-finite JSON values; or other JSON conformance details. Unknown events and
+unparseable data remain transparent and cannot poison a later recognized terminal.
+Once a terminal fact is observed, it is a fact barrier: later frames, including
+keep-alives, cannot replace or invalidate it.
+
 **Credential-failure decision matrix (authoritative and exhaustive; owner ruling
 2026-08-09).** The refresh branch is selected by the credential's actual refresh
 capability, not by vendor, Source kind label, or HTTP status alone. Surrounding prose

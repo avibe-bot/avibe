@@ -216,41 +216,27 @@ class EngineClient:
                     )
                 except (_ResponseTooLargeError, asyncio.TimeoutError, aiohttp.ClientError):
                     payload = b""
-                observation = observe_protocol_response(
+                observed_payload = observe_protocol_response(
                     request_protocol,
                     streamed=False,
                     data=payload,
                 )
-                error_type, error_code, error_candidates = _raw_error_fields(
-                    payload,
-                    observation.error_envelope_paths,
-                )
-                outcome = _outcome(
-                    kind=RawOutcomeKind.HTTP_ERROR,
+                outcome = _reduce_protocol_observation(
+                    ProtocolObservation(
+                        outcome="failed_terminal",
+                        error_payload=payload,
+                        error_envelope_paths=observed_payload.error_envelope_paths,
+                        message=f"upstream returned HTTP {response.status}",
+                    ),
                     source=source,
                     model_id=model_id,
                     http_status=response.status,
-                    error_code=error_code,
-                    error_type=error_type,
-                    error_candidates=error_candidates,
-                    message=f"upstream returned HTTP {response.status}",
+                    stream_started=False,
                 )
+                assert outcome is not None
                 response.close()
                 await session.close()
                 return completed_handle(outcome)
-
-            if stream and not _is_event_stream_response(response):
-                response.close()
-                await session.close()
-                return completed_handle(
-                    _outcome(
-                        kind=RawOutcomeKind.PROTOCOL_ERROR,
-                        source=source,
-                        model_id=model_id,
-                        http_status=response.status,
-                        message="upstream streaming response is not text/event-stream",
-                    )
-                )
 
             first = await asyncio.wait_for(
                 response.content.read(_STREAM_CHUNK_BYTES),
@@ -261,11 +247,11 @@ class EngineClient:
                 await session.close()
                 return completed_handle(
                     _outcome(
-                        kind=RawOutcomeKind.PROTOCOL_ERROR,
+                        kind=RawOutcomeKind.NETWORK_ERROR,
                         source=source,
                         model_id=model_id,
                         http_status=response.status,
-                        message="upstream response ended before the first byte",
+                        message="upstream response ended before a protocol terminal event",
                     )
                 )
             first_received = True
@@ -283,13 +269,15 @@ class EngineClient:
                     response.close()
                     await session.close()
                     return completed_handle(
-                        _outcome(
-                            kind=RawOutcomeKind.PROTOCOL_ERROR,
-                            source=source,
-                            model_id=model_id,
-                            http_status=response.status,
-                            message="upstream response exceeded the local limit",
-                            stream_started=True,
+                        _protocol_error_outcome(
+                            ProtocolObservation(
+                                outcome="protocol_error",
+                                message="upstream response exceeded the local limit",
+                            ),
+                            source,
+                            model_id,
+                            response.status,
+                            False,
                         )
                     )
                 observation = observe_protocol_response(
@@ -302,7 +290,7 @@ class EngineClient:
                     source=source,
                     model_id=model_id,
                     http_status=response.status,
-                    stream_started=True,
+                    stream_started=observation.outcome == "served",
                 )
                 assert outcome is not None
                 response.close()
@@ -367,7 +355,7 @@ class EngineClient:
                     model_id=model_id,
                     http_status=response.status if response is not None and first_received else None,
                     message="upstream request timed out",
-                    stream_started=model_output_started if stream else first_received,
+                    stream_started=model_output_started if stream else False,
                 )
             )
         except SSEFrameLimitError as exc:
@@ -375,13 +363,12 @@ class EngineClient:
                 response.close()
             await session.close()
             return completed_handle(
-                _outcome(
-                    kind=RawOutcomeKind.PROTOCOL_ERROR,
-                    source=source,
-                    model_id=model_id,
-                    http_status=response.status if response is not None else None,
-                    message=str(exc),
-                    stream_started=model_output_started if stream else first_received,
+                _protocol_error_outcome(
+                    ProtocolObservation(outcome="protocol_error", message=str(exc)),
+                    source,
+                    model_id,
+                    response.status if response is not None else None,
+                    model_output_started if stream else False,
                 )
             )
         except aiohttp.ClientError:
@@ -396,7 +383,7 @@ class EngineClient:
                     error_code="engine_down",
                     http_status=response.status if response is not None and first_received else None,
                     message="upstream request failed",
-                    stream_started=model_output_started if stream else first_received,
+                    stream_started=model_output_started if stream else False,
                 )
             )
         finally:
@@ -628,13 +615,12 @@ async def _response_stream(
                 stream_started=wire_state.model_output_started,
             )
     except SSEFrameLimitError as exc:
-        outcome = _outcome(
-            kind=RawOutcomeKind.PROTOCOL_ERROR,
-            source=source,
-            model_id=model_id,
-            http_status=response.status,
-            message=str(exc),
-            stream_started=wire_state.model_output_started,
+        outcome = _protocol_error_outcome(
+            ProtocolObservation(outcome="protocol_error", message=str(exc)),
+            source,
+            model_id,
+            response.status,
+            wire_state.model_output_started,
         )
     except asyncio.TimeoutError:
         outcome = _observed_stream_terminal_outcome(
@@ -711,7 +697,7 @@ def _reduce_protocol_observation(
     *,
     source: SourceRecord,
     model_id: str,
-    http_status: int,
+    http_status: int | None,
     stream_started: bool,
 ) -> RawCallOutcome | None:
     """Sole conversion from protocol observations to runtime call outcomes."""
@@ -739,7 +725,7 @@ def _reduce_protocol_observation(
             error_type=error_type,
             error_code=error_code,
             error_candidates=candidates,
-            message="upstream returned a protocol error event",
+            message=observation.message or "upstream returned a protocol error event",
             stream_started=stream_started,
         )
     return _outcome(
@@ -750,6 +736,24 @@ def _reduce_protocol_observation(
         message=observation.message or "upstream emitted invalid protocol data",
         stream_started=stream_started,
     )
+
+
+def _protocol_error_outcome(
+    observation: ProtocolObservation,
+    source: SourceRecord,
+    model_id: str,
+    http_status: int | None,
+    stream_started: bool,
+) -> RawCallOutcome:
+    outcome = _reduce_protocol_observation(
+        observation,
+        source=source,
+        model_id=model_id,
+        http_status=http_status,
+        stream_started=stream_started,
+    )
+    assert outcome is not None and outcome.kind is RawOutcomeKind.PROTOCOL_ERROR
+    return outcome
 
 
 def completed_handle(outcome: RawCallOutcome) -> EngineInvokeHandle:
@@ -837,8 +841,3 @@ def _safe_error_code(value: object) -> str | None:
     if not isinstance(value, str) or value not in UPSTREAM_MACHINE_ERROR_CODES:
         return None
     return value
-
-
-def _is_event_stream_response(response: aiohttp.ClientResponse) -> bool:
-    content_type = str(response.headers.get("Content-Type", ""))
-    return content_type.split(";", 1)[0].strip().lower() == "text/event-stream"

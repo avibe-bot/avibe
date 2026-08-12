@@ -230,11 +230,6 @@ MODEL_OUTPUT_ENVELOPE_FIXTURES = (
 BUFFERED_ERROR_TRUST_ROOT_FIXTURES = {
     protocol: (("error",),) for protocol in ("anthropic", "openai_responses", "openai_chat")
 }
-PROTOCOL_OBSERVATION_AUTHORITY_FIXTURES = {
-    "anthropic": {"payload_must_be_object": True, "sequence_number_path": None},
-    "openai_responses": {"payload_must_be_object": True, "sequence_number_path": ("sequence_number",)},
-    "openai_chat": {"payload_must_be_object": True, "sequence_number_path": None},
-}
 ACCEPTED_SSE_LINE_ENDINGS = (b"\r\n", b"\n", b"\r")
 STREAM_BOUNDARY_DIMENSIONS = {
     "transport_event": ("eof", "client_error"),
@@ -338,7 +333,7 @@ def _bool_keyword(call: ast.Call, name: str) -> bool | None:
     )
 
 
-def _success_outcome_calls(tree: ast.AST) -> tuple[ast.Call, ...]:
+def _protocol_outcome_calls(tree: ast.AST) -> tuple[ast.Call, ...]:
     return tuple(
         node
         for node in ast.walk(tree)
@@ -347,9 +342,17 @@ def _success_outcome_calls(tree: ast.AST) -> tuple[ast.Call, ...]:
         and any(
             keyword.arg == "kind"
             and isinstance(keyword.value, ast.Attribute)
-            and keyword.value.attr == "SUCCESS"
+            and keyword.value.attr in {"SUCCESS", "HTTP_ERROR", "PROTOCOL_ERROR"}
             for keyword in node.keywords
         )
+    )
+
+
+def _raw_outcome_constructors(tree: ast.AST) -> tuple[ast.Call, ...]:
+    return tuple(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and _call_name(node) == "RawCallOutcome"
     )
 
 
@@ -491,7 +494,7 @@ def test_first_model_output_has_one_table_backed_owner() -> None:
         )
 
 
-def test_protocol_observation_and_success_reduction_have_one_owner() -> None:
+def test_protocol_observation_and_outcome_reduction_have_one_owner() -> None:
     # Review 4914187655: buffered and streamed facts cannot bypass observation.
     client_tree = _tree(CLIENT)
     stream_tree = _tree(ROOT / "core/handlers/model_hub/stream_wire.py")
@@ -502,7 +505,23 @@ def test_protocol_observation_and_success_reduction_have_one_owner() -> None:
         case["stream"] for case in STREAM_TRANSPORT_FIXTURES
     }
     reducer = _functions(client_tree)["_reduce_protocol_observation"]
-    assert all(call in set(ast.walk(reducer)) for call in _success_outcome_calls(client_tree))
+    assert all(call in set(ast.walk(reducer)) for call in _protocol_outcome_calls(client_tree))
+    constructor_owner = _functions(client_tree)["_outcome"]
+    assert all(
+        call in set(ast.walk(constructor_owner))
+        for call in _raw_outcome_constructors(client_tree)
+    )
+
+
+def test_protocol_outcome_owner_guard_rejects_each_bypassed_kind() -> None:
+    for kind in ("SUCCESS", "HTTP_ERROR", "PROTOCOL_ERROR"):
+        tree = ast.parse(f"_outcome(kind=RawOutcomeKind.{kind})")
+        assert len(_protocol_outcome_calls(tree)) == 1
+    assert len(
+        _raw_outcome_constructors(
+            ast.parse("RawCallOutcome(kind=RawOutcomeKind.HTTP_ERROR)")
+        )
+    ) == 1
 
 
 def test_g4_terminal_projection_has_no_execution_channel() -> None:
@@ -544,16 +563,12 @@ def test_nonstream_transport_cannot_enter_the_sse_parser() -> None:
     assert {case["stream"] for case in STREAM_TRANSPORT_FIXTURES} == {False, True}
 
 
-def test_stream_content_type_guard_precedes_every_body_read() -> None:
-    # Finding 3763607208: invalid stream media must fail before forwarding bytes.
+def test_stream_observer_has_no_content_type_validation_gate() -> None:
     source = CLIENT.read_text(encoding="utf-8")
     invoke = _functions(_tree(CLIENT))["invoke"]
     body = ast.get_source_segment(source, invoke)
     assert body is not None
-    guard_at = body.index("if stream and not _is_event_stream_response(response):")
-    first_read_at = body.index("response.content.read(_STREAM_CHUNK_BYTES)")
-    response_stream_at = body.index("_response_stream(")
-    assert guard_at < first_read_at < response_stream_at
+    assert "_is_event_stream_response" not in body
 
 
 def test_forwarded_terminal_fact_guards_every_settlement_shape() -> None:
@@ -694,12 +709,6 @@ def _assert_stream_taxonomy_matches(
         if fixture_protocol == protocol
     )
     assert taxonomy.success_literal == (None if literal is None else (literal["event_name"], literal["literal"]))
-    assert taxonomy.payload_must_be_object is PROTOCOL_OBSERVATION_AUTHORITY_FIXTURES[protocol][
-        "payload_must_be_object"
-    ]
-    assert taxonomy.sequence_number_path == PROTOCOL_OBSERVATION_AUTHORITY_FIXTURES[protocol][
-        "sequence_number_path"
-    ]
     assert taxonomy.buffered_error_envelope_paths == BUFFERED_ERROR_TRUST_ROOT_FIXTURES[protocol]
 
 
@@ -739,12 +748,6 @@ def test_stream_authority_guard_rejects_an_orphaned_acceptance_fixture() -> None
         _assert_stream_taxonomy_matches("openai_responses", mutated)
 
 
-def test_protocol_observation_guard_rejects_a_missing_sequence_invariant() -> None:
-    taxonomy = replace(PROTOCOL_STREAM_TAXONOMY["openai_responses"], sequence_number_path=None)
-    with pytest.raises(AssertionError):
-        _assert_stream_taxonomy_matches("openai_responses", taxonomy)
-
-
 def test_realtime_terminal_is_not_accepted_by_responses_streaming() -> None:
     state = ProtocolSSEState("openai_responses")
     state.observe(b'event: response.done\ndata: {"type":"response.done"}\n\n')
@@ -761,18 +764,17 @@ def test_realtime_terminal_is_not_accepted_by_responses_streaming() -> None:
         b'{"sequence_number":NaN}',
     ),
 )
-def test_malformed_stream_data_cannot_be_repaired_by_a_later_terminal(data: bytes) -> None:
+def test_malformed_stream_data_is_transparent_to_a_later_terminal(data: bytes) -> None:
     state = ProtocolSSEState("openai_responses")
     state.observe(b"event: response.created\ndata: " + data + b"\n\n")
     state.observe(
         b'event: response.completed\ndata: {"type":"response.completed","sequence_number":1}\n\n'
     )
-    observation = state.terminal_observation()
-    assert observation is not None and observation.outcome == "protocol_error"
+    assert state.terminal_observation() == ProtocolObservation(outcome="served")
 
 
 @pytest.mark.parametrize("next_sequence", (1, 0))
-def test_responses_sequence_numbers_must_strictly_increase(next_sequence: int) -> None:
+def test_responses_sequence_order_is_ignored_for_settlement(next_sequence: int) -> None:
     state = ProtocolSSEState("openai_responses")
     state.observe(b'event: response.created\ndata: {"type":"response.created","sequence_number":1}\n\n')
     state.observe(
@@ -780,8 +782,8 @@ def test_responses_sequence_numbers_must_strictly_increase(next_sequence: int) -
         + str(next_sequence).encode()
         + b"}\n\n"
     )
-    observation = state.terminal_observation()
-    assert observation is not None and observation.outcome == "protocol_error"
+    state.observe(b'event: response.completed\ndata: {"type":"response.completed"}\n\n')
+    assert state.terminal_observation() == ProtocolObservation(outcome="served")
 
 
 def test_responses_sequence_numbers_accept_a_strictly_increasing_stream() -> None:
@@ -790,6 +792,13 @@ def test_responses_sequence_numbers_accept_a_strictly_increasing_stream() -> Non
     state.observe(
         b'event: response.completed\ndata: {"type":"response.completed","sequence_number":1}\n\n'
     )
+    assert state.terminal_observation() == ProtocolObservation(outcome="served")
+
+
+def test_responses_missing_sequence_is_ignored_for_settlement() -> None:
+    state = ProtocolSSEState("openai_responses")
+    state.observe(b'event: response.created\ndata: {"type":"response.created"}\n\n')
+    state.observe(b'event: response.completed\ndata: {"type":"response.completed"}\n\n')
     assert state.terminal_observation() == ProtocolObservation(outcome="served")
 
 
@@ -871,7 +880,16 @@ def test_sse_tokenizer_bounds_lines_and_frames() -> None:
         tokenizer.feed(b"x")
 
 
-def test_complete_frame_after_terminal_is_always_invalid() -> None:
+@pytest.mark.parametrize("split_at", (1, 2, 3))
+def test_initial_utf8_bom_is_normalized_for_terminal_observation(split_at: int) -> None:
+    state = ProtocolSSEState("openai_responses")
+    payload = b'\xef\xbb\xbfevent: response.completed\ndata: {"type":"response.completed"}\n\n'
+    state.observe(payload[:split_at])
+    state.observe(payload[split_at:])
+    assert state.terminal_observation() == ProtocolObservation(outcome="served")
+
+
+def test_complete_frame_after_terminal_cannot_change_the_fact() -> None:
     frames = (
         b"event: ping\n\n",
         b'data: {"type":"response.output_text.delta"}\n\n',
@@ -880,7 +898,7 @@ def test_complete_frame_after_terminal_is_always_invalid() -> None:
         state = ProtocolSSEState("openai_responses")
         state.observe(b'event: response.completed\ndata: {"type":"response.completed"}\n\n')
         state.observe(frame)
-        assert state.invalid_after_terminal is True
+        assert state.terminal_observation() == ProtocolObservation(outcome="served")
 
 
 @pytest.mark.parametrize(

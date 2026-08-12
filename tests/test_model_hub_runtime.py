@@ -1626,7 +1626,7 @@ def test_engine_client_classifies_buffered_2xx_native_error_before_success(
     protocol: str,
 ) -> None:
     async def run() -> None:
-        payload = b'{"error":{"type":"permission_error"}}'
+        payload = b'{"error":{"type":"rate_limit_error"}}'
 
         class Content:
             reads = 0
@@ -1667,10 +1667,11 @@ def test_engine_client_classifies_buffered_2xx_native_error_before_success(
         assert handle.stream is None
         outcome = await handle.outcome()
         assert outcome.kind is RawOutcomeKind.HTTP_ERROR
-        assert outcome.error_type == "permission_error"
+        assert outcome.error_type == "rate_limit_error"
+        assert outcome.stream_started is False
         decision = classify_outcome(outcome)
-        assert decision.action == "surface"
-        assert decision.downstream_status == 403
+        assert decision.action == "fallback"
+        assert decision.reason == "rate_limited"
 
     asyncio.run(run())
 
@@ -1683,7 +1684,7 @@ def test_engine_client_classifies_buffered_2xx_native_error_before_success(
         b'event: response.in_progress\ndata: {"type":"response.in_progress","sequence_number":1}\n\n',
     ),
 )
-def test_engine_client_cannot_settle_served_after_an_invalid_stream_fact(
+def test_engine_client_transparently_forwards_unvalidated_stream_data(
     monkeypatch: pytest.MonkeyPatch,
     invalid_chunk: bytes,
 ) -> None:
@@ -1736,8 +1737,54 @@ def test_engine_client_cannot_settle_served_after_an_invalid_stream_fact(
         assert handle.stream is not None
         assert [chunk async for chunk in handle.stream] == [output, invalid_chunk, terminal]
         outcome = await handle.outcome()
-        assert outcome.kind is RawOutcomeKind.PROTOCOL_ERROR
+        assert outcome.kind is RawOutcomeKind.SUCCESS
         assert outcome.stream_started is True
+
+    asyncio.run(run())
+
+
+def test_engine_client_classifies_initial_stream_eof_as_network(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> None:
+        class Content:
+            async def read(self, _size: int) -> bytes:
+                return b""
+
+        class Response:
+            status = 200
+            content = Content()
+            headers = {"Content-Type": "text/event-stream"}
+
+            def close(self) -> None:
+                return None
+
+        class Session:
+            async def post(self, *_args, **_kwargs):
+                return Response()
+
+            async def close(self) -> None:
+                return None
+
+        monkeypatch.setattr(client_module.aiohttp, "ClientSession", lambda **_: Session())
+        source = SourceRecord(
+            source_id="src_fixture123",
+            vendor="custom",
+            protocol="openai_responses",
+            base_url="https://api.example.test/v1",
+            credential_ref="cred_fixture123",
+            allowed_origins=(),
+            model_ids=("model-a",),
+            prefix="source-fixture123",
+        )
+        handle = await EngineClient(
+            EngineConnection("http://127.0.0.1:15220", "management", "gateway")
+        ).invoke(source, "model-a", {}, stream=True)
+
+        assert handle.stream is None
+        outcome = await handle.outcome()
+        assert outcome.kind is RawOutcomeKind.NETWORK_ERROR
+        assert outcome.stream_started is False
 
     asyncio.run(run())
 
@@ -1922,10 +1969,9 @@ def test_chat_finish_reason_remains_valid_before_done_sentinel() -> None:
     assert state.terminal_outcome is None
     state.observe(b"data: [DONE]\n\n")
     assert state.terminal_outcome == "served"
-    assert state.invalid_after_terminal is False
 
 
-def test_engine_client_rejects_complete_frame_after_success_terminal(
+def test_engine_client_keeps_success_after_a_later_complete_frame(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def run() -> None:
@@ -1973,7 +2019,7 @@ def test_engine_client_rejects_complete_frame_after_success_terminal(
         assert handle.stream is not None
         assert [chunk async for chunk in handle.stream] == [first, terminal, extra]
         outcome = await handle.outcome()
-        assert outcome.kind is RawOutcomeKind.PROTOCOL_ERROR
+        assert outcome.kind is RawOutcomeKind.SUCCESS
 
     asyncio.run(run())
 
@@ -2041,7 +2087,7 @@ def test_engine_client_requires_terminal_event_name_and_payload_identity(
     asyncio.run(run())
 
 
-def test_engine_client_rejects_non_sse_stream_before_forwarding(
+def test_engine_client_transparently_reads_non_sse_stream_content_type(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def run() -> None:
@@ -2050,7 +2096,11 @@ def test_engine_client_rejects_non_sse_stream_before_forwarding(
 
             async def read(self, _size: int) -> bytes:
                 self.reads += 1
-                return b'{"error":{"type":"server_error"}}'
+                return (
+                    b'{"error":{"type":"server_error"}}'
+                    if self.reads == 1
+                    else b""
+                )
 
         content = Content()
 
@@ -2086,9 +2136,9 @@ def test_engine_client_rejects_non_sse_stream_before_forwarding(
             source, "model-a", {}, stream=True
         )
         assert handle.stream is None
-        assert content.reads == 0
+        assert content.reads == 2
         outcome = await handle.outcome()
-        assert outcome.kind is RawOutcomeKind.PROTOCOL_ERROR
+        assert outcome.kind is RawOutcomeKind.NETWORK_ERROR
         assert outcome.stream_started is False
 
     asyncio.run(run())
@@ -2193,7 +2243,7 @@ def test_engine_client_requires_a_protocol_terminal_event_before_clean_eof(
 
 
 @pytest.mark.parametrize("invalid_type", [None, [], {}])
-def test_engine_client_rejects_non_string_stream_event_types(
+def test_engine_client_ignores_non_string_stream_event_types(
     monkeypatch: pytest.MonkeyPatch,
     invalid_type: object,
 ) -> None:
@@ -2246,7 +2296,7 @@ def test_engine_client_rejects_non_string_stream_event_types(
         )
         assert handle.stream is None
         outcome = await handle.outcome()
-        assert outcome.kind is RawOutcomeKind.PROTOCOL_ERROR
+        assert outcome.kind is RawOutcomeKind.NETWORK_ERROR
         assert outcome.error_code is None
 
     asyncio.run(run())
@@ -2400,7 +2450,7 @@ def test_engine_error_fields_ignore_machine_codes_outside_the_trusted_envelope()
     [
         ("first_byte", True, RawOutcomeKind.TIMEOUT, None, False),
         ("error_body", True, RawOutcomeKind.HTTP_ERROR, 429, False),
-        ("non_stream", False, RawOutcomeKind.TIMEOUT, 200, True),
+        ("non_stream", False, RawOutcomeKind.TIMEOUT, 200, False),
     ],
 )
 def test_engine_client_times_out_before_completion(
@@ -2476,7 +2526,7 @@ def test_engine_client_times_out_before_completion(
     ("model_id", "response_limit"),
     [("invalid-json", 1024), ("oversized-non-stream", 8)],
 )
-def test_engine_client_non_stream_failures_after_first_byte_block_retry(
+def test_engine_client_non_stream_unvalidated_data_stays_pre_output(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     model_id: str,
@@ -2501,11 +2551,15 @@ def test_engine_client_non_stream_failures_after_first_byte_block_retry(
             stream=False,
         )
 
-        assert handle.stream is None
+        assert (handle.stream is not None) is (model_id == "invalid-json")
+        if handle.stream is not None:
+            assert b"".join([chunk async for chunk in handle.stream])
         outcome = await handle.outcome()
-        assert outcome.kind is RawOutcomeKind.PROTOCOL_ERROR
+        assert outcome.kind is (
+            RawOutcomeKind.SUCCESS if model_id == "invalid-json" else RawOutcomeKind.PROTOCOL_ERROR
+        )
         assert outcome.http_status == 200
-        assert outcome.stream_started is True
+        assert outcome.stream_started is (model_id == "invalid-json")
         supervisor.stop()
 
     asyncio.run(run())

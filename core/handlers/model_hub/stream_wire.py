@@ -12,23 +12,11 @@ SSE_LINE_ENDINGS: Final = (b"\r\n", b"\n", b"\r")
 # span four such reads. Both retained buffers remain bounded under hostile input.
 SSE_MAX_LINE_BYTES: Final = 64 * 1024
 SSE_MAX_FRAME_BYTES: Final = 256 * 1024
+UTF8_BOM: Final = b"\xef\xbb\xbf"
 
 
 class SSEFrameLimitError(ValueError):
     """Raised when retained SSE parser state crosses a configured bound."""
-
-
-def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    result: dict[str, object] = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError("duplicate JSON key")
-        result[key] = value
-    return result
-
-
-def _reject_nonfinite_json_constant(_value: str) -> object:
-    raise ValueError("non-finite JSON constant")
 
 
 @dataclass
@@ -39,8 +27,18 @@ class SSEFrameTokenizer:
     _frame_lines: list[bytes] = field(default_factory=list)
     _after_cr: bool = False
     _frame_size: int = 0
+    _stream_prefix: bytearray = field(default_factory=bytearray)
+    _stream_started: bool = False
 
     def feed(self, chunk: bytes) -> tuple[bytes, ...]:
+        if not self._stream_started:
+            self._stream_prefix.extend(chunk)
+            prefix = bytes(self._stream_prefix)
+            if len(prefix) < len(UTF8_BOM) and UTF8_BOM.startswith(prefix):
+                return ()
+            self._stream_started = True
+            self._stream_prefix.clear()
+            chunk = prefix[len(UTF8_BOM) :] if prefix.startswith(UTF8_BOM) else prefix
         frames: list[bytes] = []
         for byte in chunk:
             if self._after_cr:
@@ -71,6 +69,7 @@ class SSEFrameTokenizer:
         self._frame_lines.clear()
         self._frame_size = 0
         self._after_cr = False
+        self._stream_prefix.clear()
         return line_open
 
     def _finish_line(self, frames: list[bytes]) -> None:
@@ -182,7 +181,6 @@ class ProtocolStreamTaxonomy:
     terminal_envelopes: tuple[ProtocolTerminalEnvelope, ...]
     model_output_envelopes: tuple[ProtocolModelOutputEnvelope, ...]
     success_literal: tuple[str | None, bytes] | None
-    payload_must_be_object: bool
     sequence_number_path: tuple[str, ...] | None
     buffered_error_envelope_paths: tuple[ErrorEnvelopePath, ...]
     terminal_event_name: str | None
@@ -223,7 +221,6 @@ PROTOCOL_STREAM_TAXONOMY: Final[Mapping[str, ProtocolStreamTaxonomy]] = {
             ),
         ),
         success_literal=None,
-        payload_must_be_object=True,
         sequence_number_path=None,
         buffered_error_envelope_paths=(("error",),),
         terminal_event_name="error",
@@ -301,7 +298,6 @@ PROTOCOL_STREAM_TAXONOMY: Final[Mapping[str, ProtocolStreamTaxonomy]] = {
             ),
         ),
         success_literal=None,
-        payload_must_be_object=True,
         sequence_number_path=("sequence_number",),
         buffered_error_envelope_paths=(("error",),),
         terminal_event_name="error",
@@ -392,7 +388,6 @@ PROTOCOL_STREAM_TAXONOMY: Final[Mapping[str, ProtocolStreamTaxonomy]] = {
         ),
         # https://platform.openai.com/docs/api-reference/chat/create#chat-create-stream
         success_literal=(None, b"[DONE]"),
-        payload_must_be_object=True,
         sequence_number_path=None,
         buffered_error_envelope_paths=(("error",),),
         terminal_event_name=None,
@@ -466,22 +461,11 @@ def observe_protocol_response(
     if streamed and taxonomy.success_literal == (event_name, data):
         return ProtocolObservation(outcome="served")
     try:
-        payload = json.loads(
-            data,
-            object_pairs_hook=_reject_duplicate_json_keys,
-            parse_constant=_reject_nonfinite_json_constant,
-        )
+        payload = json.loads(data)
     except (TypeError, ValueError):
-        return ProtocolObservation(
-            outcome="protocol_error",
-            message="upstream emitted malformed protocol data",
-        )
-    if taxonomy.payload_must_be_object and not isinstance(payload, dict):
-        return ProtocolObservation(
-            outcome="protocol_error",
-            message="upstream emitted non-object protocol data",
-        )
-    assert isinstance(payload, dict)
+        return ProtocolObservation(outcome="served" if not streamed else None)
+    if not isinstance(payload, dict):
+        return ProtocolObservation(outcome="served" if not streamed else None)
 
     if not streamed:
         if any(
@@ -496,29 +480,12 @@ def observe_protocol_response(
             )
         return ProtocolObservation(outcome="served")
 
-    if "type" in payload and not isinstance(payload["type"], str):
-        return ProtocolObservation(
-            outcome="protocol_error",
-            message="upstream emitted an invalid protocol event shape",
-        )
-
     sequence_number: int | None = None
     if taxonomy.sequence_number_path is not None:
         sequence_values = _path_values(payload, taxonomy.sequence_number_path)
-        if sequence_values:
-            candidate = sequence_values[0]
-            if (
-                len(sequence_values) != 1
-                or not isinstance(candidate, int)
-                or isinstance(candidate, bool)
-                or candidate < 0
-                or candidate <= previous_sequence_number
-            ):
-                return ProtocolObservation(
-                    outcome="protocol_error",
-                    message="upstream emitted a non-increasing protocol sequence",
-                )
-            sequence_number = candidate
+        candidate = sequence_values[0] if len(sequence_values) == 1 else None
+        if isinstance(candidate, int) and not isinstance(candidate, bool) and candidate >= 0:
+            sequence_number = max(previous_sequence_number, candidate)
 
     model_output_started = is_protocol_model_output(protocol, event_name, payload)
     for envelope in taxonomy.terminal_envelopes:
@@ -562,7 +529,7 @@ def observe_protocol_response(
 
 @dataclass
 class ProtocolSSEState:
-    """Track terminal proof and Responses sequence state from one SSE stream."""
+    """Observe settlement facts without validating the upstream protocol stream."""
 
     protocol: str
     tokenizer: SSEFrameTokenizer = field(default_factory=SSEFrameTokenizer)
@@ -570,9 +537,6 @@ class ProtocolSSEState:
     error_payload: bytes | None = None
     error_envelope_paths: tuple[ErrorEnvelopePath, ...] = ()
     last_sequence_number: int = -1
-    invalid_after_terminal: bool = False
-    invalid_protocol_shape: bool = False
-    protocol_error_message: str | None = None
     model_output_started: bool = False
     completion_observed: bool = False
 
@@ -595,7 +559,6 @@ class ProtocolSSEState:
 
     def _observe_frame(self, frame: bytes) -> None:
         if self.terminal_outcome is not None:
-            self.invalid_after_terminal = True
             return
         event_name, data = parse_sse_frame(frame)
         observation = observe_protocol_response(
@@ -605,10 +568,6 @@ class ProtocolSSEState:
             data=data,
             previous_sequence_number=self.last_sequence_number,
         )
-        if observation.outcome == "protocol_error":
-            self.invalid_protocol_shape = True
-            self.protocol_error_message = observation.message
-            return
         if observation.model_output_started:
             self.model_output_started = True
         if observation.completion_observed:
@@ -622,16 +581,6 @@ class ProtocolSSEState:
             self.last_sequence_number = observation.sequence_number
 
     def terminal_observation(self, *, allow_completion: bool = False) -> ProtocolObservation | None:
-        if self.invalid_after_terminal:
-            return ProtocolObservation(
-                outcome="protocol_error",
-                message="upstream emitted data after a protocol terminal event",
-            )
-        if self.invalid_protocol_shape:
-            return ProtocolObservation(
-                outcome="protocol_error",
-                message=self.protocol_error_message or "upstream emitted an invalid protocol event shape",
-            )
         if self.terminal_outcome is not None:
             return ProtocolObservation(
                 outcome=self.terminal_outcome,
