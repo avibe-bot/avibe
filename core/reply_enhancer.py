@@ -501,7 +501,11 @@ def _mask_legacy_bare_file_link_spaces(source: str) -> str:
         slash_count = 0
         space_offsets: List[int] = []
         destination_end = -1
+        later_marker_start = -1
         while cursor < len(source):
+            if source.startswith(marker, cursor):
+                later_marker_start = cursor
+                break
             char = source[cursor]
             if char in "\t\r\n":
                 break
@@ -523,6 +527,9 @@ def _mask_legacy_bare_file_link_spaces(source: str) -> str:
                 depth -= 1
             cursor += 1
 
+        if later_marker_start >= 0:
+            search_start = later_marker_start
+            continue
         if destination_end >= 0 and space_offsets:
             title_separator = _legacy_bare_title_separator(
                 source,

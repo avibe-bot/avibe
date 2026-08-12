@@ -1978,6 +1978,43 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(enhanced.text, text)
                 self.assertEqual(enhanced.files, [])
 
+    def test_legacy_bare_file_link_recovers_after_malformed_prefix(self):
+        text = (
+            "[bad](file:///tmp/My Report "
+            "[ok](file:///tmp/Good Report.md)"
+        )
+
+        enhanced = process_reply(text)
+
+        self.assertEqual(enhanced.text, "[bad](file:///tmp/My Report ok")
+        self.assertEqual(
+            [(file.label, file.path) for file in enhanced.files],
+            [("ok", "/tmp/Good Report.md")],
+        )
+
+    def test_legacy_bare_file_link_recovers_after_multiple_malformed_prefixes(self):
+        text = (
+            "[bad1](file:///tmp/One Report "
+            "[bad2](file:///tmp/Two Report "
+            "[ok](file:///tmp/Good Report.md)"
+        )
+
+        enhanced = process_reply(text)
+
+        self.assertEqual(
+            enhanced.text,
+            "[bad1](file:///tmp/One Report [bad2](file:///tmp/Two Report ok",
+        )
+        self.assertEqual([file.path for file in enhanced.files], ["/tmp/Good Report.md"])
+
+    def test_legacy_bare_file_link_keeps_malformed_source_without_valid_tail(self):
+        text = "[bad](file:///tmp/My Report"
+
+        enhanced = process_reply(text)
+
+        self.assertEqual(enhanced.text, text)
+        self.assertEqual(enhanced.files, [])
+
     def test_angle_wrapped_file_links_unescape_angle_brackets_in_paths(self):
         enhanced = process_reply(r"[report](<file:///tmp/a\>b.md>)")
 
@@ -2190,6 +2227,19 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(enhanced.text, text)
         self.assertEqual(enhanced.files, [])
+        self.assertLess(elapsed, 10.0)
+
+    def test_legacy_bare_file_link_scans_many_malformed_candidates_linearly(self):
+        text = (
+            "[bad](file:///tmp/My Report " * 4000
+            + "[ok](file:///tmp/Good Report.md)"
+        )
+
+        started = time.perf_counter()
+        enhanced = process_reply(text)
+        elapsed = time.perf_counter() - started
+
+        self.assertEqual([file.path for file in enhanced.files], ["/tmp/Good Report.md"])
         self.assertLess(elapsed, 10.0)
 
     def test_unwrapped_file_link_parser_keeps_existing_destination_behavior(self):

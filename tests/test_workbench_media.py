@@ -192,6 +192,30 @@ def test_rewrite_legacy_bare_space_link_and_reject_malformed_authority(tmp_path)
     assert [row["local_path"] for row in rows] == [str(report.resolve())]
 
 
+def test_rewrite_legacy_bare_space_link_after_malformed_prefix(tmp_path):
+    db = tmp_path / "vibe.sqlite"
+    run_migrations(db)
+    engine = create_sqlite_engine(db)
+    report = tmp_path / "Good Report.md"
+    report.write_text("report", encoding="utf-8")
+    prefix = "[bad](file:///tmp/My Report "
+    text = f"{prefix}[report](file://{report})"
+
+    with engine.begin() as conn:
+        scope_id = _seed_scope_and_session(conn)
+        out = rewrite_agent_media(
+            conn,
+            scope_id=scope_id,
+            session_id="sess_x",
+            text=text,
+        )
+
+    assert out.startswith(f"{prefix}[report](/api/media/")
+    with engine.connect() as conn:
+        rows = conn.execute(select(media_objects)).mappings().all()
+    assert [row["local_path"] for row in rows] == [str(report.resolve())]
+
+
 def test_rewrite_does_not_materialize_file_links_inside_code(tmp_path):
     db = tmp_path / "vibe.sqlite"
     run_migrations(db)

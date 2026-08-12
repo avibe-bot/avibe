@@ -139,6 +139,33 @@ class MessageDispatcherFileUploadTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(im_client.file_uploads, [])
 
+    async def test_legacy_bare_space_image_after_malformed_prefix_is_uploaded(self):
+        dispatcher = ConsolidatedMessageDispatcher(_StubController())
+        im_client = _StubIMClient()
+        context = MessageContext(user_id="U1", channel_id="C1")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            file_path = Path(tmpdir) / "preview image.png"
+            file_path.write_bytes(b"png")
+            prefix = "[bad](file:///tmp/My Report "
+            enhanced = process_reply(
+                f"{prefix}![preview](file://{file_path})"
+            )
+
+            self.assertEqual(enhanced.text, f"{prefix}preview")
+            self.assertEqual(len(enhanced.files), 1)
+            await dispatcher._upload_file_links(
+                im_client,
+                context,
+                enhanced.files,
+            )
+
+        self.assertEqual(
+            im_client.image_uploads,
+            [("C1", str(file_path.resolve()), "preview.png")],
+        )
+        self.assertEqual(im_client.file_uploads, [])
+
     async def test_upload_file_link_allows_path_outside_cwd(self):
         dispatcher = ConsolidatedMessageDispatcher(_StubController())
         im_client = _StubIMClient()
