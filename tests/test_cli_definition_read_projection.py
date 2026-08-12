@@ -291,7 +291,7 @@ def test_task_list_pagination_is_stable_across_run_at_boundary(capsys) -> None:
         store.close()
 
 
-def test_task_list_keeps_manual_and_unmarked_one_shots_nonterminal(capsys) -> None:
+def test_task_list_keeps_manual_and_ownerless_one_shots_visible(capsys) -> None:
     store = SQLiteBackgroundTaskStore()
     try:
         _task(
@@ -318,7 +318,13 @@ def test_task_list_keeps_manual_and_unmarked_one_shots_nonterminal(capsys) -> No
         assert cli.cmd_task_list(page_request=PageRequest(limit=20)) == 0
         rows = json.loads(capsys.readouterr().out)["definitions"]
 
-        assert [row["id"] for row in rows] == ["manual-run"]
-        assert rows[0]["lifecycle_state"] == "waiting"
+        by_id = {row["id"]: row for row in rows}
+        assert set(by_id) == {"manual-run", "scheduler-completed"}
+        assert by_id["manual-run"]["lifecycle_state"] == "waiting"
+        legacy = by_id["scheduler-completed"]
+        assert legacy["lifecycle_state"] == "finished"
+        assert legacy["lifecycle_detail"] is None
+        assert legacy["lifecycle_finished_at"] is None
+        assert store.get_scheduled_task("scheduler-completed")["last_run_at"] is None
     finally:
         store.close()

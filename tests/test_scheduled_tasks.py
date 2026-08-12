@@ -15477,7 +15477,6 @@ def test_command_task_timeout_fails_the_run_with_the_timeout_exit_code(
     assert (
         definition_lifecycle_detail(
             lifecycle_state="finished",
-            definition_type="scheduled",
             last_run_at=settled.last_run_at,
             last_exit_code=settled.last_exit_code,
             last_error=settled.last_error,
