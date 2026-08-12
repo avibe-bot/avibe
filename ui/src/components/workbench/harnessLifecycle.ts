@@ -534,9 +534,10 @@ export function definitionStateSince(
     // can prove when the pause began.
     case 'paused':
       return null;
-    // Prefer the transition owned by the definition. A missed one-shot has no
-    // Run, so its persisted retirement time must outrank the schedule deadline.
+    // A missed one-shot may carry results from an earlier manual run. Its
+    // retirement transition is the only clock that owns the Missed state.
     case 'finished':
+      if (row.lifecycle_detail === 'missed') return row.retired_at ?? null;
       return (
         row.last_finished_at ??
         row.last_run_at ??

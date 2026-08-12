@@ -64,6 +64,7 @@ logger = logging.getLogger(__name__)
 CALLBACK_TERMINAL_TURN_ID_METADATA_KEY = "callback_terminal_turn_id"
 TASK_RETIREMENT_SCHEDULE_CONSUMED = "schedule_consumed"
 TASK_RETIREMENT_SCHEDULE_MISSED = "schedule_missed"
+TASK_SCHEDULE_CONSUMED_METADATA_KEY = "task_schedule_consumed"
 
 
 def _json_dumps(value: Any) -> str:
@@ -3746,6 +3747,9 @@ class SQLiteBackgroundTaskStore:
                 metadata = _json_loads(definition["metadata_json"], {})
                 if not isinstance(metadata, dict):
                     metadata = {}
+                # Internal Run provenance: a definition's free-form metadata
+                # cannot claim that this enqueue owned the lifecycle transition.
+                metadata.pop(TASK_SCHEDULE_CONSUMED_METADATA_KEY, None)
                 # A run is an immutable record of one execution, so WHAT it executed
                 # belongs on it -- the definition it came from is editable and
                 # deletable, and the failure-notice drain reads long after the fire.
@@ -3800,6 +3804,11 @@ class SQLiteBackgroundTaskStore:
                 )
                 if not consumed.rowcount:
                     return None
+                run_metadata = _json_loads(values["metadata_json"], {})
+                if not isinstance(run_metadata, dict):
+                    run_metadata = {}
+                run_metadata[TASK_SCHEDULE_CONSUMED_METADATA_KEY] = True
+                values["metadata_json"] = _json_dumps(run_metadata)
             enqueue_run_in_connection(conn, values)
         return {
             "agent_name": values["agent_name"],

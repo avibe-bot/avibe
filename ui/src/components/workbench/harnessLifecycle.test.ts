@@ -750,6 +750,29 @@ describe('definitionRowLine', () => {
     expect(definitionStateSince(row, 'finished')).toBe(expected);
   });
 
+  it('dates a missed one-shot only from its retirement transition', () => {
+    const retiredAt = at(-HOUR);
+    expect(
+      definitionStateSince(
+        {
+          lifecycle_detail: 'missed',
+          retired_at: retiredAt,
+          last_finished_at: at(-2 * DAY),
+          last_run_at: at(-3 * DAY),
+          run_at: at(-4 * DAY),
+          updated_at: at(-MINUTE),
+        },
+        'finished',
+      ),
+    ).toBe(retiredAt);
+    expect(
+      definitionStateSince(
+        { lifecycle_detail: 'missed', last_run_at: at(-3 * DAY), updated_at: at(-MINUTE) },
+        'finished',
+      ),
+    ).toBeNull();
+  });
+
   it('does not report an intentionally retired waiter as dead', () => {
     // A one-shot watch that just fired: the same call that recorded the catch
     // stopped its waiter, and the agent run it spawned is still queued, so the

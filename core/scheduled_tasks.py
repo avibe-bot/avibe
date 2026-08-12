@@ -116,6 +116,7 @@ from storage.background import (
     SWEEP_REASON_TRANSPORT_UNAVAILABLE,
     TASK_RETIREMENT_SCHEDULE_CONSUMED,
     TASK_RETIREMENT_SCHEDULE_MISSED,
+    TASK_SCHEDULE_CONSUMED_METADATA_KEY,
     SweptRun,
     WATCH_HOOK_OUTCOME_CIRCUIT_REPAIR,
     WATCH_HOOK_OUTCOME_EVENT,
@@ -7899,10 +7900,14 @@ class ScheduledTaskService:
         try:
             if request.request_type in {"task_run", "scheduled"}:
                 # A scheduled one-shot is retired in the same SQLite transaction
-                # that created this Run. Reload unconditionally before its result
-                # writer derives a full-row compare-and-set payload, so a process
-                # mirror cannot write the pre-consumption enabled state back.
-                if request.source_kind == "scheduler":
+                # that created this Run. Only that transaction stamps the Run as
+                # its owner; cron fires keep the invalidation-aware fast path.
+                consumed_one_shot = bool(
+                    isinstance(request.metadata, dict)
+                    and request.metadata.get(TASK_SCHEDULE_CONSUMED_METADATA_KEY)
+                    is True
+                )
+                if consumed_one_shot:
                     self.store.load()
                 else:
                     self.store.maybe_reload()

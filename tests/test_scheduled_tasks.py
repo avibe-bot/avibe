@@ -72,6 +72,7 @@ from core.scheduled_tasks import (
     ScheduledTaskStore,
     SessionBindingChange,
     TaskDispatchResult,
+    TaskExecutionResult,
     TaskExecutionRequest,
     TaskExecutionStore,
     _TASK_RESULT_NOT_RECORDED_I18N_KEY,
@@ -92,6 +93,7 @@ from storage.background import (
     COMMAND_TIMED_OUT_METADATA_KEY,
     DefinitionWriteConflict,
     SQLiteBackgroundTaskStore,
+    TASK_SCHEDULE_CONSUMED_METADATA_KEY,
     definition_lifecycle_detail,
     resolve_run_at,
 )
@@ -9904,6 +9906,7 @@ def test_hfr_477_scheduler_consumes_one_shot_atomically_but_manual_run_does_not(
         run_at=(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
         timezone_name="UTC",
         session_policy="create_per_run",
+        metadata={TASK_SCHEDULE_CONSUMED_METADATA_KEY: True},
     )
 
     manual = requests.enqueue_task_run(task.id, source_kind="cli", task=task)
@@ -9935,6 +9938,88 @@ def test_hfr_477_scheduler_consumes_one_shot_atomically_but_manual_run_does_not(
         if row["definition_id"] == task.id
     ]
     assert {row["source_kind"] for row in runs} == {"cli", "scheduler"}
+    by_source = {row["source_kind"]: row for row in runs}
+    assert TASK_SCHEDULE_CONSUMED_METADATA_KEY not in by_source["cli"]["metadata"]
+    assert by_source["scheduler"]["metadata"][TASK_SCHEDULE_CONSUMED_METADATA_KEY] is True
+
+
+def test_hfr_477_only_a_consumed_one_shot_forces_the_executor_mirror_reload(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """HFR-477 -- the terminal transition, not scheduler provenance, owns reload."""
+
+    _binding_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    requests = TaskExecutionStore()
+    one_shot = store.add_task(
+        session_key="",
+        prompt="send digest",
+        schedule_type="at",
+        run_at=(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+        timezone_name="UTC",
+        session_policy="create_per_run",
+    )
+    cron = store.add_task(
+        session_key="",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+        session_policy="create_per_run",
+    )
+    queued_one_shot = requests.enqueue_task_run(
+        one_shot.id,
+        source_kind="scheduler",
+        task=one_shot,
+        expected_run_at=one_shot.run_at,
+        expected_timezone=one_shot.timezone,
+    )
+    queued_cron = requests.enqueue_task_run(
+        cron.id,
+        source_kind="scheduler",
+        task=cron,
+    )
+    assert queued_one_shot is not None and queued_cron is not None
+
+    service = ScheduledTaskService(
+        controller=SimpleNamespace(platform_settings_managers={}),
+        store=store,
+        request_store=requests,
+    )
+    reloads: list[str] = []
+    real_load = store.load
+    real_maybe_reload = store.maybe_reload
+
+    def _load() -> None:
+        reloads.append("load")
+        real_load()
+
+    def _maybe_reload() -> bool:
+        reloads.append("maybe_reload")
+        return real_maybe_reload()
+
+    async def _execute(task, **_kwargs):
+        return TaskExecutionResult(
+            error=None,
+            session_key=task.session_key,
+            session_id=task.session_id,
+        )
+
+    monkeypatch.setattr(store, "load", _load)
+    monkeypatch.setattr(store, "maybe_reload", _maybe_reload)
+    monkeypatch.setattr(service, "_execute_task", _execute)
+
+    claimed_one_shot = requests.claim(queued_one_shot.id)
+    assert claimed_one_shot is not None
+    asyncio.run(service._execute_claimed_request(claimed_one_shot))
+    assert reloads == ["load"]
+
+    reloads.clear()
+    claimed_cron = requests.claim(queued_cron.id)
+    assert claimed_cron is not None
+    asyncio.run(service._execute_claimed_request(claimed_cron))
+    assert reloads == ["maybe_reload"]
 
 
 def test_hfr_477_late_consumed_run_cannot_retire_replacement_schedule(
