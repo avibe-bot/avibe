@@ -50,7 +50,7 @@ def _route_pairs(
 
 
 def test_mh_s1_001_runtime_resolution_keeps_the_persisted_hop_identity() -> None:
-    """S-1: live health changes annotate exact hops but never choose new ones."""
+    """MH-S1-001: live health changes annotate exact hops but never choose new ones."""
 
     menu_model = fixed_model("claude")
     first = source("src_first001", ["upstream-first"])
@@ -100,7 +100,7 @@ def test_mh_s1_001_runtime_resolution_keeps_the_persisted_hop_identity() -> None
 def test_mh_config_001_chain_is_the_persisted_artifact_until_explicit_edit(
     tmp_path: Path,
 ) -> None:
-    """Refresh, reload, and inventory changes preserve a chain until a route edit."""
+    """MH-CONFIG-001: refresh, reload, and inventory changes preserve a chain until a route edit."""
 
     menu_model = fixed_model("claude")
     first = source("src_chain001", [menu_model])
@@ -151,7 +151,7 @@ def test_mh_config_001_chain_is_the_persisted_artifact_until_explicit_edit(
 def test_mh_match_001_add_source_persists_and_reports_each_exact_position(
     tmp_path: Path,
 ) -> None:
-    """Add-time matching writes exact hops and returns their persisted positions."""
+    """MH-MATCH-001: add-time matching writes exact hops and returns their persisted positions."""
 
     menu_model = fixed_model("claude")
     existing = source("src_existing01", [menu_model])
@@ -218,7 +218,7 @@ def test_mh_match_001_add_source_persists_and_reports_each_exact_position(
 
 
 def test_mh_match_002_matching_tie_break_is_independent_of_inventory_order() -> None:
-    """The matching-v1 total order produces one result for either processing order."""
+    """MH-MATCH-002: the matching-v1 total order produces one result for either processing order."""
 
     menu_model = "claude-opus-4-6"
     candidates = (
@@ -262,7 +262,7 @@ def test_mh_match_002_matching_tie_break_is_independent_of_inventory_order() -> 
 def test_mh_source_delete_001_removes_every_reference_and_preserves_survivor_order(
     tmp_path: Path,
 ) -> None:
-    """Source deletion is one transaction across all backend orders and chains."""
+    """MH-SRC-DELETE-001: source deletion is one transaction across all backend orders and chains."""
 
     claude_model = fixed_model("claude")
     codex_model = fixed_model("codex")
@@ -322,7 +322,7 @@ def test_mh_source_delete_001_removes_every_reference_and_preserves_survivor_ord
 def test_mh_supply_gap_001_empty_chain_remains_visible_after_inventory_loss(
     tmp_path: Path,
 ) -> None:
-    """A now-unsupplied menu model stays visible with a zero-length Route."""
+    """MH-SUPPLY-GAP-001: a now-unsupplied menu model stays visible with a zero-length Route."""
 
     menu_model = fixed_model("claude")
     supplied = source("src_supply01", [menu_model])
@@ -361,7 +361,7 @@ def test_mh_supply_gap_001_empty_chain_remains_visible_after_inventory_loss(
 def test_mh_protocol_001_saved_protocol_is_response_observed_and_transient_state_is_cleaned(
     tmp_path: Path,
 ) -> None:
-    """Observation proves protocol before persistence and leaves no transient ref."""
+    """MH-PROTOCOL-001: observation proves protocol before persistence and leaves no transient ref."""
 
     store = MemoryModelHubStore(config_with_sources([]))
     adapter = ModelHubScenarioAdapter(
@@ -430,7 +430,7 @@ def test_mh_protocol_001_saved_protocol_is_response_observed_and_transient_state
 
 
 def test_mh_protocol_002_contract_exposes_only_the_three_authoritative_transports() -> None:
-    """The schema and adapter authority have one exact protocol vocabulary."""
+    """MH-PROTOCOL-002: the schema and adapter authority have one exact protocol vocabulary."""
 
     schema = json.loads(
         Path("docs/plans/model-hub-contracts/source.schema.json").read_text()
@@ -444,7 +444,7 @@ def test_mh_ac29_001_persisted_source_payload_round_trips_through_the_canonical_
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A real migration write remains valid after serialization and reload."""
+    """MH-AC29-001: a real migration write remains valid after serialization and reload."""
 
     native_home = tmp_path / "native-home"
     claude_config = native_home / ".claude"

@@ -248,7 +248,7 @@ async def _post_stream(launch) -> tuple[int, bytes, BaseException | None]:
 
 
 def test_mh_turn_takeover_is_silent_and_provenance_names_the_serving_hop(tmp_path: Path) -> None:
-    """Fallback serves in order, or settles exhausted after the same route ends."""
+    """MH-TAKEOVER-001: fallback serves in order, or settles exhausted after the same route ends."""
 
     menu_model = fixed_model("claude")
     first = source("src_takeover01", [menu_model])
@@ -386,7 +386,7 @@ def test_mh_turn_takeover_is_silent_and_provenance_names_the_serving_hop(tmp_pat
 
 
 def test_mh_engine_loss_is_terminal_without_source_mutation_or_replay(tmp_path: Path) -> None:
-    """A local engine loss is terminal and never becomes a Source failure."""
+    """MH-ENGINE-001: a local engine loss is terminal and never becomes a Source failure."""
 
     menu_model = fixed_model("claude")
     upstream = source("src_engine01", [menu_model])
@@ -431,7 +431,7 @@ def test_mh_engine_loss_is_terminal_without_source_mutation_or_replay(tmp_path: 
 
 
 def test_mh_mid_turn_engine_loss_never_replays_after_output_starts(tmp_path: Path) -> None:
-    """Once output is visible, local engine loss terminates without a next-hop walk."""
+    """MH-ENGINE-MIDTURN-001: once output is visible, local engine loss terminates without a next-hop walk."""
 
     menu_model = fixed_model("claude")
     first = source("src_midengine1", [menu_model])
@@ -480,7 +480,7 @@ def test_mh_mid_turn_engine_loss_never_replays_after_output_starts(tmp_path: Pat
 
 
 def test_mh_static_credential_failure_does_not_retry_or_claim_takeover(tmp_path: Path) -> None:
-    """A 401 retries once only when the stored credential can refresh."""
+    """MH-CREDENTIAL-001: a 401 retries once only when the stored credential can refresh."""
 
     menu_model = fixed_model("claude")
     static_source = source("src_credential01", [menu_model])
@@ -548,7 +548,7 @@ def test_mh_static_credential_failure_does_not_retry_or_claim_takeover(tmp_path:
 
 
 def test_mh_turn_outcomes_and_cancel_are_closed_provenance_products(tmp_path: Path) -> None:
-    """Runtime settlement produces every outcome and no value outside the schema."""
+    """MH-TURN-RESULT-001: runtime settlement produces every outcome and no value outside the schema."""
 
     schema = _provenance_schema()
     store = BoundedProvenanceStore(tmp_path / "provenance.json")
@@ -694,7 +694,7 @@ def test_mh_turn_outcomes_and_cancel_are_closed_provenance_products(tmp_path: Pa
 
 
 def test_mh_turn_copy_keys_cover_the_authoritative_outcome_matrix() -> None:
-    """Every frozen turn decision resolves to its backend locale copy or silence."""
+    """MH-TURN-COPY-001: every frozen turn decision resolves to its backend locale copy or silence."""
 
     rows = _turn_copy_rows()
     api_contract = (CONTRACTS / "api.md").read_text()

@@ -16,16 +16,23 @@ capability:
     - tests/scenarios/model_hub/test_model_hub_native_oauth_scenarios.py
 status_legend:
   covered:
+    description: closed-loop coverage exists at the declared layer
     test_required: true
     expected_fail: false
     priority: false
+  partial:
+    description: executable coverage exists at the declared layer, but the layer named in missing_layer is still unproved
+    test_required: true
+    expected_fail: false
+    priority: true
   gap:
+    description: no executable coverage at any layer yet
     test_required: false
     expected_fail: false
     priority: true
 scenarios:
   - id: MH-CATALOG-001
-    name: Every scenario and observation resolves to one current executable row
+    name: Every scenario, observation, and canonical test resolves to discoverable executable evidence
     status: covered
     kind: contract
     layer: scenario
@@ -86,9 +93,11 @@ scenarios:
     test: tests/scenarios/model_hub/test_model_hub_configured_route_scenarios.py::test_mh_ac29_001_persisted_source_payload_round_trips_through_the_canonical_validator
   - id: MH-RUNTIME-001
     name: Service restart reports an installed engine as idle until first demand
-    status: gap
+    status: partial
     kind: recovery
     layer: unit
+    missing_layer: scenario
+    test: tests/test_model_hub_runtime.py::test_mh_runtime_001_service_restart_reports_installed_engine_as_not_started
   - id: MH-RES-LIVE-001
     name: Live turn retries an eligible backup before streaming starts
     status: covered

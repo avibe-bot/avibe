@@ -9,10 +9,19 @@ import yaml
 
 
 SCENARIO_ROOT = Path("tests/scenarios/model_hub")
+PROJECT_INDEX = Path("tests/scenarios/INDEX.yaml")
+CAPABILITY_ID = "model_hub"
 
 
 def _document(name: str) -> dict:
     return yaml.safe_load((SCENARIO_ROOT / name).read_text())
+
+
+def _indexed_capability() -> dict:
+    index = yaml.safe_load(PROJECT_INDEX.read_text())
+    entry = next((item for item in index["capabilities"] if item["id"] == CAPABILITY_ID), None)
+    assert entry is not None, f"{PROJECT_INDEX} has no {CAPABILITY_ID} capability entry"
+    return entry
 
 
 def _test_function(path: Path, function_name: str) -> ast.FunctionDef | ast.AsyncFunctionDef:
@@ -41,7 +50,7 @@ def _decorator_names(function: ast.FunctionDef | ast.AsyncFunctionDef) -> set[st
 
 
 def test_mh_catalog_001_scenario_catalog_is_complete_and_executable() -> None:
-    """MH-CATALOG-001: every live row resolves and every observation names a row."""
+    """MH-CATALOG-001: every live row resolves, names its own ID, and is reachable from the project index."""
 
     catalog = _document("catalog.yaml")
     observations = _document("observations.yaml")
@@ -68,6 +77,28 @@ def test_mh_catalog_001_scenario_catalog_is_complete_and_executable() -> None:
         function = _test_function(path, function_name)
         expected_fail = "xfail" in _decorator_names(function)
         assert expected_fail == status["expected_fail"]
+        assert scenario["id"] in (ast.get_docstring(function) or ""), (
+            f"Scenario {scenario['id']} is not named inside {test_ref}; "
+            "state the catalog ID in the test docstring so the executable evidence is greppable by ID"
+        )
+        if scenario["status"] == "partial":
+            missing_layer = scenario.get("missing_layer")
+            assert missing_layer and missing_layer != scenario["layer"], (
+                f"Scenario {scenario['id']} is partial, so it must name the unproved layer in missing_layer"
+            )
+
+    entry = _indexed_capability()
+    assert entry["catalog"] == (SCENARIO_ROOT / "catalog.yaml").as_posix()
+    assert entry["observations"] == (SCENARIO_ROOT / "observations.yaml").as_posix()
+    indexed_tests = {
+        item
+        for key in ("scenario_tests", "harness", "unit_or_contract_tests")
+        for item in entry.get(key, [])
+    }
+    assert all(Path(item).is_file() for item in indexed_tests)
+    assert canonical_tests <= indexed_tests, (
+        f"Canonical Model Hub evidence missing from {PROJECT_INDEX}: {sorted(canonical_tests - indexed_tests)}"
+    )
 
     observation_ids = [item["id"] for item in observations["observations"]]
     assert len(observation_ids) == len(set(observation_ids))
