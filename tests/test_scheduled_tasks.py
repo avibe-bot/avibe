@@ -10231,6 +10231,177 @@ def test_hfr_477_non_owner_manual_failure_preserves_retired_one_shot_projection(
     assert notice is not None and notice["state"] == "pending"
 
 
+@pytest.mark.parametrize("replacement_schedule", ["at", "cron"])
+def test_hfr_477_retired_manual_escalation_preserves_replacement_schedule(
+    tmp_path: Path,
+    monkeypatch,
+    replacement_schedule: str,
+) -> None:
+    """HFR-477 -- an old manual Run may enqueue, but never rewrite its replacement."""
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    session_id = _bare_session_row(
+        workdir=tmp_path,
+        anchor=f"avibe_retired_escalation_replacement_{replacement_schedule}",
+    )
+    task = _escalation_command_task(
+        store,
+        tmp_path,
+        shell_command="echo old manual failure >&2; exit 7",
+        schedule_type="at",
+        session_id=session_id,
+        agent_name="codex",
+    )
+    assert store.sqlite_backend is not None
+    assert store.sqlite_backend.retire_missed_one_shot(
+        task.id,
+        expected_run_at=str(task.run_at),
+        expected_timezone=task.timezone,
+        expected_updated_at=task.updated_at,
+        retired_at="2026-07-28T09:00:01+00:00",
+    )
+    store.load()
+    retired = store.get_task(task.id)
+    assert retired is not None and retired.retired_at is not None
+
+    requests = TaskExecutionStore()
+    manual = requests.enqueue_task_run(task.id, source_kind="cli", task=retired)
+    assert manual is not None
+    claimed = requests.claim(manual.id)
+    assert claimed is not None
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+    replacement_row: dict[str, Any] = {}
+    real_runner = scheduled_tasks.run_supervised_command
+
+    async def _replace_while_running(**kwargs):
+        writer = ScheduledTaskStore()
+        current = writer.get_task(task.id)
+        assert current is not None
+        replacement_run_at = (
+            "2026-07-29T10:30:00+00:00"
+            if replacement_schedule == "at"
+            else None
+        )
+        writer.update_task(
+            task.id,
+            name=current.name,
+            session_key=current.session_key,
+            session_id=current.session_id,
+            prompt="replacement definition",
+            schedule_type=replacement_schedule,
+            post_to=current.post_to,
+            deliver_key=current.deliver_key,
+            cron="30 10 * * *" if replacement_schedule == "cron" else None,
+            run_at=replacement_run_at,
+            timezone_name="UTC",
+            agent_name=current.agent_name,
+            session_policy=current.session_policy,
+        )
+        replacement_row.update(_stored_definition_row(task.id))
+        return await real_runner(**kwargs)
+
+    monkeypatch.setattr(
+        scheduled_tasks,
+        "run_supervised_command",
+        _replace_while_running,
+    )
+
+    asyncio.run(service._execute_claimed_request(claimed))
+
+    assert _stored_definition_row(task.id) == replacement_row
+    run = requests.get_run(manual.id)
+    assert run is not None and (run["status"], run["exit_code"]) == ("failed", 7)
+    escalations = _escalation_runs(store)
+    assert len(escalations) == 1
+    assert escalations[0]["parent_run_id"] == manual.id
+    assert escalations[0]["agent_name"] == "codex"
+    assert requests.sqlite_backend.owed_failure_notice(manual.id) is None
+
+
+@pytest.mark.parametrize("authority_loss", ["deleted", "reclaimed", "canceled"])
+def test_hfr_477_retired_manual_escalation_refuses_lost_authority(
+    tmp_path: Path,
+    monkeypatch,
+    authority_loss: str,
+) -> None:
+    """HFR-477 -- outbox enqueue rechecks deletion, reclaim, and cancellation."""
+
+    from storage.session_reclaim import RECLAIM_PAUSE, reclaim_bound_definitions
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    session_id = _bare_session_row(
+        workdir=tmp_path,
+        anchor=f"avibe_retired_escalation_refusal_{authority_loss}",
+    )
+    task = _escalation_command_task(
+        store,
+        tmp_path,
+        shell_command="echo refused escalation >&2; exit 7",
+        schedule_type="at",
+        session_id=session_id,
+        agent_name="codex",
+    )
+    assert store.sqlite_backend is not None
+    assert store.sqlite_backend.retire_missed_one_shot(
+        task.id,
+        expected_run_at=str(task.run_at),
+        expected_timezone=task.timezone,
+        expected_updated_at=task.updated_at,
+        retired_at="2026-07-28T09:00:01+00:00",
+    )
+    store.load()
+    retired = store.get_task(task.id)
+    assert retired is not None and retired.retired_at is not None
+
+    requests = TaskExecutionStore()
+    manual = requests.enqueue_task_run(task.id, source_kind="cli", task=retired)
+    assert manual is not None
+    claimed = requests.claim(manual.id)
+    assert claimed is not None
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+    original_enqueue = (
+        scheduled_tasks.SQLiteBackgroundTaskStore
+        .enqueue_task_escalation_without_definition_write
+    )
+
+    def _lose_authority_before_transaction(backend, definition_id, **kwargs):
+        if authority_loss == "deleted":
+            assert backend.remove_task(definition_id)
+        elif authority_loss == "reclaimed":
+            with backend.engine.begin() as conn:
+                summary = reclaim_bound_definitions(
+                    conn,
+                    session_id,
+                    mode=RECLAIM_PAUSE,
+                    reason="the bound session was replaced",
+                )
+            assert summary["paused"] == 1
+        else:
+            assert backend.cancel_run(manual.id)
+        return original_enqueue(backend, definition_id, **kwargs)
+
+    monkeypatch.setattr(
+        scheduled_tasks.SQLiteBackgroundTaskStore,
+        "enqueue_task_escalation_without_definition_write",
+        _lose_authority_before_transaction,
+    )
+
+    asyncio.run(service._execute_claimed_request(claimed))
+
+    run = requests.get_run(manual.id)
+    assert run is not None
+    assert _escalation_runs(store) == []
+    assert run["metadata"].get("escalation_run_id") is None
+    if authority_loss == "canceled":
+        assert run["status"] == "canceled"
+    else:
+        assert run["status"] == "failed"
+        notice = requests.sqlite_backend.owed_failure_notice(manual.id)
+        assert notice is not None and notice["state"] == "pending"
+
+
 def test_hfr_477_old_queued_run_does_not_suppress_replacement_generation(
     tmp_path: Path,
     monkeypatch,

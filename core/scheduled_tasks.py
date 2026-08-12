@@ -1919,6 +1919,9 @@ class ScheduledTaskStore:
         expected_uncanceled_run_id: Optional[str] = None,
         expected_schedule_generation: Optional[dict[str, str]] = None,
         expected_terminal_run_id: Optional[str] = None,
+        expected_non_owner_retired_one_shot: Optional[
+            DefinitionWriteExpectation
+        ] = None,
     ) -> bool:
         """Stamp a fire's outcome; ``False`` means the store refused the write.
 
@@ -1940,37 +1943,58 @@ class ScheduledTaskStore:
         the fire being stamped has not been stopped -- see
         ``upsert_scheduled_task_with_queued_run``. Only meaningful alongside
         ``queued_run``, because it exists to stop a stopped run queuing an Agent turn.
+
+        ``expected_non_owner_retired_one_shot`` is the binding authority captured
+        before a marker-less manual or legacy Run started. Its presence means the Run
+        owns only its history and optional escalation outbox row, even if the user has
+        replaced the retired schedule before this result arrives.
         """
 
         self.maybe_reload()
         task = self._tasks.get(task_id)
         if task is None:
             return False
+        non_owner_expectation = expected_non_owner_retired_one_shot
+        if non_owner_expectation is None and (
+            expected_schedule_generation is None
+            and task.schedule_type == "at"
+            and task.retired_at is not None
+        ):
+            non_owner_expectation = self._read_state(task)
+        if non_owner_expectation is not None:
+            # A manual or legacy Run can still settle after a one-shot retires, but
+            # without the immutable consumed-generation marker it owns only its Run
+            # history. Keep every terminal definition fact byte-for-byte unchanged.
+            if queued_run is None:
+                return True
+            if self._sqlite is None:
+                raise ValueError(
+                    "a file-backed scheduled task store cannot atomically enqueue "
+                    "a task escalation"
+                )
+            try:
+                landed = self._sqlite.enqueue_task_escalation_without_definition_write(
+                    task.id,
+                    expect=non_owner_expectation,
+                    expected_session_key=(
+                        expected_binding[1]
+                        if expected_binding is not None
+                        else task.session_key
+                    ),
+                    run_payload=queued_run,
+                    expected_uncanceled_run_id=str(expected_uncanceled_run_id or ""),
+                )
+            finally:
+                # A replacement may have committed after maybe_reload() above. The
+                # caller reconciles physical jobs immediately after this result.
+                self.load()
+            return landed
         if expected_binding is not None and (
             task.session_id,
             task.session_key,
             task.schedule_type,
         ) != expected_binding:
             return False
-        if (
-            expected_schedule_generation is None
-            and task.schedule_type == "at"
-            and task.retired_at is not None
-        ):
-            # A manual or legacy Run can still settle after a one-shot retires, but
-            # without the immutable consumed-generation marker it owns only its Run
-            # history. Keep every terminal definition fact byte-for-byte unchanged.
-            # If this command failure authorises an Agent escalation, commit that
-            # outbox row through the existing guarded transaction without changing
-            # the definition payload it is paired with.
-            if queued_run is None:
-                return True
-            return self._write_task(
-                task,
-                self._read_state(task),
-                queued_run=queued_run,
-                expected_uncanceled_run_id=expected_uncanceled_run_id,
-            )
         if expected_schedule_generation is not None:
             if (
                 expected_terminal_run_id is None
@@ -8573,6 +8597,13 @@ class ScheduledTaskService:
         # BEFORE anything can fail, and before the spawn: the enqueue predicted this
         # command from the definition as it stood then, and the executor re-read the
         # definition after claiming. This is the copy that will actually run.
+        non_owner_retired_expectation = (
+            self.store._read_state(task)
+            if schedule_generation is None
+            and task.schedule_type == "at"
+            and task.retired_at is not None
+            else None
+        )
         self._record_executed_command(execution_id, task)
 
         spawn_cwd = (
@@ -8762,6 +8793,7 @@ class ScheduledTaskService:
             expected_terminal_run_id=(
                 execution_id if schedule_generation is not None else None
             ),
+            expected_non_owner_retired_one_shot=non_owner_retired_expectation,
         )
         # ONLY when the stamp landed. A refusal rolled the escalation row back with it,
         # so claiming an escalation id here would suppress the failure notice in favour

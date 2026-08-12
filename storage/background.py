@@ -822,6 +822,25 @@ def definition_state_unchanged(expect: DefinitionWriteExpectation) -> list[Any]:
     ]
 
 
+def definition_binding_authority_unchanged(
+    expect: DefinitionWriteExpectation,
+) -> list[Any]:
+    """Predicates proving a definition still grants the same delivery authority.
+
+    Unlike a full-row write, an outbox-only enqueue does not own the definition's
+    enabled switch. It still must refuse deletion, rebinding, reclaim snapshot
+    replacement, and Agent rename/archive so an old fire cannot start a turn under
+    authority the definition no longer grants.
+    """
+
+    return [
+        unchanged_text(run_definitions.c.session_id, expect.session_id),
+        unchanged_text(run_definitions.c.deleted_at, expect.deleted_at),
+        unchanged_text(_RECLAIM_SNAPSHOT_MARKER_SQL, expect.snapshot_captured_at),
+        unchanged_text(_AGENT_BINDING_REVISION_SQL, expect.agent_binding_revision),
+    ]
+
+
 def task_schedule_owner_unchanged(
     generation: dict[str, str], run_id: str
 ) -> list[Any]:
@@ -3768,6 +3787,77 @@ class SQLiteBackgroundTaskStore:
             _pin_run_to_definition_agent(
                 conn, run_values, agent_name=values.get("agent_name")
             )
+            enqueue_run_in_connection(conn, run_values)
+        return True
+
+    def enqueue_task_escalation_without_definition_write(
+        self,
+        definition_id: str,
+        *,
+        expect: DefinitionWriteExpectation,
+        expected_session_key: str,
+        run_payload: dict[str, Any],
+        expected_uncanceled_run_id: str,
+    ) -> bool:
+        """Atomically enqueue a non-owner failure escalation, never its definition.
+
+        A manual or legacy Run of a retired one-shot owns its Run history and this
+        outbox decision, but owns no definition projection. The write lock makes the
+        authority check and enqueue one decision while allowing a concurrent schedule
+        replacement to survive byte-for-byte.
+        """
+
+        parent_run_id = str(expected_uncanceled_run_id or "").strip()
+        if not parent_run_id:
+            return False
+        run_values = self._run_values(run_payload)
+        with run_update_event_transaction(self.engine) as conn:
+            reserve_write_lock(conn)
+            parent = conn.execute(
+                select(agent_runs.c.status, agent_runs.c.cancel_requested)
+                .where(agent_runs.c.id == parent_run_id)
+                .limit(1)
+            ).mappings().first()
+            if parent is None or bool(parent["cancel_requested"]) or normalize_run_status(
+                parent["status"]
+            ) == "canceled":
+                return False
+            definition = conn.execute(
+                select(run_definitions.c.agent_name)
+                .where(run_definitions.c.id == definition_id)
+                .where(run_definitions.c.definition_type == "scheduled")
+                .where(
+                    unchanged_text(
+                        run_definitions.c.legacy_session_key,
+                        expected_session_key,
+                    )
+                )
+                .where(*definition_binding_authority_unchanged(expect))
+                .limit(1)
+            ).mappings().first()
+            if definition is None:
+                return False
+            _pin_run_to_definition_agent(
+                conn,
+                run_values,
+                agent_name=definition["agent_name"],
+            )
+            pinned_agent_id = str(run_values.get("agent_id") or "").strip()
+            current_agent_name = str(definition["agent_name"] or "").strip()
+            if current_agent_name and not pinned_agent_id:
+                return False
+            if pinned_agent_id:
+                try:
+                    identity = _require_agent_reference_identity(
+                        conn,
+                        expected_agent_id=pinned_agent_id,
+                    )
+                except ValueError:
+                    return False
+                if current_agent_name and identity["name"] != current_agent_name:
+                    return False
+                run_values["agent_id"] = identity["id"]
+                run_values["agent_name"] = identity["name"]
             enqueue_run_in_connection(conn, run_values)
         return True
 
