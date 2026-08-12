@@ -35,7 +35,7 @@ const STANDBY: SourceState = { status: 'standby', retry_at: null, detail_key: nu
 const COOLING: SourceState = {
   status: 'cooldown',
   retry_at: '2026-07-30T09:00:00Z',
-  detail_key: 'models.source.cooldown.timeout',
+  detail_key: 'models.source.cooldown.server_error',
 };
 const EXHAUSTED: SourceState = {
   status: 'cooldown',
@@ -50,16 +50,16 @@ const DEAD: SourceState = {
 
 const hubAgent = (over: Partial<AgentSupply> = {}): AgentSupply => ({
   backend: 'claude',
+  cli_present: true,
   mode: 'hub',
   menu_kind: 'fixed',
   selected_by_agent: 'claude',
   selected_model_id: 'claude-opus-4-6',
   selected_model_explicit: true,
-  sources: { policy: 'follow', order: ['src_a', 'src_b'], eligibility: [] },
+  sources: { order: ['src_a', 'src_b'], eligibility: [] },
   supply_status: 'ok',
   model_supply: [],
   named_agents: [],
-  mappings: [],
   menu: null,
   builtin_models: [],
   standard_vendors: null,
@@ -113,7 +113,7 @@ describe('needsAttention', () => {
 
 describe('healthyButUnrunnable', () => {
   const agentWith = (eligibility: NonNullable<AgentSupply['sources']>['eligibility']) =>
-    hubAgent({ sources: { policy: 'follow', order: ['src_a', 'src_b'], eligibility } });
+    hubAgent({ sources: { order: ['src_a', 'src_b'], eligibility } });
 
   it('retracts a healthy row promise this machine cannot keep', () => {
     expect(healthyButUnrunnable(agentWith(cannotLaunch('src_b')), nativeSource('src_b', ACTIVE))).toBe(true);
@@ -158,8 +158,8 @@ describe('attribution (AC-9)', () => {
     const agent = hubAgent({
       named_agents: [{ name: 'claude', effective_model_id: 'claude-opus-4-6', supply_status: 'ok' }],
       model_supply: [
-        { model_id: 'claude-opus-4-6', chain_length: 2 },
-        { model_id: 'claude-haiku-4-5', chain_length: 0 },
+        { model_id: 'claude-opus-4-6', chain_length: 2, has_runnable_hop: true },
+        { model_id: 'claude-haiku-4-5', chain_length: 0, has_runnable_hop: false },
       ],
     });
     expect(attribution(agent)).toEqual({
@@ -172,7 +172,7 @@ describe('attribution (AC-9)', () => {
   it('never double-counts a model an Agent runs', () => {
     const agent = hubAgent({
       named_agents: [{ name: 'claude', effective_model_id: 'claude-haiku-4-5', supply_status: 'interrupted' }],
-      model_supply: [{ model_id: 'claude-haiku-4-5', chain_length: 0 }],
+      model_supply: [{ model_id: 'claude-haiku-4-5', chain_length: 0, has_runnable_hop: false }],
     });
     expect(attribution(agent)).toEqual({ interrupted: ['claude'], waiting: [], unassignedModels: [] });
   });

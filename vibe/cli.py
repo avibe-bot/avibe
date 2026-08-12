@@ -37,7 +37,6 @@ from config.v2_config import V2Config
 from core.scheduled_tasks import (
     AGENT_RUN_DELIVERY_QUEUE,
     AGENT_RUN_DELIVERY_STEER,
-    AGENT_RUN_DELIVERY_SEND_NOW,
     BINDING_FOLLOWS_SESSION_METADATA_KEY,
     ScheduledTaskStore,
     TaskExecutionStore,
@@ -77,6 +76,7 @@ from storage.db import create_sqlite_engine
 from storage.background import (
     DefinitionWriteConflict,
     SQLiteBackgroundTaskStore,
+    TaskResumeBlocked,
     compute_next_run_at,
     normalize_run_status,
 )
@@ -1388,7 +1388,7 @@ def _agent_run_examples_text() -> str:
           Use --session-id to continue an existing Agent Session.
           The default is P1: steer an active native Turn, start when idle, or fall back to the durable P3 queue.
           Add --queue to persist this Run as P3 behind the active Turn.
-          Add --send-now to persist the new Run and steer the exact FIFO head into the active Turn.
+          --send-now explicitly selects the same P1 content delivery for an existing Session.
           To promote the exact existing P3 queue head without a new message, use: vibe session send-now <session-id>
           Inspect queued work with: vibe session queue list <session-id>
           Remove one exact queued row with: vibe session queue remove <session-id> <message-id>
@@ -1982,6 +1982,7 @@ _DEFINITION_FAILURE_FIELDS = (
     "processing_recent_failures",
     # The one field that says WHY, dropped from the brief list payload before.
     "last_error",
+    "resume_blocked",
 )
 
 
@@ -3686,6 +3687,21 @@ def cmd_task_set_enabled(task_id: str, enabled: bool):
         return 1
     try:
         updated = store.set_enabled(task_id, enabled)
+    except TaskResumeBlocked as exc:
+        lang = _memory_cli_language()
+        _print_task_error(
+            TaskCliError(
+                i18n_t("error.taskOwnerUnavailable.message", lang),
+                code=exc.code,
+                hint=i18n_t("error.taskOwnerUnavailable.hint", lang, id=task_id),
+                help_command=f"vibe task remove {task_id}",
+                details={
+                    "task_id": task_id,
+                    "owner_session_id": exc.owner_session_id,
+                },
+            )
+        )
+        return 1
     except DefinitionWriteConflict as exc:
         # Pause/resume is also a full-row write, so it is refused when a teardown
         # changed the definition first. Reporting the switch as flipped would be a lie
@@ -5788,13 +5804,11 @@ def cmd_agent_run(args):
         )
         session_policy = _validate_run_session_policy(args, help_command="vibe agent run --help")
         delivery_intent = (
-            AGENT_RUN_DELIVERY_SEND_NOW
-            if bool(getattr(args, "send_now", False))
-            else AGENT_RUN_DELIVERY_QUEUE
+            AGENT_RUN_DELIVERY_QUEUE
             if bool(getattr(args, "queue", False))
             else AGENT_RUN_DELIVERY_STEER
         )
-        if delivery_intent == AGENT_RUN_DELIVERY_SEND_NOW and session_policy != "existing":
+        if bool(getattr(args, "send_now", False)) and session_policy != "existing":
             raise TaskCliError(
                 "--send-now requires an existing Agent Session",
                 code="send_now_requires_existing_session",
@@ -6003,7 +6017,7 @@ def cmd_agent_run(args):
                 "parent_run_id": parent_run_id,
             },
         }
-        if delivery_intent != AGENT_RUN_DELIVERY_STEER:
+        if bool(getattr(args, "send_now", False)) or delivery_intent != AGENT_RUN_DELIVERY_STEER:
             payload["delivery_intent"] = delivery_intent
             payload["run"]["delivery_intent"] = delivery_intent
         if fork_result:
@@ -6183,6 +6197,17 @@ def _recorded_only_cancel_result(*, reason_code: str, detail: object | None = No
     return result
 
 
+def _record_live_cancel_fallback(
+    store: TaskExecutionStore,
+    run_id: str,
+    *,
+    reason_code: str,
+    detail: object | None = None,
+) -> dict:
+    store.cancel_run(run_id)
+    return _recorded_only_cancel_result(reason_code=reason_code, detail=detail)
+
+
 def _initial_cancel_result(run: dict | None) -> dict:
     if not isinstance(run, dict):
         return _recorded_only_cancel_result(reason_code="run_not_found")
@@ -6235,22 +6260,33 @@ def _live_cancel_was_confirmed(status_code: int | None, body: object) -> bool:
     return str(body.get("status") or "").strip() in {"cancel_requested", "stale_released"}
 
 
-async def _request_live_run_cancel(session_id: str) -> dict:
+async def _request_live_run_cancel(session_id: str, run_id: str) -> dict:
     from vibe import internal_client
 
-    return await internal_client.cancel_dispatch(session_id)
+    return await internal_client.cancel_dispatch(session_id, run_id=run_id)
 
 
 def _cancel_live_agent_run(store: TaskExecutionStore, run: dict) -> dict:
     session_id = _run_session_id(run)
+    run_id = str(run.get("id") or "").strip()
     from vibe import internal_client
 
     try:
-        controller_result = asyncio.run(_request_live_run_cancel(session_id))
+        controller_result = asyncio.run(_request_live_run_cancel(session_id, run_id))
     except internal_client.InternalServerUnavailable as exc:
-        return _recorded_only_cancel_result(reason_code="internal_unavailable", detail=str(exc))
+        return _record_live_cancel_fallback(
+            store,
+            run_id,
+            reason_code="internal_unavailable",
+            detail=str(exc),
+        )
     except Exception as exc:  # noqa: BLE001
-        return _recorded_only_cancel_result(reason_code="live_cancel_failed", detail=str(exc))
+        return _record_live_cancel_fallback(
+            store,
+            run_id,
+            reason_code="live_cancel_failed",
+            detail=str(exc),
+        )
 
     status_code = controller_result.get("status_code")
     try:
@@ -6258,8 +6294,43 @@ def _cancel_live_agent_run(store: TaskExecutionStore, run: dict) -> dict:
     except (TypeError, ValueError):
         normalized_status_code = None
     body = controller_result.get("body") or {}
+    if (
+        normalized_status_code is not None
+        and 200 <= normalized_status_code < 300
+        and isinstance(body, dict)
+        and str(body.get("status") or "").strip() == "run_detached"
+    ):
+        saved = store.get_run(run_id)
+        return {
+            "code": "run_canceled_without_live_stop",
+            "live_cancel_attempted": False,
+            "live_cancel_confirmed": False,
+            "run_terminalized": bool(
+                saved and normalize_run_status(saved.get("status")) == "canceled"
+            ),
+            "controller_status_code": normalized_status_code,
+            "controller_response": body,
+            "message": "Run was canceled without stopping the shared Session turn.",
+        }
+    if (
+        normalized_status_code is not None
+        and 200 <= normalized_status_code < 300
+        and isinstance(body, dict)
+        and str(body.get("status") or "").strip() == "run_settled"
+    ):
+        return {
+            "code": "run_already_settled",
+            "live_cancel_attempted": False,
+            "live_cancel_confirmed": False,
+            "run_terminalized": False,
+            "controller_status_code": normalized_status_code,
+            "controller_response": body,
+            "message": "Run had already settled before cancellation acquired ownership.",
+        }
     if not _live_cancel_was_confirmed(normalized_status_code, body):
-        return _recorded_only_cancel_result(
+        return _record_live_cancel_fallback(
+            store,
+            run_id,
             reason_code=_live_cancel_failure_code(normalized_status_code, body),
             detail={
                 "controller_status_code": normalized_status_code,
@@ -6267,7 +6338,7 @@ def _cancel_live_agent_run(store: TaskExecutionStore, run: dict) -> dict:
             },
         )
 
-    run_terminalized = store.mark_run_canceled(str(run.get("id") or ""))
+    run_terminalized = store.mark_run_canceled(run_id)
     return {
         "code": "live_cancel_confirmed",
         "live_cancel_attempted": True,
@@ -6285,13 +6356,14 @@ def cmd_runs_cancel(args):
     if existing is None:
         _print_task_error(TaskCliError(f"run '{args.run_id}' not found", code="run_not_found", details={"run_id": args.run_id}))
         return 1
-    canceled = store.cancel_run(args.run_id)
-    if not canceled:
-        _print_task_error(TaskCliError(f"run '{args.run_id}' not found", code="run_not_found", details={"run_id": args.run_id}))
-        return 1
-    cancel_result = _initial_cancel_result(existing)
     if _should_attempt_live_run_cancel(existing):
         cancel_result = _cancel_live_agent_run(store, existing)
+    else:
+        canceled = store.cancel_run(args.run_id)
+        if not canceled:
+            _print_task_error(TaskCliError(f"run '{args.run_id}' not found", code="run_not_found", details={"run_id": args.run_id}))
+            return 1
+        cancel_result = _initial_cancel_result(existing)
     run = store.get_run(args.run_id)
     _print_cli_payload(
         "agent_run",
@@ -10640,13 +10712,26 @@ def _doctor(*, deep: bool = False):
     config = None
     try:
         config = V2Config.load(config_path)
-        config_items.append(
-            {
-                "status": "pass",
-                "message": "Configuration loaded successfully",
-            }
-        )
-        summary["pass"] += 1
+        if config.load_warnings:
+            recovery_notice = api.config_recovery_notice(config)
+            if recovery_notice:
+                recovery_language = getattr(config, "language", "en") or "en"
+                _add_doctor_item(
+                    config_items,
+                    "warn",
+                    recovery_notice,
+                    i18n_t("error.configRecovery.action", recovery_language),
+                    code="config.recovery",
+                )
+                summary["warn"] += 1
+        else:
+            config_items.append(
+                {
+                    "status": "pass",
+                    "message": "Configuration loaded successfully",
+                }
+            )
+            summary["pass"] += 1
     except Exception as exc:
         config_items.append(
             {
@@ -14169,7 +14254,7 @@ def build_parser():
     agent_run_delivery_group.add_argument(
         "--send-now",
         action="store_true",
-        help="Persist this Run, then steer the exact FIFO head without stopping the active Turn",
+        help="Explicitly deliver this Run as P1 to an existing Session (the default behavior)",
     )
     agent_run_delivery_group.add_argument(
         "--queue",

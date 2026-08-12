@@ -76,6 +76,7 @@
       "burstHint": "这个 callback 来源正在频繁触发。请检查相关 watch/task；如果它在循环触发，请 pause、remove 或 update。"
     },
     "run": {
+      "sessionTurnGateUnavailable": "\u672c\u6b21 Agent Run \u65e0\u6cd5\u63a5\u5165\uff1aSession turn gate \u5f53\u524d\u4e0d\u53ef\u7528\u3002\u8bf7\u7b49\u5f85\u670d\u52a1\u542f\u52a8\u5b8c\u6210\u540e\u91cd\u8bd5\u3002",
       "interrupted": {
         "noTerminalResult": "[Avibe Harness] 本次 run 结束时 Agent 没有产出结果。turn 在 Agent 回复前就被释放，因此没有记录任何输出。请检查 Agent 日志；如果这项工作仍需完成，请重新运行。",
         "stopped": "[Avibe Harness] 本次 run 在 Agent 产出结果前被停止，因此没有最终结果。Agent 此前已经发出的输出仍会保留在这次 run 上。",
@@ -91,7 +92,6 @@
         "canceled": "本次 run 在产出结果前被取消，因此没有结果。",
         "failed": "本次 run 在产出结果前失败，因此没有结果。"
       },
-      "sendNowGateUnavailable": "本次 send-now run 无法接入：Session turn gate 当前不可用。请等待服务启动完成后重试。",
       "bindingUnresolvedRetry": "绑定的 Agent 会话 {session} 无法接收请求({attempt}/{threshold})。连续 {threshold} 次出现目标会话不可用后，该定义将自动暂停。请用以下命令重新绑定:vibe task update {id} --session-id <id>。",
       "bindingUnresolvedPaused": "已暂停:绑定的 Agent 会话 {session} 无法接收请求，该定义继续运行只会反复失败。请用以下命令重新绑定:vibe task update {id} --session-id <id>;然后恢复:vibe task resume {id}。"
     },
@@ -102,6 +102,8 @@
       "watchCircuitRepairFailed": "[Avibe Harness] Watch「{name}」的熔断修复 Agent Run 失败，Watch 将保持暂停。",
       "watchFollowUpFailed": "[Avibe Harness] Watch「{name}」的后续 Agent 处理失败。",
       "interrupted": "[Avibe Harness] 后台任务「{name}」被中断({reason}),任务本身没有问题。",
+      "restartStopped": "[Avibe Harness] 后台任务「{name}」已随 Avibe 重启停止。如需继续，请发送“继续”给 Agent。",
+      "restartStoppedUnnamed": "[Avibe Harness] 一项后台任务已随 Avibe 重启停止。如需继续，请发送“继续”给 Agent。",
       "commandLine": "命令:{command}",
       "error": "错误:{error}",
       "commandExit": "退出码:{exitCode}",
@@ -212,6 +214,10 @@
       "message": "这些设置打开后，Agent 路由已发生变化。",
       "hint": "请重新加载设置后再次修改。"
     },
+    "configRecovery": {
+      "beforeAuth": "配置加载时发生了恢复；请先修复备份的配置，再修改 backend 凭据。",
+      "action": "请检查保留的配置备份并修复后，再修改设置。"
+    },
     "scopeAgentUnavailable": {
       "message": "Agent `{agent}` 无法用于此路由。",
       "hint": "请选择一个已启用的 Agent 后重新保存。"
@@ -223,6 +229,10 @@
     "projectAgentUnavailable": {
       "message": "Agent `{agent}` 无法用于此项目。",
       "hint": "请选择一个已启用的 Agent 后重新保存项目设置。"
+    },
+    "taskOwnerUnavailable": {
+      "message": "这个 Task 的管理 Session 已不可用。",
+      "hint": "请从可用的 Agent Session 创建替代 Task，再用 `vibe task remove {id}` 删除这条失去管理者的定义。"
     },
     "sessionFork": {
       "agentUnavailable": {
@@ -714,12 +724,10 @@
       "flow_expired": "授权流程已过期。",
       "discovery_failed": "无法验证或发现此来源。",
       "invalid_source_order": "来源顺序包含不可用、不适用或重复的来源。",
-      "mapping_target_unavailable": "所选模型无法用于此后端。",
       "mode_switch_blocked": "当前供给模式或选择阻止了此操作。",
-      "engine_down": "本地模型中枢运行时不可用。",
-      "engine_down_streamed": "本地模型中枢运行时不可用。本回合输出可能不完整。",
-      "consent_required": "实验性订阅路由需要明确同意。",
-      "migration_item_conflict": "此迁移项与当前模型中枢状态冲突。",
+      "engine_down": "本地模型网关不可用。",
+      "engine_down_streamed": "本地模型网关不可用。本回合输出可能不完整。",
+      "migration_item_conflict": "此迁移项与当前模型网关状态冲突。",
       "stream_interrupted": "上游流已中断。",
       "upstream_protocol_error": "上游响应不符合预期协议。",
       "upstream_request_invalid": "上游服务拒绝了请求。",
@@ -732,7 +740,6 @@
       "cooldown": "{from_source}：{reason}，暂时冷却",
       "recover": "{to_source}：已恢复可用",
       "skip": "{from_source}：{reason}，已跳过",
-      "mapping_applied": "{from_source} -> {model}：已应用模型映射",
       "channel_switch": "{from_source}：供给通道已切换",
       "needs_action": "{from_source}：{reason}，需要处理",
       "supply_interrupted": "{model}：{reason}，模型供给已中断",

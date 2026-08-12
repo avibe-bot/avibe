@@ -4600,32 +4600,6 @@ def test_chain_projection_and_probe_latency_partition(tmp_path: Path) -> None:
     assert probe["error"] is None
     _assert_valid("probe-result.schema.json", probe)
 
-    network_service = _service(
-        tmp_path / "network",
-        sources=[_source("src_primary01", "Primary")],
-        outcomes=[_outcome(RawOutcomeKind.NETWORK_ERROR)],
-    )
-    network_model = _canonicalize_fixed_test_routes(network_service)["claude"]
-    network = asyncio.run(network_service.probe_agent("claude", network_model))
-    assert network["reachable"] is False
-    assert network["latency_ms"] is None
-    assert network["error"] == "models.source.cooldown.network"
-    _assert_valid("probe-result.schema.json", network)
-
-    timeout_service = _service(
-        tmp_path / "timeout",
-        sources=[_source("src_primary01", "Primary")],
-        outcomes=[_outcome(RawOutcomeKind.TIMEOUT)],
-    )
-    timeout_model = _canonicalize_fixed_test_routes(timeout_service)["claude"]
-    timeout = asyncio.run(timeout_service.probe_agent("claude", timeout_model))
-    assert timeout["reachable"] is False
-    assert timeout["latency_ms"] is None
-    assert timeout["error"] == "models.source.cooldown.timeout"
-    assert timeout_service.store.load().sources[0].state.detail_key == ("models.source.cooldown.timeout")
-    assert timeout_service.events.list(limit=10)[0]["reason"] == "network"
-    _assert_valid("probe-result.schema.json", timeout)
-
     rate_service = _service(
         tmp_path / "rate",
         sources=[_source("src_primary01", "Primary")],
@@ -4700,6 +4674,49 @@ def test_chain_projection_and_probe_latency_partition(tmp_path: Path) -> None:
     assert anthropic_not_found.store.load().sources[0].state.status == "standby"
     assert anthropic_not_found.events.list(limit=10) == []
     _assert_valid("probe-result.schema.json", not_found)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="AC-50: cooldown.network → backoff.connection_failed 契约先行,实现随 I7 落地",
+)
+def test_probe_transport_failures_await_ac50_backoff_contract(tmp_path: Path) -> None:
+    for name, kind in (
+        ("network", RawOutcomeKind.NETWORK_ERROR),
+        ("timeout", RawOutcomeKind.TIMEOUT),
+    ):
+        outcome = _outcome(kind)
+        assert outcome.stream_started is False
+        service = _service(
+            tmp_path / name,
+            sources=[_source("src_primary01", "Primary")],
+            outcomes=[outcome],
+        )
+        menu_model = _canonicalize_fixed_test_routes(service)["claude"]
+        config_before = json.loads(json.dumps(service.store.load().to_payload()))
+        service.store.save = Mock(wraps=service.store.save)
+
+        result = asyncio.run(service.probe_agent("claude", menu_model))
+
+        assert result["reachable"] is False
+        assert result["latency_ms"] is None
+        assert result["error"] == "models.source.backoff.connection_failed"
+        _assert_valid("probe-result.schema.json", result)
+        service.store.save.assert_not_called()
+        assert service.store.load().to_payload() == config_before
+        assert service.store.load().sources[0].state.status == "standby"
+        assert service.store.load().sources[0].state.detail_key is None
+
+        chain = service.agent_chain("claude", menu_model)
+        hop = chain["chain"][0]
+        assert hop["health"] == "backoff"
+        assert hop["runnable"] is False
+        assert hop["reason"] == "models.source.backoff.connection_failed"
+        assert datetime.fromisoformat(hop["retry_at"]) > NOW
+        assert chain["current"] is None
+        assert chain["supply_state"] == "waiting"
+        assert service.events.list(limit=10)[0]["reason"] == "network"
+        _assert_valid("agent-chain.schema.json", chain)
 
 
 def test_probe_401_uses_exact_credential_refresh_capability(tmp_path: Path) -> None:

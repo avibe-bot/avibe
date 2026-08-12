@@ -1,0 +1,10 @@
+{
+  "extends": "../../../../tsconfig.app.json",
+  "compilerOptions": {
+    "composite": false,
+    "noEmit": true,
+    "tsBuildInfoFile": "../../../../node_modules/.tmp/model-hub-tests.tsbuildinfo"
+  },
+  "include": ["./**/*.ts", "./**/*.tsx"],
+  "exclude": []
+}

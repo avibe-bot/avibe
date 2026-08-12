@@ -3807,12 +3807,12 @@ _HOOK_BRANCHES: dict[str, dict] = {
         "expect_hook": "exited with code 2",
         "expect_exit_code": 2,
     },
-    # the supervisor's own deadline. Cycle 1 retries (75 IS a retry code) and its
-    # ``retry_delay_seconds`` sleep pushes the loop past the lifetime, so iteration 2
-    # takes the lifetime branch BEFORE it ever reaches ``mark_cycle_start``. Writes in
-    # order: start #1, retry result #2, lifetime result #3.
+    # The supervisor's own deadline. The shared fixture arms the lifetime only after
+    # cycle 1's retry result has landed, then expires it after iteration 2 reloads the
+    # live mirror. The lifetime branch runs BEFORE ``mark_cycle_start``. Writes in order:
+    # start #1, retry result #2, lifetime result #3.
     "lifetime_expiry": {
-        "overrides": {"mode": "forever", "lifetime_timeout_seconds": 0.02, "retry_delay_seconds": 0.15},
+        "overrides": {"mode": "forever", "lifetime_timeout_seconds": 0},
         "cycles": [_CycleResult(exit_code=75, stdout="", stderr="not yet", timed_out=False)],
         "occurrence": 3,
         "expect_hook": "reached its lifetime timeout",
@@ -3907,6 +3907,32 @@ def _hook_branch_service(tmp_path: Path, branch: str, *, request_store=None) -> 
         return results[min(len(calls) - 1, len(results) - 1)]
 
     service._run_cycle = _spy_cycle  # type: ignore[method-assign]
+    if branch == "lifetime_expiry":
+        # Production reaches _sleep_before_retry only after the guarded retry-result
+        # stamp commits. Use that boundary as the condition; no wall-clock wait needed.
+        retry_result_landed = False
+        wait_for_follow_up_slot = service._wait_for_follow_up_slot
+
+        async def _mark_retry_result_landed(watch_arg, *, lifetime_started):  # noqa: ANN001
+            nonlocal retry_result_landed
+            assert calls == [watch_arg.id], "lifetime expiry must follow exactly one retry cycle"
+            retry_result_landed = True
+
+        async def _expire_after_next_reload(watch_id, *, lifetime_started):  # noqa: ANN001
+            slot = await wait_for_follow_up_slot(
+                watch_id,
+                lifetime_started=lifetime_started,
+            )
+            if retry_result_landed:
+                live_watch = store.get_watch(watch_id)
+                assert live_watch is not None
+                elapsed = asyncio.get_running_loop().time() - lifetime_started
+                assert elapsed > 0, "the retry result landed before the lifetime clock advanced"
+                live_watch.lifetime_timeout_seconds = elapsed
+            return slot
+
+        service._sleep_before_retry = _mark_retry_result_landed  # type: ignore[method-assign]
+        service._wait_for_follow_up_slot = _expire_after_next_reload  # type: ignore[method-assign]
     return store, service, watch, request_store, session_id, calls
 
 

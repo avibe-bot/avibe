@@ -3,7 +3,7 @@
 // 来源 and Agent bands stay visually consistent and the fixed-width chip
 // columns (frame 01r) align across rows.
 import * as React from 'react';
-import { FlaskConical, Hourglass, TriangleAlert, Unplug, Zap } from 'lucide-react';
+import { Hourglass, TriangleAlert, Unplug, Zap } from 'lucide-react';
 
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
@@ -37,7 +37,7 @@ export const BillingChip: React.FC<{
   const { t } = useTranslation();
   if (billing === 'monthly') {
     return (
-      <Badge variant="secondary" className={cn(BILLING_CHIP, 'bg-foreground/[0.03]', className)}>
+      <Badge variant="secondary" className={cn(BILLING_CHIP, 'model-hub-fill-white-08', className)}>
         {t('settings.models.billing.monthly')}
       </Badge>
     );
@@ -106,20 +106,9 @@ export const ModeChip: React.FC<{ mode: AgentMode }> = ({ mode }) => {
       {t('settings.models.mode.hub')}
     </Badge>
   ) : (
-    <Badge variant="secondary" className={cn(base, 'bg-foreground/[0.03]')}>
+    <Badge variant="secondary" className={cn(base, 'model-hub-fill-white-08')}>
       <Unplug className="size-3 sm:hidden" />
       {t('settings.models.mode.direct')}
-    </Badge>
-  );
-};
-
-/** 实验 — marks a consent-gated hub-held subscription source. */
-export const ExperimentalChip: React.FC = () => {
-  const { t } = useTranslation();
-  return (
-    <Badge variant="warning" className="rounded-md px-2 py-0.5 text-[10px] font-medium">
-      <FlaskConical className="size-3" />
-      {t('settings.models.experimental')}
     </Badge>
   );
 };

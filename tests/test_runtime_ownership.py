@@ -606,7 +606,7 @@ def test_snapshot_many_reads_backend_owner_tables_once(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("snapshot", "expected"),
+    ("snapshot", "expected", "dead_expected"),
     (
         (
             RuntimeTargetOwnershipSnapshot(
@@ -619,6 +619,7 @@ def test_snapshot_many_reads_backend_owner_tables_once(tmp_path: Path) -> None:
                 disposition=SessionRuntimeDisposition.UNKNOWN,
             ),
             True,
+            True,
         ),
         (
             RuntimeTargetOwnershipSnapshot(
@@ -630,6 +631,7 @@ def test_snapshot_many_reads_backend_owner_tables_once(tmp_path: Path) -> None:
                 sessionless_fallback_run_ids=(),
                 disposition=SessionRuntimeDisposition.ACTIVE,
             ),
+            True,
             True,
         ),
         (
@@ -644,6 +646,7 @@ def test_snapshot_many_reads_backend_owner_tables_once(tmp_path: Path) -> None:
                 reasons=("run:run-a:active",),
             ),
             True,
+            False,
         ),
         (
             RuntimeTargetOwnershipSnapshot(
@@ -665,6 +668,7 @@ def test_snapshot_many_reads_backend_owner_tables_once(tmp_path: Path) -> None:
                 sessionless_fallback_run_ids=(),
                 disposition=SessionRuntimeDisposition.ACTIVE,
             ),
+            False,
             False,
         ),
         (
@@ -688,14 +692,17 @@ def test_snapshot_many_reads_backend_owner_tables_once(tmp_path: Path) -> None:
                 disposition=SessionRuntimeDisposition.ACTIVE,
             ),
             True,
+            False,
         ),
     ),
 )
 def test_transport_replacement_gate_tracks_only_durable_native_effect_owners(
     snapshot: RuntimeTargetOwnershipSnapshot,
     expected: bool,
+    dead_expected: bool,
 ) -> None:
     assert snapshot.blocks_transport_replacement is expected
+    assert snapshot.blocks_dead_transport_replacement is dead_expected
 
 
 def _codex_reclaimer(engine, bindings: list[tuple[str, str, str, str]]):

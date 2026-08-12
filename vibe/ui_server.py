@@ -53,6 +53,10 @@ from core.show_pages import (
     SHOW_EVENT_WRITE_TOKEN_COOKIE,
     SHOW_EVENT_WRITE_TOKEN_HEADER,
     SHOW_PAGE_ICON_MAX_UPLOAD_BYTES,
+    VISIBILITY_OFFLINE,
+    VISIBILITY_PRIVATE,
+    VISIBILITY_PUBLIC,
+    ShowPage,
     show_cli_event_token,
     show_event_write_token,
     show_public_event_write_token,
@@ -4162,6 +4166,22 @@ def _project_agent_unavailable_response(exc):
     )
 
 
+def _task_resume_blocked_response(exc):
+    from core.services import settings as settings_service
+
+    lang = settings_service.load_config_or_default().language
+    return _coded_error_response(
+        exc.code,
+        t("error.taskOwnerUnavailable.message", lang),
+        409,
+        hint=t("error.taskOwnerUnavailable.hint", lang, id=exc.definition_id),
+        details={
+            "task_id": exc.definition_id,
+            "owner_session_id": exc.owner_session_id,
+        },
+    )
+
+
 def _show_page_error_response(exc):
     code = getattr(exc, "code", "invalid_show_page_request")
     # A conflict (not a malformed request) when the page is in the wrong state or
@@ -6785,7 +6805,7 @@ async def sessions_bootstrap(session_id: str):
         from storage import message_deliveries
 
         queued = message_deliveries.list_queued(conn, session_id)
-        draft = message_deliveries.get_draft(conn, session_id)
+        draft = message_deliveries.get_draft_state(conn, session_id)
 
     try:
         agents_payload = vibe_api.get_vibe_agents(include_disabled=False, include_archived=True)
@@ -6829,7 +6849,7 @@ async def sessions_bootstrap(session_id: str):
             "next_after_id": messages_result.get("next_after_id"),
             "next_before_id": messages_result.get("next_before_id"),
             "queued": queued,
-            "draft": {"text": (draft or {}).get("text") or ""},
+            "draft": _session_draft_payload(draft),
             "turn_state": turn_state,
         }
     )
@@ -8613,8 +8633,12 @@ async def sessions_messages_create(session_id: str):
             )
             if not quick_reply_for:
                 message_deliveries.set_draft(conn, session_id, None)
+            draft = message_deliveries.get_draft_state(conn, session_id)
             workbench_sessions_service.touch_session(conn, session_id)
-        return message_deliveries.delivery_payload(row)
+        result = message_deliveries.delivery_payload(row)
+        result["draft"] = _session_draft_payload(draft)
+        result["draft_advanced"] = not bool(quick_reply_for)
+        return result
 
     # Reserve the row FIRST (pending), then decide by the dispatch outcome.
     message = _persist_user_row()
@@ -8662,6 +8686,8 @@ async def sessions_messages_create(session_id: str):
         if current is None:
             return dict(message)
         payload = message_deliveries.delivery_payload(current)
+        payload["draft"] = message["draft"]
+        payload["draft_advanced"] = message["draft_advanced"]
         if current["state"] == "queued":
             payload["type"] = "queued"
             payload["queued"] = True
@@ -8744,7 +8770,14 @@ async def sessions_messages_create(session_id: str):
                         "dispatch_error": "dispatch_pending",
                     }
                 ), 502
-            return jsonify({**accepted, **body}), 201
+            return jsonify(
+                {
+                    **accepted,
+                    **body,
+                    "draft": message["draft"],
+                    "draft_advanced": message["draft_advanced"],
+                }
+            ), 201
         return jsonify({**current, **body}), 202
     current = _retire_unclaimed_delivery(f"internal_dispatch_rejected_{status}")
     return jsonify(
@@ -8899,6 +8932,13 @@ async def sessions_queue_send_now(session_id: str, message_id: str):
     return jsonify(body), status
 
 
+def _session_draft_payload(draft: dict | None) -> dict:
+    return {
+        "text": (draft or {}).get("text") or "",
+        "updated_at": (draft or {}).get("updated_at"),
+    }
+
+
 @app.route("/api/sessions/<session_id>/draft", methods=["GET"])
 def sessions_draft_get(session_id: str):
     """The session's saved unsent compose text (restored on open / device switch)."""
@@ -8906,8 +8946,8 @@ def sessions_draft_get(session_id: str):
 
     engine = _projects_engine()
     with engine.connect() as conn:
-        draft = message_deliveries.get_draft(conn, session_id)
-    return jsonify({"text": (draft or {}).get("text") or ""})
+        draft = message_deliveries.get_draft_state(conn, session_id)
+    return jsonify(_session_draft_payload(draft))
 
 
 @app.route("/api/sessions/<session_id>/draft", methods=["PUT"])
@@ -8915,26 +8955,50 @@ def sessions_draft_set(session_id: str):
     """Upsert the session's draft (debounced from the composer). Blank clears it."""
     from core.services import sessions as workbench_sessions_service
     from storage import message_deliveries
+    from storage.agent_session_rows import reserve_write_lock
 
     payload = request.json or {}
     text = payload.get("text")
+    expected_supplied = "expected_updated_at" in payload
+    expected_updated_at = payload.get("expected_updated_at")
+    if expected_supplied and expected_updated_at is not None and not isinstance(expected_updated_at, str):
+        return jsonify({"ok": False, "code": "invalid_expected_updated_at"}), 400
     engine = _projects_engine()
     try:
         with engine.begin() as conn:
+            # The version read and its update are one CAS decision. Reserving
+            # SQLite's writer slot before either read prevents a concurrent
+            # commit from turning this transaction's snapshot into BUSY_SNAPSHOT.
+            reserve_write_lock(conn)
             session = workbench_sessions_service.get_session(conn, session_id)
             # Archive is terminal: drop a late/debounced draft save (e.g. the
             # composer flushing as it unmounts right after archive) so it can't
             # recreate a draft on a session whose drafts were just reclaimed.
             if session.get("status") == "archived":
-                return jsonify({"ok": True})
+                current = message_deliveries.get_draft_state(conn, session_id)
+                return jsonify({"ok": True, "draft": _session_draft_payload(current)})
+            current = message_deliveries.get_draft_state(conn, session_id)
+            current_updated_at = (current or {}).get("updated_at")
+            if (
+                (not expected_supplied and current_updated_at is not None)
+                or (expected_supplied and current_updated_at != expected_updated_at)
+            ):
+                return jsonify(
+                    {
+                        "ok": False,
+                        "code": "draft_conflict",
+                        "draft": _session_draft_payload(current),
+                    }
+                ), 409
             message_deliveries.set_draft(
                 conn,
                 session_id,
                 text if isinstance(text, str) else None,
             )
+            saved = message_deliveries.get_draft_state(conn, session_id)
     except LookupError as err:
         return jsonify({"error": str(err)}), 404
-    return jsonify({"ok": True})
+    return jsonify({"ok": True, "draft": _session_draft_payload(saved)})
 
 
 @app.route("/api/events", methods=["GET"])
@@ -9190,10 +9254,15 @@ def harness_task_patch(task_id: str):
     if "enabled" not in payload:
         return jsonify({"ok": False, "code": "invalid_payload", "message": "missing 'enabled'"}), 400
     enabled = bool(payload["enabled"])
+    from storage.background import TaskResumeBlocked
+
     with _harness_store() as store:
         if not store.get_scheduled_task(task_id):
             return jsonify({"ok": False, "code": "task_not_found"}), 404
-        store.set_definition_enabled(task_id, enabled, definition_type="scheduled")
+        try:
+            store.set_definition_enabled(task_id, enabled, definition_type="scheduled")
+        except TaskResumeBlocked as exc:
+            return _task_resume_blocked_response(exc)
         task = store.get_scheduled_task(task_id)
     from core.inbox_events import publish_definitions_updated
 
@@ -9991,7 +10060,7 @@ def _public_show_referer_matches(share_id: str) -> bool:
 
 def _sanitize_public_show_event_payload(payload: dict[str, Any]) -> dict[str, Any]:
     sanitized = dict(payload)
-    for key in ("id", "dispatch", "sessionId", "session_id"):
+    for key in ("id", "sessionId", "session_id"):
         sanitized.pop(key, None)
     for key in ("payload", "annotation", "mark"):
         nested = sanitized.get(key)
@@ -9999,9 +10068,30 @@ def _sanitize_public_show_event_payload(payload: dict[str, Any]) -> dict[str, An
             sanitized[key] = {
                 nested_key: value
                 for nested_key, value in nested.items()
-                if nested_key not in {"dispatch", "sessionId", "session_id"}
+                if nested_key not in {"sessionId", "session_id"}
             }
     return sanitized
+
+
+def _show_annotation_capability(
+    *,
+    author: dict[str, str] | None,
+    page: ShowPage,
+    public_share_id: str | None = None,
+) -> bool:
+    """Return whether this request may write and dispatch Show annotations.
+
+    The current device-side authorization boundary is the validated Workbench
+    session (or trusted local access), represented by ``author``. Page
+    visibility and the share/session binding remain independent structural
+    checks so a future ACL can extend the author decision without changing the
+    event pipeline.
+    """
+    if author is None or page.visibility == VISIBILITY_OFFLINE:
+        return False
+    if public_share_id is not None:
+        return page.visibility == VISIBILITY_PUBLIC and page.share_id == public_share_id
+    return page.visibility in {VISIBILITY_PRIVATE, VISIBILITY_PUBLIC}
 
 
 def _show_request_author(*, public: bool = False) -> dict[str, str] | None:
@@ -10026,10 +10116,16 @@ def _show_request_author(*, public: bool = False) -> dict[str, str] | None:
     return {"kind": "local"}
 
 
-def _show_me_response(author: dict[str, str] | None, *, write_token: str | None = None):
+def _show_me_response(
+    author: dict[str, str] | None,
+    *,
+    can_annotate: bool | None = None,
+    write_token: str | None = None,
+):
     authenticated = author is not None
-    payload = {"authenticated": authenticated, "canAnnotate": authenticated}
-    if authenticated and write_token:
+    capability = authenticated if can_annotate is None else bool(can_annotate)
+    payload = {"authenticated": authenticated, "canAnnotate": capability}
+    if capability and write_token:
         payload["writeToken"] = write_token
     response = jsonify(payload)
     response.headers["Cache-Control"] = "no-store, private"
@@ -11340,8 +11436,10 @@ async def serve_private_show_page(session_id, asset_path):
         if asset_path.strip("/") == "__show/me":
             if request.method not in {"GET", "HEAD"}:
                 return jsonify({"ok": False, "code": "method_not_allowed"}), 405
+            author = {"kind": "local"}
             return _show_me_response(
-                {"kind": "local"},
+                author,
+                can_annotate=_show_annotation_capability(author=author, page=page),
                 write_token=show_event_write_token(page.session_id),
             )
         if asset_path.strip("/") in {"__show/events", "__events"}:
@@ -11425,10 +11523,16 @@ async def serve_public_show_page(share_id, asset_path):
             if request.method not in {"GET", "HEAD"}:
                 return jsonify({"ok": False, "code": "method_not_allowed"}), 405
             author = _show_request_author(public=True)
+            can_annotate = _show_annotation_capability(
+                author=author,
+                page=page,
+                public_share_id=share_id,
+            )
             return _show_me_response(
                 author,
+                can_annotate=can_annotate,
                 write_token=(
-                    show_public_event_write_token(share_id, page.session_id) if author is not None else None
+                    show_public_event_write_token(share_id, page.session_id) if can_annotate else None
                 ),
             )
         if asset_path.strip("/").startswith("__show/media/"):
@@ -11454,6 +11558,13 @@ async def serve_public_show_page(share_id, asset_path):
             author = _show_request_author(public=True)
             if author is None:
                 return jsonify({"ok": False, "code": "public_show_events_login_required"}), 403
+            can_annotate = _show_annotation_capability(
+                author=author,
+                page=page,
+                public_share_id=share_id,
+            )
+            if not can_annotate:
+                return jsonify({"ok": False, "code": "public_show_events_forbidden"}), 403
             if not _public_show_referer_matches(share_id):
                 return jsonify({"ok": False, "code": "public_show_events_origin_mismatch"}), 403
             if not _public_show_event_write_authorized(share_id, page.session_id):
@@ -11477,7 +11588,7 @@ async def serve_public_show_page(share_id, asset_path):
                 author=author,
                 public=True,
                 public_share_id=share_id,
-                allow_dispatch=False,
+                allow_dispatch=can_annotate,
             )
         if request.method in {"GET", "HEAD"}:
             if shim_response := _show_runtime_public_client_shim_response(asset_path):

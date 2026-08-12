@@ -24,32 +24,44 @@ a reviewer can open the exact frame.
 | 02 | `Q1dkS` | 模型网关 02 — 路由链编辑 |
 | 03 | `qZhJ3` | 模型网关 03 — 来源顺序抽屉 |
 | 04 | `XvCC4` | 模型网关 04 — 添加订阅 |
+| 04 exhibit | `nOgMQ` | 模型网关 04 — 粘贴回跳 |
 | 05 | `GDErR` | 模型网关 05 — 添加 API Key |
 | 06 | `wItw4` | 模型网关 06 — 来源详情 · 型号管理 |
 | 08 | `Doqav` | 模型网关 08 — 故障实况(网关接管中) |
 | 09 | `UVR97` | 模型网关 09 — 直连态首屏(升级后第一屏) |
 | 10 | `g7MOA4` | 模型网关 10 — 为单个后端启用网关(动作与后果) |
+| 11 | `cyaYh` | 模型网关 11 — 编辑来源 / 移除来源 |
+| 12 | `qQvkP` | 模型网关 12 — needs_action 来源卡片 |
+| 13 | `Q9q5lF` | 模型网关 13 — 添加订阅厂商菜单 |
 
 There is no 07: it was removed during the design pass and the remaining frames
 were deliberately **not** renumbered, so that every existing reference to "08"
 keeps pointing at the same picture.
 
-**Nine frames are covered; eight are specified.** Frame 02's interaction contract is
+**Thirteen frame exports are covered; twelve are specified.** Frame 02's interaction contract is
 not in this file `[contract-gap]` G-32. Its drawing is merged and §1.2 records the
 decisions behind it, but the mutation the editor owns has no state in §0.8, and request
 sequencing, guard refusal, lost-response reconciliation and failure copy are exactly the
 class of fact a drawing cannot carry (§0.2 item 5). Rather than half-cover it, 02 is
 stated as excluded: the route sits in §0.4's table with that reason, the debt sits in
 §0.5 as G-32, and a separate round writes the section under the same register-and-gate
-discipline as the rest. Everything this file says about *the nine* — geometry, page
-furniture, the shared shell — still includes 02, because those are readings of a drawing
-and the drawing is there.
+discipline as the rest. Everything this file says about the covered frame set still
+includes 02, because those are readings of a drawing and the drawing is there.
 
-All nine frames are 1440×1100 Dark. Light and mobile variants are not drawn yet, so
-every geometric statement in this file is a statement about Dark desktop until they are.
+The page viewport drawn by the full-page frames is 1440×1100 Dark. Frame 04's export root
+extends to a 1440×1270 authoring sheet to hold the third exhibit below that viewport;
+the paste-back PNG is a crop of that exhibit. Frame 13 is a 720×420 component exhibit.
+Light and mobile variants are not drawn yet, so every geometric statement in this file
+is a statement about Dark desktop until they are.
+
+The four additions in this registration round were verified from the read-only design
+export bundle: `MANIFEST.md` identifies the frame ids, `frames-geometry.html` is the
+authority for layer names and CSS-pixel geometry, and the @2x PNGs are visual checks only.
+That export provenance does not replace `design.pen` in the authority order below; it is
+the measurement source supplied to this lane, and this lane does not edit the design.
 
 **These frames do not draw a navigation path, and none may be inferred from them.**
-The nine frames were composed to make the model *legible* — the shell around them is
+The frame set was composed to make the model *legible* — the shell around it is
 the shell that made the picture readable, not a claim about where these surfaces live
 in the shipped app. Read a breadcrumb, a tab position or a sidebar entry off one of
 these frames and you will be reading a drawing decision as a routing decision. Where
@@ -151,13 +163,11 @@ build that control.
 you land on name the value?** A `[contract]` anchor may be a frozen artefact or an FC
 handoff item — §0.2 ranks the handoff *above* the artefacts, so an FC item that states
 a shape is authority even while `model-hub-contracts/` still carries the pre-S-1 one,
-and several do: the frozen `agent-supply.schema.json` has neither `hops` nor
-`adopted_by`, and FC-05 states both. What an FC item may not do is stand in for a shape
-nobody has stated. Where it only *requires* another file to contract something and that
-file does not — FC-12 requires `api.md` to carry `adopted_by` for the surface that uses
-it, and every read `api.md` defines omits the field, which is G-20 — the value has no
-definition anywhere the surface can reach, and the claim is `[contract-gap]` with a
-registry row. The two cases look
+and several do. What an FC item may not do is stand in for a shape nobody has stated.
+Where an authority names a response value but no drawn element consumes it — G-22's
+one-response `added_to` placement report is the live example — the wire claim is
+`[contract]` and the missing surface is `[contract-gap]` with a registry row. The two
+cases look
 identical in a citation and differ only in whether the anchor tells you the field name,
 which is why the anchor is part of the marker and why a reader must follow it.
 
@@ -204,7 +214,7 @@ frames surfaced a *missing* behaviour invariant, it is listed in the PR
 description under 「建议移交 AC 账本」 for routing — not written here, and not
 written into §8 by this lane.
 
-**Contracted mutations these nine frames do not specify.** `api.md`'s route table
+**Contracted mutations this frame set does not specify.** `api.md`'s route table
 carries twenty non-`GET` rows and **nineteen** state-changing routes: `POST
 /api/models/migration/scan` is declared 「Read-only.」 in that same table, so it is
 a read that takes a body, and counting by HTTP method rather than by declared
@@ -227,54 +237,63 @@ document is not where the work lands.
 
 | Contracted route | Where it lives instead |
 | --- | --- |
-| `POST /api/models/migration/scan` | The migration surface. Neither of these nine frames offers an import, and a scan with nothing to show it is not a screen. This is also the one row here that is not a mutation — the read-only `POST` counted out above — and it is listed anyway, because the question this table answers is 「where is this route drawn」 and not 「what does it write」 |
+| `POST /api/models/migration/scan` | The migration surface. None of these frames offers an import, and a scan with nothing to show it is not a screen. This is also the one row here that is not a mutation — the read-only `POST` counted out above — and it is listed anyway, because the question this table answers is 「where is this route drawn」 and not 「what does it write」 |
 | `POST /api/models/migration/apply` | The migration surface, following its own scan |
 | `PUT /api/models/agents/opencode/menu` | The open-menu configuration surface, which is where a menu is chosen; frame 01 renders the resulting supply and never edits the menu behind it |
-| `POST /api/models/agents/<backend>/probe` | Diagnostics. It answers "would a turn resolve right now", which none of these nine frames asks — 01 reports the supply it already has, and a probe run from a page that is not asking would report on something the user is not looking at |
+| `POST /api/models/agents/<backend>/probe` | Diagnostics. It answers "would a turn resolve right now", which none of these frames asks — 01 reports the supply it already has, and a probe run from a page that is not asking would report on something the user is not looking at |
 | `PUT /api/models/agents/<backend>/chain` | Frame 02 draws the editor that owns it and a later round specifies it; this document does neither. This is the one row in this table excluded from *inside* the frame set: §1.2 records the decisions behind the redrawn editor and states no build requirement, so this document holds no state for the mutation, no reading of its guarded `409`, no lost-response reconciliation and no failure copy. Excluded because 02's interaction contract has not been written and a separate round takes it, not because it lives on another surface; the debt is G-32 |
 
 ### 0.5 Contract-gap registry
 
-Every `[contract-gap]` in this file, in one place. A `[contract-gap]` statement
-describes the intended surface, and is **not** a requirement on the build: where a frame
-draws an affordance that sits on a gap, the section that owns that frame says so
-explicitly rather than quietly requiring it.
+Every `[contract-gap]` in this file, in one place, with retired rows retained as an
+audit trail. A live `[contract-gap]` statement describes the intended surface, and is
+**not** a requirement on the build: where a frame draws an affordance that sits on a gap,
+the section that owns that frame says so explicitly rather than quietly requiring it.
 
 The evidence column is re-verified against the contract each time the branch takes a
 merge, and names the commit it was verified at rather than the commit it was first
 written at — a citation to a stale baseline reads exactly like a citation to a live one.
-All rows below were re-verified at `ceace07f`, which is #1215's squash: the frozen
-contract artefacts are now on master, so these are gaps in a settled contract rather
-than in a moving one.
+The register was re-verified at `ea26ee6a0`, the #1326 contract close-out now on master.
+A row whose Missing cell is struck through has since been withdrawn or registered; its
+final column records that disposition instead of claiming the absence is still live.
+Rows still open at that baseline retain their evidence rather than borrowing a nearby
+contract as an answer.
 
-| # | Surface | Missing | Verified absent at `ceace07f` |
+**Gap retirement is split by ownership.** A contracted route or payload closes only the
+wire half of a row. When the intended action still has no registered UI producer, that
+surface half remains live as `[contract-gap]` until a frame registers one; wire
+reachability never stands in for an affordance. A row is fully retired only when every
+half named in its Missing cell has an owner.
+
+| # | Surface | Missing | Evidence / disposition (contract baseline `ea26ee6a0`) |
 | --- | --- | --- | --- |
-| G-3 | 06 model inventory | a way to retire a *discovered* model from a source's inventory, **and a place to remember that it was retired** | the ruled delete route removes a manual entry only; no other inventory-shrink route is user-initiated, and `source.schema.json`'s `models` carries no per-model retained flag |
+| G-3 | 06 model inventory — **retirement is contracted; its discovered-row affordance remains open** | a way to retire a *discovered* model from the drawn inventory; ~~a place to remember that it was retired~~ | `DELETE /api/models/sources/<source_id>/models/<model_id>` now persists `models[].retired: true` for a discovered row instead of deleting it. `source.schema.json` keeps that row readable, never supplying, and refresh never revives it; §4.5 applies the same exact-hop and last-supplier guards. §1.6 registers that representation as the ordinary row chrome with muted ink and the existing tag component. Frame 06 still draws removal only for manual entries, so no registered control invokes the discovered-row route; only that producer half remains live instead of treating wire reachability as a UI consumer. |
 | G-9 | ~~03 order save that drops sources~~ **withdrawn — this was never a gap** | ~~the guarded-change response for the whole-order `PUT`~~ nothing | The row read the absence of a `409` branch on the whole-order `PUT` (§1.3 Saving names the route; a withdrawn row deliberately does not, so it can excuse nothing) as something `api.md` still owed, on the strength of FC-12's 「row-for-row」 clause. It owed nothing. `model-hub.md` §4.5's Source-mutation envelope matrix is declared **authoritative and exhaustive** over 「all Source/inventory mutations, including writes that cannot remove supply」, and its eight rows do not include this route; FC-12 names 「the explicit backend Source-order PUT」 as a separate item from the mirroring clause. So the whole-order write's success echo, with 「no policy state exists」 beside it, *is* the mirror, and the absent `409` is the contract agreeing with S-1 and D-9 that reordering reaches no existing chain. Kept as a withdrawn row rather than deleted, because the number is cited in this file's own history and because a gap register that silently loses entries cannot be audited. The row names no route and quotes no body, so there is nothing left in it for a checker to excuse — but a withdrawn row is still a *number* the register defines, and a citation resolves against numbers, not against verdicts. So the rule that keeps it inert is written here rather than enforced: **no surface may carry `[contract-gap]` G-9**, and the number is not reused |
-| G-10 | 01 shell pill, install in flight — **and 08's 安装并切换**, the other press that promises one | a server-side install state, and the route that enters it | `runtime-dependency.schema.json` v5's `status.health` runs `ok · degraded · down · not_started · not_installed` with nothing between the last two, and `api.md` contracts exactly two runtime routes — `GET /api/models/runtime/status` and `POST /api/models/runtime/start` — with no install route at all. So *installing* exists on the client and nowhere else, and a reload during one reads back as `not_installed`. §0.8's Installing and Install failed rows are the client-side states that gap forces, and they are marked as such. The second caller is D-26's confirm: its primary promises install → start → switch, and only the last two are routes, so its 安装 is the same client-side state and its row carries the same marker. One missing route, two surfaces that press it |
-| G-11 | 09 direct-only home, zero backends | an installation flag per agent backend, and the payload that carries it | No property of `AgentSupply` (`agent-supply.schema.json`) reports whether a backend's CLI is present, and `core/handlers/model_hub/service.py:list_agents` builds its array from a literal three-backend tuple, so the payload is length 3 unconditionally and the zero-backend state cannot be produced from it |
-| G-12 | 01 upstream card and 06 header, `needs_action` | the control that replaces a dead credential, on either surface | §1.1 sends repair to 06 and §1.6 sends it back to 01, and no frame draws it. `api.md` contracts both replacement routes — `PUT /api/models/sources/<id>/credential` for a key and `POST /api/models/sources/<id>/reauth` for a subscription — the first with the guarded envelope, so the behaviour exists and only its affordance is missing. Both sections now state the absence instead of pointing at each other |
-| G-13 | 03 order drawer, chains that already exist | an action that re-applies the current order to chains built before it, and the route behind it | `api.md` contracts `PUT /api/models/agents/<backend>/sources` for the order itself and `PUT /api/models/agents/<backend>/chain` for one model's hops; nothing bulk-rewrites stored chains, and `model-hub.md`'s `placement-v1` runs "only during Add Source". So the order genuinely cannot reach an existing chain, and §1.3 says that rather than implying the drawer keeps chains in sync |
-| G-14 | 08 adopt-gateway confirm, `effects.1` | the adoption itself: turning the backend's existing CLI login into that backend's first `native_cli` Source | `core/handlers/model_hub/service.py:set_agent_mode` (`ceace07f:2197`) validates the mode, assigns `agent.mode`, saves, and returns the payload — it creates no Source, writes no order, and has no other caller that does. The promise is a product decision and stays, because a switch that silently drops the user's working login is not a switch anybody would accept; what is missing is the code that keeps it |
-| G-15 | 06 source detail, a source's own name and Base URL | any affordance that edits them | `api.md` contracts `PATCH /api/models/sources/<id>` with `{display_name?, base_url?}`, and no frame draws a control that sends it: 06's inventory edits model rows only, and 05 sets both fields at creation and never again. So the route is named in §1.5 as evidence of what it *cannot* carry, never as a call this spec places on a screen |
-| G-16 | 01 upstream card and 06 source detail | any affordance that removes a **source** | `api.md` contracts `DELETE /api/models/sources/<id>`, and the only 移除 any of these nine frames draws is 06's row menu, which sends `DELETE /api/models/sources/<id>/models/<model_id>` — one manual model, not the source. So a source added by mistake, or left behind by a flow the user abandoned, can be seen on 01 and not removed from it. §1.4 said the opposite until this round: it told the reader 移除 was one press away, which was reading the model-row menu as if it removed the source |
-| G-17 | 04 add-subscription, a flow that expects something pasted back | the field that takes it, and the control that sends it | `oauth-flow.schema.json`'s `presentation.expects` runs `none · paste_code · paste_callback_url`, and `api.md` contracts `POST /api/models/oauth/submit` with `{flow_id, value}` for the second and third. Frame 04's foot is 取消 / 去登录 and draws no input, so only `expects: none` — the browser round trip — has a surface. §1.4 states the declaration rather than the browser assumption it carried before, and states this absence rather than describing a field no frame draws |
-| G-18 | 05 add-by-key, 拉取型号 and the observation 添加 runs before it saves | the route that carries a non-persisting observation of a source that does not exist yet | **The behaviour is contracted and the route is not**, so this row registers a gap *inside* the contract rather than an undecided question. AC-26 states the operation outright — 「Add Source exposes one non-persisting submission that combines connectivity classification with response-backed protocol observation」, returning classified reachability, authentication and a protocol 「without persisting a Source」 — and `model-hub.md`'s protocol-observation ruling of 2026-08-09 requires every stored `protocol` to trace back to a real response taken *before* Save, so an observation that saves nothing is not optional to the design. None of `api.md`'s 28 route rows accepts one: `POST /api/models/agents/<backend>/probe` is backend-scoped (`{model?}`) and reports on the configured chain, `POST /api/models/sources/<id>/refresh` needs an `id` only Save produces, and `POST /api/models/sources` persists on success. §1.5 keeps every Pull-origin state, because the operation is contracted and 05 draws it; what is missing is the way to invoke it |
-| G-19 | 05 add-by-key, 取消 pressed while a persisting add is in flight | what the server is left holding when the cancel lands after the transient phase | **Cancellation is contracted everywhere except the persisting half.** AC-26 requires an API-key test's success, authentication failure, adapter error, timeout **and cancellation** each to 「revoke the transient provisioned ref before the operation settles」, with a durable pending-revocation record and reconciliation behind a fault-injected revoke failure, and repeats that guarantee for unsaved model discovery; `api.md` contracts `POST /api/models/oauth/cancel` for the subscription branch. No artefact states the outcome once `POST /api/models/sources` has crossed out of that transient phase into persistence — whether a cancel there yields a Source or nothing. §1.5 states the guarantee for the phase that has one and stops at that seam rather than extending AC-26 over a boundary AC-26 does not cross |
-| G-20 | 01 source card, 被哪些链收编, **and 06's status bar, which splits `active` on the same field** — on any load that is not the creation response | a *read* that carries `adopted_by` | **The contract names this exact consumer and then gives it nothing to call.** `api.md:212` defines `AdoptedBy` as 「the stable Source-card projection of persisted references」 and FC-05 requires `agent-supply` to expose it, which is what makes the field authority rather than an invention (§0.3). Every place it is actually contracted is a creation terminal: `POST /api/models/sources` → `{source, added_to, adopted_by}`, and the OAuth completion reading — `api.md`'s *OAuth completion* section, which makes the terminal shape a function of `OAuthFlow.intent` and puts the same three arrays behind `intent: "create"` and explicitly not behind `intent: "reauth"`. The reads a loaded page can call carry no trace of it: `GET /api/models/sources` → `{sources: Source[]}` and `source.schema.json` has no backend-attribution property at all; `GET /api/models/agents` → `{agents: AgentSupply[]}` and `agent-supply.schema.json`'s 13 properties do not include `adopted_by`, nor does `api.md:628`'s CI-guarded AgentSupply serializer-completeness row. So the projection survives exactly one response and a reload has nowhere to read it from, while D-28 forbids the one derivation that would rebuild it from `hops`. This is the §0.3 shape where an FC item requires another file to carry something that file does not, rather than FC-05's `hops` shape where an FC item states a shape the frozen schema omits |
-| G-21 | 01 upstream card, 添加订阅 → 04 | the step that picks **which vendor** the subscription is for | **04 is drawn per vendor and the press that opens it carries no vendor.** Every part of the dialog that means anything is a function of it: the head reads `添加 {vendor} 订阅`, the two option cards, which of them is 推荐, the ToS note and the hint are all static per vendor (§1.4's inventory), and the one route the dialog can send — `POST /api/models/oauth/start` — takes a vendor and a channel, where only the channel has a drawn producer in the radio group. `XvCC4` holds one display per vendor and each opens with the choice already made; the page behind it draws exactly one 添加订阅 and one 添加 API Key, neither per vendor and neither a menu. The absence is in the drawing, not the contract — `api.md` states the parameter and 04 consumes it, and no frame supplies it. §1.1 and §1.4 state the missing step; §0.1 forbids specifying the control that would fill it, so this row is the whole of what this document says about it |
-| G-22 | 06 for a source just added — the add flow's terminal, reached from §1.4's *Awaiting sign-in* and §1.5's ② | an element that renders `added_to` | **The contract answers a question no frame asks.** `POST /api/models/sources` and the `create` OAuth terminal both return `added_to: AddedTo[]`, an entry naming `backend`, `menu_model`, `source_id`, `model_id` and `position`, the last one-based in the persisted Route chain after commit `[contract]`. Add-time placement (`model-hub.md` §4.2) is what makes it worth showing: the source the user just added has been written into chains they did not open, and this array is the only statement of where. It has the same one-response lifetime as G-20's `adopted_by` — `GET /api/models/sources` and `GET /api/models/agents` carry no trace of it, so the landing cannot be recovered by a later read — but it is the weaker of the two gaps, because nothing in this document *claims* to render it: G-20 has drawn consumers left without a read, while this row has a read left without a consumer. §1.3 states the retirement of the hint row that used to cover the old behaviour, and names this number rather than specifying the element, because §0.2 leaves that to the frame |
+| G-10 | 01 shell pill, install in flight — **and 08's 安装并切换**, the other press that promises one — **registered against the runtime install contract** | ~~a server-side install state, and the route that enters it~~ nothing | `POST /api/models/runtime/install` is the idempotent producer. `RuntimeDependency.status.health: installing` survives reload, successful verification settles at `not_started`, and failure settles at `not_installed` with the closed `status.error_key`. §1.0 and §1.9 consume that one machine; any mounted surface observing durable `installing` owns the derived 2s status loop, while a held initiating sequence only decides whether settlement lands at Not started or continues through Starting. Unmount stops the loop; reload owns G-10's first read and restores no intent. |
+| G-11 | 09 direct-only home, zero backends — **registered against AgentSupply** | ~~an installation flag per agent backend, and the payload that carries it~~ nothing | Every `GET /api/models/agents` row now carries server-authoritative `cli_present`; the zero-installed state is exactly all rows false. §1.8 derives `installedAgents` once from that field and uses the same set for mode dispatch, rows and the count pill. Source presence is evaluated first so an empty installed set cannot hide retained Sources; only `sources == []` + the empty set enters No backend found. |
+| G-12 | 01 upstream card and 06 header, `needs_action` — **registered by frame 12** | ~~the control that replaces a dead credential~~ nothing | §1.11 registers the two repair producers drawn on the source cards: 更换 Key sends the credential-replacement flow to `PUT /api/models/sources/<id>/credential`, and 重新授权 starts `POST /api/models/sources/<id>/reauth`. §1.1 and §1.6 cite that owner instead of pointing at each other. Kept as a registered row so the former absence and its closing frame remain auditable |
+| G-13 | 03 order drawer, chains that already exist — **the route is contracted; its action remains open** | an action that re-applies the current order to chains built before it; ~~the route behind it~~ | `POST /api/models/agents/<backend>/chains/reorder` is the sole explicit operation that reorders every stored Route by the current Source order. It is idempotent, adds/removes/remaps nothing and has no guard, closing the wire half. Frame 03 still draws only order editing, so no registered control invokes that route; §1.3 keeps the surface half `[contract-gap]` G-13 rather than silently attaching it to 保存顺序. |
+| G-14 | 08 adopt-gateway confirm, `effects.1` — **registered against the mode transaction** | ~~the adoption itself: turning the backend's existing CLI login into that backend's first `native_cli` Source~~ nothing | A qualifying `direct` → `hub` mode `PATCH` now atomically adopts the recognized CLI login as the first singleton `native_cli` Source and returns the updated `AgentSupply`; an absent or unrecognized login or an existing native Source creates and reorders nothing, and repeats create no duplicate. §1.9's consequence pair states both branches and never treats `cli_present` as recognition evidence; its M5 handoff rereads Sources before the committed result lands because the response cannot carry the possibly created Source. |
+| G-15 | 06 source detail, a source's own name and Base URL — **registered by frame 11** | ~~any affordance that edits them~~ nothing | §1.10 registers the overflow action, edit dialog and guarded `PATCH /api/models/sources/<id>` producer drawn in frame 11. Kept as a registered row so the former absence and its closing frame remain auditable |
+| G-16 | 01 upstream card and 06 source detail — **registered by frame 11** | ~~any affordance that removes a source~~ nothing | §1.10 registers the overflow action and the source-removal guard dialog drawn in frame 11 for `DELETE /api/models/sources/<id>`. The existing 06 model-row 移除 remains a different operation. Kept as a registered row so the former ambiguity and its closing frame remain auditable |
+| G-17 | 04 add-subscription, a flow that expects something pasted back — **registered by the 04 paste-back exhibit** | ~~the field that takes it, and the control that sends it~~ nothing | §1.4 registers `nOgMQ`'s paste-back dialog and its `POST /api/models/oauth/submit` producer. The drawn `paste_code` variant supplies the frame geometry; `presentation.expects` selects the registered code or callback-URL copy without changing that geometry. Kept as a registered row so the former absence and its closing exhibit remain auditable |
+| G-18 | 05 add-by-key, 拉取型号 and the observation 添加 runs before it saves — **registered against Source observation** | ~~the route that carries a non-persisting observation of a source that does not exist yet~~ nothing | `POST /api/models/sources/observe` accepts `{vendor, base_url?, key, protocol_order?}` and returns `SourceObservation` without persisting a Source or returning a credential reference. §1.5 consumes its closed outcome/reachability/authentication/protocol/discovery/models facts. |
+| G-19 | 05 add-by-key, 取消 pressed while a persisting add is in flight — **registered against the Source-create commit boundary** | ~~what the server is left holding when the cancel lands after the transient phase~~ nothing | Before durable Source commit, AC-26 cleanup completes before cancellation settles. After commit, cancellation ends only the caller's wait: the Source and placements remain committed and the next Source/Agent read owns the outcome. §1.5 registers that boundary instead of promising a post-commit abort. |
+| G-20 | 01 source card and 06 status bar on every Source read — **registered against `Source.adopted_by`** | ~~a *read* that carries `adopted_by`~~ nothing | Every Source returned by `GET /api/models/sources` now carries server-derived, complete, unique `adopted_by`, sorted by backend then menu model. Creation responses echo the same projection at top level. §1.0 owns the grouping/de-duplication rendering and never derives it from chains. |
+| G-21 | 01 upstream card, 添加订阅 → 04 — **registered by frame 13** | ~~the step that picks which vendor the subscription is for~~ nothing | §1.12 registers the vendor menu drawn in frame 13. Claude 订阅 passes `anthropic` and ChatGPT 订阅 passes `openai` into §1.4 before that dialog renders its vendor-specific title, options and `POST /api/models/oauth/start` request. Kept as a registered row so the producer/consumer break and its closing frame remain auditable |
+| G-22 | 06 for a source just added — the add flow's terminal, reached from §1.4's *Awaiting sign-in* and §1.5's ② | an element that renders `added_to` | **The contract answers a question no frame asks.** `POST /api/models/sources` and the `create` OAuth terminal both return `added_to: AddedTo[]`, an entry naming `backend`, `menu_model`, `source_id`, `model_id` and `position`, the last one-based in the persisted Route chain after commit `[contract]`. Add-time placement (`model-hub.md` §4.2) is what makes it worth showing: the source the user just added has been written into chains they did not open, and this array is the only statement of where. Unlike persisted `Source.adopted_by`, `added_to` has one-response lifetime: later Source and Agent reads carry no placement report, so the landing cannot be recovered by a later read. Nothing in this document claims to render it; §1.3 names this number rather than specifying an element, because §0.2 leaves drawing to the frame |
 | G-23 | `Qp6FI`, the shared guarded-change confirm — both callers, §1.6's *Refetch refused* and *Guard refused* | a body block that lists `would_interrupt` | **The refusal carries a list and the dialog draws a sentence.** `would_interrupt` is `SupplyGap[]`, each entry `{backend, model_id, agents}` with `model_id` the protected **menu** model and `agents` the enabled named Vibe Agents that pinned it `[contract]`, and `model-hub.md` requires that 「the confirm copy names affected Agents when any exist」. `Qp6FI` as measured has exactly one label, one count pill, one row list and one hint line, and all four are the `would_remove_hops` side; the only rendering of the gap array is `guard.hint.interrupt`, one sentence that reports the array is non-empty. The strings are specified — `guard.gap.label`, `guard.gap.subject`, `guard.gap.agents`, with `gateway.modelCount` as the pill — because copy is this document's register and an authority requires these; the block that holds them is drawing, so it is a gap rather than an invention. The same absence makes `source_last_supplier` unrenderable: its `api.md` example carries `would_remove_hops: []` beside a populated `would_interrupt`, which this dialog would draw as an empty list under a bare sentence |
-| G-24 | 01 run pill, *Unsupported host* — the one pill reading that splits a `health` value on a second field | a host-platform or installability discriminator in the runtime payload | **The pill splits `not_installed` on a field the payload does not carry.** `runtime-dependency.schema.json` v5 reports `manifest.assets[].platform` for each *published* asset and nothing that says which platform the **host** is: `status` carries `installed_version`, `verified`, `listening`, `health` and `last_check`, and no property anywhere in the document names the machine the gateway would run on. The client cannot supply it either — the browser's own platform describes whichever machine has the page open, which on a remotely opened UI is not the host, and substituting it would be the same class of error as computing supply from live chains (D-28): a value read off the wrong subject and rendered as if it were the right one. So the split has no contracted input, and §1.0 states what a build does instead of requiring the guess |
-| G-25 | 01 gateway group, the collapse predicate | a per-model fact that separates a chain with a live hop from one whose hops are all stale | **The only per-row number the page-level payload carries counts configuration, and says so.** `agent-supply.schema.json`'s `model_supply` rows require exactly `model_id` and `chain_length` under `additionalProperties: false`, and `chain_length`'s own description reads 「Length of the exact configured Route chain, including cooling and process-unavailable native CLI hops. It is not a count of currently runnable candidates」, with 「Every stored hop remains counted regardless of live runnability」 beside it. `model-hub.md` §4.6 then keeps a hop whose Source is gone or whose model is no longer advertised **on purpose**, 「until the Source recovers, the user removes or changes the pair, or a guarded cascade removes it」. So a chain made entirely of stale hops reports the same nonzero number as a healthy one, and `supply_status` is one word for the whole backend. The per-model chain read can see the difference and §1.1 forbids visibility from depending on it, for reasons that hold whatever this row is; what is missing is the same fact at page grain |
-| G-26 | 03 order drawer, a reorder | a policy value that reads the stored Source order | **The order is contracted, and nothing the contract carries consumes its sequence.** `model-hub.md` §4.6 persists one `sources.order: string[]` per backend and calls it 「a visible Gateway configuration and Add-time placement input」; §4.2's only policy value, `placement-v1`, appends 「a newly added Source to each configuration-eligible backend Source order」 and 「every accepted exact match to that menu model's current Route-chain tail」 — an append at both ends, which lands in the same place whatever sequence the order is in. §4.2 also states that 「the only order runtime can execute is the exact hop order stored for that model」, so execution does not read it either. Membership is real and durable — a Source deletion prunes the id in the same transaction and preserves survivors, and reload rejects a dangling one — and G-13 already records that the order cannot reach a chain that already exists. This row is the other half: under the current policy value it does not reach a chain that does not exist yet either. §1.3's copy now says what the drawer stores rather than naming a consumer |
-| G-27 | 05 add-by-key, the persisting `POST /api/models/sources` — and §1.4's `create` terminal, which answers with the same three arrays | the request shape that route accepts | **The response is fully contracted and the request is a name.** `api.md`'s route table gives `POST /api/models/sources` as 「`SourceCreate` → `{source: Source, added_to: AddedTo[], adopted_by: AdoptedBy[]}`」, and `SourceCreate` occurs in no other line of `docs/plans/`: no schema file, no field list, no example body. `source.schema.json` cannot be read backwards into one — it is the response entity, `additionalProperties: false` over sixteen properties including the server-assigned `id`, `created_at`, `state` and `usage`. What the dialog holds is a Base URL, a key, an optional name and, on the two exits that reach persistence after a probe, a protocol proved by a real response plus an inventory that may be empty; which of those the body carries, and how 「an empty inventory」 is expressed in it, is undefined. §1.5 keeps the persisting exits because the frame draws them and AC-26 requires the observation that precedes them — what is missing is the body they send |
-| G-28 | `Qp6FI`, the hop rows — both callers, §1.6's *Refetch refused* and *Guard refused* | the hop's position, on the reference the refusal returns | **The row draws a position pill and the refusal names no position.** `model-hub.md` §4.5 returns 「ordered `would_remove_hops` entries naming each `(backend, menu_model, source_id, model_id)` reference」 — four fields, and no index among them. The array's own order is not the answer: it spans every backend and menu model the change touches and carries only the hops being removed, so an entry's place in it is not its hop's place in its chain. Deriving it means one `GET /api/models/agents/<backend>/chain?model=<id>` per distinct `(backend, menu_model)` the refusal names, issued from inside a confirm, each async and each allowed to fail — the dependence §1.1 refuses for the collapse predicate, arriving on a surface that has to be right the first time. So `guard.hop.position` and its `{{n}}` stay in the register, because copy is this document's register and the frame draws the pill; the input is what is absent, and §1.6 states what the row renders until the reference carries one |
-| G-29 | 05 add-by-key, ⑦'s 重试 — the re-read F1 requires of a `POST /api/models/sources` that may have committed unseen | anything the client holds *before* the send that the committed Source can afterwards be recognized by | **The repair is contracted and its input is not.** F1 has a create whose response was lost re-read before it is re-sent, and `GET /api/models/sources` is the only read that answers `[contract]` — but nothing the dialog sent survives into what comes back. `Source.id` matches `^src_[a-z0-9]{8,}$` and is server-assigned, so it existed only in the response that died; `source.schema.json` returns no plaintext credential; and neither `base_url` nor `display_name` is declared unique in `api.md` or `model-hub.md`, so two Sources may legitimately carry both. No route in `api.md` takes an idempotency key, and G-27 leaves `SourceCreate`'s body unspecified, so this file cannot even say the client *could* supply one. The read therefore answers 「what is in the list」 and never 「whether this create is in it」, and §1.5's ⑦ states that instead of picking a Source out of an unordered list by resemblance |
-| G-30 | 04 add-subscription, *Start failed* entered by a lost response | a way to reach a flow whose `flow_id` never arrived | **A start that was accepted and not answered leaves a flow the client cannot name.** `api.md` contracts exactly four OAuth routes — `POST /api/models/oauth/start`, `GET /api/models/oauth/status/<flow_id>`, `POST /api/models/oauth/submit`, `POST /api/models/oauth/cancel` — and the last three all take the `flow_id` the lost response was carrying. There is no flow-list read, and `oauth-flow.schema.json` carries no property that would let one be found from what the dialog does hold: the vendor and the channel it sent are what *every* start for that backend sends. So 重试 can start a second flow beside a first that is still live, and the first ends only by expiring — `expires_at`, when the provider supplies one `[contract]`. §1.4's *Start failed* states that rather than asserting the call never reached the provider, which is the reading this row replaced |
-| G-31 | 01/08 model rows — the 当前 line (`gateway.row.current`, `gateway.row.currentTakeover`), the violet reroute, and §1.1's *Takeover active* entry and exit | the chain's **current** hop, on the one read that is supposed to carry it | **The behaviour spec puts it in the read projection and the wire shape closes the object without it.** `model-hub.md` §4.3 states 「the read projection is `C` with live annotations plus `current`, never a reconstructed provider list」, writes takeover on that field — 「the current hop is not `C[0]` and `C[0]` is unavailable for a recoverable quota/cooldown reason」 — and then fixes the timing: 「recovery changes current execution position **on the next turn** without changing `C`」. The read that would deliver it is `GET /api/models/agents/<backend>/chain?model=<id>` → `{chain: AgentChain}`, and `agent-chain.schema.json` is `additionalProperties: false` over exactly `contract_version`, `backend`, `model_id`, `chain` and `supply_state`, and each hop inside `chain` is closed the same way with no `current` among the keys it does carry. The substitute is the schema's own sentence — 「the next turn uses the FIRST item with `runnable: true`」 — and it agrees with `current` everywhere except the interval §4.3 legislates: from the moment a cooling head is reported runnable again until the next turn actually moves back, the derivation names the head and `current` still names the later hop. That interval is this row's entire content, and it is why the gap is narrow rather than structural: everything else the 当前 line and the takeover visuals need is on the wire. `model-hub-implementation.md` books the missing piece as AC-30's own lane I2, 「live current-hop input」, so what is absent is the field and not the decision. This is G-20's shape — one contract file naming a value another file must carry — on a different value, a different read and a different repair, so it is registered beside it rather than folded into it |
+| G-24 | 01 run pill, *Unsupported host* — **registered against RuntimeDependency** | ~~a host-platform or installability discriminator in the runtime payload~~ nothing | Every runtime response now carries server-authoritative `host_platform`; an exact match in `manifest.assets[].platform` is the support predicate. §1.0 never substitutes the browser platform. |
+| G-25 | 01 gateway group, the collapse predicate and unavailable marker — **registered against AgentSupply model supply** | ~~a per-model fact that separates a chain with a live hop from one whose hops are all stale~~ nothing | `model_supply[].has_runnable_hop` now carries that server-derived fact under the same runnability axiom as AgentChain. §1.1 uses it at page grain to protect every non-runnable row from collapse. A nonempty chain with no runnable hop renders `legend.unavailable`; the forced-false `chain_length: 0` subset branches first to the existing `models.launch.route_unconfigured` treatment instead of borrowing paused-supply copy. |
+| G-26 | 03 order drawer, a reorder — **registered against the same explicit reorder contract as G-13** | ~~a policy value that reads the stored Source order~~ nothing | `POST /api/models/agents/<backend>/chains/reorder` consumes the current Source-order sequence with a stable total sort over every stored Route. The order PUT remains chain-byte-identical; invocation is explicit and separate. |
+| G-27 | 05 add-by-key, the persisting `POST /api/models/sources` — **registered against `source-create.schema.json`** | ~~the request shape that route accepts~~ nothing | The schema is the complete request: required `vendor` and write-only `key`; optional `display_name`, `base_url`, `protocol_order`, `client_nonce` and `accept_unavailable_inventory` `[contract]`. The client submits no protocol conclusion or discovered inventory; the server observes both. §1.5 sends the consent boolean true only from ⑤, where a repeated observation still has to prove the protocol before a failed inventory may commit. |
+| G-28 | `Qp6FI` guarded-change hop rows — **registered against `RouteHopRef.position`** | ~~the hop's position, on the reference the refusal returns~~ nothing | `guard-refusal.schema.json` carries one-based pre-mutation `position` on every `RouteHopRef`. §1.6 and §1.10 render it directly and issue no per-chain lookup. |
+| G-29 | 05 add-by-key, ⑦'s lost-response reconciliation — **registered against Source-create nonce totality** | ~~anything the client holds *before* the send that the committed Source can afterwards be recognized by~~ nothing | The client generates `SourceCreate.client_nonce` before send. A list read finds exact `Source.client_nonce` after commit; in-flight and committed retries return distinct `409` conflicts, released/list-miss retries are fresh. A committed retry never replays an old response; it returns `source_nonce_conflict` and the client rereads the list to claim the Source. |
+| G-30 | 04 add-subscription, *Start failed* entered by a lost response — **registered against OAuth start nonce totality** | ~~a way to reach a flow whose `flow_id` never arrived~~ nothing | The client generates `client_nonce` before start; the server claims the exact `(client_nonce, vendor, channel)` tuple before provider work. Concurrent retry coalesces to one pending start/result, every resulting flow echoes the nonce, and nonce-bearing cancellation remains bounded by its non-null `expires_at`. §1.4 retries the held tuple without opening a second provider start. |
+| G-31 | 01/08 model rows and takeover visuals — **registered against `AgentChain.current`** | ~~the chain's **current** hop, on the one read that is supposed to carry it~~ nothing | `agent-chain.schema.json` now requires `current`, either null or an exact member of `chain`; §1.1 renders the current-source line and takeover predicate from that field rather than the first runnable hop. |
 | G-32 | 02 route-chain editor — the frame this document points at and does not specify | the editor's interaction contract: how it sequences a save, what it does with a guarded refusal, what it reconciles against when the response is lost, and what the failure line reads | **The route is contracted, the surface is drawn, and the specification is what is missing.** `api.md` carries `PUT /api/models/agents/<backend>/chain` as one of the nineteen state-changing routes, guards it with a `409` refusal, and declares it 「the `mutation.route_replace` row of the authoritative mutation matrix」; on success it returns `{chain, removed_hops, interrupted}`, so the refusal branch, the removal report and the interruption report all exist on the wire. `Q1dkS` is merged, so the controls exist in pixels. §1.2 states no build requirement, which leaves §0.8 with no state for the write and this file with no reading of any of those three response members. That is a different absence from every other row here: those register a behaviour the contract has and no frame draws, and this one registers a frame the contract *and* the drawing both have, which no section writes down. It is therefore also the one row paired with a §0.4 exclusion — the exclusion keeps this document's accounting honest about the route, and this row keeps the debt from being read as a boundary. A separate round writes the section |
-| G-33 | 04 add-subscription, a flow whose declaration carries a device code | anywhere to display or copy `presentation.device_code`, and anywhere to render `presentation.instructions_key` | **Two contracted fields arrive in the start response and have nowhere to land.** `oauth-flow.schema.json`'s `presentation` is `additionalProperties: false` over `auth_url`, `device_code`, `expects` and `instructions_key` — the last described as the i18n key for the step-2 helper line — and the schema's own description names the compositions it expects, the middle one being 「B = auth_url + device_code + expects none」. Frame 04 draws a head, two option cards, a ToS note, a hint and a foot of 取消 / 去登录; neither §1.4's inventory nor its copy table holds a code, a control that copies one, or a line for the helper key. So a Form B flow reaches a dialog that reports it is waiting while withholding the value the provider is asking for. Registered apart from G-17, whose missing affordance is an input plus `POST /api/models/oauth/submit`: this branch submits nothing and needs a read-only value the user copies out, so neither number can close the other |
+| G-33 | 04 add-subscription, a flow whose declaration carries a device code | anywhere to display or copy `presentation.device_code` | **The remaining contracted value has nowhere to land.** `oauth-flow.schema.json`'s Form B is `auth_url + device_code + expects none`. This round gives every `presentation.instructions_key` a PD-4 helper-line consumer, including the null/unresolved fallback for Form B, so that former half is closed. The paste-back exhibit accepts and submits Forms A and C, but Form B submits nothing and instead needs a read-only device code the user copies out. The new input cannot render that output, so G-33 remains independently open |
+| G-34 | §1.4 / §1.11, E6 materialization failure — **registered against the OAuth terminal-response matrix** | ~~the contracted error-envelope shape that carries any committed, non-reconstructible impact from that failed materialization attempt~~ nothing | The standard error envelope carries exact nonempty `interrupted_pairs` if and only if acquisition-stage Source mutation already produced that report; otherwise the member is absent, never `[]`. R5 renders a present report before the mandatory attempt-scope reread and treats absence only as no response report, never as proof that materialization changed nothing. |
 
 **G-8 is closed by an owner ruling, and its number is not reused.** It asked for the
 route that saves an edited reasoning-effort list and the field it saves into. The ruling
@@ -330,10 +349,13 @@ refresh no longer advertises. Three answers were on the table — add a per-mode
 retained/stale field, keep a shadow copy of the last-seen inventory, or state the
 requirement where the contract can already meet it. The ruling took the third: **a model
 a chain references that no source supplies any more must be visibly marked on the model
-menu, and must never be silently skipped.** That lands on machinery §4.6 and §4.4 already
-have — the retained hop with its live non-runnable reason, and `chain_length: 0` driving
-「无来源可供」 — with **no new field and no new mechanism**. §1.6 states it as a rule now,
-not as a gap.
+menu, and must never be silently skipped.** The original ruling landed on the retained
+hop's live non-runnable reason and the empty-route case. The closed
+`model_supply.has_runnable_hop` projection now makes the same rule total at page grain:
+false keeps the row visible. A nonempty chain renders its explicit unavailable marker;
+the forced-false `chain_length: 0` subset is visibly structural and therefore uses the
+existing `models.launch.route_unconfigured` treatment instead. §1.6 states the rule,
+while G-25 records the fields that carry it.
 
 **What that ruling costs, stated plainly.** The requirement moved to the menu, so the
 *source page* loses the story. Frame 06's inventory is the discovered set and stays the
@@ -347,43 +369,13 @@ record only that a gap was closed without a new field. What was bought is that n
 gets silently unconfigured by a vendor changing its `/models` output; what was sold is the
 inventory's memory of its own past.
 
-**G-3's remaining half is unaffected, and stays open.** Retiring a *discovered* model
-still needs somewhere to remember the retirement, and the ruling above gives it nothing:
-a menu marker describes what supply currently is, while a retirement is a user position
-that has to outlive the next refresh. The two were named as one field earlier in this
-document because they looked like one question; the ruling answers only the half that a
-projection could answer.
-
-**G-3 and G-7 are one principle applied twice, not two independent decisions.** The
-principle: *a fact the system can project from what it already stores does not become a
-stored field, and a capability that would need a stored field nobody has asked for does
-not become a capability.* G-7 is the application that **kept** the capability — what had
-to be remembered, that a discovered id stays in after upstream dropped it, turned out to
-be projectable from the hop that already names it, so the requirement moved onto a
-projection and no per-model record was added. G-3 is the application that **drops** the
-capability: retiring a discovered id is projectable from nothing stored, so it would need
-a real per-model retention marker — and, with it, a rule for how that marker merges on
-refetch, a rule for who owns a conflict between the marker and the source's own answer,
-and a rule for what a chain hop naming a retired id resolves to. Three new rules for a
-capability no user has asked for. Deletion comes before optimisation, so the surface
-carries no retire control for discovered rows at all (§1.6), removal stays scoped to
-manual models, and G-3 stays a stated gap against the day the demand arrives.
-
-*The earlier framing was that these two were the same missing field seen from opposite
-sides* — G-3 to remember that a discovered id *stays out*, G-7 that it *stays in* — so
-one user-intent record would answer both, while two boolean flags would make refresh
-semantics depend on write order. The reasoning about the flags still holds; the merge did
-not. One fix closed one, which means they were two the whole time and the merged entry
-was hiding it. What they share is not a field. It is the rule for deciding whether to add
-one.
-
-**G-3's first half has no surface, and that is the decision rather than a deferral.** A
-user-initiated retirement needs a route (half one) *and* a durable marker saying this
-discovered id stays retired (half two) — otherwise the next inventory refresh re-adds it
-and the control reads as broken rather than absent. The contract represents neither, so
-this file specifies neither: §1.6 states that no surface claims the capability, and the
-retention half is handed to the AC ledger in §0.7. Specifying half one without half two
-is how a document starts promising a control that cannot keep its promise.
+**G-3 is contract-closed and UI-open, which are separate facts.** #1326 added the
+route and durable representation: discovered-model DELETE persists `retired: true`,
+refresh never clears the tombstone or lets the row supply, and the exact-hop and
+last-supplier guards run before the write `[contract]`. Frame 06 continues to draw
+removal only for manual entries, so the discovered-row route has no registered producer
+`[contract-gap]` G-3. The contract half no longer blocks a future drawing; it does not
+turn an undrawn action into a consumer.
 
 No row of the table above is decided here, and the table is the only place that says
 which rows are open. Each open row is routed by what it is missing, not by its number: a
@@ -429,10 +421,12 @@ how the next one should be handled — and because three of the five moved the *
 which is the argument for escalating instead of quietly writing down whichever side
 this lane had already drawn.
 
-A conflict is not the same thing as a gap. §0.5's G-3 is *missing* contract — something
-has to be added. The five below were *contradicted* contract — something had to be
-retracted. Filing a contradiction as a gap is how a lane talks itself into implementing
-the side it happened to draw.
+A conflict is not the same thing as a gap. A gap is contract silence; the five below were
+*contradicted* contract — something had to be retracted. Filing a contradiction as a gap
+is how a lane talks itself into implementing the side it happened to draw. §0.5 retains
+G-3 as the audit example of a former contract silence whose route and durable
+representation were later added while its independently missing drawn producer remained
+visible.
 
 Four of the five were new at `176b41b7`, and they arrived the same way: the frames were
 rebuilt on 2026-08-09 to the owner's rulings, and the ledger grew on 2026-08-09 to the
@@ -525,7 +519,7 @@ for **more** surface than the frames drew. AC-27 says 「『Add anyway』 is ava
 after the protocol was proved and a different result, such as model inventory, remains
 unavailable; that uncertainty is a health fact.」 The rebuilt frame 05 drew neither that
 nor E-3's version, because the rebuild removed 仍要添加 from every failure state — its two
-failure states were 401 (③) and unrecognized interface (④), and both are
+failure states were authentication failure (③) and unrecognized interface (④), and both are
 protocol-*not*-proved.
 
 The owner ruled that the two 仍要添加 are different affordances wearing one word, and that
@@ -553,35 +547,24 @@ written and been wrong about all four.
 
 ### 0.7 Behaviour invariants surfaced by this pass
 
-Two behaviours the frames imply, which no AC through AC-31 covers and which this lane
-does **not** write into any document. Both are in the PR description under 「建议移交 AC
-账本」 for the spec lane to route; they are named here only so that a reader of §1.6 and
-§1.0 can see that the silence is deliberate:
+Two former handoffs are retained here as closed audit entries because their second-order
+requirements are what made a route-only patch insufficient:
 
-- **Retiring a discovered model needs somewhere to remember the retirement.**
-  `source.schema.json`'s `models` describes what an inventory refresh found; it carries
-  no per-model retained flag, and the ruled `DELETE /api/models/sources/<source_id>/models/<model_id>`
-  removes a manual entry. So a user-initiated retirement of a *discovered* id has no
-  representation that survives the next refresh. This is the second half of G-3, and it
-  is the reason this file states only that no surface claims the capability, rather than
-  requiring the control.
-- **An install in flight has to be observable by whoever asks next, and asking twice must
-  not download twice.** This is G-10's behaviour half, and it is the half a route alone
-  does not settle: adding an install endpoint gives the *first* caller an answer, while
-  the invariant is about the second — a reload, a second tab, or a second press of
-  安装并启动 during the same download. §1.0 refuses to fake it with a client-side flag and
-  shows the truthful `health` instead, which is honest and visibly worse than the product
-  wants. The wire half — a state between `not_installed` and `not_started`, and the route
-  that enters it — is G-10's contract-lane half and travels separately; a row can be
-  blocked on both, and this one is.
+- **Discovered-model retirement is durable user intent** `[contract]` AC-37. The DELETE
+  writes `models[].retired: true`; refresh preserves the row and tombstone, and the row
+  remains readable but never supplies. This closes G-3's route and representation halves
+  together. The frame still draws no discovered-row producer, so §1.6 retains that
+  independently open surface half rather than inferring an affordance.
+- **Runtime installation is observable and singleton** `[contract]` AC-38. The install
+  route durably enters `installing`; reload and concurrent repeats return the same state
+  and start no second download. Verification settles at `not_started`; failure returns
+  to `not_installed` with the closed `error_key`. This closes G-10 for both shell entry
+  points without a client-only progress flag.
 
-The recommendation attached to it is a per-model user-intent record rather than a
-boolean: the question a retirement answers is *did a human take a position on this id?*,
-and a record shaped that way keeps set replacement as the default for every id nobody
-touched. What used to be the list's second item — a model a chain references that a
-successful refresh stops advertising — is **no longer handed over**: it was G-7, and the
-owner's ruling closed it on `chain_length: 0` and the retained hop's live reason, with no
-new field. §0.5 records that ruling and what it cost.
+What used to be the list's second model-inventory item — a model a chain references that
+a successful refresh stops advertising — remains independently closed as G-7 on the
+retained hop and menu projection. Retirement and upstream disappearance are not the same
+fact, and neither is reconstructed from the other.
 
 The list was three items at the previous basis, and all three left it the way a handoff
 list is supposed to empty — by being decided elsewhere:
@@ -616,6 +599,15 @@ their own — they point back to this one. The register is what makes
 a reviewer has to answer by hand, which is what `scripts/check_model_hub_ui_states.py`
 does with it (§0.10).
 
+**Derived-state predicate rule** `[contract]` `[derived]`. On every authoritative
+payload at a state's grain, every derived state re-evaluates its complete entry
+predicate. A false predicate retires that state before the new payload is rendered;
+the previous state remains latched only when the contract explicitly defines that
+latch. F2 is not an exception: a failed read delivered no authoritative payload, so it
+keeps the last good projection rather than reclassifying it. A visual state therefore
+cannot outlive the evidence that selected it merely because a later runtime action has
+not yet updated another field in the same projection.
+
 **Failure treatments.** A failure cell either names one of these five
 treatments, or names the state it moves to as `→ State`. The set is closed: a
 sixth treatment is a change to this section, not a local invention in a frame.
@@ -625,8 +617,127 @@ sixth treatment is a change to this section, not a local invention in a frame.
 | F1 | Retry in place | The surface stays open. The message is replaced in the slot the result would have used, the primary becomes 重试, and every value typed is kept. A refusal that came back persisted nothing. A request that never came back leaves that unknown, and 重试 establishes it before it re-sends. |
 | F2 | Keep the last good result | A failed read leaves the last successful result rendered, and the status line carries the cause. The action that failed stays enabled. |
 | F3 | Guard refusal | The request came back refused because it would break a configured chain. The shared confirm (`Qp6FI`, §1.6) states the consequence; the same request is re-sent with `force`, or abandoned. |
-| F4 | Issue and do not await | A cleanup call for something the user has already left behind, issued as they move on. There is no error surface and no retry, because the surface it would appear on is either gone or already showing the thing the user asked for instead; the truth is read from the list on the next load (D-15). |
+| F4 | Issue and do not await | A cleanup call for something the user has already left behind is owned in the background while the visible surface moves on. The departing surface does not wait and renders no cleanup error. The cleanup owner may still serialize its own work — for OAuth it settles the cancel attempt first and then re-reads the affected Source projection — because a read made before that call settles cannot account for a write the cleanup itself may materialize (D-15). |
 | F5 | No request | The state issues nothing, so it cannot fail. A local draft it holds is discarded by 取消. |
+
+**Frame-group conservation checklist** `[derived]`. Registration is additive: an exported
+frame may contribute controls and states, but it may not erase behaviour already owned by
+the surface around it. Every new frame column MUST check all fourteen rows below. `[x] N/A` is
+valid only with the reason in the cell; an empty cell or a missing row is an incomplete
+registration, not something a reviewer is expected to infer from prose.
+
+| Check | Required accounting | §1.10 / frame 11 | §1.11 / frame 12 | §1.12 / frame 13 |
+| --- | --- | --- | --- | --- |
+| C1 — existing capability-gated actions | Preserve every action the containing surface already offers; add the frame delta beside it | [x] Edit / Remove sit beside the existing capability-gated Reauthorize / Replace key producers | [x] The blocked card covers both `needs_action` and `error`: Hub error keeps Refetch, native unclassified login failure keeps Reauthorize, and the card target / healthy-source overflow producers remain | [x] The existing Add subscription trigger remains the owner; the menu adds only vendor selection |
+| C2 — valid local draft | Preserve the exact valid draft across no-op exits and F1/F3; prevent a predictably invalid submit | [x] V1/V2 define the normalized display name and Base URL draft; F1/F3 retain it | [x] The channel-selected acknowledgement copy, typed key, flow intent and any paste value remain with their owning state | [x] N/A — a row activation passes one closed vendor value and holds no editable draft |
+| C3 — focus return target | Name the mounted control that receives focus when a transient surface closes | [x] A no-op close returns to the source overflow trigger; a committed exit hands focus to its named receiving surface | [x] A no-op repair exit returns to the invoking card, vendor-observation action or menu control; a committed exit hands focus to the returned source projection | [x] Escape, outside dismissal and a no-op return from 04 restore Add subscription; a committed 04 exit hands focus to its named receiving surface |
+| C4 — in-flight response owner | A busy state with no cancellation route cannot be dismissed; if cancellation is contracted, name the state that owns its late response | [x] Saving source and Removing source disable Cancel, close, Escape and outside dismissal until the request settles | [x] Pre-flow reauth and credential replacement are locked while busy; after a flow is acquired §1.4 Dismissing owns cancellation and any late answer | [x] N/A — the menu sends no request; selection transfers ownership synchronously to §1.4 |
+| C5 — existing visual state | Hold the exact rendered origin; a no-op exit must not manufacture another state | [x] Edit/remove dialogs hold the exact §1.6 origin | [x] Blocked-card, vendor-observation, source-detail and key-entry origins are held exactly | [x] Closed is the same footer/trigger state that existed before Open |
+| C6 — committed-report exit | Once a mutation has committed, every dismissal path is the report's Done-equivalent exit and may neither restore a pre-write origin nor discard held response or D-36 commit evidence. A failed projection read adds read-only Retry and MUST NOT remove Done or any equivalent dismissal | [x] Save/remove impact reports retain their envelopes and every Done exit through M1/M2 read failure; inferred commits retain their exact Source/absence evidence through the same reads | [x] Repair impact retains R3/R4's distinct envelopes through M3/M4 read failure, and Repair unresolved retains R3 through M3; Retry is additive and no path restores the invoking origin | [x] N/A — the menu commits nothing and owns no response report |
+| C7 — authoritative field validation | Register every editable field against the authority that normalizes or rejects it; no field may rely on a generic request failure as its validator | [x] V1/V2 register every frame-11 field, including the complete Base URL normalizer | [x] V3/V4 register the replacement key and paste-back value; the shared reauth acknowledgement is the contracted literal `true`, not a free-form draft | [x] N/A — vendor rows emit closed enum values and expose no editable field |
+| C8 — acknowledgement consequence coverage | For every capability that requires acknowledgement, register every applicable channel, the exact confirmed request value and one complete consequence sentence that is true for that channel before the irreversible boundary | [x] The existing overflow reauth action transfers its exact Source/channel to §1.11's shared confirmation phase; frame 11 adds no alternate shortcut | [x] Hub and `native_cli` both confirm and send literal `true`, but select separate complete bodies: Hub names only the failure-time cost and safe cancellation; native names the immediate shared-login outage and selected-Source-only recovery | [x] N/A — vendor selection starts create intent and crosses no existing-credential boundary |
+| C9 — report-free reconciliation failure | For every committed mutation that skips its report because impact arrays are empty or unavailable after D-36 inference, register the complete-read failure state, held write evidence and read-only Retry | [x] M1, or M2 through M0, enters Committed projection stale with the updated Source or committed absence plus exact empty/unavailable disposition held; Retry repeats only its complete-surface read | [x] A non-blocked M3/M4 empty envelope or RR-7 inferred commit with an unavailable response tail enters the same state; a blocked R3 result stays in Repair unresolved instead | [x] N/A — the menu commits nothing and invalidates no projection |
+| C10 — mutation attempt scope and commit evidence | For every mutation covered by this frame group, name every projection its attempt may invalidate before the response is observed; both a received success envelope and authoritative D-36 commit evidence MUST pass through the owning M row before visible exit, with response-only members marked unavailable rather than invented | [x] R1/R2 own received save/delete envelopes; D-36 inferred save/delete commits enter the same M1/M2 reads with response-only impact arrays unavailable | [x] RR-1–RR-10 name repair attempt scope; R3/R4 classify received Source outcome, while RR-7 inferred repair commit enters M3/M4 with its absent response tail explicitly unavailable | [x] N/A — vendor selection commits nothing; create's later mutation remains owned by §1.4/RR-3 rather than the menu |
+| C11 — workflow progress evidence | A broad transport or state class may not stand in for a later workflow milestone; register what each returned stage or external gesture proves and the exact next gesture/read it authorizes | [x] Save/delete expose no intermediate accepted state: only an envelope or D-36 subject read proves commit, and both route through C10 | [x] Paste `starting` / `awaiting_action` proves action is still required; `verifying` proves submission acceptance. Opening a vendor link proves no recovery and enters the channel observation phase: Hub Refetch, native acknowledged Reauthorize | [x] Vendor selection transfers one closed value into §1.4 Default; it is not evidence that OAuth acquisition or login began |
+| C12 — delayed required presentation | If a required presentation value may be absent now and supplied later, name the bounded read owner that can deliver it without starting another producer or browser context | [x] N/A — frame 11 has no server-declared presentation | [x] PD-5 gives a paste form whose `auth_url` is null to the held flow's 2s status-read owner; the first non-null value invokes PD-2 on the original context | [x] Vendor selection transfers to §1.4; it does not own a flow or delayed presentation value |
+| C13 — terminal / absence attempt scope | Every terminal code and authoritative subject absence after a producer attempt MUST account for that attempt's full invalidation scope before visible handoff; scope is selected by the evidence milestone, never by channel alone | [x] Every `source_not_found` and inferred deletion enters M0; M2 is M0's deletion-attempt reconciliation | [x] Create E4 owns no pre-existing Source scope and create E6 re-reads `Source[]`. Every acquired-flow reauth terminal failure enters RR-5's full M3 read for Hub or native; a pre-flow reauth acquisition failure retains RR-6–RR-9's selected-Source read for either channel | [x] N/A — the menu has made no producer attempt and owns no terminal code |
+| C14 — non-mutating failure exit | Every modal failure state MUST offer an exit that sends no mutation; a committed-state exit preserves write evidence and marks unread dependent projections stale rather than restoring the origin | [x] Edit/remove failures cancel to their held draft/origin; Committed projection stale has Done-equivalent dismissal in addition to read-only Retry | [x] OAuth/repair failures can dismiss through their registered cleanup or Done-equivalent committed exit; neither path resends repair | [x] The menu's Escape / outside exit sends nothing and restores Add subscription focus |
+
+The C5 rule is the former held-state conservation rule in checklist form. In a DP-1
+reversible phase, 取消, close, Escape, an outside press, or abandoning an F3 refusal
+restores the held origin; none manufactures `Ready`. C5 does not apply merely because a
+state is idle: after commit, C6/DP-4 owns every exit and the pre-write origin is no longer
+a legal destination. Only a successful mutation or a later authoritative read may select
+a different projection.
+
+**Producer-envelope consumption register** `[contract]`. A mutation or materialization
+state is incomplete unless it cites the row that owns its exact result shape and gives every member one
+registered disposition: render it, hold it for a named receiving state, name the other
+section that consumes it, or mark it irrelevant with the reason. Empty arrays produce no
+report rows, but they are still consumed as the decision to skip that block; an unmentioned
+member is never silently discarded. OAuth reauth is deliberately a separate producer from
+the guarded Source-mutation family. The frame-11/frame-12 producers use this one register
+rather than borrowing a similar-looking tail from another route:
+
+| ID | Producer | Exact authority | Envelope members | Member-by-member disposition |
+| --- | --- | --- | --- | --- |
+| R1 | §1.10 source metadata `PATCH` | `model-hub.md` Source-mutation matrix, `mutation.source_metadata` | `source`, `removed_hops`, `interrupted` | `source` is held as the updated Source projection. `removed_hops` and `interrupted` each render their non-empty block in Source save impact reported; an empty member skips only its own block. M1 owns every invalidated projection before handoff. |
+| R2 | §1.10 source `DELETE` | `model-hub.md` Source-mutation matrix, `mutation.source_delete` | `removed_hops`, `interrupted` | Each array renders its non-empty block in Source removal impact reported; two empty arrays skip the report. The absent `source` is intentional because the Source was deleted. M2 owns the complete post-delete projection read on either path. |
+| R3 | §1.11 reauth acquisition and OAuth terminal | `api.md` OAuth completion, terminal `intent: reauth` | acquisition `flow`; terminal `flow`, `source`, `recovered`, `interrupted_pairs` | RR-1/RR-2 consume the acquisition `flow`; only a non-terminal flow owns presentation/polling, while a terminal flow is status-read first. §1.4 consumes the terminal `flow`. Hold `source` and classify its complete `state` before reading array cardinality: `needs_action` / `error` → Repair unresolved, rendering any non-empty `interrupted_pairs` there; non-blocked + non-empty pairs → Repair impact reported; non-blocked + empty pairs → M3 handoff. `interrupted_pairs` is evidence to render, never the repair verdict. `recovered` remains past-state evidence and selects no copy. M3 owns the affected projections. |
+| R4 | §1.11 credential replacement | `model-hub.md` Source-mutation matrix, `mutation.credential_replace` | `source`, `removed_hops`, `interrupted` | Hold `source`. Render non-empty `removed_hops` and `interrupted` blocks in Repair impact reported; each empty member skips only its block. This producer has no `recovered` or `interrupted_pairs` member: those names belong only to R3's OAuth terminal. M4 owns the affected projections. |
+| R5 | §1.4 / §1.11 E6 materialization error | `api.md` OAuth terminal-response matrix, `oauth_terminal.materialization_*` | standard `ok`, `contract_version`, `error`, optional `detail`; conditional `interrupted_pairs`; `flow` absent | `ok: false` and `error` select E6; `contract_version` is validated and not rendered. Optional `detail` selects no copy and is not surfaced because only registered localized keys may render. If `interrupted_pairs` is present it is exact, nonempty historical impact: render every SupplyGap row in OAuth materialization failed and hold the report through RR-5. If absent, render no report; absence is not an empty success tail and proves nothing about Source outcome. RR-5 still reconciles the full attempt scope. |
+
+**Mutation / authoritative absence → projection invalidation register** `[contract]` `[derived]`. A complete
+response or an authoritative D-36 subject read can prove the write; an exact absent read or
+`source_not_found` can prove that the Source is gone. Neither makes every dependent projection
+current. Received and inferred commit evidence therefore share one rule: before a visible
+success exit, it MUST pass through the owning M row; every authoritative absence passes M0
+before visible handoff. A
+D-36 inference has no response envelope, so response-only impact members are registered as
+unavailable — never as empty and never reconstructed from a later projection read.
+Each M row owns its exact invalidated projection set. M0–M4 use the model surface's complete
+read: `Source[]` + `AgentSupply[]` (including each backend's stored Source order) + the
+Route-chain index. M5 reads only `Source[]`, because its successful mode response already
+carries the post-commit `AgentSupply` but cannot carry a native Source the same transaction
+may have created. A report remains mounted with its response arrays while its owning read
+runs. An inferred commit instead holds the observed subject evidence while the same read
+runs. A failed read invokes F2 for the stale projection and never turns either kind of held
+commit evidence into an unconfirmed write:
+
+| ID | Authoritative evidence | Invalidated projections | Required reconciliation | Failure disposition |
+| --- | --- | --- | --- | --- |
+| M0 | Exact Source absence from `GET /api/models/sources` or a source-bound `source_not_found`; M2 supplies the same evidence after deletion | `Source[]`, every backend's Source order in `AgentSupply[]`, and every Route chain | Remove the exact Source locally, drop its overlay, retain the absence evidence and read the complete model surface before declaring dependent projections current. Every §1.6/§1.10/§1.11 caller enters this owner; M2's post-delete read is this same M0 reconciliation and may hand in its already-settled result rather than duplicate it | Enter Committed projection stale with the Source absence and last good dependent projections explicitly stale; reuse the source-removal refresh-failure line. Retry repeats only M0, while DP-4's committed exits remain legal. None resends a mutation, restores the Source, invents impact or questions the absence |
+| M1 | R1 source metadata / Base URL, or D-36 reread matching every requested normalized field | `Source[]`; a Base URL inventory change may also change `AgentSupply[]` runnability and Route chains through the guarded cascade | After a non-empty impact report's Done-equivalent exit, before handing off an impact-free received success, **or before closing an inferred commit**, read the complete model surface. Keep R1's exact envelope when received; for inference hold the reread Source and mark `removed_hops` / `interrupted` unavailable | A report stays rendered with `sourceDetail.edit.impact.refreshFail`, read-only Retry and every DP-4 Done-equivalent exit; a report-free failure enters Committed projection stale with the exact evidence held |
+| M2 | R2 source deletion, or D-36 reread proving the exact Source absent | `Source[]`, every backend's Source order in `AgentSupply[]`, and every Route chain | After the report's Done-equivalent exit, or immediately for a received two-empty-array / inferred commit, remove the exact Source locally and enter M0. This is M0's deletion-attempt complete-surface read, not a second owner. Keep received arrays when available and otherwise mark both response-only arrays unavailable | A mounted report stays rendered with `sourceDetail.remove.impact.refreshFail`, read-only Retry and every DP-4 Done-equivalent exit; a report-free failure enters Committed projection stale through M0 with the exact evidence held |
+| M3 | R3 OAuth reauth terminal, RR-5 acquired-flow terminal failure, or RR-7 reread proving a held blocked Source clear | the returned or reread Source; every affected Agent-supply/order and Route-chain projection; for `native_cli`, every same-backend sibling invalidated when login started | After a received Repair impact / unresolved report takes its Done-equivalent exit, before handing off a received non-blocked empty-impact terminal, **before an RR-5 terminal-failure handoff**, or before rendering RR-7 inferred repair, read the complete model surface. Keep R3's tail when received; RR-5 has no success tail; RR-7 marks it unavailable | A received report stays rendered with `upstream.repair.impact.refreshFail`, read-only Retry and every DP-4 Done-equivalent exit; a report-free failure enters Committed projection stale with the exact evidence held |
+| M4 | R4 credential replacement, or RR-7 reread proving a held blocked Source clear | the returned or reread Source plus every Agent-supply and Route-chain projection the credential attempt may have changed | Use the same complete-surface timing as M3. Retain R4's standard mutation envelope when received; for RR-7 hold the reread Source and mark `removed_hops` / `interrupted` unavailable | A received report stays rendered with `upstream.repair.impact.refreshFail`, read-only Retry and every DP-4 Done-equivalent exit; a report-free failure enters Committed projection stale with the exact evidence held |
+| M5 | §1.9 successful `direct` → `hub` mode `PATCH`, or D-36's held-origin AgentSupply read proving that switch committed | `Source[]`; the qualifying transaction may have created the backend's singleton native Source, while the returned or reread `AgentSupply` is already the authoritative post-commit backend projection | Hold that exact `AgentSupply` as write evidence and read `GET /api/models/sources` before the success landing. A successful read hands both current projections to 01; it never reconstructs a Source from AgentSupply | Enter Committed projection stale with the returned or reread `AgentSupply` held and the last-good Source list marked stale. Render `upstream.unread` with read-only `upstream.retry`; Retry repeats only M5's Source read. Ordinary navigation remains legal, and no path resends or questions the committed mode switch |
+
+**Repair-reconciliation totality** `[contract]` `[derived]`. This is the one machine for
+create OAuth, reauth and credential replacement. A Source snapshot and a mutation result
+are different evidence: the former may prove that a held blocker cleared, but a Source
+that was already healthy cannot prove that an elective mutation committed. Attempt scope
+is also evidence: a response lost after a native reauth producer was accepted may still
+have invalidated every sibling native Source and its downstream projections. The two new
+columns make both facts mandatory before impact-array emptiness can select an exit. Each
+row is a fixture/checklist cell; a consuming implementation is incomplete if any
+applicable cell has no transition.
+
+| Fixture | Producer / evidence now held | Held origin | Intent | Producer-attempt invalidation scope | Returned Source outcome | Required disposition |
+| --- | --- | --- | --- | --- | --- | --- |
+| RR-1 | OAuth acquisition returns `flow.state` `starting`, `awaiting_action` or `verifying` | none for create; exact Source projection for reauth | create / reauth | Create has no pre-existing Source to invalidate. Hub reauth holds the selected Source scope. An accepted `native_cli` reauth has already invalidated every same-backend native Source plus the dependent Agent/order/chain projections | None yet: acquisition carries `flow`, not a repair tail. Flow state cannot assert that the Source is healthy or that paste input was accepted | PD-1 transfers the click-owned browser context to the flow; PD-2 navigates it whenever the active flow first carries non-null `auth_url` and keeps the visible fallback. Select the server-declared presentation form, then E3a/E3b owns progress: a paste form at `starting` / `awaiting_action` waits for the value, while `verifying` owns completion polling. The acquired flow owns cancellation and the registered invalidation scope until a later read settles it |
+| RR-2 | OAuth acquisition returns any terminal flow | same as RR-1 | create / reauth | Same attempt scope as RR-1; terminal acquisition does not erase it | None yet: the terminal `flow` is not the materialized Source tail | Do **not** open or reconstruct a presentation form. PD-3 closes the unused context and immediately reads `GET /api/models/oauth/status/<flow_id>`; only that route materializes and returns the terminal tail. E2 remains inconclusive under §1.4's evidence-class matrix |
+| RR-3 | Status or submit returns terminal success with the create tail | no Source origin | create | The newly returned Source and its placement projections; no held pre-create Source exists | The returned Source becomes 06's subject. It is not classified by repair outcome rules | §1.4 consumes every member, closes into 06 for the returned `source`, and carries its placement arrays |
+| RR-4 | Status or submit returns terminal success with the repair tail | exact Source projection | reauth | M3's complete model surface; for native this includes every same-backend native sibling already named by RR-1 | Three exhaustive outcomes: `needs_action` / `error` → Repair unresolved regardless of pair count; non-blocked + non-empty `interrupted_pairs` → Repair impact reported; non-blocked + empty pairs → M3 handoff | R3 consumes every member. Hold returned `source`; render every non-empty `interrupted_pairs` block in the selected result. `recovered` remains past-state evidence only. Empty pairs never claim that repair succeeded |
+| RR-5 | Status/submit returns E6's `discovery_failed` / `migration_item_conflict`; or an acquired reauth flow returns terminal `failed` / `cancelled`, E8 `flow_not_found`, or E9 `flow_expired` | none / exact Source projection | create / reauth | Create re-reads `Source[]`. Every acquired-flow reauth terminal failure reads M3's complete model surface **before** handoff, for Hub or native; native includes same-backend siblings. The acquired-flow terminal milestone, not the channel, selects this scope. RR-6–RR-9 pre-flow reauth acquisition failure keeps a selected-Source read for either channel | No successful repair tail exists. For reauth the exact Source is absent, present, or unread; a present reread is projection evidence, not a substitute success envelope. E6 may additionally hold R5's exact nonempty error-envelope `interrupted_pairs`, which remains rendered through the read; absence is no report, not empty success | Stop polling, hold the intent-specific failure and any exact R5 report, then perform the registered read. Absent or E7 → M0 / Source gone. A present settled E6 read keeps OAuth materialization failed and only then permits fresh acquisition; a present non-E6 terminal enters OAuth failed. Unread keeps the originating failure/report mounted and enables **only** read-only Retry of RR-5 before any resend. E2 stays in the bounded poll |
+| RR-6 | A pre-flow reauth or key-replacement request fails or has no answer; the reconciliation read cannot find the held Source | exact Source projection | reauth / replace key | A pre-flow reauth acquisition failure reads the selected Source for Hub or native: without an acquired flow there is no evidence that the sibling invalidation boundary was crossed. An uncertain credential replacement reads M4's complete model surface because that synchronous mutation may have committed | Absent | Enter §1.6 Source gone. No retry may recreate or select a lookalike Source |
+| RR-7 | The same pre-flow failure; the held origin was `needs_action` or `error`, and the reread Source is no longer blocked | blocked Source projection | reauth / replace key | Same producer-attempt scope and mandatory pre-branch read as RR-6 | Present and non-blocked; compared with the held blocked origin | The cleared blocker is sufficient commit evidence, not a visible-exit shortcut. Enter M3/M4 before rendering the reread Source as repaired; if RR-6 already required the complete surface, that read satisfies the M row, while a reauth Source-only read expands to M3 here. Mark every response-only tail member unavailable and invent no impact rows |
+| RR-8 | The same pre-flow failure; the held origin was blocked and the reread Source remains blocked | blocked Source projection | reauth / replace key | Same producer-attempt scope and mandatory pre-branch read as RR-6 | Present and still `needs_action` / `error` | Stay in Repair failed with the reread projection behind it; Retry repeats the held producer and preserves acknowledgement/key |
+| RR-9 | The same pre-flow failure; the held origin was not blocked, whatever present Source the reread returns | `active`, `standby`, `cooldown` or another non-blocked projection | reauth / replace key | Same producer-attempt scope and mandatory pre-branch read as RR-6 | Present, but no state can prove an elective mutation committed without its success envelope | A healthy snapshot is **not** mutation evidence. Stay in Repair failed and repeat only on Retry. The current wire exposes no mutation-specific read marker, so the success shortcut is deliberately unavailable for elective repair |
+| RR-10 | A flow-owning dialog is dismissed, or a bounded retry releases its current flow | none / exact Source projection | create / reauth | Create owns a Source-list read; reauth owns M3's complete model-surface read, including native siblings. The scope survives cancel failure and ownership handoff | Background-only projection result; it never restores a departed dialog or manufactures a terminal repair verdict | Dismissal closes visually under F4; retry may start its fresh acquisition without waiting. In either case the cleanup owner first settles its authorized cancel attempt, then performs the registered read. The read runs even when cancel fails or ownership has moved |
+
+**Dialog phase × exit matrix** `[derived]` `[contract]`. Reversibility, not whether a
+request happens to be pending at this instant, decides dismissal semantics. Every dialog
+state in frames 11/12 and the shared §1.4 machine names one of these three phases.
+
+| Phase fixture | Registered states | Primary / Done | Cancel | Close / Escape / outside | Evidence and focus disposition |
+| --- | --- | --- | --- | --- | --- |
+| DP-1 — reversible draft | §1.4 Default and no-flow failures; Edit open, Remove confirmation, Reauth confirmation, Key entry, guarded refusals and pre-success F1 states | Starts/retries the named producer or its mandatory reconciliation | Restore the exact held origin, or close a create dialog that has no Source origin | Same as Cancel where the frame affords that dismissal | No successful response is held. Preserve valid draft through F1/F3; a no-op return restores the invoking control's focus |
+| DP-2 — in-flight, no cancellation route | Saving source, Removing source, pre-flow Reauthorizing, Replacing key | Disabled while owned | Disabled | Disabled | The state remains mounted until its response is classified; the response totality matrix owns every success member |
+| DP-3 — in-flight OAuth with contracted cancellation | Awaiting sign-in/paste-back/completion, Submitting paste-back and their retryable flow states | Submit/retry follows §1.4 | Close visually into Dismissing | Same as Cancel | RR-10 owns the late cancel and reread sequence; any late submit/poll also re-reads after it settles, and the departed surface never reopens |
+| DP-4 — committed evidence | Source save impact reported, Source removal impact reported, Repair impact reported, Repair unresolved and Committed projection stale | A report/result runs its registered Done exit. Committed projection stale keeps read-only Retry and also exposes the matching Done command | Not rendered | Close, Escape and outside press are always the Done-equivalent committed exit, including while the projection is stale | Never restore the pre-write origin. Preserve the exact success envelope, D-36 Source/absence evidence or authoritative direct absence; a stale exit carries that evidence to the receiving surface, marks unread dependent projections stale and leaves their refresh-failure line visible. Retry repeats only the registered M read. No exit questions or repeats the mutation, invents an unavailable member, or treats a read failure as failed commit |
+
+**Editable-field authority register** `[contract]` `[derived]`. C2 owns preservation;
+C7 owns validity. Save/submit is disabled for an invalid row, so F1 is never used as a
+predictable field validator. The register is exhaustive for editable values added or
+consumed by frames 11/12 and their shared OAuth form.
+
+| Fixture | Field / owner | Authority consumed | Normalization and valid value | Invalid disposition |
+| --- | --- | --- | --- | --- |
+| V1 | frame 11 `display_name` | source metadata handler: string, non-empty, at most 64 characters, `contains_credential_material(display_name) == false` | Cap the input at 64 characters and trim. Only a 1–64-character result for which the authority's credential-material detector returns false may be compared and sent | Disable Save when the trimmed value is empty or the credential-material detector matches; keep the draft local and never use F1 as its validator |
+| V2 | frame 11 `base_url` | `normalize_model_hub_base_url`, used by the source metadata handler | Empty draft → `null`. Otherwise trim, require a parseable HTTP(S) URL with a hostname, no username/password or fragment, no credential-bearing query key and no credential-shaped material; compare/send the normalizer output, including its lowercase scheme and trailing-path-slash removal | Disable Save; keep the draft local. The field is editable only for an `api_key` / Hub Source with a stored credential |
+| V3 | frame 12 replacement `key` | credential-replacement handler: required non-empty string; `force` remains a separate boolean | Trim; a non-empty result enables submit and is held through F1/F3 | Disable submit; never send an empty key |
+| V4 | §1.4 paste-back `value` consumed by frame 12 reauth | OAuth submit shape plus the selected `presentation.expects` | Trim; a non-empty code or callback URL enables submit, and the same normalized value is retained through reconciliation | Disable submit; never infer a second format beyond the server-declared enum |
 
 **F1's last clause used to read 「nothing is persisted」, and a lost answer is not a
 refusal** `[derived]`. Several states this treatment lands on are creates that are not
@@ -643,106 +754,184 @@ extra: §1.3's 保存顺序 sends one array to one route, and sending it twice l
 order. Which side a state falls on is decided by that question, not by the treatment.
 
 `—` in the Copy column means the state introduces no key: it rearranges strings
-the frame renders anyway. Keys are written without the `models.hub.` prefix,
-as everywhere else in this document.
+the frame renders anyway. UI-local short keys are written without the `models.hub.`
+prefix, as everywhere else in this document. A fully qualified presentation key owned
+by the server is the other namespace: consume it verbatim and never add the UI prefix.
+
+**SourceObservation dispatch register** `[contract]`. O1 is the only classifier for
+both the explicit `POST /api/models/sources/observe` answer and the repeated server-side
+observation performed by `POST /api/models/sources`. The producer does not change what
+one terminal observation means. A Source-create success envelope takes the committed
+success row; a classified pre-commit answer takes the matching observation row; only a
+Source-create transport/no-answer result or a response with no terminal observation
+classifier enters ⑦.
+
+| O1 evidence | Explicit observe, Add origin | Explicit observe, Pull origin | Source-create repeated observation |
+| --- | --- | --- | --- |
+| `authentication_failed`, `unreachable`, `timeout` or `adapter_error` | ③ | ③′ | ③; no Source committed |
+| `ambiguous` | ④ | ④′ | ④; no Source committed |
+| `observed`, protocol non-null, `discovery: failed` | ⑤ | ⑤′ | ⑤ when `SourceCreate.accept_unavailable_inventory` is false / omitted; only ⑤ resends it as true `[contract]` |
+| accepted producer result: explicit `observed` + `discovery: succeeded`, or a Source-create committed success envelope | Send the complete `SourceCreate` with `accept_unavailable_inventory` false / omitted `[contract]` | ①′ | Close into 06 with the returned Source and placement evidence |
+| no terminal observation classifier | The explicit observe failure remains F1 and sends no create | The explicit observe failure remains F1 and sends no create | ⑦; commit status is genuinely unconfirmed |
+
+**Held-install status-read owner** `[derived]`. The existing `BackendOAuthPanel`
+establishes the product's 2s polling cadence; installation borrows that cadence, not its
+OAuth timeout. Whenever a mounted Model Hub surface's last
+`GET /api/models/runtime/status` reading is `installing`, that surface reads the same
+route every 2s, whether or not it holds a local initiating sequence. There is no
+terminal bound:
+`installing` is durable server truth rather than a client-owned flow lifetime. A failed
+read is F2 — keep the last Installing projection, render the read cause and let the next
+2s tick retry. Unmount cancels the read owner. Reload performs G-10's first status read;
+if it reads `installing`, it starts this same owner, but restores no local sequence. Any
+later sequence advance is therefore keyed only by the held-intent rule below, never by
+seeing runtime health in isolation.
+
+**Held runtime-sequence continuation register H1** `[derived]`. The initiating surface
+holds exactly one sequence before the first request. Every phase advances only from
+evidence for that phase; runtime health never creates, changes or reconstructs an
+initiating sequence. A request or read failure keeps the exact sequence in its owning F
+state, whose Retry resumes at the first phase that authoritative evidence does not prove
+complete. Every RuntimeDependency received during recovery enters this table before any
+state exit; held intent never bypasses the evidence column.
+
+| Authoritative phase evidence | held `install_and_start` | held `install_start_switch` | no held sequence |
+| --- | --- | --- | --- |
+| Status reads `installing`, including after reload | Installing; retain the sequence and keep the 2s read owner | Installing; retain the sequence and keep the 2s read owner | Installing and keep the same 2s read owner; there is no continuation promise |
+| Status reads `not_started` | Send runtime start, enter Starting and retain the sequence | Send runtime start, enter Starting and retain the sequence | Not started; do not infer either sequence |
+| Status reads `down` | Send runtime start, enter Starting and retain the sequence | Send runtime start, enter Starting and retain the sequence | Unreachable; do not infer either sequence |
+| Status reads `not_installed` | The owning F state retains the sequence; Retry resumes install | The owning §1.9 Failed state retains the sequence; Retry resumes install | Dispatch `error_key` and manifest support through Install failed / Not installed / Unsupported host |
+| Status reads runtime live (`ok` or `degraded`) | Perform the ordinary full live-page dispatch, then release the sequence | Send the mode `PATCH` and enter §1.9 Committing; retain the sequence until M5 accepts the committed AgentSupply evidence, then let M5 own its Source read | Perform the ordinary full live-page dispatch |
+| Any owned request or read fails | The owning F state retains this exact sequence; Retry resumes its first unproved phase | The owning F state retains this exact sequence; Retry resumes its first unproved phase | The owning F state has no sequence to reconstruct |
 
 | Frame | State | Entry condition | Failure / pending | Copy keys | Exit |
 | --- | --- | --- | --- | --- | --- |
-| §1.0 | Loading | Route entered, first payload outstanding | → Unreachable / Sources unread / Partial | — | What the payload says decides where it lands, not the fact that it arrived. In the order the page reads it: `health` first — `down` → Unreachable (engine down), `not_installed` → Not installed or Unsupported host by the manifest, `not_started` → Not started, `degraded` → Impaired; of those four only `degraded` leaves the dispatch running, because it is the one reading under which the page's own two reads still answer (D-34) — the two are then dispatched underneath an Impaired pill at region grain, one of them failing → Sources unread or Partial in the region it owns; then `sources == []` → Empty (no sources); and a payload that trips none of them → Ready |
+| §1.0 | Loading | Route entered, first payload outstanding | → Unreachable / Sources unread / Partial | — | What the payload says decides where it lands, not the fact that it arrived. In the order the page reads it: `health` first — `down` → Unreachable (engine down); `installing` → Installing; `not_installed` + non-null `error_key` → Install failed; `not_installed` + null `error_key` → Not installed or Unsupported host by the manifest; `not_started` → Not started; `degraded` → Impaired. Of those readings only `degraded` leaves the dispatch running, because it is the one reading under which the page's own two reads still answer (D-34) — the two are then dispatched underneath an Impaired pill at region grain, one of them failing → Sources unread or Partial in the region it owns; then `sources == []` → Empty (no sources); and a payload that trips none of them → Ready |
 | §1.0 | Ready | `health` reads `ok`, both page reads answered, and at least one source `[contract]` | F5 | `shell.running` | Any mutation re-renders in place `[derived]` |
-| §1.0 | Empty (no sources) | `sources == []` | F5 | `upstream.empty` | 添加订阅 / 添加 API Key → 04 / 05, where the 04 leg needs a vendor no frame produces `[contract-gap]` G-21; first source → Ready |
-| §1.0 | Not installed | `health` reads `not_installed` `[contract]` | F5 | `shell.notInstalled`, `install.title` … `install.cancel` | Confirm → Installing |
-| §1.0 | Unsupported host | `not_installed`, and the host has no published asset — a reading with **no contracted input**, because nothing the payload carries names the host's platform `[contract]` `[contract-gap]` **G-24** | F5 | `shell.unsupported` | Not from this page — 直连 (§1.8) is the documented escape hatch |
-| §1.0 | Installing | An install confirm was accepted `[contract-gap]` G-10 | F1 → Install failed | `install.progress` | Component present → Not started, and the confirm's promise carries it on to Starting |
-| §1.0 | Install failed | The install did not complete | F1 lands here | `install.fail.title`, `install.fail.detail`, `install.retry` | 重试 → Installing; dismiss → whichever state the next `health` read reports, which is *Not installed* while the component is unusable — this row asserts nothing about what the failed attempt left on disk, because it saw none of it `[contract-gap]` G-10 |
+| §1.0 | Empty (no sources) | `sources == []` | F5 | `upstream.empty` | 添加订阅 → 13, then a vendor row → 04; 添加 API Key → 05; first source → Ready |
+| §1.0 | Not installed | `health: not_installed`, `error_key: null`, and an exact asset exists for server-derived `host_platform` `[contract]` | F5 | `shell.notInstalled`, `install.title` … `install.cancel` | Confirm holds initiating sequence `install_and_start` → Installing |
+| §1.0 | Unsupported host | `health: not_installed`, `error_key: null`, and no `manifest.assets[].platform` exactly equals server-derived `host_platform` `[contract]` | F5 | `shell.unsupported` | Not from this page — 直连 (§1.8) is the documented escape hatch |
+| §1.0 | Installing | `health: installing` from `POST /api/models/runtime/install`, a later status read or G-10's reload read `[contract]` | F2 — the installing-state read owner keeps the last progress state and read cause across a failed tick; the next 2s tick retries `[derived]` | `install.progress` | The observed state, not intent, owns the read loop. H1 dispatches every later RuntimeDependency: `installing` continues it; `not_started` or `down` starts runtime only for a held sequence; failed `not_installed` enters its F state; `ok` / `degraded` takes the held sequence's live row or ordinary page dispatch. Unmount stops polling; reload reconstructs no sequence |
+| §1.0 | Install failed | `health: not_installed` with `error_key: settings.models.install.fail.detail` `[contract]` | F1 lands here | `install.fail.title`, `settings.models.install.fail.detail`, `install.retry` | 重试 sends the idempotent install route → Installing; dismiss leaves the persisted failed projection, and a later successful install clears it before entering Installing |
 | §1.0 | Not started | `health` reads `not_started` `[contract]` | F5 | `shell.notStarted` | Run pill → Starting |
-| §1.0 | Starting | Start accepted — `POST /api/models/runtime/start` | → Unreachable | `shell.starting` | Live → whichever state the payload that reports it names, the same dispatch Loading makes (D-33): both page reads answered with at least one source → Ready, `sources == []` → Empty (no sources), a page read failing → Sources unread or Partial |
+| §1.0 | Starting | Start accepted — `POST /api/models/runtime/start` | → Unreachable; H1 retains any initiating sequence | `shell.starting` | H1 owns a live payload before ordinary page dispatch: held `install_and_start` → perform Loading's full live dispatch, then release; held `install_start_switch` → send the mode `PATCH`, enter §1.9 Committing and release only after M5 accepts commit evidence; no held sequence → Loading's ordinary dispatch. No runtime reading may infer either intent |
 | §1.0 | Impaired | `health` reads `degraded` `[contract]` | F2 at shell grain, over whatever the page already drew — on a first paint that is nothing, and the region whose read failed carries its own F1 beneath this pill (D-34) | `shell.degraded` | The next payload decides, read the way Loading reads one (D-33): `health` back to `ok` with both page reads answered and at least one source → Ready, `sources == []` → Empty (no sources), a page read still failing → Sources unread or Partial, another `health` value → whichever state that value names |
-| §1.0 | Unreachable (engine down) | Status request fails, or `health` reads `down` `[contract]` | F2 | `shell.stopped` | Recovery → the same dispatch Loading makes of the payload that reports it (D-33) — at least one source → Ready, `sources == []` → Empty (no sources), a page read still failing → Sources unread or Partial |
+| §1.0 | Unreachable (engine down) | Status request fails, or `health` reads `down` `[contract]` | F2; H1 retains any initiating sequence | `shell.stopped` | Every recovered RuntimeDependency enters H1: only `ok` / `degraded` may advance held `install_start_switch` to its mode `PATCH`; `not_started` / `down` resumes runtime start for either held sequence; `installing` resumes the installing-state read owner; `not_installed` enters its registered failure/support state. With no held sequence H1 performs the ordinary health dispatch, and no recovery reading creates intent |
 | §1.0 | Partial | Sources load, per-backend supply does not | F1 on a first paint, in the region the group rollups would have filled; F2 on any later read, which keeps the rollups already drawn | `gateway.supply.unread`, `gateway.retry` on a first paint; `—` on a later one, which states nothing new because nothing it was showing changed `[derived]` | 重试 → the supply read runs again and what comes back decides, read against the source list this page is already holding (D-33): a reading with at least one source → Ready, or whichever rollup §1.1 names for it; a reading while `sources == []` → Empty (no sources), which a first-paint retry reaches whenever the list that succeeded beside it was the empty one; another failure → back here |
 | §1.0 | Sources unread | The mirror: `GET /api/models/sources` fails while `health` and per-backend supply both answer `[derived]` | F1, in the region the list would have filled | `upstream.unread`, `upstream.retry` | The list decides, not the fact that one arrived: 重试 answers with at least one source → Ready, and with `sources == []` → Empty (no sources); a later payload carrying the list is read the same two ways |
 | §1.1 | Ready | Sources + per-backend supply both loaded — the two page-level payloads every group-level element is drawn from. The per-model 当前 line is a third read, owned by Chain unresolved below, and this state neither waits on it nor fails with it | F5 | `gateway.group.subtitle.direct`, `gateway.group.subtitle.gateway`, `gateway.group.mode.direct`, `gateway.group.mode.gateway`, `gateway.group.status.ok` | Card → 06; 来源顺序 → 03; model row → 02; 切换到网关 → 10; 切换到直连 → Leaving the gateway; collapse row → Group expanded |
-| §1.1 | Empty | `sources == []` | F5 | `upstream.empty` | 添加订阅 / 添加 API Key → 04 / 05, where the 04 leg needs a vendor no frame produces `[contract-gap]` G-21 |
+| §1.1 | Empty | `sources == []` | F5 | `upstream.empty` | 添加订阅 → 13, then a vendor row → 04; 添加 API Key → 05 |
 | §1.1 | Loading | First paint | → §1.0 Unreachable / §1.0 Sources unread / §1.0 Partial — the same three §1.0 disperses first paint into, because this row is that same first paint seen from the module | — | The payload decides where it lands, not the fact that it arrived — the same reading §1.0 makes one module up: `sources == []` → Empty; anything else → Ready, whose per-source and per-group rows below are drawn from that same payload |
 | §1.1 | Per-source `cooldown` | Source reports cooling `[spec §4.5]` | F5 — a rendered report, not a request | `upstream.state.unavailableRetry` while `retry_at` is still ahead, `upstream.state.unavailableDue` once it has passed `[derived]`, `legend.unavailable` | A later payload reports the source in a different state → that state. `retry_at` is when it becomes worth asking again, not evidence that asking worked, so nothing here promotes the source on a clock — and the two keys are that same fact said in copy: the clock running out changes the sentence and not the state |
-| §1.1 | Per-source `needs_action` | The source reports `needs_action` `[spec §4.5]` | F5 | `sourceDetail.status.needsAction.oauthExpired`, `sourceDetail.status.needsAction.balanceExhausted`, `sourceDetail.status.needsAction.credentialRevoked`, `sourceDetail.status.needsAction.accountBanned` | A later payload reports the source in a different state → that state, whatever it says `[contract]`. The payload carries the source's current status and no history, so on a first load that already reads `needs_action` there is no prior state to go back to; and the recovery has a resulting status of its own that the authority writes — a usable refresh clears the blocker and lands `standby` `[contract]` — so remembering one here could only contradict it. The card is one tap to 06; **replacing the credential is drawn on no frame** `[contract-gap]` G-12 |
-| §1.1 | Per-source `error` | Unclassified failure `[spec §4.5]` | F5 | `sourceDetail.status.error` | The source leaves `error`; the card is one tap to 06 |
-| §1.1 | Group waiting | Every member of that backend's chain is cooling and none is retry-ready `[contract]` | F5 — no request of this state's can fail, and no elapsed time resolves it either | `gateway.group.status.waiting` | A later payload reports a runnable member → Ready or Takeover active. Every member's `retry_at` can pass with the group still waiting, so the exit is the next payload's reading and never the elapsed time. F5 says this state issues nothing, not that waiting is the cure |
-| §1.1 | Group interrupted — CLI unavailable | `supply_status` reads `interrupted` and the blocker is the native CLI that backend depends on being unreachable **in this process**, at any source health `[contract]` | F2 — the group keeps its last rendering | `gateway.group.status.interrupted` | The CLI becomes reachable → Ready. Waiting does not resolve this one, which is why it is a different word from 暂时全部在冷却 |
-| §1.1 | Group interrupted — a source needs action | `supply_status` reads `interrupted`, no member is runnable, and at least one blocker is a source in `needs_action` or `error` `[contract]` | F2 — the group keeps its last rendering | `gateway.group.status.interrupted` | The source leaves `needs_action` / `error` → Ready, or whichever rollup the chain then reads. 重新拉取 on 06 is the drawn repair and recovers a source whose stored credential still works `[contract]`; a credential that has to be **replaced** is drawn on no frame `[contract-gap]` G-12, so this row names the reading it waits for instead of sending the user to a control 06 does not carry |
+| §1.1 | Per-source `needs_action` | The source reports `needs_action` `[spec §4.5]` | F5 | `sourceDetail.status.needsAction.oauthExpired`, `sourceDetail.status.needsAction.balanceExhausted`, `sourceDetail.status.needsAction.credentialRevoked`, `sourceDetail.status.needsAction.accountBanned`, `upstream.repair.reauthorize`, `upstream.repair.replaceKey`, `upstream.repair.topUp`, `upstream.repair.contactVendor`, `upstream.repair.contactProvider` | A later payload reports the source in a different state → that state, whatever it says `[contract]`. The payload carries the source's current status and no history, so on a first load that already reads `needs_action` there is no prior state to go back to; and the recovery has a resulting status of its own that the authority writes — a usable refresh clears the blocker and lands `standby` `[contract]` — so remembering one here could only contradict it. Frame 12 registers the card-level repair: OAuth expiry → Reauthorizing; a revoked API key → Key entry; balance exhaustion or account ban on a known subscription vendor → the §1.4 static top-up or support destination, then Vendor recovery observation; the same two causes on an `api_key` Source → the non-linked service-provider fallback. None borrows another cause's action |
+| §1.1 | Per-source `error` | Unclassified failure `[spec §4.5]` | F5 | `sourceDetail.status.error`, `upstream.state.supplyStopped`; Hub `sourceDetail.action.refetch`, native `upstream.repair.reauthorize` | The source leaves `error` → whichever state the payload reports. Frame 12 reuses its blocked-card geometry rather than inventing another card: card → 06; Hub 重新拉取 → §1.6 Refetching; an unclassified `native_cli` login failure 重新授权 → §1.11 Reauth confirmation |
+| §1.1 | Group waiting | `supply_status: waiting`: no member is runnable and every blocker is either Source cooldown or process-available live connection backoff `[contract]` | F5 — no request of this state's can fail, and no elapsed time resolves it either | `gateway.group.status.waiting` — umbrella copy pending K6 | A later payload reports a runnable member → Ready or Takeover active. Every member's `retry_at` can pass with the group still waiting, so the exit is the next payload's reading and never the elapsed time. F5 says this state issues nothing, not that waiting is the cure |
+| §1.1 | Group interrupted — CLI unavailable | `supply_status` reads `interrupted` and the blocker is the native CLI that backend depends on being unreachable **in this process**, at any source health `[contract]` | F2 — the group keeps its last rendering | `gateway.group.status.interrupted` | The CLI becomes reachable → Ready. Waiting does not resolve this one, which is why it remains distinct from the pending-K6 self-healing `waiting` umbrella |
+| §1.1 | Group interrupted — a source needs action | `supply_status` reads `interrupted`, no member is runnable, and at least one blocker is a source in `needs_action` or `error` `[contract]` | F2 — the group keeps its last rendering | `gateway.group.status.interrupted` | The source leaves `needs_action` / `error` → Ready, or whichever rollup the chain then reads. Frame 12 owns the credential repair controls; 06 keeps 重新拉取 for a source whose stored credential still works `[contract]` |
 | §1.1 | Group interrupted — empty chain | `supply_status` reads `interrupted` because the capability chain for the pinned model has no members at all `[contract]` | F2 — the group keeps its last rendering | `gateway.group.status.interrupted` | A source is placed into that model's chain → Ready. Distinct from *Nothing pinned*, where there is no chain to be empty |
 | §1.1 | Group interrupted — a hop's source is gone | `supply_status` reads `interrupted`, no member is runnable, and at least one hop names a source that no longer exists `[contract]` | F2 — the group keeps its last rendering | `gateway.group.status.interrupted` | The payload stops reporting the blocker → Ready, or whichever rollup the chain then reads. Adding the source again produces a different source and does not re-satisfy the stored hop, so the exit is a chain edit — which is 02's, and this document specifies nothing about 02 (§0.2, §1.2) |
 | §1.1 | Group interrupted — a hop's model is no longer callable | `supply_status` reads `interrupted`, no member is runnable, and at least one hop pins a model its source no longer advertises `[contract]` | F2 — the group keeps its last rendering | `gateway.group.status.interrupted` | 重新拉取 on 06 puts the model back into that source's inventory → Ready, or whichever rollup the chain then reads. The contract keeps the hop visible and non-runnable until an explicit refresh or edit and never re-points it `[contract]`; the edit half is 02's, which this document does not specify (§0.2, §1.2) |
 | §1.1 | Backend has no usable source | Every candidate filtered out | F5 | `gateway.supply.none` | Any source becomes eligible; 来源顺序 → 03 |
 | §1.1 | Backend has no models | The group resolves to zero model rows `[derived]` | F5 | `gateway.group.emptyModels` | A model becomes available to that backend |
 | §1.1 | Nothing pinned | `mode` reads `hub` and `selected_model_id` is `null`, which is exactly when `supply_status` is `null` on the gateway `[contract]` | F5 — a rendered report, not a request | `gateway.group.subtitle.gateway`, `gateway.group.mode.gateway`, `gateway.group.status.noSelection` | A pinned model gives the rollup something to answer with → Ready, or whichever rollup state that reading names |
-| §1.1 | Takeover active | The chain read — `GET /api/models/agents/<backend>/chain?model=<id>`, the only read that carries hops `[contract]` — answers with the head not runnable while a later hop is, **and the head's source reads `cooldown`** — the one `Source.state.status` value that clears itself `[contract]`. §4.3 writes the predicate on the chain's **current** hop and the payload carries no such field `[contract-gap]` **G-31**, so the entry is the runnable reading and the exit states what that costs | F5 | `gateway.group.takenOver`, `gateway.row.currentTakeover`, `gateway.group.status.degraded` | A later chain read reports the head `runnable: true` → Ready `[contract]`. That is still a payload reading and not a clock — the server compares `retry_at` to now and this surface reads the boolean, which is why the exit matches the two rows above and no exit here keys on elapsed time. What it is not is the reroute itself: §4.3 recovers by changing execution position **on the next turn**, so until `current` is on the wire (G-31) the violet retires up to one turn before execution actually moves back, and that interval is the whole cost of the gap at this row. This is frame 08 (§1.7) |
-| §1.1 | Serving past a blocked head | The serving hop is not the head, and the head is blocked by something waiting does not clear — **stated as the negation of the row above, not as a list of causes.** `runnable = health-permits AND process-available` `[contract]`, so a head is here whenever it is not runnable and its block is not the `cooldown` *Takeover active* requires: the head's source reading `needs_action` or `error`, a source that is `healthy` while the native CLI it needs is unavailable in this process (`reason: native_cli_unavailable` `[contract]`), and a head the chain reports as `source_missing` or `model_unsupported` `[contract]`. Defined by negation because the set of non-self-healing blockers is the contract's to extend, and a row enumerated by cause has to be reopened every time it does | F5 | `gateway.group.status.degraded` | The head becomes runnable again → Ready; the head enters `cooldown` while a later hop still serves → Takeover active. Both are readings of a later payload and neither is a clock (D-16) — including the user-cleared blocks, which are reported by the same read as the rest |
-| §1.1 | Chain unresolved | Row grain, not group. That same chain read is outstanding for this row, or came back failed or refused, while the two page payloads are in hand | F2 read at row grain — the group keeps everything those two payloads drew, and this row's three derived columns render `—`. The engine is not implicated and nothing on the head changes | — | The read answers → Ready or Takeover active. What re-issues it is the collapse row (D-35): collapsing and re-expanding the group re-reads every row in it, and it is the drawn control this row's repair uses, there being no per-row 重试 on the frame. The two triggers beside it are the page's own — any mutation that re-renders the group (*Ready* above) and the next load — so a row that failed is never waiting on a request nobody will send |
+| §1.1 | Per-model route unconfigured | The page-grain `model_supply` row reads `chain_length: 0`; this structural branch is evaluated before the forced `has_runnable_hop: false` reading `[contract]` | F5 for the page-grain statement; an outstanding or failed chain detail read remains F2 only for its other derived columns | server-owned `models.launch.route_unconfigured`, consumed verbatim | Render the existing route-unconfigured family in the current-text slot; never gold 供给已暂停 / Supply paused. A later page-grain payload with `chain_length > 0` leaves this structural state and is dispatched by `has_runnable_hop` |
+| §1.1 | Per-model supply paused | The page-grain `model_supply` row reads `chain_length > 0` and `has_runnable_hop: false` `[contract]` | F5 for the page-grain marker; an outstanding or failed chain detail read remains F2 only for its other derived columns | `legend.unavailable` in the existing current-text slot | Render 供给已暂停 / Supply paused immediately in `$--gold`; do not wait for the per-model chain read. A later page-grain payload with `has_runnable_hop: true` removes the marker; `chain_length: 0` instead enters Per-model route unconfigured. The chain read may still fill its other derived columns, but a pending or failed detail read cannot erase or replace this page-owned marker |
+| §1.1 | Takeover active | The chain read — `GET /api/models/agents/<backend>/chain?model=<id>` — returns non-null `current` different from `chain[0]`, while the head is unavailable for a recoverable quota/cooldown or live connection-backoff reason `[contract]` | F5 | `gateway.group.takenOver`, `gateway.row.currentTakeover`, `gateway.group.status.degraded` | Re-evaluate the complete predicate on every later chain payload. `current` back at the head → Ready. A head that is runnable / no longer recoverably unavailable also retires Takeover immediately under the derived-state predicate rule: if `current` still names the later hop, render the ordinary serving/current-hop projection without violet takeover ink or copy until a later payload changes `current`. A local clock alone changes no payload. This is frame 08 (§1.7) |
+| §1.1 | Serving past a blocked head | The serving hop is not the head, and the head is blocked by something waiting does not clear — **stated as the negation of the row above, not as a list of causes.** `runnable = health-permits AND process-available` `[contract]`, so a head is here whenever it is not runnable and its block is not a recoverable quota/cooldown or live connection-backoff reason: the head's source reading `needs_action` or `error`, a source that is `healthy` while the native CLI it needs is unavailable in this process (`reason: native_cli_unavailable` `[contract]`), and a head the chain reports as `source_missing` or `model_unsupported` `[contract]`. Defined by negation because the set of non-self-healing blockers is the contract's to extend, and a row enumerated by cause has to be reopened every time it does | F5 | `gateway.group.status.degraded` | The head becomes runnable again → Ready; the head enters a recoverable quota/cooldown or live connection-backoff while a later hop serves → Takeover active. Both are readings of a later payload and neither is a clock (D-16) — including the user-cleared blocks, which are reported by the same read as the rest |
+| §1.1 | Chain unresolved | Row grain, not group. That same chain read is outstanding for this row, or came back failed or refused, while the two page payloads are in hand | F2 read at row grain — the group keeps everything those two payloads drew. A page-grain `chain_length: 0` row keeps `models.launch.route_unconfigured`; otherwise a row whose `has_runnable_hop` is true renders `—` in its three derived columns and a false row keeps `legend.unavailable` in the current-text slot. Every case renders `—` only in the other unresolved columns. The engine is not implicated and nothing on the head changes | `models.launch.route_unconfigured` for the empty Route; `legend.unavailable` only for a nonempty false row | The read answers → Ready, Takeover active, Per-model route unconfigured or Per-model supply paused. What re-issues it is the collapse row (D-35): collapsing and re-expanding the group re-reads every row in it, and it is the drawn control this row's repair uses, there being no per-row 重试 on the frame. The two triggers beside it are the page's own — any mutation that re-renders the group (*Ready* above) and the next load — so a row that failed is never waiting on a request nobody will send |
 | §1.1 | Group expanded | Collapse row activated | F5 | `gateway.collapse` | Collapse toggled back → Ready |
-| §1.1 | Leaving the gateway | 切换到直连 pressed on a gateway group `[frame]` D-30 — `PATCH /api/models/agents/<backend>/mode` | F1, in place on the group head | `gateway.switchToDirect`, `gateway.fail.switchToDirect`, `gateway.retry` | Success → the group re-renders in its 直连 form; when it was the last gateway backend the page is decided by the sources that are still there, not by the switch — no source left → 09, at least one source retained → **01** with every group in its 直连 form, which is §1.8's own *Retained sources, all direct* branch and not this frame; a failure keeps the group on the gateway and puts the line and 重试 on the group head, which is the slot the re-rendered form would have used |
+| §1.1 | Leaving the gateway | 切换到直连 pressed on a gateway group `[frame]` D-30 — `PATCH /api/models/agents/<backend>/mode` | F1, in place on the group head | `gateway.switchToDirect`, `gateway.fail.switchToDirect`, `gateway.retry` | Success → the group re-renders in its 直连 form; when it was the last gateway backend the page is decided by the sources that are still there, not by the switch — no source left → 09, at least one source retained → **01**, which is §1.8's own *Retained sources* branch and not this frame; a failure keeps the group on the gateway and puts the line and 重试 on the group head, which is the slot the re-rendered form would have used |
 | §1.3 | Ready | Drawer opened and the eligible sources resolved | F1, in the region the list would have filled → Sources unread | `order.title`, `order.subtitle`, `order.section.ordered`, `order.section.ordered.note`, `order.section.heldOut` | 取消 / 关闭 / Escape → close, discarding uncommitted moves; 保存顺序 → Saving |
 | §1.3 | Sources unread | The eligible-source read came back failed while the page behind the drawer is still rendering a healthy runtime `[derived]` | F1, in place | `order.fail.read`, `order.retry` | 重试 → the read runs again, and what it answers with decides: at least one eligible source → Ready, none → Zero eligible sources, another failure → back here; 取消 / 关闭 / Escape → close, having changed nothing |
 | §1.3 | Zero eligible sources | No source is eligible for this backend | F5 | `order.empty.noEligible` | 关闭. A source becomes eligible → Ready. 保存顺序 is disabled |
 | §1.3 | Empty order, held-out sources remaining | The ordered section is empty and the held-out section is not | F5 | `order.empty.ordered` | 排进来 → Dirty. 保存顺序 stays enabled — an empty order is a real configuration |
 | §1.3 | Dirty (uncommitted moves) | 排进来, 移出, a drag, or a keyboard move | F5 — nothing has been sent, so nothing can fail | `order.action.include`, `order.action.exclude` | 保存顺序 → Saving; 取消 → discard, close |
 | §1.3 | Saving | 保存顺序 pressed — the whole order in one `PUT /api/models/agents/<backend>/sources` with `{order: string[]}` `[contract]`, which stores and re-echoes it and touches no chain | F1 | `order.save`, `order.fail.save`, `order.retry` | Success → close; 重试 → Saving again, with every move still held |
-| §1.4 | Default | Opened **for a vendor already chosen** — no frame draws the step that chooses it `[contract-gap]` G-21 | F5 | `addSub.title` … `addSub.hint.chatgpt` | The recommended option is pre-selected; selecting the other replaces it; 去登录 sends `POST /api/models/oauth/start` and its answer decides: accepted → Awaiting sign-in, refused because that backend already holds its one `native_cli` Source `[contract]` → Already bound, and any other answer that is not a flow → Start failed |
+| §1.4 | Default | A frame 13 vendor row has supplied the vendor | F5 | `addSub.title` … `addSub.hint.chatgpt` | The recommended option is pre-selected; selecting the other replaces it. 去登录 synchronously preallocates PD-1's blank browser context, then sends `POST /api/models/oauth/start`; RR-1/RR-2 classify any accepted flow **before** presentation: non-terminal transfers the context to PD-2, then `presentation.expects: none` → Awaiting sign-in, a paste presentation in E3a `starting` / `awaiting_action` → Awaiting paste-back, and a paste presentation already in E3b `verifying` → Awaiting paste-back completion; each navigates when `presentation.auth_url` is non-null now or on a later flow read. Terminal → immediate status read with no form reopened. Refused because that backend already holds its one `native_cli` Source `[contract]` → Already bound, and any other answer that is not a flow → Start failed; either path closes an unused blank context. Polling, re-render and reconciliation never auto-open a second context `[derived]` |
 | §1.4 | Second pass `[derived]` | Re-opened while this backend already holds its one `native_cli` source `[contract]` | F5 | `addSub.opt.added` | The native row is inert whichever account that source holds; the hub row stays choosable and is selected on open, whatever the recommendation says |
-| §1.4 | Awaiting sign-in | 去登录 pressed — `POST /api/models/oauth/start`, then `GET /api/models/oauth/status/<flow_id>` polled every 2s until `OAuthFlow.state` is terminal `[contract]` | → OAuth failed, by two different routes. **A status read that fails is a failed read and not a reading (D-16)**: it says nothing about the flow, it changes nothing this dialog is holding, and the next 2s tick is the retry the loop already carries — with the bound below still running underneath it, so a poll that never recovers ends exactly where a flow that goes silent ends. A read *refused* with `flow_not_found` or `flow_expired` `[contract]` is the other route and is a reading: the server no longer holds this `flow_id`, so no later tick can answer for it and the poll stops at once | `addSub.signIn` | `state` reads `success` → the `create` terminal answers with `flow`, `source`, `added_to` and `adopted_by` — a shape `api.md`'s *OAuth completion* section makes a function of `OAuthFlow.intent` rather than of the route polled `[contract]` — and the dialog closes **into 06 for the source that terminal names** — D-11's landing, the same one §1.5's ② already states, and the one moment `added_to` is in hand (§1.3's note on it, and G-22); `failed` → OAuth failed; `cancelled` → OAuth failed as well `[contract]` — it is one of the six readings the flow's own enum admits, so it arrives here while this dialog is still open and polling, which is the sign-in being abandoned on the provider's surface rather than this dialog's dismissal; the unsuccessful terminals share one destination because 重试 is the affordance either of them wants; the polling bound passes with no terminal reading → OAuth failed, the same state and the same sentence — the bound is `OAuthFlow.expires_at` when the flow carries one `[contract]` and 15 minutes from the start call when it does not `[derived]`, because `oauth-flow.schema.json` admits `expires_at: null` and a deadline only the provider can supply is absent exactly when it is needed; dismissed any of the three ways → Dismissing |
-| §1.4 | Dismissing | 取消, the close icon, or a press outside, while a flow is in flight | F4 — `POST /api/models/oauth/cancel` is issued as the dialog closes and its result is not awaited (D-15) | — | The dialog is gone either way. A cancel that never lands leaves a flow that may still complete, and the source list is then the surface of truth (D-16) |
-| §1.4 | OAuth failed | The flow reached an unsuccessful terminal — `OAuthFlow.state` reads `failed` or `cancelled` `[contract]` — or the status read was refused with `flow_not_found` / `flow_expired` `[contract]`, or the polling bound above passed with no terminal reading. Read off the flow, never off a source | F1 for the retry itself; **F4 for the cleanup below**, which is a call this dialog issues and does not await | `addSub.error.oauthFailed`, `addSub.retry` | 重试, entered on a terminal reading **or on a `flow_not_found` / `flow_expired` refusal** → nothing to cancel and nothing to re-read, a flow the server does not hold being unreachable by either call: a fresh `POST /api/models/oauth/start` goes out and this becomes Awaiting sign-in on the **new** `flow_id`. 重试, entered by the bound passing → the bound is this dialog's clock rather than a reading, so it first re-reads `GET /api/models/oauth/status/<flow_id>` once for the old flow `[derived]` D-32, and that answer decides: `success` → the dialog closes into 06 for the source that terminal names, with no cancel sent and no second flow started; `failed` or `cancelled` → nothing to cancel, fresh start; still non-terminal, or the read itself failed → `POST /api/models/oauth/cancel` goes out for the old `flow_id` and is forgotten whatever it answers, then the fresh start — the same call and the same treatment *Dismissing* uses, for the same reason (D-15, D-16); 取消 → Dismissing, which cancels whichever flow is current |
+| §1.4 | Awaiting sign-in | An acquired flow carries `presentation.expects: none` and no `device_code`; Form B remains G-33. `GET /api/models/oauth/status/<flow_id>` is polled every 2s until the §1.4 evidence-class matrix selects an exit `[contract]` | → OAuth failed / OAuth materialization failed. E2 transport/outage evidence, including `engine_down`, is inconclusive and the next 2s tick retries under the same bound (D-16); E4 or E8/E9 with the held Source present/unread stops at OAuth failed; only E6's two materialization codes stop at OAuth materialization failed | `addSub.signIn`; PD-4 resolves `presentation.instructions_key` and uses the device-code helper on null or lookup failure | PD-2 keeps the authorization link actionable. E5 `success` → `intent: create` closes **into 06 for the source that terminal names** with `added_to` and `adopted_by` in hand; `intent: reauth` → §1.11's R3 repair terminal `[contract]`; E4 → OAuth failed; E8/E9 first run RR-5's registered read, then absent → M0 / Source gone, present or unread → OAuth failed (the unread branch retains read-only Retry); E7 → M0 / Source gone; the polling bound passes with no terminal reading → OAuth failed — the bound is `OAuthFlow.expires_at` when the flow carries one `[contract]` and 15 minutes from acquisition when it does not `[derived]`; dismissed any of the three ways → Dismissing |
+| §1.4 | Awaiting paste-back | The flow carries `presentation.expects: paste_code` or `paste_callback_url` and E3a reads `starting` / `awaiting_action` `[contract]`; entry is either the acquired form with an empty draft or a submit/reconciliation return with its held value | F5 until submit; while `auth_url` is null, PD-5 owns a 2s presentation-delivery read under the existing bound and E2 remains inconclusive | `addSub.paste.title.code`, `addSub.paste.title.callbackUrl`, `addSub.paste.subtitle`, `addSub.paste.label.code`, `addSub.paste.label.callbackUrl`, `addSub.paste.placeholder.code`, `addSub.paste.placeholder.callbackUrl`; PD-4 resolves `presentation.instructions_key`, with `addSub.paste.hint.code` / `addSub.paste.hint.callbackUrl` on null or lookup failure; `addSub.paste.submit`, `addSub.cancel` | The first non-null URL from acquisition or PD-5 invokes PD-2 on the one original browser context; no second flow/context is opened. V4 gates 提交 → Submitting paste-back; only that explicit gesture sends or resends the held value. 取消 / close / outside press → Dismissing (C7/C11/C12/DP-3) |
+| §1.4 | Submitting paste-back | 提交 pressed — `POST /api/models/oauth/submit` with the held `{flow_id, value}` `[contract]` | F1 → Paste-back failed for E2; only E6 → OAuth materialization failed | `addSub.paste.submitting` | E5 dispatches by held intent: `create` closes into 06; `reauth` → §1.11's R3 repair terminal. E4 → OAuth failed; E8/E9 first reconcile the reauth attempt scope, then absent → M0 / Source gone, present or unread → OAuth failed (read-only Retry when unread). E3a `starting` / `awaiting_action` proves the value was not accepted and returns to Awaiting paste-back with it retained; E3b `verifying` alone → Awaiting paste-back completion. E2 transport/no answer → Paste-back failed; E7 → M0 / Source gone |
+| §1.4 | Awaiting paste-back completion `[contract]` | Submit or the reconciliation read below answered with `OAuthFlow.state: verifying`, which is E3b's positive evidence that the held paste value was accepted | The same §1.4 evidence-class matrix and expiry/15-minute bound as Awaiting sign-in: E2, including `engine_down`, continues; only E6 stops at materialization failure | `addSub.paste.submitting`, `addSub.cancel` | E5 dispatches by held intent: `create` closes into 06; `reauth` → §1.11's R3 repair terminal. E4 → OAuth failed; E8/E9 first reconcile the reauth attempt scope, then absent → M0 / Source gone, present or unread → OAuth failed (read-only Retry when unread); E3b stays here; E3a returns to Awaiting paste-back with the value retained for an explicit submit; E6 → OAuth materialization failed; E7 → M0 / Source gone. 取消 / close / outside press → Dismissing |
+| §1.4 | Paste-back failed `[derived]` | The submit request returned E2 evidence — transport/no answer or an outage such as `engine_down` — so its flow outcome is unconfirmed | F1, in place; the input, `flow_id` and intent are kept | `addSub.paste.fail`, `addSub.retry`, `addSub.cancel` | 重试 first re-reads `GET /api/models/oauth/status/<flow_id>` (D-36): E5 dispatches by held intent to 06 or §1.11's R3 repair terminal; E4 → OAuth failed; E8/E9 first reconcile the reauth attempt scope, then absent → M0 / Source gone, present or unread → OAuth failed (read-only Retry when unread); E6 → OAuth materialization failed; E3a `starting` / `awaiting_action` → Awaiting paste-back with the value retained, where only an explicit 提交 resends it; E3b `verifying` → Awaiting paste-back completion without resubmission; E2 leaves this state unchanged; E7 → M0 / Source gone. 取消 → Dismissing |
+| §1.4 | Dismissing | 取消, the close icon, or a press outside, while a flow is in flight | F4 — the dialog closes immediately; RR-10 owns cleanup in the background (D-15) | — | The cleanup owner first settles the authorized `POST /api/models/oauth/cancel` attempt and then always re-reads the affected projection: source list for create, M3's complete model surface for reauth. Cancel failure, an ownership handoff, or a terminal flow does not suppress that later read; no late answer restores the dialog (D-16) |
+| §1.4 | OAuth failed | E4 reached a create terminal failure; or E8/E9 reached a reauth `flow_not_found`, `flow_expired`, `failed` or `cancelled` terminal and RR-5's mandatory attempt-scope read found the Source **or itself failed**; or the polling bound passed with no terminal reading. The flow failure selects this state only after any intent-owned reconciliation attempt; the intent and an unresolved E8/E9 read are held | F1 for the retry itself; **F4 for the cleanup below**, whose background owner sequences cancel then reread | `addSub.error.oauthFailed`, `addSub.retry` | **Fresh acquisition preserves intent** `[contract]`: `create` sends `POST /api/models/oauth/start`; `reauth` repeats §1.11's held producer with confirmed `{acknowledge_irreversible: true}` and never calls the create route. RR-1/RR-2 classify its answer, so an already-terminal retry response is status-read and never presented. Resolved-present E8/E9 may acquire fresh; unresolved E8/E9 first repeats **only** RR-5, then absent → M0 / Source gone, present → fresh acquisition, still unread → stay without resending. After the polling bound, first re-read `GET /api/models/oauth/status/<flow_id>` once (D-32): E5 dispatches by intent to 06 or R3; E6 → OAuth materialization failed; E8/E9 run RR-5 before Source gone / this state; E4 → fresh acquisition; paste E3a → Awaiting paste-back with value retained; E2, E3b or non-paste E3a → launch fresh acquisition and F4 cleanup together, while cleanup settles cancel before RR-10 reread; E7 → M0 / Source gone. 取消 → Dismissing |
+| §1.4 | OAuth materialization failed `[derived]` `[contract]` | Status or submit returned E6's `discovery_failed` or `migration_item_conflict` after this dialog acquired the flow. Authorization entered materialization and the affected source projection may already have changed; no other named code enters this state. R5 consumes the standard error envelope and its conditional `interrupted_pairs` | F2 while RR-5 is outstanding or unread; polling stops immediately | `addSub.error.finalize` for `intent: create`, `addSub.error.finalizeReauth` for `intent: reauth`, optional `sourceDetail.impact.interruptedModels`, `guard.gap.subject`, `guard.gap.agents`, `gateway.modelCount`, `addSub.retry` | Render a present nonempty `interrupted_pairs` report before RR-5's mandatory attempt-scope reread; an absent member renders no report and proves no clean outcome. Create rereads the Source list; reauth rereads M3's complete model surface and applies M0 / Source gone precedence. Keep the failure and exact report mounted while the read runs. An unread result enables only a read-only 重试 of RR-5; it cannot start another OAuth acquisition. After the read settles, Source gone wins where applicable; otherwise the same button may begin fresh acquisition with the held intent/channel body. 取消 → Dismissing |
 | §1.4 | Engine unavailable | The gateway is not running and gateway-upstream was chosen | F1 | `addSub.error.engineDown`, `addSub.retry` | 重试 re-sends, and that press **is** the recovery observation — nothing here watches for one — so its answer decides: whichever of *Awaiting sign-in* / *Already bound* / *Start failed* the start call then names, or still down → back here; 取消 → dismiss, nothing bound `[derived]` |
 | §1.4 | Already bound | 去登录 was refused by the start call because that backend already holds its one `native_cli` Source — 「the API rejects duplicate creation with the existing Source id」 `[spec §4.1]`. **This is the race the dialog cannot see**: it disables the native row from the sources it read on open, and the singleton can appear after that | F1, in place — nothing was sent to the provider, so there is no flow to cancel | `addSub.error.alreadyBound`, `addSub.retry` | 重试 → Second pass: the dialog re-reads the sources, the native row is now the inert one, and the hub row is what 去登录 sends; 取消 → dismiss, nothing bound `[derived]` |
-| §1.4 | Start failed | `POST /api/models/oauth/start` did not put a flow in this dialog's hands, for any reason that is not the singleton refusal above — a refusal it has no second reading for, or no answer at all | F1, in place — there is no `flow_id` here, so there is nothing this dialog can cancel and nothing it can re-read. That is a statement about what the client holds and **not** about what the server did: a refusal means no flow, but a lost response leaves the outcome unknown (F1), and a start that was accepted before its answer died is a flow that may still be running with no way to reach it — `api.md` contracts no flow-list read, and the three routes that could touch it all take the `flow_id` that never arrived `[contract-gap]` **G-30** (D-36). This is the one failure here that *OAuth failed* cannot absorb: that state is defined on a flow, and this dialog has none | `addSub.error.startFailed`, `addSub.retry` | 重试 → the start call goes out again and its answer is read the same three ways *Default* reads one: accepted → Awaiting sign-in, the singleton refusal → Already bound, still no flow → back here. Where the lost answer had been an acceptance, that press is a second flow started beside a first this dialog cannot see, which is what G-30 costs until something can reach it; 取消 → dismiss, nothing bound *by this dialog* `[derived]` |
+| §1.4 | Start failed | `POST /api/models/oauth/start` did not put a flow in this dialog's hands, for any reason that is not the singleton refusal above — a refusal, or no answer at all. The exact generated `(client_nonce, vendor, channel)` tuple remains held `[contract]` | F1, in place — there is no `flow_id` to poll or cancel, so D-36 reconciliation repeats only the held tuple. The server coalesces an in-flight claim, returns its one committed flow, or releases the tuple for one fresh provider start | `addSub.error.startFailed`, `addSub.retry` | 重试 sends the same tuple and classifies the answer as Default does: accepted/coalesced flow → RR-1/RR-2, singleton refusal → Already bound, still no flow → back here. It never opens a second provider start beside the first. 取消 dismisses; a claim released before flow creation has no Source binding `[derived]` |
 | §1.5 | ① Default | Dialog opened | F5 | `addKey.title` … `addKey.submit` | 添加 → ②; 拉取型号 → ②′; 取消 → dismiss |
-| §1.5 | ①′ Pull result, **Pull origin** `[derived]` | ②′ came back with an inventory — including after a hint in ④′, and after 重试 re-ran the fetch from ⑤′ | F5 — the request already succeeded | `addKey.pull.result`, `addKey.pull.empty`, and ①'s own keys, which all still render | Editing Base URL or API Key → ①, the report dropped; 拉取型号 again → ②′; 添加 → ②, which runs its own observation (G-18) and reuses nothing from here; 取消 → dismiss |
-| §1.5 | ② Adding | 添加 pressed — the non-persisting observation runs first `[contract-gap]` G-18, and `POST /api/models/sources` goes out only on the outcome that has consent | → ③ / ④ / ⑤ | `addKey.adding`, `addKey.adding.detail` | The observation comes back clean → persist `[contract-gap]` G-27 → the dialog closes into 06; that persist failing, or never answering → ⑦ |
+| §1.5 | ①′ Pull result, **Pull origin** `[derived]` | ②′ came back with an inventory — including after a hint in ④′, and after 重试 reran the entire observation from ⑤′ | F5 — the request already succeeded | `addKey.pull.result`, `addKey.pull.empty`, and ①'s own keys, which all still render | Editing Base URL or API Key → ①, the report dropped; 拉取型号 again → ②′; 添加 → ②, which runs its own observation and reuses nothing from here; 取消 → dismiss |
+| §1.5 | ② Adding | 添加 pressed — `POST /api/models/sources/observe` runs first, and `POST /api/models/sources` with one generated `client_nonce` goes out only on the outcome that has consent `[contract]` | → ③ / ④ / ⑤ / ⑦ through O1 | `addKey.adding`, `addKey.adding.detail` | O1 classifies both producers. An accepted explicit observation sends the complete `SourceCreate` with `accept_unavailable_inventory` false / omitted `[contract]`; its committed success envelope closes into 06. A classified create refusal returns to ③ / ④ / ⑤ exactly as the same observation would; only transport/no answer or a create response with no terminal observation classifier → ⑦ |
 | §1.5 | ②′ Pulling, **Pull origin** `[derived]` | 拉取型号 pressed, or 重试 pressed from ③′ / ④′ / ⑤′ | → ③′ / ④′ / ⑤′ | `addKey.adding`, `addKey.adding.detail` | Success → ①′, persisting nothing |
-| §1.5 | ③ Failure, **Add origin** | A probe run *as part of* 添加 came back unsuccessful — classified, or the separately contracted **adapter error**, which AC-26 lists beside authentication failure and timeout as one of the five outcomes an API-key test settles on `[contract]` and which no classification of this dialog's covers | F1 | `addKey.fail.subtitle`, `addKey.fail.auth`, `addKey.fail.auth.detail`, `addKey.fail.address`, `addKey.fail.network`, `addKey.fail.unclassified`, `addKey.retry` | 重试 → ②, whichever of the four lines was rendered — the retry re-runs the observation and does not depend on what the last one concluded |
+| §1.5 | ③ Failure, **Add origin** | O1 received one of four closed unsuccessful outcomes from the explicit 添加 observation or Source create's repeated observation: `authentication_failed`, `unreachable`, `timeout` or `adapter_error` `[contract]` | F1 | `addKey.fail.subtitle`; exactly one outcome line: `authentication_failed` → `addKey.fail.auth` + `addKey.fail.auth.detail`, `unreachable` → `addKey.fail.address`, `timeout` → `addKey.fail.network`, `adapter_error` → `addKey.fail.unclassified`; `addKey.retry` | 重试 → ②, whichever producer returned the line — the retry re-runs the explicit observation before any create and does not depend on what the last one concluded |
 | §1.5 | ③′ Failure, **Pull origin** `[derived]` | A probe run by 拉取型号 classified the failure | F1 | as ③ | 重试 → **another 拉取型号, not ②** |
-| §1.5 | ④ Interface undetermined, **Add origin** | Reachable **and** authenticated, and the response shape matches no known interface | F1 | `addKey.undetermined.title`, `addKey.undetermined.detail`, `addKey.undetermined.label`, `addKey.undetermined.hint`, `addKey.protocol.anthropicMessages`, `addKey.protocol.openaiResponses`, `addKey.protocol.openaiChatCompletions`, `addKey.retry` | Pick a hint + 重试 → probe again in the hinted order → identified: persist `[contract-gap]` G-27 and close, or → ⑦ if that persist does not land; still undetermined: back to ④ with the attempt as evidence |
+| §1.5 | ④ Interface undetermined, **Add origin** | O1 received `SourceObservation.outcome: ambiguous` from the explicit 添加 observation or Source create's repeated observation: reachable, protocol null, and authentication authenticated or unknown `[contract]` | F1 | `addKey.undetermined.title`, `addKey.undetermined.detail`, `addKey.undetermined.label`, `addKey.undetermined.hint`, `addKey.protocol.anthropicMessages`, `addKey.protocol.openaiResponses`, `addKey.protocol.openaiChatCompletions`, `addKey.retry` | Pick a hint + 重试 → run the entire explicit observation with that `protocol_order`; identified with discovery succeeded → send the complete `SourceCreate` with `accept_unavailable_inventory` false / omitted `[contract]`, whose result re-enters O1; identified with discovery failed → ⑤; still ambiguous → back to ④ |
 | §1.5 | ④′ Interface undetermined, **Pull origin** `[derived]` | The same outcome, from 拉取型号 | F1 | as ④ | Pick a hint + 重试, still as a pull → identified: → ①′, persisting nothing; still undetermined: back to ④′ |
-| §1.5 | ⑤ Identified, inventory unavailable, **Add origin** `[frame]` `d6bFlX` | The probe proved the protocol with a real response, **and** the model fetch came back unusable | F1 | `addKey.inventory.title`, `addKey.inventory.detail`, `addKey.inventory.reason.rateLimited`, `addKey.inventory.reason.transport`, `addKey.inventory.reason.unknown`, `addKey.retry`, `addKey.addAnyway` | 重试 → re-run **the fetch only**; 仍要添加 → persist with the proved protocol and an empty inventory `[contract-gap]` G-27, close into 06, or → ⑦ if that persist does not land |
-| §1.5 | ⑤′ Identified, inventory unavailable, **Pull origin** `[derived]` | The same outcome, from 拉取型号 | F1 | as ⑤ | 重试 → re-run the fetch as a pull |
+| §1.5 | ⑤ Identified, inventory unavailable, **Add origin** `[frame]` `d6bFlX` | O1 received `SourceObservation.outcome: observed`, protocol non-null, and `discovery: failed` from the explicit 添加 observation or Source create's repeated observation; the contract carries no request/status/reason evidence `[contract]` | F1 | `addKey.inventory.title`, `addKey.inventory.detail`, `addKey.retry`, `addKey.addAnyway` | 重试 → run **the entire explicit observation** again. 仍要添加 → send `SourceCreate` with **`accept_unavailable_inventory: true`** `[contract]`; false / omitted remains the clean path and may not commit this repeated discovery-failed observation. The server still repeats response-backed observation: only the same protocol-proved / discovery-failed cell may commit with `models: []`; every other classified result remains O1's own and the flag supplies no evidence. Only that committed success envelope closes into 06 |
+| §1.5 | ⑤′ Identified, inventory unavailable, **Pull origin** `[derived]` | The same outcome, from 拉取型号 | F1 | as ⑤ without `addKey.addAnyway` | 重试 → run the entire observation again as a pull |
 | §1.5 | ⑥ Engine unavailable, **Add origin** `[derived]` | The gateway is not running when 添加 is pressed | F1 | `addKey.fail.engineDown`, `addKey.retry` | F1 in full: the form keeps every value it holds and the primary becomes 重试. Pressing it **is** the recovery observation — nothing here watches for one — and re-attempts 添加 → ②, whose own outcomes then apply; the engine still down → back here; 取消 → dismiss |
 | §1.5 | ⑥′ Engine unavailable, **Pull origin** `[derived]` | The gateway is not running when 拉取型号 is pressed | F1 | as ⑥ | The same, one control over: 重试 re-attempts 拉取型号 → ②′. Nothing was going to be persisted either way, so the two rows differ only in which request the press re-sends |
-| §1.5 | ⑦ Save unconfirmed, **Add origin** `[derived]` | The observation 添加 owed has already come back with consent — clean in ②, identified by a hint in ④, or waived in ⑤ — and `POST /api/models/sources` then failed or never answered. Separate from ③ / ④ / ⑤, which are readings of the *upstream*: this one is the persist step. It is a state this file can write while G-27 leaves the request body unspecified, because what failed is the request and not its shape | F1 | `addKey.fail.save`, `addKey.retry` | 重试 re-reads `GET /api/models/sources` before it re-sends, which is F1's own clause for a create that may have committed unseen — **and that read cannot name its own subject.** The `id` was server-assigned into the response that died, the key never comes back, and neither Base URL nor display name is contracted unique, so the list answers 「what is here」 and not 「whether this create is here」 `[contract-gap]` **G-29** (D-36). This row does not close that distance by resemblance — choosing the nearest-looking Source is D-28's error one surface over — so the reading is evidence for the person reading it and never a branch: 重试 → ②, which re-runs its own observation (G-18) and persists again; failing again → back here; 取消 → dismiss. Where the lost response had committed, that second persist is a second Source, which is what G-29 costs. There is no ⑦′, because Pull origin persists nothing and so has no step that can fail this way |
-| §1.6 | Ready | Source detail loaded and the table holds at least one model — discovered, added by hand, or both. When `last_discovered_at` is null the inventory has no age, `{{time}}` is absent by §0.9's rule, and the status line drops that segment `[contract]` | F5 | `sourceDetail.status.inUse`, `sourceDetail.status.listUpdated`, `sourceDetail.summary` | `iGcAi` → 01; 重新拉取 → Refetching; 添加模型 → Manual draft; a tier area → Tiers editing; a row's overflow → Removing a manual entry |
+| §1.5 | ⑦ Save unconfirmed, **Add origin** `[derived]` | The observation 添加 owed has already come back with consent — clean in ②, identified by a hint in ④, or waived in ⑤ — and the complete `SourceCreate` then returned no terminal observation classifier or never answered. Every classified pre-commit observation instead leaves through O1 to ③ / ④ / ⑤. The generated `client_nonce` and every request field remain held `[contract]` | F1 | `addKey.fail.save`; after `source_create_in_progress`, `addKey.fail.inProgress`; `addKey.retry` | Each user press of 重试 first reads `GET /api/models/sources` for the exact nonce. Match → claim the committed Source and enter 06 through the ordinary projection read. Miss → resend the same request/nonce. A response-backed observation enters O1; nonce conflicts follow the exact branches here. `source_create_in_progress` returns to this actionable state with `addKey.fail.inProgress`; there is no timer, automatic list read or automatic mutation retry. A later user press alone repeats the list-read + same-nonce resend algorithm. `source_nonce_conflict` rereads the list and claims the committed Source; a classified pre-commit observation → ③ / ④ / ⑤; a released slot starts one fresh create. Committed never replays the original response, and no branch matches by URL/name or creates a second Source (D-36). 取消 dismisses; after a committed boundary it ends only the caller's wait and the next Source/Agent read owns the result. There is no ⑦′ because Pull origin persists nothing |
+| §1.6 | Ready | Source detail loaded and the table holds at least one model — discovered, added by hand, or both. When `last_discovered_at` is null the inventory has no age, `{{time}}` is absent by §0.9's rule, and the status line drops that segment `[contract]` | F5 | `sourceDetail.status.inUse`, `sourceDetail.status.listUpdated`, `sourceDetail.summary` | `iGcAi` → 01; a rendered 重新拉取 → Refetching; 添加模型 → Manual draft; a tier area → Tiers editing; a row's overflow → Removing a manual entry. The §1.6 action-capability row decides whether 重新拉取 exists |
+| §1.6 | Retired discovered row | A model row carries `origin: discovered` and `retired: true` `[contract]` | F5 — a durable projection, not a request | `sourceDetail.entry.retired` | Keep the ordinary row chrome, switch its ink to muted and append the existing tag component with 已退役 / Retired. The row stays readable and never supplies. It renders no discovered-row delete action; refetch preserves the tombstone and cannot revive it. No new component or reactivation exit exists |
 | §1.6 | Empty (no models) | The table is empty **and** a discovery has completed — `last_discovered_at` is non-null `[contract]` | F5 | `sourceDetail.empty` | Manual add, or a successful refetch |
 | §1.6 | Never fetched | The table is empty **and** no successful discovery has ever completed — `last_discovered_at` is null `[contract]` | F5 | `sourceDetail.emptyNeverFetched` | A successful 重新拉取, or a manual add that commits → Ready |
 | §1.6 | Refetching | 重新拉取 pressed — `POST /api/models/sources/<source_id>/refresh`, guarded | F3 when the response is a guard refusal, F2 otherwise → Refetch failed | `sourceDetail.action.refetch` | Any answer this page can read → Refetch result, **whatever the row count comes back as, none included**. An emptying refetch is not a different kind of answer, and it is the one where the diff is worth most: every id the source used to advertise has just left the discovered slice, so it is where `sourceDetail.refetch.removed` names the largest set it will ever name. Leaving straight for Empty (no models) — as this row read until this round — dropped that report at that exact moment, and replaced it with a sentence that says a fetch returned nothing and not what stopped being there. The empty table is still an empty table: *Refetch result* renders `sourceDetail.empty` under the removal line, and of §1.6's two empty readings only that one is reachable from here, since this refetch completing is what makes `last_discovered_at` non-null. It is where *Refetch result* lands rather than what this state enters; a refusal → Refetch refused |
 | §1.6 | Refetch result `[derived]` | A refresh came back usable — the response carries the complete updated source `[contract]`, and this page still holds the list it was rendering, so what changed is a comparison of two payloads it has | F5 — the request already succeeded | `sourceDetail.refetch.added`, `sourceDetail.refetch.removed`, `sourceDetail.refetch.unchangedOnly`, and the keys for whatever the table now is: Ready's own while any row is left, `sourceDetail.empty` when the answer emptied it. The diff line and the table's own copy are two statements about one payload, and the second never cancels the first | Any next action, or the next load → Ready, or → Empty (no models) when the answered list was empty: the diff is a report about one fetch and nothing re-derives it, so what remains afterwards is the table's own reading. 重新拉取 again → Refetching |
-| §1.6 | Refetch refused | The refresh came back refused, naming the hops a shorter inventory would remove | F3 — `Qp6FI`, the same confirm this page already starts for a removal | `guard.title.refetch`, `guard.subtitle.refetch`, `guard.confirm.refetch`, `guard.label`, `guard.count`, `guard.hop.position`, `guard.hint.safe`, `guard.hint.interrupt`, `guard.gap.label`, `guard.gap.subject`, `guard.gap.agents`, `gateway.modelCount`, `guard.cancel` | 仍要拉取 re-sends the same `POST` with `force` → Refetching; 取消 → Ready, the previous list kept |
+| §1.6 | Refetch refused | The refresh came back refused, naming the hops a shorter inventory would remove | F3 — `Qp6FI`, the same confirm this page already starts for a removal | `guard.title.refetch`, `guard.subtitle.refetch`, `guard.confirm.refetch`, `guard.label`, `guard.count`, `guard.hop.position`, `guard.hint.safe`, `guard.hint.interrupt`, `guard.gap.label`, `guard.gap.subject`, `guard.gap.agents`, `gateway.modelCount`, `guard.cancel` | 仍要拉取 re-sends the same `POST` with `force` → Refetching; 取消 restores the exact held §1.6 origin by C5 |
 | §1.6 | Refetch failed | The refresh came back a classified failure, **or never answered at all** — F2's own 「otherwise」 lands both here. For the classified one `api.md` has the server update the **source-global state**, preserve the last successful model list and timestamp, and return the normal safe error `[contract]`, so the source changed state and the answer does not carry which. For a lost answer even that is not known: F1's rule leaves the outcome unknown, and a refresh that did commit has already replaced the discovered inventory — on the `force` path, after removing the hops the guard named | F2 lands here. The **previous list is kept only where the contract keeps it**, which is the classified branch and is the contract's guarantee rather than this page's choice; a lost answer guarantees nothing, which is why the re-read below is a reconciliation and not a status refresh | `sourceDetail.fail.refetch`; the status word is not this row's and comes from whichever state the re-read below lands on | The failure line goes on the bar, and the page re-reads `GET /api/models/sources` — the only read that answers with this source, there being no single-source route `[contract]`. **That read settles the mutation as well as the status**, because the page has held `source_id` since it sent the refresh and the list answers with the complete `Source`, models included `[contract]` (D-36): what it renders afterwards is that source as read, so a refresh that committed unseen is visible rather than papered over by the list this page was holding. The state it finds dispatches through this section's own status mapping: `cooldown` → Cooling, `needs_action` → Needs action, `error` → Unclassified error, `standby` or an `active` nothing adopts → Not supplying, an adopted `active` → Ready. The source absent from that list → Source gone. The re-read itself failing → the bar keeps the status word and the page keeps the list it was already rendering, a failed read being no reading at all (D-16), and the line above stays true of both. 重新拉取 stays enabled throughout → Refetching |
 | §1.6 | Tiers editing | A row's tier area was activated | F5 — nothing is sent until a tier is committed | `sourceDetail.tiers.add`, `sourceDetail.tiers.inputHint`, `sourceDetail.tiers.empty`, `sourceDetail.tiers.addFirst` | Enter, or a chip's × → Tier commit; Enter on an empty input, or on a value this row already carries, commits nothing and stays here — `minLength: 1` and `uniqueItems` `[contract]`; blur / Escape → Ready, discarding whatever is still uncommitted in the input |
 | §1.6 | Tier commit | A tier was added by Enter **or** removed by a chip's × — either way `PATCH /api/models/sources/<source_id>/models/<model_id>` carries the complete `reasoning_efforts` list `[contract]` | F1, on the row: the row keeps the pre-request list, states the failure and offers 重试 — an add leaves its text in the input, a removal puts its chip back | `sourceDetail.fail.tier`, `sourceDetail.retry` | Success → the answered list is what the row renders, still in Tiers editing |
 | §1.6 | Manual draft | 添加模型 pressed | F5 — a local draft, sent by nothing | `sourceDetail.entry.manual`, `sourceDetail.addRow.hint` | 添加 is enabled only once the id field holds a value this source's table does not already list `[derived]`: blank, whitespace-only, or an already-listed id leaves it **disabled**, the same answer 「Tiers editing」 gives an empty or duplicate tier, and `sourceDetail.addRow.hint` is what the row states meanwhile. Enabled 添加 → Manual commit; 取消 discards the row and nothing is persisted |
 | §1.6 | Manual commit | 添加 pressed on an enabled 添加 — `POST /api/models/sources/<source_id>/models` | F1, on the draft row: **the row and everything typed in it are kept**, and the primary becomes 重试 | `sourceDetail.fail.addModel`, `sourceDetail.retry` | Success → the row becomes an ordinary 手动添加 row → Ready |
 | §1.6 | Removing a manual entry | The row menu's 移除 — `DELETE /api/models/sources/<source_id>/models/<model_id>`, guarded | F3 when the response is a guard refusal, F1 otherwise | `sourceDetail.fail.removeModel`, `sourceDetail.retry`, `sourceDetail.row.remove` | Success → the row is gone → Ready while any row is left; removing the last one → Empty (no models) or Never fetched by `last_discovered_at`, the same two readings §1.6 gives every other empty table |
-| §1.6 | Guard refused | The `DELETE` came back refused, naming the hops it would remove | F3 — `Qp6FI`, this product's one guarded-change confirm | `guard.title.removeModel`, `guard.subtitle.removeModel`, `guard.confirm.removeModel`, `guard.label`, `guard.count`, `guard.hop.position`, `guard.hint.safe`, `guard.hint.interrupt`, `guard.gap.label`, `guard.gap.subject`, `guard.gap.agents`, `gateway.modelCount`, `guard.cancel` | 仍要移除 re-sends the same `DELETE` with `force` → Removing a manual entry; 取消 → Ready, nothing removed |
+| §1.6 | Guard refused | The `DELETE` came back refused, naming the hops it would remove | F3 — `Qp6FI`, this product's one guarded-change confirm | `guard.title.removeModel`, `guard.subtitle.removeModel`, `guard.confirm.removeModel`, `guard.label`, `guard.count`, `guard.hop.position`, `guard.hint.safe`, `guard.hint.interrupt`, `guard.gap.label`, `guard.gap.subject`, `guard.gap.agents`, `gateway.modelCount`, `guard.cancel` | 仍要移除 re-sends the same `DELETE` with `force` → Removing a manual entry; 取消 restores the exact held §1.6 origin by C5 |
 | §1.6 | Not supplying | The source is `standby`, or `active` with nothing adopting it `[contract]` | F5 | `upstream.state.standby` | The source starts supplying again — only the bar changes |
 | §1.6 | Cooling | The source is `cooldown` `[contract]` | F5 | `upstream.state.unavailableRetry` while `retry_at` is still ahead, `upstream.state.unavailableDue` once it has passed `[derived]` | A later payload reports the source in another state → that state; `retry_at` passing is not that payload — it changes which of the two keys the bar renders and nothing else. Separate from *Not supplying* because the two answer different questions — standby says nothing is drawing from this source, cooling says nothing *can* yet and names when that changes. This section's own status mapping gives `cooldown` the gold `upstream.state.unavailableRetry`; a row that folded it into the muted standby word dropped the one fact the mapping exists to carry |
-| §1.6 | Needs action | The source is `needs_action` `[spec §4.5]` | F5 | `sourceDetail.status.needsAction.oauthExpired`, `sourceDetail.status.needsAction.balanceExhausted`, `sourceDetail.status.needsAction.credentialRevoked`, `sourceDetail.status.needsAction.accountBanned` | The reported cause clears. The bar states which cause `state.detail_key` carries and the table stays live; **no repair control is drawn here or on 01** `[contract-gap]` G-12 |
-| §1.6 | Unclassified error | The source is `error` `[spec §4.5]` | F5 | `sourceDetail.status.error` | The source leaves `error`. The bar reads 异常 and claims no cause; the table and both actions stay live |
-| §1.6 | Source gone | The selected source is not in a `GET /api/models/sources` read this page makes, or a mutation on it answers `source_not_found` `[contract]` — removed by another tab, another API client, or a guarded cascade while 06 was open. Distinct from every empty reading above, which are about this source's *models*; here the subject of the page is what is gone, and the list may still hold others, so §1.0's Empty does not answer either | F5 — this state issues nothing. It is what the page renders once a read or a mutation has already told it | `sourceDetail.gone` | The detail is dropped rather than left standing over a source that is not there (D-16), and the frame's own back control `iGcAi` → 01, where the list is the surface of truth — the same answer §1.4's *Dismissing* gives for the same reason (D-16). Re-entry is not a state of this frame: there is no source left to open |
-| §1.7 | Nominal | **No route is taken over or exhausted** — every configured chain is serving its own first stored hop. AC-30 makes takeover 「a projection of visible configuration plus live runnability」 rather than a stored sibling state `[contract]`, so the subject of this frame is chains and the predicate is read per chain: a Source no chain draws from, and a non-head hop that is unavailable while the head still serves, are both outside it. Reading it globally — 「no source is unavailable」 — activated 08 for an unhealthy Source nothing was using, and left the frame with no valid state whenever one existed | F5 | — | A head enters `cooldown` while a later candidate serves → Takeover; a head stops being runnable for something waiting does not clear → §1.1 *Serving past a blocked head*, which is not this frame |
-| §1.7 | Takeover | The head is unavailable **for a recoverable quota/cooldown reason** and a next candidate is serving `[contract]` — §4.3 derives takeover from exactly that pair, and the paragraph below says what the other blocker kinds render instead | F5 | `takeover.pill`, `takeover.chip` | Recovery → Nominal, on the next turn `[spec §4.3]` |
+| §1.6 | Needs action | The source is `needs_action` `[spec §4.5]` | F5 | `sourceDetail.status.needsAction.oauthExpired`, `sourceDetail.status.needsAction.balanceExhausted`, `sourceDetail.status.needsAction.credentialRevoked`, `sourceDetail.status.needsAction.accountBanned` | The reported cause clears. The bar states which cause `state.detail_key` carries and the table stays live; frame 12 owns the card-level repair controls, while this page keeps 重新拉取 enabled only when the §1.6 action-capability row renders it |
+| §1.6 | Unclassified error | The source is `error` `[spec §4.5]` | F5 | `sourceDetail.status.error` | The source leaves `error`. The bar reads 异常 and claims no cause; the table and every action the capability row renders stay live |
+| §1.6 | Source gone | The selected source is not in a `GET /api/models/sources` read this page makes, or any source-bound mutation registered in §1.6, §1.10 or §1.11 answers `source_not_found` `[contract]` — removed by another tab, another API client, or a guarded cascade while the surface was open. This entry has precedence over every caller's F1/F3 branch; those treatments apply only after the absence reading is excluded. Distinct from every empty reading above, which is about this source's *models*; here the subject of the page is what is gone, and the list may still hold others, so §1.0's Empty does not answer either | M0 owns the read: preserve exact absence, remove the Source locally and refresh Sources + Agent supply/order + every Route chain. F2 if that read fails; the absence itself remains authoritative | `sourceDetail.gone`; on stale dependent projections reuse `sourceDetail.remove.impact.refreshFail`, `sourceDetail.retry`, `sourceDetail.remove.impact.done` | Drop the detail/card overlay immediately. M0 success hands current projections to 01. On read failure → Committed projection stale with the exact absence and last-good dependent projections. Retry repeats only M0; DP-4's Done, back, close, Escape, outside press and ordinary navigation remain legal non-mutating exits. No caller may bypass M0, re-send the mutation, restore the Source, question the absence or invent impact (C13/C14) |
+| §1.7 | Nominal | **No route is taken over or exhausted** — every configured chain is serving its own first stored hop. AC-30 makes takeover 「a projection of visible configuration plus live runnability」 rather than a stored sibling state `[contract]`, so the subject of this frame is chains and the predicate is read per chain: a Source no chain draws from, and a non-head hop that is unavailable while the head still serves, are both outside it. Reading it globally — 「no source is unavailable」 — activated 08 for an unhealthy Source nothing was using, and left the frame with no valid state whenever one existed | F5 | — | A head enters a recoverable quota/cooldown or live connection-backoff while a later candidate serves → Takeover; a head stops being runnable for something waiting does not clear → §1.1 *Serving past a blocked head*, which is not this frame |
+| §1.7 | Takeover | The head is unavailable **for a recoverable quota/cooldown or live connection-backoff reason** and a next candidate is serving `[contract]` — §4.3 derives takeover from exactly that pair, and the paragraph below says what the other blocker kinds render instead | F5 | `takeover.pill`, `takeover.chip` | Re-evaluate the complete predicate on every authoritative chain payload under §0.8's shared derived-state rule. As soon as it is false, retire Takeover: a recovered head serving → Nominal; `current` still naming the successor after the head recovers → the ordinary serving/current-hop projection, with no violet latch and no wait for another turn |
 | §1.7 | Exhausted | The head is unavailable and **no** candidate remains | F5 | `gateway.supply.none` | Any candidate recovers → Takeover or Nominal |
 | §1.7 | Multiple takeovers | More than one backend was rerouted | F5 | `takeover.pill` | Each backend recovers independently |
 | §1.7 | Loading / Empty / Unreachable | As §1.0 | As §1.0 | — | As §1.0 |
-| §1.8 | Ready (first run) | Every backend is in 直连, no source exists, and at least one backend row renders | F5 | `direct.card.current`, `direct.card.current.sub`, `direct.pill.direct`, `direct.backend.claude.detail`, `direct.backend.codex.detail`, `direct.backend.opencode.detail`, `direct.benefits.title`, `direct.benefits.1` … `direct.note.perBackend`, `shell.allDirect` | 切换到网关 on a row → 10's confirm for that backend; a source added or a backend switched → 01 |
-| §1.8 | Loading | First paint | → §1.0 Unreachable / §1.0 Sources unread / §1.0 Partial — the same three §1.0 disperses first paint into, because this is that same first paint seen from the direct home: the runtime status failing or reading `down` → Unreachable, `GET /api/models/sources` failing → Sources unread, per-backend supply failing → Partial. Neither page read may be dropped into Unreachable, whose entry is a runtime-status reading: this frame needs the source list to tell *Ready (first run)* from *Retained sources, all direct*, and needs the supply read to draw a backend row at all, so a read that failed is what has to be said `[derived]` D-34 | — | Payload arrives → No backend found when the rows resolve to zero, Retained sources, all direct when a source already exists and no backend is on the gateway — which is 01, not this page — and Ready (first run) otherwise. The three are exactly this frame's own branch table below |
-| §1.8 | No backend found | The rows resolve to zero `[derived]` `[contract-gap]` G-11 | F5 | `direct.empty.title`, `direct.empty.body`, `direct.empty.install` | **Install a backend CLI and reload.** Neither card renders and the pill is absent; the page leaves this state only when a backend appears in the payload. This is the one state on the page with no in-product action, and the copy says so rather than leaving the user to guess |
-| §1.8 | Retained sources, all direct | Every backend is in 直连 and at least one source exists — reachable through `adopt.undo.3` | F5 | — | The page is 01 with every gateway group in its 直连 form, not this frame |
+| §1.8 | Ready (first run) | `installedAgents` is nonempty, every member is in 直连, and no source exists | F5 | `direct.card.current`, `direct.card.current.sub`, `direct.pill.direct`, `direct.backend.claude.detail`, `direct.backend.codex.detail`, `direct.backend.opencode.detail`, `direct.benefits.title`, `direct.benefits.1` … `direct.note.perBackend`, `shell.allDirect` | 切换到网关 on a row → 10's confirm for that backend; a source added or an installed backend switched → 01 |
+| §1.8 | Loading | First paint | → §1.0 Unreachable / §1.0 Sources unread / §1.0 Partial — the same three §1.0 disperses first paint into, because this is that same first paint seen from the direct home: the runtime status failing or reading `down` → Unreachable, `GET /api/models/sources` failing → Sources unread, per-backend supply failing → Partial. Neither page read may be dropped into Unreachable, whose entry is a runtime-status reading: this frame needs the source list to tell *Ready (first run)* from *Retained sources*, and needs the supply read to derive `installedAgents`, so a read that failed is what has to be said `[derived]` D-34 | — | Payload arrives → Retained sources when any Source exists, even with `installedAgents` empty; otherwise No backend found when `installedAgents` is empty, Ready (first run) when every nonempty member is direct, or 01 when any installed member is on Hub. These are exactly §1.8's branch rules below |
+| §1.8 | No backend found | No Source exists **and** `installedAgents` is empty: every `AgentSupply.cli_present` is false `[contract]` | F5 | `direct.empty.title`, `direct.empty.body`, `direct.empty.install` | **Install a backend CLI and reload.** Neither card renders and the pill is absent; a Source appearing selects 01, while an installed Agent appearing re-dispatches the no-Source page by mode. Hidden persisted modes cannot suppress this zero-installed branch |
+| §1.8 | Retained sources | At least one Source exists, regardless of whether `installedAgents` is empty, all direct or contains a Hub member — reachable through `adopt.undo.3` and retained storage `[contract]` | F5 | — | The page is 01: render the upstream module and exactly the zero or more groups in `installedAgents`. An empty installed set renders zero groups and is never quantified or described as “all direct.” This frame stays absent until the last Source is removed, when the no-Source branch is evaluated |
 | §1.9 | Default | 切换到网关 pressed on a backend row | F5 | `adopt.title` … `adopt.undo.3`, `adopt.confirm`, `adopt.cancel` | 取消 → dismiss unchanged; 切换到网关 → Committing |
-| §1.9 | Committing | The confirm's primary was pressed — `PATCH /api/models/agents/<backend>/mode` | F1 → Failed | — | Success → the dialog closes and the page becomes 01 with this backend in 网关 mode |
-| §1.9 | Failed | A step this confirm promised did not go through | F1 lands here | `adopt.fail.title`, `adopt.fail.detail`, `adopt.fail.reason.transport`, `adopt.fail.reason.refused`, `adopt.fail.reason.notReady`, `adopt.fail.reason.unknown`, `install.fail.detail` | The dialog stays open, states the failure, keeps 取消 enabled and the primary retryable. **The title holds for every step; the detail is selected by which step failed.** A step that was a request renders `adopt.fail.detail` — `{{request}}` is the request that failed. The install step is no request `[contract-gap]` G-10, so it renders `install.fail.detail`, the sentence 01 already shows for the same operation (D-26). **`adopt.fail.detail`'s `{{reason}}` is one of four words and never an upstream string**: `fail.reason.transport` when no answer came back, `fail.reason.refused` when one did and it was a refusal, `fail.reason.notReady` when the start step answered and the runtime still reads `not_started` or `down`, and `fail.reason.unknown` for everything else — the residue that keeps the set total, because §0.9 has the slot always present. **重试 re-reads before it resumes, and the reading decides where it re-enters** `[derived]`: every step this confirm promises has a read that proves it, and the subject of all of them is the backend the dialog was opened on, which the client has held since the first press (D-36). `GET /api/models/runtime/status` proves the first two — `health` no longer `not_installed` means the component is there, `health` reading `ok` **or `degraded`** means it started — both are a runtime answering about itself, and only the second half of that pair is a quality judgement — and `GET /api/models/agents` proves the third, `mode` reading `hub` `[contract]`. So the press is not a replay: the runtime read answers first and the sequence resumes at the first step it cannot already see done — still `not_installed` → install, `not_started` or `down` → start, `ok` or `degraded` → the mode `PATCH`. **`degraded` is on the switching side of that split, and §1.0 is what puts it there**: it maps `degraded` to Impaired with an afforded action of `none`, so it is the one health this dialog can read that offers no control at all — re-sending the start route for it would press the thing the product declines to offer, once per retry, against a component that is already answering. Reading it as 「present but not `ok`」 did exactly that. Nothing here waits for `ok` either, because no contract conditions the mode `PATCH` on health: what the sequence owes is that the component exists and is running, and an impaired runtime meets both. A backend that already reads `hub` is a `PATCH` that committed unseen, so nothing is re-sent and the dialog closes into the success it turns out to have been, the same shape §1.6's *Refetch failed* has and §1.5's ⑦ cannot get |
-| §1.9 | Dependency missing `[derived]` D-26 `[contract-gap]` G-10 | Runtime `health` is `not_installed` (§1.0) | F1 → Failed | `adopt.effects.install`, `adopt.confirm.install` | The confirm gains one line naming the component and roughly how long it takes, and the primary becomes 安装并切换 — one press, three steps, reported as one outcome. **Only the last two steps have routes** (`POST /api/models/runtime/start`, then the mode `PATCH`), so this row inherits G-10 the way 01's pill does: the install's progress is client-side only, and a reload while it runs reads back `not_installed` with this backend still in 直连, because the mode `PATCH` is the third step and has not been sent. A step that fails lands in this dialog's own Failed row above, which is why the promise is safe to make as one outcome — the dialog reports no switch it did not make. **Which step failed decides the detail there**: the two route steps have a `METHOD path` to name and render `adopt.fail.detail`; the install step has none — that is what G-10 *is* — so it renders `install.fail.detail`, and no string is asked to interpolate evidence this dialog cannot produce. 取消 is unchanged |
+| §1.9 | Committing | The confirm's primary was pressed — `PATCH /api/models/agents/<backend>/mode` | F1 → Failed | — | Success holds the returned `AgentSupply` as write evidence and enters M5's Source-list read. That read succeeds → the dialog closes and page 01 receives both current projections; it fails → Committed projection stale, never Failed and never a repeated mode `PATCH` |
+| §1.9 | Failed | A step this confirm promised did not go through | F1 lands here | `adopt.fail.title`, `adopt.fail.detail`, `adopt.fail.reason.transport`, `adopt.fail.reason.refused`, `adopt.fail.reason.notReady`, `adopt.fail.reason.unknown`, `settings.models.install.fail.detail` | The dialog stays open, states the failure, keeps 取消 enabled and the primary retryable. The install step consumes the closed `settings.models.install.fail.detail` verbatim from `RuntimeDependency.status.error_key`; start and mode request failures render `adopt.fail.detail`, whose `{{request}}`, optional `{{status}}` and total `{{reason}}` come only from that request state. **重试 re-reads before it resumes** `[derived]`: `installing` stays busy; `not_installed` with the install error retries install; `not_started` or `down` resumes at runtime start; `ok` or `degraded` resumes at the mode `PATCH`; `GET /api/models/agents` reading `mode: hub` holds that AgentSupply as D-36 commit evidence and enters M5 instead of resending or closing. The install route is not retried from `down`, where the contract makes it a no-op. No branch replays a step the authoritative reads already prove complete (D-36) |
+| §1.9 | Dependency missing `[derived]` D-26 `[contract]` | Runtime `health` is `not_installed` with `error_key: null` on a supported `host_platform` (§1.0) | F1 → Failed | `adopt.effects.install`, `adopt.confirm.install` | The confirm gains one line naming the component and roughly how long it takes, and the primary becomes 安装并切换 — one press holds H1's `install_start_switch` across three contracted steps: runtime install → runtime start → mode `PATCH`. `installing` keeps the dialog mounted across reload-equivalent reads; `not_started` advances to start only because that sequence is held; live advances from Starting to the mode `PATCH`; M5's acceptance of committed AgentSupply evidence releases the sequence and makes M5 the sole owner of the Source read. An install failure renders the closed `status.error_key` and retains the sequence in Failed; a later Retry resumes at the first step the authoritative reads do not prove complete. 取消 is unchanged before commit and unavailable while a step owns its response |
+| §1.10 | Edit open | 编辑来源 chosen from 06's source overflow; that menu's capability-gated credential actions remain beside Edit / Remove (C1) | F5 | `sourceDetail.edit.title`, `sourceDetail.edit.name`, `sourceDetail.edit.baseUrl`, `sourceDetail.edit.hint`, `sourceDetail.edit.cancel`, `sourceDetail.edit.save` | V1/V2 are the exhaustive field gates. 保存 is enabled only when every changed normalized value is valid and at least one differs from the held Source; 保存 → Saving source. 取消 / close / outside press → dismiss unchanged and return focus to the overflow trigger (C2/C3/C7) |
+| §1.10 | Saving source | 保存 pressed — `PATCH /api/models/sources/<id>` with the normalized changed `display_name` and/or `base_url` `[contract]` | F3 when a Base URL change is refused; F1 otherwise → Source save failed. The request owns the dialog: Cancel, close, Escape and outside dismissal are disabled until it settles (C4) | `sourceDetail.edit.saving` | R1 owns the complete success envelope: non-empty impact → Source save impact reported; empty impact → hold the returned `source` while M1 reads the complete model surface, then close. A guard refusal → Source save refused; `source_not_found` → §1.6 Source gone |
+| §1.10 | Source save refused | The guarded `PATCH` names the hops or supply gaps the Base URL change would remove `[contract]` | F3 — shared `Qp6FI` | `guard.title.editSource`, `guard.subtitle.editSource`, `guard.confirm.editSource`, `guard.label`, `guard.count`, `guard.hop.position`, `guard.hint.safe`, `guard.hint.interrupt`, `guard.gap.label`, `guard.gap.subject`, `guard.gap.agents`, `gateway.modelCount`, `guard.cancel` | 仍要保存 re-sends the same `PATCH` with `force: true` → Saving source; 取消 → Edit open with both values kept |
+| §1.10 | Source save failed `[derived]` | The `PATCH` failed or never answered | F1, in the edit dialog | `sourceDetail.edit.fail`, `sourceDetail.retry` | 重试 first re-reads `GET /api/models/sources` by the held source id (D-36): the requested normalized fields already present are authoritative commit evidence → M1 with the reread Source held and response-only `removed_hops` / `interrupted` explicitly unavailable, then close only after its complete-surface read; source absent → §1.6 Source gone; otherwise re-send → Saving source |
+| §1.10 | Source save impact reported `[derived]` `[contract]` | R1 holds a successful metadata response with non-empty `removed_hops` and/or `interrupted` | F2 for M1's complete-surface read; the write already succeeded and the authoritative response is held. DP-4 owns every exit | `sourceDetail.edit.impact.title`, `sourceDetail.edit.impact.detail`, `sourceDetail.edit.impact.done`, `sourceDetail.edit.impact.refreshFail`, `sourceDetail.impact.removedHops`, `sourceDetail.impact.interruptedModels`, `guard.hop.position`, `guard.gap.subject`, `guard.gap.agents`, `gateway.modelCount`, `sourceDetail.retry` | Render each non-empty array once: the existing hop block for `removed_hops`, the §1.11 SupplyGap block for `interrupted`. 完成, close, Escape or outside press first run M1's complete model-surface read; success returns with the current surface. Failure keeps this report and envelope mounted, adds the refresh-failure line and read-only 重试, and leaves 完成 plus every DP-4 equivalent exit active; those exits carry the held evidence and mark dependent projections stale. 重试 repeats only M1. No path restores the pre-write origin or lets a reread replace response evidence |
+| §1.10 | Remove confirmation `[derived]` | 移除来源 chosen from 06's source overflow; the exact §1.6 source-detail state behind it is held | F5 — no request has been sent | `guard.title.removeSource`, `guard.hint.removeSource`, `guard.confirm.removeSource`, `guard.cancel` | 移除来源 → Removing source with the initial non-forced delete; 取消 / close / outside press restores the held §1.6 origin by C5 |
+| §1.10 | Removing source | The destructive primary was activated in Remove confirmation or Source remove refused — `DELETE /api/models/sources/<id>` is non-forced on the first path and carries `?force=true` only on the second `[contract]` | F3 on refusal; F1 otherwise → Source remove failed. The request owns the dialog and all dismissal paths are disabled until it settles (C4) | `sourceDetail.remove.checking` | R2 owns the complete success envelope: either array non-empty → Source removal impact reported; both empty → remove the exact Source locally, run M2's complete model-surface read, then §1.6 Source gone. An initial guard refusal → Source remove refused; `source_not_found` → §1.6 Source gone |
+| §1.10 | Source remove refused | The non-forced delete returned the guarded envelope; frame 11 renders its source-removal variant while retaining the held §1.6 origin | F3 — shared refusal semantics and the frame 11 dialog | `guard.title.removeSource`, `guard.confirm.removeSource`, `guard.label.removeSource`, `guard.count`, `guard.hop.position.removeSource`, `guard.hint.removeSource`, `guard.gap.label`, `guard.gap.subject`, `guard.gap.agents`, `gateway.modelCount`, `guard.cancel` | 移除来源 re-sends the same `DELETE` with `force` → Removing source; 取消 / close / outside press restores the held origin by C5 |
+| §1.10 | Source remove failed `[derived]` | Either delete request failed or never answered | F1, in place | `sourceDetail.remove.fail`, `sourceDetail.retry` | 重试 re-reads `GET /api/models/sources` by the held id (D-36): absence is authoritative delete-commit evidence → M2 with both response-only impact arrays explicitly unavailable, then §1.6 Source gone only after its complete-surface read; present → re-send the same stage, non-forced before refusal and forced after one |
+| §1.10 | Source removal impact reported `[derived]` `[contract]` | R2 holds a successful delete response with non-empty `removed_hops` and/or `interrupted`; the source is already gone | F2 for M2's complete-surface read after a DP-4 exit; the read cannot negate the held delete response | `sourceDetail.remove.impact.title`, `sourceDetail.remove.impact.detail`, `sourceDetail.remove.impact.done`, `sourceDetail.remove.impact.refreshFail`, `sourceDetail.impact.removedHops`, `sourceDetail.impact.interruptedModels`, `guard.hop.position.removeSource`, `guard.gap.subject`, `guard.gap.agents`, `gateway.modelCount`, `sourceDetail.retry` | Render the authoritative success arrays before any reread, even when they differ from the earlier refusal preview. 完成, close, Escape or outside press first run M2's complete model-surface read; success drops the detail into 01 with the current surface. Failure keeps the report and envelope mounted, states only that the surface refresh failed, adds read-only 重试, and leaves 完成 plus every DP-4 equivalent exit active; those exits carry the held delete evidence and mark dependent projections stale. 重试 repeats only M2. It never says the committed deletion is unconfirmed |
+| §1.11 | Blocked source card | Frame 12's card delta is rendered for a source whose status is `needs_action` or `error`; both states reuse the same geometry and card target | F5 | `needs_action`: the selected `sourceDetail.status.needsAction.*` plus `upstream.state.supplyStopped` and its registered cause action. `error`: `sourceDetail.status.error` plus `upstream.state.supplyStopped`; Hub uses `sourceDetail.action.refetch`, while an unclassified `native_cli` login failure uses `upstream.repair.reauthorize` | Card → 06. For `needs_action`, OAuth expiry → Reauth confirmation; revoked key → Key entry; a known subscription vendor's balance/account link opens its §1.4 static destination → Vendor recovery observation; an `api_key` Source keeps the non-linked service-provider fallback. For `error`, Hub 重新拉取 → §1.6 Refetching; native 重新授权 → Reauth confirmation. A later payload always dispatches the status it actually reports |
+| §1.11 | Vendor recovery observation `[derived]` `[contract]` | A subscription's 补充额度 or 联系厂商 destination was activated from Blocked source card. Opening the external page proves no recovery; the same single-action card shell stays mounted and enters this channel-selected observation phase | F5 — no model mutation or hidden poll is sent | the original cause plus `upstream.state.supplyStopped`; Hub `sourceDetail.action.refetch`; native `upstream.repair.reauthorizeToRefresh` | Hub 重新拉取 → §1.6 Refetching. Native 重新登录以刷新订阅状态 → Reauth confirmation and MUST pass its existing acknowledgement before reauth. A later payload that changes the Source state leaves this phase; a reload that still reads the blocker reconstructs Blocked source card. No branch treats opening or returning from the vendor page as recovery evidence |
+| §1.11 | Reauth confirmation `[derived]` `[contract]` | 重新授权 or 重新登录以刷新订阅状态 pressed for a Hub or `native_cli` source from Blocked source card, Vendor recovery observation or the capability-gated source overflow | F5 — no request has been sent | `upstream.repair.reauthConfirm.title`; exactly one of `upstream.repair.reauthConfirm.detail.onFailure` or `upstream.repair.reauthConfirm.detail.immediate`; `upstream.repair.reauthConfirm.confirm`, `upstream.repair.reauthConfirm.cancel` | The confirmation phase and literal request value are shared, but the complete consequence body is selected by channel: Hub renders only `onFailure`; `native_cli` renders only `immediate`. 继续登录 synchronously preallocates PD-1's blank context, then sends `POST /api/models/sources/<id>/reauth` with `{acknowledge_irreversible: true}` → Reauthorizing; 取消 / close / Escape restores the exact invoking card/menu/observation origin and its focus target (C2/C3/C5/C8) |
+| §1.11 | Reauthorizing | The shared acknowledgement was confirmed. The activating gesture has synchronously preallocated PD-1's blank context; `POST /api/models/sources/<id>/reauth` sends the confirmed `{acknowledge_irreversible: true}` for either supply channel `[contract]` | F1 before a flow is held → Repair failed, with every dismissal path locked while that request is pending (C4); PD-1 closes the unused context. After acquisition, §1.4 owns cancellation, 2s polling and F1–F5 | `upstream.repair.reauthorizing` | R3 and RR-1/RR-2 own acquisition: a non-terminal `flow` enters §1.4 with held `intent: reauth`, where E3a/E3b and PD-5 select the actual presentation/progress read; an already-terminal `flow` is status-read immediately and never presented. RR-4 classifies the materialized terminal by returned `source.state` before pair cardinality: blocked → Repair unresolved; non-blocked + pairs → Repair impact reported; non-blocked + empty → M3 handoff. E8 `flow_not_found` and E9 `flow_expired` / terminal failure run RR-5 before OAuth failed / M0 Source gone. Only E6 stops polling for materialization; R5 renders any exact error-envelope `interrupted_pairs` before RR-5's complete-surface refresh. E2 remains inconclusive. Create-only arrays are absent by contract |
+| §1.11 | Key entry `[derived]` | 更换 Key pressed from either Blocked source card or the capability-gated source overflow, or a guarded refusal is abandoned | F5 — the secret remains local and no request is sent until submit | `upstream.repair.replaceKey` | V3 gates submit. A valid submit holds the normalized key and sends `PUT /api/models/sources/<id>/credential` with `{key}` → Replacing key; cancel restores the exact invoking origin and focus target (C2/C3/C5/C7) |
+| §1.11 | Replacing key | Key entry submitted, or the guarded confirm below was accepted — the latter reuses the held key and adds `force: true` `[contract]` | F3 on guard refusal; F1 otherwise → Repair failed, with the key kept under F1. All dismissal paths are locked until the request settles (C4) | `upstream.repair.replacingKey` | R4 consumes the standard Source-mutation success: a non-empty `removed_hops` and/or `interrupted` → Repair impact reported; both empty → hold the returned `source` while M4 reads the complete model surface; refusal → Key replacement refused; failure → Repair failed |
+| §1.11 | Key replacement refused `[derived]` `[contract]` | The non-forced credential replacement returned the shared guarded `409`; the typed key and exact Key entry origin are held | F3 — shared `Qp6FI`, with only the operation strings below changed | `guard.title.replaceKey`, `guard.subtitle.replaceKey`, `guard.confirm.replaceKey`, `guard.label`, `guard.count`, `guard.hop.position`, `guard.hint.safe`, `guard.hint.interrupt`, `guard.gap.label`, `guard.gap.subject`, `guard.gap.agents`, `gateway.modelCount`, `guard.cancel` | 仍要更换 re-sends the held `{key, force: true}` → Replacing key; 取消 / close / Escape → Key entry with the typed key kept, by C2/C5 |
+| §1.11 | Repair impact reported `[derived]` `[contract]` | R3 holds a successful OAuth repair whose returned Source is non-blocked and whose `interrupted_pairs` is non-empty, or R4 holds a successful key replacement with non-empty `removed_hops` and/or `interrupted`; the complete returned `source` is held | F2 for M3/M4's complete-surface read; the successful response is already in hand and DP-4 owns every exit | `upstream.repair.impact.title`, `upstream.repair.impact.detail`, `upstream.repair.impact.refreshFail`, `sourceDetail.impact.removedHops`, `sourceDetail.impact.interruptedModels`, `guard.hop.position`, `guard.gap.subject`, `guard.gap.agents`, `gateway.modelCount`, `upstream.repair.impact.done`, `upstream.retry` | Render every non-empty response array under its matching hop or SupplyGap block. 完成, close, Escape or outside press first run M3/M4's complete model-surface read; success returns with the current surface. Failure keeps the exact report and envelope mounted, adds the refresh-failure line and read-only 重试, and leaves 完成 plus every DP-4 equivalent exit active; those exits carry the evidence and mark dependent projections stale. 重试 repeats only M3/M4. The reread never replaces response evidence or restores the invoking origin |
+| §1.11 | Repair unresolved `[derived]` `[contract]` | R3 holds a successful OAuth repair whose returned `source.state` is still `needs_action` or `error`, regardless of `recovered` and whether `interrupted_pairs` is empty | F2 for M3's complete-surface read; this is a successful terminal with a blocked result, not an F1 failure | `upstream.repair.unresolved`, optional `sourceDetail.impact.interruptedModels`, `guard.gap.subject`, `guard.gap.agents`, `gateway.modelCount`, `upstream.repair.impact.refreshFail`, `upstream.repair.impact.done`, `upstream.retry` | Keep the result visible in the gold needs-action treatment and render every non-empty `interrupted_pairs` block as independent evidence below it. 完成, close, Escape or outside press first run M3's complete model-surface read; success returns with the current blocked projection. Failure keeps this exact result and R3 envelope mounted, adds the refresh-failure line and read-only 重试, and leaves 完成 plus every DP-4 equivalent exit active; those exits carry the result and mark dependent projections stale. 重试 repeats only M3. Never show repaired/refreshed copy or auto-close from an empty array (C6/C10) |
+| §1.6 / §1.9 / §1.10 / §1.11 | Committed projection stale `[derived]` | M0 has authoritative Source absence; an M1/M2/M3/M4 mutation or R3 terminal has commit evidence and its required complete model-surface read failed; or M5 holds the committed mode-switch AgentSupply and its Source-list read failed. Hold the exact success envelope when one arrived; for direct absence or D-36 inference, hold the authoritative reread subject and mark response-only members unavailable. In every case keep the last good dependent projections | F2 — the selected operation-specific sentence names only the stale read, never the completed write or authoritative absence | M0/M2 `sourceDetail.remove.impact.refreshFail`; M1 `sourceDetail.edit.impact.refreshFail`; M3/M4 `upstream.repair.impact.refreshFail`; M5 `upstream.unread`; the owning read's Retry and, where a dialog/report remains mounted, its operation Done key | M0–M4 render the committed Source or absence with last-good Agent/order/chain projections marked stale; M5 renders the held AgentSupply with the last-good Source list marked stale on 01. 重试 repeats only the owning M read; success hands off current projections, another failure stays. Done, close, Escape and outside press remain legal DP-4 exits for a mounted producer, while M5's stale page keeps ordinary navigation. Never resend mutation, invent impact, discard evidence, restore origin or describe the write/absence as uncertain (C6/C9/C10/C14; M5 applies the same invariant at page grain) |
+| §1.11 | Repair failed `[derived]` | The pre-flow reauth request or credential replacement failed before its terminal could be confirmed; the repair intent, channel acknowledgement, exact origin status and any typed key remain held | F1, on the repair surface | `upstream.repair.fail`, `upstream.retry` | RR-6–RR-9 first perform the evidence-milestone read C10 registers: a pre-flow reauth acquisition failure reads the held Source id for Hub or native, while uncertain credential replacement reads M4's complete model surface. Then absent → M0 / Source gone; a held `needs_action`/`error` origin that is now clear → RR-7's M3/M4 handoff before rendering the reread Source as repaired; a still-blocked origin → remain here; any origin already non-blocked → remain regardless of present snapshot, because health is not mutation evidence. 重试 repeats the held producer. After a flow is acquired, E8/E9 and reauth E6 run RR-5's complete M3 read before OAuth failed / Source gone; E4 is create-only and E2 remains inconclusive. Every branch preserves `intent: reauth` |
+| §1.12 | Closed | 添加订阅 is rendered in 01's upstream footer | F5 | `upstream.addSubscription` | Activate → Open |
+| §1.12 | Open | The frame 13 vendor menu is visible and focus is on its first row; the Add subscription trigger remains held as the focus owner | F5 | `addSubMenu.vendor.claude`, `addSubMenu.vendor.chatgpt`, `addSubMenu.recommendation.native`, `addSubMenu.recommendation.gateway` | Claude 订阅 → §1.4 with `vendor: anthropic`; ChatGPT 订阅 → §1.4 with `vendor: openai`. Selection closes the menu; if 04 later dismisses back to 01, focus returns explicitly to Add subscription, while a committed exit gives focus to 06. Escape / outside press → Closed with the same trigger focus (C3) |
 
-Two frames deliberately hold no rows. §1.2 specifies nothing (§0.2), and the
-`Qp6FI` confirm is not a frame of its own — it is reached from two callers and
-its states are the two refusal rows above, `Refetch refused` and `Guard refused`.
+One covered frame deliberately holds no rows: §1.2 specifies nothing (§0.2). The
+`Qp6FI` confirm is not a frame of its own — its refusal rows sit with each caller,
+including the frame 11 source-level mutations registered above.
 
 ### 0.9 Interpolation slot register
 
@@ -772,21 +961,20 @@ a different key.
 | --- | --- | --- | --- |
 | `{{count}}` | A cardinality. The i18next plural family on the key picks the form; the number is never written into the singular text by hand. | Always present | `addKey.pull.result`, `gateway.collapse`, `gateway.modelCount`, `guard.count`, `shell.allDirect`, `sourceDetail.refetch.removed`, `sourceDetail.summary`, `takeover.pill`, `upstream.count` |
 | `{{backend}}` | The backend's product name — Claude Code, Codex, opencode — never the internal id. | Always present | `adopt.subtitle`, `adopt.title`, `adopt.undo.2`, `adopt.undo.3`, `guard.gap.subject`, `order.title`, `upstream.state.supplyingNative` |
-| `{{vendor}}` | The upstream vendor's product name, as the user chose it. | Always present | `addSub.title`, `adopt.effects.1` |
+| `{{vendor}}` | The upstream vendor's product name, as the user chose it. | Always present | `addSub.title`, `addSub.paste.title.code`, `addSub.paste.title.callbackUrl`, `adopt.effects.1` |
 | `{{host}}` | The source's host, as entered, without scheme or path. | **Absent when the source has no entered host** `[contract]`: `base_url` is `api_key`-kind only, null there means the vendor's official endpoint, and a subscription may not carry one at all. §1.6 states what the one string that interpolates it renders instead. | `sourceDetail.summary` |
-| `{{source}}` | A source's display name. | Always present | `gateway.row.current`, `gateway.row.currentTakeover`, `guard.title.refetch`, `guard.title.removeModel` |
-| `{{model}}` | A model's display id, as the source reports it. | Always present | `guard.title.removeModel` |
+| `{{source}}` | A source's display name. | Always present | `gateway.row.current`, `gateway.row.currentTakeover`, `guard.title.editSource`, `guard.title.refetch`, `guard.title.removeModel`, `guard.title.removeSource`, `guard.title.replaceKey`, `sourceDetail.edit.title`, `upstream.repair.reauthConfirm.title` |
+| `{{model}}` | A model's display id, as the source reports it. | Always present | `guard.title.removeModel`, server-owned `models.launch.route_unconfigured` |
 | `{{models}}` | Several model ids, joined by `、` / `,` — the ids that left the discovered slice on one fetch. Ids as the source reported them, never display names, because the row that carried a display name is the row that is gone. | Always present in the one key that carries it: `sourceDetail.refetch.removed` renders only when at least one id was removed, which is the same branch guarantee that keeps its `{{count}}` off zero. | `sourceDetail.refetch.removed` |
-| `{{n}}` | A hop's 1-based position in the configured order. | Always present | `guard.hop.position` |
+| `{{n}}` | A hop's 1-based position in the configured order. | Always present | `guard.hop.position`, `guard.hop.position.removeSource` |
 | `{{menuModel}}` | A protected **menu** model's id — `SupplyGap.model_id`. It is its own slot rather than a second use of `{{model}}` because the two name different things and the guard turns on the difference: `{{model}}` is an id a source reports, and `model-hub.md` says 「the protected identifier is always the menu model, never a hop's upstream `model_id`」. | Always present | `guard.gap.subject` |
 | `{{agents}}` | The enabled named Vibe Agents that pinned this menu model, by name, joined by `、` / `,` — `SupplyGap.agents` `[contract]`. | Always present in the one key that carries it: `SupplyGap.agents` 「is present and may be empty」, and an empty one renders no line at all, which is `model-hub.md`'s 「names affected Agents **when any exist**」 read as a branch rather than as an empty list. | `guard.gap.agents` |
 | `{{time}}` | A relative timestamp, looking back — 3 分钟前 / 3 minutes ago. | **Absent when `last_discovered_at` is null** `[contract]` — no discovery has ever completed, so the inventory has no age to report. The one string that interpolates it is not rendered, and the status line drops that segment: 使用中 alone. A hand-populated source that has never fetched reads exactly that way; §1.6 states why it is Ready rather than an empty state. | `sourceDetail.status.listUpdated` |
 | `{{delay}}` | A rough interval, looking forward — how long until the automatic retry. Same shape as `{{time}}` and the opposite direction, which is why it is its own slot: one string says a fetch happened 3 分钟前, the other says a retry comes 3 分钟后, and a single "relative timestamp" covers both while meaning neither. | Always present in the one key that carries it, because a `retry_at` still ahead is what selects that key. **A `retry_at` that has passed cannot fill it** — the interval renders zero or negative — and that is an ordinary reading, not an edge: no row in this document promotes a source on a clock, so `cooldown` can be reported with its retry time behind it for as long as the next payload takes. That reading renders `upstream.state.unavailableDue`, which is the absence rule's 「a state that cannot fill it uses a different key」 applied to a slot that may not be dropped. | `upstream.state.unavailableRetry` |
-| `{{protocol}}` | The interface the probe proved, by its display name (§1.5's three options). | Always present in ⑤ / ⑤′, which are entered only after a protocol was proved. Never rendered by ④ / ④′, whose whole content is that no protocol was proved. | `addKey.inventory.detail` |
-| `{{request}}` | The request that produced the evidence, as `METHOD path`. | Always present — a classified failure has a request by construction. | `addKey.inventory.detail`, `addKey.undetermined.detail`, `adopt.fail.detail` |
-| `{{status}}` | The HTTP status the upstream returned. | **Absent on a transport failure**, which never reached HTTP. The segment is dropped by the absence rule, so the string reads `{{protocol}} 已认出 · {{request}} · {{reason}}`. | `addKey.inventory.detail`, `addKey.undetermined.detail`, `adopt.fail.detail` |
+| `{{request}}` | The request that failed, as `METHOD path`. | Always present in the remaining consumer, which is selected only for a request-backed §1.9 step. Source observation exposes no request member. | `adopt.fail.detail` |
+| `{{status}}` | The HTTP status that request returned. | **Absent when the §1.9 request had no HTTP response.** The separator drops with it. Source observation exposes no status member. | `adopt.fail.detail` |
 | `{{health}}` | One of exactly five words — `gateway.group.status.ok`, `gateway.group.status.degraded`, `gateway.group.status.waiting`, `gateway.group.status.interrupted`, `gateway.group.status.noSelection`. The first four are `supply_status` readings; the fifth is Hub mode with nothing pinned to roll up, which is a state of this backend and not a health of its supply. Supply health, not an HTTP status: nothing here is a code, and the group renders it whether or not any request was made. | Always present | `gateway.group.subtitle.gateway` |
-| `{{reason}}` | The classified cause, from the closed set the state's own copy declares. That set is **total**: it carries a residual key the state falls back to, because this slot is always present and an unmatched failure still has to render one word. No consumer interpolates an upstream string here. | Always present | `addKey.inventory.detail`, `adopt.fail.detail` |
+| `{{reason}}` | The §1.9 classified cause, from that state's closed and total copy set. No consumer interpolates an upstream string here. Source observation exposes no reason member. | Always present | `adopt.fail.detail` |
 | `{{mode}}` | One of exactly two words — `gateway.group.mode.direct` or `gateway.group.mode.gateway`. The subtitle interpolates the word rather than carrying two whole strings, because the health half varies independently of it. | Always present | `gateway.group.subtitle.direct`, `gateway.group.subtitle.gateway` |
 | `{{backends}}` | The backends that have this source configured into a route, by product name, joined by `、` / `,` — `adopted_by`'s projection, grouped and de-duplicated, never a computation over live chains (§1.0). | Always present — `upstream.state.supplying` is entered only when the list is non-empty; a source no backend has configured is 备用 instead | `upstream.state.supplying` |
 | `{{component}}` | The gateway component's name, as the manifest names it `[contract]`. | Always present | `adopt.effects.install`, `install.effects.1` |
@@ -843,10 +1031,11 @@ the scale is printed with the verdict rather than in a comment.
 
 ### 1.0 Shared shell
 
-Seven frames render the same chrome, 06 renders a drill-in variant of it whose header
-left is a bare back icon, and 04/05/10 render it behind a scrim. Specifying it once is
-not a shortcut: a shell
-duplicated across nine sections is a shell that will drift in eight of them.
+Seven original full-page frames render the same chrome, 06 renders a drill-in variant
+whose header left is a bare back icon, and 04/05/10 render it behind a scrim. Frames 11
+and 12 reuse 06 and 01 respectively as exhibit backgrounds; the 04 paste-back crop and
+frame 13 are component exhibits. Specifying the shell once is not a shortcut: a shell
+copied into every section is one that will drift in all but one of them.
 
 **Two parts of the shell are conditional, and the frames disagree about them on
 purpose.** Frames 09 and 10 draw the header but **no tab strip and no `cols`
@@ -949,6 +1138,18 @@ Every state above except Ready is **not drawn** `[derived]`. Required behaviour:
   share the component name, the duration and the download-nothing-before-consent rule —
   which is the part D-26 exists to keep from diverging — and differ on exactly the
   consequence each entry point actually has.
+- **The initiating sequence, not the frame, owns post-install continuation** `[derived]`.
+  Before the install request, the non-switching run-pill confirm holds
+  `install_and_start`; §1.9's three-step confirm holds `install_start_switch`. These are
+  local operation intents, never a wire field or a second runtime state. H1 is their one
+  continuation register: while either sequence remains held, a status read settling at
+  `not_started` proves installation and immediately advances to Starting; a later live
+  reading releases `install_and_start` after ordinary page dispatch, but advances
+  `install_start_switch` to the mode `PATCH` and holds it until M5 accepts commit
+  evidence. An install-only status read or a reload with no held initiating sequence
+  lands at Not started instead. Reload therefore recovers the server-owned install
+  without inventing a client promise it no longer holds, and runtime health never stands
+  in for one.
 - **Installing**: the confirm does not close on acceptance. Its primary becomes an
   in-place progress state — `install.progress`, spinner, both buttons inert — because a
   dialog that closes on 安装并启动 hands the user back a page whose pill still reads
@@ -958,30 +1159,23 @@ Every state above except Ready is **not drawn** `[derived]`. Required behaviour:
   download in flight would be a button that lies. What it costs to say so is one
   sentence; what it costs to leave unsaid is a user who presses 取消, sees the dialog
   close, and has no idea whether a binary is landing on their disk.
+  Every mounted surface displaying a durable `installing` reading owns the 2s
+  `GET /api/models/runtime/status` loop registered above. This dialog is one such
+  surface; a page remounted by reload is another even though it restores no initiating
+  sequence. Unlike the borrowed `BackendOAuthPanel` cadence, installation has no client
+  timeout: each `installing` reading continues the loop, a read failure keeps the
+  progress and cause under F2, and unmount ends the owner.
 - **Install failed**: the dialog stays open, the message is replaced, and the primary
   becomes 重试 `[derived]` — the same shape §1.4's failure rows take, and for the same
-  reason. Dismissing from here renders **whatever the next `health` read reports**, and
-  this page asserts nothing beyond that. It said 「a failed install leaves nothing
-  behind」 until this round, which is a claim about the disk made by the one participant
-  that never saw it: the install has no route (G-10), so the page watched a client-side
-  operation and learned only that it did not finish. Failing after the staged component
-  is in place and its metadata written is an ordinary way for it to fail, and the next
-  read is then `not_started` or `degraded` rather than `not_installed` — while a page
-  that had already decided the answer would draw 点击安装 over a component sitting there
-  installed. `install.fail.detail` tells the user the same thing in one sentence —
-  组件可能处于未完成状态 — so the paragraph that promised otherwise was contradicting
-  this file's own copy as well as §0.8's row.
-- **Re-entry while an install is in flight is the one case this page cannot answer
-  honestly, and that is G-10** `[contract-gap]`. Installing is a client-side state with
-  no field behind it — `runtime-dependency.schema.json` has `not_installed` and
-  `not_started` and nothing between them — so a user who navigates away and returns
-  re-reads `health` and sees Not installed, while the download may well still be
-  running. The page must not paper over that by remembering a local flag across a route
-  change: a fabricated 安装中 that survives a reload would keep claiming progress after
-  a failure it cannot observe. Until the contract carries an install state, re-entry
-  shows the truthful `health` reading, and the confirm's own 安装并启动 is idempotent —
-  pressing it again on a component that is already landing must not start a second
-  download.
+  reason. The authoritative failure reading is `health: not_installed` with the closed
+  `status.error_key`; no raw downloader or verifier text renders. A new install request
+  clears that key before it enters `installing`, while dismissal preserves the failed
+  projection until a later status says otherwise `[contract]`.
+- **Re-entry while an install is in flight is server-owned** `[contract]`. The install
+  route durably enters `health: installing`; reload and concurrent repeats read or return
+  the same state and start no second job. Service bootstrap verifies or restarts an
+  orphaned job before serving runtime endpoints, so the client neither fabricates a local
+  progress flag nor resumes a download itself.
 - **Unsupported host**: `manifest.assets` is per platform, and the README states that
   unsupported hosts **fail closed** with 直连 as the escape hatch `[contract]`. So on a
   platform with no pinned asset the pill reads `shell.unsupported`, carries the idle
@@ -990,22 +1184,11 @@ Every state above except Ready is **not drawn** `[derived]`. Required behaviour:
   on adoption: offering 点击安装 here would be D-9a's dead control with a download URL
   behind it — a confirm that names a component, promises a duration, and then cannot
   find a file to fetch.
-- **That split has no contracted input, and this page does not guess one**
-  `[contract-gap]` **G-24**. Deciding it needs the host's platform, and the payload
-  reports only which platforms have a *published* asset: `manifest.assets[].platform`
-  is a property of the manifest, not of the machine the component would land on, and
-  `status` carries `installed_version`, `verified`, `listening`, `health` and
-  `last_check` and nothing else. The one identifier a client can reach without asking
-  the server is the browser's own, and on a UI opened from another machine that names
-  the wrong host — a value read off the wrong subject is worse than no value, because
-  it renders exactly as though it were the right one (D-28 refuses the same substitution
-  one field over). So until the payload carries a host platform or a plain
-  installability flag, `not_installed` renders **Not installed** with its install
-  affordance live, and a host with no asset learns that from the install failing. That
-  cost is stated rather than hidden: it is D-9a's dead control arriving one press later,
-  which is the honest ordering while the page cannot tell the two hosts apart, and the
-  alternative is worse — withholding the install from every host that could have used
-  it, on the strength of a field describing somebody else's machine.
+- **That split reads the Avibe host, never the browser** `[contract]`. Every runtime
+  response carries server-derived `host_platform`; support is exactly an equal
+  `manifest.assets[].platform`. A browser platform is a different subject and is never a
+  fallback. Unsupported `not_installed` therefore renders the inert escape immediately,
+  while a supported host renders the install affordance.
 - **Not started**: the pill reads `shell.notStarted` and is the page's start
   affordance. It is styled as an *idle* pill — `$--muted` label on `#FFFFFF0A`,
   **not** the error treatment `[derived]`. The runtime contract classes
@@ -1060,8 +1243,10 @@ the same shape frame 06's bar has when it splits `active` on adoption:
 | `degraded` | Impaired | `shell.degraded` | error | none |
 | `down` | Unreachable | `shell.stopped` | error | start (`POST /api/models/runtime/start` `[contract]`) |
 | `not_started` | Not started | `shell.notStarted` | idle | start |
-| `not_installed`, with a manifest asset for this platform `[contract]` `[contract-gap]` **G-24** | Not installed | `shell.notInstalled` | idle | the non-switching install confirm — **never** the start route |
-| `not_installed`, with none `[contract]` `[contract-gap]` **G-24** | Unsupported host | `shell.unsupported` | idle | none — 直连 (§1.8) is the escape hatch |
+| `installing` | Installing | `install.progress` | idle / busy | none; status reads own progress |
+| `not_installed`, `error_key` non-null `[contract]` | Install failed | `install.fail.title` / `settings.models.install.fail.detail` | error | retry `POST /api/models/runtime/install` |
+| `not_installed`, `error_key: null`, exact asset for `host_platform` `[contract]` | Not installed | `shell.notInstalled` | idle | the non-switching install confirm — **never** the start route |
+| `not_installed`, `error_key: null`, no exact asset for `host_platform` `[contract]` | Unsupported host | `shell.unsupported` | idle | none — 直连 (§1.8) is the escape hatch |
 
 Starting is the one pill with no `health` behind it: it is the client's own optimistic
 state between accepting the press and the next payload. A transport failure — the status
@@ -1174,7 +1359,6 @@ unable to outlive its surface, which is the cheaper answer wherever it is availa
 | `install.cancel` `[derived]` | 取消 | Cancel |
 | `install.progress` `[derived]` | 正在安装… | Installing… |
 | `install.fail.title` `[derived]` | 安装没有完成 | The install did not finish |
-| `install.fail.detail` `[derived]` | 这次安装没有完成,组件可能处于未完成状态。重试会重新装一遍。 | The install did not finish, and the component may be left incomplete. Retrying installs it again from scratch. |
 | `install.retry` `[derived]` | 重试 | Try again |
 | `shell.tab.hub` | 来源与网关 | Sources & gateway |
 | `shell.tab.usage` | 用量与额度 | Usage & quota |
@@ -1191,11 +1375,31 @@ unable to outlive its surface, which is the cheaper answer wherever it is availa
 | `upstream.state.standby` | 备用 | Standby |
 | `upstream.state.unavailableRetry` | 暂不可用 · {{delay}} 后自动重试 | Unavailable · retrying automatically after {{delay}} |
 | `upstream.state.unavailableDue` `[derived]` | 暂不可用 · 已到重试时间 | Unavailable · the retry is due |
+| `upstream.state.supplyStopped` `[frame]` | · 已停止供给 | · stopped supplying |
 | `upstream.empty` `[derived]` | 还没有来源。先添加一个订阅或 API Key。 | No sources yet. Add a subscription or an API key first. |
 | `upstream.unread` `[derived]` | 来源列表没读到 · 网关本身正常 | Could not read the source list · the gateway itself is fine |
 | `upstream.retry` `[derived]` | 重试 | Retry |
 | `upstream.addSubscription` | 添加订阅 | Add subscription |
 | `upstream.addApiKey` | 添加 API Key | Add API key |
+| `upstream.repair.reauthorize` `[frame]` | 重新授权 | Reauthorize |
+| `upstream.repair.reauthorizeToRefresh` `[derived]` `[contract]` | 重新登录以刷新订阅状态 | Sign in again to refresh subscription status |
+| `upstream.repair.replaceKey` `[frame]` | 更换 Key | Replace key |
+| `upstream.repair.topUp` `[derived]` | 补充额度 | Add credits |
+| `upstream.repair.contactVendor` `[derived]` | 联系厂商 | Contact vendor |
+| `upstream.repair.contactProvider` `[derived]` | 联系你的服务商 | Contact your provider |
+| `upstream.repair.reauthConfirm.title` `[derived]` `[contract]` | 重新授权 {{source}} | Reauthorize {{source}} |
+| `upstream.repair.reauthConfirm.detail.onFailure` `[derived]` `[contract]` | 只有这次登录失败时,这个来源才会需要处理,直到你重新登录;取消不会替换现有登录。 | Only if this sign-in fails will the source need attention until you sign in again; cancelling does not replace the current sign-in. |
+| `upstream.repair.reauthConfirm.detail.immediate` `[derived]` `[contract]` | 开始后旧的本机登录立即失效,共用它的每个来源都会不可用。完成后只恢复这一个,其它来源需要各自重新登录。 | The old local sign-in stops working immediately, and every source sharing it becomes unavailable. Finishing restores only this source; the others each need their own sign-in. |
+| `upstream.repair.reauthConfirm.confirm` `[derived]` `[contract]` | 继续登录 | Continue to sign in |
+| `upstream.repair.reauthConfirm.cancel` `[derived]` | 取消 | Cancel |
+| `upstream.repair.reauthorizing` `[derived]` | 正在重新授权… | Reauthorizing… |
+| `upstream.repair.replacingKey` `[derived]` | 正在更换 Key… | Replacing key… |
+| `upstream.repair.impact.title` `[derived]` `[contract]` | 凭据已更新,部分供给受到影响 | The credential was updated, and some supply was affected |
+| `upstream.repair.impact.detail` `[derived]` `[contract]` | 以下路由或型号已被移除或中断。 | The following routes or models were removed or interrupted. |
+| `upstream.repair.impact.refreshFail` `[derived]` | 凭据已更新,但模型页面暂时无法刷新。 | The credential was updated, but the model surface could not be refreshed. |
+| `upstream.repair.impact.done` `[derived]` | 完成 | Done |
+| `upstream.repair.unresolved` `[derived]` | 仍然不可用 | Still not working |
+| `upstream.repair.fail` `[derived]` | 没能完成这次凭据修复 | The credential repair did not finish |
 | `gateway.heading` | 网关 | Gateway |
 | `gateway.sourceOrder` | 来源顺序 | Source order |
 | `gateway.switchToGateway` | 切换到网关 | Switch to gateway |
@@ -1208,7 +1412,7 @@ unable to outlive its surface, which is the cheaper answer wherever it is availa
 | `gateway.group.mode.gateway` | 网关 | Gateway |
 | `gateway.group.status.ok` `[contract]` | 正常 | Healthy |
 | `gateway.group.status.degraded` `[contract]` | 降级 | Degraded |
-| `gateway.group.status.waiting` `[contract]` | 暂时全部在冷却 | All sources are cooling down |
+| `gateway.group.status.waiting` `[contract]` | **pending K6: umbrella copy for cooldown + live backoff** | **pending K6: umbrella copy for cooldown + live backoff** |
 | `gateway.group.status.interrupted` `[contract]` | 无可用来源 | No source is available |
 | `gateway.group.status.noSelection` `[derived]` | 未选型号 | No model selected |
 | `gateway.group.takenOver` | 接管中 | Taken over |
@@ -1219,6 +1423,7 @@ unable to outlive its surface, which is the cheaper answer wherever it is availa
 | `gateway.group.emptyModels` `[derived]` | 这个后端没有可用型号 | This backend has no models |
 | `gateway.row.current` | 当前 {{source}} | Now: {{source}} |
 | `gateway.row.currentTakeover` | 当前 {{source}}(接管) | Now: {{source}} (takeover) |
+| `models.launch.route_unconfigured` `[contract]` | 模型 {{model}} 尚未配置路由。请前往 Models 配置。 | Model {{model}} has no configured route. Open Models to configure one. |
 | `gateway.collapse_one` | 还有 {{count}} 个型号 | {{count}} more model |
 | `gateway.collapse_other` | 还有 {{count}} 个型号 | {{count}} more models |
 | `legend.native` `[frame]` | 原生 | Native |
@@ -1244,17 +1449,18 @@ switched on but not finished configuring. So `mode` decides the first word every
 | `direct` | not read — Direct arbitrates nothing, so it rolls nothing up | 直连 | `gateway.group.subtitle.direct` + `gateway.group.mode.direct` |
 | `hub` | `ok` | 网关 · 正常 | `gateway.group.subtitle.gateway` + `gateway.group.status.ok` |
 | `hub` | `degraded` | 网关 · 降级 | `gateway.group.subtitle.gateway` + `gateway.group.status.degraded` |
-| `hub` | `waiting` | 网关 · 暂时全部在冷却 | `gateway.group.subtitle.gateway` + `gateway.group.status.waiting` |
+| `hub` | `waiting` | 网关 · **pending K6 umbrella copy** | `gateway.group.subtitle.gateway` + `gateway.group.status.waiting` |
 | `hub` | `interrupted` | 网关 · 无可用来源 | `gateway.group.subtitle.gateway` + `gateway.group.status.interrupted` |
 | `hub` | `null` | 网关 · 未选型号 | `gateway.group.subtitle.gateway` + `gateway.group.status.noSelection` |
 
-**The four `[contract]` words are `model-hub.md` §4.5's wording, transcribed** `[contract]`.
-正常 / 降级 / 暂时全部在冷却 / 无可用来源 are that section's zh (UI) column verbatim, and
-it says they are the only backend-level supply-health wording — so this table is a place the
-projection is rendered, not a place it is named again in words that read better here. Two of
-them read as descriptions rather than labels, which is the point: `waiting` heals itself at
-the earliest `retry_at` and `interrupted` does not, and 等待重试 / 已中断 blurred exactly
-that split while sounding tidier. A change to any of the four is a change to §4.5 first.
+**Three `[contract]` words are transcribed; `waiting` is a pending K6 anchor** `[contract]`.
+正常 / 降级 / 无可用来源 remain `model-hub.md` §4.5's verbatim labels. The frozen
+`waiting` label is deliberately not mirrored here: its authority now includes pure live
+connection-backoff chains, while its old wording asserted that every Source was in
+cooldown. K6 owns the already-ruled umbrella replacement, which must be true for both
+cooldown and live backoff while per-Source rows retain their distinct causes. This file
+keeps the stable key and pending-K6 anchor until that authority lands; it does not create
+a second enum or guess the final locale text.
 
 `gateway.supply.none` is not a fifth word, because it is not the same grain `[derived]`.
 The four above are the backend rollup rendered into the group head's status line, which
@@ -1313,9 +1519,8 @@ gone, or who never placed one, to check a CLI that is running fine.
 
 **接管中 is not one of these values, and must not be rendered from this field.**
 Takeover is a projection of the chain — the current hop is not the first hop, and the
-first hop is unavailable for a *recoverable* reason (AC-30, D-21, C-5). Recoverable is
-`cooldown` and nothing else: it is the one `Source.state.status` value that clears on its
-own, and 接管中 promises exactly that clearing. A head blocked by anything else is also
+first hop is unavailable for a *recoverable quota/cooldown or live connection-backoff*
+reason (AC-30, D-21, C-5). 接管中 promises exactly that self-healing class. A head blocked by anything else is also
 being served past — `needs_action`, `error`, a native CLI unavailable in this process, a
 hop whose source or model is gone — and none of those clears on a clock, so every one of
 them is **degraded without takeover** — §1.1's *Serving past a blocked head*, which is
@@ -1327,9 +1532,8 @@ can co-occur (a taken-over backend usually reads `degraded`) and are computed fr
 different inputs, so a surface that derives one from the other is right by accident until
 the first `degraded`-without-reroute payload.
 
-**A source's supply line renders `adopted_by`, not the chain** `[contract]` FC-05 —
-**and on any load that is not the creation response it has nothing to render it from**
-`[contract-gap]` G-20. `upstream.state.supplying*` names which backends have this source
+**A source's supply line renders `adopted_by`, not the chain** `[contract]`.
+`upstream.state.supplying*` names which backends have this source
 **configured into a route** — the same reading §1.6's 使用中 gets one surface over, and
 for the same reason. *Stable* is the operative word in the field's own definition: the
 array is unchanged by a cooldown, a revoked credential, or a takeover that routes past
@@ -1339,28 +1543,13 @@ anyway. The line is selected by the source's **state** first — a cooling or bl
 shows its state word instead, which is what §1.7's card delta *is* — so it appears only on
 a healthy source; and what it then claims is configuration, not flow. The live question is
 the chain read's (§1.2), and D-28 is the rule that keeps the two projections from standing
-in for each other. FC-05 states that `agent-supply` exposes
-`adopted_by: [{backend, menu_model}]` from the persisted references and that source-card
-attribution reuses that projection, and `api.md` calls that array 「the stable Source-card
-projection」 in as many words — which is what makes the field authority here even though
-the frozen `agent-supply.schema.json` omits it (§0.3, the FC-05 case). What is missing is
-not the shape but the read: every response that carries it is a *creation* terminal, and
-neither `GET /api/models/sources` nor `GET /api/models/agents` returns it, so a page that
-paints this line after a reload is painting a value the contract never sends. That is
-G-20, and it is the FC-12 case rather than the FC-05 one. The line groups the projection
-by backend and de-duplicates, so it carries no position and no menu-model detail. This
-section owns that reading; §1.1 and §1.7 render it and name no source of their own. The
-chain is the other projection — the stored `hops` array, read by §1.2 and §1.3 — and
-D-28 is why neither may be computed from the other.
-
-**Under G-20 the line is absent, not derived** `[derived]`. The two candidate
-work-arounds are both worse than the gap showing through: recomputing attribution from
-the chains is the one derivation D-28 forbids by name, and holding the creation
-response's array in client state would make the card correct for one session and
-confidently wrong in the next — a source adopted by a chain edited elsewhere would still
-claim its old backends, which is the failure D-28 exists to prevent. So the card renders
-the line when a response carries the projection and omits it otherwise. A missing line
-reads as *unknown*, which is true; a stale one would read as *known*, which is not.
+in for each other. Every `GET /api/models/sources` row carries the server-derived,
+complete `adopted_by: [{backend, menu_model}]` projection. It is unique and sorted by
+backend then menu model; the line groups it by backend and de-duplicates, so it carries
+no position and no menu-model detail. Creation responses echo the same projection at top
+level. This section owns that reading; §1.1 and §1.7 render it and name no source of
+their own. The chain is the other projection — the stored `hops` array, read by §1.2 and
+§1.3 — and D-28 is why neither may be computed from the other.
 
 **The legend is a rendered-relation index, not a fixed asset** `[frame]` `[derived]`.
 01 draws three keys, 08 draws five; the two extra keys in 08 are exactly the two
@@ -1399,7 +1588,7 @@ with a hole is not a partition.
 | `$--mint` `#5BFFA0` | gateway supply | active / selected / primary | success emphasis | relation: wire `@1.75`, rail (`#5BFFA01A` chip / `#5BFFA033` line), supply text. control: active tab underline `@2`, order badges, selected option card, tier-editor focus ring, manual-row wash `#5BFFA00D`, primary buttons. advisory: 05's success note (`#5BFFA014` / `#5BFFA040`) |
 | `$--violet` `#7C5BFF` | **taken over — this supply is temporarily rerouted** | **never** | **never** | 08 only: wire `AEaxi` `@1.75`, module pill and group text `$--violet`, per-model current-source text `#7C5BFFCC`, legend swatch `#7C5BFF` |
 | `$--gold` `#FFC857` | **supply paused — this source is temporarily unavailable** | **never** | warning emphasis | relation: 08 only — wire `gtjOy` `@1`, upstream card border `#FFC85733`, state text, legend swatch `#FFC857`. advisory: 05 state ④ strip and state ⑤ strip (`#FFC85714` / `#FFC85759`), 04 ToS note (`#FFC8571A` / `#FFC8574D`) |
-| `#FF6B6B` | **needs action — this source cannot serve until a person acts** | **never** | error emphasis | advisory: 05 state ③ strip (`#FF6B6B14` / `#FF6B6B40`). relation/status: no frame draws it `[derived]` — see below |
+| `#FF6B6B` | **needs action — this source cannot serve until a person acts** | repair / destructive action | error emphasis | advisory: 05 state ③ strip (`#FF6B6B14` / `#FF6B6B40`). relation/status: frame 12 source-card dot and text. control: frame 12 repair actions and frame 11 destructive action |
 | `#FFFFFF26` | connected but not currently used | — | — | dim wire `@1` only |
 
 **Violet and gold were previously one row, and merging them was a real error, not a
@@ -1421,12 +1610,12 @@ the role partition was undefined on a drawn element. That is the same "partition
 hole" this section rejects one paragraph earlier, and it is worth naming rather than
 quietly patching: this table drifted because it was written once and then not
 re-derived, while §1.4 and §1.5 were measured again. Rose's **relation/status** meaning
-is `[derived]`, not `[frame]`: no frame draws a source in `needs_action` or `error`, so
-no wire, dot or status word is rose anywhere in the nine. D-21 nevertheless assigns
-those states this ink, and §1.1 and §1.6 both admit them as states, so the row states
-the meaning and marks it as unrendered instead of leaving the ink undefined the first
-time an implementation has to draw one. Rose never inks a control, for the same reason
-cyan never does: an error is not something you select.
+is partly `[frame]`: frame 12 now draws `needs_action` at card grain, while no frame
+draws an `error` source or a rose wire. D-21 assigns both states this ink, and §1.1 and
+§1.6 admit them as states, so the row states the shared meaning without pretending the
+new card exhibit also supplies every relation rendering the first time an implementation
+has to draw one. Rose controls are narrow: they repair the rose state or confirm a
+destructive mutation, and never indicate selection or ordinary forward progress.
 
 The stroke widths carry the same fact and are not decoration: `gtjOy` is the *only*
 relation wire drawn at `@1` besides the dim never-used wire, and in 01 that same
@@ -1491,14 +1680,14 @@ dispatch arbitrates → each backend's models resolve to these sources today.
 | --- | --- | --- | --- | --- |
 | `heujA` upstream card | tile icon by kind, name, kind pill, mono detail line, one status line | one source | yes (whole card) | Open 06 for that source |
 | `uf3re` detail | account label, or `host/path · masked key` — **and every field it can draw is nullable, so the line is specified by omission, exactly as §0.9 and §1.6 rule the same hole** `[contract]`. `account_label`, `base_url` and `masked_credential` are each `["string","null"]` in `source.schema.json`, so a segment with no value is dropped, never rendered empty and never left behind a dangling `·`; `base_url: null` is the vendor's official endpoint (§0.9's `{{host}}`) and is not synthesized into a hostname (§1.6). When nothing is left the whole line is omitted rather than filled — a subscription that reports no account label is the common case, and the card still identifies itself from four required fields (icon and pill by `kind`, name by `display_name`, state by `state`). Repeating the kind pill or the card's own name here would be the only alternative, and it would say nothing the card has not already said | source | no | — |
-| `YcOFo` status | which backends have this source configured into a route — `adopted_by`, absent under `[contract-gap]` G-20 (§1.0) | that projection when a response carries it, never a computation over chains (D-28) | no | — |
-| `wmROQ` / `Xitl7` footer buttons | Add subscription / Add API key | — | yes | Open 04 / 05. 04 is drawn per vendor and this press carries none, and no frame draws the step that picks one `[contract-gap]` G-21 |
+| `YcOFo` status | which backends have this source configured into a route — `adopted_by` (§1.0) | the complete server-derived Source projection, never a computation over chains (D-28) | no | — |
+| `wmROQ` / `Xitl7` footer buttons | Add subscription / Add API key | — | yes | 添加订阅 opens frame 13; its selected vendor opens 04. 添加 API Key opens 05 |
 | `f8w6Xp` + `pnYa0` rail | dispatch happens between the columns | decorative | no | — |
 | `GLylJ` backend group | backend tile, name, model count, head buttons, and one `{{mode}} · {{health}}` line | per-backend mode + supply health | head: buttons only | — |
 | `ehGRK` / `bGsC7` 「来源顺序」 | — | — | yes | Open 03 **for that backend** |
 | `IyKyp` 「切换到网关」 | — | backend in 直连 | yes | Open the 10 confirm for that backend |
 | `z02Ep` / `gbrq2` 「切换到直连」 | — | backend on the gateway | yes | That backend leaves the gateway immediately — **no confirm** (D-30) |
-| `Exx0a` model row | model id (mono 12), a chain chip, current-source text | chain head per model | yes | Open 02 for `(backend, model)` |
+| `Exx0a` model row | model id (mono 12), a chain chip, current-source text; `legend.unavailable` occupies that text slot when the page-grain row has no runnable hop | `AgentSupply.model_supply[].has_runnable_hop`; per-model AgentChain and its `current` member | yes | Open 02 for `(backend, model)` |
 | `ZM1pm` collapse row | `还有 N 个型号` | count of hidden rows | yes | Expand in place |
 | `FZUYI` wire layer | one path per supply relation + endpoint dots | derived supply set | no | — |
 | `ftWgW` legend info icon | the legend's note — **the string is measured from the frame, not specified here** (§0.2) | static | hover, focus **and** activation — the same three §1.0's title icon carries | Tooltip, the note standing as the icon's accessible description |
@@ -1506,8 +1695,8 @@ dispatch arbitrates → each backend's models resolve to these sources today.
 **The 当前 line is a third read, and the page does not wait on it** `[contract]`. Every
 element above it is drawn from the two page-level payloads — tile, name, count, the mode
 and status line, the head buttons, the collapse row — but the serving hop is in neither:
-`api.md` states that AgentSupply projects no backend-level serving head, and that
-`model_supply` carries only `chain_length`. The one read that carries hops at all is
+`api.md` states that AgentSupply projects no backend-level serving head; `model_supply`
+carries row-grain configuration/runnability facts but no current hop. The one read that carries hops at all is
 `GET /api/models/agents/<backend>/chain?model=<id>`, per model and Hub only — a 直连
 backend gets the documented `direct_mode` refusal. So 「Ready」 is defined on the two
 payloads on purpose: waiting on the third would hold the whole page for one row's
@@ -1515,24 +1704,26 @@ projection, and on a 直连 group it would wait for a read the contract refuses.
 refusal is also why a 直连 group draws no 当前 line and no takeover rather than an empty
 one — there is nothing there to be pending about.
 
-**And when that read answers, it carries the hops without saying which one is current**
-`[contract-gap]` **G-31**. `model-hub.md` §4.3 puts `current` in the read projection —
-「the read projection is `C` with live annotations plus `current`」 — and writes takeover
-on it; `agent-chain.schema.json` closes the payload without it. What survives is most of
-the row: the hops, their configured order, their health, their runnability and the
-model-grain `supply_state` are all on the wire, so the cost is bounded and nameable
-rather than structural. 当前 therefore renders **the hop a turn would use now** — the
-schema's own 「the next turn uses the FIRST item with `runnable: true`」 — and that
-reading is exact except across the one interval §4.3 legislates: 「recovery changes
-current execution position **on the next turn**」, so between a head becoming runnable
-again and the turn that actually moves back, the wire says the head and the truth is
-still the later hop. §1.1's *Takeover active* states that interval instead of pretending
-the two readings are one, and no frame here reads `current` as though it had arrived.
+**When that read answers, `current` names the serving hop exactly** `[contract]`.
+`agent-chain.schema.json` requires either null or an exact member of `chain`; the page
+renders that member and never substitutes the first runnable hop. Takeover is true only
+when `current` is not the chain head and that head is unavailable for a recoverable
+quota/cooldown or live connection-backoff reason. A null `current` or a blocked head with any non-recoverable reason has
+no takeover visual. Every later chain payload re-evaluates that complete predicate under
+§0.8's shared rule; there is no next-turn latch. If the head is now runnable while
+`current` still names the successor, that successor is rendered as the ordinary serving
+hop without takeover ink or copy.
 
-**Until that read answers, the derived columns say so** `[derived]`. Current source,
-chain and takeover render `—` while the chain read is outstanding, and again when it
-comes back failed or refused. This is not a new rendering: it is the one §1.0 already
-gives those same three columns when the engine is unreachable, for the same reason (D-3
+**Until that read answers, only facts the page payload already proved may replace `—`**
+`[derived]`. Chain and takeover render `—` while the chain read is outstanding, and
+again when it comes back failed or refused. Current source does too when
+`has_runnable_hop` is true. When that page-grain field is false, however, the existing
+current-text slot immediately renders a page-owned statement: `chain_length: 0` first
+selects server-owned `models.launch.route_unconfigured`, while a nonempty chain selects
+`legend.unavailable` in `$--gold`. The page has already proved which of those two facts
+holds even though it cannot yet name a current hop or detailed cause. This reuses the
+row's measured 10.5px text slot and adds no geometry. The unresolved rendering otherwise
+matches the one §1.0 gives those same columns when the engine is unreachable, for the same reason (D-3
 — a surface that cannot prove a fact must say so). **The rendering is shared; the state
 is not** — 「Chain unresolved」 is a row-grain state of its own precisely so that this
 one cannot be written as a transition into §1.0 Unreachable, which would stop the run
@@ -1590,11 +1781,10 @@ Needs action is the one worth stating precisely `[derived]`: a
 `needs_action` source **stays in the list, in place**, with its status line
 replaced by the cause `state.detail_key` names `[contract]`. It is not removed, not moved to the bottom, and not
 silently dropped from the chains that name it — a source you cannot see is a
-source you cannot fix. What the card offers is the cause and the way to the
-detail page; the control that *replaces* the credential is drawn on neither
-surface and is registered as G-12, so this paragraph states the visibility rule
-and stops there. It said 「a one-tap repair action」 until this round, which is
-the whole gap written as if it were a feature.
+source you cannot fix. Frame 12 closes that loop at the card: a repairable credential
+cause adds exactly one action, 重新授权 or 更换 Key, while the card itself remains the
+way into 06. §1.11 owns those controls so the cause vocabulary here and on 06 stays one
+vocabulary rather than a second set of card-only status strings.
 
 **A backend with zero model rows is a different emptiness from a backend with no usable
 source, and they must not share a message** `[derived]`. 没有可用来源 says *this backend
@@ -1605,7 +1795,7 @@ half the time. The group keeps its header and its `<mode> · <status>` line eith
 only the row area differs.
 
 **This list states the cause and does not offer the fix, and that is a scope fact rather
-than an omission** `[derived]`. None of these nine frames draws the surface that edits a
+than an omission** `[derived]`. None of the covered frames draws the surface that edits a
 backend's model menu, so there is no add affordance on this list to keep enabled — and
 naming where that surface lives would be a navigation path, which §0.1 forbids this file
 to draw. The empty state claims the message and the preserved shell here, and claims a
@@ -1621,7 +1811,7 @@ N = 3                                       # ADDITIONAL nominal rows, not a tot
 
 # 0. STATE — one per-row fact, read from the payload the group is already drawn from.
 #    `model_supply` is an array in hub mode and null in 直连  [contract]
-state(m) = unsupplied  iff  supplyRow(m) exists and its chain_length == 0
+state(m) = unsupplied  iff  supplyRow(m) exists and has_runnable_hop == false
          = nominal     otherwise      # includes every row of a 直连 group
 
 # 1. ORDER — one total order over the whole group, computed before anything is hidden
@@ -1639,18 +1829,17 @@ collapse label count = |collapsed|
 ```
 
 **`state` is one field of the same two payloads, and it has to be** `[contract]`
-`[derived]`. The only per-row fact those payloads carry is `model_supply`'s
-`chain_length`, whose contract says what it counts and what it does not: 「Length of the
-exact configured Route chain… It is not a count of currently runnable candidates. Zero
-marks a structurally empty Route; live blockers appear through `supply_status`.」 So
-zero is *this model has no configured chain at all*, and every other value is a row with
-hops stored in it — a statement about configuration, which is the only thing this field
-counts. That is the whole state space this predicate gets, because
-`supply_status` is one word for the backend and says nothing about which row it is about.
+`[derived]`. Every `model_supply` row carries `has_runnable_hop`, derived server-side
+under the same runnability axiom as AgentChain. `chain_length: 0` forces false; a nonzero
+chain may carry either value. This gives the collapse predicate the exact row-grain fact
+it needs without asking the backend-level `supply_status` which model it describes.
 
-Everything else a row can be — serving past its head, taking over, waiting — is the
-third read (「Chain unresolved」 above), and **the collapse must not touch it.** That read
-is per model, asynchronous, and allowed to fail: a predicate reading it decides visibility
+The Boolean has two page-grain consumers: collapse and the row marker. It keeps the row
+visible whenever false; `chain_length` first partitions that marker into structural
+`models.launch.route_unconfigured` at zero and `legend.unavailable` for a nonempty
+chain. Which hop is current and why another is unavailable belong to the third read
+(「Chain unresolved」 above), and **neither consumer may manufacture those details.**
+That read is per model, asynchronous, and allowed to fail: a predicate reading it decides visibility
 from how many requests have come back, so the group renders one way at first paint and
 reorganizes itself as answers land, under whatever the user is pointing at. It is the
 same non-determinacy the override tier was deleted for two paragraphs down, arriving
@@ -1659,42 +1848,22 @@ there is no answer to be non-deterministic about, and the two implementable read
 both wrong: treat a pending row as non-nominal and the whole menu expands on every paint,
 treat a failed read as nominal and the rule quietly stops being hard. A row whose chain
 read is outstanding, failed or refused keeps exactly the visibility this predicate already
-gave it, and renders `—` in its three derived columns where it sits.
+gave it. A true page-grain row renders `—` in its three derived columns; a false row keeps
+the page-grain marker selected above in the current-text slot and renders `—` only for
+unresolved details.
 
-**One row this predicate cannot protect, and the reason is the payload rather than the
-rule** `[contract-gap]` **G-25**. `chain_length` counts stored hops, and `model-hub.md`
-§4.6 keeps a hop the live read cannot run **on purpose** — 「its live reason remains
-visible until the Source recovers, the user removes or changes the pair, or a guarded
-cascade removes it」. Deletion is not one of those reasons and this row does not claim
-it is: §4.5 refuses an unforced Source `DELETE` while any configured chain names that
-Source, and `force=true` removes the Source and every hop naming it **in the same
-transaction**, so the contracted delete path leaves nothing dangling behind it. The
-stale hop this row is about is the ordinary one — a model the Source no longer
-advertises, or a pair whose Source sits in a state that does not clear itself — and
-`source_missing` stays a real chain reading for the store that was corrupted or edited
-outside those routes. So a menu model whose
-every hop is stale reports the same nonzero `chain_length` as a healthy one, reads
-`nominal` here, and is collapsible — while it is exactly the row that needs a person:
-nothing about it heals on its own, a model the Source stopped advertising returns only
-if the Source advertises it again, and a source that vanished outside the contracted
-path cannot be restored by adding it back, because that produces a *different* source
-which does not re-satisfy the stored hop (§1.1's *a hop's source is gone*). The
-read that can see the difference is the per-model one the paragraph above rules out, and
-that ruling is not what this row asks to reverse — a predicate waiting on N async
-failable requests reorganizes the group under the user's hands and stops being hard the
-first time one fails. What would close it is one per-row fact in a payload the group is
-already drawn from, a liveness count beside `chain_length` or a flag, and
-`agent-supply.schema.json` carries neither: `model_supply` rows are `model_id` and
-`chain_length` under `additionalProperties: false`, and `supply_status` is one word for
-the whole backend. Until then the row is reachable only by expanding the group, which is
-a press the user has no reason to make, and this file says so rather than writing a
-predicate on evidence it does not have.
+The predicate therefore treats every false row as non-nominal and keeps it visible
+without waiting on the per-model chain read. A nonzero stored chain whose hops are all
+stale is marked 供给已暂停 / Supply paused; a zero-length Route instead reports that it
+is unconfigured and never borrows paused-supply ink. A
+outstanding or failed detail read can neither erase that marker nor reorganize the group
+under the user's pointer.
 
 **This is D-7 at the grain the payload supports, not a weakening of it** `[derived]`. D-7
-protects the row that needs attention, and on this page that is the model no chain can
-serve — it is stuck until the user configures something, and 「无来源可供」 is the only row
-reading with no self-recovery behind it *that this payload can name*, G-25 above being
-the one it cannot. A takeover is the opposite case: §1.7 has it
+protects the row that needs visibility, and on this page that is a model no chain can
+serve now; its row-level state tells the user whether recovery needs action or another
+payload. `has_runnable_hop: false` names that condition at the grain this page already
+holds. A takeover is the opposite case: §1.7 has it
 resolving on its own turn, and §1.1 reserves the violet treatment for exactly the head
 blocker that clears itself, so a taken-over row inside a collapse is a row the system is
 already handling. Hiding it costs the user nothing they must act on; hiding an unsupplied
@@ -1812,24 +1981,16 @@ draw on, and in what order does the user keep them?* One ordered list, scoped to
 backend — the list add-time placement writes into, not a value any current policy reads
 back out.
 
-**It governs placement, not execution** `[spec]` S-1. A chain is stored configuration
-executed exactly as stored, so nothing in this list reaches a turn; what it reaches is
-add-time placement, which is where `model-hub.md` §4.6 puts it — 「a visible Gateway
-configuration and Add-time placement input」. What it does **not** do is decide an order
-at that moment. §4.2's only policy value, `placement-v1`, **appends** a newly added
-Source to each configuration-eligible backend order and **appends** every accepted exact
-match to that menu model's Route-chain tail, and an append lands in the same place
-whatever sequence the list is already in, so the sequence stored here has no reader
-`[contract-gap]` G-26. Reordering therefore leaves every existing chain untouched —
-including the chains that were built from an earlier state of this very list — and,
-while `placement-v1` is the policy, every future one as well. That is the property that
-makes the list safe to edit, and it is why this section's copy states what the drawer
-stores rather than naming a consumer. §4.2 calls `placement-v1` 「only the current policy
-value, not an API, UI, or acceptance invariant」, so a later policy may give the sequence
-a reader; what this frame must not do is draw one before the contract has it. Bringing
-chains that already exist back in line with the current order is a thing a user may well
-want, and it can only ever be an explicit action taken on those chains; no frame draws
-one and no route carries it `[contract-gap]` G-13.
+**It governs placement configuration, not execution** `[spec]` S-1. A chain is stored
+configuration executed exactly as stored, so saving this list reaches no turn and changes
+no existing chain. `PUT /api/models/agents/<backend>/sources` owns only the stored order.
+The separate contracted consumer is explicit:
+`POST /api/models/agents/<backend>/chains/reorder` applies the current Source-order
+sequence to every stored Route with a stable total sort, without adding, removing or
+remapping a hop `[contract]`. Frame 03 draws no control for that operation, so 保存顺序
+never invokes it implicitly. This separation closes G-26 and G-13's wire half while
+keeping G-13's missing producer `[contract-gap]`; it preserves the frame's promise that
+an order edit itself is non-destructive.
 
 The scope in that sentence is the whole point of the frame, and it is what the frame
 used to get wrong. An earlier version drew one product-global order with native
@@ -1928,8 +2089,9 @@ owns — and returns `{agent: AgentSupply}`: the backend's supply read back with
 it just stored, and no policy state beside it. Taking a source
 out of this list removes it from *this list*: a chain that names that source keeps naming
 it, because the order is read at add time and a stored chain is executed exactly as
-stored (S-1, D-9, and G-13 for the action that would reconcile the two, which no frame
-draws). There is nothing for a guard to refuse, so 保存顺序 sends, succeeds, and closes.
+stored (S-1, D-9). The separate explicit `chains/reorder` route can reconcile them, but
+this frame does not invoke it. There is nothing for a guard to refuse, so 保存顺序 sends,
+succeeds, and closes.
 
 *An earlier version of this section had it removing hops.* It read the order save as
 「a save that drops sources is not a different kind of change from any other that would
@@ -1982,7 +2144,7 @@ because the condition was, not because the surface moved.
 *Nothing renders where it landed, and that is a gap rather than a decision.* A user who
 has just added a source needs to know where it went, and the one moment the answer is in
 hand is the add transaction's own response — a drawer opened later cannot read it back,
-the same one-response lifetime G-20 records for `adopted_by`. **No frame in this document
+unlike persisted `Source.adopted_by`. **No frame in this document
 draws `added_to`** `[contract-gap]` **G-22**. The surface that would own it is the add
 flow's terminal, 06 for the source just created — §1.4's *Awaiting sign-in* and §1.5's ②
 both land there, and both land holding the array. This file states the landing and not the
@@ -2013,25 +2175,12 @@ keyboard produces is byte-identical to the one a drag produces — they must wri
 same value through the same commit path, not two paths that agree today. Every binding in
 the table above commits through that one path, and so does every button on a row.
 
-**The subtitle says what the drawer stores, because the sequence has no consumer to
-promise** `[contract]` `[contract-gap]` **G-26**. It read 「新建路由链时,从上往下挑第一个
-能用的来源」 until this round, and that is two claims the contract does not carry. *First
-usable* is a runtime capability filter, and §4.2 says this order is 「a visible Gateway
-default for Add-time placement, **not** a runtime capability filter」, with 「the only
-order runtime can execute is the exact hop order stored for that model」 beside it — a
-resolver that walked this list at request time is the per-backend priority list §9 rules
-out by name. *New routing chains* is the placement half, and the only policy value the
-contract carries appends at both ends: `placement-v1` puts a newly added Source at the
-end of each eligible backend's order and each accepted exact match at the tail of that
-menu model's chain, which lands in the same place whatever sequence this drawer saved.
-So a reorder writes durable configuration and reaches nothing that reads it — G-13
-already records that it cannot reach a chain that exists, and this is the same sentence
-about a chain that does not exist yet. The drawer stays, because the order is
-contract-owned state with a real write path, real membership rules and a real deletion
-transaction behind it; what this file must not do is name a consumer in order to justify
-a surface. When a policy value that reads the sequence exists, this subtitle is where it
-gets said, and `placement-v1` is 「only the current policy value」 by the contract's own
-words.
+**The subtitle says what this drawer stores and what its Save does not do** `[contract]`.
+It does not promise runtime resolution or automatic chain rewriting: the only order a
+turn executes is the exact hop order stored for that model, and the only operation that
+reapplies this Source order is the separate explicit `chains/reorder` route. Therefore
+the subtitle says changing this order changes no configured Route chain. A future frame
+may register the explicit operation; this one must not attach it to 保存顺序.
 
 **Copy** — namespace `models.hub.order.*`
 
@@ -2121,20 +2270,35 @@ where 排在链里 named a chain this drawer does not write.
 directly, or hand it to the gateway?* Two dialogs, because the recommended answer
 is **different per vendor** and for a reason that is legal, not technical.
 
-**Nothing drawn picks the vendor** `[contract-gap]` G-21. Every line below is stated per
-vendor — the head, both option cards, which one carries 推荐, the ToS note, the hint — and
-`POST /api/models/oauth/start` sends `{vendor, channel}`, of which only the channel has a
-producer in the radio group this dialog draws. The one entrance to 04 these nine frames
-draw is 01's single 添加订阅 (§1.1): not per vendor, not a menu. So the parameter this
-whole section is a function of arrives from a step no frame contains. This section
-specifies the dialog as drawn and states the absence; it does not invent the picker,
-because §0.1 confines this document to frames that exist.
+**Frame 13 supplies the vendor before this dialog opens** `[frame]` `[contract]`. Every
+line below remains per vendor — the head, both option cards, which one carries 推荐, the
+ToS note and the hint — while the producer is now explicit: Claude 订阅 selects
+`vendor: anthropic`, ChatGPT 订阅 selects `vendor: openai`, and §1.12 owns that mapping. The
+radio group here still produces only `channel`; `POST /api/models/oauth/start` combines
+the vendor already held with the channel chosen here.
+
+**Static subscription-vendor register**. These are client-owned brand destinations, the
+same class of declaration as the vendor name, plan subtitle and ToS note above; they are
+not OAuth-flow fields and do not travel through the server. Frame 12 consumes the top-up
+destination for `balance_exhausted` and the support destination for `account_banned`:
+
+| Subscription vendor | `Source.vendor` | Top-up destination | Support / appeal destination | Implementation consumer |
+| --- | --- | --- | --- | --- |
+| Claude | `anthropic` | `https://claude.ai/settings/usage` | `https://claude.ai/restricted` | I4 extends `ui/src/components/settings/models/vendorMeta.ts` with both static destinations |
+| ChatGPT | `openai` | `https://chatgpt.com/codex/settings/usage` | `https://openai.com/form/appeal/` | I4 extends `ui/src/components/settings/models/vendorMeta.ts` with both static destinations |
+
+This register is total only for the two subscription vendors the frame-13 producer can
+emit. An `api_key` Source does not consume it: even when its compatibility preset leaves a
+known `vendor` string on the Source, that string does not identify who operates the
+account or where that operator takes payment and support requests. Frame 12 renders the
+non-linked 联系你的服务商 fallback for that population. Adding a provider is therefore a
+static-register change with a matching I4 consumer, not a new wire member.
 
 **Element inventory**
 
 | Element | Displays | Data source | Interactive | On activate |
 | --- | --- | --- | --- | --- |
-| head | `添加 {vendor} 订阅` + `host / plan` | vendor, chosen before the dialog opens and by nothing this document draws `[contract-gap]` G-21 | close, named by `addSub.cancel` (§1.0) | Dismiss |
+| head | `添加 {vendor} 订阅` + `host / plan` | vendor selected in frame 13 | close, named by `addSub.cancel` (§1.0) | Dismiss |
 | `gI9r5` / `gBZ4W` (Claude), `mUvIf` / `Fs6bj` (ChatGPT) option | radio mark, name, recommendation badge, one-line consequence | static per vendor | yes | Select **this** option and deselect the other |
 | `uzelE` ToS note | why gateway-supplying a Claude subscription is out of scope | static, Claude only | no | — |
 | `iF4LZ` / `O0o5X` hint | how to get the other channel too (Claude) / what the non-recommended choice costs (ChatGPT) | static per vendor | no | — |
@@ -2148,6 +2312,55 @@ selected with a `$--mint` dot inside it, `stroke #FFFFFF33` and empty when not. 
 `padding [3,8]` `radius 999` `#5BFFA01A` / `#5BFFA04D`. ToS note 524 wide
 `padding [9,11]` `radius 8`, gold (`#FFC8571A` / `#FFC8574D`), `triangle-alert` icon.
 Foot 61 tall, mint 去登录 with `arrow-right`.
+
+**The paste-back exhibit `nOgMQ` registers the step after start** `[frame]`
+`[contract]`. It is the third exhibit on frame 04's authoring sheet; the crop contains
+only the dialog, and its authoring caption is not product copy. The drawn variant is
+`presentation.expects: paste_code`. `paste_callback_url` uses the same geometry and
+selects the callback-URL copy below `[derived]`, because the frozen enum changes the
+value accepted by the one contracted submit route and does not define a second form.
+
+| Element | Displays | Interactive | On activate |
+| --- | --- | --- | --- |
+| paste head | The selected vendor and the flow's expected return | close | Dismissing |
+| authorization link `[derived]` | The exact non-null `presentation.auth_url` | yes | Open the same provider URL without starting another flow (PD-2) |
+| paste input | Code or complete callback URL, selected by `presentation.expects` | yes | Keeps the value locally; empty means 提交 is disabled |
+| helper | PD-4's resolved server-declared string; null or lookup failure uses the expects-specific generic hint | no | — |
+| 取消 | Leave the flow | yes | Dismissing |
+| 提交 | Send the held value | yes when non-empty | `POST /api/models/oauth/submit` with `{flow_id, value}` |
+
+The provider handoff belongs to the start transition, while the visible row is its
+same-flow recovery path `[contract]` `[derived]`. PD-1 preallocates the browser context
+inside the 去登录 gesture; RR-1 transfers it to the **non-terminal** accepted flow, and PD-2
+navigates when that flow first carries `presentation.auth_url` and keeps the exact URL
+actionable in the dialog. RR-2 routes an
+already-terminal acquisition straight to status and PD-3 closes the unused context. That
+is how the user obtains the code or callback URL even when browser popup policy refused the
+automatic handoff. The URL is server-declared; the client keeps no vendor-to-**OAuth**-URL
+table, and the static top-up/support register above is never consulted for this transition.
+Polling, re-rendering or reconciling a submit never **auto-opens** the authorization URL
+again; the user may still activate the held link. A submit response is not assumed terminal,
+but C11 forbids treating every non-terminal state as the same milestone. E3a `starting` /
+`awaiting_action` says the provider still needs the paste value and returns to the form with
+that value retained; only the user's next explicit 提交 resends it. E3b `verifying` says the
+value was accepted and transfers ownership to the 2s completion poll without resubmission.
+
+The helper is declaration-first as well `[contract]`: PD-4 sends
+`presentation.instructions_key` through the existing missing-key-safe resolver. Forms A,
+B and C render it directly only when lookup resolves. A null **or unresolved** key falls
+back to the generic helper selected by `expects`; the client owns neither a
+vendor-to-instruction table nor a second paraphrase of resolved server copy.
+
+**Paste-back geometry** `[frame]`
+
+| Element | Metric |
+| --- | --- |
+| Dialog | 620 wide, height hugs content, `#0E0E18`, `#FFFFFF24` border, radius 14, shadow `0 16 40 #00000099` |
+| Head | `padding [16,20]`, `gap 4`; title 15 / 700; subtitle JetBrains Mono 10.5 / 400 `#9BA3B8B3`; close 15px |
+| Body | `padding 20`, `gap 14` |
+| Field | label 11.5 / 600 `#FFFFFF8C`; input 36 high, `padding [0,12]`, `#FFFFFF08`, `#FFFFFF14` border, radius 8; value and placeholder JetBrains Mono 11.5 / 400 |
+| Helper | `gap 7`; info icon 12px; text 520 wide, Inter 11 / 400, line 17, `#FFFFFF8C` |
+| Foot | `padding [14,20]`, `gap 8`, `#FFFFFF05`; buttons `padding [8,14]`, radius 7, labels 12 / 600; submit icon 12px |
 
 The recommendation flips per vendor `[frame]`: Claude = 原生使用 **推荐** /
 登录为网关来源 **次选**; ChatGPT = 登录为网关来源 **推荐** / 原生使用
@@ -2201,9 +2414,10 @@ claude.ai / Max · Pro and chatgpt.com / Plus · Pro, and this section registere
 as `{{host}} / {{plans}}` — two promises nothing here can keep. A subscription carries no
 `base_url` at all, so there is no entered host to interpolate; and no contract in this set
 publishes which plans a channel accepts, so there is no list to join either. Synthesizing
-the vendor's endpoint is ruled out for the reason §1.6 gives when it rules the same move
-out: it needs a vendor→URL table no contract here holds. Every other string in this dialog
-is already static per vendor — which is what the element inventory says this head is — so
+the vendor's **API endpoint** from the remediation register is ruled out: a billing or
+support destination says nothing about the endpoint a Source calls, and the two facts may
+not substitute for each other. Every other string in this dialog is already static per
+vendor — which is what the element inventory says this head is — so
 the subtitle is two rows beside `tos.claude` and `hint.chatgpt` rather than a template with
 nothing behind it. `{{plans}}` had no second consumer and its §0.9 row goes with it.
 
@@ -2216,7 +2430,7 @@ OAuth flow that has nowhere to land is the most expensive possible way to report
 that the engine is down.
 
 **去登录 does not mean 「open a browser and wait」; it means 「start the flow and render
-what the flow declares」** `[contract]` `[contract-gap]` G-17 `[contract-gap]` G-33.
+what the flow declares」** `[contract]` `[contract-gap]` G-33.
 `POST /api/models/oauth/start` answers with an `OAuthFlow`, and `oauth-flow.schema.json`
 puts the whole step-2 shape in `presentation`: `auth_url`, `device_code`,
 `instructions_key`, and `expects`, which runs `none · paste_code · paste_callback_url`.
@@ -2226,30 +2440,40 @@ the three compositions it expects, and the middle one is why this reading had to
 split: 「A = auth_url + expects paste_code; **B = auth_url + device_code + expects
 none**; C = auth_url + expects paste_callback_url」.
 
-**`expects` says what comes back, not whether anything is shown, and this section had
-read it as both** `[contract]` `[contract-gap]` G-33. `expects: none` means the user
+**Presentation-delivery totality** `[contract]` `[derived]`. Declaring a URL or copy key
+is not yet delivering it to a person. These rows are shared by create and reauth and apply
+to Forms A, B and C; a form consumer that skips one leaves a valid server declaration
+unusable:
+
+| ID | Evidence / moment | Browser-context ownership | In-dialog fallback / copy disposition |
+| --- | --- | --- | --- |
+| PD-1 | A create or reauth flow-producing control is activated while the browser still owns the user gesture | Synchronously open one blank external context **before** awaiting the start/reauth request. The request still runs when popup policy returns no context | Nothing is rendered yet. A refused/failed acquisition closes an unused blank context. A non-terminal flow owns it even while `auth_url` is null, because a later status read may supply the URL |
+| PD-2 | Acquisition or a later read of the active non-terminal flow first carries non-null `presentation.auth_url` | Navigate the one PD-1 context to that exact URL. Never derive or rewrite it, and never auto-open another context during polling, submit or reconciliation | Keep the exact URL as a visible actionable link for the lifetime of the active form. It is the manual path when PD-1 was blocked or the external context was closed; activating it opens the same URL without restarting the flow |
+| PD-3 | RR-2 receives a terminal flow, or an active flow terminates before PD-2 navigates | Close the unused PD-1 context and status-read or settle immediately; a terminal flow owns no provider handoff | Render no form and no stale authorization link |
+| PD-4 | An active form carries `presentation.instructions_key` and `expects` | N/A — this is localized copy, not navigation | Resolve the open-vocabulary key through the existing `serverText` missing-key guard. A resolved key renders directly. A null **or unresolved** key renders the generic helper selected by `expects`: device-code, authorization-code paste or callback-URL paste. Never print the machine key and never use a vendor→instruction table |
+| PD-5 | An active paste form in E3a carries `presentation.auth_url: null` | The one held flow and its one PD-1 context own a 2s status read under the existing dialog bound. Keep reading while the required URL is null; never start a second flow or browser context. E2 stays inconclusive, and the evidence-class matrix owns every other answer | Keep the held form and draft. The first read with a non-null URL invokes PD-2 on the original context and pauses this delivery-only poll while E3a still waits for explicit submit |
+
+**`expects` says what comes back, not whether anything is shown** `[contract]`
+`[contract-gap]` G-33. `expects: none` means the user
 hands no value back to Avibe. It does not mean the flow declared nothing to display:
 Form B is `expects: none` carrying a `device_code`, the pattern where the provider's own
 page asks for a code that this dialog is the only holder of. So 「the branch that
 finishes by itself」 and 「the branch with nothing to render」 are two different sets,
 and 04 draws the second: a head, two option cards, a ToS note, a hint and a foot
-of 取消 / 去登录, with no code block, no copy control and no line for `instructions_key`
-anywhere in this section's inventory or copy table. A Form B flow therefore renders here
-as a dialog that says it is waiting while withholding the value the user has to type.
-That absence is G-33.
+of 取消 / 去登录, with no code block or copy control. Its non-null
+`presentation.instructions_key` still renders in the helper under the declaration-first
+rule above, but instructions cannot substitute for the `device_code` value the user must
+type. That missing read-only value and copy control are G-33.
 
-**G-33 is registered beside G-17 rather than folded into it** `[derived]`
-`[contract-gap]` G-17 `[contract-gap]` G-33. Forms A and C end with the user holding a
-value the dialog has to take and send to
-`POST /api/models/oauth/submit` as `{flow_id, value}`, and 04's foot has no field between
-its two buttons to take it — that is G-17, and its repair is an input plus that route.
-G-33's repair is a read-only value the user copies out and a helper line, with nothing
-submitted anywhere. Either can be closed while the other stays open, so folding them
-would leave a number that cannot be retired. *Awaiting sign-in* is therefore the
-`expects: none` branch **whose `presentation` carries no `device_code`**, stated as that
-branch rather than as all of OAuth. The schema's own Claude example uses `paste_code`, so
-neither gap is a hypothetical vendor: the first one it contracts is already outside what
-this frame draws.
+**G-33 stays open after the paste-back registration** `[derived]` `[contract-gap]`
+G-33. Forms A and C now render the `nOgMQ` field and submit `{flow_id, value}` to
+`POST /api/models/oauth/submit`, and every form renders a non-null
+`presentation.instructions_key`. Form B still needs a read-only `device_code` the user
+copies out, with nothing submitted anywhere; the new input cannot substitute for that
+output block. *Awaiting sign-in* is therefore the `expects: none` branch **whose
+`presentation` carries no `device_code`**, stated as that branch rather than as all of
+OAuth. The schema's own Claude example uses `paste_code`, so the registered paste branch
+is not hypothetical while the separate device-code debt remains explicit.
 
 **「Finishes by itself」 is not 「tells us by itself」** `[contract]`. `expects: none` means
 the user hands nothing back, not that anything notifies the client — so the completion
@@ -2258,8 +2482,40 @@ is polled while the flow is non-terminal, at the 2s cadence and under the bound 
 and a terminal `OAuthFlow.state` is what
 ends the wait. Without the poll *Awaiting sign-in* is a state with an entry and no exit:
 the flow finishes in the browser, the source exists, and this dialog is still sitting on
-a button the user already pressed. A single failed read is not a terminal reading and
-does not end the flow — the poll is bounded by the clock, not by the first blip.
+a button the user already pressed.
+
+**Status-read evidence-class matrix** `[contract]` `[derived]`. This is the one matrix used
+by Awaiting sign-in, Awaiting paste-back completion, Paste-back failed reconciliation and
+§1.11 reauth. A machine code is classified by what it can prove about this flow, never by
+the fact that the server named it:
+
+| Evidence class | Acquisition / status / submit outcome | What it proves | Poll ownership | Intent-specific projection |
+| --- | --- | --- | --- | --- |
+| E1 — acquisition terminal, tail not yet materialized | Acquisition returns a terminal `flow` without a terminal tail | The producer found a finished flow, but has not materialized or reported its create/repair result | Status-read immediately under RR-2; PD-3 opens no form or `auth_url` | None until the status route returns the complete terminal envelope |
+| E2 — inconclusive read | Transport failure, no answer or `engine_down` | Nothing about whether this flow is still pending or has completed; `_oauth_status` can emit `engine_down` for an ordinary adapter outage while pending | Keep the held state; the next 2s tick retries under the same bound | None; neither source list nor source card is changed by evidence about no flow state |
+| E3a — action still required | Non-terminal `{flow}` in `starting` or `awaiting_action` | The flow exists and is not done. For a paste presentation, these states prove that the provider still needs the held paste value; they do **not** prove that submit was accepted | An ordinary sign-in keeps its owned form/poll. A paste form with null `auth_url` keeps PD-5's delivery poll; once the URL is delivered it waits without a completion poll. A direct submit or D-36 reconciliation returns to Awaiting paste-back with the value retained; only a later explicit 提交 resends it | None |
+| E3b — submitted, verifying | Non-terminal `{flow}` in `verifying` | The flow exists, the provider accepted the paste value when that presentation owns one, and terminal materialization is still pending | Enter or continue Awaiting paste-back completion under the same bounded poll; never resubmit the held value | None |
+| E4 — create terminal flow failure | Terminal `failed` / `cancelled`, `flow_expired`, or `flow_not_found` with held `intent: create` | This flow cannot produce a later success terminal; create owns no pre-existing Source subject to reconcile | Stop → OAuth failed | Retry preserves the held create intent |
+| E5 — terminal success | Terminal `success` envelope | Authorization and materialization completed | Stop | `flow` supplies terminal state and intent; `create` consumes `source`, `added_to`, `adopted_by`; reauth consumes R3's `source`, `recovered`, `interrupted_pairs` |
+| E6 — materialization-only failure | Exactly `discovery_failed` or `migration_item_conflict` in the standard error envelope | This code can arise only after terminal authorization entered materialization, which may already have changed Source state and dependent supply. Conditional `interrupted_pairs` is present and nonempty only when acquisition-stage mutation already produced that exact impact; otherwise it is absent | Stop immediately → OAuth materialization failed; render a present report, then RR-5 reads the attempt scope | R5 consumes every error-envelope member. `create` refreshes the Source list; `reauth` refreshes M3's complete model surface, including same-backend native siblings, before M0 Source-gone precedence. A later read never replaces or reconstructs `interrupted_pairs` |
+| E7 — reauth Source absence | `source_not_found` while the held intent is `reauth` | The exact repair subject no longer exists | Stop → M0 / §1.6 Source gone | Drop the repair overlay, retain exact absence, reconcile the complete model surface and never select a lookalike Source |
+| E8 — forgotten reauth flow | `flow_not_found` while an acquired flow holds `intent: reauth` | Only that the flow binding is gone; a completed binding can be forgotten after its exact Source is deleted, so this proves neither repair failure nor Source presence | Before failure handoff, run RR-5's M3 complete model-surface read for Hub or native; only a pre-flow acquisition failure outside E8 keeps the narrower RR-6–RR-9 selected-Source read | Source absent → E7 / M0; Source present → OAuth failed in front of the complete reconciled projection; read failure → OAuth failed with read-only RR-5 Retry before any resend. No retry is offered against known absence |
+| E9 — reauth terminal failure | `flow_expired` while the held intent is `reauth`, or terminal `failed` / `cancelled` after that reauth producer | The held flow cannot produce a success tail, but that fact does not settle the producer attempt's Source or dependent projections | Run the same RR-5 attempt-scope read as E8 before visible failure handoff | Source absent → E7 / M0; Source present → OAuth failed in front of the reconciled projection; read failure → OAuth failed with RR-5 read-only Retry. No branch treats an empty or missing impact tail as a clean repair |
+
+E2 is bounded by the dialog clock, not by the first outage. E3a/E3b are deliberately
+separate progress evidence: `non-terminal` alone can never authorize completion polling
+for a paste value the provider still awaits; PD-5 is a presentation-delivery read, not
+that completion poll. E6 is the deliberately closed
+exception: treating one of its two members as silence can keep polling after
+materialization already cleared a reauth Source's discovered supply. No open-ended
+「server-named」 bucket is allowed to claim that transition; adding a third E6 member
+requires evidence that the code is exclusive to terminal materialization and a change to
+this table, while adding any other named failure requires its own evidence-class row.
+The intent-specific failure copy says which journey failed, and the refreshed projection
+carries what the server now says about the affected source. R5 closes the former G-34
+exception: a present `interrupted_pairs` report is rendered exactly once and retained;
+an absent member stays absent. No implementation may infer or rebuild the historical
+report from the later projection read.
 
 **The clock that bounds it is this dialog's, not the flow's** `[derived]`. What ends a
 flow no terminal reading ever comes back for is `OAuthFlow.expires_at` when the flow
@@ -2289,31 +2545,24 @@ started. An unsuccessful terminal reads like the other two entries and leaves no
 cancel. Only a still-non-terminal reading, or a read that fails, puts the dialog back
 where the bound left it, and that is the branch the cleanup below belongs to.
 
-**The cleanup goes out and the new flow does not wait for it** `[derived]`. The browser
-tab on the other side of the bound is untouched: a user who signs in twenty minutes later
-completes a flow this dialog gave up on, and if 重试 has meanwhile started a second one,
-the provider can complete both. So the retry issues
-`POST /api/models/oauth/cancel` — 「Cancels and forgets the flow」 `[contract]` — for the
-`flow_id` it is abandoning, and starts the new one without awaiting it. Serializing the
-start behind the cancel is the tempting change and it buys nothing: the cancel is F4, so
-holding the start would mean holding the user behind a call whose failure this dialog has
-already decided not to surface, and the outcome it would be protecting against survives
-anyway. That outcome is a second Source — this backend's `native_cli` singleton is what
-refuses a duplicate, and the `hub` channel these flows also use has no such rule —
-landing in the list with no removal affordance, which is G-16's. It is one press away on a path
-that has no cancel to serialize behind: dismiss the dialog, open 添加订阅 again, sign in.
-The duplicate is the missing affordance's, not this button's ordering.
+**The new flow does not wait for cleanup, but cleanup's own read does wait for cancel**
+`[derived]`. This paragraph begins only after the read owner has settled: an unread
+RR-5 result, including E6 with a mounted `interrupted_pairs` report, exposes only its
+read-only Retry and cannot arrive here. Once reconciliation permits a fresh retry, it
+launches the acquisition the user asked for and gives the old flow to an F4 background
+owner. Within that owner the order is fixed: settle the
+authorized `POST /api/models/oauth/cancel` attempt, then re-read the affected projection.
+Starting the new flow need not block on that work; reading before the cancel settles is
+forbidden because cancel can itself materialize the old flow. If the fresh journey has
+already adopted a reusable reauth flow, the ownership check withholds the stale cancel
+and still performs the read.
 
-The cleanup is issued and not awaited, which is F4, and this is the treatment's second
-caller rather than a new one: a cancel that fails here has no repair the user could
-perform, because the surface that would have to state it is already showing the retry
-they asked for. Blocking the retry on it would be worse than not sending it — the user
-pressed 重试 to sign in, and a dialog that answers 清理失败 has replaced their action with
-somebody else's bookkeeping. D-16 already says where the truth is when a cancel does not
-land: the source list on the next load, which is exactly where the duplicate would show
-up. Conditioning first on how the state was entered and then on what the re-read says
-keeps the request off the wire in every case that has nothing to cancel; it costs no
-second state and no second sentence, because the user sees one dialog throughout.
+A cleanup failure has no error surface and does not replace 重试 with bookkeeping. The
+post-cleanup read still runs, which narrows D-16 from 「the next load eventually tells」 to
+「the cleanup owner refreshes after its last possible write」. Create refreshes the list;
+reauth refreshes the held Source. A failed cancel may still leave a later completion, but
+the spec neither calls that cleanup success nor suppresses the read that can observe the
+latest projection.
 
 **This state is read off the flow, and there is no source to read it off** `[contract]`.
 It said 「classified `needs_action`」 until this round, which named a real status and put
@@ -2349,39 +2598,24 @@ flow, its 重试 branches on a `flow_id`, and neither exists when the start call
 failed — so a fourth row is cheaper than a state that has to check whether its own
 subject is there.
 
-**Dismissing while a sign-in is in flight cancels the flow, and that is what makes
-re-entry trivial** `[derived]` `[contract]`. 取消, the close icon and a press outside the
-dialog are one action, not three: each ends the dialog, and when the dialog is in
-*Awaiting sign-in* each also calls `POST /api/models/oauth/cancel` with the `flow_id`
-returned when the flow started — the route exists for exactly this and its own
-description is 「Cancels and forgets the flow」 (`api.md`, `[contract]`). The browser tab
-the user was sent to is not ours to close; what we owe is that finishing in that tab
-after dismissal binds nothing, which is the forgetting the route does. §1.0's rule asks
-every state for entry, exit **and** re-entry, and this is the section that takes the
-cheaper of the two answers it allows: **no flow outlives its dialog**, so re-entry needs
-no rule of its own — reopening 添加订阅 is always a fresh Default or a fresh Second pass,
-never a resumption. The expensive answer would have been a resume path, and it would have
-had to survive a restart, a second dialog for the same vendor, and an OAuth code that
-completes minutes later; none of that is worth buying when the flow can simply be
-allowed not to exist.
+**Dismissing while a sign-in is in flight is visually immediate and evidentially
+ordered** `[derived]` `[contract]`. 取消, the close icon and a press outside are the one
+DP-3 exit: the dialog leaves at once, while RR-10's background owner decides whether it
+still owns `POST /api/models/oauth/cancel`. That owner always waits for its cancel attempt
+to settle before it re-reads the affected projection. This order is load-bearing: cancel
+may itself materialize a terminal create/repair, and a read issued beside or before it
+can return the state that existed before that write.
 
-**The cancel call's own failure does not hold the user** `[derived]`. It is issued as the
-dialog closes and its result is not awaited: a non-2xx or a dropped connection changes
-nothing on screen, renders no error, and offers no retry. Two reasons, and the second is
-the load-bearing one. Keeping someone inside a dialog to finish cleaning up an operation
-they just abandoned is the opposite of what 取消 means, and D-15 already says a failure
-never makes a mutation the only way out — a *forward* control on a dismissal would be
-exactly that. And the residual risk is **visible but not yet recoverable** `[contract-gap]` G-16: a
-cancel that never lands leaves a flow that may still complete, in which case a source the
-user did not keep appears in the list — where D-16's rule applies unchanged, since the
-list reports what exists rather than what was intended. `api.md` contracts
-`DELETE /api/models/sources/<id>`, and no frame here draws it; 06's 移除 removes one
-manual model row, not the source. So the state this paragraph leaves the user in is
-*seeing* the unwanted source, and G-16 is the affordance that would end it. This section
-said 移除 was one press away until this round, which was the model-row menu read as if it
-removed the source. What it will **not** do is claim the guarantee is stronger than the
-call: 「no flow outlives its dialog」 holds when the route answers, and the source list is
-the surface of truth when it does not.
+**The cancel call's own failure still does not hold the user** `[derived]`. A non-2xx or
+dropped connection renders no cleanup error and offers no retry on a surface that is gone,
+but it also does not suppress the later read. Create rereads the Source list; reauth
+rereads M3's complete model surface, including every same-backend native sibling an
+accepted attempt may already have invalidated. An ownership handoff skips an unauthorized
+cancel and performs the same read. The result is the only re-entry rule required: a later
+open starts from the projection the model surface now reports, while no late cleanup
+response reopens the departed dialog. This does not promise that no flow can outlive a
+failed call; it promises that the
+latest available authority is read after cleanup has had its chance to write.
 
 **There is no partial-completion state here, and that is a property of the rebuild, not
 an omission.** An earlier draft of this section carried a `[contract-gap]` (G-5) for the
@@ -2415,12 +2649,26 @@ not reused.
 | `signIn` | 去登录 | Sign in |
 | `cancel` | 取消 | Cancel |
 | `retry` `[derived]` | 重试 | Retry |
+| `paste.title.code` `[frame]` | 回填授权码 · {{vendor}} 订阅 | Paste authorization code · {{vendor}} subscription |
+| `paste.title.callbackUrl` `[derived]` `[contract]` | 回填回跳地址 · {{vendor}} 订阅 | Paste callback URL · {{vendor}} subscription |
+| `paste.subtitle` `[frame]` | 登录进行中 | Sign-in in progress |
+| `paste.label.code` `[frame]` | 授权码 | Authorization code |
+| `paste.label.callbackUrl` `[derived]` `[contract]` | 回跳地址 | Callback URL |
+| `paste.placeholder.code` `[frame]` | 粘贴浏览器给你的授权码 | Paste the authorization code from the browser |
+| `paste.placeholder.callbackUrl` `[derived]` `[contract]` | 粘贴浏览器回跳后的完整地址 | Paste the complete URL after the browser redirects |
+| `paste.hint.code` `[frame]` | 在浏览器完成登录后,页面会给你一个授权码;贴回这里继续。没拿到码就回浏览器重试,或取消后重新发起。 | After signing in in the browser, the page gives you an authorization code. Paste it here to continue. If there is no code, retry in the browser or cancel and start again. |
+| `paste.hint.callbackUrl` `[derived]` `[contract]` | 在浏览器完成登录后,复制地址栏里的完整地址;贴回这里继续。没拿到地址就回浏览器重试,或取消后重新发起。 | After signing in in the browser, copy the complete address from the address bar and paste it here. If there is no address, retry in the browser or cancel and start again. |
+| `paste.submit` `[frame]` | 提交 | Submit |
+| `paste.submitting` `[derived]` | 正在提交… | Submitting… |
+| `paste.fail` `[derived]` | 没能确认这次回填已经提交 | Could not confirm the pasted value was submitted |
 | `error.oauthFailed` `[derived]` | 登录没有完成。可以重试。 | Sign-in did not complete. You can retry. |
+| `error.finalize` `[derived]` | 已完成授权,但创建来源失败。请重试。 | Authorization completed, but the source could not be created. Try again. |
+| `error.finalizeReauth` `[derived]` | 已重新登录,但这个来源仍不可用。请重试。 | Sign-in completed, but this source is still unavailable. Try again. |
 | `error.startFailed` `[derived]` | 没能确认登录已经开始,可以重试 | Could not confirm the sign-in started — you can retry |
 | `error.engineDown` `[derived]` | 网关没有响应,请重试 | The gateway is not responding. Please retry. |
 | `error.alreadyBound` `[derived]` | 这个后端的原生登录位已经被占用了。改用网关托管添加。 | This backend's native login slot is already taken. Add it as a gateway-held source instead. |
 
-The five error strings are `[derived]`, not `[spec]`: the failure *classes* are the
+These error strings are `[derived]`, not `[spec]`: the failure *classes* are the
 spec's (§4.5), but no `models.oauth.*` namespace exists in either locale file today,
 so this file is where these strings are decided.
 
@@ -2472,13 +2720,13 @@ refusing: ③ and ④ cannot save at all, ⑤ can.
 | `zVU7c` / `V6CtoF` 拉取型号 + hint | an optional early pull, which Add performs anyway | — | yes | Enter ②′; render its result in place |
 | `S0pOY2` 添加 | — | form validity | yes | Run the add action (connect + identify + fetch) |
 | `OT0Xf` state ② | spinner, 连接中…, what is happening, 通常 1–3 秒 — **and state ②′ unchanged** | in-flight | 取消 only | Abort; from ②′, back to ① with the form intact |
-| `C72yS` state ③ strip | classified cause, then request evidence | probe result | no | — |
+| `C72yS` state ③ strip | classified outcome copy | observation result | no | — |
 | `EJrDH` ③ foot | 取消 / 重试 | — | yes | Dismiss / re-run whatever failed |
-| `vKiIo` state ④ strip | connected + authenticated, interface undetermined, with evidence | probe result | no | — |
+| `vKiIo` state ④ strip | connected, interface undetermined | observation result | no | — |
 | `WZyA8` selector | the three interface types, as a **hint to the prober** | static | yes, **nothing pre-selected** | Select one; enables 重试 |
 | `Nak7y` ④ foot | 取消 / 重试 (dimmed until a hint is picked) | selection | yes | — |
-| `d6bFlX` state ⑤ strip | the interface *was* identified, and the model list did not come back, with evidence | probe result + fetch result | no | — |
-| `x0Gzg` ⑤ foot | 取消 / 仍要添加 / 重试 — **three** buttons, the only foot in the product with three | — | yes | Dismiss / save the source without an inventory / re-run the fetch |
+| `d6bFlX` state ⑤ strip | the interface *was* identified, and the model list did not come back | observation result | no | — |
+| `x0Gzg` ⑤ foot | 取消 / 仍要添加 / 重试 — **three** buttons, the only foot in the product with three | — | yes | Dismiss / save the source without an inventory / rerun the entire observation |
 | `sqZa9` success note | that the dialog closes straight into 06 | static | no | — |
 
 **Metrics** `[frame]`: dialog 560 wide, height auto in all five states — the frame
@@ -2503,28 +2751,25 @@ The rule underneath all four is one sentence: **full mint means the user has alr
 supplied the new information; dimmed mint means pressing it repeats a request the
 user has not changed.** ③ qualifies because fixing the credential field *is* the new
 information. ② is mid-flight, ④ without a hint would re-run the identical probe
-order, and ⑤'s fetch would re-hit the same endpoint with the same key — in ⑤ the new
-information is elapsed time, which the user supplies by waiting rather than by
-editing. A build that pre-selects a segment, or that enables ④'s 重试 before a pick,
-or that promotes ⑤'s 重试 to full mint, is not deviating cosmetically; it has
+order, and ⑤'s whole observation would re-hit the same endpoint with the same key — in
+⑤ the new information is elapsed time, which the user supplies by waiting rather than
+by editing. A build that pre-selects a segment, or that enables ④'s 重试 before a pick,
+or that promotes ⑤'s whole-observation retry to full mint, is not deviating cosmetically; it has
 implemented the opposite decision.
 
 **States** — §0.8, rows marked §1.5. Two of them are absences worth stating: this
 dialog has no Loading state, because nothing is fetched before it opens, and no Empty
 state, because a form has none.
 
-**Every state past the form is an observation this dialog has no route to run**
-`[contract-gap]` G-18. The operation itself is contracted — AC-26 declares one
-non-persisting submission that classifies reachability and authentication and reports a
-protocol only a real upstream response proved, and the protocol-observation ruling makes
-an unsaved observation load-bearing for every Save that follows it — but no row in
-`api.md` accepts it. So the states below stay fully specified, because a contracted
-operation that a frame draws is not a state this file may drop; what is registered is the
-absence of the route, and §0.5 owns that. Nothing below invents a payload, a status code
-or a path for it.
+**Every state past the form consumes the one non-persisting observation route**
+`[contract]`. `POST /api/models/sources/observe` returns `SourceObservation` and no
+credential reference or persisted Source. The dialog consumes only its contracted
+outcome, reachability, authentication, protocol, discovery and models facts. It does not
+reconstruct the removed request/status/reason evidence slots from adapter logs or HTTP
+details.
 
 **添加 observes before it persists, and that ordering is what makes ③, ④ and ⑤ offers
-rather than notifications** `[contract-gap]` G-18. Each of them asks the user for a
+rather than notifications** `[contract]`. Each of them asks the user for a
 decision — retry, pick a protocol, add anyway — and a decision offered after the row is
 already stored is not a decision; ⑤ is the clearest case, because 仍要添加 is only an
 offer if nothing was added when the inventory came back unusable. So 添加 runs the same
@@ -2554,15 +2799,15 @@ time:
   server-side **for as long as the operation is still the non-persisting submission**
   (`[contract]` AC-26, which requires that revocation on every way the submission can
   settle, cancellation included); what a cancel yields once the add has crossed into
-  persistence is `[contract-gap]` G-19, and this file states the guarantee for the phase
-  that has one instead of extending it past the seam. **A cancelled pull revokes too**
+  persistence has one contracted boundary: before durable commit, cleanup completes
+  before cancellation settles; after commit, cancellation ends only this caller's wait
+  and the next Source/Agent read claims the committed result. **A cancelled pull revokes too**
   `[contract]` AC-26, which names unsaved discovery separately from the connectivity test
   and gives it its own independently provisioned transient ref, the same revocation on
   success, failure, adapter error, timeout and cancellation, and the same durable
   pending-revocation record when the revoke itself fails. The pull is the simpler half of
   that rule rather than an exception to it: it can never persist (below), so it has no
-  seam for the guarantee to stop at, and where the add's promise ends at G-19's boundary
-  the pull's covers every way it can settle.
+  commit boundary, so the pull's cleanup covers every way it can settle.
 - **A pull-origin state can never persist.** Where a state's Add-origin form offers a
   persisting exit, the pull-origin form does not offer it at all: ④′ reports its result
   inline instead of saving, and ⑤′ drops 仍要添加 and keeps the ordinary two-button foot.
@@ -2623,10 +2868,10 @@ describes as 「Dialog opened」. ①′ is that state written down: the form ex
 renders it, plus `addKey.pull.result` reporting what came back, or `addKey.pull.empty`
 when the source answered and listed nothing — the reachable zero this key has, and the
 reason it takes a string rather than 「拉到 0 个型号」. It is also where ④′ lands when
-the hint identifies the interface, and where ⑤′'s 重试 lands when the re-run fetch
+  the hint identifies the interface, and where ⑤′'s 重试 lands when the repeated observation
 comes back usable: the same result by a longer road, which is the point of naming it once. Three
 properties hold here because it is a Pull-origin state and for no other reason. Nothing
-was persisted, so 添加 from here still runs its own observation (G-18) and reuses none of
+was persisted, so 添加 from here still runs its own observation and reuses none of
 this. Editing Base URL or API Key drops the report, because a count is a fact about the
 address it was fetched from. And 取消 dismisses with nothing to abort — the in-flight
 abort belongs to ②′, which is where the request still is. A build without this row has to
@@ -2704,24 +2949,21 @@ that persist a source equals the set whose protocol came from an observed respon
 build that lets ③ or ④ save, and a build that refuses ⑤, break the same equality from
 opposite sides — which is why it is worth stating as one.
 
-**The exits that persist are specified and the body they send is not** `[contract-gap]`
-**G-27**. `api.md`'s route table gives `POST /api/models/sources` the body `SourceCreate`
-and answers `{source, added_to, adopted_by}`; the answer is a schema and the request is
-a name that occurs in no other line of the contract. The response entity cannot be
-read backwards into one — `source.schema.json` is `additionalProperties: false` over
-sixteen properties, four of them server-assigned (`id`, `created_at`, `state`, `usage`),
-so a body derived from it is wrong on the fields the server is the one to decide. Two of
-the request's terms are not in the entity at all. The first is the credential: `Source`
-carries `credential_ref` and `masked_credential`, while what this dialog holds is a
-plaintext key that AC-26 routes through a transient provisioned ref — the same seam G-19
-already stops at, arriving here as *what the persisting call is handed*. The second is
-the distinction ④ and ⑤ exist to draw: both persist a protocol proved by a real
-response, ④ with the inventory the hinted probe returned and ⑤ with an empty one it
-observed, and 「identified, nothing in it」 against 「identified, these models」 is the
-equality above written as a request body. So this file specifies **when** each exit
-persists and does not specify what it sends; the three exits carry the marker in §0.8
-where a reader meets them, and §1.4's `create` terminal answers with the same three
-arrays from the branch that never sees a `SourceCreate` at all.
+**The persisting body is the complete `SourceCreate` schema, including
+`accept_unavailable_inventory`** `[contract]`. The frozen schema
+carries required `vendor` and write-only `key`,
+optional `display_name`, normalized `base_url`, the one-time `protocol_order` hint when
+present, and the generated `client_nonce`. It
+carries no protocol conclusion or discovered inventory: the server repeats the same
+response-backed observation inside the create attempt and owns the stored protocol,
+models and health. Thus ④'s pick remains ordering rather than authority, and ⑤'s
+仍要添加 is the only producer that sets `accept_unavailable_inventory: true`;
+the clean path sends false or omits it and may not commit when that server-side
+observation again proves a protocol while discovery remains unavailable. The flag never
+supplies or overrides observation evidence, is inert on successful discovery, and cannot
+bypass reachability, authentication or protocol proof. The response is
+`{source, added_to, adopted_by}`;
+the plaintext key and nonce reservation never become routing inputs.
 
 **The reveal control is named by its action, and the value's state is the input's**
 `[derived]`. `mZBBw` draws a masked value with a reveal icon, and an icon-only control
@@ -2755,60 +2997,58 @@ is revealed; the button carries the verb.
 | `adding` | 连接中… | Connecting… |
 | `adding.detail` | 连上 + 认出接口 + 首次拉取型号列表 · 通常 1–3 秒 | Connect, identify the interface, fetch the model list · usually 1–3s |
 | `fail.subtitle` | 认出接口是「添加」的前置条件 · 先按下面这条修,再重试 | Identifying the interface is a precondition of Add · fix what the line below names, then retry |
-| `fail.auth` | 鉴权失败:401 Unauthorized | Authentication failed: 401 Unauthorized |
+| `fail.auth` | 鉴权失败 | Authentication failed |
 | `fail.auth.detail` | 检查 API Key 是否有效 | Check whether the API key is valid |
-| `fail.address` `[derived]` | 地址不对:404 Not Found | Wrong address: 404 Not Found |
-| `fail.network` `[derived]` | 网络不通:连接超时 | Network unreachable: connection timed out |
-| `fail.unclassified` `[derived]` | 没连成,原因认不出来 | It did not connect, and the cause could not be identified |
+| `fail.address` `[derived]` | 无法连接这个地址 | Could not reach this address |
+| `fail.network` `[derived]` | 连接超时 | The connection timed out |
+| `fail.unclassified` `[derived]` | 响应无法归类 | The response could not be classified |
 | `fail.engineDown` `[derived]` | 网关没有响应,请重试 | The gateway is not responding — try again |
 | `fail.save` `[derived]` | 没能确认这个来源已经保存 | The source is not confirmed saved |
+| `fail.inProgress` `[derived]` | 创建仍在进行,可稍后重试 | Creation is still in progress. Try again later. |
 | `retry` | 重试 | Retry |
-| `undetermined.title` | 连上了、也通过了鉴权 —— 但认不出它说哪种接口 | Connected and authenticated — but we cannot tell which interface it speaks |
-| `undetermined.detail` | {{request}} · {{status}} · 返回结构对不上任何一种已知接口 | {{request}} · {{status}} · the response shape matches no interface we know |
+| `undetermined.title` | 连上了 —— 但认不出它说哪种接口 | Connected — but we cannot tell which interface it speaks |
+| `undetermined.detail` | 返回结构对不上任何一种已知接口 | The response shape matches no interface we know |
 | `undetermined.label` | 接口类型 · 这一次由你提示 | Interface type · you hint it this once |
 | `undetermined.hint` | 提示只改探测顺序 · 仍要真的连上才会保存;保存后不可更改 | The hint only reorders the probe · it still has to really connect before anything is saved, and it cannot be changed afterwards |
 | `protocol.anthropicMessages` | Anthropic Messages | Anthropic Messages |
 | `protocol.openaiResponses` | OpenAI Responses | OpenAI Responses |
 | `protocol.openaiChatCompletions` | OpenAI Chat Completions | OpenAI Chat Completions |
 | `inventory.title` | 接口已经认出来了 —— 但这次没拿到它的型号清单 | The interface is identified — but its model list did not come back this time |
-| `inventory.detail` | {{protocol}} 已认出 · {{request}} · {{status}} · {{reason}} | {{protocol}} identified · {{request}} · {{status}} · {{reason}} |
-| `inventory.reason.transport` `[derived]` | 没能连上来源 | The source could not be reached |
-| `inventory.reason.rateLimited` | 上游限流,清单没返回 | Upstream rate limit — the list was not returned |
-| `inventory.reason.unknown` `[derived]` | 清单没能读出来 | The list could not be read |
+| `inventory.detail` | 接口已经确认;这次型号清单读取失败 | The interface is confirmed; the model list could not be read this time |
 | `addAnyway` | 仍要添加 | Add anyway |
 | `success.title` | 成功 → 弹窗关闭,直接进入「来源详情 · 型号管理」 | Done → the dialog closes and you land on Source details · Models |
 | `success.detail` | 型号列表、重新拉取、推理强度档位都在那里维护 | The model list, refetch and reasoning tiers are all maintained there |
 | `cancel` | 取消 | Cancel |
 
-**`inventory.reason` has a third word for the same reason `{{reason}}` is always
-present** `[derived]`. ⑤ is entered whenever the model fetch 「came back unusable」, and
-rate limiting and a transport failure are two readings of that, not both of them: a 500,
-a body that parses to nothing, a 200 with a shape the protocol does not admit all land
-here too. With only the first two the frame either interpolates the upstream's own
-sentence — untranslated, and the thing §0.9 forbids — or reports a rate limit that never
-happened. 清单没能读出来 says exactly what ⑤'s title already says and claims nothing
-more, which is what a residual reading is for.
+**Observation evidence slots are retired, not left nullable** `[contract]` AC-49.
+`SourceObservation` carries only outcome, reachability, authentication, protocol,
+discovery and models; it has no request, status or reason producer. Therefore
+`addKey.undetermined.detail` and `addKey.inventory.detail` are static failure statements,
+and the former `addKey.inventory.reason.*` family is a tombstone with no wire producer.
+No separator or placeholder is conditionally reconstructed from transport details.
 
 **`fail.subtitle` is shared by every cause, which is why it names none of them**
 `[derived]`. State ③ renders exactly one of `fail.auth` / `fail.address` /
-`fail.network` / `fail.unclassified` underneath it, and the first three are a 401, a 404
-and a timeout — only one of them is about a credential. A subtitle that names the
+`fail.network` / `fail.unclassified` underneath it, selected only by
+`authentication_failed` / `unreachable` / `timeout` / `adapter_error`. Only the first
+is about a credential. A subtitle that names the
 credential is right one time in four and actively misleading the rest: it sends a user
 with a typo in the base URL off to regenerate a key that was never the problem. It points
-at whichever line the classification produced instead, which is the same thing
+at whichever outcome-safe line the observation produced instead, which is the same thing
 `fail.auth.detail` does one level down — the specific advice lives with the specific
 cause.
 
-**`fail.unclassified` is the fourth line for the same reason `inventory.reason` has a
-third word** `[derived]`. AC-26 settles an API-key test on five outcomes — success,
-authentication failure, **adapter error**, timeout and cancellation — and ③'s three
-classified lines cover two of them. The adapter error is the contract's own name for an
-upstream that answered with something the adapter could not use, and it is neither a 401,
-a 404 nor a timeout; with only three lines a build either files it under one of those,
+**`fail.unclassified` is the fourth line that keeps the failure set total** `[derived]`.
+`SourceObservation` has six terminal outcomes. `observed` and `ambiguous` leave ③ for
+their own states; the four remaining outcomes map one-for-one here. `adapter_error` is
+the contract's own name for an upstream result the adapter could not classify, and it is
+neither authentication rejection, unreachable nor timeout; without the residual line a
+build either files it under one of those,
 which reports a cause that was never observed, or renders ③ with an empty cause slot on a
-frame whose subtitle promises one. 没连成,原因认不出来 says exactly what ③'s subtitle
-already says and claims nothing more, which is what a residual reading is for. The exit
-is unchanged, because 重试 re-runs the whole observation and never resumes from a
+frame whose subtitle promises one. 响应无法归类 says only what the evidence proves and
+remains true for both contracted forms: a shaped server/rate-limit response with
+`reachable: true`, and a local adapter failure with `reachable: null`. The exit is
+unchanged, because 重试 re-runs the whole observation and never resumes from a
 classification.
 
 The three protocol strings above are the **only** protocol names anywhere in the
@@ -2816,23 +3056,18 @@ product surface. They are identifiers, identical in both locales, and they
 are exactly the three transports the protocol enum admits `[contract]` AC-28 — the
 label 「OpenAI Chat Completions」 maps to `openai_chat`.
 
-`inventory.detail` opens with `{{protocol}} 已认出` for a reason worth stating: the
-one fact that distinguishes ⑤ from ④ — and therefore the one fact that licenses
-仍要添加 — is that the interface *is* known, so the line leads with it rather than
-with the failure. `{{reason}}` is a classified cause in the same style as ③'s three,
-and `inventory.reason.rateLimited` is the instance the frame draws. `[derived]`: the
-key is open, because the fetch can fail for reasons the probe already ruled out for
-the connection itself; whatever set an implementation ends up with, each member has
-to be a plain sentence about the upstream, not a status code on its own — `{{status}}`
-is already in the line.
+`inventory.detail` keeps the one fact that distinguishes ⑤ from ④ — and therefore the
+one fact that licenses 仍要添加: the interface is known and only discovery failed.
+It deliberately names no request, status or cause, because `discovery: failed` is a bare
+enum and cannot support finer evidence. The sentence is static in both locales.
 
 **`undetermined.hint` used to contradict AC-27, and now states it.** The string the
 frame drew previously — 「选一种才会保存 · 之后可在来源详情里改」 — promised the choice
 was changeable later. At `ca45aeb6`, AC-27 says the opposite: after Save the stored
 protocol is preserved byte-for-byte through retest, discovery, refresh, credential and
 Base-URL replacement and restart, and 「changing protocol requires a new Source」; FC-12
-`PATCH /api/models/sources/<source_id>` `[contract]` `[contract-gap]` G-15 carries
-metadata only and has no protocol field at all, so there is no request that could
+`PATCH /api/models/sources/<source_id>` `[contract]` carries metadata only — frame 11
+now registers that editor in §1.10 — and has no protocol field at all, so there is no request that could
 change one. The rebuilt string
 ends 「保存后不可更改」 — the frame moved onto the contract's side. **E-2 is closed, and this string is now its whole surface.** The other
 half of that conflict was an instruction to put a protocol-edit entry point on frame
@@ -2881,9 +3116,11 @@ them do I actually want, and what reasoning tiers does each accept?* Nothing els
 | Element | Displays | Data source | Interactive | On activate |
 | --- | --- | --- | --- | --- |
 | `iGcAi` back icon | icon only; `sourceDetail.back` is its accessible name in both locales `[derived]` | route | yes | Return to 01 |
-| `sugad` source bar | 36×36 identity tile, source name, **state dot + state label** (使用中 in the drawn state) + 型号列表更新于 {{time}}, mono `host · N 个型号` | source state `[spec §4.5]` | 重新拉取 / 添加模型 | Refetch / append an editable row |
+| `sugad` source bar | 36×36 identity tile, source name, **state dot + state label** (使用中 in the drawn state) + 型号列表更新于 {{time}}, mono `host · N 个型号` | source state `[spec §4.5]` | capability-gated 重新拉取 / 添加模型 / source overflow `[frame 11]` | Refetch / append an editable row / open 编辑来源 · 移除来源 |
+| 重新拉取 action capability `[derived]` | `sourceDetail.action.refetch` | `Source.supply_channel` | render for `hub`; do not render for `native_cli` | A Hub Source → Refetching. A native Source has no stored credential for this route to validate, so it exposes no activation |
 | `myA8k` header | 型号 ID (250) · 录入 (84) · 推理强度 (470, with info) · fill spacer | static | no | — |
 | `OM5PH` row | model id, entry-kind pill, tier chips, overflow icon | one model | tiers, overflow | Edit tiers / row menu |
+| Retired discovered-row delta `[derived]` | same `OM5PH` chrome, muted ink, existing tag component with `sourceDetail.entry.retired`; never a new row component | `origin: discovered`, `retired: true` `[contract]` | no delete or reactivation action | Remains readable and non-supplying; refetch preserves it |
 | `p2JwTz` tiers | chips, or 未设置档位 + `+ 添加档位` | `reasoning_efforts[]` `[contract]` FC-03 | yes | Enter edit mode |
 | `eVavA` tiers (editing) | removable chips + text input + 回车添加 · 任意文本 | local edit → `PATCH /api/models/sources/<source_id>/models/<model_id>` `[contract]` | yes | Add / remove a tier |
 | `nN4TZ` manual row | editable id input, 手动添加 pill, tier affordance, 取消 / 添加 | local draft → `POST /api/models/sources/<source_id>/models` `[contract]` | yes | Commit or discard |
@@ -2907,34 +3144,28 @@ per-model boolean here would be a second owner of the same fact, and the two wou
 disagree the first time a chain changed. What the page owns is the *inventory* —
 which models this source has, and what tiers each accepts.
 
-**What a row's overflow menu offers is derived, and this file writes the derivation
-rather than a roster** `[derived]` `[contract]`. The ruled routes give a Source's models
-one delete — `DELETE /api/models/sources/<source_id>/models/<model_id>`, guarded — and it
-reaches an entry the user wrote. The reason it stops there is a property of the entry, not
-a permission table: a discovered entry exists because the upstream reported it, so
-removing it is not a decision the user is in a position to make, and the next successful
-重新拉取 would report it again. An entry the user typed has no author but the user, so it
-is theirs to withdraw. That is the whole rule, and it is deliberately stated as a rule:
-a list of which entry kinds carry which controls would be a second owner of a fact the
-row already displays in its 录入 column, and the two drift the first time anything is
-added to either. So the menu carries `sourceDetail.row.remove` exactly where the user
-authored the entry, and
-on every other row it carries no removal item at all — not a disabled one, which would
-advertise an operation that can never become available (D-9a).
+**What a row's overflow menu offers is measured, and the contract is now broader than
+that drawing** `[frame]` `[contract-gap]` G-3. Frame 06 carries
+`sourceDetail.row.remove` only on manual rows and no removal item on discovered rows.
+The contracted guarded DELETE now accepts either: manual deletes the row; discovered
+persists `retired: true`, remains readable and never supplies. Therefore `origin` cannot
+be used as a capability predicate for the route, and the missing discovered-row producer
+cannot be explained as server impossibility. This specification preserves the measured
+manual-only menu and registers the absent producer; it does not add an unframed control
+or advertise the existing route as unreachable. It does register the producer's durable
+projection: a retired discovered row keeps `OM5PH`'s chrome, uses muted ink, and appends
+the existing tag component with `sourceDetail.entry.retired`. It has no discovered-row
+delete or reactivation action, remains readable but never supplies, and no refetch may
+clear the tombstone `[contract]`.
 
-That derivation is also what makes **G-3** a gap in the record rather than a missing
-control on this frame `[contract-gap]`, and the frame agrees: `Qp6FI`'s subtitle reads
-「aihub · 只有手动添加的型号能移除」. What the gap is about is the *other* half — a user
-who wants a discovered model gone. The refetch rule two paragraphs down is a diff, not a
-replacement, so a removal that writes nothing durable is undone by the next successful
-重新拉取, and the user watches a row they deleted come back. Closing that means a
-retention marker on the discovered-model record, and §0.5 records why three further rules
-would have to come with it. No rule in this file requires the control.
+**G-3's route and tombstone are closed; its frame affordance is not.** Refresh never
+revives a retired row, and the shared guards run before either delete outcome
+`[contract]`. A future frame can register the discovered-row consumer against that
+complete route without another contract change.
 
-**Dropping the control is only not a net loss with one property attached, so the property
-is stated here** `[derived]`. Without a per-model retirement, a source that broadcasts a
-large catalogue leaves every one of its models on this page. What has to hold is about
-reach, not about controls:
+**Omitting the discovered-retirement control from this frame still requires one reach
+property** `[derived]`. A source may broadcast a large catalogue, and this frame draws no
+retirement consumer for those rows. What has to hold is about reach, not about controls:
 
 > However many models a source broadcasts, the number of actions a user needs to reach a
 > particular model does not grow linearly with the size of the set.
@@ -2961,31 +3192,24 @@ top border, `padding [14,20]` `gap 8`, right-aligned: 取消 `FijDU` in the neut
 treatment, and the forcing action `QRZGe` in the destructive one (`#FF6B6B1A`, stroke
 `#FF6B6B59`, label `$--destructive`).
 
-**The position pill is drawn and the refusal carries no position** `[contract-gap]`
-**G-28**. `guard.hop.position` renders 顺序 #{{n}} and §0.9 has `{{n}}` always present,
-while §4.5's refusal names each hop as `(backend, menu_model, source_id, model_id)` —
-four fields and no index among them. The array being ordered is not the answer: it spans
-every backend and menu model the change touches and lists only the hops being removed,
-so an entry's place in it is not that hop's place in its chain, and reading the index off
-it would produce a number that looks right and is wrong exactly when the chain is long
-enough for the number to matter. The one read that carries a position is the per-model
-chain read, which means one request per distinct `(backend, menu_model)` the refusal
-names, issued from inside a confirm the user is already waiting on, each async and each
-allowed to fail — the dependence §1.1 refuses for a predicate that only decides what to
-hide, arriving here on the surface that has to be right the first time. So each row
-renders its model line and its consequence, and **renders no pill until the reference
-carries a position**. The key stays in the register because copy is this document's
-register and the frame draws the pill; this is G-23 seen from the other side — there the
-strings exist and the element does not, here the element exists and the value does not.
+**The position pill consumes `RouteHopRef.position` directly** `[contract]`.
+`guard.hop.position` renders 顺序 #{{n}} and frame 11's
+`guard.hop.position.removeSource` renders 第 {{n}} 跳 from the refusal row's required
+one-based pre-mutation position. The UI neither treats array order as chain position nor
+issues a per-chain lookup. `{{n}}` is therefore always present whenever the hop row is
+rendered.
 
-That structure is not specific to removing a model, and the surface is not either. It is
-the guarded-change refusal rendered once `[spec §4.5]`: the count pill and the row list
+That structure is not specific to removing a model, and the surface is not either. Frame
+11 proves the same shell at source grain for Base-URL edits and source removal. It is the
+guarded-change refusal rendered once `[spec §4.5]`: the count pill and the row list
 are the hops the change would remove, the hint line is `would_interrupt`, and the
 destructive button is the `force` re-send. What opens it are requests that persist, not
-the gestures that precede them, and **the two this page sends are
+the gestures that precede them. The two inventory mutations this page already sent are
 `POST /api/models/sources/<source_id>/refresh` and
-`DELETE /api/models/sources/<source_id>/models/<model_id>`** `[contract]` — with the title
-naming the operation and the rows naming the hops. Which operations are guarded at all is
+`DELETE /api/models/sources/<source_id>/models/<model_id>`; frame 11 adds guarded
+`PATCH /api/models/sources/<source_id>` and `DELETE /api/models/sources/<source_id>`
+and frame 12 adds `PUT /api/models/sources/<source_id>/credential` `[contract]` — with
+the title naming the operation and the rows naming the hops. Which operations are guarded at all is
 §4.5's matrix, and this page does not restate it: an enumeration written twice is two
 things to keep in step, and the copy that fell behind is exactly how a caller withdrawn
 from the matrix went on being listed here. A second surface for the same refusal would be
@@ -3011,19 +3235,22 @@ being called.
 
 **Copy** — `models.hub.guard.*`. The surface is shared, so its strings live in their own
 namespace rather than in either caller's. The parts that describe the refusal are the
-same in both directions — they render the same envelope — and only the three strings that
-name the operation vary by caller. That split is the copy-level form of the same rule the
-geometry follows: **one surface, one reading of `would_interrupt`; two operations, two
-names for what is about to happen.**
+same in every direction — they render the same envelope — and only the strings that name
+the operation vary by caller. That split is the copy-level form of the same rule the
+geometry follows: **one surface, one reading of `would_interrupt`; each operation names
+only what it is about to do.**
 
 | Key | 中文 | English |
 | --- | --- | --- |
 | `label` | 会被移除的跳 | Hops that will be removed |
+| `label.removeSource` `[frame]` | 移除后会一起消失的跳 | Hops that disappear with this source |
 | `count_one` | {{count}} 跳 | {{count}} hop |
 | `count_other` | {{count}} 跳 | {{count}} hops |
 | `hop.position` | 顺序 #{{n}} | Order #{{n}} |
+| `hop.position.removeSource` `[frame]` | 第 {{n}} 跳 | Hop {{n}} |
 | `hint.safe` | 这些型号还有别的来源可用。 | These models still have another source available. |
 | `hint.interrupt` | 有型号会因此没有可用来源。 | Some models will be left with no usable source. |
+| `hint.removeSource` `[frame]` | 一个事务:来源从每个后端的顺序与所有路由链一起移除;空掉的链保留并标「中断」,其余跳顺序不变。 | One transaction removes the source from every backend order and every route chain. Empty chains remain and are marked interrupted; all other hop order stays unchanged. |
 | `gap.label` `[derived]` | 会失去可用来源的型号 | Models that will be left with no source |
 | `gap.subject` `[derived]` | {{backend}} · {{menuModel}} | {{backend}} · {{menuModel}} |
 | `gap.agents` `[derived]` | 已指定它的 Agent:{{agents}} | Agents pinned to it: {{agents}} |
@@ -3034,6 +3261,14 @@ names for what is about to happen.**
 | `title.refetch` | 重新拉取 {{source}} 的型号 | Refetch models from {{source}} |
 | `subtitle.refetch` | 这次拉取会让部分型号从这个来源的清单里消失 | This refetch drops models from this source's inventory |
 | `confirm.refetch` | 仍要拉取 | Refetch anyway |
+| `title.editSource` `[derived]` | 保存 {{source}} 的来源修改 | Save source changes for {{source}} |
+| `subtitle.editSource` `[derived]` | 新的 Base URL 会让部分型号从这个来源的清单里消失 | The new Base URL drops models from this source's inventory |
+| `confirm.editSource` `[derived]` | 仍要保存 | Save anyway |
+| `title.replaceKey` `[derived]` `[contract]` | 更换 {{source}} 的 Key | Replace key for {{source}} |
+| `subtitle.replaceKey` `[derived]` `[contract]` | 新 Key 会让部分型号从这个来源的清单里消失 | The new key drops models from this source's inventory |
+| `confirm.replaceKey` `[derived]` | 仍要更换 | Replace anyway |
+| `title.removeSource` `[frame]` | 移除来源 {{source}} | Remove source {{source}} |
+| `confirm.removeSource` `[frame]` | 移除来源 | Remove source |
 
 **The hint line answers 有没有 and the refusal also carries 哪些** `[derived]`
 `[contract]` `[contract-gap]` **G-23**. `would_interrupt` is not a flag. It is a
@@ -3071,7 +3306,8 @@ The hint line is unchanged and stays a summary: `hint.safe` when `would_interrup
 empty, `hint.interrupt` when it is not — the same fact the list states in detail, kept
 because a user scanning the dialog reads the sentence before the rows.
 
-**Two callers, not three.** An earlier version of this table carried a `*.saveOrder`
+**The source-level callers do not revive the deleted order-save caller.** An earlier
+version of this table carried a `*.saveOrder`
 triple whose subtitle read 「移出的来源会从这个后端的所有路由链里消失」. §1.3 no longer
 starts this surface, because the order save is not a guarded mutation (§1.3, and
 `model-hub.md` §4.5's matrix, which is exhaustive and does not list that route), and the
@@ -3089,7 +3325,8 @@ pair S-1 deleted; a hop belongs to a configured chain and there is no second kin
 `radius 12` `$--surface` / `$--border`, identity tile 36×36 `radius 9`, status row =
 5px dot + 12/500 (`$--mint` as drawn — the ink is the state's, see below) + 11
 `#FFFFFF8C`, mono line 10.5 JetBrains Mono
-`#9BA3B8B3`, both actions 95 wide (添加模型 `$--mint`). Table `fill_container`
+`#9BA3B8B3`, both labelled actions 95 wide (添加模型 `$--mint`); source overflow `b4_more`
+is 33 wide with `padding [8,9]`, `#FFFFFF0A`, radius 7 and a 14px ellipsis. Table `fill_container`
 `radius 12` `$--surface`; header `padding [10,18]` `gap 16` fill `#FFFFFF05`, labels
 11/600 `#FFFFFF73`; row `padding [11,18]` `gap 16` with a bottom border; column
 widths **250 / 84 / 470 / fill** and they must match the header exactly. Tier chip
@@ -3112,8 +3349,8 @@ text:
 
 | `Source.state.status` `[contract]` | Ink | Key |
 | --- | --- | --- |
-| `active`, and some backend adopts it `[contract-gap]` G-20 | `$--mint` | `sourceDetail.status.inUse` |
-| `active`, adopted by nothing `[contract-gap]` G-20 | `$--muted` | `upstream.state.standby` |
+| `active`, and `adopted_by` is non-empty `[contract]` | `$--mint` | `sourceDetail.status.inUse` |
+| `active`, and `adopted_by` is empty `[contract]` | `$--muted` | `upstream.state.standby` |
 | `standby` | `$--muted` | `upstream.state.standby` |
 | `cooldown` | `$--gold` | `upstream.state.unavailableRetry`, or `upstream.state.unavailableDue` once `retry_at` has passed `[derived]` |
 | `needs_action` | `#FF6B6B` | the `sourceDetail.status.needsAction.*` row `state.detail_key` selects `[derived]` `[contract]` |
@@ -3130,23 +3367,16 @@ and stable is the operative word: a reference persists across a cooldown, a revo
 credential and a takeover that routes past this hop entirely. So 使用中 is a statement
 about configuration, and the copy is written to be true of a standby hop that a chain
 still points at. A card that promised live supply would need the per-chain runnability
-read, which is a different projection D-28 keeps separate and G-20 does not deliver here
-anyway — and it would go stale the moment a hop it named entered cooldown. `standby` and unadopted `active`
+read, which is a different projection D-28 keeps separate — and it would go stale the
+moment a hop it named entered cooldown. `standby` and unadopted `active`
 land on one word deliberately — they differ in *why* nothing is drawing from the source,
 and this bar is not where that difference is actionable.
 
-**And the second field is one only a creation response carries** `[contract-gap]` G-20.
-This bar is the projection's second consumer, and the reading it gets is the one §1.0
-already stated for the first: `adopted_by` is absent from `GET /api/models/sources` and
-from `source.schema.json`, so on any load that is not the creation terminal the split
-above cannot be made. It is then not made. The bar falls back to the vocabulary
-`model-hub.md` §4.5 states for the field it does have — `active` reads 使用中, which is
-that table's own word for it — and the finer distinction appears only when a response
-carried the array. Neither work-around §1.0 rejects is available here either: chains may
-not be read backwards into attribution (D-28), and a creation array held in client state
-would make this page confidently wrong the moment a chain was edited elsewhere. What this
-bar must not do is invent a third reading of its own, which is the whole reason the fact
-is registered once and cited twice rather than ruled twice.
+**Every Source read carries that second field** `[contract]`. The bar consumes the
+complete server-derived `adopted_by` array from `GET /api/models/sources`, exactly as
+§1.0's card does. It never reads chains backwards into attribution (D-28) or relies on a
+creation response retained in client state. The fact is registered once and cited twice
+so both consumers select the same active/in-use split.
 
 **`needs_action` is four causes, not one, and the row above resolves to whichever of them
 the payload carries** `[contract]`. `state.detail_key` is required on this state and its
@@ -3198,16 +3428,14 @@ to act* — but a **different word**, because they need different acts: a `needs
 source names its cause and the act that clears it, while 异常 deliberately claims no
 cause. Naming a cause the product
 did not classify would be worse than admitting it has none; what the user can still do is
-drawn either way, since 重新拉取 is enabled in every state.
+drawn either way. A Hub Source keeps 重新拉取 in every state; a `native_cli` Source uses
+its credential repair action and never renders the refetch action registered above.
 
-**No repair control is drawn here, and that is deliberate up to a point** `[contract-gap]`
-G-12. A second upstream-contacting action would be exactly the invention the 重新拉取 rule
-below forbids: repair needs one owner, not two that can disagree, and this page states the
-cause and returns to 01 through `iGcAi`. What this section will not do is claim the owner
-it names has the control. Neither frame draws credential replacement, `api.md` contracts
-both routes that would perform it, and G-12 is that absence — so 01 is where the control
-*belongs*, not where it currently is, and a build that follows this paragraph puts the
-cause on both screens and the repair on neither.
+**Credential repair has one owner, and it is frame 12's card** `[frame]` `[contract]`.
+A second upstream-contacting action on this page would be exactly the duplication the
+重新拉取 rule below forbids: the bar states the cause, the table stays visible, and
+`iGcAi` returns to the card whose 重新授权 or 更换 Key action §1.11 registers. This keeps
+refresh/recovery and credential replacement separate without leaving either route ownerless.
 
 **The 录入 pill is a second witness for D-19's neutral pair** `[frame]`. 自动拉取
 renders `#FFFFFF0A` / `$--border` / `$--muted`; 手动添加 renders `#FFFFFF14` /
@@ -3273,13 +3501,14 @@ Five rules:
 
   What survives unchanged is the rule the earlier text was written to protect, and it was
   never about hops: **一条链引用的型号,若在所有来源上都不再供应,必须在型号菜单上可见地
-  标出,不得静默跳过。** §4.4's `model_supply` projects `chain_length: 0` into 「无来源可供」
-  on the menu, and that projection is reached both by the retained-hop path and by a
-  confirmed cascade that empties a route — an emptied route stays an explicit empty
-  configuration, so the menu still has something to mark. **No new field, no new mechanism,
-  and no stale row on this frame.** The marker renders on the model menu, which no frame in
-  this document draws, so **this file states nothing about how it renders** — doing so would
-  specify a surface no frame here draws. It is covered by the AC ledger instead.
+  标出,不得静默跳过。** §4.4's `model_supply.has_runnable_hop: false` makes that row
+  non-nominal on frame 01. A nonempty chain renders `legend.unavailable` in its existing
+  current-text slot; `chain_length: 0` branches first to the existing
+  `models.launch.route_unconfigured` family. The projection
+  is reached both by the retained-hop path and by a confirmed cascade that empties a route
+  — an emptied route stays an explicit empty configuration, so the menu still has something
+  to mark. **No stale row is invented on frame 06.** Frame 01 is the registered model-row
+  consumer; the Source inventory remains only the Source's current inventory.
 
   *What that costs, said here too because this is the page where it is felt.* The source a
   model came from is exactly what this table used to tell you, and after the refetch it no
@@ -3293,8 +3522,9 @@ Five rules:
   a retained hop naming a source whose inventory no longer lists that id — three surfaces
   to answer a question one page could have answered if the inventory remembered its own
   past. The trade is deliberate: nobody gets silently unconfigured by a vendor changing
-  `/models`, and the price is that the explanation is assembled rather than read. §0.5
-  records the ruling; G-3's retirement half stays open and is unaffected by it.
+  `/models`, and the price is that the explanation is assembled rather than read. The
+  separate discovered-model retirement route persists its own tombstone; this refetch
+  rule neither substitutes for nor closes G-3's still-undrawn discovered-row producer.
 - **Empty state** `[derived]` keeps the header row and the add row and shows whichever
   of `sourceDetail.empty` / `sourceDetail.emptyNeverFetched` the source's
   `last_discovered_at` selects. An empty table with a live add row is the shortest path
@@ -3312,20 +3542,23 @@ Five rules:
 - **Needs action** `[derived]` keeps the whole table visible and
   read-only-ish: you can still see what you had configured. Hiding the inventory
   because the credential stopped working destroys the only copy of the user's intent.
-- **Every mutation on this page can answer that its subject is gone, and one state
-  absorbs all of them** `[contract]` `[derived]`. `source_not_found` is in `api.md`'s
-  minimum error set and every route this page sends takes the source id in its path, so
-  a tier edit, a manual add, a manual removal and a refetch can each come back with it —
+- **Every source-bound mutation on this page or in its frame-11/frame-12 overlays can
+  answer that its subject is gone, and one state absorbs all of them** `[contract]`
+  `[derived]`. `source_not_found` is in `api.md`'s minimum error set and every route these
+  surfaces send takes the source id in its path, so a tier edit, manual add/removal,
+  refetch, source edit/removal, reauthorization and key replacement can each come back with it —
   the source having been deleted from another tab, another API client, or a guarded
   cascade while 06 sat open. Four F1 rows each inventing a sentence for it would be four
   ways of saying the same thing, and each would leave the user on a page whose subject
   does not exist: the retry those rows offer cannot succeed, which is the dead control
   D-9a rules out. So the reading is promoted out of the treatments — any of them
   answering `source_not_found` lands *Source gone*, whose only affordance is the way
-  back to a list that is still true.
+  back to a list that is still true. §0.8 declares that dispatch once, with precedence
+  over F1/F3, for §1.6, §1.10 and §1.11; their caller rows do not restate it.
 - **重新拉取 is the only action here that contacts the upstream, and the contract has
-  only one to draw** `[frame]` `[contract]` AC-26. The frame draws 重新拉取 and 添加模型
-  and nothing else — no connectivity test — and of those two only 重新拉取 leaves the
+  only one to draw** `[frame]` `[contract]` AC-26. A Hub Source draws 重新拉取 beside
+  添加模型; a `native_cli` Source draws only 添加模型. No source draws a connectivity test,
+  and of the Hub Source's two actions only 重新拉取 leaves the
   machine; 添加模型 writes a row the user typed. 05's 拉取型号 and 06's 重新拉取 are the
   same operation at two moments, which is why they share a verb and neither is called a
   test.
@@ -3333,9 +3566,10 @@ Five rules:
   mutation `POST /api/models/sources/<id>/refresh` — the only refresh/recovery route,
   runnable against a source in `needs_action` or `error` precisely so that it can recover
   one `[contract]`. Recovery is therefore not a control this page is missing; it is what
-  pressing 重新拉取 on a blocked source already does, which is also why the action stays
-  enabled in every state above. The only probe the contract exposes is backend-scoped and
-  walks a chain, so it is not a thing a source page can offer at all. A 测试连接 control
+  pressing 重新拉取 on a blocked Hub Source already does, which is also why the action stays
+  enabled in every Hub state above. A `native_cli` Source has no stored credential for this
+  route to validate and therefore does not render it. The only probe the contract exposes
+  is backend-scoped and walks a chain, so it is not a thing a source page can offer at all. A 测试连接 control
   here would re-create the second upstream-contacting operation the amendment deleted, and
   would immediately owe an answer for what its verdict means when the refresh that follows
   disagrees.
@@ -3377,6 +3611,18 @@ Five rules:
 | `summary_one` | {{host}} · {{count}} 个型号 | {{host}} · {{count}} model |
 | `summary_other` | {{host}} · {{count}} 个型号 | {{host}} · {{count}} models |
 | `action.refetch` | 重新拉取 | Refetch |
+| `action.editSource` `[frame]` | 编辑来源 | Edit source |
+| `action.removeSource` `[frame]` | 移除来源 | Remove source |
+| `edit.title` `[frame]` | 编辑来源 {{source}} | Edit source {{source}} |
+| `edit.name` `[frame]` | 显示名称 | Display name |
+| `edit.baseUrl` `[frame]` | Base URL | Base URL |
+| `edit.hint` `[derived]` `[contract]` | 协议已由真实响应证明,不在这里改;改显示名称不会影响型号与路由链。改地址时会先检查供给影响。 | The protocol was proved by a real response and cannot be changed here. Renaming does not affect models or routes; changing the address first checks its supply impact. |
+| `edit.cancel` `[frame]` | 取消 | Cancel |
+| `edit.save` `[frame]` | 保存 | Save |
+| `edit.saving` `[derived]` | 正在保存… | Saving… |
+| `edit.fail` `[derived]` | 没能确认来源修改已经保存 | Could not confirm the source changes were saved |
+| `remove.checking` `[derived]` | 正在检查移除来源的影响… | Checking the impact of removing the source… |
+| `remove.fail` `[derived]` | 没能确认这个来源已经移除 | Could not confirm the source was removed |
 | `refetch.added` `[derived]` | 新增 | New |
 | `refetch.removed_one` `[derived]` | 本次拉取移除了 {{count}} 个型号:{{models}} | This fetch removed {{count}} model: {{models}} |
 | `refetch.removed_other` `[derived]` | 本次拉取移除了 {{count}} 个型号:{{models}} | This fetch removed {{count}} models: {{models}} |
@@ -3394,6 +3640,7 @@ Five rules:
 | `col.tiers` | 推理强度 | Reasoning tiers |
 | `entry.auto` | 自动拉取 | Auto-fetched |
 | `entry.manual` | 手动添加 | Added manually |
+| `entry.retired` `[derived]` | 已退役 | Retired |
 | `tiers.empty` | 未设置档位 | No tiers set |
 | `tiers.addFirst` | + 添加档位 | + Add tier |
 | `tiers.add` | + 档位 | + Tier |
@@ -3468,9 +3715,10 @@ drawn from them.
   dropped and the line renders `gateway.modelCount` instead, reused verbatim rather than
   restated under a new key; this bar already reuses `upstream.state.standby` the same
   way and for the same reason. Synthesizing the vendor's official hostname to fill the
-  slot is specifically ruled out — it would need a vendor→URL table no contract here
-  holds, and it would teach every subscription user an endpoint they cannot change and
-  did not ask about, which is the mechanism D-8 exists to keep off the screen.
+  slot is specifically ruled out — it would need a separate vendor→API-host registry,
+  and §1.4's billing/support destinations are no such input. It would also teach every
+  subscription user an endpoint they cannot change and did not ask about, which is the
+  mechanism D-8 exists to keep off the screen.
 - **`sourceDetail.empty` claims a fetch happened.** 这个来源没有返回型号 is a statement about a
   completed discovery, and it is false for a source that has never had one — where the
   honest sentence is a different sentence with a different first action, since refetching
@@ -3592,7 +3840,7 @@ contributes zero to it.
 
 `[derived]`: **A head blocked by `needs_action` or `error` is not takeover either, and
 the word on the pill is the reason.** §4.3 derives takeover from a head that is
-unavailable *for a recoverable quota/cooldown reason*; violet says 临时改走, and
+unavailable *for a recoverable quota/cooldown or live connection-backoff reason*; violet says 临时改走, and
 `model-hub.md` §4.5 is explicit that `error` carries no `retry_at` and that
 `needs_action` waits on the user. Painting violet over either promises a return that
 nothing in the system will deliver — the same defect as the Exhausted case, one condition
@@ -3655,9 +3903,20 @@ what is this page, and why would I want one?* It is the same page as 01, in the 
 where nothing is adopted. Upgrading into it is the common way to arrive; it is not the
 only one.
 
-**Display condition** `[derived]`: every backend is in 直连 mode and no source exists.
-Both terms are read from current state, and that is deliberate — **this is a repeatable
-empty state, not a first-run screen.** The return path is contracted end to end: AC-31's
+**One visible backend set owns filtering and page dispatch** `[derived]` `[contract]`:
+`installedAgents = AgentSupply[]` filtered to `cli_present: true`. Source presence is
+evaluated before that set: any retained Source selects 01 so its registered UI cannot be
+hidden by an empty Agent set. Only when `sources == []` may an empty `installedAgents`
+set select No backend found; only a nonempty set is quantified for all-direct / any-Hub
+page selection, counted in the pill and rendered as rows. A hidden catalogue row's
+persisted mode therefore cannot select a page that has no row for it, and the empty set
+is never treated as vacuously “all direct.”
+
+**Display condition** `[derived]`: `installedAgents` is nonempty, every member is in 直连
+mode and no source exists. The empty `installedAgents` case is this section's No backend
+found branch below. All terms are read from current state, and that is deliberate —
+**this is a repeatable empty state, not a first-run screen.** The return path is
+contracted end to end: AC-31's
 round trip switches a backend Direct → Gateway → Direct and 「preserves saved Sources and
 route configuration」, and §4.5's Source `DELETE` then removes the survivors — refusing
 while a configured chain names one, and with `force=true` removing the Source and every
@@ -3670,32 +3929,37 @@ So the frame is specified as the empty state it is, rather than promising a
 disappearance the inputs cannot deliver.
 
 This is a *state of the Models surface*, not a separate onboarding route — the
-moment one backend switches, the page becomes 01. Specifying it as a route would create
+moment one installed backend switches, the page becomes 01. Specifying it as a route would create
 a second address that has to be kept in sync with the first and that users can reach
 after it stops being true.
 
-Stated as the rule an implementation has to encode, it is a switch on **two** terms —
-*does any backend run through the gateway*, and *does any source exist* — because
+The rule an implementation has to encode is an ordered switch on **three** terms — *does
+any source exist*, *is `installedAgents` empty*, and only for a nonempty set, *does any
+member run through the gateway* — because
 `undo.3` (§1.9) promises that switching the last backend back to 直连 keeps the sources
 the user added. That promise makes 「all direct, sources non-empty」 a reachable state,
-and it is the one state where the two terms disagree.
+and retained storage makes 「zero installed, sources non-empty」 reachable too. Both must
+keep 01's Source consumer visible.
 
-| Any backend on the gateway | Any source exists | Page title | Tab strip | Body |
+| Any source exists | `installedAgents` | Any installed backend on the gateway | Page title / tabs | Body |
 | --- | --- | --- | --- | --- |
-| **No** | **no** | `oPD53` 「模型」 | **absent** | this frame, and it occupies the whole page |
-| **No** | **yes** | 「模型」 (`YkN0P`) | present `[frame]` | 01, every gateway group in its 直连 form |
-| **Yes** | either | 「模型」 (`YkN0P` on 01, `VaXos` on 08) | present: 「来源与网关」 · 「用量与额度」 `[frame]` | 01 — this frame is gone as a page |
+| **Yes** | empty or nonempty | either | 01 title + tabs `[frame]` | 01; upstream Sources plus exactly zero or more installed Agent groups |
+| **No** | empty | not quantified | `oPD53` 「模型」, tabs absent | No backend found; neither card renders |
+| **No** | nonempty | **No** | `oPD53` 「模型」, tabs absent | this frame, and it occupies the whole page |
+| **No** | nonempty | **Yes** | 01 title + tabs `[frame]` | 01 — this frame is gone as a page |
 
-**The middle row needs no new frame, and this section's own reasoning is what settles
-it** `[derived]`. 09 is 01 「in the state where nothing is adopted」, and in the middle
-row something is: the sources are still there. That alone would leave the choice open,
+**The retained-Source row needs no new frame, and this section's own reasoning is what settles
+it** `[derived]`. 09 is 01 「in the state where nothing is adopted」, and in that row
+something is: the sources are still there. That alone would leave the choice open,
 so the frame decides it — 09 draws no upstream column, so rendering it here would hide
 sources the product just promised to keep, leaving no surface to inspect or delete them
 on. So the
 page is 01, and every element of it is already specified: the upstream module lists the
-retained sources (§1.1), each backend group renders in the 直连 form with 切换到网关 on
+retained sources (§1.1), and each of zero or more `installedAgents` groups renders in its
+current mode. An all-direct group carries 切换到网关 on
 its header (`g3Wh0P`) exactly as a partially-adopted page renders its still-direct
-groups, and the wire layer draws nothing because there are no supply relations. The run
+groups; an empty set renders no group and is never summarized as all direct. The wire
+layer draws only actual supply relations. The run
 pill follows §1.0's runtime keying here, not 09's adoption keying — the engine's
 liveness is a real fact again once the component has been installed, which is the split
 the pill paragraph below already draws.
@@ -3733,7 +3997,7 @@ than its absence: it would assert that a thing exists here and is currently brok
 which is the opposite of the truth.
 
 **The page and the module have different names, and neither is 「模型网关」** `[frame]`.
-Measured across all nine frames: the page title is 「模型」 (`oPD53` here, `YkN0P` on 01,
+Measured across the original full-page set: the page title is 「模型」 (`oPD53` here, `YkN0P` on 01,
 `VaXos` on 08, and so on), the first tab — the module this document specifies — is
 「来源与网关」, and the second is 「用量与额度」. The string 「模型网关」 is **not rendered
 anywhere in the product surface**; it appears only in the design file's own frame names
@@ -3771,7 +4035,7 @@ decoration before the user has learned what they mean.
 | Element | Displays | Interactive | On activate |
 | --- | --- | --- | --- |
 | Run pill | 「{{count}} 个后端都在直连」, muted dot on `#FFFFFF0A` | no | — |
-| Backend row ×3 | Name, 直连 pill, which login it uses | 切换到网关: yes | Open frame 10's confirm for **that backend** |
+| Backend row ×3 in the frame; one per `installedAgents` member at runtime | Name, 直连 pill, which login it uses | 切换到网关: yes | Open frame 10's confirm for **that backend** |
 | 你会多出三件事 | The three things adoption buys | no | — |
 | `note_逐个切换` | That adoption is per-backend and reversible | no | — |
 
@@ -3784,30 +4048,22 @@ machine keys the pill on runtime status *and* this page keys it on adoption. A b
 that shows 「网关未运行」 in red on a first-run screen is reporting a problem the user
 does not have.
 
-**At zero installed backends the pill does not render, and that absence is what gives
-`shell.allDirect` its branch guarantee** `[derived]` `[contract-gap]` G-11. The rows come
-from `GET /api/models/agents` → `{agents: AgentSupply[]}` (`api.md`), and the array
-carries no `minItems` in `agent-supply.schema.json`, so an empty one is a *legal*
-response, not a malformed one. Legal is not the same as reachable, and G-11 is the
-distance between them: no property of `AgentSupply` reports whether a backend's CLI is
-present, and the array is built from a literal three-backend tuple, so the payload is
-length 3 whatever the machine has and an empty one is a response nothing can currently
-send. **What follows is specified against the payload closing G-11 would produce, not
-against one this build emits** — the reading is inferred from the array's length only
-because the gap leaves no flag to read, and it is marked so a reader cannot mistake the
-branch for reachable behavior. The
-extreme-data rule below omits an uninstalled backend from the list and derives
-`{{count}}` from the rows rendered; at zero rows those two rules together select
-`shell.allDirect_other` at `count = 0`, and the pill says 「0 个后端都在直连」 / 「All 0
-backends are direct」. That sentence is not merely awkward, it is false in the way that
-matters: it reports a configuration where there is nothing to configure.
+**At zero installed backends the all-direct pill does not render, and Source presence
+still owns the body** `[derived]` `[contract]`. Every AgentSupply row
+carries server-authoritative `cli_present`; the page derives `installedAgents` once, then
+uses that same set for rows, mode quantification and `{{count}}`. An empty set therefore
+renders zero Agent groups without pretending that the fixed backend catalogue is itself
+an installed set. With Sources it remains on 01; without Sources it reaches No backend found.
+The branch occurs before plural selection, so the UI never renders 「0 个后端都在直连」 /
+「All 0 backends are direct」.
 
 So the page branches once more, and it branches **before** the pill:
 
-| Backends installed | Header pill | Body |
-| --- | --- | --- |
-| **0** | absent `[derived]` `[contract-gap]` G-11 | Empty state: `empty.title` / `empty.body`, and neither card renders |
-| **≥1** | `shell.allDirect`, count = rows rendered | This frame as drawn |
+| Sources | Backends installed | Header pill | Body |
+| --- | --- | --- | --- |
+| **≥1** | **0** | 01's runtime-owned pill, never `shell.allDirect` | 01: Sources module, zero Agent groups |
+| **0** | **0** | absent `[derived]` `[contract]` (`cli_present` is false for every row) | Empty state: `empty.title` / `empty.body`, and neither card renders |
+| **0** | **≥1**, all direct | `shell.allDirect`, count = `installedAgents.length` | This frame as drawn |
 
 The empty state keeps the 你会多出三件事 card off the page too: three benefits that all
 begin 「切换到网关」 argue for an action with no subject here, and the row list that would
@@ -3862,7 +4118,7 @@ care about it yet.
   rendered, never hard-coded to 3. **At zero rows the pill is not rendered at all** — see
   the branch table above; this bullet is the rule that makes zero reachable, so it is the
   one that has to name the exit.
-- **One backend already on the gateway** ends this frame's display condition; the page
+- **One installed backend already on the gateway** ends this frame's display condition; the page
   is 01.
 - **Long account names** truncate in the detail line with the full value in `title`.
 
@@ -3901,7 +4157,7 @@ way 08's is.
 | 可以撤回 ×3 | That it is reversible, and precisely where the exit is | no | — |
 | 取消 | Leave unchanged | yes | Dismiss; nothing is written |
 | 关闭 (head) | The same leaving, one press up; `adopt.cancel` names it (§1.0) `[derived]` | yes | Dismiss; nothing is written |
-| 切换到网关 | Commit | yes | Switch **this backend only**; the page becomes 01 |
+| 切换到网关 | Commit | yes | Switch **this backend only**; M5 refreshes Sources before the current result lands on 01 |
 | Failure strip `[derived]` | `fail.title` over `fail.detail`, in the Failed state only | no | — |
 
 **The dialog names the exit by location, not by promise** `[frame]`. The second
@@ -3929,8 +4185,8 @@ difference is not an inconsistency: that frame's entry condition is *every backe
 | `title` | 把 {{backend}} 切换到网关 | Switch {{backend}} to the gateway |
 | `subtitle` `[derived]` | 只影响 {{backend}},其余后端保持原样 | Affects {{backend}} only; the other backends are unchanged |
 | `section.effects` | 会发生什么 | What will happen |
-| `effects.1` `[contract-gap]` G-14 | 你现在的 {{vendor}} 登录成为第一个来源,继续优先使用 | Your current {{vendor}} login becomes the first source and keeps priority |
-| `effects.2` | 等你添加了别的来源,这个登录用满时会自动换过去 | Once you add other sources, it moves to them when this login is exhausted |
+| `effects.1` `[contract]` | 若 Avibe 识别到当前 {{vendor}} 登录,且这个后端还没有原生来源,该登录会成为这个后端的原生来源。 | If Avibe recognizes the current {{vendor}} login and this backend has no native Source, that login becomes this backend's native Source. |
+| `effects.2` `[contract]` | 否则这次只切换模式:不创建来源,也不调整已有来源的顺序。 | Otherwise this changes only the mode: it creates no source and does not reorder existing sources. |
 | `effects.1.opencode` `[derived]` | OpenCode 自己的模型配置原样保留,这次切换不改动它 | OpenCode's own model configuration is kept as it is; this switch does not change it |
 | `effects.2.opencode` `[derived]` | 它的型号从此由这一页上的来源供给;还没有来源时,先添加一个 | Its models are supplied from the sources on this page; if there are none yet, add one first |
 | `effects.3` | 型号菜单不变 | The model menu does not change |
@@ -3965,10 +4221,17 @@ weaker than the other three on purpose: it is the honest reading of a failure th
 document did not anticipate, and it is the one line here that never misdiagnoses.
 
 **The first two bullets are selected by backend, and only OpenCode differs** `[derived]`.
+For Claude and Codex they are also the complete adoption precondition, not a promise that
+`cli_present` can substantiate: executable presence proves neither a recognized login nor
+the absence of an existing native Source `[contract]`. The pair therefore states both
+transaction outcomes before the press. It never tells an unrecognized-login user that a
+Source will appear, and it never claims an existing native Source will be moved to first.
+
 Every backend row on 09 opens this same confirm, so its copy has to be true for all three.
-`effects.1` / `effects.2` are true for Claude Code and Codex because each has exactly one
-sanctioned CLI login that becomes that backend's singleton `native_cli` Source
-`[contract]`. OpenCode has no such login — 09's own row says 「用它自己的模型配置」, and
+`effects.1` / `effects.2` are total for Claude Code and Codex: a sanctioned recognized
+login is adopted only when no native Source exists, and every other legal press changes
+mode without creating or reordering a Source `[contract]`. OpenCode has no such login —
+09's own row says 「用它自己的模型配置」, and
 the eligibility matrix gives it no `native_cli` row at all, only API-key and hub-held
 Sources. Rendering 「你现在的 {{vendor}} 登录成为第一个来源」 for it would either name a
 vendor that does not exist as a single value or promise a source the switch does not
@@ -3995,6 +4258,16 @@ space. Nothing here explains what a gateway *is*; that argument belongs to 09's 
 card, and repeating it in the confirm would turn a decision surface into a second pitch.
 
 **States** — §0.8, rows marked §1.9.
+
+**A committed mode switch does not yet own a complete landing projection** `[contract]`
+`[derived]`. The success envelope carries the post-commit `AgentSupply`, so that exact
+object is held as write evidence and is never reconstructed. A qualifying G-14
+transaction may also have created a native Source, but neither the envelope nor any
+AgentSupply inference carries that Source object. M5 therefore reads Sources before the
+success landing. If that read fails, the mode change remains committed: 01 renders the
+held AgentSupply with the last-good Source list marked stale, `upstream.unread` offers a
+read-only retry, and ordinary navigation remains available. No path calls the mode
+`PATCH` again or describes its result as uncertain.
 
 **The Failed state has a rendering, and it is not a new one** `[derived]`. The failure
 renders as one strip at the top of `dbody` `PtmwS`, above 会发生什么 — the same place the
@@ -4028,22 +4301,16 @@ bullet and one label, both inside structures the frame already has, which is the
 economy §1.6 used for the interface rule. `[frame]` for the shell, `[derived]` for the
 two strings — see the copy table's `effects.install` and `confirm.install` rows.
 
-**One primary, three steps, and only two of them can be quoted** `[derived]`
-`[contract-gap]` G-10. 安装并切换 promises install → start → switch, and the failure line
-this dialog otherwise renders is `fail.detail`, `{{request}} · {{status}} · {{reason}}` —
-a shape built for a request, on a page where every other failure is one. The install step
-is the one thing on this confirm that is not: G-10 is precisely that no route installs
-anything, so a failed install has no `METHOD path` to put in `{{request}}` and no HTTP
-status to put beside it. Routing it through this string anyway leaves an implementer
-inventing a request that was never sent — `POST /api/models/runtime/start` is the nearest
-plausible lie, and it names the step that did *not* fail.
-
-So the detail is selected by step, and the sentence for the install step is the one that
-already exists: `install.fail.detail`,
-这次安装没有完成,组件可能处于未完成状态。重试会重新装一遍。 It is the same operation failing that 01's *Install failed* reports, and it needs no
-evidence shape because a client-side operation with no request has nothing to quote —
-what the user needs to know is what state the failure left behind and that the button
-works again, which is what that sentence says.
+**One primary, three contracted steps, one read-before-resume rule** `[derived]`
+`[contract]`. 安装并切换 promises install → start → switch. The first step sends
+`POST /api/models/runtime/install`; its durable `installing` state owns progress and its
+closed `status.error_key` selects the verbatim
+`settings.models.install.fail.detail` on failure. The later request
+steps may use `fail.detail`. 重试 reads runtime status and AgentSupply before acting, then
+resumes at the first unproved step; it never restarts an owned install or repeats a mode
+switch already visible as `hub`. A proved mode commit is not a visible-exit shortcut:
+the returned or reread AgentSupply enters M5, and only M5's Source read can make the
+landing projection current.
 
 *It says 「可能处于未完成状态」 and not 「什么都没装上」, and the difference is a claim this
 UI cannot make.* An earlier wording read 没有任何东西被装上,可以重试。 — a promise about
@@ -4053,8 +4320,8 @@ only then moves the staged copy into place, so a failure can land with partial b
 written *or* with a previously working install already destroyed. A string that says
 nothing was installed is false in both of those readings, and false in the direction that
 matters — it tells a user not to look at a component that may now be broken. The rewritten
-sentence is cause-neutral on purpose: it does not guess which of the two happened, because
-this dialog has no evidence either way (G-10 is exactly that absence), and it states the
+sentence is cause-neutral on purpose: the closed error key reports no filesystem detail,
+and it states the
 one thing that is true in every case — retrying reinstalls from scratch rather than
 resuming. §1.0's *Install failed* row carries the same correction: the reading after a
 dismissal is whatever `health` reports on the next read, not an assertion this surface
@@ -4070,6 +4337,378 @@ bullets wrap rather than truncate, because a consequence half-shown is worse tha
 that costs a line. The dependency line adds a seventh interpolation (`{{component}}`)
 and an eighth (`{{duration}}`), and both are rendered inside the bullet, never as a
 separate banner.
+
+---
+
+### 1.10 Frame 11 `cyaYh` — Edit source / remove source
+
+**The question it answers:** *where do I correct a source after creation, and where do I
+remove the source itself rather than one model row?* The source overflow on 06 owns both
+actions. Frame 11 is an exhibit sheet: its edit and remove dialogs are shown side by side
+for registration and are never simultaneous runtime state `[frame]`.
+
+Those two actions are an additive frame delta, not the overflow's complete menu (C1).
+Healthy sources retain 重新授权 when their credential capability permits reauth and 更换 Key
+when it permits static-key replacement; the same producers enter §1.11's shared repair
+lifecycle. A `needs_action` card suppresses only a duplicate action already rendered inline.
+
+**Element inventory**
+
+| Element | Displays | Data source | Interactive | On activate |
+| --- | --- | --- | --- | --- |
+| Source overflow | 编辑来源; capability-gated 重新授权 or 更换 Key; 移除来源 | selected source + credential capability | yes | Edit / Remove open frame 11; either credential action enters the matching §1.11 producer with the exact source-detail origin held |
+| Edit head | `sourceDetail.edit.title` plus kind, credential owner and proved protocol | selected source | close | Dismiss unchanged |
+| 显示名称 | current `display_name` | source | yes | Edit locally |
+| Base URL | current `base_url` | API-key source | yes | Edit locally; clearing a custom value commits `null` and restores the official endpoint |
+| Edit helper | Why protocol is fixed and when a Base-URL edit can affect supply | static | no | — |
+| 取消 / 保存 | abandon / commit changed fields | local draft | yes | Dismiss / guarded `PATCH /api/models/sources/<id>` |
+| Remove head | `guard.title.removeSource` plus kind, endpoint and model count | selected source | close | Return without forcing |
+| Affected-hop list | `would_remove_hops`; each row names backend/menu model and, when contracted, its position | guarded refusal; absent before the first request | no | — |
+| Remove helper | The transaction's destructive scope before the request; after refusal, the server-backed impact | static / guarded refusal | no | — |
+| 取消 / 移除来源 | abandon / confirm the current stage | selected source / held refusal | yes | Dismiss / initial non-forced `DELETE`, then `?force=true` only after a guarded refusal |
+
+**Edit geometry** `[frame]`
+
+| Element | Metric |
+| --- | --- |
+| Scrim | 1440×1100, `#05050BE0` |
+| Source overflow `b4_more` | 33 wide, `padding [8,9]`, `gap 6`, `#FFFFFF0A`, radius 7; 14px ellipsis |
+| Dialog | left 180, top 360; 520 wide, height hugs content, `#0E0E18`, `#FFFFFF24` border, radius 14, shadow `0 16 40 #00000099` |
+| Head | `padding [16,20]`, `gap 4`; title 15 / 700; data line JetBrains Mono 10.5 / 400 `#9BA3B8`; close 15px |
+| Body | `padding 20`, `gap 14` |
+| Field | `gap 6`; label 11.5 / 600 `#FFFFFF8C`; input 36 high, `padding [0,12]`, `#FFFFFF08`, `#FFFFFF14` border, radius 8 |
+| Values | Name Inter 12.5 / 400; Base URL JetBrains Mono 11.5 / 400 |
+| Helper | `gap 7`; info icon 13px; text 420 wide, Inter 11.5 / 400, line 17, `#FFFFFF73` |
+| Foot | `padding [14,20]`, `gap 8`, `#FFFFFF05`; buttons `padding [8,14]`, radius 7, labels 12 / 600; 保存 uses mint |
+
+**Remove geometry** `[frame]`
+
+| Element | Metric |
+| --- | --- |
+| Dialog shell and head | left 740, top 360; the same 520-wide shell and head metrics as Edit |
+| Body | `padding 20`, `gap 14` |
+| List label | Inter 10.5 / 700 `#FFFFFF73`; count pill `padding [3,8]`, `#FFFFFF0A`, radius 999, 10 / 600 |
+| Hop list | `padding 8`, `gap 6`, `#080812`, `#FFFFFF14` border, radius 10 |
+| Hop row | 52 high, `padding [0,10]`, `gap 10`, `#FFFFFF03`, `#FFFFFF14` border, radius 8; main 12 / 600 `#F5F1E8B3`; meta JetBrains Mono 10.5 `#9BA3B8B3` |
+| Helper | `gap 7`; info icon 13px; text 420 wide, Inter 11.5 / 400, line 17, `#FFFFFF73` |
+| Destructive primary | `#FF6B6B1A` fill, `#FF6B6B59` border, `#FF6B6B` label; otherwise the shared foot metrics |
+
+**The edit helper is governed by the contract, not by the exhibit's optimistic sentence**
+`[contract]`. The drawn line says changing name or address does not rerun matching and
+leaves models and routes unchanged. That is true for a display-name-only edit and false
+for a Base-URL edit: the authoritative mutation matrix stages the new inventory, guards
+the supply impact and may remove affected hops on force. `sourceDetail.edit.hint` is the
+string of record, preserving the frame's fixed-protocol point while naming the guard
+instead of promising no consequence. This is a copy correction, not a geometry change.
+
+V1/V2 are the sole metadata-draft validator register `[derived]` `[contract]`. This
+section does not keep a second field list: clearing a custom Base URL reaches the official
+endpoint because V2 normalizes it to `null`, and every other Base URL or display-name
+predicate comes from the same table. Save compares normalized values, while F1/F3 retain
+them (C2/C7).
+
+**Removal keeps confirmation before the first destructive request, then escalates in the
+same shell** `[frame]` `[contract]`. Choosing the overflow action opens frame 11's 520-wide
+remove dialog with the selected source identity and the transaction-scope helper, but no
+affected-hop or supply-gap rows: the client has no server evidence for those yet and does
+not scan chains to invent them. Its first 移除来源 press sends the non-forced delete.
+A success removes the source; empty impact skips the report and reconciles through M2,
+while non-empty impact is reported below before that same read. A guarded `409` fills the
+same dialog with the server's staged consequence,
+and only the next destructive press re-sends with
+`?force=true`. The confirmation therefore protects even a source with no route impact,
+while every consequence row remains evidentiary.
+
+The forced response is newer evidence than its refusal preview `[contract]`. R2 therefore
+holds and renders the returned `removed_hops` and `interrupted` before any surface reread; a
+second client may have changed chains or protected Agent selections between the two
+requests. The terminal report composes frame 11's existing hop block with §1.11's existing
+`SupplyGap` block, omits whichever array is empty, and keeps both exact success arrays until
+完成; M2 then reads Sources, Agents/source orders and Route chains together. With two empty
+arrays the report is skipped, the exact Source is removed locally and the same M2 read runs.
+R1 applies the same response-total rule to a Base-URL save: the returned `source` is the next
+projection, non-empty impact evidence is shown first, and M1 reconciles the complete surface.
+The same M rows also own D-36 commit inference. If a lost metadata response is reconciled by
+the requested normalized fields appearing on the held Source, M1 runs before close; if a lost
+delete is reconciled by that exact Source being absent, M2 transfers the evidence into M0.
+Every other exact Source absence enters that same owner directly, so `source_not_found` cannot
+jump from a modal to 01 with stale orders or chains. Those reads
+cannot recover `removed_hops` or `interrupted`, so both members are marked unavailable rather
+than empty and no impact report is invented. If any report-free read fails, C9 enters
+Committed projection stale with exactly the returned or inferred write evidence and the last
+good dependent projections marked stale. Its Retry repeats the same M1/M2 read and cannot
+repeat the edit or deletion; DP-4's Done-equivalent exits preserve that evidence and stale mark.
+
+The frame draws position pills directly from each refusal row's contracted one-based
+`RouteHopRef.position`; it issues no per-chain lookup. It still inherits G-23 for a non-empty `would_interrupt`, because the registered
+dialog has the hop block and summary sentence but no second body block that names protected
+menu models and Agents. That remaining open gap is not filled from inference here.
+
+**States** — §0.8, rows marked §1.10. The dialogs trap focus; Tab stays inside. DP-1
+reversible states make Escape and the head close equivalent to 取消 and restore focus to
+the source overflow trigger. DP-2 disables every dismissal path while Saving source or
+Removing source owns a request. DP-4 committed reports instead make close, Escape and an
+outside press equivalent to 完成; Committed projection stale adds the same exits beside its
+read-only Retry and carries the stale-dependent-projection marker to the receiving surface.
+Neither takes Cancel semantics, repeats the committed mutation or restores the held
+pre-write origin (C3/C4/C6/C9). Enter submits Edit only when V1/V2 are valid and focus is in
+a single-line field; both destructive stages require activating the focused button and
+are not default Enter actions `[derived]`.
+
+**Copy** is registered in the existing owners: source-menu and edit strings under
+`models.hub.sourceDetail.*`, and refusal strings under `models.hub.guard.*`. Dynamic head
+metadata is data and receives no copy key. The two response reports add only their
+operation-specific shell strings and reuse the existing hop / `SupplyGap` row copy:
+
+| Key under `models.hub.sourceDetail.*` | 中文 | English |
+| --- | --- | --- |
+| `edit.impact.title` `[derived]` `[contract]` | 来源已更新,部分供给受到影响 | The source was updated, and some supply was affected |
+| `edit.impact.detail` `[derived]` `[contract]` | 以下路由或型号已被移除或中断。 | The following routes or models were removed or interrupted. |
+| `edit.impact.refreshFail` `[derived]` | 来源已更新,但模型页面暂时无法刷新。 | The source was updated, but the model surface could not be refreshed. |
+| `edit.impact.done` `[derived]` | 完成 | Done |
+| `remove.impact.title` `[derived]` `[contract]` | 来源已移除,部分供给受到影响 | The source was removed, and some supply was affected |
+| `remove.impact.detail` `[derived]` `[contract]` | 以下是这次移除实际影响的路由和型号。 | These are the routes and models actually affected by this removal. |
+| `remove.impact.refreshFail` `[derived]` | 来源已移除,但模型页面暂时无法刷新。 | The source was removed, but the model surface could not be refreshed. |
+| `remove.impact.done` `[derived]` | 完成 | Done |
+| `impact.removedHops` `[derived]` `[contract]` | 已移除的跳 | Removed hops |
+| `impact.interruptedModels` `[derived]` `[contract]` | 已中断的型号 | Interrupted models |
+
+---
+
+### 1.11 Frame 12 `qQvkP` — Needs-action / error source cards
+
+**The question it answers:** *when a source has stopped supplying and its current state
+already selects a recovery capability, what action is available where that state is visible?*
+Frame 12 draws two `needs_action` card deltas over frame 01: an OAuth source with 重新授权
+and an API-key source with 更换 Key `[frame]`. The same shell also renders contracted
+`error` sources with their channel-selected existing action; it does not create a second
+card component `[derived]` `[contract]`.
+
+The card is not the only credential-repair producer (C1). The healthy-source overflow in
+§1.10 keeps the same capability-gated 重新授权 / 更换 Key actions, and both entry points reuse
+the lifecycle below. What differs is only the held origin and focus return target: the
+blocked card when repair was inline, the vendor-observation action when it followed an
+external destination, or the source overflow control when repair was elective.
+
+**This is a component exhibit, not a coherent page snapshot** `[frame]`. The unchanged
+gateway groups behind the two cards are authoring context and do not claim that broken
+sources remain current or that downstream supply stays healthy. Implement only the two
+drawn geometry variants from this frame, reuse that shell for `error`, and derive downstream
+rollups from the normal §1.1 payloads.
+
+**Element inventory**
+
+| Element | Displays | Data source | Interactive | On activate |
+| --- | --- | --- | --- | --- |
+| OAuth needs-action card | Existing source identity and detail; rose dot; canonical `sourceDetail.status.needsAction.*` cause + `upstream.state.supplyStopped` | source | card + 重新授权 | Card → 06; 重新授权 → the shared acknowledgement, with channel-specific warning copy |
+| API-key needs-action card | Existing source identity and detail; rose dot; canonical cause + `upstream.state.supplyStopped` | source | card + 更换 Key | Card → 06; 更换 Key → credential replacement entry |
+| Error card projection `[derived]` `[contract]` | The same identity, rose state and supply-stopped line; canonical `sourceDetail.status.error` | source + supply channel | card + one existing channel action | Card → 06; Hub 重新拉取 → §1.6 Refetching; native 重新授权 → the shared acknowledgement |
+| Repair action | One action selected by credential capability and cause; the same credential producers may also come from the healthy-source overflow | source + §1.4 static vendor register for the two vendor-directed causes | yes when a registered action exists | Starts the matching shared credential repair, or opens the registered external destination; it never also opens 06 |
+| Self-managed fallback | `upstream.repair.contactProvider` after either vendor-directed cause on an `api_key` Source | source kind | no | — |
+
+**Geometry** `[frame]`
+
+| Element | Metric |
+| --- | --- |
+| Subscription card | Fill width, 108 high, `padding [0,12]`, `gap 10`, `#080812`, `#FFFFFF14` border, radius 10 |
+| API-key card | Fill width, 106 high; otherwise the same shell |
+| Identity tile | 34×34, radius 9; mint-soft fill |
+| Name / detail | Inter 12.5 / 700; detail JetBrains Mono 10.5 / 400 `#9BA3B8CC` |
+| Blocked state | 5px `#FF6B6B` dot + Inter 10.5 / 600 `#FF6B6B` |
+| Repair button | `padding [5,12]`, `gap 6`, `#FF6B6B1A`, `#FF6B6B59` border, radius 7; label 11 / 600 `#FF6B6B` |
+
+**The copy register wins over the exhibit's abbreviated causes** `[frame]` `[contract]`.
+The PNG reads 授权已过期 and 凭据无效; §1.6 already registers the contract's four total
+`detail_key` strings and §1.1 requires cards to reuse them. Frame 12 therefore contributes
+the two drawn action keys and rose geometry, not a second cause vocabulary. The first example
+renders 需要重新登录; the second renders 凭据被吊销. Both append the frame's
+literal `upstream.state.supplyStopped`, so the full line still states the drawn supply
+consequence without replacing the canonical cause `[frame]` `[contract]`. An `error`
+projection uses the already-registered `sourceDetail.status.error` plus that same suffix;
+it does not borrow a `needs_action` cause or add new cause copy. The derived vendor-observation
+button key below is a channel-phase label, not another cause `[derived]` `[contract]`.
+
+**Action selection is the contract's state × classification × channel-capability mapping**
+`[contract]`: a classified OAuth expiry reauthorizes; a revoked static API key is replaced;
+balance is topped up; a banned account goes to the vendor. For unclassified `error`, Hub
+keeps the existing Refetch producer and `native_cli` keeps Reauthorize because its login is
+the available observation primitive. Frame 12 draws the first two `needs_action` producers
+and reuses their shell for `error`; it does not turn either drawn button into a universal remedy.
+
+The other two branches consume §1.4's static subscription-vendor register rather than an
+OAuth-flow field `[derived]`. On a subscription Source, `balance_exhausted` renders
+`upstream.repair.topUp` and opens that vendor's top-up destination;
+`account_banned` renders `upstream.repair.contactVendor` and opens its support/appeal
+destination. Both reuse the drawn repair-button shell and open in a new browser context.
+That gesture proves no recovery, so the mounted card enters Vendor recovery observation:
+a Hub Source exposes its existing 重新拉取 producer, while `native_cli` exposes
+`upstream.repair.reauthorizeToRefresh` — 「重新登录以刷新订阅状态」 — and then MUST pass
+the existing acknowledgement before reauth. Returning from the vendor page is not evidence
+that the vendor changed the account; only the channel observation or a later Source payload
+can change what is rendered.
+
+**Observation target ledger** `[derived]`: native currently targets acknowledged Reauthorize.
+If the engine later contracts a non-destructive native observation capability, replace only
+that target; the card shell, phase, state/copy mapping and evidence rule remain unchanged.
+
+An `api_key` Source takes neither link branch, including one created from an official
+compatibility preset. Its `vendor` says which protocol family was configured, not who
+operates the account. For `balance_exhausted` or `account_banned` it therefore renders the
+non-interactive `upstream.repair.contactProvider` fallback and keeps the card target to 06;
+it never sends that user to Anthropic or OpenAI on an identity the payload did not prove.
+
+Both Hub and `native_cli` reauth actions, including the native observation label above,
+first open the same registered acknowledgement phase
+`[contract]`, and only 继续登录 sends the literal `{acknowledge_irreversible: true}`. The
+body is not shared: Hub selects `upstream.repair.reauthConfirm.detail.onFailure`, whose
+complete conditional sentence says that failure is the cost and cancellation does not
+replace the current login; `native_cli` selects
+`upstream.repair.reauthConfirm.detail.immediate`, whose complete sentence says that starting
+one CLI login immediately makes every Source sharing it unavailable and success restores
+only the selected Source. Neither body is assembled from a sentence that is false for the
+other channel (C8).
+
+**Reauth imports §1.4's one OAuth machine; these are its only deltas** `[contract]`:
+
+- acquisition and every fresh retry preserve `intent: reauth`: they repeat
+  `POST /api/models/sources/<id>/reauth` with the held channel body, never the create-only
+  `POST /api/models/oauth/start`. RR-1/RR-2 classify the returned flow before any form: a
+  terminal acquisition is status-read immediately and is never presented;
+- Forms A, B and C are selected from a **non-terminal** returned `presentation`, never a
+  vendor table. PD-1–PD-3 preallocate and navigate the gesture-owned browser context, then
+  keep the non-null `auth_url` as a visible same-flow fallback. PD-5 reads a held paste flow
+  every 2 seconds while that required URL is null, and its first non-null value navigates the
+  original PD-1 context without starting another flow or context. `expects` selects the branch,
+  and PD-4 renders a resolved `instructions_key` or the expects-specific fallback when it
+  is null or unresolved; G-33 remains only the missing Form B `device_code` output. Submit,
+  the evidence-class matrix, 2s polling, timeout, cancel and the F1–F5 treatments are
+  otherwise §1.4 verbatim. In particular, E2 transport/`engine_down` evidence keeps polling,
+  E3a/E3b distinguish action-required from accepted paste input, and an acquired reauth flow's
+  E8 `flow_not_found`, E9 `flow_expired` / terminal failure or E6 materialization failure runs
+  RR-5's complete M3 read for Hub or native before handoff. A pre-flow reauth acquisition
+  failure instead reads only the selected Source for either channel; the evidence milestone,
+  never the channel name, selects the scope. Only E6's `discovery_failed` /
+  `migration_item_conflict` stops immediately; R5 renders a conditionally present,
+  exact nonempty `interrupted_pairs` report and never invents one when the member is absent;
+- a successful terminal carries `source`, `recovered` and `interrupted_pairs`; it never
+  consumes create-only `added_to` or `adopted_by`;
+- RR-10 owns every dismissed flow: the dialog leaves immediately, then background cleanup
+  settles its authorized cancel attempt before it re-reads the complete model surface. A
+  cancel failure or ownership handoff does not suppress the read.
+
+The 更换 Key card action is the producer, not the secret field. It opens the key-entry
+step owned by credential repair; plaintext remains local until submit, and only submit
+sends the guarded replacement route. Its guarded `409` imports §1.6 `Qp6FI`; the only
+delta is the operation: hold the typed key, render the `guard.*.replaceKey` strings, and
+confirm by re-sending `{key, force: true}`. Cancel returns to the held key-entry state with
+the key intact. Frame 12 fixes the missing card affordance without claiming unexported
+modal geometry.
+
+R3 and R4 share the report shell, not a wire tail `[contract]`. R3 holds OAuth reauth's
+`source`, `recovered` and `interrupted_pairs`; it classifies `source.state` before array
+cardinality. A blocked returned Source enters Repair unresolved and stays visible whether
+the array is empty or not. Each non-empty pair is still a `SupplyGap`: backend and protected
+menu model, followed by the named-Agent line only when `agents` is non-empty, and renders as
+evidence under either Repair unresolved or a non-blocked Repair impact result.
+R4 instead holds the standard guarded-mutation `source`, `removed_hops` and `interrupted`,
+and renders the existing hop and SupplyGap blocks independently. `recovered` is explicitly
+not a second R3 UI branch: it reports whether the prior state was blocked, while
+`source.state` is the complete current projection. No response array can be rebuilt by a
+later read, so DP-4 keeps the exact R3/R4 envelope rendered while M3/M4 refresh Sources,
+Agents/source orders and Route chains together. A failed read keeps the report and exact
+envelope mounted, adds read-only Retry, and leaves Done, close, Escape and outside press as
+legal committed exits; those exits carry the evidence and stale-projection marker and never
+question the credential write. Only a non-blocked empty-impact success may take the
+report-free M3 handoff; it holds the exact empty envelope and returned Source while the
+complete read settles, and failure enters Committed projection stale. A blocked empty-impact
+success remains Repair unresolved instead (C9/C10).
+
+RR-7 is the response-lost counterpart of that rule `[derived]`: a held blocked origin that
+the authoritative reread now shows clear is mutation-specific commit evidence, but it is not
+a response envelope. It therefore enters M3/M4 before a visible repaired handoff and marks
+every response-only tail member unavailable. A failed complete read enters Committed
+projection stale with that Source evidence; a later projection read may complete the handoff
+but can never reconstruct or render an impact row the lost response alone could have carried.
+
+The shared acknowledgement, key-replacement refusal and frame 11 removal all cite §0.8's
+C2/C3/C5 checks: a no-op exit restores the exact state and valid draft under the modal,
+returns focus to its invoking control and never promotes the source to `Ready` `[derived]`.
+Committed repair reports/results instead cite C6, and the replacement key / paste-back
+fields cite C7. The acknowledgement also cites C8 for channel consequence coverage, and empty-impact
+or unavailable-impact repair cites C9 for its committed read-failure state. C10 owns attempt
+scope and received/inferred commit evidence before either report or handoff; C11 owns the
+workflow milestone each non-terminal flow state can prove. C12 owns delayed presentation
+delivery, C13 makes attempt-scope reconciliation mandatory for every terminal/absence, and
+C14 gives each modal failure a non-mutating exit. None can be inferred from the reversible
+no-op rule.
+
+**States** — §0.8, rows marked §1.11. Within a card, Tab reaches the card target and then
+the repair button; Enter or Space activates the focused target. Activating the nested
+repair button does not bubble into the card's open-detail action. Idle confirmations trap
+focus; Escape is cancel; Enter activates only the focused control. Pre-flow Reauthorizing
+and Replacing key disable dismissal while their mutation owns the response; once a flow is
+held, §1.4's explicit cancel path owns its late answer and RR-10 reread (C4). Every impact
+report and unresolved result keeps focus inside; close, Escape and outside press invoke the
+same committed exit as 完成 and never restore the invoking origin. Committed projection stale
+focuses read-only Retry first, but Done, close, Escape and outside press remain legal committed
+exits that carry held evidence and explicitly stale dependent projections (C6/C9/C14/DP-4) `[derived]`.
+
+**Copy** — the causes reuse `models.hub.sourceDetail.status.needsAction.*`; the drawn supply
+suffix is `models.hub.upstream.state.supplyStopped`; credential actions, vendor exits,
+self-managed fallback, acknowledgement, unresolved outcome and terminal impact strings are
+registered under `models.hub.upstream.repair.*` in §1.0; the credential refusal's operation strings are
+`models.hub.guard.*.replaceKey` in §1.6. No i18n file is changed by this registration.
+
+---
+
+### 1.12 Frame 13 `Q9q5lF` — Subscription vendor menu
+
+**The question it answers:** *which subscription am I adding before the vendor-specific
+dialog asks how it should be used?* It is the producer for §1.4's vendor parameter and
+the only effect of 01's 添加订阅 press `[frame]` `[contract]`.
+
+**Element inventory**
+
+| Element | Displays | Interactive | On activate |
+| --- | --- | --- | --- |
+| 添加订阅 trigger | Shared `upstream.addSubscription` label and plus icon | yes | Toggle the menu |
+| Claude 订阅 row | Vendor subscription name + 原生推荐 | yes | Close; open 04 with `vendor: anthropic` |
+| ChatGPT 订阅 row | Vendor subscription name + 网关推荐 | yes | Close; open 04 with `vendor: openai` |
+
+**Geometry** `[frame]`
+
+| Element | Metric |
+| --- | --- |
+| Component exhibit | 720×420, `padding [56,60]`, `gap 14`, `#080812` |
+| Trigger | `padding [7,12]`, `gap 6`, mint fill and border, radius 7; icon 12px; label 12 / 600 `#080812` |
+| Menu | 300 wide, height hugs content, `padding 6`, `gap 2`, `#0E0E18`, `#FFFFFF24` border, radius 10, shadow `0 10 28 #00000080` |
+| Row | fill width, `padding [9,10]`, `gap 8`, radius 7; active/focus fill `#FFFFFF08`; label 12.5 / 600 |
+| Native badge | `padding [2,7]`, `#5BFFA01A`, radius 999; label 10 / 600 mint |
+| Gateway badge | `padding [2,7]`, `#FFFFFF0A`, `#FFFFFF14` border, radius 999; label 10 / 600 muted |
+
+The authoring caption above the exhibit is not product text. On open, focus moves to
+Claude 订阅, the first row. Arrow Up/Down moves between rows, Home/End moves to the first
+or last row, Enter/Space selects, Escape returns focus to 添加订阅, and an outside press
+dismisses without choosing `[derived]`. A selection closes the menu before 04 opens, so
+returning from 04 never leaves a stale menu under the dialog. The menu row that held focus
+has unmounted by then, so a no-op 04 dismissal back to 01 explicitly restores focus to the
+still-mounted 添加订阅 trigger rather than falling back to the document body. A successful
+terminal enters 06 instead, and that receiving surface owns focus (C3).
+
+**States** — §0.8, rows marked §1.12.
+
+**Copy** — namespace `models.hub.addSubMenu.*`
+
+| Key | 中文 | English |
+| --- | --- | --- |
+| `vendor.claude` `[frame]` | Claude 订阅 | Claude subscription |
+| `vendor.chatgpt` `[frame]` | ChatGPT 订阅 | ChatGPT subscription |
+| `recommendation.native` `[frame]` | 原生推荐 | Native recommended |
+| `recommendation.gateway` `[frame]` | 网关推荐 | Gateway recommended |
+
+Long localized recommendation badges may not widen the 300px menu. The badge wraps only
+as a last resort; the vendor label keeps the flexible track and truncates with its full
+value in `title` `[derived]`.
 
 ---
 
@@ -4130,12 +4769,16 @@ as "this backend is 直连" will draw the wrong thing on that row (E-4, D-24).
 
 **D-7 — A collapse never swallows an active state.** Every non-nominal model row
 is visible even if that pushes the group past three rows. §1.1 defines non-nominal as
-one thing — a structurally empty Route, `chain_length: 0` — and defines it there rather
-than here because that is where the payload it has to be readable from is stated.
-*Why:* a collapse exists to hide the boring. If it can hide the one row that needs
-attention, the compression has inverted its own purpose. The row that needs attention is
-the one that recovers from nothing: a taken-over or cooling row is the system doing its
-job, while a model no chain can serve stays that way until somebody configures something.
+`model_supply.has_runnable_hop: false`; a structurally empty Route is the forced
+`chain_length: 0` subset. That structural subset renders
+`models.launch.route_unconfigured`; a nonempty false row renders the explicit
+`legend.unavailable` marker, so visibility is never mistaken for the state indication.
+The definition lives there because that is where the payload it has to be readable from
+is stated.
+*Why:* a collapse exists to hide the boring. A row with no runnable hop is a current
+service interruption whether its next step is a later payload or user action, so its own
+state must remain visible. A taken-over row still has a runnable later hop and may stay
+nominal for collapse; a row with `has_runnable_hop: false` may not.
 
 **D-8 — The user does not perceive the supply mechanism.** Protocol, channel and
 injection are never *displayed*: no surface reports which one is in use, and none offers
@@ -4277,10 +4920,12 @@ is cyan there.
 **D-21 — The state-text layer and the wire layer are separate vocabularies, and a colour
 means different things in each.** Wires: cyan = 原生, mint = 网关供给, violet =
 接管, `#FFFFFF26` = 已启用 · 当前未被使用, gold = 供给已暂停. State text:
-mint = 使用中 / 正常, gold = 降级 / 暂不可用 / 冷却 / 暂时全部在冷却, rose = 需处理 /
+mint = 使用中 / 正常, gold = 降级 / 暂不可用 / 冷却 / the pending-K6 `waiting`
+umbrella, rose = 需处理 /
 异常 / 无可用来源, muted = 备用 / 未选型号, cyan = 原生 provenance only, violet-tint
 `#7C5BFFCC` = a takeover hop label. The group-status vocabulary (§1.1) is assigned here
-in full — 正常 mint, 降级 gold, 暂时全部在冷却 gold, 无可用来源 rose, 未选型号 muted — and
+in full — 正常 mint, 降级 gold, `waiting`'s pending-K6 umbrella gold, 无可用来源 rose,
+未选型号 muted — and
 the split worth stating is §4.5's: a wait that heals itself takes the same gold as every
 other wait, one that does not takes rose, and the fifth is not a fault at all, because
 nothing is pinned and no supply's health is being reported.
@@ -4291,7 +4936,8 @@ are not the same claim. §1.0's ink table is the single place both are written d
 
 **D-22 — A group head's status line is `<mode> · <status>` on the gateway and the mode
 word alone in Direct, and the two words are read from two different fields.** 网关 · 正常,
-网关 · 降级, 网关 · 暂时全部在冷却, 网关 · 无可用来源, 网关 · 未选型号 — and bare 直连, because a
+网关 · 降级, 网关 · the pending-K6 `waiting` umbrella, 网关 · 无可用来源,
+网关 · 未选型号 — and bare 直连, because a
 direct backend arbitrates nothing and so has no supply whose health could be reported.
 §1.0's C-6 is the total mapping, `supply_status` `null` included, and no other surface
 derives a status line of its own.
@@ -4436,7 +5082,7 @@ are not symmetric. Adopting changes where a backend's traffic goes and is the st
 10 exists to explain, down to where the undo lives (`undo.1`, `undo.2`). Leaving
 destroys nothing: the same dialog's third line already promises
 that the sources stay and only stop supplying that backend `undo.3`, and §1.8's
-*Retained sources, all direct* is the state that promise lands in. Putting a confirm on
+*Retained sources* is the state that promise lands in. Putting a confirm on
 the reversible half would make the product ask twice for the thing it just told the user
 was free, and a confirm the user learns to click through stops protecting the adoption
 that needed one. This is the same asymmetry D-15 applies to a cancel: the direction that
@@ -4472,8 +5118,9 @@ is a reason to ask again, not a verdict.**
 
 **D-33 — Recovery is a re-dispatch, never a jump.** No exit may name one destination
 for a payload it has not read yet. A state left by a new reading names the reading:
-§1.0's *Starting*, *Impaired*, *Unreachable* and *Partial* all hand back to the dispatch
-*Loading* performs, rather than to Ready.
+§1.0's *Starting*, *Impaired*, *Unreachable* and *Partial* hand payloads back to the
+dispatch *Loading* performs, rather than to Ready, except that H1 first consumes a held
+`install_start_switch` live reading to continue the already-promised mode `PATCH`.
 *Why:* Ready is a conjunction — `health` `ok`, both page reads answered, at least one
 source — and every exit that named it on recovery was asserting three facts on the
 strength of one. The visible cost is a page that renders 网关运行中 over a source list it
@@ -4510,15 +5157,28 @@ a read; what decides whether that read is a *reconciliation* or merely a refresh
 whether the client can name what it is asking about. §1.6's *Refetch failed* holds the
 `source_id` it sent, so `GET /api/models/sources` answers about that exact source and
 settles the question. §1.9's *Failed* holds the backend, so the runtime and agent reads
-settle each step it promised. §1.5's ⑦ and §1.4's *Start failed* hold nothing the server
-can be asked about — the `id` and the `flow_id` were both born in the response that died
-— and those become G-29 and G-30 rather than exits this file could write.
+settle each step it promised. §1.10's failed metadata save holds both the Source id and
+the requested normalized values, so their exact appearance proves the commit; its failed
+delete holds the Source id, so exact absence proves the deletion outcome. **That proof does
+not bypass invalidation ownership:** the inferred save enters M1 and the inferred deletion
+enters M2 before either visible exit. §1.11's RR-7 is the repair form: only a held blocked
+origin now read clear is mutation-specific evidence, and it enters M3/M4 before a repaired
+handoff. Because the response was lost, response-only impact/tail arrays are unavailable,
+not empty, and no M row may invent them from the reread.
+§1.5's ⑦ holds the `SourceCreate.client_nonce` generated before send: an exact Source-list
+match proves commit. A miss permits one same-nonce resend on that user press;
+`source_create_in_progress` returns to actionable ⑦ and schedules nothing, so only a
+later user Retry starts another list-read + resend attempt. Committed
+`source_nonce_conflict` rereads the list to claim the Source rather than replaying an old
+response. §1.4's *Start failed* holds the exact `(client_nonce, vendor, channel)` tuple;
+retry coalesces with the reserved start and returns its pending flow or settled result.
+Both lost-response paths therefore reconcile exact producer identity without resemblance.
 *Why:* the alternative is matching by resemblance — picking the nearest-looking Source
 out of an unordered list, or reading no answer as no flow — and both are D-28's error in
 a new place: a value read off the wrong subject and rendered as if it were the right one.
-Writing the rule once also stops the register from re-deciding it per row: the same
-question has now arrived at four states in three sections, and it has exactly two
-answers.
+Writing the rule once also stops the register from re-deciding it per row: every state
+answers the same two questions — can this exact subject be read, and if that read proves a
+commit, which M row owns all projections the attempt may have invalidated?
 
 ---
 

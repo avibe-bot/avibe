@@ -60,11 +60,16 @@ class MemoryStore:
     def __init__(self, config: ModelHubConfig):
         self.config = config
         self.requested_models = {"claude": "claude-opus-4-6"}
+        self.recovery = False
 
     def load(self) -> ModelHubConfig:
         return self.config
 
     def save(self, config: ModelHubConfig) -> None:
+        if self.recovery:
+            raise ValueError(
+                "Config was loaded with recovery warnings; repair the backed-up config before saving changes"
+            )
         self.config = config
 
     def requested_model(self, backend: str) -> str:
@@ -630,6 +635,57 @@ def test_runtime_skips_later_hops_after_a_source_global_failure(tmp_path):
         (second.id, "upstream-third"),
     ]
     assert resolved.model_id == "upstream-third"
+
+
+def test_runtime_fallback_continues_when_recovery_blocks_runtime_state_save(tmp_path):
+    first = _source("src_recovery001", ("upstream-first",))
+    second = _source("src_recovery002", ("upstream-second",))
+    config = _config([first, second])
+    config.agents["claude"].routes["claude-opus-4-6"] = ModelHubRouteConfig(
+        hops=(
+            ModelHubRouteHopConfig(first.id, "upstream-first"),
+            ModelHubRouteHopConfig(second.id, "upstream-second"),
+        )
+    )
+    adapter = FakeAdapter()
+    adapter.outcomes.extend(
+        (
+            RawCallOutcome(
+                kind=RawOutcomeKind.HTTP_ERROR,
+                http_status=429,
+                error_code="rate_limit_error",
+                redacted_message=None,
+                stream_started=False,
+                model_id="upstream-first",
+                source_id=first.id,
+            ),
+            RawCallOutcome(
+                kind=RawOutcomeKind.SUCCESS,
+                http_status=200,
+                error_code=None,
+                redacted_message=None,
+                stream_started=False,
+                model_id="upstream-second",
+                source_id=second.id,
+            ),
+        )
+    )
+    service, store, _ = _service(tmp_path, config, adapter)
+    store.recovery = True
+
+    resolved = asyncio.run(
+        service.resolve(
+            backend="claude",
+            model_id="claude-opus-4-6",
+            request={},
+        )
+    )
+
+    assert adapter.invocations == [
+        (first.id, "upstream-first"),
+        (second.id, "upstream-second"),
+    ]
+    assert resolved.source_id == second.id
 
 
 def test_static_api_key_401_falls_through_without_retry(tmp_path):

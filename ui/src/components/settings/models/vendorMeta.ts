@@ -1,32 +1,28 @@
-// Visual + vendor metadata for the Model Hub surfaces. Colors follow the V4
-// design (design.pen `产品改造 V4 01r/06r/07`): subscriptions carry the brand
-// sparkle accent (Claude→mint, ChatGPT→gold); API keys carry a per-vendor key
-// accent (Anthropic→violet, 智谱→cyan, custom/relay→gold). Only the icon
-// component is reused from `lib/agentBackends`; the V4 accents differ from the
-// older backends page on purpose, so they live here as data.
+// Model Hub identity colors are semantic, not vendor branding: channel/kind
+// owns source color, while backend identity owns Agent color.
 import type React from 'react';
 import { Bot, KeyRound, Sparkles, Terminal } from 'lucide-react';
 
-import type { AgentBackend, Source, SourceProtocol } from './types';
+import type { AgentBackend, Source } from './types';
 
 export type Accent = 'mint' | 'gold' | 'cyan' | 'violet' | 'muted';
 
 // Soft-tinted tile + matching icon/dot color per accent. Uses the theme tokens
 // (mint/gold/cyan/violet + *-soft) so it tracks Light/Dark automatically.
 export const ACCENT_TILE: Record<Accent, string> = {
-  mint: 'bg-mint-soft',
-  gold: 'bg-gold/15',
-  cyan: 'bg-cyan-soft',
-  violet: 'bg-violet-soft',
-  muted: 'bg-surface-2',
+  mint: 'model-hub-accent-tile--mint',
+  gold: 'model-hub-accent-tile--gold',
+  cyan: 'model-hub-accent-tile--cyan',
+  violet: 'model-hub-accent-tile--violet',
+  muted: 'model-hub-accent-tile--neutral',
 };
 
 export const ACCENT_ICON: Record<Accent, string> = {
-  mint: 'text-mint',
-  gold: 'text-gold',
-  cyan: 'text-cyan',
-  violet: 'text-violet',
-  muted: 'text-muted',
+  mint: 'model-hub-accent-ink--mint',
+  gold: 'model-hub-accent-ink--gold',
+  cyan: 'model-hub-accent-ink--cyan',
+  violet: 'model-hub-accent-ink--violet',
+  muted: 'model-hub-accent-ink--neutral',
 };
 
 // Status dot fill (composite pill · recent-switch list). Gold reserved for the
@@ -39,30 +35,31 @@ export const ACCENT_DOT: Record<Accent, string> = {
   muted: 'bg-muted',
 };
 
-type IconType = React.ComponentType<{ size?: number; className?: string }>;
-
-// api_key accent by vendor id. Unknown vendors fall back to violet (the generic
-// "key" accent used by the add-source menu).
-const API_KEY_ACCENT: Record<string, Accent> = {
-  anthropic: 'violet',
-  openai: 'gold',
-  zhipuai: 'cyan',
-  kimi: 'cyan',
-  xai: 'muted',
-  custom: 'gold',
+export const ACCENT_PILL: Record<Accent, string> = {
+  mint: 'model-hub-accent-pill--mint',
+  gold: 'model-hub-accent-pill--gold',
+  cyan: 'model-hub-accent-pill--cyan',
+  violet: 'model-hub-accent-pill--violet',
+  muted: 'model-hub-accent-pill--neutral',
 };
 
-export function sourceAccent(source: Pick<Source, 'kind' | 'vendor'>): Accent {
-  if (source.kind === 'subscription') {
-    if (source.vendor === 'openai') return 'gold';
-    return 'mint'; // anthropic + any other subscription
-  }
-  return API_KEY_ACCENT[source.vendor] ?? 'violet';
+type IconType = React.ComponentType<{ size?: number; className?: string }>;
+
+export const SOURCE_IDENTITY_ACCENT = {
+  native_cli: 'cyan',
+  subscription: 'mint',
+  api_key: 'muted',
+} as const satisfies Record<'native_cli' | Source['kind'], Accent>;
+
+export function sourceAccent(source: Pick<Source, 'kind' | 'supply_channel'>): Accent {
+  return source.supply_channel === 'native_cli'
+    ? SOURCE_IDENTITY_ACCENT.native_cli
+    : SOURCE_IDENTITY_ACCENT[source.kind];
 }
 
 export type SourceVisual = { Icon: IconType; accent: Accent };
 
-export function sourceVisual(source: Pick<Source, 'kind' | 'vendor'>): SourceVisual {
+export function sourceVisual(source: Pick<Source, 'kind' | 'supply_channel'>): SourceVisual {
   return {
     Icon: source.kind === 'subscription' ? Sparkles : KeyRound,
     accent: sourceAccent(source),
@@ -72,37 +69,43 @@ export function sourceVisual(source: Pick<Source, 'kind' | 'vendor'>): SourceVis
 // ── Agent backends (Agent card rows) ────────────────────────────────────
 export type BackendVisual = { Icon: IconType; accent: Accent };
 
+export const BACKEND_IDENTITY_ACCENT = {
+  claude: 'cyan',
+  codex: 'mint',
+  opencode: 'violet',
+} as const satisfies Record<AgentBackend, Accent>;
+
+export const BACKEND_ADOPTION_VENDOR_KEY = {
+  claude: 'claude',
+  codex: 'chatgpt',
+  opencode: 'chatgpt',
+} as const satisfies Record<AgentBackend, string>;
+
+const BACKEND_ICON: Record<AgentBackend, IconType> = {
+  claude: Sparkles,
+  codex: Bot,
+  opencode: Terminal,
+};
+
 const BACKEND_VISUAL: Record<AgentBackend, BackendVisual> = {
-  claude: { Icon: Sparkles, accent: 'mint' },
-  codex: { Icon: Bot, accent: 'gold' },
-  opencode: { Icon: Terminal, accent: 'violet' },
+  claude: { Icon: BACKEND_ICON.claude, accent: BACKEND_IDENTITY_ACCENT.claude },
+  codex: { Icon: BACKEND_ICON.codex, accent: BACKEND_IDENTITY_ACCENT.codex },
+  opencode: { Icon: BACKEND_ICON.opencode, accent: BACKEND_IDENTITY_ACCENT.opencode },
 };
 
 export function backendVisual(backend: AgentBackend): BackendVisual {
   return BACKEND_VISUAL[backend] ?? { Icon: Bot, accent: 'muted' };
 }
 
-// ── API-key vendor picker (frame 06r) ───────────────────────────────────
-// value = standard vendor id; labelKey → i18n; base_url prefilled for official
-// vendors (editable), null for 自定义. Probe order is only a hint; the server
-// still requires upstream response evidence before it stores a protocol.
-export type VendorOption = {
-  value: string;
-  labelKey: string;
-  base_url: string | null;
-  probe_order: SourceProtocol[];
+// Official endpoints are used only to classify an existing Source as custom.
+// Add API key accepts a Base URL directly and intentionally has no vendor picker.
+const OFFICIAL_BASE_URLS: Record<string, string> = {
+  anthropic: 'https://api.anthropic.com/v1',
+  openai: 'https://api.openai.com/v1',
+  zhipuai: 'https://open.bigmodel.cn/api/paas/v4',
+  kimi: 'https://api.moonshot.cn/v1',
+  xai: 'https://api.x.ai/v1',
 };
-
-export const VENDOR_OPTIONS: VendorOption[] = [
-  { value: 'custom', labelKey: 'settings.models.addKey.vendors.custom', base_url: null, probe_order: ['openai_responses', 'openai_chat', 'anthropic'] },
-  { value: 'anthropic', labelKey: 'settings.models.addKey.vendors.anthropic', base_url: 'https://api.anthropic.com/v1', probe_order: ['anthropic', 'openai_responses', 'openai_chat'] },
-  { value: 'openai', labelKey: 'settings.models.addKey.vendors.openai', base_url: 'https://api.openai.com/v1', probe_order: ['openai_responses', 'openai_chat', 'anthropic'] },
-  { value: 'zhipuai', labelKey: 'settings.models.addKey.vendors.zhipuai', base_url: 'https://open.bigmodel.cn/api/paas/v4', probe_order: ['openai_responses', 'openai_chat', 'anthropic'] },
-  { value: 'kimi', labelKey: 'settings.models.addKey.vendors.kimi', base_url: 'https://api.moonshot.cn/v1', probe_order: ['openai_responses', 'openai_chat', 'anthropic'] },
-  { value: 'xai', labelKey: 'settings.models.addKey.vendors.xai', base_url: 'https://api.x.ai/v1', probe_order: ['openai_responses', 'openai_chat', 'anthropic'] },
-];
-
-export const DEFAULT_VENDOR = VENDOR_OPTIONS[0];
 
 // An api_key points at a custom endpoint when its base URL is set and differs
 // from the vendor's official one — covers both vendor='custom' (official = null)
@@ -110,6 +113,6 @@ export const DEFAULT_VENDOR = VENDOR_OPTIONS[0];
 // by the 来源 list (SourceRow) and the custom-model source picker.
 export function isCustomEndpoint(source: Pick<Source, 'vendor' | 'base_url'>): boolean {
   if (!source.base_url) return false;
-  const official = VENDOR_OPTIONS.find((v) => v.value === source.vendor)?.base_url ?? null;
+  const official = OFFICIAL_BASE_URLS[source.vendor] ?? null;
   return source.base_url !== official;
 }

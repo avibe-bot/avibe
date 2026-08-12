@@ -60,7 +60,12 @@ from storage import messages_service
 from storage import message_deliveries as delivery_store
 from storage.agent_session_rows import reserve_write_lock
 from storage.db import get_cached_sqlite_engine
-from storage.background import normalize_run_status
+from storage.background import (
+    OWED_FAILURE_NOTICE_KEY,
+    apply_live_agent_run_cancellation_in_connection,
+    normalize_run_status,
+    run_update_event_transaction,
+)
 from storage.session_reclaim import reconcile_explicit_overrides
 from storage.models import (
     agent_runs,
@@ -474,6 +479,9 @@ class DeliveryRequest:
     delivery_id: str | None = None
     expected_delivery_id: str | None = None
     expected_turn_id: str | None = None
+    # Run-level cancellation may interrupt a backend only when this exact Run is
+    # still the Turn's sole initial input.  Checked under the P0 writer lock.
+    expected_exclusive_agent_run_id: str | None = None
     scope_id: str | None = None
     platform: str = "avibe"
     source: str = "user"
@@ -1840,6 +1848,71 @@ class SessionTurnManager:
         return delivery
 
     @classmethod
+    def _terminalize_detached_run_replacement(
+        cls,
+        conn: Connection,
+        *,
+        run_id: str,
+        session_id: str,
+        current: dict[str, Any],
+    ) -> bool:
+        """Give the Turn owner sole authority to terminalize a canceled successor."""
+
+        if current.get("control_mode") != "replace" or current.get(
+            "control_state"
+        ) not in {
+            "pending",
+            "interrupting",
+            "waiting_terminal",
+            "reconciling",
+        }:
+            return False
+        run = conn.execute(
+            select(agent_runs.c.status, agent_runs.c.delivery_id)
+            .where(agent_runs.c.id == run_id)
+            .where(agent_runs.c.session_id == session_id)
+            .limit(1)
+        ).mappings().first()
+        successor_delivery_id = str(
+            current.get("control_successor_delivery_id") or ""
+        )
+        successor_turn_id = str(current.get("control_successor_turn_id") or "")
+        if (
+            run is None
+            or normalize_run_status(run["status"]) not in {"queued", "running"}
+            or str(run["delivery_id"] or "") != successor_delivery_id
+            or not successor_turn_id
+        ):
+            return False
+        successor = delivery_store.get_turn(conn, successor_turn_id)
+        successor_delivery = delivery_store.get_delivery(
+            conn,
+            successor_delivery_id,
+        )
+        if (
+            successor is None
+            or successor["session_id"] != session_id
+            or successor["state"] != "waiting"
+            or successor["initial_delivery_id"] != successor_delivery_id
+            or successor_delivery is None
+            or successor_delivery["session_id"] != session_id
+            or successor_delivery["state"] != "interrupt_waiting"
+            or successor_delivery["turn_id"] != successor_turn_id
+            or successor_delivery["turn_role"] != "initial"
+        ):
+            return False
+        terminalized = cls._write_terminal_snapshot(
+            conn,
+            successor_turn_id,
+            outcome="not_written",
+            settled_by="agent_run_canceled",
+            evidence_kind="replacement_run_canceled",
+        )
+        if not terminalized.get("changed"):
+            raise RuntimeError("replacement Run cancellation lost Turn authority")
+        return True
+
+    @classmethod
     def _retire_delivery_not_written(
         cls,
         conn: Connection,
@@ -2985,7 +3058,10 @@ class SessionTurnManager:
         interrupt_target_id: str | None = None
         should_interrupt = False
         joined = False
-        with self._runtime_start_owner(request.session_id, backend) as start_owner, self._sqlite_engine().begin() as conn:
+        with self._runtime_start_owner(
+            request.session_id,
+            backend,
+        ) as start_owner, run_update_event_transaction(self._sqlite_engine()) as conn:
             reserve_write_lock(conn)
             session_status = conn.execute(
                 select(agent_sessions.c.status).where(
@@ -2993,6 +3069,9 @@ class SessionTurnManager:
                 )
             ).scalar_one_or_none()
             current = delivery_store.active_turn(conn, request.session_id)
+            expected_exclusive_run_id = str(
+                request.expected_exclusive_agent_run_id or ""
+            ).strip()
             if request.content is not None and session_status != "active":
                 existing = (
                     delivery_store.get_delivery(conn, request.delivery_id)
@@ -3011,6 +3090,23 @@ class SessionTurnManager:
             current_id = str((current or {}).get("id") or "") or None
             if current is None:
                 if request.content is None:
+                    if expected_exclusive_run_id:
+                        cancellation = apply_live_agent_run_cancellation_in_connection(
+                            conn,
+                            expected_exclusive_run_id,
+                            session_id=request.session_id,
+                            detach=True,
+                        )
+                        return DeliveryResult(
+                            None,
+                            None,
+                            (
+                                "run_detached"
+                                if cancellation == "run_detached"
+                                else "settled"
+                            ),
+                            reason=cancellation,
+                        )
                     return DeliveryResult(None, None, "settled", reason="not_active")
                 delivery = self._insert_delivery(
                     conn,
@@ -3039,6 +3135,7 @@ class SessionTurnManager:
                     request.content is None
                     and expected_turn_id
                     and current_id != expected_turn_id
+                    and not expected_exclusive_run_id
                 ):
                     return DeliveryResult(
                         None,
@@ -3047,6 +3144,52 @@ class SessionTurnManager:
                         current_id,
                         "target_turn_changed",
                     )
+                if request.content is None and expected_exclusive_run_id:
+                    exclusive, reason = delivery_store.agent_run_exclusively_owns_turn(
+                        conn,
+                        run_id=expected_exclusive_run_id,
+                        turn_id=str(current_id or ""),
+                    )
+                    replacement_terminalized = False
+                    if not exclusive:
+                        replacement_terminalized = (
+                            self._terminalize_detached_run_replacement(
+                                conn,
+                                run_id=expected_exclusive_run_id,
+                                session_id=request.session_id,
+                                current=current,
+                            )
+                        )
+                    cancellation = apply_live_agent_run_cancellation_in_connection(
+                        conn,
+                        expected_exclusive_run_id,
+                        session_id=request.session_id,
+                        detach=not exclusive,
+                    )
+                    if replacement_terminalized and cancellation != "run_detached":
+                        raise RuntimeError(
+                            "replacement Run terminalized without cancellation ownership"
+                        )
+                    if not exclusive:
+                        return DeliveryResult(
+                            None,
+                            None,
+                            (
+                                "run_detached"
+                                if cancellation == "run_detached"
+                                else "settled"
+                            ),
+                            current_id,
+                            reason if cancellation == "run_detached" else cancellation,
+                        )
+                    if cancellation != "cancel_requested":
+                        return DeliveryResult(
+                            None,
+                            None,
+                            "settled",
+                            current_id,
+                            cancellation,
+                        )
                 control_in_progress = current.get("control_state") in {
                     "pending",
                     "interrupting",
@@ -3444,6 +3587,15 @@ class SessionTurnManager:
                     ),
                     "control_receipt_json": json.dumps(
                         {"reason": reason or "stop_error"}, sort_keys=True
+                    ),
+                    **(
+                        {
+                            "control_mode": None,
+                            "control_successor_delivery_id": None,
+                            "control_successor_turn_id": None,
+                        }
+                        if definitive and not terminal_proven
+                        else {}
                     ),
                 },
             )
@@ -3859,6 +4011,7 @@ class SessionTurnManager:
         result: dict[str, Any]
         materialized_id: str | None = None
         terminal_run_ids: list[str] = []
+        terminal_turn_snapshot: dict[str, Any] | None = None
         projected_status: str | None = None
         status_changed = False
         replayed_unknown_start = False
@@ -4275,6 +4428,7 @@ class SessionTurnManager:
                             turn_id,
                         )
                     )
+                    terminal_turn_snapshot = delivery_store.get_turn(conn, turn_id)
                     projected_status = (
                         "running"
                         if claimed_successor
@@ -4295,7 +4449,20 @@ class SessionTurnManager:
                 if result.get("unknown_start_exhausted")
                 else settled_by
             )
-            self._settle_agent_run_ids(terminal_run_ids, run_settled_by)
+            if (
+                terminal_turn_snapshot is not None
+                and run_settled_by in SETTLEMENTS_WITHOUT_RESULT
+            ):
+                terminal_turn_snapshot = {
+                    **terminal_turn_snapshot,
+                    "settled_by": run_settled_by,
+                }
+                self._settle_agent_run_ids_from_terminal_turn(
+                    terminal_run_ids,
+                    terminal_turn_snapshot,
+                )
+            else:
+                self._settle_agent_run_ids(terminal_run_ids, run_settled_by)
         if materialized_id:
             self._publish_materialized_delivery(materialized_id)
         if result.get("changed"):
@@ -6119,24 +6286,61 @@ class SessionTurnManager:
                 for _terminal_turn, run_ids in terminal_run_owners
                 for run_id in run_ids
             }
-            statuses = {
-                str(row["id"]): normalize_run_status(row["status"])
+            run_rows = {
+                str(row["id"]): row
                 for row in conn.execute(
-                    select(agent_runs.c.id, agent_runs.c.status).where(
+                    select(
+                        agent_runs.c.id,
+                        agent_runs.c.status,
+                        agent_runs.c.metadata_json,
+                    ).where(
                         agent_runs.c.id.in_(all_run_ids)
                     )
                 ).mappings()
             }
-            unsettled_owners: list[tuple[dict[str, Any], list[str]]] = []
+            recoverable_owners: list[tuple[dict[str, Any], list[str]]] = []
             for terminal_turn, run_ids in terminal_run_owners:
                 unsettled = [
                     run_id
                     for run_id in run_ids
-                    if statuses.get(run_id) in {"queued", "running"}
+                    if run_id in run_rows
+                    and normalize_run_status(run_rows[run_id]["status"])
+                    in {"queued", "running"}
                 ]
-                if unsettled:
-                    unsettled_owners.append((terminal_turn, unsettled))
-        for terminal_turn, run_ids in unsettled_owners:
+                settled_by = str(terminal_turn.get("settled_by") or "")
+                legacy_pending_notice = False
+                if settled_by in SETTLEMENTS_WITHOUT_RESULT:
+                    for run_id in run_ids:
+                        row = run_rows.get(run_id)
+                        if row is None:
+                            continue
+                        try:
+                            metadata = json.loads(str(row["metadata_json"] or "{}"))
+                        except (TypeError, ValueError, json.JSONDecodeError):
+                            continue
+                        notice = (
+                            metadata.get(OWED_FAILURE_NOTICE_KEY)
+                            if isinstance(metadata, dict)
+                            else None
+                        )
+                        if (
+                            isinstance(notice, dict)
+                            and notice.get("state") == "pending"
+                            and not str(notice.get("turn_id") or "").strip()
+                            and str(
+                                notice.get("interrupt_reason")
+                                or metadata.get("interrupt_reason")
+                                or ""
+                            ).strip()
+                            == settled_by
+                        ):
+                            legacy_pending_notice = True
+                            break
+                if unsettled or legacy_pending_notice:
+                    # Older releases stamped one notice per Run even though the
+                    # accepted Delivery relation retained this exact Turn owner.
+                    recoverable_owners.append((terminal_turn, run_ids))
+        for terminal_turn, run_ids in recoverable_owners:
             self._settle_agent_run_ids_from_terminal_turn(run_ids, terminal_turn)
         with self._sqlite_engine().begin() as conn:
             reserve_write_lock(conn)
@@ -7287,14 +7491,36 @@ class SessionTurnManager:
             )
         return bool(terminal.get("changed"))
 
-    async def cancel(self, session_id: str) -> dict:
-        """Persist one empty-P0 control request against the exact active Turn."""
+    async def cancel(
+        self,
+        session_id: str,
+        *,
+        agent_run_id: str | None = None,
+    ) -> dict:
+        """Cancel a Session Turn or detach one exact Run from a shared Turn."""
+        normalized_agent_run_id = (
+            str(agent_run_id).strip() if agent_run_id is not None else None
+        )
+        if agent_run_id is not None and not normalized_agent_run_id:
+            return {
+                "ok": False,
+                "code": "invalid_run_id",
+                "session_id": session_id,
+                "reason": "run_id_required",
+            }
         turn = self.in_flight.get(session_id)
         if not self._durable_schema_available():
+            if normalized_agent_run_id:
+                return {
+                    "ok": False,
+                    "code": "atomic_run_cancel_unavailable",
+                    "session_id": session_id,
+                    "reason": "durable_turn_ownership_unavailable",
+                }
             return await self._cancel_legacy_turn(session_id, turn)
         with self._sqlite_engine().connect() as conn:
             owner = delivery_store.active_turn(conn, session_id)
-        if owner is None:
+        if owner is None and not agent_run_id:
             return {
                 "ok": False,
                 "code": "not_in_flight",
@@ -7308,13 +7534,30 @@ class SessionTurnManager:
                 session_id=session_id,
                 priority="p0",
                 content=None,
-                expected_turn_id=str(owner["id"]),
+                expected_turn_id=(str(owner["id"]) if owner is not None else None),
+                expected_exclusive_agent_run_id=(
+                    normalized_agent_run_id
+                ),
             ),
             context=turn.context if turn is not None else None,
         )
+        if result.state == "run_detached":
+            return {
+                "ok": True,
+                "session_id": session_id,
+                "status": "run_detached",
+                "reason": result.reason or "shared_turn",
+            }
         if result.state in {"waiting_terminal", "interrupt_waiting"}:
             return {"ok": True, "session_id": session_id, "status": "cancel_requested"}
         if result.state == "settled":
+            if normalized_agent_run_id:
+                return {
+                    "ok": True,
+                    "session_id": session_id,
+                    "status": "run_settled",
+                    "reason": result.reason or "already_terminal",
+                }
             return {
                 "ok": True,
                 "session_id": session_id,

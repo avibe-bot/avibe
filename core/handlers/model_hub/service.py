@@ -161,6 +161,14 @@ class V2ModelHubConfigStore:
         except FileNotFoundError:
             return default_config().model_hub
 
+    def ensure_writable(self) -> None:
+        try:
+            config = V2Config.load()
+        except FileNotFoundError:
+            return
+        if config.load_warnings:
+            raise ModelHubError("config_recovery", status=409)
+
     def save(self, model_hub: ModelHubConfig) -> None:
         model_hub = ModelHubConfig.from_payload(model_hub.to_payload())
         with CONFIG_LOCK:
@@ -646,6 +654,23 @@ class ModelHubService:
         canonical = ModelHubConfig.from_payload(config.to_payload())
         self.store.save(canonical)
         return canonical
+
+    def _save_runtime_config(self, config: ModelHubConfig) -> bool:
+        """Best-effort persistence for runtime state during config recovery."""
+
+        try:
+            self._save_config(config)
+        except ValueError as exc:
+            if "recovery warnings" not in str(exc):
+                raise
+            logger.warning("Skipped Model Hub runtime-state persistence during config recovery")
+            return False
+        return True
+
+    def _ensure_config_writable(self) -> None:
+        ensure_writable = getattr(self.store, "ensure_writable", None)
+        if callable(ensure_writable):
+            ensure_writable()
 
     async def _sync_sources(self, config: ModelHubConfig, *, force_empty: bool = False) -> None:
         bindings = self._bindings(config)
@@ -1265,6 +1290,7 @@ class ModelHubService:
         # Claim and consume a completed flow under the aggregate lock. This
         # prevents a duplicate browser retry from revoking the winning source's
         # credential while still retaining rollback ownership before discovery.
+        self._ensure_config_writable()
         async with self._mutation_lock:
             rollback_credential_ref: Optional[str] = None
             source_id = ""
@@ -1551,6 +1577,7 @@ class ModelHubService:
         binding: OAuthFlowBinding,
         flow: OAuthFlowState,
     ) -> dict:
+        self._ensure_config_writable()
         if binding.source_id is None or binding.vendor is None:
             raise ModelHubError("flow_not_found", status=404)
 
@@ -3223,8 +3250,8 @@ class ModelHubService:
                 status=status,
                 detail_key=detail_key,
             )
-            self._save_config(config)
-            if not unchanged and emit_event:
+            persisted = self._save_runtime_config(config)
+            if persisted and not unchanged and emit_event:
                 self._record_event(
                     agent=cast(EventAgent, backend),
                     kind="needs_action",
@@ -3610,6 +3637,7 @@ class ModelHubService:
         except ValueError:
             raise ModelHubError("flow_not_found", status=400) from None
         oauth_channel = cast(OAuthChannel, channel)
+        self._ensure_config_writable()
         if oauth_channel == "native_cli":
             backend = _NATIVE_VENDOR_BACKENDS.get(vendor)
             if backend is not None:
@@ -3706,6 +3734,7 @@ class ModelHubService:
         value = payload.get("value") if isinstance(payload, dict) else None
         if not isinstance(flow_id, str) or not isinstance(value, str):
             raise ModelHubError("flow_not_found", status=404)
+        self._ensure_config_writable()
         binding = self._oauth_binding(flow_id)
         completed = self._completed_oauth_flow(flow_id, binding)
         if completed is not None:
@@ -3840,6 +3869,7 @@ class ModelHubService:
         async with self._mutation_lock:
             config = self.store.load()
             config_changed = False
+            recovered_sources: list[ModelHubSourceConfig] = []
             for source_id in resolution.recoverable_source_ids:
                 source = next(
                     (item for item in config.sources if item.id == source_id),
@@ -3852,17 +3882,19 @@ class ModelHubService:
                     continue
                 source.state = recovered_source.state
                 config_changed = True
-                self._record_event(
-                    agent=cast(EventAgent, resolution.backend),
-                    kind="recover",
-                    model_id=resolution.requested_model,
-                    reason="recovery",
-                    to_source=source.id,
-                    to_label=source.display_name,
-                    now=self.now(),
-                )
+                recovered_sources.append(source)
             if config_changed:
-                self._save_config(config)
+                if self._save_runtime_config(config):
+                    for source in recovered_sources:
+                        self._record_event(
+                            agent=cast(EventAgent, resolution.backend),
+                            kind="recover",
+                            model_id=resolution.requested_model,
+                            reason="recovery",
+                            to_source=source.id,
+                            to_label=source.display_name,
+                            now=self.now(),
+                        )
 
     async def _cooldown(
         self,
@@ -3891,8 +3923,8 @@ class ModelHubService:
                 retry_at=(self.now() + timedelta(seconds=decision.cooldown_seconds)).isoformat(),
                 detail_key=detail_key or f"models.source.cooldown.{decision.reason}",
             )
-            self._save_config(config)
-            if not already_cooling and emit_event:
+            persisted = self._save_runtime_config(config)
+            if persisted and not already_cooling and emit_event:
                 self._record_event(
                     agent=agent,
                     kind="cooldown",

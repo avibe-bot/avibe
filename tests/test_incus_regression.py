@@ -299,6 +299,7 @@ def test_tenant_exec_exports_regression_guard_override() -> None:
     assert "[ ! -f /etc/avibe-regression.env ] || . /etc/avibe-regression.env" in command
     assert "VIBE_DEPLOYMENT_ENV=regression" in command
     assert "AVIBE_ALLOW_DEV_STATE_MIGRATION=1" in command
+    assert "VIBE_INTERNAL_DISPATCH_SOCKET=/tmp/vibe_remote/dispatch.sock" in command
 
 
 def test_remote_ref_prefixes_resource_names_only() -> None:

@@ -74,12 +74,17 @@ class MemoryStore:
             }
         )
         self.requested_models = {}
+        self.recovery = False
 
     def load(self):
         return self.config
 
     def save(self, config):
         self.config = config
+
+    def ensure_writable(self):
+        if self.recovery:
+            raise ModelHubError("config_recovery", status=409)
 
     def requested_model(self, backend):
         return self.requested_models.get(backend, "")
@@ -986,6 +991,26 @@ def test_oauth_start_normalizes_vendor_before_singleton_and_adapter(tmp_path):
     assert adapter.oauth_start_calls == [(flow["source_id"], "anthropic")]
 
 
+def test_model_hub_oauth_blocks_recovery_before_external_auth(tmp_path):
+    service, store, adapter = _service(tmp_path)
+    flow = asyncio.run(
+        service.oauth_start({"vendor": "anthropic", "channel": "native_cli"})
+    )["flow"]
+    store.recovery = True
+
+    with pytest.raises(ModelHubError) as start_error:
+        asyncio.run(service.oauth_start({"vendor": "anthropic", "channel": "native_cli"}))
+    assert start_error.value.code == "config_recovery"
+    assert len(adapter.oauth_start_calls) == 1
+
+    with pytest.raises(ModelHubError) as submit_error:
+        asyncio.run(
+            service.oauth_submit({"flow_id": flow["flow_id"], "value": "auth-code"})
+        )
+    assert submit_error.value.code == "config_recovery"
+    assert adapter.secret_lengths == []
+
+
 def test_chain_route_reorders_exact_persisted_hops(monkeypatch, tmp_path):
     service, _, _ = _service(tmp_path)
     first = asyncio.run(
@@ -1695,6 +1720,43 @@ def test_hub_reauth_refreshes_discovery_when_engine_reuses_credential_ref(
     }
     assert adapter.revoked == []
     assert service.revocations.list() == []
+
+
+def test_completed_hub_reauth_blocks_recovery_before_discovery(tmp_path):
+    service, store, adapter = _service(tmp_path)
+    source = ModelHubSourceConfig(
+        id="src_huboauth01",
+        kind="subscription",
+        vendor="anthropic",
+        display_name="Hub subscription",
+        protocol="anthropic",
+        supply_channel="hub",
+        billing="monthly",
+        state=ModelHubSourceStateConfig(
+            status="needs_action",
+            detail_key="models.source.needs_action.oauth_expired",
+        ),
+        models=[ModelHubModelConfig(id="stale-entitlement", provenance="discovered")],
+        credential_ref="cred_hub_reused",
+    )
+    store.config.sources.append(source)
+    _refresh_fixture_routes(store.config)
+    flow = asyncio.run(service.reauth_source(source.id, {}))["flow"]
+    adapter.flows[flow["flow_id"]] = OAuthFlowState(
+        **{
+            **adapter.flows[flow["flow_id"]].__dict__,
+            "state": "success",
+            "credential_ref": "cred_hub_reused",
+        }
+    )
+    store.recovery = True
+
+    with pytest.raises(ModelHubError) as error:
+        asyncio.run(service.oauth_status(flow["flow_id"]))
+
+    assert error.value.code == "config_recovery"
+    assert adapter.secret_lengths == []
+    assert store.config.sources[0].models[0].id == "stale-entitlement"
 
 
 def test_concurrent_completed_hub_reauth_materializes_once(tmp_path):

@@ -325,12 +325,13 @@ new Run into an active native Turn, starts it immediately when idle, or moves th
 same Delivery to the durable P3 queue after a definitive refusal/not-active
 receipt. It does not interrupt the active Turn.
 
-`--send-now` is valid only with an existing `--session-id`. Avibe persists the
-new Run at P3 first, then promotes the exact FIFO head through P1. With an active
-Turn that head steers the same native Turn; when idle it starts normally. Older
-queued work remains ahead of the new Run. `vibe session send-now` uses the same
-exact-head promotion without adding a message. A stale head is refused rather
-than replaced by the next queued item, and neither form calls Stop.
+`--send-now` is valid only with an existing `--session-id` and explicitly selects
+the normal content-bearing P1 behavior: the new message steers an active native
+Turn, starts immediately when idle, and falls back to P3 after a definitive
+refusal. It never promotes an older queued message. `vibe session send-now` is
+the content-free P1 operation: it promotes the exact existing FIFO head without
+adding a message. A stale head is refused rather than replaced by the next queued
+item, and neither command calls Stop.
 
 Use `--fork-session <session-id>` when a new Agent Session should branch from
 an existing Session's native backend context instead of starting blank. The new

@@ -15,7 +15,6 @@ import type {
   ProbeResult,
   Source,
   SourceDetailKey,
-  SourcePolicy,
   SourceRepaired,
   SourceState,
   SupplyChannel,
@@ -221,10 +220,7 @@ export const repairOutcome = (tail: SourceRepaired): RepairOutcome =>
  * Whether the journey may close itself.
  *
  * Provable from the tail alone: 「nothing was stranded, and the source came back
- * working」 is two fields the server sends. The adoption auto-close next door now
- * stands on the same footing — `covered` needs `skipped_by`, and that field has
- * since landed — so the two differ in which fields they read, not in whether they
- * can reach a verdict at all.
+ * working」 is two fields the server sends.
  *
  * An allowlist rather than `!== 'gaps'`: L4's rule is that the 1.4s dismissal is
  * for a plain success and 「every other verdict leaves an instruction on screen
@@ -289,119 +285,6 @@ export function dryRunPlan(agent: AgentSupply): DryRunPlan {
  *  the source rows keep for an id that no longer resolves. */
 const nameOf = (sources: Source[], id: string): string =>
   sources.find((s) => s.id === id)?.display_name || id;
-
-/**
- * The identity of the chain a 试跑 report is ABOUT, so that a report outlives every
- * refresh except the ones that make it answer for something else.
- *
- * The rule this obeys, and the reason it is not just 「everything on `agent`」: key
- * on the surface the USER selects with, never on the pick the server RESOLVES from
- * it. The probe deliberately sends no model, so the server resolves whichever
- * selection is live at request time — which makes the selection part of the chain
- * the report describes, not context around it. But resolution outputs move for a
- * second reason: a failing probe cools its own head down, and keying on anything
- * that moves for THAT reason erases the sentence the click just produced (the
- * mistake this key was already once rebuilt to escape — see the reset effect in
- * `SourceOrderDrawer.tsx`).
- *
- * So the members are the config-level ones, verified against the server rather than
- * assumed:
- *
- * - `policy` / `order` as the USER currently has them, not as `agent.sources` holds
- *   them: a drag has already moved them before any PUT lands.
- * - `mappings` — pruned only by `_available_model_ids`, which is
- *   `source_eligible_for_backend` over the inventory and reads no `state.status`
- *   and no cooldown. An inventory change is a real chain change; a cooldown cannot
- *   fake one.
- * - `menu.checked` — same pruning via `_available_opencode_identifiers`, and for
- *   opencode this IS the selection surface. It goes in IN ORDER, unsorted, because
- *   on opencode the order is the selection: with no explicit request the resolver
- *   walks `checked` and takes the first identifier whose source is runnable
- *   (`resolver.py:171-182`), so `[A, B]` and `[B, A]` are different turns — a
- *   different model and possibly a different source — with the same membership.
- *   Nothing on this page writes `checked`, so a re-order arrives the way the
- *   inventory does, from another client; canonicalizing it here would hide exactly
- *   the change the member exists to catch. On the fixed-menu backends the order
- *   carries nothing, and the sensitivity costs at most a still-true report cleared
- *   by an edit that did not matter, which the user answers by re-running 一次试跑
- *   — the same asymmetry the inventory paragraph below settles the same way.
- *   `savedMenuKey` already reads this list in order for the drawer's own baseline.
- * - `selected_model_id`, but only while `selected_model_explicit` says the user is
- *   the one who asked for it. One rule for every backend, because the flag states
- *   the rule the backends were a proxy for: it is a CONFIG fact, derived from the
- *   stored request before anything resolves (`service.py:2109` —
- *   `mode == "hub" and bool(requested_model)`), while `selected_model_id` is the
- *   resolver's echo of that same request. On the fixed-menu backends the two agree
- *   and the guard changes nothing: the hub path echoes `requested_model` back
- *   verbatim in every return (only `target_model` takes the mapping), so a
- *   non-null id there always had a request behind it, and an unset request stays
- *   empty through to a null id. On opencode it separates the two cases that used to
- *   be one — an explicit request comes back merely normalized and IS now keyed on,
- *   while an empty one sends the resolver walking `checked` for the first
- *   identifier whose source is runnable (`resolver.py:171-182`), a pick that
- *   `unavailable_source_ids` and cooldown gating decide and that `checked` above
- *   stands in for.
- *
- *   Reading the flag is what makes the member health-free, and it is why this
- *   waited for the server instead of approximating. Both client-side stand-ins
- *   keyed on something the failing probe itself moves: on the VALUE, a
- *   single-source setup erases its own report, because the probe cools the only
- *   source the head model had and the pick moves; on `supply_status` (sound —
- *   the loop only ever returns a candidate WITH a source, so
- *   `waiting`/`interrupted` proves the request was explicit) the same erasure,
- *   through the guard rather than the value. `selected_model_explicit` moves only
- *   when the user edits the request, so the report survives its own failure.
- *
- * - the sources' model INVENTORIES, and this one is not the user's edit at all.
- *   Everything above is a surface the user changes from this page, and the
- *   paragraph on `mappings` claims 「an inventory change is a real chain change」
- *   while relying on the pruning of two lists to notice one. It does not always
- *   notice: an agent with no mappings and an empty `checked` has nothing
- *   inventory-derived in the key, and under the `follow` policy `order` is a
- *   recommendation rather than the membership — eligibility runs over the
- *   inventory (`source_eligible_for_backend`), so a discovery, a key replacement
- *   or a re-auth elsewhere can move a source in or out of the chain with every
- *   surface on this page untouched. Another client is enough; so is the same user
- *   in a second tab.
- *
- *   Keying on it is safe for the reason the `selected_model_id` paragraph above is
- *   about, read the other way: an inventory is not health. The two writers a
- *   failing 试跑 reaches — `_cooldown` and `_set_source_blocker` — assign
- *   `source.state` and nothing else, so the probe cannot move this member and the
- *   self-erasing report that killed both remedies for the OpenCode gap cannot
- *   happen here. It is `models[].id` only: no `state`, no `usage`, no
- *   `retry_at`, no `provenance` (which changes without changing eligibility).
- *
- *   Scope is every source, not the ones `order` names, precisely because of the
- *   `follow` case above — under that policy a source can join the chain without
- *   appearing in `order` first. The cost of being that broad is an unrelated
- *   source's discovery clearing a report that was still true, and the user re-runs
- *   一次试跑; the cost of being narrow is a sentence that answers for a supplier
- *   chain that no longer exists. Only one of those two is a wrong answer.
- *
- * Excluded on purpose: resolved-head state and everything else about health. A
- * head moving is what a failing report is for.
- */
-export const dryRunChainKey = (
-  agent: AgentSupply,
-  policy: SourcePolicy,
-  order: string[],
-  sources: Source[],
-): string =>
-  [
-    policy,
-    order.join('>'),
-    agent.selected_model_explicit ? (agent.selected_model_id ?? '') : '',
-    (agent.mappings ?? [])
-      .map((m) => `${m.builtin_id}>${m.target_model_id}:${m.enabled ? 'on' : 'off'}`)
-      .sort()
-      .join(','),
-    (agent.menu?.checked ?? []).join(','),
-    sources
-      .map((s) => `${s.id}:${s.models.map((m) => m.id).sort().join('+')}`)
-      .sort()
-      .join(';'),
-  ].join('|');
 
 /**
  * The probe's own verdict, named for copy. `reachable` is the discriminator the

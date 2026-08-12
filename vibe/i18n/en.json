@@ -76,6 +76,7 @@
       "burstHint": "This callback source is firing frequently. Inspect the related watch/task and pause, remove, or update it if it is looping."
     },
     "run": {
+      "sessionTurnGateUnavailable": "This Agent Run could not be admitted because the Session turn gate is unavailable. Retry after the service finishes starting.",
       "interrupted": {
         "noTerminalResult": "[Avibe Harness] This run ended without the Agent producing a result. The turn was released before the Agent replied, so no output was recorded. Check the Agent logs, then run it again if the work still needs doing.",
         "stopped": "[Avibe Harness] This run was stopped before the Agent produced a result, so it has no final result. Any output the Agent had already sent is still kept on the run.",
@@ -91,7 +92,6 @@
         "canceled": "The run was canceled before producing a result.",
         "failed": "The run failed before producing a result."
       },
-      "sendNowGateUnavailable": "This send-now run could not be admitted because the Session turn gate is unavailable. Retry after the service finishes starting.",
       "bindingUnresolvedRetry": "Pinned agent session {session} cannot accept a turn ({attempt}/{threshold}). This definition will be paused after {threshold} consecutive unresolvable-target failures. Re-point it with: vibe task update {id} --session-id <id>.",
       "bindingUnresolvedPaused": "paused: pinned agent session {session} cannot accept a turn. This definition would fail on every run. Re-point it with: vibe task update {id} --session-id <id>; then resume it with: vibe task resume {id}."
     },
@@ -102,6 +102,8 @@
       "watchCircuitRepairFailed": "[Avibe Harness] Watch \"{name}\" remains paused because its circuit-repair Agent Run failed.",
       "watchFollowUpFailed": "[Avibe Harness] Watch \"{name}\" follow-up Agent processing failed.",
       "interrupted": "[Avibe Harness] Scheduled work \"{name}\" was interrupted ({reason}). Nothing is wrong with the definition itself.",
+      "restartStopped": "[Avibe Harness] Background task \"{name}\" stopped when Avibe restarted. To continue, send \"continue\" to the Agent.",
+      "restartStoppedUnnamed": "[Avibe Harness] A background task stopped when Avibe restarted. To continue, send \"continue\" to the Agent.",
       "commandLine": "Command: {command}",
       "error": "Error: {error}",
       "commandExit": "Exit code: {exitCode}",
@@ -212,6 +214,10 @@
       "message": "Agent routing changed while these settings were open.",
       "hint": "Reload the settings and apply your change again."
     },
+    "configRecovery": {
+      "beforeAuth": "Config was loaded with recovery warnings; repair the backed-up config before changing backend credentials",
+      "action": "Review the preserved config backup and repair it before changing settings."
+    },
     "scopeAgentUnavailable": {
       "message": "Agent `{agent}` is unavailable for this route.",
       "hint": "Choose an enabled Agent and apply the setting again."
@@ -223,6 +229,10 @@
     "projectAgentUnavailable": {
       "message": "Agent `{agent}` is unavailable for this project.",
       "hint": "Choose an enabled Agent and apply the project setting again."
+    },
+    "taskOwnerUnavailable": {
+      "message": "This Task's managing Session is no longer available.",
+      "hint": "Create a replacement Task from an available Agent Session, then remove this orphaned definition with `vibe task remove {id}`."
     },
     "sessionFork": {
       "agentUnavailable": {
@@ -714,12 +724,10 @@
       "flow_expired": "Authorization flow expired.",
       "discovery_failed": "Could not validate or discover this source.",
       "invalid_source_order": "The source order contains an unavailable, ineligible, or duplicate source.",
-      "mapping_target_unavailable": "The selected model is unavailable for this backend.",
       "mode_switch_blocked": "This operation is blocked by the current supply mode or selection.",
-      "engine_down": "The local Model Hub runtime is unavailable.",
-      "engine_down_streamed": "The local Model Hub runtime is unavailable. This turn's output may be incomplete.",
-      "consent_required": "Explicit consent is required for experimental subscription routing.",
-      "migration_item_conflict": "This migration item conflicts with current Model Hub state.",
+      "engine_down": "The local model gateway is unavailable.",
+      "engine_down_streamed": "The local model gateway is unavailable. This turn's output may be incomplete.",
+      "migration_item_conflict": "This migration item conflicts with the current model gateway state.",
       "stream_interrupted": "The upstream stream was interrupted.",
       "upstream_protocol_error": "The upstream response did not match the expected protocol.",
       "upstream_request_invalid": "The upstream service rejected the request.",
@@ -732,7 +740,6 @@
       "cooldown": "{from_source}: {reason}; cooling down",
       "recover": "{to_source}: recovered and available",
       "skip": "{from_source}: {reason}; skipped",
-      "mapping_applied": "{from_source} -> {model}: model mapping applied",
       "channel_switch": "{from_source}: supply channel changed",
       "needs_action": "{from_source}: {reason}; action required",
       "supply_interrupted": "{model}: {reason}; model supply interrupted",
