@@ -90,14 +90,21 @@ class MessageDispatcherFileUploadTests(unittest.IsolatedAsyncioTestCase):
         context = MessageContext(user_id="U1", channel_id="C1")
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            file_path = Path(tmpdir) / "preview (final).png"
+            file_path = Path(tmpdir) / "preview & (final).png"
             file_path.write_bytes(b"png")
-            escaped_path = str(file_path).replace("(", r"\(").replace(")", r"\)")
+            escaped_path = (
+                str(file_path)
+                .replace("&", "&amp;")
+                .replace("(", r"\(")
+                .replace(")", r"\)")
+            )
             enhanced = process_reply(
-                f'![preview](<FILE://{escaped_path}> "download")'
+                f'![preview](<f&#105;le://{escaped_path}> "download") '
+                "and [draft](<file:relative.png>)"
             )
 
-            self.assertEqual(enhanced.text, "preview")
+            self.assertEqual(enhanced.text, "preview and [draft](<file:relative.png>)")
+            self.assertEqual(len(enhanced.files), 1)
             await dispatcher._upload_file_links(im_client, context, enhanced.files)
 
         self.assertEqual(

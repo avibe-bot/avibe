@@ -11,6 +11,7 @@ from __future__ import annotations
 import struct
 import zlib
 from datetime import datetime, timezone
+from unittest.mock import patch
 
 from sqlalchemy import select
 
@@ -155,8 +156,8 @@ def test_rewrite_angle_wrapped_file_links(tmp_path):
         out = rewrite_agent_media(conn, scope_id=scope_id, session_id="sess_x", text=text)
 
     assert "file://" not in out
-    assert out.startswith("![图片](/api/media/")
-    assert "and [下载报告](/api/media/" in out
+    assert out.startswith("![图片](</api/media/")
+    assert "and [下载报告](</api/media/" in out
     with engine.connect() as conn:
         rows = conn.execute(select(media_objects)).mappings().all()
     assert {row["local_path"] for row in rows} == {
@@ -412,5 +413,55 @@ def test_rewrite_angle_file_link_unescapes_path_and_ignores_title(tmp_path):
         scope_id = _seed_scope_and_session(conn)
         out = rewrite_agent_media(conn, scope_id=scope_id, session_id="sess_x", text=text)
 
-    assert out.startswith("[report](/api/media/")
-    assert out.endswith(")")
+    assert out.startswith("[report](</api/media/")
+    assert out.endswith('> "download")')
+
+
+def test_rewrite_commonmark_owned_destination_preserves_source_syntax(tmp_path):
+    db = tmp_path / "vibe.sqlite"
+    run_migrations(db)
+    engine = create_sqlite_engine(db)
+    report = tmp_path / "report & (final).md"
+    report.write_text("report", encoding="utf-8")
+    escaped_report = (
+        str(report)
+        .replace("&", "&amp;")
+        .replace("(", r"\(")
+        .replace(")", r"\)")
+    )
+    text = (
+        f'[outer [report](<f&#105;le://{escaped_report}>\n "download")]'
+        " and [draft](<file:relative.md>)"
+    )
+
+    with engine.begin() as conn:
+        scope_id = _seed_scope_and_session(conn)
+        out = rewrite_agent_media(conn, scope_id=scope_id, session_id="sess_x", text=text)
+
+    assert out.startswith("[outer [report](</api/media/")
+    assert out.endswith('>\n "download")] and [draft](<file:relative.md>)')
+    with engine.connect() as conn:
+        rows = conn.execute(select(media_objects)).mappings().all()
+    assert [row["local_path"] for row in rows] == [str(report.resolve())]
+
+
+def test_rewrite_failure_preserves_original_destination_source(tmp_path):
+    db = tmp_path / "vibe.sqlite"
+    run_migrations(db)
+    engine = create_sqlite_engine(db)
+    text = '[report](<f&#105;le:///tmp/a&amp;b.md> "download")'
+
+    with engine.begin() as conn:
+        scope_id = _seed_scope_and_session(conn)
+        with patch(
+            "core.workbench_media.register_agent_reply_media",
+            side_effect=RuntimeError("registration failed"),
+        ):
+            out = rewrite_agent_media(
+                conn,
+                scope_id=scope_id,
+                session_id="sess_x",
+                text=text,
+            )
+
+    assert out == text

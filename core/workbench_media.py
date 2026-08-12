@@ -371,23 +371,24 @@ def rewrite_agent_media(conn: Connection, *, scope_id: str | None, session_id: s
     and non-absolute paths are left untouched. Best-effort: a registration
     failure leaves that one link as written rather than dropping the reply.
     """
-    if not text or "file://" not in text.casefold():
+    if not text:
         return text
 
     def _replace(match) -> str:
         bang, label, url = match.group(1), match.group(2), match.group(3)
+        source_url = text[match.start(3) : match.end(3)]
         parsed = _parse_file_uri(url)
         if parsed.scheme.casefold() != "file":
-            return match.group(0)
+            return source_url
         path = _file_uri_to_local_path(parsed)
         if not os.path.isabs(path):
             logger.warning("workbench_media: skipping non-absolute file link: %s", url)
-            return match.group(0)
+            return source_url
         try:
             safe_path = str(Path(path).resolve())
         except Exception:
             logger.warning("workbench_media: could not resolve file link: %s", url)
-            return match.group(0)
+            return source_url
         try:
             token = register_agent_reply_media(
                 conn,
@@ -399,7 +400,7 @@ def rewrite_agent_media(conn: Connection, *, scope_id: str | None, session_id: s
             )
         except Exception:
             logger.exception("workbench_media: failed to register media for %s", safe_path)
-            return match.group(0)
+            return source_url
         url = f"/api/media/{token}"
         # For an image, carry its pixel dimensions on the URL (``?w=&h=``) so the
         # browser reserves the box before it loads — the transcript never shifts on
@@ -412,7 +413,7 @@ def rewrite_agent_media(conn: Connection, *, scope_id: str | None, session_id: s
                     url = f"{url}?w={w}&h={h}"
             except Exception:
                 logger.debug("workbench_media: no dimensions for %s", safe_path, exc_info=True)
-        return f"{bang}[{label}]({url})"
+        return url
 
     return _replace_file_links(text, _replace)
 

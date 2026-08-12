@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -1981,6 +1982,58 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(enhanced.files), 1)
                 self.assertEqual(enhanced.files[0].path, expected_path)
 
+    def test_file_link_parser_uses_commonmark_link_ownership(self):
+        nested = process_reply("[outer [inner](<file:///tmp/inner.txt>)]")
+        titled = process_reply(
+            '[outer](<file:///tmp/outer.txt> "fake [inner](<file:///tmp/inner.txt>)")'
+        )
+        image_label = process_reply(
+            "[outer ![inner](<file:///tmp/inner.png>)](<file:///tmp/outer.txt>)"
+        )
+
+        self.assertEqual(nested.text, "[outer inner]")
+        self.assertEqual([file.path for file in nested.files], ["/tmp/inner.txt"])
+        self.assertEqual(titled.text, "outer")
+        self.assertEqual([file.path for file in titled.files], ["/tmp/outer.txt"])
+        self.assertEqual(
+            image_label.text,
+            "outer ![inner](<file:///tmp/inner.png>)",
+        )
+        self.assertEqual(
+            [file.path for file in image_label.files],
+            ["/tmp/outer.txt"],
+        )
+
+    def test_file_link_parser_respects_commonmark_html_block_ownership(self):
+        html_block = "<script>\n[hidden](<file:///tmp/hidden.txt>)\n</script>"
+        escaped_tag = r"\<span>[visible](<file:///tmp/visible.txt>)</span>"
+
+        blocked = process_reply(html_block)
+        visible = process_reply(escaped_tag)
+
+        self.assertEqual(blocked.text, html_block)
+        self.assertEqual(blocked.files, [])
+        self.assertEqual(visible.text, r"\<span>visible</span>")
+        self.assertEqual([file.path for file in visible.files], ["/tmp/visible.txt"])
+
+    def test_file_link_parser_normalizes_strict_entities_before_acceptance(self):
+        valid = process_reply("[report](<f&#105;le:///tmp/a&amp;b.txt>)")
+        semicolonless = process_reply("[literal](<file:///tmp/a&amp.txt>)")
+
+        self.assertEqual([file.path for file in valid.files], ["/tmp/a&b.txt"])
+        self.assertEqual(
+            [file.path for file in semicolonless.files],
+            ["/tmp/a&amp.txt"],
+        )
+
+    def test_file_link_parser_keeps_rejected_relative_links_verbatim(self):
+        text = "[draft](<file:relative/report.md>)"
+
+        enhanced = process_reply(text)
+
+        self.assertEqual(enhanced.text, text)
+        self.assertEqual(enhanced.files, [])
+
     def test_angle_wrapped_file_links_require_whitespace_before_title(self):
         text = '[report](<file:///tmp/report.md>"download")'
 
@@ -1994,6 +2047,7 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             '[double](<file:///tmp/report.md> "download")',
             r"[single](<file:///tmp/report.md> 'download')",
             r"[paren](<file:///tmp/report.md> (download))",
+            '[line](<file:///tmp/report.md>\n "download")',
         ]
         for text in valid:
             with self.subTest(text=text):
@@ -2004,6 +2058,7 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             r"[nested](<file:///tmp/report.md> (download (copy)))",
             '[marker](<file:///tmp/report.md> `download`)',
             '[no-space](<file:///tmp/report.md>"download")',
+            '[blank](<file:///tmp/report.md>\n\n"download")',
         ]
         for text in invalid:
             with self.subTest(text=text):
@@ -2041,7 +2096,7 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             "[extra angle](<file:///tmp/report>copy.md>)",
             "[extra open](<<file:///tmp/report.md>>)",
             "[missing label close(<file:///tmp/report.md>)",
-            "[missing close](<file://" + "a" * 10000,
+            "[missing close](<file://" + "a" * 100000,
             "`[inline](<file:///tmp/report.md>)`",
             "```markdown\n[fenced](<file:///tmp/report.md>)\n```",
         ]
@@ -2051,6 +2106,16 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
                 enhanced = process_reply(text)
                 self.assertEqual(enhanced.text, text)
                 self.assertEqual(enhanced.files, [])
+
+    def test_file_link_parser_handles_many_openers_in_bounded_time(self):
+        text = "[" * 100000 + "[report](<file:///tmp/report.md>)"
+
+        started = time.perf_counter()
+        enhanced = process_reply(text)
+        elapsed = time.perf_counter() - started
+
+        self.assertEqual([file.path for file in enhanced.files], ["/tmp/report.md"])
+        self.assertLess(elapsed, 10.0)
 
     def test_unwrapped_file_link_parser_keeps_existing_destination_behavior(self):
         enhanced = process_reply("[report](file:///tmp/report>draft.md)")
