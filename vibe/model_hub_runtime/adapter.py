@@ -1081,25 +1081,25 @@ class CLIProxyEngineAdapter:
                     RawCallOutcome(
                         kind=RawOutcomeKind.NETWORK_ERROR,
                         http_status=None,
-                        error_code=None,
+                        error_code="engine_down",
                         redacted_message=None,
                         stream_started=False,
                         model_id=model_id,
                         source_id=source_id,
                     )
                 )
-            request_protocol = {
-                "claude": "anthropic",
-                "codex": "openai_responses",
-            }.get(origin, getattr(request, "protocol", None) or source.protocol)
-            return await client.invoke(
-                source,
-                model_id,
-                request,
-                stream=stream,
-                request_protocol=request_protocol,
-                request_headers=getattr(request, "headers", None),
-            )
+        request_protocol = {
+            "claude": "anthropic",
+            "codex": "openai_responses",
+        }.get(origin, getattr(request, "protocol", None) or source.protocol)
+        return await client.invoke(
+            source,
+            model_id,
+            request,
+            stream=stream,
+            request_protocol=request_protocol,
+            request_headers=getattr(request, "headers", None),
+        )
 
     async def _complete_oauth(self, flow: _OAuthFlow, client: EngineClient) -> None:
         flow.grant_write_possible = True

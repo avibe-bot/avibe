@@ -1,0 +1,47 @@
+{
+  "source": "Released contract-v5 examples at squash 8a7ceccd2",
+  "degraded_reason": "unclassified_error",
+  "provenance": [
+    {
+      "contract_version": 5,
+      "turn_id": "turn_01k9x6db",
+      "ts": "2026-07-30T05:55:00Z",
+      "agent": "claude",
+      "requested_model_id": "claude-opus-4-6",
+      "outcome": "served",
+      "failed_attempts": [
+        {
+          "source_id": "src_primary01",
+          "configured_model_id": "claude-opus-4-6",
+          "channel": "hub",
+          "reason": "permission_denied"
+        }
+      ],
+      "served": {
+        "source_id": "src_backup001",
+        "configured_model_id": "claude-opus-4-6",
+        "channel": "hub"
+      },
+      "terminal_error": null,
+      "canceled_attempt": null,
+      "model_supply_state": null,
+      "blockers": []
+    }
+  ],
+  "resolution_events": [
+    {
+      "id": "evt_20260730c",
+      "ts": "2026-07-30T05:55:00Z",
+      "agent": "claude",
+      "kind": "switch",
+      "model_id": "claude-opus-4-6",
+      "from_source": "src_primary01",
+      "to_source": "src_backup001",
+      "reason": "permission_denied",
+      "billing_note": null,
+      "severity": "info",
+      "human_zh": "Primary：请求权限被拒绝 -> 已切到 Backup",
+      "human_en": "Primary: request permission denied -> switched to Backup"
+    }
+  ]
+}

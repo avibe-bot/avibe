@@ -387,7 +387,10 @@ class Controller:
             selected_agent_override=default_vibe_agent_name,
             named_agents_override=named_vibe_agents,
         )
-        self.model_hub_turn_gateway = ModelHubTurnGateway(self.model_hub_service)
+        self.model_hub_turn_gateway = ModelHubTurnGateway(
+            self.model_hub_service,
+            language_provider=lambda: self.config.language,
+        )
         self.model_hub_runtime = ModelHubRuntimeRouter(
             service=self.model_hub_service,
             turn_gateway=self.model_hub_turn_gateway,

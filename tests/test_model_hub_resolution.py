@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,8 +29,19 @@ from core.handlers.model_hub.adapter import (
     RawOutcomeKind,
     SourceObservation,
 )
+from core.handlers.model_hub.classification import (
+    SOURCE_SETTLEMENT_AUTHORITY,
+    classify_outcome,
+    source_settlement_allowed,
+    terminal_outcome_category,
+)
 from core.handlers.model_hub.events import BoundedEventLog
 from core.handlers.model_hub.errors import ModelDiscoveryError
+from core.handlers.model_hub.provenance import (
+    TurnSupplyBlocker,
+    produce_turn_outcome,
+    project_turn_outcome_copy,
+)
 from core.handlers.model_hub.request import ModelHubRequest
 from core.handlers.model_hub.resolver import allowed_origins, resolve_model_hub_turn
 from core.handlers.model_hub.resolver import (
@@ -43,7 +55,14 @@ from core.handlers.model_hub.service import (
     _await_owned_task_before_settling,
     _matching_v1_model_id,
 )
-from modules.agents.model_hub import ModelHubRuntimeRouter
+
+
+E64_SETTLEMENT_BOUNDARIES = json.loads(
+    (
+        Path(__file__).parent
+        / "fixtures/model_hub/e64_settlement_boundaries.json"
+    ).read_text(encoding="utf-8")
+)
 
 
 class MemoryStore:
@@ -64,6 +83,55 @@ class MemoryStore:
 
     def requested_model(self, backend: str) -> str:
         return self.requested_models.get(backend, "")
+
+
+def test_source_settlement_authority_never_downgrades_a_decided_error() -> None:
+    assert source_settlement_allowed("error", "network") is False
+    assert source_settlement_allowed("cooldown", "unclassified_error") is True
+
+
+def test_source_settlement_authority_is_transitive() -> None:
+    representatives = {
+        rule.status: reason
+        for reason, rule in SOURCE_SETTLEMENT_AUTHORITY.items()
+    }
+    assert set(representatives) == {"cooldown", "error", "needs_action"}
+    assert len({rule.priority for rule in SOURCE_SETTLEMENT_AUTHORITY.values()}) == len(
+        representatives
+    )
+    for existing_status in ("active", "standby", *representatives):
+        for middle_status, middle_reason in representatives.items():
+            for final_reason in representatives.values():
+                if source_settlement_allowed(
+                    existing_status, middle_reason
+                ) and source_settlement_allowed(middle_status, final_reason):
+                    assert source_settlement_allowed(existing_status, final_reason)
+
+
+@pytest.mark.parametrize(
+    "fixture",
+    E64_SETTLEMENT_BOUNDARIES["stream_errors"],
+    ids=lambda fixture: fixture["code"],
+)
+def test_streamed_native_transient_errors_keep_their_settlement_class(
+    fixture: dict[str, object],
+) -> None:
+    decision = classify_outcome(
+        RawCallOutcome(
+            kind=RawOutcomeKind.HTTP_ERROR,
+            http_status=200,
+            error_code=str(fixture["code"]),
+            redacted_message=None,
+            stream_started=True,
+            model_id="upstream-model",
+            source_id="src_streamerr01",
+        )
+    )
+
+    assert decision.action == "surface"
+    assert decision.reason == fixture["reason"]
+    assert decision.cooldown_seconds == fixture["cooldown_seconds"]
+    assert decision.error_code == "stream_interrupted"
 
 
 class FakeInvokeHandle:
@@ -402,7 +470,104 @@ def test_supply_is_degraded_when_a_later_exact_hop_is_blocked():
     assert resolution.supply_status == "degraded"
 
 
-def test_runtime_fallback_preserves_distinct_models_from_one_source(tmp_path):
+def test_streamed_protocol_failure_preserves_its_positive_terminal_category():
+    decision = classify_outcome(
+        RawCallOutcome(
+            kind=RawOutcomeKind.PROTOCOL_ERROR,
+            http_status=502,
+            error_code="upstream_protocol_error",
+            redacted_message=None,
+            stream_started=True,
+            model_id="upstream-first",
+            source_id="src_route006",
+        )
+    )
+
+    assert decision.action == "surface"
+    assert decision.reason is None
+    assert decision.error_code == "upstream_protocol_error"
+
+
+@pytest.mark.parametrize(
+    ("outcome", "expected_category"),
+    [
+        (
+            RawCallOutcome(
+                kind=RawOutcomeKind.SUCCESS,
+                http_status=200,
+                error_code=None,
+                redacted_message=None,
+                stream_started=True,
+                model_id="upstream-first",
+                source_id="src_route006",
+            ),
+            "served",
+        ),
+        (
+            RawCallOutcome(
+                kind=RawOutcomeKind.HTTP_ERROR,
+                http_status=403,
+                error_code="permission_error",
+                redacted_message=None,
+                stream_started=True,
+                model_id="upstream-first",
+                source_id="src_route006",
+            ),
+            "request_nonfallback",
+        ),
+        (
+            RawCallOutcome(
+                kind=RawOutcomeKind.PROTOCOL_ERROR,
+                http_status=502,
+                error_code=None,
+                redacted_message=None,
+                stream_started=True,
+                model_id="upstream-first",
+                source_id="src_route006",
+            ),
+            "upstream_protocol",
+        ),
+        (
+            RawCallOutcome(
+                kind=RawOutcomeKind.NETWORK_ERROR,
+                http_status=200,
+                error_code="engine_down",
+                redacted_message="loopback transport failed",
+                stream_started=True,
+                model_id="upstream-first",
+                source_id="src_route006",
+            ),
+            "engine_down",
+        ),
+        (
+            RawCallOutcome(
+                kind=RawOutcomeKind.NETWORK_ERROR,
+                http_status=None,
+                error_code=None,
+                redacted_message=None,
+                stream_started=True,
+                model_id="upstream-first",
+                source_id="src_route006",
+            ),
+            "fallback_source",
+        ),
+    ],
+)
+def test_terminal_outcome_category_authority_has_a_behavior_consumer(
+    outcome: RawCallOutcome,
+    expected_category: str,
+) -> None:
+    assert terminal_outcome_category(
+        outcome,
+        classify_outcome(outcome),
+    ) == expected_category
+
+
+@pytest.mark.parametrize("status", [401, 402, 403, 429, 500])
+def test_machine_permission_denial_precedes_every_status_heuristic(
+    tmp_path,
+    status,
+):
     source = _source("src_route006", ("upstream-first", "upstream-second"))
     config = _config([source])
     config.agents["claude"].routes["claude-opus-4-6"] = ModelHubRouteConfig(
@@ -416,7 +581,7 @@ def test_runtime_fallback_preserves_distinct_models_from_one_source(tmp_path):
         (
             RawCallOutcome(
                 kind=RawOutcomeKind.HTTP_ERROR,
-                http_status=403,
+                http_status=status,
                 error_code="permission_error",
                 redacted_message=None,
                 stream_started=False,
@@ -434,21 +599,26 @@ def test_runtime_fallback_preserves_distinct_models_from_one_source(tmp_path):
             ),
         )
     )
-    service, _store, _ = _service(tmp_path, config, adapter)
+    service, store, _ = _service(tmp_path, config, adapter)
 
-    resolved = asyncio.run(
-        service.resolve(
-            backend="claude",
-            model_id="claude-opus-4-6",
-            request={},
+    decisions = []
+    with pytest.raises(ModelHubError) as exc:
+        asyncio.run(
+            service.resolve(
+                backend="claude",
+                model_id="claude-opus-4-6",
+                request={},
+                attempt_observer=lambda *args: decisions.append(args[-1]),
+            )
         )
-    )
 
-    assert adapter.invocations == [
-        (source.id, "upstream-first"),
-        (source.id, "upstream-second"),
-    ]
-    assert resolved.model_id == "upstream-second"
+    assert exc.value.code == "request_incompatible"
+    assert exc.value.status == 403
+    assert decisions[-1].action == "surface"
+    assert adapter.invocations == [(source.id, "upstream-first")]
+    assert adapter.capability_queries == []
+    assert store.load().sources[0].state.status == "standby"
+    assert BoundedEventLog(tmp_path / "events.json").list() == []
 
 
 def test_runtime_skips_later_hops_after_a_source_global_failure(tmp_path):
@@ -675,8 +845,8 @@ def test_runtime_filters_reasoning_effort_for_each_exact_hop(tmp_path):
         (
             RawCallOutcome(
                 kind=RawOutcomeKind.HTTP_ERROR,
-                http_status=403,
-                error_code="permission_error",
+                http_status=429,
+                error_code="rate_limit_error",
                 redacted_message=None,
                 stream_started=False,
                 model_id="upstream-first",
@@ -738,17 +908,20 @@ def test_launch_failure_reports_unsupported_exact_hop():
     config = _config([source], model="stale-model")
     resolution = resolve_model_hub_turn(config, "claude", "stale-model")
 
-    failure = ModelHubRuntimeRouter._launch_failure(config, resolution)
+    projection = produce_turn_outcome(
+        "turn.no_candidate.blocked",
+        config=config,
+        resolution=resolution,
+    )
+    facts = projection.supply_facts
+    assert facts is not None
+    copy = project_turn_outcome_copy(projection)
 
-    assert failure["copy_key"] == "interrupted"
-    assert failure["blockers"] == [
-        {
-            "source": source.display_name,
-            "status": source.state.status,
-            "detail_key": source.state.detail_key,
-            "reason": "model_unsupported",
-        }
-    ]
+    assert copy is not None
+    assert copy.key == "modelHub.launch.interrupted"
+    assert facts.blockers == (
+        TurnSupplyBlocker(source.display_name, "model_unsupported"),
+    )
 
 
 def test_exact_hop_inspection_is_the_single_identity_and_supply_authority():
@@ -1985,8 +2158,11 @@ def test_credential_target_and_refresh_capability_have_single_service_consumers(
         }
 
     assert "retarget_api_key_credential" in calls(methods["patch_source"])
-    assert "credential_supports_refresh" in calls(
+    assert "_classify_credential_outcome" in calls(
         methods["_classify_source_outcome"]
+    )
+    assert "credential_supports_refresh" in calls(
+        methods["_classify_credential_outcome"]
     )
     assert "_classify_source_outcome" in calls(methods["probe_agent"])
     assert "_classify_source_outcome" in calls(methods["resolve"])
@@ -1995,7 +2171,7 @@ def test_credential_target_and_refresh_capability_have_single_service_consumers(
         for name, method in methods.items()
         if "credential_supports_refresh" in calls(method)
     }
-    assert capability_callers == {"_classify_source_outcome"}
+    assert capability_callers == {"_classify_credential_outcome"}
 
 
 def test_direct_mode_refuses_chain_and_probe(tmp_path):
