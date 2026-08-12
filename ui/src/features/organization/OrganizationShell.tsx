@@ -177,25 +177,22 @@ function OrganizationNavbar() {
               <div className="flex items-center gap-2 text-[12px] font-semibold">
                 <span className="size-2 rounded-full bg-mint shadow-[0_0_8px_rgba(91,255,160,0.8)]" />
                 {t('organization.sidebar.cloudConnected')}
-              </div>
-              <div className="mt-1 font-mono text-[10px] text-muted">
-                {t('organization.sidebar.sessionRemaining', { minutes: Math.max(1, Math.ceil((session?.expires_in ?? 0) / 60)) })}
+                <span className="font-mono text-[10px] font-normal text-muted">
+                  · {t('organization.sidebar.sessionRemaining', { minutes: Math.max(1, Math.ceil((session?.expires_in ?? 0) / 60)) })}
+                </span>
               </div>
             </div>
             <InitialsAvatar value={session?.user.email ?? ''} className="size-8 rounded-full" />
           </div>
           <Button
             variant="ghost"
-            size="icon"
+            size="sm"
             aria-label={t('organization.actions.signOut')}
             onClick={() => void signOut()}
           >
             <LogOut className="size-4" />
+            <span>{t('organization.actions.signOut')}</span>
           </Button>
-          <Link to={backToControlPanelPath} className="inline-flex items-center gap-2 text-[13px] text-muted hover:text-foreground">
-            <ArrowLeft className="size-4" />
-            <span className="hidden sm:inline">{t('organization.actions.backToControlPanel')}</span>
-          </Link>
         </div>
       </div>
       <nav className="mt-6 -mb-px overflow-x-auto" aria-label={t('organization.sidebar.section')}>

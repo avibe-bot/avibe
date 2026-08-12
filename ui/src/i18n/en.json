@@ -4030,7 +4030,7 @@
       "organizationCount": "{{count}} organizations",
       "switchOrganization": "Switch Organization",
       "cloudConnected": "Cloud connected",
-      "sessionRemaining": "management session · {{minutes}}m",
+      "sessionRemaining": "{{minutes}}m",
       "openMenu": "Open Organization menu"
     },
     "states": {

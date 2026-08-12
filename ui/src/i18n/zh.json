@@ -4030,7 +4030,7 @@
       "organizationCount": "{{count}} 个组织",
       "switchOrganization": "切换组织",
       "cloudConnected": "Cloud 已连接",
-      "sessionRemaining": "管理会话 · {{minutes}} 分钟",
+      "sessionRemaining": "{{minutes}} 分钟",
       "openMenu": "打开组织菜单"
     },
     "states": {
