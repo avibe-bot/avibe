@@ -23,6 +23,31 @@ from vibe import api, internal_client, remote_access, ui_memory_routes, ui_serve
 from vibe.ui_server import app
 
 
+def test_memory_rebuild_result_preserves_closed_preflight_diagnostic() -> None:
+    payload, status = ui_memory_routes._memory_rebuild_result(
+        {
+            "ok": False,
+            "error": "memory_embedding_unavailable",
+            "result": "failed",
+            "diagnostic": {
+                "side": "embedding",
+                "http_status": 404,
+                "provider_error_code": "model_not_supported",
+                "message": "unsupported model",
+                "raw": "must not cross",
+            },
+        },
+        409,
+    )
+    assert status == 409
+    assert payload["diagnostic"] == {
+        "side": "embedding",
+        "http_status": 404,
+        "provider_error_code": "model_not_supported",
+        "message": "unsupported model",
+    }
+
+
 def _save_config(tmp_path) -> None:
     V2Config(
         mode="self_host",
