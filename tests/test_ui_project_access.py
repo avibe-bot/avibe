@@ -321,6 +321,13 @@ def test_session_bootstrap_uses_effective_project_chat_role(monkeypatch, tmp_pat
             ids["session_a"],
             "editor-only draft",
         )
+    with engine.connect() as conn:
+        draft_state = message_deliveries.get_draft_state(conn, ids["session_a"])
+    expected_draft = {
+        "text": "editor-only draft",
+        "updated_at": draft_state["updated_at"],
+    }
+    assert expected_draft["updated_at"]
 
     monkeypatch.setattr(
         api,
@@ -343,7 +350,7 @@ def test_session_bootstrap_uses_effective_project_chat_role(monkeypatch, tmp_pat
     assert viewer_payload["agents"][0]["name"] == "editor-agent"
     assert viewer_payload["default_agent_name"] == "editor-agent"
     assert viewer_payload["queued"][0]["text"] == "editor-only queued prompt"
-    assert viewer_payload["draft"] == {"text": "editor-only draft"}
+    assert viewer_payload["draft"] == expected_draft
     assert [message["text"] for message in viewer_payload["messages"]] == ["shared needle"]
     assert viewer_payload["session"]["workdir"] == str((tmp_path / "project-a").resolve())
     assert viewer_payload["session"]["metadata"] == {"created_via": "workbench"}
@@ -365,7 +372,7 @@ def test_session_bootstrap_uses_effective_project_chat_role(monkeypatch, tmp_pat
     assert editor_payload["agents"][0]["name"] == "editor-agent"
     assert editor_payload["default_agent_name"] == "editor-agent"
     assert editor_payload["queued"][0]["text"] == "editor-only queued prompt"
-    assert editor_payload["draft"] == {"text": "editor-only draft"}
+    assert editor_payload["draft"] == expected_draft
     assert editor_payload["config"]["runtime"]["default_cwd"] == "."
     assert "agents" in editor_payload["config"]
     assert "memory" not in editor_payload["config"]
@@ -390,10 +397,13 @@ def test_session_bootstrap_uses_effective_project_chat_role(monkeypatch, tmp_pat
         base_url=REMOTE_ORIGIN,
         environ_base=REMOTE_PEER,
         headers=csrf_headers(client, REMOTE_ORIGIN),
-        json={"text": "remote overwrite"},
+        json={
+            "text": "remote overwrite",
+            "expected_updated_at": expected_draft["updated_at"],
+        },
     )
     assert draft_get.status_code == 200
-    assert draft_get.get_json() == {"text": "editor-only draft"}
+    assert draft_get.get_json() == expected_draft
     assert draft_put.status_code == 200
     with engine.connect() as conn:
         assert message_deliveries.get_draft(conn, ids["session_a"])["text"] == "remote overwrite"
