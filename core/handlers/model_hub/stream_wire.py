@@ -12,6 +12,8 @@ SSE_LINE_ENDINGS: Final = (b"\r\n", b"\n", b"\r")
 # span four such reads. Both retained buffers remain bounded under hostile input.
 SSE_MAX_LINE_BYTES: Final = 64 * 1024
 SSE_MAX_FRAME_BYTES: Final = 256 * 1024
+# The pre-output owner shares the buffered-response ceiling; valid preludes are smaller.
+SSE_MAX_PRELUDE_BYTES: Final = 16 * 1024 * 1024
 UTF8_BOM: Final = b"\xef\xbb\xbf"
 
 

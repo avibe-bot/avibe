@@ -68,6 +68,7 @@ class ModelHubLaunch:
     source_id: Optional[str] = None
     gateway_base_url: Optional[str] = None
     gateway_token: Optional[str] = None
+    settlement_generation: Optional[int] = field(default=None, repr=False)
 
     @property
     def fingerprint(self) -> str:
@@ -796,6 +797,9 @@ class ModelHubRuntimeRouter:
                 target_model=target_model,
                 runtime_model=target_model,
                 source_id=source.id,
+                settlement_generation=self.service._reserve_settlement_generation(
+                    source.id
+                ),
             )
             if self.turn_gateway is not None:
                 self.turn_gateway.correlation.begin_native_attempt(
@@ -919,11 +923,12 @@ class ModelHubRuntimeRouter:
         source = next((item for item in config.sources if item.id == launch.source_id), None)
         if source is None:
             return False
-        await self.service._cooldown(
+        await self.service._settle_fallback_source(
             source,
             decision,
-            agent=cast(EventAgent, launch.backend),
+            backend=launch.backend,
             model_id=launch.requested_model,
+            settlement_generation=launch.settlement_generation,
         )
         setattr(context, _CONTEXT_FAILURE_RECORDED_ATTR, True)
         return True

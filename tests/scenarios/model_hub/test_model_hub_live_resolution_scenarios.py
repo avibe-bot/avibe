@@ -624,3 +624,37 @@ def test_mh_evt_002_switch_events_survive_router_and_service_restart(tmp_path: P
             await second_gateway.close()
 
     asyncio.run(exercise())
+
+
+def test_native_failure_settlement_rejects_a_stale_attempt(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        clock = datetime(2026, 7, 25, tzinfo=timezone.utc)
+        native = _source("src_native01", channel="native_cli", kind="subscription")
+        backup = _source("src_backup01")
+        store = MemoryStore(_config(native, backup))
+        service = _service(tmp_path, store, AdapterBoundaryFake([]), now=lambda: clock)
+        gateway = ModelHubTurnGateway(service)
+        router = ModelHubRuntimeRouter(
+            service=service,
+            turn_gateway=gateway,
+            native_cli_ready=lambda backend: True,
+        )
+        try:
+            launch = await router.resolve("codex", _requested_model("codex"))
+            assert launch.settlement_generation is not None
+            service._reserve_settlement_generation(native.id)
+            context = SimpleNamespace()
+            bind_launch(context, launch)
+
+            assert await router.record_native_failure(
+                context,
+                "usage quota exceeded",
+            ) is True
+
+            current = next(source for source in store.load().sources if source.id == native.id)
+            assert current.state.status == native.state.status
+            assert BoundedEventLog(tmp_path / "events.json").list(limit=10) == []
+        finally:
+            await gateway.close()
+
+    asyncio.run(exercise())

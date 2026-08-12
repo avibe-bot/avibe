@@ -97,6 +97,79 @@ def test_stream_prelude_does_not_charge_released_keepalives_to_frame_budget() ->
     assert outcome is None
 
 
+def test_stream_prelude_total_budget_ends_as_network_failure_and_cleans_spill(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> None:
+        budget = 512 * 1024
+        keepalive = b": " + b"k" * (32 * 1024 - 4) + b"\n\n"
+        preludes: list[TrackingPrelude] = []
+
+        class TrackingPrelude(client_module._StreamPrelude):
+            def __init__(self) -> None:
+                super().__init__(memory_limit=64, total_limit=budget)
+                self.physical_close_calls = 0
+                self.spill_observed = False
+                preludes.append(self)
+
+            def write(self, data: bytes) -> bool:
+                stored = super().write(data)
+                self.spill_observed = self.spill_observed or self.spilled
+                return stored
+
+            def close(self) -> None:
+                if not self.closed:
+                    self.physical_close_calls += 1
+                super().close()
+
+        class Content:
+            async def read(self, _size: int) -> bytes:
+                return keepalive
+
+        class Response:
+            status = 200
+            headers = {"Content-Type": "text/event-stream"}
+            content = Content()
+
+            def close(self) -> None:
+                return None
+
+        class Session:
+            async def post(self, *_args, **_kwargs):
+                return Response()
+
+            async def close(self) -> None:
+                return None
+
+        source = SourceRecord(
+            source_id="src_budget001",
+            vendor="custom",
+            protocol="openai_responses",
+            base_url="https://budget.example.test/v1",
+            credential_ref="cred_budget001",
+            allowed_origins=("codex",),
+            model_ids=("model-a",),
+            prefix="budget",
+        )
+        monkeypatch.setattr(client_module, "_StreamPrelude", TrackingPrelude)
+        monkeypatch.setattr(client_module.aiohttp, "ClientSession", lambda **_: Session())
+        client = EngineClient(
+            EngineConnection("http://127.0.0.1:15220", "management", "gateway")
+        )
+
+        handle = await client.invoke(source, "model-a", {}, stream=True)
+        outcome = await handle.outcome()
+
+        assert outcome.kind == RawOutcomeKind.NETWORK_ERROR
+        assert outcome.stream_started is False
+        assert preludes[0].spill_observed is True
+        assert preludes[0].stored_bytes <= budget
+        assert preludes[0].closed is True
+        assert preludes[0].physical_close_calls == 1
+
+    asyncio.run(run())
+
+
 def _write_fixture_archive(tmp_path: Path, *, version: str = "7.2.95") -> tuple[Path, bytes]:
     tmp_path.mkdir(parents=True, exist_ok=True)
     binary = (

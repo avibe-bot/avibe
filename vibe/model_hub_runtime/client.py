@@ -26,6 +26,7 @@ from core.handlers.model_hub.stream_wire import (
     ProtocolObservation,
     ProtocolSSEState,
     SSE_MAX_FRAME_BYTES,
+    SSE_MAX_PRELUDE_BYTES,
     SSEFrameLimitError,
     observe_protocol_response,
 )
@@ -69,10 +70,17 @@ class _ResponseTooLargeError(RuntimeError):
 class _StreamPrelude:
     """Per-invocation byte owner that spills pre-output data out of memory."""
 
-    def __init__(self, *, memory_limit: int | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        memory_limit: int | None = None,
+        total_limit: int | None = None,
+    ) -> None:
         self._memory_limit = _PRELUDE_MEMORY_BYTES if memory_limit is None else memory_limit
+        self._total_limit = SSE_MAX_PRELUDE_BYTES if total_limit is None else total_limit
         self._memory = bytearray()
         self._file: BinaryIO | None = None
+        self._stored_bytes = 0
         self._closed = False
 
     @property
@@ -84,20 +92,29 @@ class _StreamPrelude:
         return self._file is not None
 
     @property
+    def stored_bytes(self) -> int:
+        return self._stored_bytes
+
+    @property
     def closed(self) -> bool:
         return self._closed
 
-    def write(self, data: bytes) -> None:
+    def write(self, data: bytes) -> bool:
         if self._closed:
             raise RuntimeError("stream prelude is closed")
+        if self._stored_bytes + len(data) > self._total_limit:
+            return False
         if self._file is None and len(self._memory) + len(data) <= self._memory_limit:
             self._memory.extend(data)
-            return
+            self._stored_bytes += len(data)
+            return True
         if self._file is None:
             self._file = tempfile.TemporaryFile()
             self._file.write(self._memory)
             self._memory.clear()
         self._file.write(data)
+        self._stored_bytes += len(data)
+        return True
 
     async def chunks(self) -> AsyncIterator[bytes]:
         if self._closed:
@@ -601,7 +618,8 @@ async def _read_stream_prelude(
     """Buffer transport metadata until the sole first-model-output fact."""
 
     wire_state = ProtocolSSEState(protocol)
-    prelude.write(first)
+    if not prelude.write(first):
+        return wire_state, _prelude_ended_outcome(source, model_id, response.status)
     wire_state.observe(first)
     while not wire_state.model_output_started:
         outcome = _observed_stream_terminal_outcome(
@@ -627,17 +645,26 @@ async def _read_stream_prelude(
                 return wire_state, completion
             return (
                 wire_state,
-                _outcome(
-                    kind=RawOutcomeKind.NETWORK_ERROR,
-                    source=source,
-                    model_id=model_id,
-                    http_status=response.status,
-                    message="upstream stream ended before model output",
-                ),
+                _prelude_ended_outcome(source, model_id, response.status),
             )
-        prelude.write(chunk)
+        if not prelude.write(chunk):
+            return wire_state, _prelude_ended_outcome(source, model_id, response.status)
         wire_state.observe(chunk)
     return wire_state, None
+
+
+def _prelude_ended_outcome(
+    source: SourceRecord,
+    model_id: str,
+    http_status: int,
+) -> RawCallOutcome:
+    return _outcome(
+        kind=RawOutcomeKind.NETWORK_ERROR,
+        source=source,
+        model_id=model_id,
+        http_status=http_status,
+        message="upstream stream ended before model output",
+    )
 
 
 async def _response_stream(
