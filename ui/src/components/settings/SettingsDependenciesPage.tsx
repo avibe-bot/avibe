@@ -61,7 +61,7 @@ export const SettingsDependenciesPage: React.FC = () => {
   const [reinitializeBusy, setReinitializeBusy] = useState(false);
   const [reinitializeResult, setReinitializeResult] = useState<MemoryFactoryResetResult | null>(null);
 
-  const refresh = useCallback(async () => {
+  const refreshDependencies = useCallback(async () => {
     try {
       const res = await api.listDependencies();
       setDeps(res.deps ?? []);
@@ -79,10 +79,13 @@ export const SettingsDependenciesPage: React.FC = () => {
     }
   }, [api]);
 
+  const refreshAll = useCallback(async () => {
+    await Promise.all([refreshDependencies(), refreshMemorySettings()]);
+  }, [refreshDependencies, refreshMemorySettings]);
+
   useEffect(() => {
-    void refresh();
-    void refreshMemorySettings();
-  }, [refresh, refreshMemorySettings]);
+    void refreshAll();
+  }, [refreshAll]);
 
   // A closed backend reason/message is often a snake_case token (e.g.
   // `memory_runtime_unpublished`) rather than human copy. Localize any
@@ -107,7 +110,7 @@ export const SettingsDependenciesPage: React.FC = () => {
           : localizedFailure(res),
         res.ok ? 'success' : 'error'
       );
-      await refresh();
+      await refreshAll();
     } catch (e) {
       showToast(errorMessage(e) || t('settings.dependencies.installFailed'), 'error');
     } finally {
@@ -133,7 +136,7 @@ export const SettingsDependenciesPage: React.FC = () => {
       setReinitializeOpen(false);
       showToast(t('memory.factoryReset.failed'), 'error');
     } finally {
-      await Promise.all([refresh(), refreshMemorySettings()]);
+      await refreshAll();
       window.dispatchEvent(new Event('avibe:memory-settings-changed'));
       setReinitializeBusy(false);
     }
@@ -162,7 +165,7 @@ export const SettingsDependenciesPage: React.FC = () => {
       title={t('settings.dependenciesTitle')}
       subtitle={t('settings.dependenciesSubtitle')}
       actions={
-        <Button variant="secondary" size="sm" onClick={() => void refresh()}>
+        <Button variant="secondary" size="sm" onClick={() => void refreshAll()}>
           <RefreshCw className="size-3.5" />
           {t('settings.dependencies.recheckAll')}
         </Button>

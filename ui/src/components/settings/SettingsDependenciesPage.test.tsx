@@ -34,7 +34,13 @@ vi.mock('react-i18next', () => ({
 }));
 
 vi.mock('./SettingsPageShell', () => ({
-  SettingsPageShell: ({ children }: { children: React.ReactNode }) => children,
+  SettingsPageShell: ({
+    actions,
+    children,
+  }: {
+    actions?: React.ReactNode;
+    children: React.ReactNode;
+  }) => <>{actions}{children}</>,
 }));
 
 vi.mock('../ui/confirm-dialog', () => ({
@@ -128,6 +134,34 @@ describe('SettingsDependenciesPage Memory reinitialization', () => {
     const action = await screen.findByRole('button', { name: 'memory.factoryReset.button' });
     expect((action as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getByText('memory.factoryReset.settingsUnavailable')).toBeTruthy();
+  });
+
+  it('refreshes Memory settings when Re-check All retries a failed settings request', async () => {
+    api.getMemorySettings
+      .mockRejectedValueOnce(new Error('temporary failure'))
+      .mockResolvedValue(settings());
+    const user = userEvent.setup();
+    renderPage();
+
+    const action = await screen.findByRole('button', { name: 'memory.factoryReset.button' });
+    expect((action as HTMLButtonElement).disabled).toBe(true);
+    await user.click(screen.getByRole('button', { name: 'settings.dependencies.recheckAll' }));
+
+    await waitFor(() => expect((action as HTMLButtonElement).disabled).toBe(false));
+    expect(api.getMemorySettings).toHaveBeenCalledTimes(2);
+  });
+
+  it('refreshes Memory settings after dependency Repair changes recovery state', async () => {
+    api.getMemorySettings
+      .mockResolvedValueOnce(settings())
+      .mockResolvedValue(settings(true));
+    const user = userEvent.setup();
+    renderPage();
+
+    await user.click(await screen.findByRole('button', { name: 'settings.dependencies.repair' }));
+
+    expect(await screen.findByRole('button', { name: 'memory.factoryReset.retry' })).toBeTruthy();
+    expect(api.getMemorySettings).toHaveBeenCalledTimes(2);
   });
 
   it('derives Retry only from factory_reset_required and keeps it visible when Repair is required', async () => {
