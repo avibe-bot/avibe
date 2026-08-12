@@ -84,6 +84,27 @@ class MessageDispatcherFileUploadTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(im_client.image_uploads, [])
 
+    async def test_angle_image_link_with_title_is_uploaded_as_image(self):
+        dispatcher = ConsolidatedMessageDispatcher(_StubController())
+        im_client = _StubIMClient()
+        context = MessageContext(user_id="U1", channel_id="C1")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            file_path = Path(tmpdir) / "preview (final).png"
+            file_path.write_bytes(b"png")
+            escaped_path = str(file_path).replace("(", r"\(").replace(")", r"\)")
+            enhanced = process_reply(
+                f'![preview](<file://{escaped_path}> "download")'
+            )
+
+            self.assertEqual(enhanced.text, "preview")
+            await dispatcher._upload_file_links(im_client, context, enhanced.files)
+
+        self.assertEqual(
+            im_client.image_uploads,
+            [("C1", str(file_path.resolve()), "preview.png")],
+        )
+
     async def test_upload_file_link_allows_path_outside_cwd(self):
         dispatcher = ConsolidatedMessageDispatcher(_StubController())
         im_client = _StubIMClient()

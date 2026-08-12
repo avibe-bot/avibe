@@ -28,12 +28,11 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
-from urllib.parse import urlparse
 
 from sqlalchemy.engine import Connection
 
 from config import paths
-from core.reply_enhancer import _file_uri_to_local_path, _replace_file_links
+from core.reply_enhancer import _file_uri_to_local_path, _parse_file_uri, _replace_file_links
 from storage import media_service
 
 logger = logging.getLogger(__name__)
@@ -377,7 +376,7 @@ def rewrite_agent_media(conn: Connection, *, scope_id: str | None, session_id: s
 
     def _replace(match) -> str:
         bang, label, url = match.group(1), match.group(2), match.group(3)
-        parsed = urlparse(url)
+        parsed = _parse_file_uri(url)
         if parsed.scheme != "file":
             return match.group(0)
         path = _file_uri_to_local_path(parsed)

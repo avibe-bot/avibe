@@ -1962,6 +1962,33 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(enhanced.text, "literal")
         self.assertEqual([file.path for file in enhanced.files], [r"/tmp/a\>b.txt"])
 
+    def test_angle_wrapped_file_links_unescape_all_commonmark_punctuation(self):
+        enhanced = process_reply(r"[report](<file:///tmp/a\(b\)\[c\]\#d.md> 'download')")
+
+        self.assertEqual(enhanced.text, "report")
+        self.assertEqual([file.path for file in enhanced.files], ["/tmp/a(b)[c]#d.md"])
+
+    def test_angle_wrapped_file_links_support_titles_and_reject_bad_titles(self):
+        valid = [
+            '[double](<file:///tmp/report.md> "download")',
+            r"[single](<file:///tmp/report.md> 'download')",
+            r"[paren](<file:///tmp/report.md> (download))",
+        ]
+        for text in valid:
+            with self.subTest(text=text):
+                self.assertEqual(len(process_reply(text).files), 1)
+
+        invalid = [
+            '[unclosed](<file:///tmp/report.md> "download)',
+            r"[nested](<file:///tmp/report.md> (download (copy)))",
+            '[marker](<file:///tmp/report.md> `download`)',
+        ]
+        for text in invalid:
+            with self.subTest(text=text):
+                enhanced = process_reply(text)
+                self.assertEqual(enhanced.text, text)
+                self.assertEqual(enhanced.files, [])
+
     def test_angle_wrapped_file_links_ignore_escaped_openers(self):
         escaped = process_reply(r"\[example](<file:///tmp/report.txt>)")
         even_escaped = process_reply(r"\\[example](<file:///tmp/report.txt>)")
@@ -1970,6 +1997,13 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(escaped.files, [])
         self.assertEqual(even_escaped.text, r"\\example")
         self.assertEqual([file.path for file in even_escaped.files], ["/tmp/report.txt"])
+
+        escaped_image = process_reply(r"\![preview](<file:///tmp/preview.png>)")
+        even_escaped_image = process_reply(r"\\![preview](<file:///tmp/preview.png>)")
+        self.assertEqual(escaped_image.text, r"\!preview")
+        self.assertEqual([file.is_image for file in escaped_image.files], [False])
+        self.assertEqual(even_escaped_image.text, r"\\preview")
+        self.assertEqual([file.is_image for file in even_escaped_image.files], [True])
 
     def test_angle_wrapped_file_links_reject_malformed_markdown_and_code(self):
         specimens = [

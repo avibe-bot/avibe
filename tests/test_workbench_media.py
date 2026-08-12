@@ -397,3 +397,20 @@ def test_rewrite_appends_image_dimensions(tmp_path):
     # …and a non-image link gets no dimension query.
     assert "/api/media/" in out.split(" and ")[1]
     assert "?w=" not in out.split(" and ")[1]
+
+
+def test_rewrite_angle_file_link_unescapes_path_and_ignores_title(tmp_path):
+    db = tmp_path / "vibe.sqlite"
+    run_migrations(db)
+    engine = create_sqlite_engine(db)
+    report = tmp_path / "report (final).md"
+    report.write_text("report", encoding="utf-8")
+    escaped_report = str(report).replace("(", "\\(").replace(")", "\\)")
+    text = f'[report](<file://{escaped_report}> "download")'
+
+    with engine.begin() as conn:
+        scope_id = _seed_scope_and_session(conn)
+        out = rewrite_agent_media(conn, scope_id=scope_id, session_id="sess_x", text=text)
+
+    assert out.startswith("[report](/api/media/")
+    assert out.endswith(")")

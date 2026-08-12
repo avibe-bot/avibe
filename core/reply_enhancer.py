@@ -134,6 +134,51 @@ class EnhancedReply:
     secret_requests: List[SecretRequest] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class _FileLinkMatch:
+    """Small match-compatible value shared by the regex and angle scanner."""
+
+    source: str
+    start_offset: int
+    end_offset: int
+    bang: str
+    label: str
+    url: str
+
+    def start(self, group: int | None = None) -> int:
+        if group in (None, 0):
+            return self.start_offset
+        if group == 1:
+            return self.start_offset
+        if group == 2:
+            return self.start_offset + len(self.bang) + 1
+        if group == 3:
+            label_end = self.start_offset + len(self.bang) + 1 + len(self.label)
+            return label_end + 2
+        raise IndexError(group)
+
+    def end(self, group: int | None = None) -> int:
+        if group in (None, 0):
+            return self.end_offset
+        if group == 1:
+            return self.start_offset + len(self.bang)
+        if group == 2:
+            return self.start_offset + len(self.bang) + 1 + len(self.label)
+        if group == 3:
+            return self.start(3) + len(self.url)
+        raise IndexError(group)
+
+    def group(self, *groups: int) -> str | tuple[str, ...]:
+        values = (self.source, self.bang, self.label, self.url)
+        if not groups:
+            return self.source
+        selected = tuple(values[group] for group in groups)
+        return selected[0] if len(selected) == 1 else selected
+
+    def groups(self) -> tuple[str, str, str]:
+        return self.bang, self.label, self.url
+
+
 # ---------------------------------------------------------------------------
 # Regex patterns
 # ---------------------------------------------------------------------------
@@ -147,14 +192,12 @@ class EnhancedReply:
 # The lookahead validates the complete destination form before the shared URL
 # capture consumes it, keeping malformed or half-paired brackets unmatched.
 _BARE_FILE_URI = r"file://(?:[^()]+|\([^)]*\))+"
-# Pointy destinations may contain spaces and unbalanced parentheses. Each
-# repetition begins with either a non-backslash or a backslash, keeping
-# malformed input linear while allowing escaped angle brackets.
-_ANGLE_FILE_URI = r"file://(?:[^\\<>\r\n]|\\[^\r\n])+"
-_FILE_LINK_RE = re.compile(
-    rf"(!?)\[([^\]]*)\]\("
-    rf"(?=(?:<{_ANGLE_FILE_URI}>|{_BARE_FILE_URI})\))"
-    rf"(?:<)?((?<=<){_ANGLE_FILE_URI}|{_BARE_FILE_URI})(?:>)?\)"
+_BARE_FILE_LINK_RE = re.compile(
+    rf"(!?)\[([^\]]*)\]\(({_BARE_FILE_URI})\)"
+)
+_FILE_LINK_LABEL_RE = re.compile(r"(!?)\[([^\]]*)\]\(")
+_COMMONMARK_ASCII_PUNCTUATION = frozenset(
+    r'''!"#$%&'()*+,-./:;<=>?@[\]^_`{|}~'''
 )
 
 # Matches the quick-reply button block at the end of the text.
@@ -301,7 +344,7 @@ def _extract_file_links(
     results: List[FileLink] = []
     for match in _file_link_matches(text, markdown_mask):
         bang, label, url = match.groups()
-        parsed = urlparse(url)
+        parsed = _parse_file_uri(url)
         if parsed.scheme != "file":
             continue
         path = _file_uri_to_local_path(parsed)
@@ -316,7 +359,7 @@ def _file_uri_to_local_path(parsed) -> str:
     """Convert a parsed file URI into a local path for the current OS."""
     # CommonMark pointy destinations permit backslash-escaped angle brackets;
     # those escapes are Markdown syntax, not part of the local filename.
-    path = unquote(re.sub(r"\\([<>])", r"\1", parsed.path))
+    path = unquote(_unescape_commonmark_destination_characters(parsed.path))
     if os.name != "nt":
         return path
 
@@ -325,6 +368,116 @@ def _file_uri_to_local_path(parsed) -> str:
     if re.match(r"^/[A-Za-z]:/", path):
         path = path[1:]
     return ntpath.normpath(path)
+
+
+def _unescape_commonmark_destination_characters(value: str) -> str:
+    """Remove CommonMark backslash escapes from ASCII punctuation only."""
+    chars: List[str] = []
+    cursor = 0
+    while cursor < len(value):
+        if (
+            value[cursor] == "\\"
+            and cursor + 1 < len(value)
+            and value[cursor + 1] in _COMMONMARK_ASCII_PUNCTUATION
+        ):
+            chars.append(value[cursor + 1])
+            cursor += 2
+            continue
+        chars.append(value[cursor])
+        cursor += 1
+    return "".join(chars)
+
+
+def _protect_file_uri_delimiters(value: str) -> str:
+    """Keep escaped URI delimiters in the local path during URL parsing."""
+    return re.sub(
+        r"\\([?#])",
+        lambda match: f"%{ord(match.group(1)):02X}",
+        value,
+    )
+
+
+def _parse_file_uri(value: str):
+    """Parse a source-level CommonMark destination without losing path punctuation."""
+    protected = _protect_file_uri_delimiters(value)
+    return urlparse(_unescape_commonmark_destination_characters(protected))
+
+
+def _scan_angle_file_link(
+    text: str,
+    mask: str,
+    start: int,
+    label_end: int,
+) -> _FileLinkMatch | None:
+    """Scan one angle destination and its optional CommonMark title."""
+    destination_start = label_end + 2
+    if mask[destination_start : destination_start + 1] != "<":
+        return None
+    cursor = destination_start + 1
+    uri_chars: List[str] = []
+    while cursor < len(text):
+        char = text[cursor]
+        if char in "\r\n":
+            return None
+        if char == ">":
+            break
+        if char == "<":
+            return None
+        if char == "\\" and cursor + 1 < len(text):
+            next_char = text[cursor + 1]
+            if next_char in _COMMONMARK_ASCII_PUNCTUATION:
+                uri_chars.append(text[cursor : cursor + 2])
+                cursor += 2
+                continue
+        uri_chars.append(text[cursor])
+        cursor += 1
+    raw_uri = "".join(uri_chars)
+    if cursor >= len(text) or not _unescape_commonmark_destination_characters(
+        raw_uri
+    ).startswith("file://"):
+        return None
+
+    cursor += 1
+    while cursor < len(text) and text[cursor].isspace():
+        cursor += 1
+    if cursor >= len(text):
+        return None
+    if text[cursor] != ")":
+        marker = text[cursor]
+        if marker not in "\"'(":
+            return None
+        closing = ")" if marker == "(" else marker
+        cursor += 1
+        while cursor < len(text):
+            char = text[cursor]
+            if char == "\\" and cursor + 1 < len(text):
+                cursor += 2
+                continue
+            if char == "\r" or char == "\n":
+                return None
+            if char == "(" and closing == ")":
+                return None
+            if char == closing:
+                cursor += 1
+                break
+            cursor += 1
+        else:
+            return None
+        while cursor < len(text) and text[cursor].isspace():
+            cursor += 1
+    if cursor >= len(text) or text[cursor] != ")":
+        return None
+
+    bang = text[start : start + 1] if text[start : start + 1] == "!" else ""
+    label_start = start + len(bang) + 1
+    return _FileLinkMatch(
+        source=text[start : cursor + 1],
+        start_offset=start,
+        end_offset=cursor + 1,
+        bang=bang,
+        label=text[label_start:label_end],
+        url=raw_uri,
+    )
 
 
 def _strip_file_links(text: str) -> str:
@@ -370,29 +523,37 @@ def _replace_file_links(text: str, replacement) -> str:
 def _file_link_matches(
     text: str,
     markdown_mask: str | None = None,
-) -> List[re.Match]:
+) -> List[_FileLinkMatch | re.Match]:
     """Find eligible link ranges using a mask, then recover original groups."""
-    matches: List[re.Match] = []
+    matches: List[_FileLinkMatch | re.Match] = []
     mask = markdown_mask if markdown_mask is not None else _mask_markdown_code(text)
-    for masked_match in _FILE_LINK_RE.finditer(mask):
-        original_match = _FILE_LINK_RE.fullmatch(
-            text,
-            masked_match.start(),
-            masked_match.end(),
-        )
-        if original_match is None:
-            continue
-        bracket_start = original_match.start() + (
-            1 if original_match.group(1) else 0
-        )
+    for candidate in _FILE_LINK_LABEL_RE.finditer(mask):
+        opener_start = candidate.start()
+        bang = candidate.group(1) == "!"
+        bracket_start = opener_start + (1 if bang else 0)
         backslash_count = 0
-        cursor = bracket_start - 1
-        while cursor >= 0 and text[cursor] == "\\":
+        prefix_cursor = opener_start - 1
+        while prefix_cursor >= 0 and text[prefix_cursor] == "\\":
             backslash_count += 1
-            cursor -= 1
+            prefix_cursor -= 1
         if backslash_count % 2:
-            continue
-        matches.append(original_match)
+            if not bang:
+                continue
+            opener_start = bracket_start
+        label_end = candidate.end() - 2
+        if mask[label_end + 2 : label_end + 3] == "<":
+            angle_match = _scan_angle_file_link(text, mask, opener_start, label_end)
+            if angle_match is not None:
+                matches.append(angle_match)
+                continue
+        bare_match = _BARE_FILE_LINK_RE.match(mask, opener_start)
+        if bare_match is not None:
+            original_match = _BARE_FILE_LINK_RE.fullmatch(
+                text, opener_start, bare_match.end()
+            )
+            if original_match is not None:
+                matches.append(original_match)
+                continue
     return matches
 
 
