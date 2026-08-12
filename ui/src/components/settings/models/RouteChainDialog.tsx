@@ -247,10 +247,10 @@ export const RouteChainDialog: React.FC<{
       invalidSignature.current = "";
       return;
     }
+    if (phase !== "ready" && phase !== "rejected") return;
     if (signature === invalidSignature.current) return;
     invalidSignature.current = signature;
     if (phase === "rejected") setPhase("ready");
-    if (phase !== "ready" && phase !== "rejected") return;
     setSelectorOpen(false);
     setCandidate(null);
     setGrabbed(null);
@@ -294,12 +294,13 @@ export const RouteChainDialog: React.FC<{
     const nextDraft = draft.filter((_, cursor) => cursor !== index);
     setDraft(nextDraft);
     setGrabbed(null);
-    setRovingIndex(Math.min(index, Math.max(0, nextDraft.length - 1)));
+    const focusedIndex = Math.min(index, Math.max(0, nextDraft.length - 1));
+    setRovingIndex(focusedIndex);
     grabSnapshot.current = null;
     grabOriginIndex.current = null;
     requestAnimationFrame(() => {
       if (nextDraft.length > 0) {
-        gripRefs.current[Math.min(index, nextDraft.length - 1)]?.focus();
+        gripRefs.current[focusedIndex]?.focus();
       } else if (candidates.length > 0) {
         addButtonRef.current?.focus();
       } else if (reseedButtonRef.current && !reseedButtonRef.current.disabled) {
@@ -308,9 +309,11 @@ export const RouteChainDialog: React.FC<{
         cancelButtonRef.current?.focus();
       }
     });
-    announce("settings.models.routeDialog.reorder.position", {
-      position: Math.max(1, index),
-    });
+    if (nextDraft.length > 0) {
+      announce("settings.models.routeDialog.reorder.position", {
+        position: focusedIndex + 1,
+      });
+    }
   };
   const reorder = (index: number, nextIndex: number) => {
     if (nextIndex < 0 || nextIndex >= draft.length) return;

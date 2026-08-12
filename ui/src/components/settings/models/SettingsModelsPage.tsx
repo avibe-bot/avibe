@@ -684,11 +684,12 @@ export const SettingsModelsPage: React.FC = () => {
     onStatus: setRouteCommitStatus,
   }), [readRouteAgents, readRouteSources]);
   const routeCommitted = React.useCallback((result: RouteReport) => {
+    chainReadAuthority.invalidate(result.chain.backend);
     routeObserved(result.chain);
     setSuspendedRouteAttempt(null);
     setRouteCommitBackend(result.chain.backend);
     routeProjectionReconciler.start(result.chain.backend);
-  }, [routeObserved, routeProjectionReconciler]);
+  }, [chainReadAuthority, routeObserved, routeProjectionReconciler]);
   React.useEffect(() => {
     if (routeCommitStatus && !routeCommitStatus.pending && routeCommitStatus.failed.size === 0) {
       setRouteCommitBackend(null);

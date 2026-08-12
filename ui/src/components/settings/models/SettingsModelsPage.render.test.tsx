@@ -358,6 +358,55 @@ describe('SettingsModelsPage surface branches', () => {
     expect(screen.queryByText(/Now: Replacement source \(takeover\)|当前 Replacement source（接管）/i)).toBeNull();
   });
 
+  it('cannot let a pre-save chain read overwrite the committed route echo', async () => {
+    const head = { ...retainedSource, id: 'src_head', display_name: 'Paused source', state: { status: 'active' as const, retry_at: null, detail_key: null } };
+    const relay = { ...retainedSource, id: 'src_relay', display_name: 'Replacement source', state: { status: 'active' as const, retry_at: null, detail_key: null } };
+    const pendingOldChain = deferred<AgentChain>();
+    const pendingReconciliation = deferred<AgentSupply[]>();
+    const committedChain: AgentChain = {
+      ...takeoverChain,
+      current: { source_id: 'src_head', model_id: 'gpt-5.6-sol' },
+      chain: [{ ...takeoverChain.chain[0], health: 'healthy', runnable: true, retry_at: null }],
+    };
+    vi.spyOn(modelsApi, 'listSources').mockResolvedValue([head, relay]);
+    vi.spyOn(modelsApi, 'listAgents')
+      .mockResolvedValueOnce([takeoverAgent])
+      .mockReturnValueOnce(pendingReconciliation.promise);
+    vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
+    vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
+    vi.spyOn(modelsApi, 'getAgentChain')
+      .mockReturnValueOnce(pendingOldChain.promise)
+      .mockResolvedValueOnce(takeoverChain);
+    vi.spyOn(modelsApi, 'putAgentChain').mockResolvedValue({
+      chain: committedChain,
+      removed_hops: [],
+      interrupted: [],
+    });
+
+    render(
+      <ToastProvider>
+        <I18nextProvider i18n={i18n}>
+          <SettingsModelsPage />
+        </I18nextProvider>
+      </ToastProvider>,
+    );
+
+    await userEvent.click(await screen.findByRole('button', { name: /Open gpt-5\.6-sol route chain|打开 gpt-5\.6-sol 的路由链/i }));
+    const removeButtons = await screen.findAllByRole('button', { name: /^Remove hop$|^移除这一跳$/i });
+    await userEvent.click(removeButtons[1]);
+    await userEvent.click(screen.getByRole('button', { name: /^Save$|^保存$/i }));
+    await userEvent.click((await screen.findByText(/^Done$|^完成$/i)).closest('button') as HTMLButtonElement);
+    expect(await screen.findByText(/^Now: Paused source$|^当前 Paused source$/i)).toBeTruthy();
+
+    await act(async () => {
+      pendingOldChain.resolve(takeoverChain);
+      await pendingOldChain.promise;
+    });
+
+    expect(screen.getByText(/^Now: Paused source$|^当前 Paused source$/i)).toBeTruthy();
+    expect(screen.queryByText(/Now: Replacement source \(takeover\)|当前 Replacement source（接管）/i)).toBeNull();
+  });
+
   it('reconciles a lost Direct-mode response before rendering failure', async () => {
     const direct = { ...takeoverAgent, mode: 'direct' as const, sources: null, routes: null, supply_status: null, model_supply: null };
     const agentRead = vi.spyOn(modelsApi, 'listAgents')

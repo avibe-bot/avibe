@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { I18nextProvider } from "react-i18next";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -425,6 +425,124 @@ describe("RouteChainDialog", () => {
     await waitFor(() => expect(readChain).toHaveBeenCalledTimes(3));
     expect(readSources).toHaveBeenCalledTimes(2);
     expect(put).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns an invalidated pending draft to editing after a named rejection", async () => {
+    const user = userEvent.setup();
+    const pending = deferred<AgentChainMutation>();
+    const editableAgent: AgentSupply = {
+      ...agent,
+      sources: {
+        order: ["src_a", "src_b"],
+        eligibility: [
+          { source_id: "src_a", eligible: true },
+          { source_id: "src_b", eligible: true },
+        ],
+      },
+    };
+    const editableSources: Source[] = [
+      {
+        ...sources[0],
+        models: [
+          { id: "claude-opus-5", origin: "discovered", reasoning_efforts: [] },
+          { id: "claude-sonnet-5", origin: "discovered", reasoning_efforts: [] },
+        ],
+      },
+      {
+        ...sources[1],
+        models: [
+          { id: "opus-5", origin: "discovered", reasoning_efforts: [] },
+        ],
+      },
+    ];
+    vi.spyOn(modelsApi, "getAgentChain").mockResolvedValue(chain);
+    vi.spyOn(modelsApi, "putAgentChain").mockReturnValue(pending.promise);
+    const props = {
+      selection: {
+        agent: editableAgent,
+        modelId: "opus-5",
+        read: readyRegion(chain),
+      },
+      onClose: vi.fn(),
+      readAgents: vi.fn().mockResolvedValue(observation([editableAgent])),
+      readSources: vi.fn().mockResolvedValue(observation(editableSources)),
+    };
+    const page = render(
+      <I18nextProvider i18n={i18n}>
+        <RouteChainDialog {...props} sources={editableSources} />
+      </I18nextProvider>,
+    );
+    await screen.findAllByRole("button", { name: "Remove hop" });
+    await user.click(screen.getByRole("button", { name: "Add a hop" }));
+    await user.click(screen.getByRole("button", { name: "Add" }));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findAllByText("Saving route chain…")).toHaveLength(2);
+
+    const refreshedSources = editableSources.map((source) =>
+      source.id === "src_a"
+        ? { ...source, models: source.models.slice(0, 1) }
+        : source,
+    );
+    page.rerender(
+      <I18nextProvider i18n={i18n}>
+        <RouteChainDialog {...props} sources={refreshedSources} />
+      </I18nextProvider>,
+    );
+    await act(async () => {
+      pending.reject(new ApiCallError("invalid_route"));
+      await pending.promise.catch(() => undefined);
+    });
+
+    expect(
+      await screen.findAllByText(
+        "This edited hop is unavailable after the refresh. Remove it before saving.",
+      ),
+    ).toHaveLength(2);
+    expect(screen.getAllByRole("button", { name: "Remove hop" })).toHaveLength(3);
+    expect(
+      (screen.getByRole("button", { name: "Save" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+  });
+
+  it("announces the one-based position of the hop focused after removal", async () => {
+    const user = userEvent.setup();
+    const threeHopChain: AgentChain = {
+      ...chain,
+      chain: [
+        chain.chain[0],
+        chain.chain[1],
+        {
+          ...chain.chain[0],
+          source_id: "src_c",
+          model_id: "claude-haiku-5",
+        },
+      ],
+    };
+    vi.spyOn(modelsApi, "getAgentChain").mockResolvedValue(threeHopChain);
+    render(
+      <I18nextProvider i18n={i18n}>
+        <RouteChainDialog
+          selection={{ agent, modelId: "opus-5", read: readyRegion(threeHopChain) }}
+          sources={sources}
+          onClose={vi.fn()}
+          readAgents={vi.fn().mockResolvedValue(observation([agent]))}
+          readSources={vi.fn().mockResolvedValue(observation(sources))}
+        />
+      </I18nextProvider>,
+    );
+    const removeButtons = await screen.findAllByRole("button", {
+      name: "Remove hop",
+    });
+
+    await user.click(removeButtons[1]);
+
+    expect(screen.getByText("Moved to hop 2.")).toBeTruthy();
+    await waitFor(() =>
+      expect(document.activeElement).toBe(
+        screen.getAllByRole("button", { name: "Reorder this hop" })[1],
+      ),
+    );
   });
 
   it("supports the grip keyboard contract and restores the draft on Escape", async () => {
