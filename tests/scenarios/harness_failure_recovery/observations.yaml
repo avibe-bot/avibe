@@ -300,3 +300,14 @@ observations:
       producer has already asserted 274 distinct events. The event lifecycle must
       include its Agent follow-up, and the Watch owner must stop admitting events
       when successful exits remain implausibly dense.
+  - id: HFR-OBS-025
+    date: 2026-08-12
+    source: Avibe 3.0.10 runtime evidence plus deterministic admission reproduction
+    result: confirmed
+    detail: >-
+      A create_per_run definition reserves its runtime Session after the Run row is
+      created. The first durable Delivery then tried to bind against that new Session,
+      but the Run still had an empty session_id and the strict equality guard rejected
+      the handoff before any backend started. The binding transaction must atomically
+      adopt the freshly reserved Session only for create_per_run rows; a Run already
+      bound to another Session must remain a hard refusal.

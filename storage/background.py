@@ -2651,10 +2651,16 @@ def attach_agent_run_delivery_in_connection(
         metadata = {}
     if bool(row["cancel_requested"]):
         return False
-    if str(row["session_id"] or "").strip() != normalized_session_id:
+    existing_session_id = str(row["session_id"] or "").strip()
+    session_policy = str(row["session_policy"] or "").strip()
+    can_adopt_session = not existing_session_id and session_policy == "create_per_run"
+    if existing_session_id != normalized_session_id and not can_adopt_session:
         return False
     existing_delivery_id = str(row["delivery_id"] or "").strip()
-    if existing_delivery_id == normalized_delivery_id:
+    if (
+        existing_delivery_id == normalized_delivery_id
+        and existing_session_id == normalized_session_id
+    ):
         return True
     if existing_delivery_id:
         return False
@@ -2664,7 +2670,18 @@ def attach_agent_run_delivery_in_connection(
     result = conn.execute(
         update(agent_runs)
         .where(agent_runs.c.id == normalized_run_id)
-        .where(agent_runs.c.session_id == normalized_session_id)
+        .where(
+            or_(
+                agent_runs.c.session_id == normalized_session_id,
+                and_(
+                    agent_runs.c.session_policy == "create_per_run",
+                    or_(
+                        agent_runs.c.session_id.is_(None),
+                        agent_runs.c.session_id == "",
+                    ),
+                ),
+            )
+        )
         .where(
             agent_runs.c.status.in_(
                 _status_query_values("running") + _status_query_values("queued")
@@ -2673,6 +2690,7 @@ def attach_agent_run_delivery_in_connection(
         .where(agent_runs.c.cancel_requested == 0)
         .where(agent_runs.c.delivery_id.is_(None))
         .values(
+            session_id=normalized_session_id,
             delivery_id=normalized_delivery_id,
             updated_at=now,
             metadata_json=_json_dumps(metadata),
