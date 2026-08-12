@@ -274,7 +274,7 @@ BARE_METHOD_RE = re.compile(r"`(GET|POST|PUT|PATCH|DELETE)`")
 METHOD_LIST_RE = re.compile(r"`\s*/\s*`")
 # Which §1 frame a sentence points at. Only `1.` — a §4 or §0 reference is a
 # pointer into the contract or the registers, and neither is a frame claim.
-FRAME_REF_RE = re.compile(r"§(1\.\d+)")
+FRAME_REF_RE = re.compile(r"§(1\.\d+)(?![\w.-])")
 # A frame heading gives the same frame three names — section, display number,
 # node id — and §1 prose uses all three ("a state of 09", "Deltas from 01").
 FRAME_NAME_RE = re.compile(r"Frame\s+(\d+)\s+`(\w+)`")
@@ -285,7 +285,10 @@ FRAME_ALIAS_RE = re.compile(r"`(\w+)`|(?<![\w.\-])(\d{2})(?![\w.\-])")
 # A reference to another frame, and the state in it this cell names — the two
 # halves of 「→ §1.0 Unreachable」, both of which have to resolve.
 CROSS_FRAME_RE = re.compile(
-    r"(?:As\s+|→\s*)§(\d+\.\d+)(?:\s+\*?([^/|—;.,*]+))?"
+    r"(?:As\s+|→\s*)§(\d+\.\d+)(?![\w.-])(?:\s+\*?([^/|—;.,*]+))?"
+)
+CROSS_FRAME_CANDIDATE_RE = re.compile(
+    r"(?:As\s+|→\s*)§([A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*)"
 )
 # The document's own marker for a normative claim, and the reason this file can
 # tell one apart from the narration around it. See the class C attribution arm.
@@ -725,7 +728,7 @@ CLASS_LABELS: dict[str, str] = {
 }
 assert set(CLASS_LABELS) == set(CLASSES), "a gate class with no label prints as nothing"
 
-KEY_REF_RE = re.compile(r"`([a-z][A-Za-z0-9]*(?:\.[A-Za-z0-9_*]+)+)`")
+KEY_REF_RE = re.compile(r"`([A-Za-z][A-Za-z0-9_-]*(?:[.-][A-Za-z0-9_*-]+)+)`")
 # A run of key citations joined by nothing but list punctuation — what this
 # document writes when it means 「these and no others」. The separators are
 # LIST_COMMA_RE's plus the 「and」 that closes an English list; `/` stays out for
@@ -757,7 +760,7 @@ SHAPE_RE = re.compile(r"\{\{\w+\}\}(?:[^|`\n]*?·[^|`\n]*?\{\{\w+\}\})+")
 LIST_COMMA_RE = re.compile(r"[,、]")
 TREAT_RE = re.compile(r"\bF([1-5])\b")
 TREAT_CANDIDATE_RE = re.compile(
-    r"(?<![A-Za-z0-9_])(F(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]+)"
+    r"(?<![A-Za-z0-9_])(F\d+|F[A-Za-z_][A-Za-z0-9_-]*?(?=\s*→))"
 )
 GOTO_RE = re.compile(r"→\s*([^,;.]+)")
 # What an exit cell says after an arrow, up to the next arrow or the end of the
@@ -1740,6 +1743,8 @@ def parse(doc: Document) -> dict[str, Any]:
             *(f"has an empty required {name} cell" for name in empty_required),
             *copy_field.malformed,
         ]
+        if cells[2] == "—":
+            problems.append("has placeholder-only entry condition `—`")
         if not re.fullmatch(r"§1\.\d+(?:\s*/\s*§1\.\d+)*", cells[0]):
             problems.append(f"has malformed frame identity `{cells[0]}`")
         for problem in problems:
@@ -1857,8 +1862,10 @@ def parse(doc: Document) -> dict[str, Any]:
             continue
         treatments.define(cells[0], cells[1], content=(cells[1], cells[2]), where=n)
 
-    frames = Universe("frames", "spec", "C")
-    for name, line_no, heading in doc.sections("1."):
+    frames = Universe("frames", "spec", "C", reject_repeats=True)
+    frame_sections = doc.sections("1.")
+    frames.candidates = len(frame_sections)
+    for name, line_no, heading in frame_sections:
         also = FRAME_NAME_RE.search(heading)
         frames.define(
             name,
@@ -2091,6 +2098,16 @@ def parse(doc: Document) -> dict[str, Any]:
             ):
                 continue
             if k.startswith("models.") and not k.startswith("models.hub."):
+                continue
+            if not COPY_KEY_RE.fullmatch(k):
+                normalized = k.replace("-", ".").casefold()
+                local = {candidate.casefold() for candidate in local_heads.get(sec, frozenset())}
+                if (
+                    any(normalized == candidate.casefold() for candidate in copy.tokens())
+                    or head.casefold() in local
+                    or head.casefold() in {namespace.casefold() for namespace in namespaces}
+                ):
+                    refs.append((sec, n, k))
                 continue
             if (head == "models" and k.startswith("models.hub.")) or head in namespaces:
                 refs.append((sec, n, k))
@@ -2870,7 +2887,10 @@ def authority_claims(
             hit = gaps.resolve(m_gap.group(1))
             if hit.empty:
                 add(f"L{line_no}", f"`[contract-gap] {m_gap.group(1)}` names no §0.5 row")
-        exempt = line_no in registrations or cites_a_registered_gap(gaps, scope)
+        own_gap = registrations.get(line_no)
+        exempt = own_gap is not None or cites_a_registered_gap(gaps, scope)
+        excused_routes = set(own_gap.routes) if own_gap else gap_excused_routes(gaps, scope)
+        excused_fields = set(own_gap.fields) if own_gap else gap_excused_fields(gaps, scope)
         # Where each route is written, not just which routes appear: a body
         # literal is bound to one route, and binding needs positions.
         route_claims = [
@@ -3023,7 +3043,16 @@ def authority_claims(
             # other route does carry: `{hops}` on the order save is not a
             # missing behaviour, it is the per-model chain's body written on the
             # wrong route, and the review that found it was reading by hand.
-            stray = sorted(k for k in keys - allowed if not (exempt and k not in every_contracted_key))
+            stray = sorted(
+                k
+                for k in keys - allowed
+                if not (
+                    exempt
+                    and bound in excused_routes
+                    and k in excused_fields
+                    and k not in every_contracted_key
+                )
+            )
             if stray:
                 add(
                     f"L{line_no}",
@@ -3136,7 +3165,15 @@ def authority_claims(
         # as the body literals and the 409 branches.
         for m_count in COUNT_CLAIM_RE.finditer(scope):
             want = count_value(m_count.group(1))
-            if want is None or not cited:
+            if not cited:
+                continue
+            if want is None:
+                if re.search(r"\d", m_count.group(1)):
+                    scale["vocabulary claims"] += 1
+                    add(
+                        f"L{line_no}",
+                        f"`{m_count.group(1)}` is a malformed numeric vocabulary count",
+                    )
                 continue
             scale["vocabulary claims"] += 1
             schema = nearest_subject(cited, m_count.start(), m_count.end())
@@ -3487,8 +3524,18 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
         # up to the punctuation that ends the phrase. What follows a reference in
         # lower case is the sentence explaining it — 「the same three §1.0
         # disperses first paint into」 — and is not a citation to resolve.
-        if re.search(r"(?:As |→\s*)§\d", cell):
-            for target, state in CROSS_FRAME_RE.findall(cell):
+        if re.search(r"(?:As |→\s*)§", cell):
+            candidates = CROSS_FRAME_CANDIDATE_RE.findall(cell)
+            parsed = list(CROSS_FRAME_RE.findall(cell))
+            parsed_tokens = [target for target, _state in parsed]
+            malformed_targets = [target for target in candidates if target not in parsed_tokens]
+            for target in malformed_targets:
+                add(
+                    "A",
+                    f"L{r['line']}",
+                    f"「{r['state']}」 has malformed cross-frame identity `§{target}`",
+                )
+            for target, state in parsed:
                 named = state.strip()
                 if frame_u.resolve(target).empty:
                     add("A", f"L{r['line']}", f"「{r['state']}」 defers to §{target}, which is no frame")
@@ -4134,11 +4181,32 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
                 explicit_foreign_frames |= frame_refs(sentence_prefix, frame_u) - {frame}
             for branch in ALTERNATIVE_RE.split(segment.split(";")[0]):
                 said, stop = phrase(branch)
-                if not said or not said[0].isupper() or "§" in said or stop == ":":
+                if not said or "§" in said or stop == ":":
                     # A colon is this document introducing an explanation of the
                     # transition — 「Second pass: the dialog re-reads the sources」
                     # — not naming where it goes. Nothing it files as a state is
                     # ever written with one.
+                    continue
+                if said[0].isascii() and said[0].islower():
+                    folded = said.casefold()
+                    near = [
+                        row
+                        for row in local_rows
+                        if any(
+                            folded == name.casefold()
+                            or folded.startswith(f"{name.casefold()} ")
+                            for name in state_spellings(row["state"])
+                        )
+                    ]
+                    if near:
+                        state_exit_candidates += 1
+                        add(
+                            "C",
+                            f"L{r['line']}",
+                            f"「{r['state']}」 exits to case-mangled state 「{said}」 in §{frame}",
+                        )
+                    continue
+                if not said[0].isascii() or not said[0].isupper():
                     continue
                 if re.match(r"^(?:[A-Z]{1,3}-?\d+|[A-Z]\d+[a-z]?)\b", said):
                     continue
@@ -4486,6 +4554,7 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
         "failure-treatment candidates": p["registry candidates"]["treatment"],
         "interpolation-slot candidates": p["registry candidates"]["slot"],
         "contract-gap candidates": gaps.candidates,
+        "frame section candidates": frame_u.candidates,
         "body member candidates": e_scale["body members"],
         "distinct states": len(states),
         "frames with a register row": len(reg_frames),

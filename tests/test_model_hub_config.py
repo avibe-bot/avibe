@@ -1135,6 +1135,141 @@ def test_model_hub_ui_gate_reports_duplicate_body_members_before_type_comparison
     assert any("repeats body member(s) flow_id" in finding["message"] for finding in result["findings"])
 
 
+@pytest.mark.parametrize(
+    ("scale", "before", "after", "message"),
+    [
+        (
+            "prose key references",
+            "pill reads `shell.notInstalled`",
+            "pill reads `Shell.notInstalled`",
+            "Shell.notInstalled",
+        ),
+        (
+            "frame section candidates",
+            "### 1.0 Shared shell",
+            "### 1.0 Shared shell\n### 1.0 Shared shell",
+            "defined twice in frames",
+        ),
+        (
+            "state-register exit candidates",
+            "first source → Ready",
+            "first source → ready",
+            "case-mangled state",
+        ),
+    ],
+)
+def test_model_hub_ui_gate_non_table_candidates_are_never_lost(
+    tmp_path: Path, scale: str, before: str, after: str, message: str
+):
+    spec = Path("docs/plans/model-hub-ui-spec.md").read_text(encoding="utf-8")
+    baseline = check_model_hub_ui_states(Path.cwd())
+    assert spec.count(before) == 1
+    mutated = tmp_path / "mutated.md"
+    mutated.write_text(spec.replace(before, after, 1), encoding="utf-8")
+
+    result = check_model_hub_ui_states(mutated, authorities=Path.cwd())
+
+    expected = baseline["input_scale"][scale] + (1 if before in after else 0)
+    assert result["input_scale"][scale] == expected
+    assert any(message in finding["message"] for finding in result["findings"])
+
+
+@pytest.mark.parametrize("treatment", ("Fx", "F_"))
+def test_model_hub_ui_gate_rejects_digitless_treatment_candidates(
+    tmp_path: Path, treatment: str
+):
+    spec = Path("docs/plans/model-hub-ui-spec.md").read_text(encoding="utf-8")
+    before = "F1 → Paste-back failed for E2"
+    after = f"{treatment} → Paste-back failed for E2"
+    assert spec.count(before) == 1
+    mutated = tmp_path / "mutated.md"
+    mutated.write_text(spec.replace(before, after, 1), encoding="utf-8")
+
+    result = check_model_hub_ui_states(mutated, authorities=Path.cwd())
+
+    assert any(
+        treatment in finding["message"] and "closed set does not define" in finding["message"]
+        for finding in result["findings"]
+    )
+
+
+def test_model_hub_ui_gate_rejects_placeholder_state_entry(tmp_path: Path):
+    spec = Path("docs/plans/model-hub-ui-spec.md").read_text(encoding="utf-8")
+    baseline = check_model_hub_ui_states(Path.cwd())
+    before = "| §1.0 | Ready | `health` reads `ok`, both page reads answered, and at least one source `[contract]` |"
+    after = "| §1.0 | Ready | — |"
+    assert spec.count(before) == 1
+    mutated = tmp_path / "mutated.md"
+    mutated.write_text(spec.replace(before, after, 1), encoding="utf-8")
+
+    result = check_model_hub_ui_states(mutated, authorities=Path.cwd())
+
+    assert result["input_scale"]["state-register candidates"] == baseline["input_scale"][
+        "state-register candidates"
+    ]
+    assert any("placeholder-only entry condition" in finding["message"] for finding in result["findings"])
+
+
+def test_model_hub_ui_gate_preserves_malformed_numeric_count_candidate(tmp_path: Path):
+    spec = Path("docs/plans/model-hub-ui-spec.md").read_text(encoding="utf-8")
+    baseline = check_model_hub_ui_states(Path.cwd())
+    claim = "`agent-supply.schema.json`'s `supply_status` enumerates 5x values."
+    mutated = tmp_path / "mutated.md"
+    mutated.write_text(f"{spec}\n{claim}\n", encoding="utf-8")
+
+    result = check_model_hub_ui_states(mutated, authorities=Path.cwd())
+
+    assert result["input_scale"]["authority: counted-vocabulary claims"] == baseline[
+        "input_scale"
+    ]["authority: counted-vocabulary claims"] + 1
+    assert any(
+        "malformed numeric vocabulary count" in finding["message"]
+        for finding in result["findings"]
+    )
+
+
+@pytest.mark.parametrize("frame", ("§1-0", "§1.0x"))
+def test_model_hub_ui_gate_rejects_malformed_cross_frame_candidates(
+    tmp_path: Path, frame: str
+):
+    spec = Path("docs/plans/model-hub-ui-spec.md").read_text(encoding="utf-8")
+    baseline = check_model_hub_ui_states(Path.cwd())
+    before = "→ §1.0 Unreachable / §1.0 Sources unread / §1.0 Partial"
+    after = f"→ {frame} Unreachable / §1.0 Sources unread / §1.0 Partial"
+    assert spec.count(before) >= 1
+    mutated = tmp_path / "mutated.md"
+    mutated.write_text(spec.replace(before, after, 1), encoding="utf-8")
+
+    result = check_model_hub_ui_states(mutated, authorities=Path.cwd())
+
+    assert result["input_scale"]["failure dispersals parsed"] == baseline[
+        "input_scale"
+    ]["failure dispersals parsed"]
+    assert any(
+        "malformed cross-frame identity" in finding["message"]
+        and frame in finding["message"]
+        for finding in result["findings"]
+    )
+
+
+def test_model_hub_ui_gate_binds_body_gap_exemptions_to_registered_route_and_field(
+    tmp_path: Path,
+):
+    spec = Path("docs/plans/model-hub-ui-spec.md").read_text(encoding="utf-8")
+    before = "`POST /api/models/oauth/submit` with the held `{flow_id, value}`"
+    after = "`POST /api/models/oauth/submit` with the held `{flow_id, value, bogus}` `[contract-gap]` G-22"
+    assert spec.count(before) == 1
+    mutated = tmp_path / "mutated.md"
+    mutated.write_text(spec.replace(before, after, 1), encoding="utf-8")
+
+    result = check_model_hub_ui_states(mutated, authorities=Path.cwd())
+
+    assert any(
+        "bogus" in finding["message"] and "not contracted" in finding["message"]
+        for finding in result["findings"]
+    )
+
+
 def test_model_hub_ui_gate_line_citations_do_not_read_git_history(
     monkeypatch, tmp_path: Path
 ):
