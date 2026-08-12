@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import http.client
 import importlib.util
 import json
 import urllib.error
@@ -117,6 +118,18 @@ def test_unauthenticated_rate_limit_is_terminal() -> None:
     assert result.error is not None
     assert result.error.retryable is False
     assert result.error.status_code == 429
+
+
+def test_http_incomplete_read_is_transient() -> None:
+    module = _load_module()
+
+    result = module.github_request(
+        lambda: (_ for _ in ()).throw(http.client.IncompleteRead(b"partial", 12))
+    )
+
+    assert result.error is not None
+    assert result.error.retryable is True
+    assert "IncompleteRead" in str(result.error)
 
 
 def test_github_get_without_cache_sends_no_conditional_header() -> None:

@@ -2,10 +2,12 @@ import React, { createContext, useContext, useEffect, useMemo, useRef } from 're
 import { useTranslation } from 'react-i18next';
 import { requestMemoryRuntimeRepair } from '../lib/memoryRepair';
 import { useToast } from './ToastContext';
-import { apiFetch } from '../lib/apiFetch';
+import { apiFetch, recoverRemoteAuthFromSessionProbe } from '../lib/apiFetch';
+import { isAuthorizationSensitiveReadPath } from '../lib/authorizationCache';
 import type { TurnActivityGroupWire } from '../lib/agentActivity';
 import type { AgentGraphParams, AgentGraphResult, AgentGraphVisibility } from '../lib/agentGraph';
 import { visibilityActivityEvents } from '../lib/sessionVisibilityEvents';
+import { normalizeSessionInfo, type InstanceCapabilities, type SessionInfo } from '../lib/sessionInfo';
 import type { VaultSessionPolicy } from '../lib/vaultSandboxPolicy';
 import {
   WorkbenchEventReconnectLoop,
@@ -21,6 +23,8 @@ import {
   type SessionDraftServerState,
   type SessionDraftWrite,
 } from '../lib/sessionDraftPersistence';
+
+export type { InstanceCapabilities, SessionInfo };
 
 // The workbench Dock API response shape ({ ok, dock }); the Dock document type
 // itself lives with the DockProvider that owns reconciliation.
@@ -719,7 +723,7 @@ export type ApiContextType = {
     opts?: { limit?: number; includeArchived?: boolean },
   ) => Promise<MessageSearchResult>;
   sendSessionMessage: (sessionId: string, payload: { text?: string; content?: Record<string, unknown>; metadata?: Record<string, unknown>; author_id?: string; author_name?: string }) => Promise<WorkbenchMessage>;
-  markSessionRead: (sessionId: string, untilMessageId?: string) => Promise<{ updated: number; unread_counts: Record<string, number>; unread_by_session: Record<string, number> }>;
+  markSessionRead: (sessionId: string, untilMessageId?: string, opts?: { handleError?: boolean }) => Promise<{ updated: number; unread_counts: Record<string, number>; unread_by_session?: Record<string, number> }>;
   cancelSession: (
     sessionId: string,
   ) => Promise<{
@@ -751,6 +755,8 @@ export type ApiContextType = {
     includeArchived?: boolean;
     cache?: boolean;
   }) => Promise<{ ok: boolean; agents: VibeAgentBrief[]; default_agent_name: string | null }>;
+  getVibeAgentOnboarding: () => Promise<VibeAgentOnboardingResult>;
+  onboardVibeAgents: () => Promise<VibeAgentOnboardingResult>;
   getVibeAgent: (name: string) => Promise<{ ok: boolean; agent: VibeAgentFull; default_agent_name: string | null }>;
   createVibeAgent: (payload: VibeAgentCreatePayload) => Promise<{ ok: boolean; agent: VibeAgentFull }>;
   updateVibeAgent: (name: string, payload: VibeAgentUpdatePayload) => Promise<{ ok: boolean; agent: VibeAgentFull }>;
@@ -871,6 +877,9 @@ export type WorkbenchProject = {
   archived: boolean;
   default_agent?: ProjectDefaultAgent | null;
   metadata?: Record<string, unknown>;
+  capabilities: {
+    can_chat: boolean;
+  };
 };
 
 export type ProjectSessionsPage = {
@@ -969,6 +978,40 @@ export type VibeAgentFull = VibeAgentBrief & {
   system_prompt: string | null;
   metadata: Record<string, unknown>;
   created_at: string;
+};
+
+export type VibeAgentOnboardingItem = {
+  id: string;
+  name: string;
+  backend: string;
+  source: string;
+  enabled: boolean;
+  status: 'not_onboarded' | 'private' | 'published' | 'managed_elsewhere';
+  access_level: 'private' | 'scope' | 'public' | null;
+  group_ids: string[];
+  policy_revision: number | null;
+  applied_acl_revision: number | null;
+};
+
+export type VibeAgentOnboardingResult = {
+  ok: boolean;
+  available: boolean;
+  organization_id: string | null;
+  console_url?: string;
+  agents: VibeAgentOnboardingItem[];
+  counts: {
+    total: number;
+    system: number;
+    custom: number;
+    not_onboarded: number;
+    private: number;
+    published: number;
+    conflicts: number;
+  };
+  created?: number;
+  unchanged?: number;
+  conflicts?: number;
+  sync?: { ok?: boolean; error?: string };
 };
 
 export type VibeAgentCreatePayload = {
@@ -1092,6 +1135,11 @@ export type WorkbenchEventHandlers = {
   onConnected?: (data: { sub_id: number; source?: 'browser' | 'controller' }) => void;
   onConnectionState?: (state: WorkbenchEventConnectionState) => void;
   onEventBridgeStatus?: (data: { connected: boolean }) => void;
+  onAuthorizationChanged?: (data: {
+    project_ids?: string[];
+    resource_kinds?: string[];
+    instance_authorization_revision?: number;
+  }) => void;
   onMessageNew?: (data: WorkbenchMessage) => void;
   // ``visibility`` (contract A6): the backend carries the session's current
   // foreground/background on visibility/scope changes so the Inbox can drop /
@@ -1266,6 +1314,7 @@ export type SessionRuntimeState = {
 
 export type WorkbenchSessionBootstrap = {
   session: WorkbenchSession;
+  capabilities: { can_chat: boolean };
   agents: VibeAgentBrief[];
   default_agent_name: string | null;
   config: any | null;
@@ -1691,13 +1740,6 @@ export type RunningAgentCounts = {
 export type RunningAgentsResult =
   | { ok: true; agents: RunningAgent[]; counts: RunningAgentCounts; unreachable?: false }
   | { ok: false; unreachable: true; agents: RunningAgent[]; counts: Partial<RunningAgentCounts> };
-
-export type SessionInfo =
-  | { remote: false }
-  | { remote: true; authenticated: false }
-  // sub is the stable OIDC subject; prefer it over email for per-account scoping (email can
-  // be absent or shared across subjects).
-  | { remote: true; authenticated: true; email: string; sub?: string };
 
 export type LogEntry = {
   timestamp: string;
@@ -2662,6 +2704,19 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         dispatchToWorkbenchHandlers((handlers) => handlers.onConnected?.(connected));
       }
     });
+    source.addEventListener('authorization.changed', (e: MessageEvent) => {
+      const envelope = parseWorkbenchEnvelope<{
+        project_ids?: string[];
+        resource_kinds?: string[];
+        instance_authorization_revision?: number;
+      }>(e.data);
+      if (!envelope) return;
+      clearReadCacheMatching(isAuthorizationSensitiveReadPath);
+      dispatchToWorkbenchHandlers((handlers) => {
+        handlers.onAny?.(envelope);
+        handlers.onAuthorizationChanged?.(envelope.data);
+      });
+    });
     source.addEventListener('message.new', (e: MessageEvent) => {
       const envelope = parseWorkbenchEnvelope<WorkbenchMessage>(e.data);
       if (!envelope) return;
@@ -2804,6 +2859,12 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     source.onerror = (err) => {
       if (eventSourceRef.current !== source) return;
       closeActiveWorkbenchEventSource();
+      // EventSource does not expose a failed response's status or JSON body.
+      // Probe through apiFetch, then inspect the successful /api/session form;
+      // both 401s and the 200 refresh payload enter the shared login recovery.
+      void apiFetch('/api/session', { cache: 'no-store' })
+        .then(recoverRemoteAuthFromSessionProbe)
+        .catch(() => undefined);
       setWorkbenchEventConnectionState('reconnecting');
       dispatchToWorkbenchHandlers((handlers) => handlers.onEventBridgeStatus?.({ connected: false }));
       dispatchToWorkbenchHandlers((handlers) => handlers.onError?.(err));
@@ -3439,10 +3500,11 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     },
     sendSessionMessage: (sessionId, payload) =>
       postJson(`/api/sessions/${encodeURIComponent(sessionId)}/messages`, payload),
-    markSessionRead: (sessionId, untilMessageId) =>
+    markSessionRead: (sessionId, untilMessageId, opts) =>
       postJson(
         `/api/sessions/${encodeURIComponent(sessionId)}/mark-read`,
         untilMessageId ? { until_message_id: untilMessageId } : {},
+        opts,
       ),
     cancelSession: async (sessionId) => {
       const { res, payloadJson } = await requestJson(`/api/sessions/${encodeURIComponent(sessionId)}/cancel`, {
@@ -3547,6 +3609,8 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const path = qs ? `/api/agents?${qs}` : '/api/agents';
       return params?.cache === false ? getJson(path) : getCachedJson(path, 5_000);
     },
+    getVibeAgentOnboarding: () => getJson('/api/agent-onboarding'),
+    onboardVibeAgents: () => postJson('/api/agent-onboarding', {}),
     getVibeAgent: (name) => getCachedJson(`/api/agents/${encodeURIComponent(name)}`, 5_000),
     createVibeAgent: (payload) => postJson('/api/agents', payload),
     updateVibeAgent: async (name, payload) => {
@@ -3814,7 +3878,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     getRemoteAccessNetworkInterfaces: () => getJson('/api/remote-access/network-interfaces'),
     saveRemoteAccessSettings: (settings) => postJson('/api/remote-access/settings', settings),
     diagnoseRemoteAccess: () => postJson('/api/remote-access/diagnostics', {}),
-    getAuthSession: () => getJson('/api/session'),
+    getAuthSession: () => getJson('/api/session').then(normalizeSessionInfo),
     signOut: () => postJson('/auth/logout', {}),
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }), [sessionDraftPersistence, showToast, t]);

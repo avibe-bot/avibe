@@ -1556,8 +1556,6 @@ def memory_config_to_payload(
 
 
 def _optional_memory_object(value: object, *, name: str) -> dict[str, object]:
-    if value is None:
-        return {}
     if not isinstance(value, dict):
         raise ValueError(f"Config '{name}' must be an object")
     return value
@@ -1568,19 +1566,19 @@ def memory_config_from_payload(payload: object) -> MemoryConfig:
 
     payload = _optional_memory_object(payload, name="memory")
     processing_payload = _optional_memory_object(
-        payload.get("processing"),
+        payload.get("processing", {}),
         name="memory.processing",
     )
     llm_payload = _optional_memory_object(
-        processing_payload.get("llm"),
+        processing_payload.get("llm", {}),
         name="memory.processing.llm",
     )
     embedding_payload = _optional_memory_object(
-        processing_payload.get("embedding"),
+        processing_payload.get("embedding", {}),
         name="memory.processing.embedding",
     )
     diagnostics_payload = _optional_memory_object(
-        payload.get("diagnostics"),
+        payload.get("diagnostics", {}),
         name="memory.diagnostics",
     )
 
@@ -2815,7 +2813,7 @@ class V2Config:
             avault=avault,
         )
 
-        memory = memory_config_from_payload(payload.get("memory"))
+        memory = memory_config_from_payload(payload.get("memory", {}))
 
         model_hub_payload = payload.get("model_hub")
         if model_hub_payload is None:

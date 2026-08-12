@@ -60,6 +60,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 logger = logging.getLogger(__name__)
 _SOCKET_MODE = 0o600
 _SOCKET_UMASK_MODE = 0o700
+_CHECK_POSIX_SOCKET_MODE = os.name != "nt"
 _UNSUPPORTED_SOCKET_CHMOD_ERRNOS = frozenset(
     value
     for value in (
@@ -107,6 +108,9 @@ def _create_controller_loop_server(config: Any) -> Any:
     import uvicorn
 
     class _ControllerLoopServer(uvicorn.Server):
+        # Uvicorn >= 0.29 wraps serve() in capture_signals(); older supported
+        # versions call install_signal_handlers() instead. The controller owns
+        # this process and its event loop, so both hooks must remain inert.
         def capture_signals(self):
             return contextlib.nullcontext()
 
@@ -717,6 +721,26 @@ def create_app(
                 if delivery is not None and delivery["session_id"] == session_id
                 else None
             )
+            if (
+                delivery is not None
+                and delivery_payload is not None
+                and message_deliveries.delivery_has_remote_resource_context(delivery)
+            ):
+                message_deliveries.retire_not_written(
+                    conn,
+                    session_id,
+                    delivery_id,
+                    reason="remote_execution_disabled",
+                )
+                return JSONResponse(
+                    status_code=403,
+                    content={
+                        "ok": False,
+                        "code": "remote_execution_disabled",
+                        "session_id": session_id,
+                        "delivery_id": delivery_id,
+                    },
+                )
             attachment_specs: list[dict[str, Any]] = []
             if delivery_payload is not None:
                 from core.workbench_media import resolve_attachment_specs
@@ -1831,6 +1855,8 @@ def _bind_socket(socket_path: Optional[Path] = None) -> tuple[socket.socket, Pat
     uvicorn's path chmod while keeping the endpoint local-only.
     """
 
+    # Bind and report the canonical path so platform aliases (for example
+    # macOS ``/var`` -> ``/private/var``) do not produce a mismatched endpoint.
     target = (socket_path or default_socket_path()).expanduser().resolve()
     target.parent.mkdir(parents=True, exist_ok=True)
     _remove_stale_owned_socket(target)
@@ -1900,9 +1926,10 @@ def _verify_owned_socket(target: Path, *, allow_umask_mode: bool = False) -> Non
         raise OSError("internal dispatch socket is unsafe")
     if hasattr(os, "getuid") and info.st_uid != os.getuid():
         raise OSError("internal dispatch socket owner mismatch")
-    allowed_modes = {_SOCKET_MODE, _SOCKET_UMASK_MODE} if allow_umask_mode else {_SOCKET_MODE}
-    if stat.S_IMODE(info.st_mode) not in allowed_modes:
-        raise OSError("internal dispatch socket mode mismatch")
+    if _CHECK_POSIX_SOCKET_MODE:
+        allowed_modes = {_SOCKET_MODE, _SOCKET_UMASK_MODE} if allow_umask_mode else {_SOCKET_MODE}
+        if stat.S_IMODE(info.st_mode) not in allowed_modes:
+            raise OSError("internal dispatch socket mode mismatch")
 
 
 def _write_internal_server_status(

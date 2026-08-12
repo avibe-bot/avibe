@@ -22,6 +22,7 @@ from core.show_session_events import (
     _format_dispatch_text,
     _format_transcript_text,
     localized_show_event_error,
+    show_event_request_requests_dispatch,
     show_event_requests_dispatch,
 )
 from storage import message_deliveries
@@ -970,6 +971,35 @@ def test_show_trigger_kind_is_closed_over_dispatching_event_types():
         )
 
 
+@pytest.mark.parametrize(
+    "request_payload",
+    [
+        {
+            "type": "human.annotation.created",
+            "annotation": {"comment": "Run this.", "dispatch": True},
+        },
+        {
+            "type": "human.intent.submitted",
+            "payload": {"intent": "choose", "dispatch": True},
+        },
+    ],
+)
+def test_show_event_request_dispatch_matches_normalized_event(request_payload):
+    assert show_event_request_requests_dispatch(request_payload) is True
+
+
+def test_show_event_request_without_dispatch_does_not_start_agent_turn():
+    assert (
+        show_event_request_requests_dispatch(
+            {
+                "type": "human.annotation.created",
+                "annotation": {"comment": "Leave a review."},
+            }
+        )
+        is False
+    )
+
+
 def test_show_event_store_records_assistant_page_update(isolated_state):
     _seed_session()
 
@@ -1515,11 +1545,14 @@ def test_localized_show_event_errors_follow_configured_language(
 
     conflict = localized_show_event_error("event_id_conflict")
     pending = localized_show_event_error("show_event_dispatch_pending")
+    unsupported = localized_show_event_error("unsupported_event_type")
 
     assert conflict.code == "event_id_conflict"
     assert str(conflict) == "此 Show 事件 ID 已绑定到不同的事件内容。"
     assert pending.code == "show_event_dispatch_pending"
     assert str(pending) == "Show 事件可能仍在处理中，未在本地重复提交。"
+    assert unsupported.code == "unsupported_event_type"
+    assert str(unsupported) == "Show Page 写入必须使用受支持的人类事件或标记解析类型。"
 
 
 def test_direct_dispatching_show_event_requires_acceptance_before_visibility(isolated_state):

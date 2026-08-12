@@ -37,6 +37,8 @@ import { SettingsPlatformsPage } from './components/settings/SettingsPlatformsPa
 import { SettingsServicePage } from './components/settings/SettingsServicePage';
 import { StatusProvider } from './context/StatusProvider';
 import { ApiProvider, useApi, ApiError } from './context/ApiContext';
+import type { SessionInfo } from './context/ApiContext';
+import { InstanceAuthorizationProvider } from './context/InstanceAuthorizationProvider';
 import { useWindowManager } from './context/WindowManagerContext';
 import { ToastProvider } from './context/ToastProvider';
 import { ThemeProvider } from './context/ThemeProvider';
@@ -54,6 +56,7 @@ import {
     isSetupCheckBypassed,
     remoteLoginPath,
     REMOTE_AUTH_REQUIRED_EVENT,
+    shouldBypassSetupForRemoteOwner,
     shouldDeferRemoteAuthRedirect,
 } from './lib/remoteAuth';
 import { useIsDesktop } from './lib/useIsDesktop';
@@ -99,6 +102,18 @@ import { applyAppTitle } from './lib/documentTitle';
 import { useTranslation } from 'react-i18next';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './components/ui/card';
 import { Button } from './components/ui/button';
+import { OrganizationOverviewPage } from './features/organization/pages/OrganizationOverviewPage';
+import { OrganizationMembersPage } from './features/organization/pages/OrganizationMembersPage';
+import {
+  OrganizationGroupDetailPage,
+  OrganizationGroupsPage,
+} from './features/organization/pages/OrganizationGroupsPages';
+import { OrganizationInstancesPage } from './features/organization/pages/OrganizationInstancesPage';
+import {
+  InstanceAccessPage,
+  InstanceProjectsPage,
+} from './features/organization/pages/OrganizationInstancePages';
+import { OrganizationResourcesPage } from './features/organization/pages/OrganizationResourcesPage';
 
 const RemoteLoginGate = ({ target }: { target: string }) => {
     const { t } = useTranslation();
@@ -236,6 +251,7 @@ const AuthGuard = ({ children }: { children: ReactNode }) => {
     const [guardStatus, setGuardStatus] = useState<GuardStatus>('loading');
     const [blockedCode, setBlockedCode] = useState<string | null>(null);
     const [authCheckVersion, setAuthCheckVersion] = useState(0);
+    const [authorizationSession, setAuthorizationSession] = useState<SessionInfo | null>(null);
     const bypassSetupGuard = isSetupCheckBypassed(location.pathname);
     // Re-validate only when crossing the setup boundary, not on every
     // route change. The wizard completes by saving config and navigating
@@ -282,10 +298,15 @@ const AuthGuard = ({ children }: { children: ReactNode }) => {
         // transition is fine — it's the setup boundary, not every nav.
         setGuardStatus('loading');
 
-        checkRemoteAuthForPath(location.pathname, getAuthSession).then(({ loginRequired, checkSetup }) => {
+        checkRemoteAuthForPath(location.pathname, getAuthSession).then(({ session, loginRequired, checkSetup }) => {
             if (cancelled) return;
+            setAuthorizationSession(session);
             if (loginRequired) {
                 setGuardStatus('remote-login-required');
+                return null;
+            }
+            if (session.remote && session.authenticated && !session.capabilities.can_manage_instance) {
+                setGuardStatus('ready');
                 return null;
             }
             if (!checkSetup) {
@@ -298,12 +319,21 @@ const AuthGuard = ({ children }: { children: ReactNode }) => {
                 const setupReady = typeof setupState?.needs_setup === 'boolean'
                     ? setupState.needs_setup === false
                     : hasConfiguredPlatformCredentials(config);
-                setGuardStatus(!config || !config.mode || !setupReady ? 'needs-setup' : 'ready');
+                if (!config || !config.mode || !setupReady) {
+                    if (shouldBypassSetupForRemoteOwner(session)) {
+                        setGuardStatus('ready');
+                        return;
+                    }
+                    setGuardStatus('needs-setup');
+                    return;
+                }
+                setGuardStatus('ready');
             });
         }).catch(async (error) => {
             if (cancelled) return;
             const authCheck = await checkRemoteAuthForPath(location.pathname, getAuthSession).catch(() => null);
             if (cancelled) return;
+            if (authCheck?.session) setAuthorizationSession(authCheck.session);
             if (authCheck?.loginRequired) {
                 setGuardStatus('remote-login-required');
                 return;
@@ -350,7 +380,9 @@ const AuthGuard = ({ children }: { children: ReactNode }) => {
     }
     if (bypassSetupGuard) return children;
     if (guardStatus === 'needs-setup') {
-        if (location.pathname === '/setup') return children;
+        if (location.pathname === '/setup' && authorizationSession) {
+            return <InstanceAuthorizationProvider session={authorizationSession}>{children}</InstanceAuthorizationProvider>;
+        }
         // A wizard finish navigates from /setup to / before the re-validation
         // effect can flip `guardStatus` to loading. Without this render-time
         // bridge, the stale setup-required state immediately redirects back to
@@ -367,7 +399,10 @@ const AuthGuard = ({ children }: { children: ReactNode }) => {
         }
         return <Navigate to="/setup" replace />;
     }
-    return children;
+    if (!authorizationSession) {
+        return <div className="min-h-screen flex items-center justify-center bg-bg text-text">{t('common.loading')}</div>;
+    }
+    return <InstanceAuthorizationProvider session={authorizationSession}>{children}</InstanceAuthorizationProvider>;
 };
 
 // Brief fallback while a lazy Apps route chunk loads (the pages render their own
@@ -578,6 +613,15 @@ const router = createBrowserRouter(
         {/* Control Panel mode — existing pages moved under /admin/* */}
         <Route path="/admin" element={<Navigate to="/admin/dashboard" replace />} />
         <Route path="/admin/dashboard" element={<Dashboard />} />
+        <Route path="/admin/organization" element={<Navigate to="/admin/organization/overview" replace />} />
+        <Route path="/admin/organization/overview" element={<OrganizationOverviewPage />} />
+        <Route path="/admin/organization/members" element={<OrganizationMembersPage />} />
+        <Route path="/admin/organization/groups" element={<OrganizationGroupsPage />} />
+        <Route path="/admin/organization/groups/:groupId" element={<OrganizationGroupDetailPage />} />
+        <Route path="/admin/organization/instances" element={<OrganizationInstancesPage />} />
+        <Route path="/admin/organization/instances/:instanceId/access" element={<InstanceAccessPage />} />
+        <Route path="/admin/organization/instances/:instanceId/projects" element={<InstanceProjectsPage />} />
+        <Route path="/admin/organization/resources" element={<OrganizationResourcesPage />} />
         <Route path="/admin/remote-access" element={<RemoteAccessPage />} />
         <Route path="/admin/groups" element={<ChannelList isPage />} />
         <Route path="/admin/users" element={<UserList />} />

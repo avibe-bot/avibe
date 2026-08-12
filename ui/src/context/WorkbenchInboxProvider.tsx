@@ -327,8 +327,14 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
 
   const markRead = useCallback(
     async (sessionId: string, untilMessageId?: string) => {
+      // Clearing unread is best-effort, so a failure must not raise an error
+      // toast: `POST /api/sessions/{id}/mark-read` is local-only, and a remote
+      // viewer reading a session it is allowed to read auto-clears unread on
+      // view. The mark-read CONTROLS are already trusted-local (`can_chat`);
+      // this keeps the automatic write from surfacing
+      // `remote_execution_disabled` to a legitimate remote reader.
       const operation = readOwnershipRef.current.beginRead(`inbox-mark-read:${sessionId}`);
-      const result = await api.markSessionRead(sessionId, untilMessageId);
+      const result = await api.markSessionRead(sessionId, untilMessageId, { handleError: false });
       if (
         !readOwnershipRef.current.isMutationCurrent(operation, `inbox-session:${sessionId}`)
       ) {
@@ -345,9 +351,10 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
       // The unread map is authoritative for badges; the card's unread styling
       // derives from it, so clearing here clears the dot without touching the
       // feed order (a read doesn't change last activity).
-      applySessionUnread(sessionId, result.unread_by_session?.[sessionId] ?? 0);
+      if (!result?.unread_by_session) return;
+      applyUnreadMap(result.unread_by_session);
     },
-    [api, applySessionUnread],
+    [api, applyUnreadMap],
   );
 
   // Resume reconcile: re-read the feed WITHOUT collapsing pagination. A
@@ -520,6 +527,9 @@ export const WorkbenchInboxProvider = ({ children }: { children: ReactNode }) =>
       void reconcile();
     }
     const disconnect = api.connectWorkbenchEvents({
+      onAuthorizationChanged: () => {
+        void refresh();
+      },
       onInboxSessionUpdated: (row) => {
         targetedSnapshotsRef.current.delete(row.session_id);
         acceptSessionMutation(row.session_id);

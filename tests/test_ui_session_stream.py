@@ -30,7 +30,8 @@ from storage import message_deliveries, messages_service
 from storage.models import agent_sessions, messages
 from storage.models import scope_settings
 from storage.settings_service import upsert_scope
-from tests.ui_server_test_helpers import csrf_headers
+from tests.ui_server_test_helpers import csrf_headers, remote_session_cookie
+from vibe import remote_access
 
 
 @pytest.fixture()
@@ -200,18 +201,7 @@ def test_route_fire_and_forgets_dispatch(isolated_state, tmp_path):
 
     _, session_id = _make_session(tmp_path)
 
-    async def dispatch(payload):
-        settled = _settle_reserved_delivery(payload, state="accepted")
-        return {
-            "status_code": 202,
-            "body": {
-                "ok": True,
-                "session_id": session_id,
-                "delivery_state": settled["state"],
-            },
-        }
-
-    dispatch_mock = AsyncMock(side_effect=dispatch)
+    dispatch_mock = AsyncMock(side_effect=_accepted_dispatch(session_id))
     with (
         patch("vibe.internal_client.dispatch_async", dispatch_mock),
         patch("vibe.ui_server._web_push_user_key", return_value="remote:user-a"),
@@ -233,7 +223,7 @@ def test_route_fire_and_forgets_dispatch(isolated_state, tmp_path):
     payload = response.get_json()
     assert payload["author"] == "user"
     assert payload["author_id"] == "remote:user-a"
-    assert payload["metadata"]["_web_push_user_key"] == "remote:user-a"
+    assert "_web_push_user_key" not in payload["metadata"]
     assert payload["metadata"]["_memory_cli_admitted"] is False
     assert payload["text"] == "no stream"
     assert payload["draft_advanced"] is True
@@ -839,7 +829,8 @@ def test_create_and_patch_session_canonicalize_agent_identity(isolated_state, tm
     cleared = cleared_response.get_json()
     assert cleared["agent_id"] is None
     assert cleared["agent_name"] is None
-    assert cleared["agent_backend"] == ""
+    # Clearing the Agent selector does not clear the durable backend pin.
+    assert cleared["agent_backend"] == "codex"
 
 
 def test_fork_session_creates_new_workbench_session(isolated_state, tmp_path):
@@ -1153,6 +1144,8 @@ def test_chat_bootstrap_returns_first_screen_payload(isolated_state, tmp_path):
                         "runtime_key": "runtime-1",
                         "kind": "background_task",
                         "status": "running",
+                        "item_kind": "backend_activity",
+                        "label": "Waiting for turn",
                     }
                 ],
                 "pending_activity_output_count": 0,
@@ -1188,8 +1181,130 @@ def test_chat_bootstrap_returns_first_screen_payload(isolated_state, tmp_path):
     assert body["turn_state"]["foreground"] == "running"
     assert body["turn_state"]["pending_input_count"] == 1
     assert body["turn_state"]["background_activities"][0]["id"] == "task-1"
+    assert body["turn_state"]["background_activities"][0]["label"] == "Waiting for turn"
     assert body["turn_state"]["connection"] == "connected"
 
+
+def test_chat_bootstrap_filters_non_backend_activities_for_remote_context(isolated_state, tmp_path):
+    from vibe.ui_server import app
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from tests.test_ui_memory_routes import _save_remote_config
+
+    config = _save_remote_config(tmp_path)
+    _, session_id = _make_session(tmp_path)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(config, "owner@example.com", "user-owner"),
+        domain="alex.avibe.bot",
+    )
+
+    async def projected(_session_id):
+        return {
+            "status_code": 200,
+            "body": {
+                "in_flight": False,
+                "foreground": "idle",
+                "pending_input_count": 0,
+                "background_activities": [
+                    {
+                        "id": "backend-1",
+                        "item_kind": "backend_activity",
+                        "label": "Waiting for approval",
+                        "status": "running",
+                    },
+                    {
+                        "id": "task-1",
+                        "item_kind": "task",
+                        "label": "private prompt head",
+                        "status": "scheduled",
+                    },
+                ],
+                "pending_activity_output_count": 1,
+                "connection": "reconnecting",
+            },
+        }
+
+    with (
+        patch("vibe.internal_client.turn_state", projected),
+        patch(
+            "vibe.api.get_vibe_agents",
+            return_value={
+                "agents": [{"name": "worker", "backend": "claude", "enabled": True}],
+                "default_agent_name": "worker",
+            },
+        ),
+    ):
+        response = client.get(
+            f"/api/sessions/{session_id}/bootstrap",
+            base_url="https://alex.avibe.bot",
+            environ_base={"REMOTE_ADDR": "203.0.113.10"},
+        )
+    monkeypatch.undo()
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert [item["id"] for item in body["turn_state"]["background_activities"]] == ["backend-1"]
+    assert body["turn_state"]["background_activities"][0]["label"] == "Waiting for approval"
+
+
+def test_turn_state_route_filters_non_backend_activities_for_remote_context(isolated_state, tmp_path):
+    from vibe.ui_server import app
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from tests.test_ui_memory_routes import _save_remote_config
+
+    config = _save_remote_config(tmp_path)
+    _, session_id = _make_session(tmp_path)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_session_cookie(config, "owner@example.com", "user-owner"),
+        domain="alex.avibe.bot",
+    )
+
+    async def projected(session_id_inner):
+        assert session_id_inner == session_id
+        return {
+            "status_code": 200,
+            "body": {
+                "in_flight": False,
+                "foreground": "idle",
+                "pending_input_count": 0,
+                "background_activities": [
+                    {
+                        "id": "backend-1",
+                        "item_kind": "backend_activity",
+                        "label": "Waiting for approval",
+                        "status": "running",
+                    },
+                    {
+                        "id": "watch-1",
+                        "item_kind": "watch",
+                        "label": "private waiter prompt",
+                        "status": "enabled",
+                    },
+                ],
+                "pending_activity_output_count": 1,
+                "connection": "reconnecting",
+            },
+        }
+
+    with patch("vibe.internal_client.turn_state", projected):
+        response = client.get(
+            f"/api/sessions/{session_id}/turn-state",
+            base_url="https://alex.avibe.bot",
+            environ_base={"REMOTE_ADDR": "203.0.113.10"},
+        )
+    monkeypatch.undo()
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert [item["id"] for item in body["background_activities"]] == ["backend-1"]
+    assert body["background_activities"][0]["label"] == "Waiting for approval"
 
 def test_session_draft_compare_and_set_protects_newer_writes_and_clears(
     isolated_state,
@@ -1302,7 +1417,6 @@ def test_session_draft_reserves_writer_before_cas_reads(isolated_state, tmp_path
 
     assert response.status_code == 200
     assert calls[:2] == ["write_lock", "session_read"]
-
 
 def test_queue_row_send_now_passes_the_exact_delivery_id(isolated_state, tmp_path):
     from vibe.ui_server import app
@@ -1562,6 +1676,7 @@ def test_turn_state_route_preserves_orthogonal_runtime_axes(isolated_state, tmp_
                         "runtime_key": "runtime-1",
                         "kind": "background_task",
                         "status": "running",
+                        "item_kind": "backend_activity",
                     }
                 ],
                 "pending_activity_output_count": 1,

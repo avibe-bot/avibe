@@ -250,6 +250,21 @@ describe('a read-only session', () => {
       expect(mocks.archiveSession).not.toHaveBeenCalled();
     }
 
+    const capabilityBlocked = mount(options({ writable: false }));
+    expect(capabilityBlocked.actions).toEqual([]);
+    expect(capabilityBlocked.archiveDialog).toBeNull();
+    expect(capabilityBlocked.canArchive).toBe(false);
+
     expect(mount(options()).canArchive).toBe(true);
+  });
+});
+
+describe('a metadata-only session', () => {
+  it('keeps organization actions but removes local lifecycle actions', () => {
+    const h = mount(options({ writable: true, lifecycleWritable: false }));
+
+    expect(h.actions.map((action) => action.id)).toEqual(['pin', 'rename', 'hide']);
+    expect(h.canArchive).toBe(false);
+    expect(h.archiveDialog).toBeNull();
   });
 });

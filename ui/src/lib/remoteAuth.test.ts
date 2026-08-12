@@ -8,12 +8,57 @@ const platform = vi.hoisted(() => ({
 vi.mock('./platform', () => platform);
 
 import {
+  canAdministerMemory,
+  canArchiveProjects,
+  canEditAgentDefinitions,
+  canEditProjectDefaultAgent,
+  canEditProjectInstructions,
+  canManageSkills,
+  canManageVaultSecrets,
+  canRegisterWebPush,
+  canUseHarness,
   checkRemoteAuthForPath,
   deferRemoteAuthRedirect,
   remoteLoginPath,
+  shouldBypassSetupForRemoteOwner,
   REMOTE_AUTH_REQUIRED_EVENT,
   shouldDeferRemoteAuthRedirect,
 } from './remoteAuth';
+
+describe('agent definition editing', () => {
+  it('keeps the Agent editor available on a local instance', () => {
+    expect(canEditAgentDefinitions({ remote: false })).toBe(true);
+  });
+
+  it('renders a read-only catalog on a remote instance', () => {
+    expect(canEditAgentDefinitions({ remote: true })).toBe(false);
+  });
+});
+
+// Every Workbench control whose endpoint the remote HTTP policy classifies
+// local-only needs this locality check on top of its capability, because
+// `can_manage_instance` / `can_manage_agents` / `can_manage_projects` stay true
+// for a remote Instance owner.
+describe('local-only workbench controls', () => {
+  const predicates = {
+    canManageSkills,
+    canManageVaultSecrets,
+    canRegisterWebPush,
+    canUseHarness,
+    canArchiveProjects,
+    canEditProjectInstructions,
+    canEditProjectDefaultAgent,
+    canAdministerMemory,
+  };
+
+  it.each(Object.entries(predicates))('keeps %s available on a local instance', (_name, predicate) => {
+    expect(predicate({ remote: false })).toBe(true);
+  });
+
+  it.each(Object.entries(predicates))('withholds %s on a remote instance', (_name, predicate) => {
+    expect(predicate({ remote: true })).toBe(false);
+  });
+});
 
 describe('remote auth navigation', () => {
   beforeEach(() => {
@@ -57,6 +102,7 @@ describe('remote auth navigation', () => {
       const getSession = vi.fn(async () => ({ remote: true, authenticated: false }));
 
       await expect(checkRemoteAuthForPath(path, getSession)).resolves.toEqual({
+        session: { remote: true, authenticated: false },
         loginRequired: true,
         checkSetup: false,
       });
@@ -68,7 +114,11 @@ describe('remote auth navigation', () => {
     await expect(checkRemoteAuthForPath(
       '/inbox',
       async () => ({ remote: true, authenticated: true }),
-    )).resolves.toEqual({ loginRequired: false, checkSetup: true });
+    )).resolves.toEqual({
+      session: { remote: true, authenticated: true },
+      loginRequired: false,
+      checkSetup: true,
+    });
   });
 
   it('signals AuthGuard instead of navigating automatically', () => {
@@ -81,5 +131,31 @@ describe('remote auth navigation', () => {
     expect(dispatchEvent).toHaveBeenCalledOnce();
     expect(dispatchEvent.mock.calls[0]?.[0]).toBeInstanceOf(Event);
     expect(dispatchEvent.mock.calls[0]?.[0].type).toBe(REMOTE_AUTH_REQUIRED_EVENT);
+  });
+});
+
+describe('setup bypass for remote owners', () => {
+  it('bypasses the setup wizard only for an authenticated remote owner', () => {
+    expect(
+      shouldBypassSetupForRemoteOwner({
+        remote: true,
+        authenticated: true,
+        capabilities: { can_manage_instance: true },
+      }),
+    ).toBe(true);
+    expect(
+      shouldBypassSetupForRemoteOwner({
+        remote: true,
+        authenticated: true,
+        capabilities: { can_manage_instance: false },
+      }),
+    ).toBe(false);
+    expect(
+      shouldBypassSetupForRemoteOwner({
+        remote: false,
+        authenticated: true,
+        capabilities: { can_manage_instance: true },
+      }),
+    ).toBe(false);
   });
 });

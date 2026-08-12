@@ -175,23 +175,6 @@ def test_memory_config_rejects_non_object_sections(
         V2Config.from_payload(_payload(memory))
 
 
-def test_memory_config_keeps_legacy_null_section_compatibility() -> None:
-    root_null = V2Config.from_payload(_payload(None))
-    processing_null = V2Config.from_payload(_payload({"processing": None}))
-    nested_nulls = V2Config.from_payload(
-        _payload(
-            {
-                "processing": {"llm": None, "embedding": None},
-                "diagnostics": None,
-            }
-        )
-    )
-
-    assert root_null.memory == MemoryConfig()
-    assert processing_null.memory == MemoryConfig()
-    assert nested_nulls.memory == MemoryConfig()
-
-
 def test_memory_config_drops_retired_proactive_capture_flag(tmp_path) -> None:
     """A config written by a release that had the opt-in flag still loads."""
 
@@ -344,6 +327,35 @@ def test_memory_config_rejects_invalid_diagnostics(diagnostics: object) -> None:
                 }
             )
         )
+
+
+def test_memory_config_defaults_when_block_is_absent() -> None:
+    payload = _payload({})
+    payload.pop("memory")
+
+    config = V2Config.from_payload(payload)
+
+    assert config.memory == MemoryConfig()
+
+
+def test_memory_config_rejects_explicit_null_block() -> None:
+    with pytest.raises(ValueError, match="Config 'memory' must be an object"):
+        V2Config.from_payload(_payload(None))  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "memory",
+    [
+        {"processing": None},
+        {"processing": {"llm": None, "embedding": {"base_url": "x", "model": "m"}}},
+        {"processing": {"llm": {"base_url": "x", "model": "m"}, "embedding": None}},
+        {"diagnostics": None},
+    ],
+)
+def test_memory_config_rejects_explicit_null_nested_blocks(memory: dict) -> None:
+    """An explicitly null processing/llm/embedding block is corruption, not an omission."""
+    with pytest.raises(ValueError, match="must be an object"):
+        V2Config.from_payload(_payload(memory))
 
 
 def test_generic_config_save_preserves_memory_keys(monkeypatch, tmp_path) -> None:

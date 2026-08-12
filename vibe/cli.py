@@ -46,7 +46,7 @@ from core.scheduled_tasks import (
     resolve_session_id_target,
     session_anchor_for_target,
 )
-from core.caller_context import caller_context_from_env
+from core.caller_context import caller_context_from_env, caller_resource_user_context
 from core.command_runner import command_line_preview
 from core.vibe_agents import AgentArchivedEditError, AgentArchiveError, AgentNameValidationError, AgentReferenceRewriteError, VibeAgent, VibeAgentStore, iter_global_agent_files, parse_agent_file, validate_agent_backend
 from core.watches import (
@@ -276,6 +276,25 @@ def _print_task_error(exc: Exception, *, help_command: str | None = None) -> Non
     # payload builder below.
     if isinstance(exc, UnresolvableSessionTarget) and exc.reason == "reserved":
         exc = _reserved_session_cli_error(exc)
+    from storage.resource_access_service import (
+        REMOTE_AUTONOMOUS_HARNESS_DISABLED_CODE,
+        ResourceAccessError,
+    )
+
+    if (
+        isinstance(exc, ResourceAccessError)
+        and exc.code == REMOTE_AUTONOMOUS_HARNESS_DISABLED_CODE
+    ):
+        try:
+            lang = V2Config.load().language
+        except Exception:
+            lang = "en"
+        exc = TaskCliError(
+            str(exc),
+            code=exc.code,
+            hint=i18n_t("harness.notice.remoteExecutionDisabled", lang),
+            help_command=help_command,
+        )
     if isinstance(exc, TaskCliError):
         payload = {
             "schema_version": 1,
@@ -3567,6 +3586,7 @@ def cmd_task_add(args):
     reserved_session_id: Optional[str] = None
     try:
         caller_context = caller_context_from_env()
+        caller_user_context = caller_resource_user_context(caller_context)
         command, shell_command, has_command = _resolve_task_command(
             args,
             help_command="vibe task add --help",
@@ -3751,6 +3771,7 @@ def cmd_task_add(args):
                 metadata=metadata,
                 expected_enabled_agent_id=expected_enabled_agent_id,
                 expected_reference_agent_id=expected_reference_agent_id,
+                user_context=caller_user_context,
             )
         else:
             try:
@@ -3783,6 +3804,7 @@ def cmd_task_add(args):
                 metadata=metadata,
                 expected_enabled_agent_id=expected_enabled_agent_id,
                 expected_reference_agent_id=expected_reference_agent_id,
+                user_context=caller_user_context,
             )
         reserved_session_id = None
         warnings = _collect_target_warnings(session_target, delivery_target)
@@ -4201,6 +4223,7 @@ def cmd_task_update(args):
                 help_command="vibe task update --help",
             )
         caller_context = caller_context_from_env()
+        caller_user_context = caller_resource_user_context(caller_context)
         scope_arg_present = (getattr(args, "scope_id", None) is not None) or bool(getattr(args, "same_scope", False))
         if scope_arg_present and not (
             bool(getattr(args, "create_session", False)) or bool(getattr(args, "create_session_per_run", False))
@@ -4556,6 +4579,7 @@ def cmd_task_update(args):
             metadata=metadata,
             expected_enabled_agent_id=expected_enabled_agent_id,
             expected_reference_agent_id=expected_reference_agent_id,
+            user_context=caller_user_context,
         )
         reserved_session_id = None
         warnings = _collect_target_warnings(session_target, delivery_target)
@@ -9803,6 +9827,7 @@ def cmd_watch_add(args):
     reserved_session_id: Optional[str] = None
     try:
         caller_context = caller_context_from_env()
+        caller_user_context = caller_resource_user_context(caller_context)
         session_default_notice = _apply_caller_session_default(
             args,
             caller_context,
@@ -9903,6 +9928,7 @@ def cmd_watch_add(args):
             metadata=_definition_metadata_with_scope(caller_context, scope_id=scope_key, session_workdir=session_workdir),
             expected_enabled_agent_id=expected_enabled_agent_id,
             expected_reference_agent_id=expected_reference_agent_id,
+            user_context=caller_user_context,
         )
         reserved_session_id = None
         runtime_store = _watch_runtime_store()
@@ -10027,6 +10053,7 @@ def cmd_watch_update(args):
                 help_command="vibe watch update --help",
             )
         caller_context = caller_context_from_env()
+        caller_user_context = caller_resource_user_context(caller_context)
         scope_arg_present = (getattr(args, "scope_id", None) is not None) or bool(getattr(args, "same_scope", False))
         if scope_arg_present and not (
             bool(getattr(args, "create_session", False)) or bool(getattr(args, "create_session_per_run", False))
@@ -10330,6 +10357,7 @@ def cmd_watch_update(args):
             **changes,
             expected_enabled_agent_id=expected_enabled_agent_id,
             expected_reference_agent_id=expected_reference_agent_id,
+            user_context=caller_user_context,
         )
         reserved_session_id = None
         runtime_entry = _watch_runtime_store().load().get("watches", {}).get(updated.id)

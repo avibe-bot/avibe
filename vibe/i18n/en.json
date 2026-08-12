@@ -16,7 +16,8 @@
     "event": {
       "acceptanceUnknown": "The Show event may still be processing. It was not replayed locally.",
       "dispatchFailed": "The Show event was recorded, but its agent turn could not be delivered.",
-      "idConflict": "This Show event ID is already bound to different event contents."
+      "idConflict": "This Show event ID is already bound to different event contents.",
+      "unsupportedEventType": "Show Page writes require a supported human event or mark resolution type."
     }
   },
   "harness": {
@@ -261,6 +262,7 @@
     },
     "sessionArchived": "This session is archived and can no longer be changed.",
     "sessionArchiveUnavailable": "This session cannot be archived while the Avibe controller is unavailable. Please try again shortly.",
+    "projectAccessDenied": "You do not have permission to create a session in this project.",
     "workbenchAttachment": {
       "session_not_found": "This session is no longer available.",
       "file_required": "Choose a file to upload.",

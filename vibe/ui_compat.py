@@ -71,6 +71,13 @@ class CompatRequest:
     def json(self) -> Any:
         return self._json_payload
 
+    async def load_json(self) -> Any:
+        """Parse and cache JSON when a shared request hook needs the body."""
+
+        if self._json_payload is None:
+            self._json_payload = await _read_json_payload(self._request)
+        return self._json_payload
+
     @property
     def host(self) -> str:
         return self._request.headers.get("host", "")
@@ -103,6 +110,14 @@ class CompatRequest:
 
 request = _LocalProxy(lambda: _request_var.get())
 g = _LocalProxy(lambda: _g_var.get())
+
+
+def has_request_context() -> bool:
+    try:
+        _request_var.get()
+    except LookupError:
+        return False
+    return True
 
 
 def jsonify(*args: Any, **kwargs: Any) -> JSONResponse:
@@ -413,6 +428,8 @@ class CompatApp(FastAPI):
         self,
         starlette_request: FastAPIRequest,
         func: Callable[..., Any],
+        *,
+        parse_json: bool = True,
     ) -> Response:
         """Run a native FastAPI endpoint through the shared UI request hooks.
 
@@ -435,7 +452,8 @@ class CompatApp(FastAPI):
                         response = normalize_response(result)
                         break
                 if response is None:
-                    compat_request._json_payload = await _read_json_payload(starlette_request)
+                    if parse_json:
+                        compat_request._json_payload = await _read_json_payload(starlette_request)
                     response = normalize_response(await run_maybe_async(func))
             except Exception as exc:
                 response = await self._handle_compat_exception(exc)
