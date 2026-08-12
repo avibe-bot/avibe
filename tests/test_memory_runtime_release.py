@@ -17,6 +17,7 @@ from scripts.build_memory_runtime import (
     LOCK_SHA256,
     PYTHON_VERSION,
     UV_VERSION,
+    _short_socket_directory,
     _temporary_directory,
     create_archive,
     prune_runtime,
@@ -66,6 +67,21 @@ def test_memory_runtime_scratch_paths_resolve_the_system_temp_root(
     with _temporary_directory("memory-runtime-test-") as scratch:
         assert scratch.parent == real_temp.resolve(strict=True)
         assert scratch == scratch.resolve(strict=True)
+
+
+def test_memory_runtime_health_home_uses_a_short_canonical_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    long_temp = tmp_path / ("long-temp-" * 12)
+    long_temp.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(long_temp))
+
+    with _short_socket_directory("mrv-") as health_home:
+        socket_path = health_home / "memory" / ".rt" / "everos.sock"
+        assert health_home.parent == Path("/tmp").resolve(strict=True)
+        assert health_home == health_home.resolve(strict=True)
+        assert len(os.fsencode(socket_path)) < 104
 
 
 def test_github_only_release_runs_memory_runtime_guard_before_uploading_assets() -> None:

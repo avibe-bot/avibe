@@ -66,6 +66,15 @@ def _temporary_directory(prefix: str) -> Iterator[Path]:
         yield Path(temporary)
 
 
+@contextmanager
+def _short_socket_directory(prefix: str) -> Iterator[Path]:
+    """Create canonical scratch space short enough for Unix-domain sockets."""
+
+    temp_root = Path("/tmp").resolve(strict=True)
+    with tempfile.TemporaryDirectory(prefix=prefix, dir=temp_root) as temporary:
+        yield Path(temporary)
+
+
 def _platform_tag() -> str:
     raw = sysconfig.get_platform().lower()
     machine = raw.rsplit("-", 1)[-1]
@@ -182,7 +191,7 @@ def verify_archive(archive_path: Path, *, binary_sha256: str) -> None:
         if _sha256(binary) != binary_sha256:
             raise SystemExit("Memory Runtime extracted Python checksum mismatch")
         _smoke(binary, cwd=destination.parent)
-        with _temporary_directory("mrv-health-") as health_home:
+        with _short_socket_directory("mrv-") as health_home:
             _sidecar_health_smoke(binary, effective_home=health_home)
 
 
