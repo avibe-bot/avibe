@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 import uuid
@@ -292,6 +293,19 @@ AttemptObserver = Callable[
     ],
     None,
 ]
+
+
+def _same_json_value(left: object, right: object) -> bool:
+    try:
+        options = {
+            "allow_nan": False,
+            "ensure_ascii": False,
+            "separators": (",", ":"),
+            "sort_keys": True,
+        }
+        return json.dumps(left, **options) == json.dumps(right, **options)
+    except (TypeError, ValueError):
+        return False
 
 
 def _utc_now() -> datetime:
@@ -2705,7 +2719,8 @@ class ModelHubService:
             or not isinstance(model_id, str)
             or not model_id.strip()
             or not isinstance(payload, dict)
-            or set(payload) - {"hops", "force"}
+            or set(payload)
+            - {"hops", "force", "would_remove_hops", "would_interrupt"}
             or "hops" not in payload
             or ("force" in payload and not isinstance(payload["force"], bool))
         ):
@@ -2734,16 +2749,20 @@ class ModelHubService:
                     model.id == hop.model_id for model in source.models
                 ):
                     raise ModelHubError("mapping_target_unavailable", status=409)
+            new_pairs = {
+                (item.source_id, item.model_id)
+                for item in route.hops
+            }
             removed_hops = [
                 {
                     "backend": backend,
                     "menu_model": model_id,
                     "source_id": hop.source_id,
                     "model_id": hop.model_id,
+                    "position": position,
                 }
-                for hop in old_route.hops
-                if (hop.source_id, hop.model_id)
-                not in {(item.source_id, item.model_id) for item in route.hops}
+                for position, hop in enumerate(old_route.hops, start=1)
+                if (hop.source_id, hop.model_id) not in new_pairs
             ]
             agent.routes[model_id] = route
             interrupted = self._introduced_interruptions(
@@ -2755,7 +2774,18 @@ class ModelHubService:
                     else frozenset()
                 ),
             )
-            if interrupted and payload.get("force") is not True:
+            confirmed = (
+                payload.get("force") is True
+                and _same_json_value(
+                    payload.get("would_remove_hops"),
+                    removed_hops,
+                )
+                and _same_json_value(
+                    payload.get("would_interrupt"),
+                    interrupted,
+                )
+            )
+            if interrupted and not confirmed:
                 raise ModelHubError(
                     "source_last_supplier",
                     status=409,

@@ -1305,6 +1305,7 @@ def test_set_agent_chain_reports_complete_removed_hops_without_syncing(tmp_path)
             "menu_model": menu_model,
             "source_id": second.id,
             "model_id": menu_model,
+            "position": 2,
         }
     ]
     assert adapter.synced == []

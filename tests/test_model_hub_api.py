@@ -326,6 +326,33 @@ def _refresh_fixture_routes(config: ModelHubConfig) -> None:
                 route.hops = (*route.hops, ModelHubRouteHopConfig(source.id, model.id))
 
 
+def _set_claude_route_fixture(
+    store: MemoryStore,
+    source_ids: tuple[str, ...],
+    model_id: str,
+) -> tuple[ModelHubRouteHopConfig, ...]:
+    sources = [
+        ModelHubSourceConfig(
+            id=source_id,
+            kind="api_key",
+            vendor="anthropic",
+            display_name=source_id,
+            protocol="anthropic",
+            supply_channel="hub",
+            billing="metered",
+            state=ModelHubSourceStateConfig(status="standby"),
+            models=[ModelHubModelConfig(id=model_id, provenance="discovered")],
+            credential_ref=f"cred_{source_id}",
+        )
+        for source_id in source_ids
+    ]
+    hops = tuple(ModelHubRouteHopConfig(source.id, model_id) for source in sources)
+    store.config.sources = sources
+    store.config.agents["claude"].sources.order = list(source_ids)
+    store.config.agents["claude"].routes[model_id] = ModelHubRouteConfig(hops=hops)
+    return hops
+
+
 async def _create_source(service: ModelHubService, payload: dict) -> dict:
     return (await service.create_source(payload))["source"]
 
@@ -1069,6 +1096,147 @@ def test_chain_route_preserves_submitted_hops_against_opposite_source_order(
         (hop.source_id, hop.model_id)
         for hop in store.config.agents["claude"].routes[model_id].hops
     ] == [(hop["source_id"], hop["model_id"]) for hop in hops]
+
+
+def test_chain_route_guard_requires_and_replays_the_exact_current_plan(
+    monkeypatch, tmp_path
+):
+    service, store, _ = _service(tmp_path)
+    model_id = "claude-opus-4-6"
+    first_id, second_id = "src_chain0101", "src_chain0102"
+    old_hops = _set_claude_route_fixture(
+        store,
+        (first_id, second_id),
+        model_id,
+    )
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
+    client = app.test_client()
+    base_url = "http://127.0.0.1:15131"
+    headers = csrf_headers(client, base_url)
+    endpoint = f"/api/models/agents/claude/chain?model={model_id}"
+
+    refused = client.put(
+        endpoint,
+        json={"hops": []},
+        headers=headers,
+        base_url=base_url,
+    )
+
+    assert refused.status_code == 409
+    refusal = refused.get_json()
+    _assert_envelope(refusal, ok=False)
+    assert refusal["error"] == "source_last_supplier"
+    assert refusal["would_remove_hops"] == [
+        {
+            "backend": "claude",
+            "menu_model": model_id,
+            "source_id": first_id,
+            "model_id": model_id,
+            "position": 1,
+        },
+        {
+            "backend": "claude",
+            "menu_model": model_id,
+            "source_id": second_id,
+            "model_id": model_id,
+            "position": 2,
+        },
+    ]
+    assert refusal["would_interrupt"] == [
+        {"backend": "claude", "model_id": model_id, "agents": []}
+    ]
+
+    unconfirmed = client.put(
+        endpoint,
+        json={
+            "hops": [],
+            "force": True,
+            "would_remove_hops": [
+                {**refusal["would_remove_hops"][0], "position": True},
+                refusal["would_remove_hops"][1],
+            ],
+            "would_interrupt": refusal["would_interrupt"],
+        },
+        headers=headers,
+        base_url=base_url,
+    )
+
+    assert unconfirmed.status_code == 409
+    assert unconfirmed.get_json()["would_remove_hops"] == refusal["would_remove_hops"]
+    assert [
+        (hop.source_id, hop.model_id)
+        for hop in store.config.agents["claude"].routes[model_id].hops
+    ] == [(hop.source_id, hop.model_id) for hop in old_hops]
+
+    committed = client.put(
+        endpoint,
+        json={
+            "hops": [],
+            "force": True,
+            "would_remove_hops": refusal["would_remove_hops"],
+            "would_interrupt": refusal["would_interrupt"],
+        },
+        headers=headers,
+        base_url=base_url,
+    )
+
+    assert committed.status_code == 200
+    success = committed.get_json()
+    assert json.dumps(success["removed_hops"], separators=(",", ":")) == json.dumps(
+        refusal["would_remove_hops"], separators=(",", ":")
+    )
+    assert json.dumps(success["interrupted"], separators=(",", ":")) == json.dumps(
+        refusal["would_interrupt"], separators=(",", ":")
+    )
+    assert success["chain"]["chain"] == []
+    assert store.config.agents["claude"].routes[model_id].hops == ()
+
+
+def test_chain_route_noninterrupting_success_is_force_invariant(monkeypatch, tmp_path):
+    unforced_service, unforced_store, _ = _service(tmp_path / "unforced")
+    model_id = "claude-opus-4-6"
+    first_id, second_id = "src_chain0201", "src_chain0202"
+    _set_claude_route_fixture(
+        unforced_store,
+        (first_id, second_id),
+        model_id,
+    )
+    forced_service, forced_store, _ = _service(tmp_path / "forced")
+    forced_store.config = ModelHubConfig.from_payload(
+        unforced_store.config.to_payload()
+    )
+    client = app.test_client()
+    base_url = "http://127.0.0.1:15131"
+    headers = csrf_headers(client, base_url)
+    endpoint = f"/api/models/agents/claude/chain?model={model_id}"
+    hops = [{"source_id": first_id, "model_id": model_id}]
+
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: unforced_service)
+    unforced = client.put(
+        endpoint,
+        json={"hops": hops},
+        headers=headers,
+        base_url=base_url,
+    )
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: forced_service)
+    forced = client.put(
+        endpoint,
+        json={"hops": hops, "force": True},
+        headers=headers,
+        base_url=base_url,
+    )
+
+    assert unforced.status_code == forced.status_code == 200
+    assert unforced.content == forced.content
+    assert unforced.get_json()["removed_hops"] == [
+        {
+            "backend": "claude",
+            "menu_model": model_id,
+            "source_id": second_id,
+            "model_id": model_id,
+            "position": 2,
+        }
+    ]
 
 
 def test_delete_guard_reports_only_routes_emptied_by_this_mutation(tmp_path):
