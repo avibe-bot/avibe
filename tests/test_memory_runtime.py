@@ -49,6 +49,7 @@ from core.memory.process import (
     FakeEverOSProcessFactory,
     RebuildProcessResult,
 )
+from core.memory.provider_root import ProviderRootMetadata
 from core.memory.runtime import (
     MemoryRuntime,
     MemorySessionLifecycleBusyError,
@@ -5609,6 +5610,134 @@ async def test_runtime_rebuild_empty_root_settles_without_child(
     await memory_runtime_factory.close(runtime)
 
 
+async def test_runtime_rebuild_finalizes_incompatible_empty_root_before_settlement(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    memory_runtime_factory,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    candidate = MemoryConfig(
+        enabled=True,
+        processing=_processing_config(),
+        recovery_intent="rebuild",
+    )
+    V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+        memory=candidate,
+    ).save()
+    artifact = _installed_artifact(
+        root_format="everos-2.0",
+        fingerprint="artifact-2.0",
+        compatible_formats=frozenset({"everos-2.0"}),
+    )
+    runtime = memory_runtime_factory(
+        candidate,
+        artifact_manager=artifact,
+        process_factory=FakeEverOSProcessFactory(),
+        effective_home=tmp_path,
+    )
+    meta = runtime._store.ensure_meta()
+    previous = ProviderRootMetadata(
+        provider_root_format="everos-1.0",
+        compatible_provider_root_formats=frozenset({"everos-1.0"}),
+        artifact_fingerprint="artifact-1.0",
+    )
+    runtime._provider_root_owner.ensure(meta, previous)
+    settlement_formats: list[str | None] = []
+    settle_rebuild_intent = runtime._settle_rebuild_intent
+
+    def settle_after_root_finalization(config: MemoryConfig):
+        root_state = runtime._provider_root_owner.inspect(
+            runtime._active_provider_root_metadata()
+        )
+        settlement_formats.append(root_state.provider_root_format)
+        return settle_rebuild_intent(config)
+
+    monkeypatch.setattr(
+        runtime,
+        "_settle_rebuild_intent",
+        settle_after_root_finalization,
+    )
+
+    assert await runtime.rebuild() == {
+        "ok": True,
+        "result": "completed_empty",
+        "state": "ready",
+    }
+    root_state = runtime._provider_root_owner.inspect(
+        runtime._active_provider_root_metadata()
+    )
+    assert root_state.provider_root_format == "everos-2.0"
+    assert root_state.empty is True
+    assert settlement_formats == ["everos-2.0"]
+    assert V2Config.load().memory.recovery_intent is None
+    await memory_runtime_factory.close(runtime)
+
+
+@pytest.mark.parametrize("failure_stage", ["activate", "ensure"])
+async def test_runtime_rebuild_empty_root_transition_failure_retains_marker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    memory_runtime_factory,
+    failure_stage: str,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    candidate = MemoryConfig(
+        enabled=True,
+        processing=_processing_config(),
+        recovery_intent="rebuild",
+    )
+    V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+        memory=candidate,
+    ).save()
+    runtime = memory_runtime_factory(
+        candidate,
+        artifact_manager=_installed_artifact(
+            root_format="everos-2.0",
+            fingerprint="artifact-2.0",
+            compatible_formats=frozenset({"everos-2.0"}),
+        ),
+        process_factory=FakeEverOSProcessFactory(),
+        effective_home=tmp_path,
+    )
+    meta = runtime._store.ensure_meta()
+    previous = ProviderRootMetadata(
+        provider_root_format="everos-1.0",
+        compatible_provider_root_formats=frozenset({"everos-1.0"}),
+        artifact_fingerprint="artifact-1.0",
+    )
+    runtime._provider_root_owner.ensure(meta, previous)
+
+    def fail_transition(*_args, **_kwargs):
+        raise RuntimeError(f"injected {failure_stage} failure")
+
+    monkeypatch.setattr(
+        runtime._provider_root_owner,
+        "activate_empty_format" if failure_stage == "activate" else "ensure",
+        fail_transition,
+    )
+
+    assert await runtime.rebuild() == {
+        "ok": False,
+        "error": "memory_rebuild_failed",
+        "result": "failed",
+    }
+    assert V2Config.load().memory.recovery_intent == "rebuild"
+    assert runtime._config.recovery_intent == "rebuild"
+    assert runtime._restart_config.recovery_intent == "rebuild"
+    assert runtime._provider_root_owner.inspect(previous).provider_root_format == "everos-1.0"
+    await memory_runtime_factory.close(runtime)
+
+
 async def test_runtime_rebuild_reads_key_correction_after_admission_gap(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -6007,7 +6136,7 @@ async def test_cancelled_rebuild_caller_still_refreshes_settled_config(
     await memory_runtime_factory.close(runtime)
 
 
-async def test_runtime_rebuild_keeps_completed_result_when_root_activation_fails(
+async def test_runtime_rebuild_retains_marker_when_root_identity_is_unavailable(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     memory_runtime_factory,
@@ -6041,11 +6170,12 @@ async def test_runtime_rebuild_keeps_completed_result_when_root_activation_fails
 
     assert await runtime.rebuild() == {
         "ok": False,
-        "error": "memory_restart_failed",
-        "result": "completed_empty",
+        "error": "memory_rebuild_failed",
+        "result": "failed",
     }
-    assert V2Config.load().memory.recovery_intent is None
-    assert runtime._restart_config.recovery_intent is None
+    assert V2Config.load().memory.recovery_intent == "rebuild"
+    assert runtime._config.recovery_intent == "rebuild"
+    assert runtime._restart_config.recovery_intent == "rebuild"
     assert runtime.module._worker._claims_paused is True
     await memory_runtime_factory.close(runtime)
 

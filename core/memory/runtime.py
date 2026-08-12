@@ -2389,6 +2389,34 @@ class MemoryRuntime:
                     "ok": True,
                     "result": "completed_empty",
                 }
+                # Empty rebuilds still own a provider-root format transition.
+                # Complete and verify it before clearing the durable retry fence.
+                try:
+                    async with self.module.provider_root_lifecycle():
+                        meta = await asyncio.to_thread(self._store.ensure_meta)
+                        active_metadata = self._active_provider_root_metadata()
+                        root_rollback = await run_blocking(
+                            self._provider_root_owner.activate_empty_format,
+                            meta,
+                            active_metadata,
+                        )
+                        try:
+                            await run_blocking(
+                                self._provider_root_owner.ensure,
+                                meta,
+                                active_metadata,
+                            )
+                        except Exception:
+                            if root_rollback is not None:
+                                await run_blocking(root_rollback.rollback)
+                            raise
+                except Exception:
+                    self._runtime_error = "memory_rebuild_failed"
+                    return {
+                        "ok": False,
+                        "error": self._runtime_error,
+                        "result": "failed",
+                    }
 
             settled = await run_blocking(
                 self._settle_rebuild_intent,
