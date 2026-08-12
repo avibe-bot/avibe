@@ -1,0 +1,28 @@
+version: 1
+capability:
+  id: memory_clear_recovery
+  name: Journaled Memory Clear recovery
+  canonical_tests:
+    - tests/test_memory_maintenance.py
+status_legend:
+  covered: scenario coverage exists
+  partial: unit or contract coverage exists but the closed loop is incomplete
+  manual: currently validated only by human regression
+  gap: not covered yet
+scenarios:
+  - id: MEMORY-CLEAR-201
+    name: Clear discards an unknown add and restores session delivery
+    status: covered
+    kind: recovery
+    layer: scenario
+    test: tests/test_memory_maintenance.py::test_clear_discards_manual_required_fence_and_allows_new_delivery
+    actor: Memory Settings user
+    trigger: A provider add times out after submission and fences its session as manual_required
+    given: The queue retains the ambiguous payload and pinned attachment bundle without replaying it
+    when: The user confirms Clear Memory Data
+    then: The journaled Clear removes the retained evidence, advances the epoch, and a later capture in the same logical session delivers normally
+    expected_outputs:
+      - Maintenance advertises can_clear while the manual_required fence exists
+      - Clear completes through the existing snapshot and journal surfaces
+      - The ambiguous payload and attachment bundle are removed without another provider add
+      - The session is unfenced and a subsequent capture reaches the provider
