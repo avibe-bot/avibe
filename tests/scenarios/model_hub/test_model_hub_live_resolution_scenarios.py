@@ -309,9 +309,14 @@ def test_mh_res_live_001_pre_stream_failure_falls_back_within_turn(
             assert status == 200
             assert body == b'{"ok":true}'
             assert [call[0] for call in adapter.invocations] == ["src_primary1", "src_backup01"]
-            assert store.load().sources[0].state.status == "cooldown"
-            assert [event["kind"] for event in service.list_events(limit=5)[:2]] == ["switch", "cooldown"]
-            assert service.list_events(limit=5)[1]["reason"] == reason
+            events = service.list_events(limit=5)
+            if failed.kind is RawOutcomeKind.NETWORK_ERROR:
+                assert store.load().sources[0].state.status == "standby"
+                assert [event["kind"] for event in events] == ["switch"]
+            else:
+                assert store.load().sources[0].state.status == "cooldown"
+                assert [event["kind"] for event in events[:2]] == ["switch", "cooldown"]
+                assert events[1]["reason"] == reason
 
             clock[0] += timedelta(minutes=6)
             if backend == "opencode":
