@@ -24,7 +24,10 @@ import { VaultSettingsDialog } from '../ui/vault-settings-dialog';
 import { canManageVaultSecrets } from '../../lib/remoteAuth';
 import { useProtectedVault } from '../../lib/useProtectedVault';
 import { useVaultRequestRefresh } from '../../lib/useVaultRequestRefresh';
-import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
+import {
+  canUseRuntimeSurfaces,
+  useInstanceAuthorization,
+} from '../../context/InstanceAuthorizationContext';
 
 const PENDING_REQUEST_EXPIRY_GRACE_MS = 100;
 const MAX_BROWSER_TIMEOUT_MS = 2_147_483_647;
@@ -232,8 +235,8 @@ function describeGrant(g: VaultGrant, t: TFunction): { Icon: typeof KeyRound; la
  * and an inline × to revoke. A grant is a fixed protected set keyed by grant_id — the chip
  * summarizes its `source_selector`, never a group.
  */
-// ``onRevoke`` is omitted when revocation is unavailable (remote access: the
-// revoke route is local-only), which renders the chip read-only.
+// ``onRevoke`` is omitted when the current runtime policy withholds revocation,
+// which renders the chip read-only.
 const GrantChip: React.FC<{ grant: VaultGrant; now: number; onRevoke?: (grant: VaultGrant) => void }> = ({
   grant: g,
   now,
@@ -489,15 +492,15 @@ export const VaultsPage: React.FC = () => {
   const api = useApi();
   const { showToast } = useToast();
   const vault = useProtectedVault();
-  const { capabilities, remote } = useInstanceAuthorization();
-  // `can_manage_instance` stays true for a remote Instance owner, but every Vault
-  // mutation (create / edit / delete / reveal, settings save, request fulfil or
-  // deny, grant revoke, sign) and every key-material read the lock indicator
-  // needs (`vmk`, `pubkey`, `sandbox/root-metadata`) is local-only. Remote owners
-  // therefore keep the reads the policy permits — inventory, tags, settings,
-  // grants, audit — and lose the controls that would dead-end.
-  const canManage = capabilities.can_manage_instance && canManageVaultSecrets({ remote });
-  const canReadVaultState = capabilities.can_manage_instance;
+  const { capabilities, remote, hasTemporaryUnrestrictedOrgAccess } = useInstanceAuthorization();
+  const canUseRuntime = canUseRuntimeSurfaces(remote, hasTemporaryUnrestrictedOrgAccess);
+  const canManage =
+    (capabilities.can_manage_instance || canUseRuntime) &&
+    canManageVaultSecrets({
+      remote,
+      temporaryUnrestrictedOrgAccess: hasTemporaryUnrestrictedOrgAccess,
+    });
+  const canReadVaultState = capabilities.can_manage_instance || canUseRuntime;
   const [searchParams, setSearchParams] = useSearchParams();
   const [secrets, setSecrets] = useState<VaultSecret[]>([]);
   const [grants, setGrants] = useState<VaultGrant[]>([]);
@@ -778,7 +781,7 @@ export const VaultsPage: React.FC = () => {
                 <Plus className="size-4" />
                 {t('vaults.add')}
               </Button>
-            ) : remote ? (
+            ) : remote && !canUseRuntime ? (
               <Badge variant="secondary" title={t('vaults.remoteReadOnlyHint')}>
                 <Lock className="size-3" />
                 {t('vaults.remoteReadOnly')}

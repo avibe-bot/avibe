@@ -3,7 +3,10 @@ import { NavLink, useLocation } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { Activity, Bot, KeyRound, WandSparkles } from 'lucide-react';
 import clsx from 'clsx';
-import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
+import {
+  canUseRuntimeSurfaces,
+  useInstanceAuthorization,
+} from '../../context/InstanceAuthorizationContext';
 import { canUseHarness } from '../../lib/remoteAuth';
 
 const TABS = [
@@ -21,17 +24,21 @@ export const CapabilityTabs: React.FC = () => {
   const { t } = useTranslation();
   const { pathname } = useLocation();
   const activeTabRef = useRef<HTMLAnchorElement | null>(null);
-  const { capabilities, remote } = useInstanceAuthorization();
+  const {
+    capabilities,
+    remote,
+    hasTemporaryUnrestrictedOrgAccess,
+  } = useInstanceAuthorization();
+  const canUseRuntime = canUseRuntimeSurfaces(remote, hasTemporaryUnrestrictedOrgAccess);
   const tabs = TABS.filter(({ to }) => {
-    // Harness is the exception to the owner check: its page opens entirely on
-    // local-only routes (`/api/harness/bootstrap`), so `can_manage_agents`
-    // (which stays true for a remote owner) would navigate a remote owner into
-    // the AppShell local-only redirect. The trusted-local `canUseHarness`
-    // predicate keeps the tab local-only, matching the desktop sidebar.
-    if (to === '/harness') return capabilities.can_manage_agents && canUseHarness({ remote });
-    if (to === '/agents') return capabilities.can_manage_agents;
-    if (to === '/skills') return capabilities.can_use_skills;
-    if (to === '/vaults') return capabilities.can_use_vault_secrets;
+    if (canUseRuntime) return true;
+    if (to === '/harness') return (capabilities.can_manage_agents || canUseRuntime) && canUseHarness({
+      remote,
+      temporaryUnrestrictedOrgAccess: hasTemporaryUnrestrictedOrgAccess,
+    });
+    if (to === '/agents') return capabilities.can_manage_agents || canUseRuntime;
+    if (to === '/skills') return capabilities.can_use_skills || canUseRuntime;
+    if (to === '/vaults') return capabilities.can_use_vault_secrets || canUseRuntime;
     return false;
   });
 

@@ -22,7 +22,12 @@ import {
 export const InboxPage: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const { capabilities } = useInstanceAuthorization();
+  const {
+    capabilities,
+    remote,
+    hasTemporaryUnrestrictedOrgAccess,
+  } = useInstanceAuthorization();
+  const canUseRuntime = !remote || hasTemporaryUnrestrictedOrgAccess === true;
   const {
     inboxSessions,
     unreadBySession,
@@ -189,8 +194,8 @@ export const InboxPage: React.FC = () => {
           ))}
         </div>
         <div className="flex min-w-0 flex-wrap items-center gap-2 sm:ml-auto sm:justify-end">
-          {capabilities.can_manage_instance && <WebPushControl />}
-          {capabilities.can_chat && (
+          {(capabilities.can_manage_instance || canUseRuntime) && <WebPushControl />}
+          {(capabilities.can_chat || canUseRuntime) && (
             <button
               type="button"
               onClick={onMarkAllRead}
@@ -292,7 +297,7 @@ export const InboxPage: React.FC = () => {
                     {t('workbench.inbox.openSession')}
                     <ArrowRight className="size-3" />
                   </button>
-                  {capabilities.can_chat && unread > 0 && (
+                  {(capabilities.can_chat || canUseRuntime) && unread > 0 && (
                     <button
                       type="button"
                       onClick={() => markRead(s.session_id)}

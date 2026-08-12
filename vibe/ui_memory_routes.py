@@ -1,6 +1,6 @@
 """The ``/api/memory/*`` UI surface.
 
-Every route here requires a trusted local or authenticated Avibe Cloud browser
+Every route here requires an authorized local or authenticated Avibe Cloud browser
 and answers with the closed Memory result envelope (``{"status": "ok", ...}`` /
 ``{"status": "failed", "error":
 <closed code>}``) plus ``Cache-Control: no-store``. Keeping them in one module
@@ -31,7 +31,7 @@ _MEMORY_LOG_ENTRY_ID_RE = re.compile(r"[A-Za-z0-9_.:-]{1,256}\Z")
 
 
 def _memory_ui_user_key() -> str | None:
-    """Ask ``ui_server`` for the trusted browser's Memory identity.
+    """Ask ``ui_server`` for the authorized browser's Memory identity.
 
     Late-bound on purpose: the policy belongs with the other request-locality
     helpers in ``ui_server``, and resolving it per call keeps it patchable there.

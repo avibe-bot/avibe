@@ -56,7 +56,7 @@ def _seed_policies(connection) -> None:
     )
 
 
-def test_policy_evaluation_private_public_scope_and_missing_group_context(tmp_path) -> None:
+def test_active_org_members_bypass_resource_acl_without_changing_unknown_kind_fail_closed(tmp_path) -> None:
     db = tmp_path / "vibe.sqlite"
     run_migrations(db)
     engine = create_sqlite_engine(db)
@@ -70,25 +70,23 @@ def test_policy_evaluation_private_public_scope_and_missing_group_context(tmp_pa
             member_other_group = _context("member-4", group_ids=frozenset({"group-sales"}))
             outside_org = _context("member-5", organization_id="org-2", group_ids=frozenset({"group-engineering"}))
 
-            assert resource_access_service.can_use_resource(owner, "agent", "private-agent", connection=connection)
-            assert not resource_access_service.can_use_resource(
-                engineering_member, "agent", "private-agent", connection=connection
-            )
-
+            for context in (owner, engineering_member, member_without_groups, member_other_group):
+                assert resource_access_service.can_use_resource(
+                    context, "agent", "private-agent", connection=connection
+                )
+                assert resource_access_service.can_use_resource(
+                    context, "agent", "public-agent", connection=connection
+                )
+                assert resource_access_service.can_use_resource(
+                    context, "agent", "scoped-agent", connection=connection
+                )
             assert resource_access_service.can_use_resource(
-                engineering_member, "agent", "public-agent", connection=connection
+                outside_org, "agent", "public-agent", connection=connection
             )
-            assert not resource_access_service.can_use_resource(outside_org, "agent", "public-agent", connection=connection)
-
-            assert resource_access_service.can_use_resource(
-                engineering_member, "agent", "scoped-agent", connection=connection
-            )
-            assert not resource_access_service.can_use_resource(
-                member_without_groups, "agent", "scoped-agent", connection=connection
-            )
-            assert not resource_access_service.can_use_resource(
-                member_other_group, "agent", "scoped-agent", connection=connection
-            )
+            with pytest.raises(resource_access_service.ResourceAccessError, match="invalid_resource_kind"):
+                resource_access_service.can_use_resource(
+                    engineering_member, "future_resource", "future-1", connection=connection
+                )
     finally:
         engine.dispose()
 
@@ -124,7 +122,7 @@ def test_resource_policy_narrowing_matrix(
     )
 
 
-def test_no_policy_is_local_private_but_instance_owner_keeps_legacy_access(tmp_path) -> None:
+def test_active_org_members_can_use_legacy_resources_without_forging_local_identity(tmp_path) -> None:
     db = tmp_path / "vibe.sqlite"
     run_migrations(db)
     engine = create_sqlite_engine(db)
@@ -133,22 +131,29 @@ def test_no_policy_is_local_private_but_instance_owner_keeps_legacy_access(tmp_p
             member = _context("member-1", group_ids=frozenset({"group-engineering"}))
             owner = _context("owner-1", instance_role="owner", access_source="owner")
             diagnostic_owner = _context("member-2", instance_role="viewer", access_source="owner")
+            non_member_owner = _context(
+                "legacy-owner",
+                organization_id=None,
+                role=None,
+                instance_role="owner",
+                access_source="owner",
+            )
             local = resource_access_service.ResourceUserContext(is_trusted_local=True)
 
-            assert not resource_access_service.can_use_resource(member, "agent", "legacy-agent", connection=connection)
+            assert resource_access_service.can_use_resource(member, "agent", "legacy-agent", connection=connection)
             assert resource_access_service.can_use_resource(owner, "agent", "legacy-agent", connection=connection)
+            assert resource_access_service.can_use_resource(
+                diagnostic_owner, "agent", "legacy-agent", connection=connection
+            )
             assert not resource_access_service.can_use_resource(
-                diagnostic_owner,
-                "agent",
-                "legacy-agent",
-                connection=connection,
+                non_member_owner, "agent", "legacy-agent", connection=connection
             )
             assert resource_access_service.can_use_resource(local, "agent", "legacy-agent", connection=connection)
     finally:
         engine.dispose()
 
 
-def test_removed_org_owner_loses_org_private_resources_but_keeps_personal_resources(tmp_path) -> None:
+def test_non_member_role_rank_does_not_bypass_organization_resource_acl(tmp_path) -> None:
     db = tmp_path / "vibe.sqlite"
     run_migrations(db)
     engine = create_sqlite_engine(db)
@@ -183,17 +188,14 @@ def test_removed_org_owner_loses_org_private_resources_but_keeps_personal_resour
                 "private-agent",
                 connection=connection,
             )
+            # Direct service calls retain ordinary role plus resource-policy
+            # semantics; HTTP admission rejects this non-member before runtime
+            # APIs can reach the service.
             assert resource_access_service.can_use_resource(
-                removed_owner,
-                "agent",
-                "personal-agent",
-                connection=connection,
+                removed_owner, "agent", "personal-agent", connection=connection
             )
             assert resource_access_service.can_manage_resource_acl(
-                removed_owner,
-                "agent",
-                "personal-agent",
-                connection=connection,
+                removed_owner, "agent", "personal-agent", connection=connection
             )
     finally:
         engine.dispose()
@@ -228,7 +230,7 @@ def test_http_resource_services_reuse_the_parsed_authorization_context() -> None
         assert resource_access_service.resolve_resource_access_context() is context
 
 
-def test_deferred_remote_context_expires_at_authorization_refresh_boundary() -> None:
+def test_deferred_remote_context_remains_valid_past_authorization_refresh_boundary() -> None:
     from vibe import remote_access
 
     issued_at = 1_700_000_000
@@ -248,17 +250,21 @@ def test_deferred_remote_context_expires_at_authorization_refresh_boundary() -> 
     metadata = resource_access_service.metadata_with_resource_user_context({}, context)
     expires_at = issued_at + remote_access.SESSION_AUTHORIZATION_REFRESH_SECONDS
 
-    restored = resource_access_service.resource_user_context_from_metadata(
+    # The refresh boundary is recorded for audit but is no longer a hard
+    # execution cutoff: durable Harness automation must keep running past the
+    # creating browser session's refresh window. Active Organization membership
+    # is re-derived from the signed claims at execution time (avibe#1343 P1).
+    before = resource_access_service.resource_user_context_from_metadata(
         metadata,
         now=expires_at - 1,
     )
-    assert restored is not None
-    assert restored.subject == "member-1"
-    with pytest.raises(resource_access_service.ResourceAccessError, match="resource_authorization_expired"):
-        resource_access_service.resource_user_context_from_metadata(
-            metadata,
-            now=expires_at,
-        )
+    after = resource_access_service.resource_user_context_from_metadata(
+        metadata,
+        now=expires_at + 86_400,  # well past the 12h refresh window
+    )
+    assert before is not None and after is not None
+    assert before.subject == after.subject == "member-1"
+    assert after.is_active_organization_member is True
 
 
 def test_personal_resources_cannot_use_organization_access_levels(tmp_path) -> None:

@@ -19,6 +19,7 @@ import { useLatestRef } from '@/lib/useLatestRef';
 // immediately (no flicker) before the server document loads. Matches the
 // server's fresh-instance seed; reconcileDock takes over once the GET resolves.
 const DEFAULT_DOC: DockDoc = seedDefaultDock();
+
 const DISABLED_DOCK_VALUE: DockValue = {
   order: DEFAULT_DOC.order,
   pins: [],

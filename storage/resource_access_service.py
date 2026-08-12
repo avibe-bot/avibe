@@ -22,6 +22,8 @@ from storage.models import resource_access_groups, resource_access_policies, sta
 from vibe.authorization import (
     AuthorizationContext,
     context_from_session_payload,
+    has_temporary_unrestricted_org_access,
+    has_temporary_unrestricted_runtime_access,
     trusted_local_context,
 )
 
@@ -205,10 +207,14 @@ def resolve_resource_access_context(
 def ensure_local_harness_definition_write(
     user_context: ResourceUserContext | Mapping[str, Any] | None = None,
 ) -> ResourceUserContext:
-    """Keep executable Harness definitions on the trusted-local side."""
+    """Allow the temporary active-Organization runtime rollout to write Harness data.
+
+    The caller's real remote identity is retained in all persisted metadata;
+    this helper only decides whether the operation is admitted.
+    """
 
     context = resolve_resource_access_context(user_context)
-    if context.is_remote:
+    if context.is_remote and not has_temporary_unrestricted_org_access(context):
         raise ResourceAccessError(REMOTE_AUTONOMOUS_HARNESS_DISABLED_CODE)
     return context
 
@@ -219,6 +225,29 @@ def metadata_has_remote_resource_context(metadata: Mapping[str, Any] | None) -> 
     return isinstance(metadata, Mapping) and isinstance(
         metadata.get(RESOURCE_USER_CONTEXT_METADATA_KEY),
         Mapping,
+    )
+
+
+def metadata_allows_temporary_unrestricted_runtime(
+    metadata: Mapping[str, Any] | None,
+) -> bool:
+    """Return whether persisted remote provenance may execute runtime work.
+
+    Remote Harness definitions retain signed claims instead of becoming local
+    owners. Rehydrate those claims and require the same active-Organization
+    rollout signal at execution time; malformed, expired, or non-member
+    metadata remains denied.
+    """
+
+    if not metadata_has_remote_resource_context(metadata):
+        return True
+    try:
+        context = resource_user_context_from_metadata(metadata)
+    except ResourceAccessError:
+        return False
+    return bool(
+        context is not None
+        and has_temporary_unrestricted_runtime_access(context)
     )
 
 
@@ -243,6 +272,7 @@ def metadata_with_resource_user_context(
         "vibe_membership_version": context.membership_version,
         "vibe_instance_role": context.instance_role,
         "vibe_instance_access_source": context.instance_access_source,
+        "vibe_show_page_id": context.show_page_id,
         "claims_issued_at": context.claims_issued_at,
         "vibe_instance_authorization_revision": context.authorization_revision,
         "authorization_expires_at": _resource_context_expires_at(context),
@@ -262,10 +292,17 @@ def resource_user_context_from_metadata(
     *,
     now: int | None = None,
 ) -> ResourceUserContext | None:
-    """Restore remote provenance for non-executable compatibility callers.
+    """Restore remote provenance for deferred authorization checks.
 
-    The returned object is not autonomous execution authority. Task and Watch
-    executors reject metadata carrying this provenance before calling here.
+    The returned context retains the real signed Organization identity. Deferred
+    runtime executors still apply ``metadata_allows_temporary_unrestricted_runtime``
+    before doing work, so malformed and non-member snapshots fail closed.
+
+    The ``authorization_expires_at`` snapshot is recorded for audit but is no
+    longer a hard execution cutoff: durable automation (Harness tasks/watches)
+    must not be permanently suspended just because the creating browser session's
+    refresh window elapsed. Active Organization membership is re-derived from the
+    signed claims at execution time instead (avibe#1343 P1).
     """
 
     if not isinstance(metadata, Mapping):
@@ -273,9 +310,6 @@ def resource_user_context_from_metadata(
     snapshot = metadata.get(RESOURCE_USER_CONTEXT_METADATA_KEY)
     if not isinstance(snapshot, Mapping):
         return None
-    expires_at = _clean_positive_int(snapshot.get("authorization_expires_at"))
-    if expires_at is None or expires_at <= (now if now is not None else int(time.time())):
-        raise ResourceAccessError("resource_authorization_expired")
     return current_resource_context(snapshot, is_remote=True, is_trusted_local=False)
 
 
@@ -285,6 +319,28 @@ def _as_context(user_context: ResourceUserContext | Mapping[str, Any] | None) ->
     if isinstance(user_context, Mapping):
         return _context_from_mapping(user_context, is_remote=True, is_trusted_local=False)
     return ResourceUserContext()
+
+
+def _temporary_unrestricted_resource_bypass(
+    context: ResourceUserContext,
+    resource_kind: str,
+) -> bool:
+    """Apply the temporary rollout to known runtime resource kinds.
+
+    This is still an explicit resource-kind allowlist. It does not change the
+    caller into a trusted-local principal and unknown resource kinds fail closed.
+    """
+
+    return resource_kind in RESOURCE_KINDS and has_temporary_unrestricted_org_access(context)
+
+
+def _temporary_show_page_bypass(
+    context: ResourceUserContext,
+    resource_kind: str,
+) -> bool:
+    """Compatibility predicate for callers that specifically handle Show Pages."""
+
+    return resource_kind == "show_page" and has_temporary_unrestricted_org_access(context)
 
 
 @contextmanager
@@ -542,17 +598,32 @@ def _replace_policy_groups(
 def _policy_allows(
     context: ResourceUserContext,
     resource_kind: str,
+    resource_id: str,
     policy: Mapping[str, Any] | None,
     group_ids: Sequence[str],
 ) -> bool:
     if context.is_trusted_local:
         return True
+    if _temporary_unrestricted_resource_bypass(context, resource_kind):
+        return True
+    if resource_kind == "show_page" and context.can_use_show_page(resource_id):
+        return True
+    if context.instance_access_source == "show_page_email":
+        return False
     if not context.can_use_resource(resource_kind):
         return False
     if policy is None:
         # A legacy no-policy resource is local-private. The paired instance's
-        # owner retains legacy access, while remote organization members do not.
-        return context.is_instance_owner
+        # owner retains legacy access only when it carries an admitted remote
+        # identity (active Organization member or signed Instance owner with an
+        # accepted access source); a remote non-member owner claim must not
+        # bypass the Resource ACL boundary.
+        if context.is_trusted_local:
+            return True
+        return bool(
+            context.instance_role == "owner"
+            and context._has_admitted_remote_identity()
+        )
 
     owner_user_id = _clean_optional_string(policy.get("owner_user_id"))
     if policy.get("access_level") == "private":
@@ -578,9 +649,18 @@ def _policy_allows(
 
 
 def _policy_allows_management(context: ResourceUserContext, policy: Mapping[str, Any] | None) -> bool:
+    # Resource ACL management is a durable Org boundary, not a runtime surface
+    # that the temporary Organization rollout opens. Keep the origin/org gate
+    # by checking the role rank directly so the runtime-only owner bypass
+    # applied for runtime API admission does not bleed into ACL decisions.
     if context.is_trusted_local:
         return True
-    if not context.has_role("owner"):
+    instance_role_rank = {
+        "owner": 3,
+        "editor": 2,
+        "viewer": 1,
+    }.get(context.instance_role or "", 0)
+    if instance_role_rank < 3:
         return False
     if policy is None:
         return True
@@ -597,6 +677,59 @@ def _policy_allows_management(context: ResourceUserContext, policy: Mapping[str,
         and context.organization_id == _clean_optional_string(policy.get("organization_id"))
         and context.organization_role in {"owner", "admin"}
     )
+
+
+def _policy_allows_owner_control(
+    context: ResourceUserContext,
+    policy: Mapping[str, Any] | None,
+) -> bool:
+    """Allow high-impact sharing actions only to the resource owner."""
+
+    if context.is_trusted_local:
+        return True
+    if isinstance(policy, Mapping) and _temporary_unrestricted_resource_bypass(
+        context,
+        str(policy.get("resource_kind") or ""),
+    ):
+        return True
+    if policy is None:
+        return context.is_instance_owner
+    if not context.can_use_resource(str(policy.get("resource_kind") or "")):
+        return False
+    owner_user_id = _clean_optional_string(policy.get("owner_user_id"))
+    if not (owner_user_id and context.subject and owner_user_id == context.subject):
+        return False
+    organization_id = _clean_optional_string(policy.get("organization_id"))
+    return bool(
+        not organization_id
+        or context.is_active_organization_member
+        and context.organization_id == organization_id
+    )
+
+
+def _policy_allows_show_page_access_management(
+    context: ResourceUserContext,
+    policy: Mapping[str, Any] | None,
+) -> bool:
+    """Allow Show Page owners and Organization managers to narrow access."""
+
+    if (
+        isinstance(policy, Mapping)
+        and _temporary_show_page_bypass(context, str(policy.get("resource_kind") or ""))
+    ):
+        return True
+    if _policy_allows_owner_control(context, policy):
+        return True
+    if policy is None or policy.get("resource_kind") != "show_page":
+        return False
+    organization_id = _clean_optional_string(policy.get("organization_id"))
+    return bool(
+        organization_id
+        and context.can_use_resource("show_page")
+        and context.is_active_organization_member
+        and context.organization_id == organization_id
+        and context.organization_role in {"owner", "admin"}
+    ) or _policy_allows_management(context, policy)
 
 
 def can_use_resource_policy_snapshot(
@@ -617,6 +750,7 @@ def can_use_resource_policy_snapshot(
     return _policy_allows(
         context,
         str(resource_kind),
+        str(policy.get("resource_id") or ""),
         policy,
         [str(group_id) for group_id in group_ids],
     )
@@ -646,7 +780,7 @@ def can_use_resource(
     with _connection(connection) as conn:
         policy = _policy_row(conn, kind, identifier)
         groups = _policy_groups(conn, kind, identifier) if policy else []
-        return _policy_allows(context, kind, policy, groups)
+        return _policy_allows(context, kind, identifier, policy, groups)
 
 
 def can_manage_resource_acl(
@@ -659,11 +793,49 @@ def can_manage_resource_acl(
     context = _as_context(user_context)
     kind = _validate_resource_kind(resource_kind)
     identifier = _required_identifier(resource_id, code="invalid_resource_id")
+    # Resource ACL management is a durable Org boundary, not a runtime surface
+    # that the temporary Organization rollout opens. Keep the origin/org gate.
     if context.is_trusted_local:
         return True
     with _connection(connection) as conn:
         policy = _policy_row(conn, kind, identifier)
     return _policy_allows_management(context, policy)
+
+
+def can_manage_show_page_access(
+    user_context: ResourceUserContext | Mapping[str, Any] | None,
+    resource_id: str,
+    *,
+    connection: Connection | None = None,
+) -> bool:
+    """Return whether the caller may manage a Show Page audience or narrow sharing."""
+
+    context = _as_context(user_context)
+    identifier = _required_identifier(resource_id, code="invalid_resource_id")
+    if _temporary_show_page_bypass(context, "show_page"):
+        return True
+    with _connection(connection) as conn:
+        policy = _policy_row(conn, "show_page", identifier)
+    return _policy_allows_show_page_access_management(context, policy)
+
+
+def can_control_resource_sharing(
+    user_context: ResourceUserContext | Mapping[str, Any] | None,
+    resource_kind: str,
+    resource_id: str,
+    *,
+    connection: Connection | None = None,
+) -> bool:
+    """Return whether the resource owner may widen anonymous sharing."""
+
+    context = _as_context(user_context)
+    kind = _validate_resource_kind(resource_kind)
+    identifier = _required_identifier(resource_id, code="invalid_resource_id")
+    if _temporary_unrestricted_resource_bypass(context, kind):
+        return True
+    with _connection(connection) as conn:
+        policy = _policy_row(conn, kind, identifier)
+    return _policy_allows_owner_control(context, policy)
 
 
 def _row_resource_id(row: Any) -> str | None:
@@ -716,7 +888,13 @@ def filter_accessible_resources(
         row
         for row, identifier in candidates
         if identifier is not None
-        and _policy_allows(context, kind, policies.get(identifier), groups.get(identifier, []))
+        and _policy_allows(
+            context,
+            kind,
+            identifier,
+            policies.get(identifier),
+            groups.get(identifier, []),
+        )
     ]
 
 

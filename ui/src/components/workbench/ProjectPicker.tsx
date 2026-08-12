@@ -4,7 +4,10 @@ import clsx from 'clsx';
 
 import type { WorkbenchProject } from '../../context/ApiContext';
 import { Button } from '../ui/button';
-import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
+import {
+  canUseRuntimeSurfaces,
+  useInstanceAuthorization,
+} from '../../context/InstanceAuthorizationContext';
 import { canCreateLocalProject } from '../../lib/sessionInfo';
 
 interface ProjectPickerProps {
@@ -22,8 +25,14 @@ interface ProjectPickerProps {
 // reachable) plus a New Project chip; the active chip is the resolved target.
 export const ProjectPicker: React.FC<ProjectPickerProps> = ({ projects, targetId, onSelect, onNewProject, disabled }) => {
   const { t } = useTranslation();
-  const { capabilities } = useInstanceAuthorization();
-  const canCreateProject = canCreateLocalProject(capabilities);
+  const {
+    capabilities,
+    remote,
+    hasTemporaryUnrestrictedOrgAccess,
+  } = useInstanceAuthorization();
+  const canCreateProject =
+    canUseRuntimeSurfaces(remote, hasTemporaryUnrestrictedOrgAccess) ||
+    canCreateLocalProject(capabilities);
   return (
     // min-w-0 lets this shrink inside the sheet's CSS grid so the chip row
     // scrolls horizontally instead of stretching the whole sheet wide.

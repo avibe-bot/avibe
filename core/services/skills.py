@@ -32,6 +32,8 @@ import os
 import re
 from typing import Any, Optional
 
+from vibe.authorization import has_temporary_unrestricted_runtime_access
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT = 30.0
@@ -378,7 +380,7 @@ def _filter_skill_listing(
     if not result.get("ok") or not isinstance(result.get("skills"), list):
         return result
     context = resolve_resource_access_context(user_context)
-    if context.is_trusted_local:
+    if context.is_trusted_local or has_temporary_unrestricted_runtime_access(context):
         return result
 
     raw_skills = [dict(skill) for skill in result["skills"] if isinstance(skill, dict)]
@@ -491,7 +493,7 @@ def _require_skill_management_access(
     from storage.db import get_cached_sqlite_engine
 
     context = resolve_resource_access_context(user_context)
-    if context.is_trusted_local:
+    if context.is_trusted_local or has_temporary_unrestricted_runtime_access(context):
         return
     engine = get_cached_sqlite_engine()
     with engine.connect() as connection:
@@ -512,7 +514,7 @@ def _require_skill_management_access(
 
 def _require_skill_create_access(user_context: Any) -> None:
     context = resolve_resource_access_context(user_context)
-    if context.can_manage_instance:
+    if context.can_manage_instance or has_temporary_unrestricted_runtime_access(context):
         return
     raise SkillAccessError()
 
@@ -525,9 +527,16 @@ def _require_skill_use_access(
 ) -> None:
     """Require Instance use and Project chat access before invoking askill."""
 
-    if not context.can_use_resource("skill"):
+    if (
+        not context.can_use_resource("skill")
+        and not has_temporary_unrestricted_runtime_access(context)
+    ):
         raise SkillAccessError()
-    if context.is_trusted_local or context.is_instance_owner:
+    if (
+        context.is_trusted_local
+        or context.is_instance_owner
+        or has_temporary_unrestricted_runtime_access(context)
+    ):
         return
     if not project_dir:
         if scope in {"all", "global"}:
@@ -811,7 +820,10 @@ async def add_skill(
     if scope not in ("global", "project"):
         raise SkillsError("invalid_scope", "install scope must be global or project")
     context = resolve_resource_access_context(user_context)
-    if not context.is_trusted_local:
+    if not (
+        context.is_trusted_local
+        or has_temporary_unrestricted_runtime_access(context)
+    ):
         _require_skill_create_access(context)
         target_names = [skill] if skill else []
         if not target_names:
@@ -915,7 +927,10 @@ async def remove_skill(
     if scope not in ("global", "project"):
         raise SkillsError("invalid_scope", "remove scope must be global or project")
     context = resolve_resource_access_context(user_context)
-    if not context.is_trusted_local:
+    if not (
+        context.is_trusted_local
+        or has_temporary_unrestricted_runtime_access(context)
+    ):
         _require_skill_create_access(context)
         resource_ids = await _installed_skill_resource_ids(
             askill_path,
@@ -990,7 +1005,11 @@ async def check(
         backends=list(BACKEND_TO_AGENT),
         user_context=context,
     )
-    if context.is_trusted_local or not isinstance(filtered.get("summary"), dict):
+    if (
+        context.is_trusted_local
+        or has_temporary_unrestricted_runtime_access(context)
+        or not isinstance(filtered.get("summary"), dict)
+    ):
         return filtered
     skills = filtered.get("skills") if isinstance(filtered.get("skills"), list) else []
     statuses = [str(skill.get("status") or "") for skill in skills if isinstance(skill, dict)]
@@ -1018,7 +1037,10 @@ async def update(
     if scope not in ("global", "project"):
         raise SkillsError("invalid_scope", "update scope must be global or project")
     context = resolve_resource_access_context(user_context)
-    if not context.is_trusted_local:
+    if not (
+        context.is_trusted_local
+        or has_temporary_unrestricted_runtime_access(context)
+    ):
         _require_skill_create_access(context)
         resource_ids = await _installed_skill_resource_ids(
             askill_path,

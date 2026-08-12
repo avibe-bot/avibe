@@ -30,16 +30,17 @@ describe('agent definition editing', () => {
     expect(canEditAgentDefinitions({ remote: false })).toBe(true);
   });
 
-  it('renders a read-only catalog on a remote instance', () => {
+  it('allows an active Organization member to edit on a remote instance', () => {
+    expect(canEditAgentDefinitions({ remote: true, temporaryUnrestrictedOrgAccess: true })).toBe(true);
+  });
+
+  it('keeps unauthenticated or non-member remote sessions denied', () => {
     expect(canEditAgentDefinitions({ remote: true })).toBe(false);
   });
 });
 
-// Every Workbench control whose endpoint the remote HTTP policy classifies
-// local-only needs this locality check on top of its capability, because
-// `can_manage_instance` / `can_manage_agents` / `can_manage_projects` stay true
-// for a remote Instance owner.
-describe('local-only workbench controls', () => {
+// Runtime controls use the signed temporary Organization admission signal.
+describe('runtime-policy workbench controls', () => {
   const predicates = {
     canManageSkills,
     canManageVaultSecrets,
@@ -55,7 +56,11 @@ describe('local-only workbench controls', () => {
     expect(predicate({ remote: false })).toBe(true);
   });
 
-  it.each(Object.entries(predicates))('withholds %s on a remote instance', (_name, predicate) => {
+  it.each(Object.entries(predicates))('allows %s for an active Organization member', (_name, predicate) => {
+    expect(predicate({ remote: true, temporaryUnrestrictedOrgAccess: true })).toBe(true);
+  });
+
+  it.each(Object.entries(predicates))('withholds %s for a remote non-member', (_name, predicate) => {
     expect(predicate({ remote: true })).toBe(false);
   });
 });
@@ -134,13 +139,21 @@ describe('remote auth navigation', () => {
   });
 });
 
-describe('setup bypass for remote owners', () => {
-  it('bypasses the setup wizard only for an authenticated remote owner', () => {
+describe('setup bypass for remote runtime access', () => {
+  it('bypasses setup for an authenticated owner or active Organization member', () => {
     expect(
       shouldBypassSetupForRemoteOwner({
         remote: true,
         authenticated: true,
         capabilities: { can_manage_instance: true },
+      }),
+    ).toBe(true);
+    expect(
+      shouldBypassSetupForRemoteOwner({
+        remote: true,
+        authenticated: true,
+        capabilities: { can_manage_instance: false },
+        temporaryUnrestrictedOrgAccess: true,
       }),
     ).toBe(true);
     expect(

@@ -27,6 +27,18 @@ const remoteOwner = {
   },
 };
 
+const activeOrgMember = {
+  remote: true,
+  instanceRole: 'viewer' as const,
+  hasTemporaryUnrestrictedOrgAccess: true,
+  capabilities: {
+    ...OWNER_INSTANCE_CAPABILITIES,
+    can_manage_instance: false,
+    can_use_vault_secrets: false,
+    can_use_system: false,
+  },
+};
+
 vi.mock('../../context/ApiContext', async (loadOriginal) => {
   const original = await loadOriginal<typeof import('../../context/ApiContext')>();
   return { ...original, useApi: () => api };
@@ -38,6 +50,7 @@ vi.mock('../../context/ToastContext', () => ({
 
 vi.mock('../../lib/useProtectedVault', () => ({
   useProtectedVault: () => ({ revealProtectedValue }),
+  useVaultLock: () => ({ unlocked: false, remainingMs: 0, lockNow: vi.fn() }),
 }));
 
 vi.mock('react-i18next', () => ({
@@ -57,9 +70,9 @@ vi.mock('./WorkbenchPageHeader', () => ({
   ),
 }));
 
-function renderPage() {
+function renderPage(context = remoteOwner) {
   return render(
-    <InstanceAuthorizationContext.Provider value={remoteOwner}>
+    <InstanceAuthorizationContext.Provider value={context}>
       <MemoryRouter initialEntries={['/vaults']}>
         <VaultsPage />
       </MemoryRouter>
@@ -95,5 +108,12 @@ describe('VaultsPage remote audit history', () => {
     expect(await screen.findByText('vaults.audit.title')).toBeTruthy();
     expect(await screen.findByText('grant_created')).toBeTruthy();
     expect(await screen.findByText('alpha')).toBeTruthy();
+  });
+
+  it('shows Vault management controls to an active Organization member', async () => {
+    renderPage(activeOrgMember);
+
+    expect(await screen.findByRole('button', { name: 'vaults.add' })).toBeTruthy();
+    expect(screen.queryByText('vaults.remoteReadOnly')).toBeNull();
   });
 });

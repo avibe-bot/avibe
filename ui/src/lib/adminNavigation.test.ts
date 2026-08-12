@@ -3,9 +3,11 @@ import { describe, expect, it } from 'vitest';
 import {
   adminLandingPath,
   filterLocalSystemNavItems,
+  filterRuntimeAccessNavItems,
   isAdvancedSettingsPath,
   isLocalOnlyMessagingField,
   isLocalSystemPath,
+  isLocalSystemPathForAccess,
   isMemorySettingsPath,
 } from './adminNavigation';
 
@@ -35,7 +37,7 @@ describe('isAdvancedSettingsPath', () => {
 });
 
 describe('isLocalSystemPath', () => {
-  it('covers every destination whose page runs entirely on local-only routes', () => {
+  it('covers every destination with a historical trusted-local gate', () => {
     expect(isLocalSystemPath('/admin/dashboard')).toBe(true);
     expect(isLocalSystemPath('/admin/remote-access')).toBe(true);
     expect(isLocalSystemPath('/admin/groups')).toBe(true);
@@ -49,7 +51,6 @@ describe('isLocalSystemPath', () => {
     expect(isLocalSystemPath('/admin/settings/diagnostics')).toBe(true);
     expect(isLocalSystemPath('/admin/settings/logs')).toBe(true);
     expect(isLocalSystemPath('/harness')).toBe(true);
-    expect(isLocalSystemPath('/apps/library')).toBe(true);
   });
 
   it('matches nested paths under a gated destination', () => {
@@ -61,6 +62,11 @@ describe('isLocalSystemPath', () => {
   it('leaves remotely usable destinations open', () => {
     expect(isLocalSystemPath('/admin/settings/messaging')).toBe(false);
     expect(isLocalSystemPath('/admin/organization/overview')).toBe(false);
+    expect(isLocalSystemPath('/apps/files')).toBe(false);
+    expect(isLocalSystemPath('/apps/editor')).toBe(false);
+    expect(isLocalSystemPath('/apps/terminal')).toBe(false);
+    expect(isLocalSystemPath('/apps/library')).toBe(false);
+    expect(isLocalSystemPath('/apps/show/session-1')).toBe(false);
     expect(isLocalSystemPath('/')).toBe(false);
   });
 
@@ -95,6 +101,33 @@ describe('filterLocalSystemNavItems', () => {
   });
 });
 
+describe('filterRuntimeAccessNavItems', () => {
+  const navItems = [
+    { to: '/admin/dashboard' },
+    {
+      children: [
+        { to: '/admin/remote-access' },
+        { to: '/admin/settings/models' },
+      ],
+    },
+    { to: '/admin/settings/messaging' },
+  ];
+
+  it('withholds only Remote Access during the temporary Organization rollout', () => {
+    expect(filterRuntimeAccessNavItems(navItems, true)).toEqual([
+      { to: '/admin/dashboard' },
+      { children: [{ to: '/admin/settings/models' }] },
+      { to: '/admin/settings/messaging' },
+    ]);
+  });
+
+  it('keeps the baseline local-system filter outside the temporary rollout', () => {
+    expect(filterRuntimeAccessNavItems(navItems, false)).toEqual([
+      { to: '/admin/settings/messaging' },
+    ]);
+  });
+});
+
 describe('adminLandingPath', () => {
   it('opens the Dashboard for a trusted-local caller', () => {
     expect(adminLandingPath(true)).toBe('/admin/dashboard');
@@ -105,10 +138,28 @@ describe('adminLandingPath', () => {
     expect(destination).toBe('/admin/settings/messaging');
     expect(isLocalSystemPath(destination)).toBe(false);
   });
+
+  it('opens the Dashboard for the temporary Organization runtime policy', () => {
+    expect(adminLandingPath(false, true)).toBe('/admin/dashboard');
+  });
+});
+
+describe('isLocalSystemPathForAccess', () => {
+  it('opens known runtime administration while preserving Remote Access control', () => {
+    expect(isLocalSystemPathForAccess('/admin/dashboard', true)).toBe(false);
+    expect(isLocalSystemPathForAccess('/admin/users', true)).toBe(false);
+    expect(isLocalSystemPathForAccess('/admin/settings/models', true)).toBe(false);
+    expect(isLocalSystemPathForAccess('/admin/remote-access', true)).toBe(true);
+  });
+
+  it('keeps the baseline gate without the signed temporary signal', () => {
+    expect(isLocalSystemPathForAccess('/admin/users', false)).toBe(true);
+    expect(isLocalSystemPathForAccess('/admin/settings/models', false)).toBe(true);
+  });
 });
 
 describe('isLocalOnlyMessagingField', () => {
-  it('marks only the protected messaging controls as trusted-local', () => {
+  it('marks the messaging controls governed by the runtime admission signal', () => {
     expect(isLocalOnlyMessagingField('agents.opencode.error_retry_limit')).toBe(true);
     expect(isLocalOnlyMessagingField('agents.opencode.active_turn_timeout_seconds')).toBe(true);
     expect(isLocalOnlyMessagingField('show_pages_prompt')).toBe(true);

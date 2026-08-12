@@ -181,6 +181,7 @@ VAULT_SANDBOX_PERMISSIONS_POLICY = (
 )
 REMOTE_OAUTH_COOKIE_NAME = "__Host-vibe_remote_oauth"
 REMOTE_OAUTH_RETRY_PARAM = "__vibe_oauth_retry"
+REMOTE_SHOW_PAGE_REAUTH_PARAM = "__vibe_show_page_reauth"
 # Lifetime of the short-lived OAuth handshake (signed state + PKCE cookie). The
 # cookie MUST carry an explicit Max-Age: iOS standalone PWAs drop session-scoped
 # cookies (no Max-Age) across the cross-origin authorize excursion / app
@@ -1565,6 +1566,21 @@ def _is_ui_static_request() -> bool:
     return getattr(endpoint, "__name__", "") == "serve_static_compat_endpoint"
 
 
+_PROJECT_RESOURCE_POLICY_WRITE = re.compile(r"^/api/resource-policies/[^/]+/[^/]+$")
+
+
+def _project_resource_policy_write_path(path: str) -> bool:
+    """Resource policy write endpoints surface not_found for non-members.
+
+    These routes stay classified ``local_only`` so the boundary still refuses
+    trusted-local writes from arbitrary remote callers, but active members and
+    owners pass through to the handler, which returns 404 to non-members so the
+    existence of an unrelated Organization's policy is not leaked.
+    """
+
+    return bool(_PROJECT_RESOURCE_POLICY_WRITE.match(path))
+
+
 def _oauth_cookie_signature(secret: str, payload: str) -> str:
     return hmac.new(secret.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
 
@@ -1709,19 +1725,64 @@ def _add_oauth_retry_param(value: str) -> str:
     return urlunsplit(("", "", parsed.path or "/", urlencode(params), ""))
 
 
+def _strip_show_page_reauth_param(value: str) -> str:
+    target = _safe_remote_redirect_target(value)
+    parsed = urlsplit(target)
+    query = urlencode(
+        [
+            (key, val)
+            for key, val in parse_qsl(parsed.query, keep_blank_values=True)
+            if key != REMOTE_SHOW_PAGE_REAUTH_PARAM
+        ]
+    )
+    return urlunsplit(("", "", parsed.path or "/", query, ""))
+
+
+def _add_show_page_reauth_param(value: str) -> str:
+    target = _strip_show_page_reauth_param(value)
+    parsed = urlsplit(target)
+    params = parse_qsl(parsed.query, keep_blank_values=True)
+    params.append((REMOTE_SHOW_PAGE_REAUTH_PARAM, "1"))
+    return urlunsplit(("", "", parsed.path or "/", urlencode(params), ""))
+
+
 def _oauth_callback_arg(name: str) -> str | None:
     return request.args.get(name) or request.args.get(f"amp;{name}")
 
 
-def _redirect_to_vibe_cloud_login(config: V2Config, *, next_target: Any | None = None):
+def _show_page_id_from_private_route(path: str) -> str | None:
+    match = re.match(r"^/show/([^/]+)(?:/|$)", path or "")
+    if match is None:
+        return None
+    try:
+        from core.show_pages import validate_session_id
+
+        return validate_session_id(unquote(match.group(1)))
+    except Exception:
+        return None
+
+
+def _redirect_to_vibe_cloud_login(
+    config: V2Config,
+    *,
+    next_target: Any | None = None,
+    show_page_reauth: bool = False,
+):
     from vibe import remote_access
 
     cloud = config.remote_access.vibe_cloud
     code_verifier = secrets.token_urlsafe(48)
     digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
     code_challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
-    raw_next = next_target if next_target is not None else (request.full_path if request.query_string else request.path)
-    next_target = _strip_oauth_retry_param(raw_next)
+    raw_next = (
+        next_target
+        if next_target is not None
+        else (request.full_path if request.query_string else request.path)
+    )
+    next_target = _strip_show_page_reauth_param(_strip_oauth_retry_param(raw_next))
+    if show_page_reauth:
+        next_target = _add_show_page_reauth_param(next_target)
+    show_page_id = _show_page_id_from_private_route(urlsplit(next_target).path)
     rid = secrets.token_urlsafe(18)
     state = _make_oauth_state(
         cloud.session_secret,
@@ -1747,6 +1808,7 @@ def _redirect_to_vibe_cloud_login(config: V2Config, *, next_target: Any | None =
         next_target=next_target,
         device_hash=_oauth_device_hash(cloud.session_secret, device_id),
         redirect_uri=redirect_uri,
+        show_page_id=show_page_id,
     )
     oauth_cookie = _make_oauth_cookie(
         cloud.session_secret,
@@ -1756,6 +1818,7 @@ def _redirect_to_vibe_cloud_login(config: V2Config, *, next_target: Any | None =
             "code_verifier": code_verifier,
             "next": next_target,
             "redirect_uri": redirect_uri,
+            "show_page_id": show_page_id,
             "exp": int(datetime.now().timestamp()) + REMOTE_OAUTH_HANDSHAKE_TTL_SECONDS,
         },
     )
@@ -1766,6 +1829,7 @@ def _redirect_to_vibe_cloud_login(config: V2Config, *, next_target: Any | None =
         nonce,
         code_challenge,
         redirect_uri=redirect_uri,
+        show_page_id=show_page_id,
     )
     response.set_cookie(
         REMOTE_OAUTH_COOKIE_NAME,
@@ -2254,7 +2318,30 @@ def enforce_remote_access_cookie():
                     return _auth_rate_limit_response()
                 return _redirect_to_vibe_cloud_login(config)
             return jsonify({"ok": False, "error": "remote_access_authorization_refresh_required"}), 401
-        g.authorization_context = context_from_session_payload(payload)
+        context = context_from_session_payload(payload)
+        if request.method == "GET" and context.instance_access_source != "show_page_email":
+            show_page_id = _show_page_id_from_private_route(request.path)
+            if show_page_id is not None:
+                from vibe.authorization import has_temporary_unrestricted_org_access
+
+                resource_allowed = (
+                    has_temporary_unrestricted_org_access(context)
+                    or context.can_use_show_page(show_page_id)
+                    or _show_page_resource_access_allowed(context, show_page_id)
+                )
+                reauth_attempted = request.args.get(REMOTE_SHOW_PAGE_REAUTH_PARAM) == "1"
+                wants_html = "text/html" in request.headers.get("Accept", "")
+                raw_next = request.full_path if request.query_string else request.path
+                if reauth_attempted and resource_allowed and wants_html:
+                    return redirect(_strip_show_page_reauth_param(raw_next))
+                if not resource_allowed:
+                    if not wants_html:
+                        return jsonify({"ok": False, "error": "remote_access_login_required"}), 401
+                    if not reauth_attempted:
+                        if _auth_rate_limited():
+                            return _auth_rate_limit_response()
+                        return _redirect_to_vibe_cloud_login(config, show_page_reauth=True)
+        g.authorization_context = context
         g.remote_session_payload = payload
         g.remote_authorization_refresh_at = remote_access.session_authorization_refresh_deadline(payload)
         if remote_access.session_needs_renewal(payload):
@@ -2272,18 +2359,148 @@ def enforce_remote_access_cookie():
 
 
 @app.before_request
+def enforce_show_page_email_scope():
+    """Keep an email-grant session inside its one signed Show Page subtree."""
+
+    config = _load_remote_access_config()
+    if config is None or not _is_remote_access_request(config):
+        return None
+    context = getattr(g, "authorization_context", None)
+    if context is None:
+        from vibe import remote_access
+        from vibe.authorization import context_from_session_payload
+
+        payload = remote_access.parse_session_cookie(
+            config,
+            request.cookies.get(remote_access.SESSION_COOKIE_NAME),
+        )
+        if payload is not None:
+            context = context_from_session_payload(payload)
+    if context is None or context.instance_access_source != "show_page_email":
+        return None
+
+    path = request.path or ""
+    public_static = (
+        path.startswith("/assets/")
+        or path.startswith(f"{_SHOW_RUNTIME_VENDOR_PREFIX}/")
+        or path.startswith("/p/")
+        or path == "/favicon.ico"
+        or path in _PWA_PUBLIC_ASSETS
+        or path
+        in {
+            _SHOW_RUNTIME_PUBLIC_CLIENT_SHIM_PATH,
+            _SHOW_RUNTIME_PUBLIC_REACT_REFRESH_SHIM_PATH,
+            "/auth/callback",
+            "/auth/logout",
+            "/health",
+        }
+    )
+    expected_prefix = f"/show/{context.show_page_id}" if context.show_page_id else ""
+    exact_show_page = bool(
+        expected_prefix and (path == expected_prefix or path.startswith(f"{expected_prefix}/"))
+    )
+    if public_static or exact_show_page:
+        return None
+    return jsonify({"ok": False, "error": "show_page_access_forbidden"}), 403
+
+
+def _temporary_org_runtime_resource_context(context: Any = None):
+    """Return the unchanged identity for the temporary runtime policy.
+
+    Admission is evaluated by explicit policy helpers. This function must never
+    turn an Organization member into a trusted-local owner or persist ownership
+    on their behalf.
+    """
+
+    if context is not None:
+        return context
+    try:
+        resolved = getattr(g, "authorization_context", None)
+    except (LookupError, RuntimeError):
+        resolved = None
+    return resolved
+
+
+def _has_temporary_runtime_access(context: Any) -> bool:
+    from vibe.authorization import has_temporary_unrestricted_runtime_access
+
+    return bool(has_temporary_unrestricted_runtime_access(context))
+
+
+def _has_runtime_owner_access(context: Any) -> bool:
+    if context is None:
+        return False
+    # A signed Instance owner (local or remote) owns its runtime surfaces, as in
+    # the established model; the temporary Organization rollout additionally
+    # admits active members. This never restricts a pre-existing owner.
+    if context.is_trusted_local or context.instance_role == "owner":
+        return True
+    return _has_temporary_runtime_access(context)
+
+
+@app.before_request
 def enforce_instance_role_capabilities():
     if _remote_auth_exempt_path():
         return None
-    from vibe.authorization import http_authorization_policy
+    from vibe.authorization import (
+        InstanceAuthorizationError,
+        REMOTE_HTTP_ACTIVE_ORGANIZATION_MEMBER,
+        REMOTE_HTTP_LOCAL_ONLY,
+        has_temporary_unrestricted_org_access,
+        http_authorization_policy,
+        require_instance_role,
+    )
 
-    policy = http_authorization_policy(request.method, request.path)
+    policy = http_authorization_policy(
+        request.method,
+        request.path,
+    )
     g.http_authorization_policy = policy
     minimum_role = policy.minimum_role
     if minimum_role is None:
         return None
-    context = getattr(g, "authorization_context", None)
-    if context is None or not context.has_role(minimum_role):
+    try:
+        context = getattr(g, "authorization_context", None)
+    except (LookupError, RuntimeError):
+        # This helper is also exercised by pure policy tests outside a request.
+        context = None
+    # Cloud-management routes re-establish identity themselves (OAuth handshake,
+    # silent reauthorization). They must admit an authenticated remote principal
+    # who is not yet an active Organization member, so they bypass the
+    # Organization-admitted-identity role gate; each handler re-validates cloud
+    # identity before acting.
+    is_identity_bootstrap_path = request.path.startswith("/api/cloud-management/")
+    if is_identity_bootstrap_path:
+        return None
+    try:
+        if context is None:
+            raise InstanceAuthorizationError(minimum_role)
+        # The temporary Organization rollout admits active members. Other remote
+        # principals on API runtime routes fail the active-Organization admission
+        # check here, before role rank. Viewer-allowed reads already have
+        # origin/org admission and are not subject to this gate.
+        if (
+            context.is_remote
+            and minimum_role == "owner"
+            and request.path.startswith("/api/")
+            and not has_temporary_unrestricted_org_access(context)
+        ):
+            # Routes classified for the temporary rollout and existing
+            # trusted-local routes retain the remote-execution error contract.
+            # Ordinary remotely exposed runtime APIs instead fail the active
+            # Organization membership admission check here, before role rank.
+            # Resource policy write endpoints defer to the handler so non-members
+            # get not_found (no existence leak).
+            if policy.remote_access == REMOTE_HTTP_ACTIVE_ORGANIZATION_MEMBER:
+                if _project_resource_policy_write_path(request.path):
+                    return None
+                return _remote_execution_disabled_response()
+            if policy.remote_access != REMOTE_HTTP_LOCAL_ONLY:
+                if _project_resource_policy_write_path(request.path):
+                    return None
+                raise InstanceAuthorizationError(minimum_role)
+        require_instance_role(context, minimum_role)
+    except InstanceAuthorizationError:
         return jsonify(
             {
                 "ok": False,
@@ -2424,7 +2641,10 @@ def _is_remote_local_execution_request(method: str, path: str, payload: Any = No
         http_authorization_policy,
     )
 
-    remote_access = http_authorization_policy(method, path).remote_access
+    remote_access = http_authorization_policy(
+        method,
+        path,
+    ).remote_access
     if remote_access == REMOTE_HTTP_LOCAL_ONLY:
         return True
     if remote_access != REMOTE_HTTP_PAYLOAD_FILTERED:
@@ -2436,19 +2656,48 @@ def _is_remote_local_execution_request(method: str, path: str, payload: Any = No
 async def enforce_remote_local_execution_boundary():
     """Keep unapproved local-machine capabilities on the trusted-local origin."""
 
-    context = getattr(g, "authorization_context", None)
+    try:
+        context = getattr(g, "authorization_context", None)
+    except (LookupError, RuntimeError):
+        context = None
     if context is None or not context.is_remote:
         return None
     from vibe.authorization import (
+        REMOTE_HTTP_ACTIVE_ORGANIZATION_MEMBER,
         REMOTE_HTTP_LOCAL_ONLY,
         REMOTE_HTTP_PAYLOAD_FILTERED,
+        has_temporary_unrestricted_org_access,
         http_authorization_policy,
     )
 
     policy = getattr(g, "http_authorization_policy", None)
     if policy is None:
-        policy = http_authorization_policy(request.method, request.path)
+        policy = http_authorization_policy(
+            request.method,
+            request.path,
+        )
+    if policy.remote_access == REMOTE_HTTP_ACTIVE_ORGANIZATION_MEMBER:
+        if has_temporary_unrestricted_org_access(context):
+            if request.method == "POST" and request.path == "/api/config":
+                # Runtime configuration is temporarily writable for active
+                # Organization members, but remote access identity/tunnel
+                # settings remain control-plane owned. Drop that block before
+                # it reaches the generic config merge/save path.
+                payload = await request.load_json()
+                if isinstance(payload, dict):
+                    payload = dict(payload)
+                    payload.pop("remote_access", None)
+                g.remote_unrestricted_config_payload = payload
+            return None
+        # Org resource policy writes keep the local-only classification but the
+        # handler returns 404 for non-members (no existence leak). Defer to the
+        # handler so callers learn not_found instead of remote_execution_disabled.
+        if _project_resource_policy_write_path(request.path):
+            return None
+        return _remote_execution_disabled_response()
     if policy.remote_access == REMOTE_HTTP_LOCAL_ONLY:
+        if _project_resource_policy_write_path(request.path):
+            return None
         return _remote_execution_disabled_response()
     if policy.remote_access != REMOTE_HTTP_PAYLOAD_FILTERED:
         return None
@@ -2463,9 +2712,9 @@ async def enforce_remote_local_execution_boundary():
 _PROJECT_RESOURCE_PATHS = (
     ("project", re.compile(r"^/api/projects/([^/]+)(?:/agents-md)?$")),
     ("session", re.compile(r"^/api/sessions/([^/]+)(?:/.*)?$")),
-    ("session", re.compile(r"^/api/show-pages/([^/]+)(?:/.*)?$")),
-    ("session", re.compile(r"^/api/show/sessions/([^/]+)(?:/.*)?$")),
-    ("session", re.compile(r"^/show/([^/]+)(?:/.*)?$")),
+    ("show_page", re.compile(r"^/api/show-pages/([^/]+)(?:/.*)?$")),
+    ("show_page", re.compile(r"^/api/show/sessions/([^/]+)(?:/.*)?$")),
+    ("show_page", re.compile(r"^/show/([^/]+)(?:/.*)?$")),
 )
 
 
@@ -2483,14 +2732,23 @@ def enforce_project_role_capabilities():
     if _remote_auth_exempt_path():
         return None
     context = getattr(g, "authorization_context", None)
-    if context is None or context.is_instance_owner:
+    if context is None or _has_runtime_owner_access(context):
         return None
 
     from storage import project_access_service
     from storage.db import create_sqlite_engine
     from vibe.authorization import required_instance_role
 
-    minimum_instance_role = required_instance_role(request.method, request.path)
+    minimum_instance_role = getattr(
+        g,
+        "http_authorization_policy",
+        None,
+    )
+    minimum_instance_role = (
+        minimum_instance_role.minimum_role
+        if minimum_instance_role is not None
+        else required_instance_role(request.method, request.path)
+    )
     if minimum_instance_role not in {"viewer", "editor"}:
         return None
     resource = _project_access_resource(request.path)
@@ -2498,6 +2756,11 @@ def enforce_project_role_capabilities():
         return None
 
     kind, resource_id = resource
+    if kind == "show_page":
+        if _has_temporary_runtime_access(context) or context.can_use_show_page(
+            resource_id
+        ):
+            return None
     engine = create_sqlite_engine()
     with engine.connect() as conn:
         role = (
@@ -2969,7 +3232,11 @@ async def terminal_websocket(websocket: WebSocket, session_id: str):
     if not _terminal_origin_allowed(websocket):
         await websocket.close(code=1008)
         return
-    if not _show_runtime_websocket_authorized(websocket, minimum_role="owner"):
+    if not _show_runtime_websocket_authorized(
+        websocket,
+        minimum_role="viewer",
+        require_unrestricted_org_apps=True,
+    ):
         await websocket.close(code=1008)
         return
 
@@ -2977,9 +3244,6 @@ async def terminal_websocket(websocket: WebSocket, session_id: str):
     remote_payload = _remote_access_websocket_session_claims(websocket, config)
     if remote_payload is None and not _websocket_is_local_request(websocket, config):
         await websocket.close(code=_AUTHORIZATION_REFRESH_WEBSOCKET_CLOSE_CODE)
-        return
-    if remote_payload is not None:
-        await websocket.close(code=1008)
         return
     await websocket.accept()
     remote_addr = _websocket_client_host(websocket) or "unknown"
@@ -3073,7 +3337,11 @@ async def terminal_session_delete(session_id: str):
     terminal_request = _terminal_http_request_adapter()
     if not _terminal_origin_allowed(terminal_request):
         return jsonify({"ok": False, "error": "terminal_origin_forbidden"}), 403
-    if not _show_runtime_websocket_authorized(terminal_request, minimum_role="owner"):
+    if not _show_runtime_websocket_authorized(
+        terminal_request,
+        minimum_role="viewer",
+        require_unrestricted_org_apps=True,
+    ):
         return jsonify({"ok": False, "error": "terminal_unauthorized"}), 403
 
     remote_subject = _remote_access_websocket_subject(terminal_request)
@@ -3102,6 +3370,7 @@ def _show_runtime_websocket_authorized(
     *,
     minimum_role: str = "viewer",
     project_session_id: str | None = None,
+    require_unrestricted_org_apps: bool = False,
 ) -> bool:
     config = _load_remote_access_config()
     if config is None:
@@ -3113,23 +3382,42 @@ def _show_runtime_websocket_authorized(
     payload = _remote_access_websocket_session_payload(websocket, config)
     if payload is None:
         return False
-    from vibe.authorization import context_from_session_payload
+    from vibe.authorization import (
+        context_from_session_payload,
+        has_temporary_unrestricted_org_access,
+    )
 
     context = context_from_session_payload(payload)
-    if not context.has_role(minimum_role):
+    temporary_org_access = has_temporary_unrestricted_org_access(context)
+    if context.instance_access_source == "show_page_email":
+        if require_unrestricted_org_apps:
+            return False
+        if project_session_id is None or not context.can_use_show_page(project_session_id):
+            return False
+        return context.has_role(minimum_role)
+    if not temporary_org_access:
         return False
-    if project_session_id is None or context.is_instance_owner:
+    if project_session_id is None or _has_runtime_owner_access(context):
         return True
     return _project_session_access_allowed(context, project_session_id, minimum_role)
 
 
 def _project_session_access_allowed(context: Any, session_id: str, minimum_role: str) -> bool:
     from storage import project_access_service
+    from vibe.authorization import has_temporary_unrestricted_org_access
 
-    if context is None or context.is_instance_owner:
+    if context is None:
+        return False
+    if context.is_remote and context.instance_access_source == "show_page_email":
+        return minimum_role == "viewer" and context.can_use_show_page(session_id)
+    if context.is_remote and not has_temporary_unrestricted_org_access(context):
+        return False
+    if _has_runtime_owner_access(context):
         return True
     if not context.has_role(minimum_role):
         return False
+    if minimum_role == "viewer" and context.can_use_show_page(session_id):
+        return True
     engine = _projects_engine()
     with engine.connect() as conn:
         role = project_access_service.get_effective_session_role(
@@ -3160,8 +3448,15 @@ async def _wait_for_project_session_access_loss(
 
 def _show_page_resource_access_allowed(context: Any, session_id: str) -> bool:
     from storage import resource_access_service
+    from vibe.authorization import has_temporary_unrestricted_org_access
 
     if context is None:
+        return False
+    if context.is_remote and context.instance_access_source == "show_page_email":
+        return context.can_use_show_page(session_id)
+    if context.is_remote and not has_temporary_unrestricted_org_access(context):
+        return False
+    if has_temporary_unrestricted_org_access(context):
         return True
     try:
         return resource_access_service.can_use_resource(
@@ -3194,10 +3489,12 @@ def _show_runtime_websocket_resource_context(websocket: Any):
     payload = _remote_access_websocket_session_payload(websocket, config)
     if payload is None:
         return resource_access_service.ResourceUserContext()
-    return resource_access_service.current_resource_context(
-        payload,
-        is_remote=True,
-        is_trusted_local=False,
+    return _temporary_org_runtime_resource_context(
+        resource_access_service.current_resource_context(
+            payload,
+            is_remote=True,
+            is_trusted_local=False,
+        )
     )
 
 
@@ -3684,14 +3981,27 @@ def config_get():
     # (``save_config``) already creates the file on the first real save.
     config = settings_service.load_config_or_default()
     authorization_context = getattr(g, "authorization_context", None)
-    if authorization_context is None or not authorization_context.is_remote:
-        payload = api.client_config_payload(config)
-        payload["capabilities"] = {"model_hub": {"enabled": is_model_hub_enabled()}}
-        return jsonify(payload)
-
-    payload = api.remote_config_payload(config)
+    payload = _config_payload_for_context(config, authorization_context)
     payload["capabilities"] = {"model_hub": {"enabled": is_model_hub_enabled()}}
     return jsonify(payload)
+
+
+def _config_payload_for_context(config: Any, authorization_context: Any) -> dict[str, Any]:
+    """Project config without turning a remote member into a local identity."""
+
+    from vibe import api
+
+    if authorization_context is None or not authorization_context.is_remote:
+        return api.client_config_payload(config)
+    if not _has_temporary_runtime_access(authorization_context):
+        return api.remote_config_payload(config)
+
+    # Active Organization members temporarily receive the same runtime/config
+    # fields as local callers. Pairing and tunnel identity remain a separate
+    # control-plane boundary and never travel through this generic endpoint.
+    payload = api.client_config_payload(config)
+    payload.pop("remote_access", None)
+    return payload
 
 
 _MODEL_HUB_SERVICE = None
@@ -4167,6 +4477,7 @@ def vibe_agents_get():
     from vibe import api
 
     try:
+        user_context = getattr(g, "authorization_context", None)
         include_disabled = str(request.args.get("include_disabled") or request.args.get("all") or "").lower() in {
             "1",
             "true",
@@ -4182,6 +4493,7 @@ def vibe_agents_get():
                 backend=request.args.get("backend") or None,
                 include_disabled=include_disabled,
                 include_archived=include_archived,
+                user_context=user_context,
             )
         )
     except (ValueError, PermissionError) as exc:
@@ -4195,9 +4507,10 @@ def vibe_agent_onboarding():
     from vibe import api
 
     try:
+        user_context = getattr(g, "authorization_context", None)
         if request.method == "POST":
-            return jsonify(api.onboard_vibe_agents())
-        return jsonify(api.get_vibe_agent_onboarding())
+            return jsonify(api.onboard_vibe_agents(user_context=user_context))
+        return jsonify(api.get_vibe_agent_onboarding(user_context=user_context))
     except (ValueError, PermissionError) as exc:
         return _vibe_agent_error_response(exc)
 
@@ -4292,7 +4605,7 @@ def vibe_agent_get(name):
     from vibe import api
 
     try:
-        return jsonify(api.get_vibe_agent(name))
+        return jsonify(api.get_vibe_agent(name, user_context=getattr(g, "authorization_context", None)))
     except (ValueError, PermissionError) as exc:
         return _vibe_agent_error_response(exc)
 
@@ -4302,7 +4615,12 @@ def vibe_agents_post():
     from vibe import api
 
     try:
-        return _vibe_agent_result_response(api.create_vibe_agent(request.json or {}))
+        return _vibe_agent_result_response(
+            api.create_vibe_agent(
+                request.json or {},
+                user_context=getattr(g, "authorization_context", None),
+            )
+        )
     except (ValueError, PermissionError) as exc:
         return _vibe_agent_error_response(exc)
 
@@ -4312,7 +4630,12 @@ def vibe_agents_import_post():
     from vibe import api
 
     try:
-        return _vibe_agent_result_response(api.import_vibe_agents(request.json or {}))
+        return _vibe_agent_result_response(
+            api.import_vibe_agents(
+                request.json or {},
+                user_context=getattr(g, "authorization_context", None),
+            )
+        )
     except (ValueError, PermissionError) as exc:
         return _vibe_agent_error_response(exc)
 
@@ -4323,7 +4646,12 @@ def vibe_agents_default_post():
 
     payload = request.json or {}
     try:
-        return jsonify(api.set_default_vibe_agent(payload.get("name") or ""))
+        return jsonify(
+            api.set_default_vibe_agent(
+                payload.get("name") or "",
+                user_context=getattr(g, "authorization_context", None),
+            )
+        )
     except (ValueError, PermissionError) as exc:
         return _vibe_agent_error_response(exc)
 
@@ -4333,7 +4661,13 @@ def vibe_agent_patch(name):
     from vibe import api
 
     try:
-        return _vibe_agent_result_response(api.update_vibe_agent(name, request.json or {}))
+        return _vibe_agent_result_response(
+            api.update_vibe_agent(
+                name,
+                request.json or {},
+                user_context=getattr(g, "authorization_context", None),
+            )
+        )
     except (ValueError, PermissionError) as exc:
         return _vibe_agent_error_response(exc)
 
@@ -4343,7 +4677,12 @@ def vibe_agent_delete(name):
     from vibe import api
 
     try:
-        return _vibe_agent_result_response(api.remove_vibe_agent(name))
+        return _vibe_agent_result_response(
+            api.remove_vibe_agent(
+                name,
+                user_context=getattr(g, "authorization_context", None),
+            )
+        )
     except (ValueError, PermissionError) as exc:
         return _vibe_agent_error_response(exc)
 
@@ -4352,7 +4691,12 @@ def vibe_agent_delete(name):
 def settings_get():
     from vibe import api
 
-    return jsonify(api.get_settings(request.args.get("platform") or None))
+    return jsonify(
+        api.get_settings(
+            request.args.get("platform") or None,
+            user_context=getattr(g, "authorization_context", None),
+        )
+    )
 
 
 def _vault_error_response(exc):
@@ -4811,10 +5155,14 @@ def _show_page_error_response(exc):
     code = getattr(exc, "code", "invalid_show_page_request")
     if code == "resource_access_forbidden":
         status = 403
+    elif code == "show_page_not_found":
+        status = 404
     # A conflict (not a malformed request) when the page is in the wrong state or
     # the chosen suffix is already claimed.
     elif code in {"not_public", "share_id_taken"}:
         status = 409
+    elif code == "show_page_email_access_transient":
+        status = 503
     else:
         status = 400
     return _coded_error_response(code, str(exc), status)
@@ -4830,7 +5178,8 @@ def _is_remote_show_page_request() -> bool:
 
 
 def _show_page_payload_for_request(payload: dict) -> dict:
-    if not _is_remote_show_page_request():
+    context = getattr(g, "authorization_context", None)
+    if not _is_remote_show_page_request() or _has_temporary_runtime_access(context):
         return payload
     return {key: value for key, value in payload.items() if key != "path"}
 
@@ -4840,8 +5189,9 @@ def show_pages_list_get():
     from storage import project_access_service
     from vibe import api
 
-    payload = api.list_show_pages()
     context = getattr(g, "authorization_context", None)
+    resource_context = _temporary_org_runtime_resource_context(context)
+    payload = api.list_show_pages(user_context=resource_context)
     if _is_remote_show_page_request():
         payload = {
             **payload,
@@ -4850,7 +5200,10 @@ def show_pages_list_get():
                 for page in payload.get("pages", [])
             ],
         }
-    if context is not None and not context.is_instance_owner:
+    if (
+        context is not None
+        and not _has_runtime_owner_access(context)
+    ):
         engine = _projects_engine()
         with engine.connect() as conn:
             payload["pages"] = [
@@ -4876,7 +5229,13 @@ def show_page_visibility_post(session_id):
 
     payload = request.json or {}
     try:
-        return jsonify(api.set_show_page_visibility(session_id, str(payload.get("visibility") or "")))
+        return jsonify(
+            api.set_show_page_visibility(
+                session_id,
+                str(payload.get("visibility") or ""),
+                user_context=_temporary_org_runtime_resource_context(),
+            )
+        )
     except ShowPageError as exc:
         return _show_page_error_response(exc)
 
@@ -4887,7 +5246,79 @@ def show_page_ensure_post(session_id):
     from vibe import api
 
     try:
-        return jsonify(_show_page_payload_for_request(api.ensure_show_page(session_id)))
+        return jsonify(
+            _show_page_payload_for_request(
+                api.ensure_show_page(
+                    session_id,
+                    user_context=_temporary_org_runtime_resource_context(),
+                )
+            )
+        )
+    except ShowPageError as exc:
+        return _show_page_error_response(exc)
+
+
+@app.route("/api/show-pages/<session_id>/access", methods=["GET"])
+def show_page_access_get(session_id):
+    from core.show_pages import ShowPageError
+    from vibe import api
+
+    try:
+        response = jsonify(
+            api.get_show_page_access(
+                session_id,
+                user_context=_temporary_org_runtime_resource_context(),
+            )
+        )
+        response.headers["Cache-Control"] = "no-store, private"
+        response.headers["Vary"] = "Cookie"
+        return response
+    except ShowPageError as exc:
+        return _show_page_error_response(exc)
+
+
+@app.route("/api/show-pages/<session_id>/authorized-emails", methods=["GET"])
+def show_page_authorized_emails_get(session_id):
+    from core.show_pages import ShowPageError
+    from vibe import api
+
+    try:
+        response = jsonify(
+            api.get_show_page_authorized_emails(
+                session_id,
+                user_context=_temporary_org_runtime_resource_context(),
+            )
+        )
+        response.headers["Cache-Control"] = "no-store, private"
+        response.headers["Vary"] = "Cookie"
+        return response
+    except ShowPageError as exc:
+        return _show_page_error_response(exc)
+
+
+@app.route("/api/show-pages/<session_id>/authorized-emails", methods=["PUT"])
+def show_page_authorized_emails_put(session_id):
+    from core.show_pages import ShowPageError
+    from vibe import api
+
+    payload = request.json if isinstance(request.json, dict) else {}
+    emails = payload.get("emails")
+    if (
+        not isinstance(emails, list)
+        or len(emails) > 64
+        or any(not isinstance(email, str) for email in emails)
+    ):
+        return _show_page_error_response(
+            ShowPageError("Invalid Show Page email audience.", code="invalid_email")
+        )
+    try:
+        return jsonify(
+            api.replace_show_page_authorized_emails(
+                session_id,
+                emails,
+                user_context=_temporary_org_runtime_resource_context(),
+            )
+        )
     except ShowPageError as exc:
         return _show_page_error_response(exc)
 
@@ -4898,7 +5329,12 @@ def show_page_rotate_share_post(session_id):
     from vibe import api
 
     try:
-        return jsonify(api.rotate_show_page_share(session_id))
+        return jsonify(
+            api.rotate_show_page_share(
+                session_id,
+                user_context=_temporary_org_runtime_resource_context(),
+            )
+        )
     except ShowPageError as exc:
         return _show_page_error_response(exc)
 
@@ -4910,7 +5346,13 @@ def show_page_set_share_id_post(session_id):
 
     payload = request.json or {}
     try:
-        return jsonify(api.set_show_page_share_id(session_id, str(payload.get("share_id") or "")))
+        return jsonify(
+            api.set_show_page_share_id(
+                session_id,
+                str(payload.get("share_id") or ""),
+                user_context=_temporary_org_runtime_resource_context(),
+            )
+        )
     except ShowPageError as exc:
         return _show_page_error_response(exc)
 
@@ -4949,7 +5391,10 @@ def show_page_icon_get(session_id):
     try:
         store = ShowPageStore()
         try:
-            page = store.require_access(session_id)
+            page = store.require_access(
+                session_id,
+                user_context=_temporary_org_runtime_resource_context(),
+            )
             # Any of the user's own pages — private, public, OR offline — may serve
             # its static icon: the payload advertises an icon token for all of them
             # and the inventory lists them, so gating by visibility would strand
@@ -5007,7 +5452,7 @@ def _dock_error_response(exc):
 def dock_get():
     from vibe import api
 
-    return jsonify(api.get_dock())
+    return jsonify(api.get_dock(user_context=_temporary_org_runtime_resource_context()))
 
 
 @app.route("/api/dock/pins", methods=["POST"])
@@ -5018,7 +5463,12 @@ def dock_pin_post():
 
     payload = request.json or {}
     try:
-        return jsonify(api.pin_dock_show_page(str(payload.get("session_id") or "")))
+        return jsonify(
+            api.pin_dock_show_page(
+                str(payload.get("session_id") or ""),
+                user_context=_temporary_org_runtime_resource_context(),
+            )
+        )
     except (DockError, ShowPageError) as exc:
         return _dock_error_response(exc)
 
@@ -5030,7 +5480,12 @@ def dock_unpin_delete(session_id):
     from vibe import api
 
     try:
-        return jsonify(api.unpin_dock_show_page(session_id))
+        return jsonify(
+            api.unpin_dock_show_page(
+                session_id,
+                user_context=_temporary_org_runtime_resource_context(),
+            )
+        )
     except (DockError, ShowPageError) as exc:
         return _dock_error_response(exc)
 
@@ -5047,7 +5502,13 @@ def dock_order_put():
         # concurrency — set_dock_order rejects the write as stale when it no
         # longer matches the server's, so a stale tab can't silently undock a pin
         # another tab installed.
-        return jsonify(api.set_dock_order(payload.get("order"), known=payload.get("known")))
+        return jsonify(
+            api.set_dock_order(
+                payload.get("order"),
+                known=payload.get("known"),
+                user_context=_temporary_org_runtime_resource_context(),
+            )
+        )
     except (DockError, ShowPageError) as exc:
         return _dock_error_response(exc)
 
@@ -5480,8 +5941,11 @@ async def config_post():
     from vibe import remote_access
 
     remote_mutable_payload = getattr(g, "remote_mutable_config_payload", None)
+    unrestricted_payload = getattr(g, "remote_unrestricted_config_payload", None)
     payload = (
-        remote_mutable_payload
+        unrestricted_payload
+        if unrestricted_payload is not None
+        else remote_mutable_payload
         if remote_mutable_payload is not None
         else request.json or {}
     )
@@ -5562,16 +6026,16 @@ async def config_post():
                 agent_backend_runtime["apply_on_next_start"] = True
     authorization_context = getattr(g, "authorization_context", None)
     is_remote = bool(authorization_context is not None and authorization_context.is_remote)
-    response_payload = (
-        api.remote_config_payload(config)
-        if is_remote
-        else api.client_config_payload(config)
-    )
-    # Remote config writes are restricted to preferences. Runtime reconciliation
-    # results belong to trusted-local configuration and can expose local state.
+    has_temporary_runtime_access = _has_temporary_runtime_access(authorization_context)
+    response_payload = _config_payload_for_context(config, authorization_context)
+    # Pairing/tunnel reconciliation remains local-only. Active Organization
+    # members do receive the platform and Agent backend results needed to
+    # confirm the runtime configuration changes they are temporarily allowed
+    # to make.
     if not is_remote:
         if remote_access_runtime is not None:
             response_payload["remote_access_runtime"] = remote_access_runtime
+    if not is_remote or has_temporary_runtime_access:
         if platform_runtime is not None:
             response_payload["platform_runtime"] = platform_runtime
         if agent_backend_runtime is not None:
@@ -5941,6 +6405,11 @@ def cloud_management_auth_callback():
         _delete_cloud_management_cookie(response, cloud_management.HANDLE_COOKIE_NAME)
         _mark_cloud_management_manual(response)
         return response
+    browser_id = request.cookies.get(cloud_management.BROWSER_COOKIE_NAME) or ""
+    failure_next_path = (
+        cloud_management.handshake_next_path(state, browser_id)
+        or "/admin/organization/overview"
+    )
     try:
         grant, next_path = cloud_management.complete_authorization(
             config,
@@ -5956,7 +6425,7 @@ def cloud_management_auth_callback():
             else "cloud_management_unavailable"
         )
         response = _cloud_management_redirect(
-            "/admin/organization/overview",
+            failure_next_path,
             code,
         )
         if not owns_flow:
@@ -6228,6 +6697,7 @@ def remote_access_auth_callback():
         handshake_nonce = cookie_state.get("nonce")
         next_target = cookie_state.get("next")
         redirect_uri = str(cookie_state.get("redirect_uri") or cloud.redirect_uri)
+        expected_show_page_id = cookie_state.get("show_page_id")
     elif store_record is not None and _oauth_store_record_device_bound(cloud.session_secret, store_record):
         # Store-fallback for the iOS standalone PWA case, where the handshake cookie's
         # state desyncs (authorize ran in a separate in-app-browser context). Gated on
@@ -6240,6 +6710,7 @@ def remote_access_auth_callback():
         handshake_nonce = store_record.get("nonce")
         next_target = store_record.get("next")
         redirect_uri = str(store_record.get("redirect_uri") or cloud.redirect_uri)
+        expected_show_page_id = store_record.get("show_page_id")
     else:
         # Neither the cookie nor the server-side store yielded the handshake.
         # Rate-limited: this branch is unauthenticated-reachable.
@@ -6269,6 +6740,16 @@ def remote_access_auth_callback():
         session_claims = result.get("session_claims")
         if not isinstance(session_claims, dict):
             raise remote_access.OAuthCodeExchangeError("invalid_session_claims")
+        if "vibe_show_page_id" in session_claims and (
+            not isinstance(expected_show_page_id, str)
+            or session_claims.get("vibe_show_page_id") != expected_show_page_id
+        ):
+            raise remote_access.OAuthCodeExchangeError("invalid_show_page_id")
+        if (
+            isinstance(expected_show_page_id, str)
+            and session_claims.get("vibe_show_page_id") == expected_show_page_id
+        ):
+            next_target = _strip_show_page_reauth_param(next_target)
     except Exception as exc:
         # Unauthenticated-reachable (valid handshake + bad code), so rate-limited.
         reason = exc.reason if isinstance(exc, remote_access.OAuthCodeExchangeError) else exc.__class__.__name__
@@ -6308,7 +6789,11 @@ def remote_access_auth_callback():
 @app.route("/api/session", methods=["GET"])
 def api_session():
     from vibe import remote_access
-    from vibe.authorization import context_from_session_payload, trusted_local_context
+    from vibe.authorization import (
+        context_from_session_payload,
+        has_temporary_unrestricted_org_access,
+        trusted_local_context,
+    )
 
     config = _load_remote_access_config()
     if config is None or not _is_remote_access_request(config):
@@ -6343,6 +6828,12 @@ def api_session():
                     "email": str(payload.get("email", "")),
                     "sub": str(payload.get("sub", "")),
                     "instance_role": context.instance_role,
+                    "temporary_unrestricted_org_access": (
+                        has_temporary_unrestricted_org_access(context)
+                    ),
+                    "temporary_unrestricted_org_app_access": (
+                        has_temporary_unrestricted_org_access(context)
+                    ),
                     "capabilities": context.capability_projection(),
                 }
             )
@@ -6536,10 +7027,17 @@ def resource_policy_put(resource_kind: str, resource_id: str):
             )
             if policy is None:
                 return jsonify({"error": "resource_not_found"}), 404
-            if policy.get("organization_id") and policy.get("organization_id") != user_context.organization_id:
-                return jsonify({"error": "resource_not_found"}), 404
-            if policy.get("organization_id") and not user_context.is_active_organization_member:
-                return jsonify({"error": "organization_context_required"}), 403
+            if policy.get("organization_id"):
+                # Resource existence is hidden from non-member callers and from
+                # callers whose Organization membership does not match the
+                # resource's owning Organization; surface not_found in either
+                # case so the existence of an unrelated Organization's policy
+                # is not leaked.
+                if (
+                    not user_context.is_active_organization_member
+                    or user_context.organization_id != policy.get("organization_id")
+                ):
+                    return jsonify({"error": "resource_not_found"}), 404
             if not resource_access_service.can_manage_resource_acl(
                 user_context,
                 resource_kind,
@@ -7567,7 +8065,7 @@ def _accessible_project_scope_ids_for_context(conn, context) -> list[str] | None
     """Return a principal's readable Project scopes; owners need no SQL filter."""
     from storage import project_access_service
 
-    if context is None or context.is_instance_owner:
+    if context is None or _has_runtime_owner_access(context):
         return None
     return sorted(
         project_access_service.project_scope_id(project_id)
@@ -7776,6 +8274,19 @@ def _skills_project_id_kwargs(project_dir: str | None, project_id: str | None) -
     return {"project_id": project_id}
 
 
+def _skills_user_context_kwargs(context: Any) -> dict[str, Any]:
+    """Pass authorization context only to remote skill API calls.
+
+    Local callers historically invoke the skill API with its compact legacy
+    signature. Remote requests need the real context for Org ACL enforcement,
+    so include it only when the request actually crossed the remote boundary.
+    """
+
+    if getattr(context, "is_remote", False):
+        return {"user_context": context}
+    return {}
+
+
 @app.route("/api/projects/<project_id>/agents-md", methods=["GET"])
 def project_agents_md_get(project_id: str):
     """Read the project's AGENTS.md (falling back to CLAUDE.md) for the editor."""
@@ -7860,6 +8371,7 @@ def global_prompts_save():
 async def skills_list():
     from vibe import api
 
+    user_context = getattr(g, "authorization_context", None)
     scope = request.args.get("scope") or "all"
     backends = [b for b in (request.args.get("backends") or "").split(",") if b]
     project_id = request.args.get("project_id")
@@ -7873,6 +8385,7 @@ async def skills_list():
         result = await api.list_skills(
             scope="global",
             backends=backends or None,
+            **_skills_user_context_kwargs(user_context),
             **_skills_project_id_kwargs(None, project_id),
         )
         if isinstance(result, dict) and result.get("ok"):
@@ -7883,6 +8396,7 @@ async def skills_list():
             scope=scope,
             project_dir=project_dir,
             backends=backends or None,
+            **_skills_user_context_kwargs(user_context),
             **_skills_project_id_kwargs(project_dir, project_id),
         )
     )
@@ -7892,6 +8406,7 @@ async def skills_list():
 async def skills_preview():
     from vibe import api
 
+    user_context = getattr(g, "authorization_context", None)
     payload = request.json or {}
     project_id = payload.get("project_id")
     try:
@@ -7904,6 +8419,7 @@ async def skills_preview():
         await api.preview_skill_source(
             str(payload.get("source") or ""),
             project_dir=project_dir,
+            **_skills_user_context_kwargs(user_context),
             **_skills_project_id_kwargs(project_dir, project_id),
         )
     )
@@ -7913,6 +8429,7 @@ async def skills_preview():
 async def skills_add():
     from vibe import api
 
+    user_context = getattr(g, "authorization_context", None)
     payload = request.json or {}
     project_id = payload.get("project_id")
     try:
@@ -7931,6 +8448,7 @@ async def skills_add():
             all_skills=bool(payload.get("all")),
             skill=payload.get("skill") or None,
             copy=bool(payload.get("copy")),
+            **_skills_user_context_kwargs(user_context),
         )
     )
 
@@ -7939,6 +8457,7 @@ async def skills_add():
 async def skills_remove(name):
     from vibe import api
 
+    user_context = getattr(g, "authorization_context", None)
     backends = [b for b in (request.args.get("backends") or "").split(",") if b]
     project_id = request.args.get("project_id")
     try:
@@ -7954,6 +8473,7 @@ async def skills_remove(name):
             project_dir=project_dir,
             project_id=project_id,
             backends=backends or None,
+            **_skills_user_context_kwargs(user_context),
         )
     )
 
@@ -7962,13 +8482,19 @@ async def skills_remove(name):
 async def skills_find():
     from vibe import api
 
-    return jsonify(await api.find_skills(request.args.get("q") or ""))
+    return jsonify(
+        await api.find_skills(
+            request.args.get("q") or "",
+            **_skills_user_context_kwargs(getattr(g, "authorization_context", None)),
+        )
+    )
 
 
 @app.route("/api/skills/check", methods=["GET"])
 async def skills_check():
     from vibe import api
 
+    user_context = getattr(g, "authorization_context", None)
     scope = request.args.get("scope") or "project"
     project_id = request.args.get("project_id")
     try:
@@ -7978,13 +8504,21 @@ async def skills_check():
     except _ProjectNoFolder:
         # Folderless project has no project-local skills, so nothing to check.
         return jsonify({"ok": True, "skills": []})
-    return jsonify(await api.check_skills(scope=scope, project_dir=project_dir, project_id=project_id))
+    return jsonify(
+        await api.check_skills(
+            scope=scope,
+            project_dir=project_dir,
+            project_id=project_id,
+            **_skills_user_context_kwargs(user_context),
+        )
+    )
 
 
 @app.route("/api/skills/update", methods=["POST"])
 async def skills_update():
     from vibe import api
 
+    user_context = getattr(g, "authorization_context", None)
     payload = request.json or {}
     project_id = payload.get("project_id")
     try:
@@ -7999,6 +8533,7 @@ async def skills_update():
             scope=payload.get("scope") or "project",
             project_dir=project_dir,
             project_id=project_id,
+            **_skills_user_context_kwargs(user_context),
         )
     )
 
@@ -8007,6 +8542,7 @@ async def skills_update():
 async def skills_upload():
     from vibe import api
 
+    user_context = getattr(g, "authorization_context", None)
     payload = request.json or {}
     project_id = payload.get("project_id")
     try:
@@ -8021,6 +8557,7 @@ async def skills_upload():
         await api.upload_skill_zip(
             payload,
             project_dir=project_dir,
+            **_skills_user_context_kwargs(user_context),
             **_skills_project_id_kwargs(project_dir, project_id),
         )
     )
@@ -8375,7 +8912,12 @@ def _session_runtime_projection(
         if isinstance(raw_activities, list)
         else []
     )
-    if getattr(authorization_context, "is_remote", False):
+    from vibe.authorization import has_temporary_unrestricted_runtime_access
+
+    if (
+        getattr(authorization_context, "is_remote", False)
+        and not has_temporary_unrestricted_runtime_access(authorization_context)
+    ):
         activities = [
             item
             for item in activities
@@ -8447,8 +8989,12 @@ async def sessions_bootstrap(session_id: str):
             if can_chat
             else []
         )
-        can_access_draft = can_chat and not bool(
-            authorization_context and authorization_context.is_remote
+        from vibe.authorization import has_temporary_unrestricted_runtime_access
+
+        can_access_draft = can_chat and not (
+            authorization_context
+            and authorization_context.is_remote
+            and not has_temporary_unrestricted_runtime_access(authorization_context)
         )
         draft = (
             message_deliveries.get_draft_state(conn, session_id)
@@ -8468,11 +9014,7 @@ async def sessions_bootstrap(session_id: str):
 
     try:
         config = settings_service.load_config_or_default()
-        config_payload = (
-            vibe_api.remote_config_payload(config)
-            if authorization_context and authorization_context.is_remote
-            else vibe_api.client_config_payload(config)
-        )
+        config_payload = _config_payload_for_context(config, authorization_context)
     except Exception:
         logger.exception("sessions_bootstrap: failed to load config")
         config_payload = None
@@ -8978,7 +9520,10 @@ async def sessions_archive(session_id: str):
     writes into hidden history rather than re-surfacing the session.
     """
     from core.services import sessions as workbench_sessions_service
+    from core.show_pages import ShowPageError, require_show_page_management
+    from sqlalchemy import select
     from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID
+    from storage.models import show_pages
     from vibe.sse_broker import broker
 
     engine = _projects_engine()
@@ -8994,8 +9539,21 @@ async def sessions_archive(session_id: str):
                 session_id,
                 authorization_context=getattr(g, "authorization_context", None),
             )
+            page_exists = conn.execute(
+                select(show_pages.c.session_id).where(
+                    show_pages.c.session_id == session_id
+                )
+            ).scalar_one_or_none()
+            if page_exists is not None:
+                require_show_page_management(
+                    conn,
+                    session_id,
+                    user_context=getattr(g, "authorization_context", None),
+                )
     except LookupError as err:
         return jsonify({"error": str(err)}), 404
+    except ShowPageError as err:
+        return _coded_error_response(err.code, str(err), 403)
     if existing_session.get("status") == "archived":
         try:
             with engine.begin() as conn:
@@ -9478,6 +10036,7 @@ async def show_page_icon_upload(session_id: str, starlette_request: FastAPIReque
                     data,
                     filename=upload.filename,
                     content_type=upload.content_type,
+                    user_context=_temporary_org_runtime_resource_context(),
                 )
                 # Broadcast so EVERY already-mounted inventory (Dock, WindowLayer, mobile
                 # drawer, app search) reloads and picks up the new icon_version — the
@@ -9786,11 +10345,19 @@ def _media_row_show_page_access_allowed(context: Any, row: dict[str, Any]) -> bo
 
 def _request_can_read_media_row(conn, token: str, row: dict[str, Any]) -> bool:
     from storage import media_service, project_access_service
+    from vibe.authorization import has_temporary_unrestricted_org_access
 
     context = getattr(g, "authorization_context", None)
     if not _media_row_show_page_access_allowed(context, row):
         return False
-    if context is None or context.is_instance_owner:
+    if row.get("source") == "show_annotation" and has_temporary_unrestricted_org_access(
+        context
+    ):
+        # Annotation screenshots are part of the Show Page surface. During the
+        # temporary unrestricted Organization rollout they follow the page,
+        # while all unrelated media keeps its existing Project/session ACL.
+        return True
+    if context is None or _has_runtime_owner_access(context):
         return True
     session_ids = media_service.referenced_session_ids(conn, token)
     if session_ids:
@@ -9818,6 +10385,7 @@ def _registered_media_response(
     *,
     expected_session_id: str | None = None,
     expected_source: str | None = None,
+    public_show_page: bool = False,
 ):
     from urllib.parse import quote
 
@@ -9826,8 +10394,6 @@ def _registered_media_response(
     engine = _projects_engine()
     with engine.connect() as conn:
         row = media_service.get_by_token(conn, token)
-        if row and not _request_can_read_media_row(conn, token, row):
-            row = None
         matches_expected_session = (
             expected_session_id is None
             or bool(row)
@@ -9836,11 +10402,29 @@ def _registered_media_response(
                 or media_service.is_referenced_by_session(conn, token, expected_session_id)
             )
         )
+        matches_expected_source = (
+            expected_source is None
+            or bool(row)
+            and row.get("source") == expected_source
+        )
+        public_show_page_validated = bool(
+            public_show_page
+            and expected_session_id
+            and expected_source == "show_annotation"
+            and matches_expected_session
+            and matches_expected_source
+        )
+        if row and not public_show_page_validated and not _request_can_read_media_row(
+            conn,
+            token,
+            row,
+        ):
+            row = None
     if not row or row.get("revoked_at"):
         return jsonify({"error": "not_found"}), 404
     if not matches_expected_session:
         return jsonify({"error": "not_found"}), 404
-    if expected_source is not None and row.get("source") != expected_source:
+    if not matches_expected_source:
         return jsonify({"error": "not_found"}), 404
     stored = row["local_path"]
     try:
@@ -10913,7 +11497,13 @@ def _workbench_event_visible_to_context(context, event_type: str, payload: str) 
             return False
         if not _show_page_resource_access_allowed(context, session_id):
             return False
-    if context.is_instance_owner:
+        from vibe.authorization import has_temporary_unrestricted_org_access
+
+        if has_temporary_unrestricted_org_access(context):
+            # Show events are page content. Keep them aligned with the same
+            # temporary all-pages policy instead of reapplying Project ACL here.
+            return True
+    if _has_runtime_owner_access(context):
         return True
     if event_type in {"authorization.changed", "workbench.events.bridge.status"}:
         return True
@@ -10947,11 +11537,18 @@ def _workbench_event_payload_for_context(context, event_type: str, payload: str)
     Returns ``None`` when the event cannot be projected safely for this
     recipient, in which case the caller drops the frame.
     """
-    if event_type == "show.event" and context is not None and context.is_remote:
+    if (
+        event_type == "show.event"
+        and context is not None
+        and context.is_remote
+    ):
         # A Show annotation event carries the absolute host path of its
-        # materialized screenshot. Remote subscribers read the image by
-        # attachment id, so drop the path rather than stream the host layout —
-        # and drop the whole frame if it cannot be projected.
+        # materialized screenshot. Every remote recipient reads the image by
+        # attachment id, so the path is useless to them and only discloses
+        # the host's directory layout — drop it for every remote reader
+        # (active Organization members included) and drop the whole frame
+        # if it cannot be projected. Display-layer redaction is preserved
+        # under the temporary full-access rollout (see #1343).
         try:
             envelope = json.loads(payload)
         except (TypeError, json.JSONDecodeError):
@@ -10964,7 +11561,12 @@ def _workbench_event_payload_for_context(context, event_type: str, payload: str)
             ensure_ascii=False,
             separators=(",", ":"),
         )
-    if event_type == "vaults.updated" and context is not None and context.is_remote:
+    if (
+        event_type == "vaults.updated"
+        and context is not None
+        and context.is_remote
+        and not _has_temporary_runtime_access(context)
+    ):
         try:
             envelope = json.loads(payload)
         except (TypeError, json.JSONDecodeError):
@@ -11109,7 +11711,7 @@ async def workbench_events():
                     if (
                         event_type == "authorization.changed"
                         and authorization_context is not None
-                        and not authorization_context.is_instance_owner
+                        and not _has_runtime_owner_access(authorization_context)
                     ):
                         payload = json.dumps(
                             {
@@ -12196,12 +12798,17 @@ def _show_annotation_capability(
 
 def _show_request_author(*, public: bool = False) -> dict[str, str] | None:
     from vibe import remote_access
-    from vibe.authorization import context_from_session_payload
+    from vibe.authorization import (
+        context_from_session_payload,
+        has_temporary_unrestricted_runtime_access,
+    )
 
     if not public:
         context = getattr(g, "authorization_context", None)
         if context is not None:
-            if not context.has_role("editor"):
+            if not context.has_role("editor") and not has_temporary_unrestricted_runtime_access(
+                context
+            ):
                 return None
             if context.is_remote:
                 return {"kind": "user", "email": context.email} if context.email else None
@@ -12220,7 +12827,10 @@ def _show_request_author(*, public: bool = False) -> dict[str, str] | None:
         )
         if context is not None:
             email = str(session.get("email", "")).strip()
-            if email and context.has_role("editor"):
+            if email and (
+                context.has_role("editor")
+                or has_temporary_unrestricted_runtime_access(context)
+            ):
                 return {"kind": "user", "email": email}
             return None
 
@@ -12261,7 +12871,11 @@ async def _show_event_response_from_payload(
 ):
     context = getattr(g, "authorization_context", None)
     is_remote_caller = context is not None and context.is_remote
-    if is_remote_caller and show_event_request_requests_dispatch(payload):
+    if (
+        is_remote_caller
+        and show_event_request_requests_dispatch(payload)
+        and not _has_temporary_runtime_access(context)
+    ):
         return _remote_execution_disabled_response()
     if is_remote_caller or public:
         # A remote caller — whether an authenticated editor on the HTML route or
@@ -12278,9 +12892,13 @@ async def _show_event_response_from_payload(
         event_type = str(payload.get("type") or "").strip()
         if event_type not in HUMAN_EVENT_TYPES and event_type != "assistant.mark.resolved":
             return _unsupported_show_event_type_response()
-    # The echo of the stored event goes back to whoever posted it, so a remote
-    # author must not learn the local screenshot path from its own response.
-    remote = not public and _is_remote_show_page_request()
+    # Non-member remote readers keep the host-path redaction. Active
+    # Organization members receive the same runtime detail as local callers.
+    remote = (
+        not public
+        and _is_remote_show_page_request()
+        and not _has_temporary_runtime_access(context)
+    )
     if show_event_payload_session_mismatch(session_id, payload):
         return (
             jsonify(
@@ -12938,10 +13556,13 @@ async def _show_events_response(
     public: bool = False,
     public_share_id: str | None = None,
 ):
-    # A remote reader of the private Show surface must not receive local
-    # screenshot paths either; resolve it here because the SSE generator runs
-    # after the request context is gone.
-    remote = not public and _is_remote_show_page_request()
+    # Resolve the projection before the SSE generator loses request context.
+    authorization_context = None if public else getattr(g, "authorization_context", None)
+    remote = (
+        not public
+        and _is_remote_show_page_request()
+        and not _has_temporary_runtime_access(authorization_context)
+    )
     if request.method == "GET":
         if request.args.get("stream") == "1":
             return await _show_events_stream(
@@ -12953,9 +13574,7 @@ async def _show_events_response(
                 authorization_refresh_at=(
                     None if public else getattr(g, "remote_authorization_refresh_at", None)
                 ),
-                authorization_context=(
-                    None if public else getattr(g, "authorization_context", None)
-                ),
+                authorization_context=authorization_context,
                 remote_session_payload=(
                     None if public else getattr(g, "remote_session_payload", None)
                 ),
@@ -13708,7 +14327,10 @@ def redirect_private_show_page_to_canonical_path(session_id):
     store = ShowPageStore()
     try:
         try:
-            page = store.require_access(session_id)
+            page = store.require_access(
+                session_id,
+                user_context=_temporary_org_runtime_resource_context(),
+            )
         except ShowPageError as exc:
             if exc.code == "resource_access_forbidden":
                 return _show_page_access_forbidden_response()
@@ -13739,7 +14361,10 @@ async def serve_private_show_page(session_id, asset_path):
     store = ShowPageStore()
     try:
         try:
-            page = store.require_access(session_id)
+            page = store.require_access(
+                session_id,
+                user_context=_temporary_org_runtime_resource_context(),
+            )
         except ShowPageError as exc:
             if exc.code == "resource_access_forbidden":
                 return _show_page_access_forbidden_response()
@@ -13885,6 +14510,7 @@ async def serve_public_show_page(share_id, asset_path):
                 token,
                 expected_session_id=page.session_id,
                 expected_source="show_annotation",
+                public_show_page=True,
             )
         if asset_path.strip("/") in {"__show/events", "__events"}:
             if request.method == "GET":

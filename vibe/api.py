@@ -1264,11 +1264,10 @@ def client_config_payload(config: V2Config) -> dict:
     ``config_to_payload`` has to emit ``memory`` because the UI save path uses
     the same projection as its deep-merge base, and an omitted block resets the
     stored one (the ``agents.avault`` comment above records the same hazard).
-    A response is the opposite case: Memory settings — enablement, both
-    processing endpoint URLs and model names, and API-key-presence flags — are
-    reachable only through the direct-loopback-only ``/api/memory/*`` routes,
-    so returning them from a generic endpoint would hand them to any
-    authenticated remote caller over the tunnel.
+    A response is the opposite case: Memory settings have their own
+    ``/api/memory/*`` routes and lifecycle, so returning them from the generic
+    config endpoint would duplicate that contract and mix independently loaded
+    state into every settings response.
 
     Every endpoint that returns the generic config must project through this
     function, so a new one inherits the exclusion instead of having to repeat
@@ -1296,12 +1295,11 @@ _REMOTE_CONFIG_UI_FIELDS = (
 
 
 def remote_config_payload(config: V2Config) -> dict:
-    """Return the explicit remote-safe projection of generic configuration.
+    """Return the fallback projection for remote identities without rollout access.
 
-    Instance role determines which remote routes a caller may use, but it does
-    not make the caller trusted to inspect local filesystem layout, executable
-    paths, or runtime configuration. Keep this as an allowlist so new local
-    settings remain local by default.
+    Active Organization members use the full runtime projection with the
+    pairing/tunnel block removed. Keep this allowlist for every other remote
+    identity so a future caller cannot inherit host paths or runtime settings.
     """
 
     payload = client_config_payload(config)
@@ -1371,7 +1369,7 @@ def _apply_session_meta(payloads: list[dict]) -> list[dict]:
     return payloads
 
 
-def list_show_pages() -> dict:
+def list_show_pages(*, user_context: Any = None) -> dict:
     """All Show Pages, newest-first, each enriched with the session title.
 
     Reuses ``ShowPageStore.list_page`` (already ordered by ``updated_at`` desc)
@@ -1384,7 +1382,7 @@ def list_show_pages() -> dict:
     config = V2Config.load()
     store = ShowPageStore()
     try:
-        result = store.list_page(page_request=None)
+        result = store.list_page(page_request=None, user_context=user_context)
         pages = [show_page_payload(page, config=config) for page in result.items]
     finally:
         store.close()
@@ -1398,25 +1396,74 @@ def list_show_pages() -> dict:
     }
 
 
-def set_show_page_visibility(session_id: str, visibility: str) -> dict:
+def _show_page_mutation_response(
+    store,
+    page,
+    *,
+    config: V2Config,
+    additional_payload: dict | None = None,
+    user_context: Any = None,
+) -> dict:
+    """Return mutation details only when the caller can use the page."""
+    from storage import resource_access_service
+
+    context = resource_access_service.resolve_resource_access_context(user_context)
+    with store.engine.connect() as connection:
+        can_use = resource_access_service.can_use_resource(
+            context,
+            "show_page",
+            page.session_id,
+            connection=connection,
+        )
+    if not can_use:
+        # Audience managers may revoke an anonymous link without page-use
+        # access. Do not return page paths, URLs, share IDs, or session metadata.
+        return {
+            "ok": True,
+            "public_link_enabled": page.visibility == "public",
+        }
+    from core.show_pages import show_page_payload
+
+    payload = show_page_payload(page, config=config)
+    return {
+        "ok": True,
+        **(additional_payload or {}),
+        **_apply_session_meta([payload])[0],
+    }
+
+
+def set_show_page_visibility(
+    session_id: str,
+    visibility: str,
+    *,
+    user_context: Any = None,
+) -> dict:
     """Switch a Show Page between private / public / offline.
 
     Raises ``ShowPageError`` (a ``ValueError``) for invalid input, which the
     route layer maps to a 4xx response.
     """
-    from core.show_pages import ShowPageStore, show_page_payload
+    from core.show_pages import ShowPageStore
 
     config = V2Config.load()
     store = ShowPageStore()
     try:
-        updated = store.update_visibility(session_id, visibility)
-        payload = show_page_payload(updated, config=config)
+        updated = store.update_visibility(
+            session_id,
+            visibility,
+            user_context=user_context,
+        )
+        return _show_page_mutation_response(
+            store,
+            updated,
+            config=config,
+            user_context=user_context,
+        )
     finally:
         store.close()
-    return {"ok": True, **_apply_session_meta([payload])[0]}
 
 
-def ensure_show_page(session_id: str) -> dict:
+def ensure_show_page(session_id: str, *, user_context: Any = None) -> dict:
     """Create the session's Show Page if it doesn't exist yet; report which.
 
     ``existed`` tells the caller whether the page was already initialized, so the
@@ -1432,48 +1479,235 @@ def ensure_show_page(session_id: str) -> dict:
         # whether IT created the row (so the UI only prompts the agent on a real
         # first creation, not a concurrent ensure). Raises ShowPageError for an
         # archived session — the route maps it to a 4xx.
-        page, created = store.ensure_active(session_id)
+        page, created = store.ensure_active(session_id, user_context=user_context)
         payload = show_page_payload(page, config=config)
     finally:
         store.close()
     return {"ok": True, "existed": not created, **_apply_session_meta([payload])[0]}
 
 
-def rotate_show_page_share(session_id: str) -> dict:
+def get_show_page_access(session_id: str, *, user_context: Any = None) -> dict:
+    """Return the applied authenticated audience and sharing authority."""
+
+    from core.show_pages import ShowPageError, ShowPageStore
+    from storage import resource_access_service
+
+    context = resource_access_service.resolve_resource_access_context(user_context)
+    store = ShowPageStore()
+    try:
+        page = store.get(session_id)
+        if page is None:
+            raise ShowPageError("This session has no Show Page.", code="show_page_not_found")
+        with store.engine.connect() as connection:
+            policy = resource_access_service.get_resource_policy(
+                "show_page",
+                page.session_id,
+                connection=connection,
+            )
+            can_use = resource_access_service.can_use_resource(
+                context,
+                "show_page",
+                page.session_id,
+                connection=connection,
+            )
+            can_manage = resource_access_service.can_manage_show_page_access(
+                context,
+                page.session_id,
+                connection=connection,
+            )
+            can_publish_public = resource_access_service.can_control_resource_sharing(
+                context,
+                "show_page",
+                page.session_id,
+                connection=connection,
+            )
+            if not (can_use or can_manage):
+                raise ShowPageError("Show Page access is not permitted.", code="resource_access_forbidden")
+    finally:
+        store.close()
+
+    organization_id = policy.get("organization_id") if policy else None
+    instance_id = context.instance_id
+    if context.is_trusted_local and organization_id and not instance_id:
+        instance_id = V2Config.load().remote_access.vibe_cloud.instance_id or None
+    return {
+        "ok": True,
+        "mode": "organization" if organization_id else "personal",
+        "instance_id": instance_id,
+        "organization_id": organization_id,
+        "access_level": policy.get("access_level", "private") if policy else "private",
+        "group_ids": list(policy.get("group_ids") or []) if policy else [],
+        "policy_revision": policy.get("policy_revision") if policy else None,
+        "last_applied_control_plane_revision": (
+            policy.get("last_applied_control_plane_revision") if policy else None
+        ),
+        "can_use": can_use,
+        "can_manage": can_manage,
+        "can_publish_public": can_publish_public,
+        "public_link_enabled": page.visibility == "public",
+    }
+
+
+def _require_show_page_email_access_owner(
+    session_id: str,
+    *,
+    user_context: Any = None,
+) -> None:
+    from core.show_pages import ShowPageError, ShowPageStore
+    from storage import resource_access_service
+
+    context = resource_access_service.resolve_resource_access_context(user_context)
+    store = ShowPageStore()
+    try:
+        page = store.get(session_id)
+        if page is None:
+            raise ShowPageError("This session has no Show Page.", code="show_page_not_found")
+        with store.engine.connect() as connection:
+            if not resource_access_service.can_control_resource_sharing(
+                context,
+                "show_page",
+                page.session_id,
+                connection=connection,
+            ):
+                raise ShowPageError(
+                    "Show Page access is not permitted.",
+                    code="resource_access_forbidden",
+                )
+    finally:
+        store.close()
+
+
+def _show_page_email_access_error(exc: Exception):
+    from core.show_pages import ShowPageError
+    from vibe import remote_access
+
+    known_codes = {
+        "invalid_email",
+        "too_many_entries",
+        "show_page_email_access_not_configured",
+        "show_page_email_access_invalid_response",
+    }
+    transient_code = "show_page_email_access_transient"
+    if isinstance(exc, ShowPageError):
+        return exc
+    if isinstance(exc, remote_access.BackendRequestError):
+        raw_code = str(exc.payload.get("error") or "")
+        code = raw_code if raw_code in known_codes else (
+            transient_code if exc.status >= 500 else "show_page_email_access_unavailable"
+        )
+    else:
+        raw_code = str(exc)
+        code = transient_code if raw_code in {
+            "resource_acl_device_unavailable",
+            "show_page_email_access_invalid_response",
+        } else raw_code or "show_page_email_access_unavailable"
+        if code not in known_codes and code != transient_code:
+            code = "show_page_email_access_unavailable"
+    return ShowPageError(code, code=code)
+
+
+def get_show_page_authorized_emails(
+    session_id: str,
+    *,
+    user_context: Any = None,
+) -> dict:
+    """Return exact email grants for one owner-managed Show Page."""
+
+    from vibe import remote_access
+
+    _require_show_page_email_access_owner(session_id, user_context=user_context)
+    try:
+        result = remote_access.get_show_page_authorized_emails(session_id)
+    except Exception as exc:
+        raise _show_page_email_access_error(exc) from exc
+    return {"ok": True, "emails": result["emails"]}
+
+
+def replace_show_page_authorized_emails(
+    session_id: str,
+    emails: list[str],
+    *,
+    user_context: Any = None,
+) -> dict:
+    """Replace one Show Page's exact email grants through paired-device auth."""
+
+    from vibe import remote_access
+
+    _require_show_page_email_access_owner(session_id, user_context=user_context)
+    normalized = sorted({str(email).strip().lower() for email in emails if str(email).strip()})
+    try:
+        result = remote_access.replace_show_page_authorized_emails(session_id, normalized)
+    except Exception as exc:
+        raise _show_page_email_access_error(exc) from exc
+    return {
+        "ok": True,
+        "emails": result["emails"],
+        "changed": result["changed"],
+    }
+
+
+def rotate_show_page_share(session_id: str, *, user_context: Any = None) -> dict:
     """Revoke the current public link and issue a new one (public pages only)."""
-    from core.show_pages import ShowPageStore, show_page_payload
+    from core.show_pages import ShowPageStore
 
     config = V2Config.load()
     store = ShowPageStore()
     try:
-        updated, previous_share_id = store.rotate_share(session_id)
-        payload = show_page_payload(updated, config=config)
+        updated, previous_share_id = store.rotate_share(
+            session_id,
+            user_context=user_context,
+        )
+        return _show_page_mutation_response(
+            store,
+            updated,
+            config=config,
+            additional_payload={"previous_share_id": previous_share_id},
+            user_context=user_context,
+        )
     finally:
         store.close()
-    return {"ok": True, "previous_share_id": previous_share_id, **_apply_session_meta([payload])[0]}
 
 
-def set_show_page_share_id(session_id: str, share_id: str) -> dict:
+def set_show_page_share_id(
+    session_id: str,
+    share_id: str,
+    *,
+    user_context: Any = None,
+) -> dict:
     """Set a custom public link suffix (public pages only).
 
     Like ``rotate_show_page_share`` but with a caller-chosen value; setting it
     revokes the previous public URL. Raises ``ShowPageError`` for an invalid /
     taken suffix or a non-public page, which the route layer maps to a 4xx/409.
     """
-    from core.show_pages import ShowPageStore, show_page_payload
+    from core.show_pages import ShowPageStore
 
     config = V2Config.load()
     store = ShowPageStore()
     try:
-        updated, previous_share_id = store.set_share_id(session_id, share_id)
-        payload = show_page_payload(updated, config=config)
+        updated, previous_share_id = store.set_share_id(
+            session_id,
+            share_id,
+            user_context=user_context,
+        )
+        return _show_page_mutation_response(
+            store,
+            updated,
+            config=config,
+            additional_payload={"previous_share_id": previous_share_id},
+            user_context=user_context,
+        )
     finally:
         store.close()
-    return {"ok": True, "previous_share_id": previous_share_id, **_apply_session_meta([payload])[0]}
 
 
 def upload_show_page_icon(
-    session_id: str, data: bytes, *, filename: str | None, content_type: str | None
+    session_id: str,
+    data: bytes,
+    *,
+    filename: str | None,
+    content_type: str | None,
+    user_context: Any = None,
 ) -> dict:
     """Write an uploaded image as the page's workspace-root favicon; return the
     refreshed page payload so the Web UI merges it like any other show-page mutation
@@ -1490,7 +1724,7 @@ def upload_show_page_icon(
     config = V2Config.load()
     store = ShowPageStore()
     try:
-        page = store.require_management(session_id)
+        page = store.require_management(session_id, user_context=user_context)
         if store.is_archived(session_id):
             # Archiving leaves the page offline and terminal; the other mutators guard it
             # with session_archived, so a direct icon upload must not slip past that.
@@ -1613,9 +1847,10 @@ def get_vibe_agents(
     backend: Optional[str] = None,
     include_disabled: bool = False,
     include_archived: bool = False,
+    user_context: Any = None,
 ) -> dict:
     _ensure_builtin_default_agents()
-    user_context = resolve_resource_access_context()
+    user_context = resolve_resource_access_context(user_context)
     store = VibeAgentStore()
     try:
         normalized_backend = validate_agent_backend(backend) if backend else None
@@ -1678,7 +1913,7 @@ def _agent_onboarding_resource_descriptors(
     return descriptors
 
 
-def get_vibe_agent_onboarding() -> dict:
+def get_vibe_agent_onboarding(*, user_context: Any = None) -> dict:
     """Return the safe owner inventory for Organization Agent onboarding."""
 
     config = V2Config.load()
@@ -1686,7 +1921,7 @@ def get_vibe_agent_onboarding() -> dict:
     store = VibeAgentStore()
     try:
         result = store.organization_onboarding_inventory(
-            user_context=resolve_resource_access_context(),
+            user_context=resolve_resource_access_context(user_context),
         )
     finally:
         store.close()
@@ -1699,14 +1934,14 @@ def get_vibe_agent_onboarding() -> dict:
     return result
 
 
-def onboard_vibe_agents() -> dict:
+def onboard_vibe_agents(*, user_context: Any = None) -> dict:
     """Register all existing Agents privately, then publish the safe index."""
 
     from vibe import remote_access
 
     config = V2Config.load()
     _ensure_builtin_default_agents(config)
-    context = resolve_resource_access_context()
+    context = resolve_resource_access_context(user_context)
     store = VibeAgentStore()
     try:
         result = store.onboard_organization_agents(user_context=context)
@@ -1732,8 +1967,10 @@ def onboard_vibe_agents() -> dict:
     return result
 
 
-def get_vibe_agent(name: str) -> dict:
-    user_context = resolve_resource_access_context()
+def get_vibe_agent(name: str, *, user_context: Any = None) -> dict:
+    user_context = resolve_resource_access_context(user_context)
+    from vibe.authorization import has_temporary_unrestricted_runtime_access
+
     store = VibeAgentStore()
     try:
         agent = store.require_accessible(name, user_context=user_context)
@@ -1745,14 +1982,20 @@ def get_vibe_agent(name: str) -> dict:
                 default_agent = None
         return {
             "ok": True,
-            "agent": _vibe_agent_payload(agent, remote_safe=user_context.is_remote),
+            "agent": _vibe_agent_payload(
+                agent,
+                remote_safe=(
+                    user_context.is_remote
+                    and not has_temporary_unrestricted_runtime_access(user_context)
+                ),
+            ),
             "default_agent_name": default_agent.name if default_agent else None,
         }
     finally:
         store.close()
 
 
-def create_vibe_agent(payload: dict) -> dict:
+def create_vibe_agent(payload: dict, *, user_context: Any = None) -> dict:
     if not isinstance(payload, dict):
         raise ValueError("Agent payload must be an object")
     metadata = payload.get("metadata") or payload.get("metadata_json") or {}
@@ -1770,7 +2013,7 @@ def create_vibe_agent(payload: dict) -> dict:
                 system_prompt=payload.get("system_prompt"),
                 metadata=metadata,
                 enabled=_parse_agent_enabled_field(payload, default=True),
-                user_context=resolve_resource_access_context(),
+                user_context=resolve_resource_access_context(user_context),
             )
         except AgentNameValidationError as exc:
             return _agent_name_validation_error(exc)
@@ -1779,7 +2022,7 @@ def create_vibe_agent(payload: dict) -> dict:
         store.close()
 
 
-def update_vibe_agent(name: str, payload: dict) -> dict:
+def update_vibe_agent(name: str, payload: dict, *, user_context: Any = None) -> dict:
     if not isinstance(payload, dict):
         raise ValueError("Agent payload must be an object")
     if "backend" in payload:
@@ -1825,7 +2068,7 @@ def update_vibe_agent(name: str, payload: dict) -> dict:
 
     store = VibeAgentStore()
     try:
-        context = resolve_resource_access_context()
+        context = resolve_resource_access_context(user_context)
         try:
             agent = (
                 store.rename(name, new_name, user_context=context)
@@ -1885,10 +2128,10 @@ def _agent_reference_rewrite_error(exc: AgentReferenceRewriteError) -> dict:
     }
 
 
-def remove_vibe_agent(name: str) -> dict:
+def remove_vibe_agent(name: str, *, user_context: Any = None) -> dict:
     store = VibeAgentStore()
     try:
-        context = resolve_resource_access_context()
+        context = resolve_resource_access_context(user_context)
         store.require_manageable(name, user_context=context)
         try:
             archived = store.archive(name, user_context=context)
@@ -1921,10 +2164,10 @@ def remove_vibe_agent(name: str) -> dict:
         store.close()
 
 
-def set_default_vibe_agent(name: str) -> dict:
+def set_default_vibe_agent(name: str, *, user_context: Any = None) -> dict:
     store = VibeAgentStore()
     try:
-        context = resolve_resource_access_context()
+        context = resolve_resource_access_context(user_context)
         agent = store.require_manageable(name, user_context=context)
         if not agent.enabled:
             raise ValueError(f"agent '{agent.name}' is disabled")
@@ -4606,7 +4849,7 @@ def store_vault_pubkey_pin(payload: dict) -> dict:
     return {"ok": True, "secret": meta}
 
 
-def import_vibe_agents(payload: dict) -> dict:
+def import_vibe_agents(payload: dict, *, user_context: Any = None) -> dict:
     if not isinstance(payload, dict):
         raise ValueError("Import payload must be an object")
     candidates = []
@@ -4647,7 +4890,10 @@ def import_vibe_agents(payload: dict) -> dict:
 
     store = VibeAgentStore()
     try:
-        result = store.import_candidates(candidates, user_context=resolve_resource_access_context())
+        result = store.import_candidates(
+            candidates,
+            user_context=resolve_resource_access_context(user_context),
+        )
         return {
             "ok": True,
             "imported": [_vibe_agent_payload(agent, brief=True) for agent in result.imported],
@@ -4657,13 +4903,16 @@ def import_vibe_agents(payload: dict) -> dict:
         store.close()
 
 
-def get_settings(platform: Optional[str] = None) -> dict:
+def get_settings(platform: Optional[str] = None, *, user_context: Any = None) -> dict:
     store = SettingsStore.get_instance()
     target_platform = platform or _current_platform()
     if target_platform == "discord":
         _migrate_discord_guild_scope_from_config(store)
     payload = _settings_to_payload(store, platform=target_platform)
-    payload["agent_catalog"] = get_vibe_agents(include_archived=True)
+    payload["agent_catalog"] = get_vibe_agents(
+        include_archived=True,
+        user_context=user_context,
+    )
     return payload
 
 

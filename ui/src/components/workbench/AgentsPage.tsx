@@ -33,7 +33,10 @@ import type {
   VibeAgentOnboardingResult,
   VibeAgentUpdatePayload,
 } from '../../context/ApiContext';
-import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
+import {
+  canUseRuntimeSurfaces,
+  useInstanceAuthorization,
+} from '../../context/InstanceAuthorizationContext';
 import { AgentGraphTab } from './AgentGraphTab';
 import { useToast } from '../../context/ToastContext';
 import { NewAgentDialog } from './NewAgentDialog';
@@ -79,7 +82,12 @@ export const AgentsPage: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
   const { showToast } = useToast();
-  const { capabilities, remote } = useInstanceAuthorization();
+  const {
+    capabilities,
+    remote,
+    hasTemporaryUnrestrictedOrgAccess,
+  } = useInstanceAuthorization();
+  const canUseRuntime = canUseRuntimeSurfaces(remote, hasTemporaryUnrestrictedOrgAccess);
   // General navigation (sidebar / nav / capability tabs) resumes the tab the user
   // left the page on; a fresh browser opens Definitions. A contextual caller that
   // needs a specific tab passes ``?tab=`` and wins over the memory — the tab it
@@ -118,15 +126,15 @@ export const AgentsPage: React.FC = () => {
   // Mobile drill-down: a row tap opens the detail full-screen. The agent
   // auto-selected on mount stays in the list view until the user drills in.
   const [detailOpen, setDetailOpen] = useState(false);
-  const visibleTabs = remote ? (['definitions'] as const) : AGENTS_TAB_ORDER;
-  const activeTab = remote ? 'definitions' : agentsTab;
-  // Every Agent editor control is local-only; remote instances get a read-only
-  // catalog. Organization onboarding stays available — it is separately
-  // permitted by the remote policy.
-  const canEditAgents = canEditAgentDefinitions({ remote });
+  const visibleTabs = remote && !canUseRuntime ? (['definitions'] as const) : AGENTS_TAB_ORDER;
+  const activeTab = remote && !canUseRuntime ? 'definitions' : agentsTab;
+  const canEditAgents = canEditAgentDefinitions({
+    remote,
+    temporaryUnrestrictedOrgAccess: hasTemporaryUnrestrictedOrgAccess,
+  });
 
   const refreshOnboarding = useCallback(async () => {
-    if (!capabilities.can_manage_agents) {
+    if (!capabilities.can_manage_agents && !canUseRuntime) {
       setOnboardingInventory(null);
       return;
     }
@@ -136,7 +144,7 @@ export const AgentsPage: React.FC = () => {
     } catch {
       setOnboardingInventory(null);
     }
-  }, [api, capabilities.can_manage_agents]);
+  }, [api, capabilities.can_manage_agents, canUseRuntime]);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -184,7 +192,7 @@ export const AgentsPage: React.FC = () => {
   }, [selected]);
 
   const fetchRunningActiveCount = useCallback(async () => {
-    if (remote) {
+    if (remote && !canUseRuntime) {
       setRunningActiveCount(null);
       return;
     }
@@ -202,7 +210,7 @@ export const AgentsPage: React.FC = () => {
     } catch {
       setRunningActiveCount(null);
     }
-  }, [api, remote]);
+  }, [api, canUseRuntime, remote]);
 
   // Keep the badge fresh on every tab (including 运行) so it never depends on
   // the graph view's filters.
@@ -211,7 +219,7 @@ export const AgentsPage: React.FC = () => {
   }, [fetchRunningActiveCount]);
 
   useEffect(() => {
-    if (remote) {
+    if (remote && !canUseRuntime) {
       setEventBridgeConnected(false);
       return;
     }
@@ -233,10 +241,10 @@ export const AgentsPage: React.FC = () => {
       onSessionStatus: () => fetchRunningActiveCount(),
       onAuthorizationChanged: () => void refresh(),
     });
-  }, [api, fetchRunningActiveCount, refresh, remote]);
+  }, [api, canUseRuntime, fetchRunningActiveCount, refresh, remote]);
 
   useEffect(() => {
-    if (remote) return;
+    if (remote && !canUseRuntime) return;
     // Reconcile the badge even while SSE is connected: process death / orphan /
     // reap is a sampled snapshot with no run/session SSE event, so a slow
     // liveness poll keeps the count fresh (30s connected, 8s disconnected),
@@ -286,7 +294,7 @@ export const AgentsPage: React.FC = () => {
       document.removeEventListener('visibilitychange', refreshNow);
       window.removeEventListener('focus', refreshNow);
     };
-  }, [eventBridgeConnected, fetchRunningActiveCount, remote]);
+  }, [canUseRuntime, eventBridgeConnected, fetchRunningActiveCount, remote]);
 
   const selectAgent = useCallback(
     async (name: string, openDetail = false) => {
@@ -501,8 +509,8 @@ export const AgentsPage: React.FC = () => {
         })}
       </div>
 
-      {/* The run graph is a trusted-local process diagnostic. */}
-      {!remote && activeTab === 'running' && <AgentGraphTab />}
+      {/* The run graph follows the temporary Organization runtime policy. */}
+      {(!remote || canUseRuntime) && activeTab === 'running' && <AgentGraphTab />}
 
       {activeTab === 'definitions' && onboardingInventory && (
         <OrganizationAgentOnboarding
@@ -1161,9 +1169,9 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
         </div>
       </Field>
 
-      {/* Model — Combobox with chevron + searchable + custom values. Remote
-          instances get the same value as a locked chip (the Backend field's
-          read-only treatment) because the update endpoint is local-only. */}
+      {/* Model — Combobox with chevron + searchable + custom values. Callers
+          outside the current runtime policy get the Backend field's locked
+          treatment. */}
       <Field label={t('agents.detail.model')}>
         {!canEdit ? (
           <div className="flex items-center gap-2 rounded-lg border border-border bg-surface-3 px-3 py-2">
@@ -1258,8 +1266,7 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, on
             </span>
           </button>
           {/* Expand into the full editor modal (large input + Markdown
-              edit/preview) — the shared EditorDialog primitive. The editor
-              saves, so it stays local-only. */}
+              edit/preview) — the shared EditorDialog primitive. */}
           {canEdit && (
             <Button
               type="button"

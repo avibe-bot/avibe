@@ -18,9 +18,23 @@ from config.v2_config import (
     V2Config,
 )
 from core.memory.operation_lock import MemoryOperationLease
-from tests.ui_server_test_helpers import csrf_headers
+from tests.ui_server_test_helpers import csrf_headers, remote_session_cookie
 from vibe import api, internal_client, remote_access, ui_memory_routes, ui_server
 from vibe.ui_server import app
+
+
+def _active_org_member_cookie(config: V2Config, email: str, subject: str) -> str:
+    return remote_session_cookie(
+        config,
+        email,
+        subject,
+        role="viewer",
+        access_source="organization_group",
+        organization_id="org-1",
+        organization_member_id="member-1",
+        organization_role="member",
+        group_ids=[],
+    )
 
 
 def test_memory_rebuild_result_preserves_closed_preflight_diagnostic() -> None:
@@ -87,20 +101,26 @@ def _renewable_remote_session_cookie(
     email: str,
     subject: str,
 ) -> str:
-    expires_at = int(time.time()) + (remote_access.SESSION_TTL_SECONDS // 2) - 60
-    payload = {
-        "email": email,
-        "sub": subject,
-        "instance_id": config.remote_access.vibe_cloud.instance_id,
-        "iat": expires_at - remote_access.SESSION_TTL_SECONDS,
-        "exp": expires_at,
-    }
-    payload_text = urllib.parse.quote(json.dumps(payload, separators=(",", ":")), safe="")
-    signature = remote_access._session_signature(
-        config.remote_access.vibe_cloud.session_secret,
-        payload_text,
+    current = remote_session_cookie(
+        config,
+        email,
+        subject,
+        role="viewer",
+        access_source="organization_group",
+        organization_id="org-1",
+        organization_member_id=f"member-{subject}",
+        organization_role="member",
+        group_ids=[],
     )
-    return f"{payload_text}.{signature}"
+    payload_text, _signature = current.rsplit(".", 1)
+    payload = json.loads(urllib.parse.unquote(payload_text))
+    expires_at = int(time.time()) + (remote_access.SESSION_TTL_SECONDS // 2) - 60
+    payload["iat"] = expires_at - remote_access.SESSION_TTL_SECONDS
+    payload["exp"] = expires_at
+    return remote_access._encode_session_cookie(
+        config.remote_access.vibe_cloud.session_secret,
+        payload,
+    )
 
 
 def _local_headers() -> dict[str, str]:
@@ -524,7 +544,7 @@ def test_memory_authenticated_avibe_cloud_uses_the_remote_workbench_principal(
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        remote_access.make_session_cookie(config, "alex@example.com", "user-1"),
+        _active_org_member_cookie(config, "alex@example.com", "user-1"),
         domain="alex.avibe.bot",
     )
     remote_headers = {"Origin": "https://alex.avibe.bot"}
@@ -575,13 +595,16 @@ def test_memory_authenticated_avibe_cloud_uses_the_remote_workbench_principal(
     ]
 
 
-def test_memory_diagnostics_patch_is_rejected_for_remote_ui(monkeypatch, tmp_path) -> None:
+def test_active_org_member_memory_patch_rejects_retired_diagnostics_field(
+    monkeypatch,
+    tmp_path,
+) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_remote_config(tmp_path)
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        remote_access.make_session_cookie(config, "alex@example.com", "user-1"),
+        _active_org_member_cookie(config, "alex@example.com", "user-1"),
         domain="alex.avibe.bot",
     )
     calls: list[bool] = []
@@ -636,7 +659,7 @@ def test_memory_avibe_cloud_read_still_requires_same_origin(monkeypatch, tmp_pat
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        remote_access.make_session_cookie(config, "alex@example.com", "user-1"),
+        _active_org_member_cookie(config, "alex@example.com", "user-1"),
         domain="alex.avibe.bot",
     )
 

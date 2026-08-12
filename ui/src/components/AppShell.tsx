@@ -11,7 +11,10 @@ import { memoryNavShouldBeVisible } from '../lib/memorySettings';
 import { useApi } from '../context/ApiContext';
 import { useStatus } from '../context/StatusContext';
 import { useWorkbenchInbox } from '../context/WorkbenchInboxContext';
-import { useInstanceAuthorization } from '../context/InstanceAuthorizationContext';
+import {
+  canUseAppsSurface,
+  useInstanceAuthorization,
+} from '../context/InstanceAuthorizationContext';
 import { AccountMenu } from './AccountMenu';
 import { LanguageSwitcher } from './LanguageSwitcher';
 import { ThemeToggle } from './ThemeToggle';
@@ -32,12 +35,11 @@ import { InstallHint } from './InstallHint';
 import logoImg from '../assets/logo.png';
 import { getEnabledPlatforms, platformSupportsChannels } from '../lib/platforms';
 import { useViewportHeightVar } from '../lib/useViewportHeightVar';
-import { OrganizationShell } from '../features/organization/OrganizationShell';
 import {
   adminLandingPath,
-  filterLocalSystemNavItems,
+  filterRuntimeAccessNavItems,
   isAdvancedSettingsPath,
-  isLocalSystemPath,
+  isLocalSystemPathForAccess,
   isMemorySettingsPath,
 } from '../lib/adminNavigation';
 
@@ -60,9 +62,9 @@ type ShellNavItem = {
   variant?: 'workbench';
 };
 
-// Keep the Organization routes available for direct access while the product
-// entry points remain hidden. Re-enable every shell surface from one switch.
-const ORGANIZATION_NAV_ENABLED = false;
+// Organization is exposed from the admin control panel only. The workbench
+// keeps its compact navigation focused on agent work.
+const ORGANIZATION_NAV_ENABLED = true;
 
 const isItemActive = (item: ShellNavItem, pathname: string): boolean =>
   item.match
@@ -263,7 +265,11 @@ export const AppShell: React.FC = () => {
   const { t } = useTranslation();
   const { status } = useStatus();
   const { totalUnread } = useWorkbenchInbox();
-  const { capabilities, remote } = useInstanceAuthorization();
+  const {
+    capabilities,
+    remote,
+    hasTemporaryUnrestrictedOrgAccess,
+  } = useInstanceAuthorization();
   const api = useApi();
   const location = useLocation();
   const [enabledPlatforms, setEnabledPlatforms] = useState<string[]>([]);
@@ -292,12 +298,12 @@ export const AppShell: React.FC = () => {
   useViewportHeightVar();
 
   useEffect(() => {
-    if (!capabilities.can_manage_instance) return;
+    if (!capabilities.can_manage_instance && !hasTemporaryUnrestrictedOrgAccess) return;
     api.getConfig().then((c: any) => {
       setConfig(c);
       setEnabledPlatforms(getEnabledPlatforms(c));
     }).catch(() => {});
-  }, [api, capabilities.can_manage_instance]);
+  }, [api, capabilities.can_manage_instance, hasTemporaryUnrestrictedOrgAccess]);
 
   useEffect(() => {
     const refreshMemoryNav = () => {
@@ -363,13 +369,11 @@ export const AppShell: React.FC = () => {
     window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`);
   }, [chromeless, location.pathname, location.search]);
 
-  // Organization takes over the whole shell, so it returns after every hook above
-  // has run — an early return before them would make those hooks conditional.
-  if (location.pathname.startsWith('/admin/organization')) {
-    return <OrganizationShell />;
-  }
-
-  if (location.pathname === '/setup' && remote && capabilities.can_manage_instance) {
+  if (
+    location.pathname === '/setup' &&
+    remote &&
+    (capabilities.can_manage_instance || hasTemporaryUnrestrictedOrgAccess)
+  ) {
     return (
       <main className="flex min-h-screen items-center justify-center bg-background p-4 text-foreground">
         <Card className="w-full max-w-md">
@@ -380,7 +384,7 @@ export const AppShell: React.FC = () => {
           <CardContent className="space-y-4">
             <p className="text-sm leading-relaxed text-muted">{t('setup.remoteOwner.hint')}</p>
             <Button asChild>
-              <Link to={adminLandingPath(capabilities.can_use_system)}>
+              <Link to={adminLandingPath(capabilities.can_use_system, hasTemporaryUnrestrictedOrgAccess === true)}>
                 {t('setup.remoteOwner.action')}
               </Link>
             </Button>
@@ -393,30 +397,31 @@ export const AppShell: React.FC = () => {
   const hasChannelPlatforms = enabledPlatforms.some((platform) => platformSupportsChannels(config, platform));
   const modelHubEnabled = modelHubEnabledFromConfig(config);
   const isRunning = status.state === 'running';
+  const canUseApps = canUseAppsSurface(remote, hasTemporaryUnrestrictedOrgAccess);
+  const canUseRuntimeSurfaces = !remote || hasTemporaryUnrestrictedOrgAccess === true;
 
   const ownerOnlyPath =
     location.pathname === '/setup' ||
     (location.pathname.startsWith('/admin') && !location.pathname.startsWith('/admin/organization')) ||
-    ['/agents', '/harness', '/apps/library'].some(
+    ['/agents', '/harness'].some(
       (path) => location.pathname === path || location.pathname.startsWith(`${path}/`),
     );
-  // Owner is not enough for these: `can_manage_instance` stays true for a remote
-  // Instance owner, but every one of them runs on local-only routes. The list
-  // and its rationale live in `isLocalSystemPath` so this redirect and the
-  // navigation entries below cannot drift apart.
-  const localSystemPath = isLocalSystemPath(location.pathname);
+  // The temporary Organization rollout admits these runtime/admin surfaces for
+  // active members. Remote Access pairing/tunnel controls stay on their own
+  // control-plane route and remain gated by the projected system capability.
+  const localSystemPath = isLocalSystemPathForAccess(
+    location.pathname,
+    canUseRuntimeSurfaces,
+  );
   const resourceUseDenied =
-    (location.pathname.startsWith('/skills') && !capabilities.can_use_skills) ||
-    (location.pathname.startsWith('/vaults') && !capabilities.can_use_vault_secrets);
-  const fileOnlyPath =
-    location.pathname.startsWith('/apps/files') || location.pathname.startsWith('/apps/editor');
-  const terminalOnlyPath = location.pathname.startsWith('/apps/terminal');
+    (location.pathname.startsWith('/skills') && !capabilities.can_use_skills && !canUseRuntimeSurfaces) ||
+    (location.pathname.startsWith('/vaults') && !capabilities.can_use_vault_secrets && !canUseRuntimeSurfaces);
+  const appAccessDenied = location.pathname.startsWith('/apps/') && !canUseApps;
   if (
-    (ownerOnlyPath && !capabilities.can_manage_instance) ||
+    (ownerOnlyPath && !capabilities.can_manage_instance && !canUseRuntimeSurfaces) ||
     (localSystemPath && !capabilities.can_use_system) ||
     resourceUseDenied ||
-    (fileOnlyPath && !capabilities.can_use_files) ||
-    (terminalOnlyPath && !capabilities.can_use_terminal)
+    appAccessDenied
   ) {
     return <Navigate to="/" replace />;
   }
@@ -443,10 +448,11 @@ export const AppShell: React.FC = () => {
           match: (p: string) => p.startsWith('/admin/organization'),
         }]
       : []),
-    // Permanent escape hatch to the App Library (a workbench app). Always present,
-    // so the Library is reachable from the control panel even when it is undocked
-    // (§7.1c #7). Matches any /apps/library path so it stays active on the route.
-    { to: '/apps/library', label: t('nav.appLibrary'), icon: LayoutGrid, match: (p) => p.startsWith('/apps/library') },
+    // Permanent escape hatch to the App Library (a workbench app) for principals
+    // covered by the current Apps policy. It stays reachable even when undocked.
+    ...(canUseApps
+      ? [{ to: '/apps/library', label: t('nav.appLibrary'), icon: LayoutGrid, match: (p: string) => p.startsWith('/apps/library') }]
+      : []),
     { to: '/admin/remote-access', label: t('nav.remoteAccess'), icon: Globe },
     {
       // 通讯平台: groups everything about connecting messaging platforms — the
@@ -494,12 +500,13 @@ export const AppShell: React.FC = () => {
     },
   ];
 
-  // Second half of the trusted-local gate: a page the redirect above withholds
+  // Second half of the runtime-access gate: a page the redirect above withholds
   // must not still be advertised, or a remote owner taps a nav entry and lands
-  // back on the Workbench.
+  // back on the Workbench. With the temporary Organization rollout every admin
+  // surface except remote-access pairing is admitted, so the nav stays full.
   const visibleAdminItems = capabilities.can_use_system
     ? adminItems
-    : filterLocalSystemNavItems(adminItems);
+    : filterRuntimeAccessNavItems(adminItems, canUseRuntimeSurfaces);
 
   const items: ShellNavItem[] = shellMode === 'admin' ? visibleAdminItems : [];
 
@@ -523,7 +530,7 @@ export const AppShell: React.FC = () => {
   ];
   const adminMobileTabs = capabilities.can_use_system
     ? adminMobileTabsAll
-    : filterLocalSystemNavItems(adminMobileTabsAll);
+    : filterRuntimeAccessNavItems(adminMobileTabsAll, canUseRuntimeSurfaces);
   // The More sheet shows the overflow: admin sections not already on the bottom
   // bar. Keep its filtering aligned with the currently visible primary tabs.
   const adminBottomBarPaths = new Set(
@@ -542,8 +549,8 @@ export const AppShell: React.FC = () => {
   const workbenchTabs: ShellNavItem[] = [
     { to: '/inbox', label: t('nav.inbox'), icon: Inbox, badge: totalUnread },
     { to: '/projects', label: t('nav.projects'), icon: FolderTree },
-    ...(capabilities.can_manage_agents || capabilities.can_use_skills || capabilities.can_use_vault_secrets ? [{
-      to: capabilities.can_manage_agents ? '/agents' : capabilities.can_use_skills ? '/skills' : '/vaults',
+    ...(capabilities.can_manage_agents || capabilities.can_use_skills || capabilities.can_use_vault_secrets || canUseRuntimeSurfaces ? [{
+      to: capabilities.can_manage_agents || canUseRuntimeSurfaces ? '/agents' : capabilities.can_use_skills ? '/skills' : '/vaults',
       label: t('nav.capabilities'),
       icon: LayoutGrid,
       match: (p: string) => ['/agents', '/skills', '/harness', '/vaults'].some((x) => p.startsWith(x)),
@@ -551,7 +558,7 @@ export const AppShell: React.FC = () => {
     // Apps (§7.1b): replaces the old 更多 route tab. Tapping toggles the Dock
     // drawer (the mobile Dock) rather than navigating; `grid-2x2` distinguishes
     // it from Capabilities' `layout-grid`.
-    ...(capabilities.can_use_system
+    ...(canUseApps
       ? [{ label: t('nav.apps'), icon: Grid2x2, onClick: () => setAppsDrawerOpen((v) => !v), match: () => appsDrawerOpen }]
       : []),
   ];
@@ -577,7 +584,7 @@ export const AppShell: React.FC = () => {
     // Desktop: normal document flow.
     <WindowManagerProvider standalone={standaloneAppTab}>
     <StandaloneAppTabContext.Provider value={standaloneAppTab}>
-    <DockProvider enabled={capabilities.can_use_system}>
+    <DockProvider enabled={canUseApps}>
     <ShowPageDragProvider>
     {/* Chromeless (single-app tab): the locked full-viewport column applies on DESKTOP too —
         the app fills the browser area exactly, with nothing to scroll around it. */}
@@ -649,20 +656,10 @@ export const AppShell: React.FC = () => {
                 centered Chat composer. Workbench → Settings (control panel);
                 Control Panel → Back to Workbench, the mint counterpart. */}
             <div className="flex items-stretch gap-2">
-              {capabilities.can_use_system && <AppsLauncher />}
-              {shellMode === 'workbench' && ORGANIZATION_NAV_ENABLED && (
+              {canUseApps && <AppsLauncher />}
+              {shellMode === 'workbench' && (capabilities.can_manage_instance || canUseRuntimeSurfaces) && (
                 <Link
-                  to="/admin/organization/overview"
-                  title={t('nav.organization')}
-                  aria-label={t('nav.organization')}
-                  className="group flex w-11 shrink-0 items-center justify-center rounded-lg border border-border-strong text-foreground transition-colors hover:bg-foreground/[0.04]"
-                >
-                  <Building2 className="size-[18px] text-muted group-hover:text-foreground" />
-                </Link>
-              )}
-              {shellMode === 'workbench' && capabilities.can_manage_instance && (
-                <Link
-                  to={adminLandingPath(capabilities.can_use_system)}
+                  to={adminLandingPath(capabilities.can_use_system, canUseRuntimeSurfaces)}
                   title={t('appShell.openControlPanel')}
                   aria-label={t('appShell.openControlPanel')}
                   className="group flex w-11 shrink-0 items-center justify-center rounded-lg border border-border-strong text-foreground transition-colors hover:bg-foreground/[0.04]"
@@ -715,7 +712,7 @@ export const AppShell: React.FC = () => {
                 />
                 {isRunning ? t('common.running') : t('common.stopped')}
               </span>
-              {capabilities.can_manage_instance && <VersionBadge openUpward />}
+              {(capabilities.can_manage_instance || canUseRuntimeSurfaces) && <VersionBadge openUpward />}
             </div>
           </div>
         </div>
@@ -743,16 +740,6 @@ export const AppShell: React.FC = () => {
               when not yet installed; null everywhere else). Version / language /
               theme / account live in the More tab. */}
           <div className="flex items-center gap-1.5">
-            {ORGANIZATION_NAV_ENABLED && (
-              <Link
-                to="/admin/organization/overview"
-                title={t('nav.organization')}
-                aria-label={t('nav.organization')}
-                className="grid size-9 place-items-center rounded-lg text-muted transition-colors hover:bg-foreground/[0.05] hover:text-foreground"
-              >
-                <Building2 className="size-[18px]" />
-              </Link>
-            )}
             <InstallHint />
           </div>
         </header>
@@ -773,7 +760,14 @@ export const AppShell: React.FC = () => {
             (location.pathname.startsWith('/admin/settings') ? 'page-glow-settings' : 'page-glow-console')
         )}
       >
-        <div className={clsx('w-full', chromeless ? 'h-full' : 'mx-auto px-4 py-5 md:px-10 md:py-8')}>
+        <div className={clsx(
+          'w-full',
+          chromeless
+            ? 'h-full'
+            : location.pathname.startsWith('/admin/organization')
+              ? 'mx-auto'
+              : 'mx-auto px-4 py-5 md:px-10 md:py-8',
+        )}>
           {/* A crashing page only replaces the content area — the sidebar + chrome stay usable, and
               navigating elsewhere clears the error without a manual retry. Key on location.key (not
               just pathname) so a query-only navigation (e.g. /search?q=…) also resets. */}
@@ -789,7 +783,7 @@ export const AppShell: React.FC = () => {
         ) : (
           <MobileTabBar
             items={workbenchTabs}
-            center={capabilities.can_chat
+            center={(capabilities.can_chat || canUseRuntimeSurfaces)
               ? { onClick: () => setNewSessionOpen(true), label: t('appShell.newSession'), icon: Plus }
               : undefined}
           />
@@ -832,11 +826,11 @@ export const AppShell: React.FC = () => {
       {/* Mobile Dock drawer — the workbench Apps tab summons it (§7.1b). Mobile-only
           (md:hidden internally); mounted inside DockProvider so it reads the same
           docked tiles + order as the desktop Dock. */}
-      {shellMode === 'workbench' && capabilities.can_use_system && (
+      {shellMode === 'workbench' && canUseApps && (
         <MobileDockDrawer open={appsDrawerOpen} onClose={() => setAppsDrawerOpen(false)} />
       )}
 
-      {capabilities.can_chat && (
+      {(capabilities.can_chat || canUseRuntimeSurfaces) && (
         <NewSessionSheet
           open={newSessionOpen}
           onClose={() => setNewSessionOpen(false)}
@@ -855,7 +849,7 @@ export const AppShell: React.FC = () => {
           second launcher on top in full-screen anymore (product: avoid the fullscreen floating
           button; a Dock redesign comes later). Un-maximize via the window traffic-lights to reach
           the sidebar launcher. */}
-      {capabilities.can_use_system && <WindowLayer />}
+      {canUseApps && <WindowLayer />}
     </div>
     </ShowPageDragProvider>
     </DockProvider>

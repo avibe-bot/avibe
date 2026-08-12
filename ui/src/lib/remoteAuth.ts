@@ -28,127 +28,99 @@ export function isSetupCheckBypassed(path: string): boolean {
   return SETUP_CHECK_BYPASS_PATHS.has(path);
 }
 
-/**
- * Locality half of a Workbench control gate.
- *
- * `can_manage_instance` / `can_manage_agents` / `can_manage_projects` stay true
- * for a remote Instance owner, so a role check alone still renders controls whose
- * endpoints the remote HTTP policy classifies local-only — they dead-end in
- * `remote_execution_disabled`. Every predicate below is that missing locality
- * check; combine it with the capability that already guards the surface locally
- * (`canManageSkills({ remote }) && capabilities.can_manage_instance`), the same
- * shape as the trusted-local capabilities the backend derives
- * (`can_use_system` = not remote and owner).
- */
-type RemoteContext = { remote: boolean };
+/** Temporary runtime policy signal carried by signed active-Organization claims. */
+export type RemoteContext = {
+  remote: boolean;
+  temporaryUnrestrictedOrgAccess?: boolean;
+  /** Compatibility with the previous Apps-only rollout field. */
+  temporaryUnrestrictedOrgAppAccess?: boolean;
+};
 type RemoteSetupSession = RemoteContext & {
   authenticated?: boolean;
   capabilities?: { can_manage_instance?: boolean };
 };
 
-function isTrustedLocal(context: RemoteContext): boolean {
-  return !context.remote;
+function hasTemporaryUnrestrictedOrgAccess(context: RemoteContext): boolean {
+  return (
+    context.temporaryUnrestrictedOrgAccess === true ||
+    context.temporaryUnrestrictedOrgAppAccess === true
+  );
+}
+
+function canUseTemporaryOrgRuntime(context: RemoteContext): boolean {
+  return !context.remote || hasTemporaryUnrestrictedOrgAccess(context);
 }
 
 /**
- * Agent definition editing is local-only. The remote HTTP policy permits Agent
- * detail reads and organization onboarding, and `/api/global-prompts` is local
- * only, so create / import / edit / enable / set-default / run / delete would
- * all dead-end in `remote_execution_disabled`. Remote instances therefore get a
- * read-only Agent catalog; onboarding stays available because it is separately
- * permitted.
+ * Temporary policy: active Organization members may edit Agent definitions.
  */
 export function canEditAgentDefinitions(context: RemoteContext): boolean {
-  return isTrustedLocal(context);
+  return canUseTemporaryOrgRuntime(context);
 }
 
 /**
- * Skill management is local-only: `GET /api/skills` is the only remote-permitted
- * Skill route, while add / upload / preview / registry search / dependency
- * install / update / remove are all local. Remote instances therefore get a
- * read-only Skill catalog.
+ * Temporary policy: active Organization members may manage Skills.
  */
 export function canManageSkills(context: RemoteContext): boolean {
-  return isTrustedLocal(context);
+  return canUseTemporaryOrgRuntime(context);
 }
 
 /**
- * Vault management is local-only. The inventory, tags, settings, pending
- * requests, grants and audit reads are remote-permitted, but every mutation
- * (create / edit / delete a secret, reveal, settings save, request fulfil/deny,
- * grant revoke, sign) and every key-material read (`vmk`, `pubkey`,
- * `sandbox/root-metadata`, WebAuthn factor options) is local. Remote instances
- * therefore get a read-only Vault.
+ * Temporary policy: active Organization members may manage Vault resources.
  */
 export function canManageVaultSecrets(context: RemoteContext): boolean {
-  return isTrustedLocal(context);
+  return canUseTemporaryOrgRuntime(context);
 }
 
 /**
- * Harness is local-only: the page opens on `/api/harness/bootstrap` and every
- * task / watch / run route it drives is local, so the whole surface — route and
- * navigation entry — is unavailable remotely.
+ * Temporary policy: active Organization members may use Harness definitions and runs.
  */
 export function canUseHarness(context: RemoteContext): boolean {
-  return isTrustedLocal(context);
+  return canUseTemporaryOrgRuntime(context);
 }
 
 /**
- * Archiving a Project is local-only (`DELETE /api/projects/{id}`), unlike the
- * remote-permitted Project list, create and rename.
+ * Temporary policy: active Organization members may archive Projects.
  */
 export function canArchiveProjects(context: RemoteContext): boolean {
-  return isTrustedLocal(context);
+  return canUseTemporaryOrgRuntime(context);
 }
 
 /**
- * Project instructions are local-only in both directions: saving `AGENTS.md` is
- * local, and the read is too because a checked-in `AGENTS.md` / `CLAUDE.md`
- * symlink can point outside the Project workspace, which a remote caller has no
- * file capability to follow.
+ * Temporary policy: active Organization members may edit project instructions.
  */
 export function canEditProjectInstructions(context: RemoteContext): boolean {
-  return isTrustedLocal(context);
+  return canUseTemporaryOrgRuntime(context);
 }
 
 /**
- * A Project's default Agent is local-only. `PATCH /api/projects/{id}` is
- * payload-filtered remotely down to `display_name`, so the rename this dialog
- * shares stays permitted while every default-Agent field the picker persists
- * (`agent_id`, `agent_name`, `agent_variant`, `model`, `reasoning_effort`)
- * dead-ends in `remote_execution_disabled`.
+ * Temporary policy: active Organization members may edit project Agent defaults.
  */
 export function canEditProjectDefaultAgent(context: RemoteContext): boolean {
-  return isTrustedLocal(context);
+  return canUseTemporaryOrgRuntime(context);
 }
 
 /**
- * Memory administration is local-only: the admin log enumerates memcells for
- * every principal, a settings save repoints the shared provider endpoints, and
- * clear / runtime-restart act on the whole local sidecar. The principal-scoped
- * status, profile and search reads stay remote-permitted.
+ * Temporary policy: active Organization members may administer Memory.
  */
 export function canAdministerMemory(context: RemoteContext): boolean {
-  return isTrustedLocal(context);
+  return canUseTemporaryOrgRuntime(context);
 }
 
-/**
- * Remote owners can skip the global setup wizard: the wizard is a local-only
- * flow, while the remote shell has its own recovery surface.
- */
+/** Remote runtime principals skip the local setup wizard and use shell recovery. */
 export function shouldBypassSetupForRemoteOwner(session: RemoteSetupSession | null | undefined): boolean {
-  return !!session?.remote && session.authenticated === true && session.capabilities?.can_manage_instance === true;
+  return !!session?.remote && session.authenticated === true && (
+    session.capabilities?.can_manage_instance === true ||
+    session.temporaryUnrestrictedOrgAccess === true ||
+    session.temporaryUnrestrictedOrgAppAccess === true
+  );
 }
 
 /**
- * Registering and testing a Web Push subscription is local-only: the endpoint is
- * caller-supplied and this host later fetches it, so a remote subscription would
- * be an outbound request to an address the caller picked. Reading push status
- * stays remote-permitted, which is why this gates the enable / disable / test
- * controls rather than the surface that shows them.
+ * Temporary policy: active Organization members may register and test Web Push.
  */
 export function canRegisterWebPush(context: RemoteContext): boolean {
-  return isTrustedLocal(context);
+  return canUseTemporaryOrgRuntime(context);
 }
 
 

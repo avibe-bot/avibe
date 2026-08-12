@@ -116,7 +116,7 @@ export const VaultApprovalCard: React.FC<{
   const { t } = useTranslation();
   const api = useApi();
   const vault = useProtectedVault();
-  const { remote } = useInstanceAuthorization();
+  const { remote, hasTemporaryUnrestrictedOrgAccess } = useInstanceAuthorization();
 
   // The request is passed in already hydrated by the UI-audience inbox list
   // (`getVaultRequests`, #708), so `card.secret_unlock_material` /
@@ -360,12 +360,10 @@ export const VaultApprovalCard: React.FC<{
     );
   }
 
-  // Approve / deny / sign all drive local-only Vault routes, and
-  // `can_manage_instance` stays true for a remote Instance owner, so a remote
-  // approver would only reach `remote_execution_disabled`. Show the request
-  // read-only there instead — this card also renders inside the chat transcript,
-  // which a remote viewer can read.
-  const canApprove = canManageVaultSecrets({ remote });
+  const canApprove = canManageVaultSecrets({
+    remote,
+    temporaryUnrestrictedOrgAccess: hasTemporaryUnrestrictedOrgAccess,
+  });
   const approveDisabled = busy || !canApprove || (!isSign && !option);
 
   return (

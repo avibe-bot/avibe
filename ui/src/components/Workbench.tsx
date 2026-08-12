@@ -8,7 +8,10 @@ import { NewProjectDialog } from './workbench/NewProjectDialog';
 import { Composer } from './workbench/Composer';
 import { ProjectPicker } from './workbench/ProjectPicker';
 import { AgentRoutePicker } from './workbench/AgentRoutePicker';
-import { useInstanceAuthorization } from '../context/InstanceAuthorizationContext';
+import {
+  canUseRuntimeSurfaces,
+  useInstanceAuthorization,
+} from '../context/InstanceAuthorizationContext';
 import { canCreateLocalProject } from '../lib/sessionInfo';
 
 // Mirrors design.pen DnkGJ "Workbench" canvas: a centered hero panel +
@@ -21,10 +24,15 @@ import { canCreateLocalProject } from '../lib/sessionInfo';
 export const Workbench: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const { capabilities } = useInstanceAuthorization();
-  const canCreateProject = canCreateLocalProject(capabilities);
+  const {
+    capabilities,
+    remote,
+    hasTemporaryUnrestrictedOrgAccess,
+  } = useInstanceAuthorization();
+  const canUseRuntime = canUseRuntimeSurfaces(remote, hasTemporaryUnrestrictedOrgAccess);
+  const canCreateProject = canUseRuntime || canCreateLocalProject(capabilities);
   const ns = useNewSession({
-    active: capabilities.can_chat,
+    active: capabilities.can_chat || canUseRuntime,
     loadErrorText: t('newSession.loadError'),
     createFailedText: t('newSession.createFailed'),
   });
@@ -50,15 +58,15 @@ export const Workbench: React.FC = () => {
     ...(canCreateProject
       ? [{ key: 'newProject', icon: FolderPlus, onClick: () => setNewProjectOpen(true) }]
       : []),
-    ...(capabilities.can_manage_agents
+    ...(capabilities.can_manage_agents || canUseRuntime
       ? [{ key: 'openAgents', icon: Bot, onClick: () => navigate('/agents') }]
       : []),
-    ...(capabilities.can_manage_instance
+    ...(capabilities.can_manage_instance || canUseRuntime
       ? [{ key: 'openHarness', icon: Activity, onClick: () => navigate('/harness') }]
       : []),
   ];
 
-  if (!capabilities.can_chat) return <Navigate to="/projects" replace />;
+  if (!capabilities.can_chat && !canUseRuntime) return <Navigate to="/projects" replace />;
 
   return (
     // Desktop centers the hero + Composer as a group (min-h + justify-center). On

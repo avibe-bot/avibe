@@ -24,15 +24,16 @@ type Status = 'checking' | 'unsupported' | 'needs_install' | 'disabled' | 'enabl
 export const WebPushControl: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
-  const { remote } = useInstanceAuthorization();
+  const { remote, hasTemporaryUnrestrictedOrgAccess } = useInstanceAuthorization();
   const { showToast } = useToast();
   const [status, setStatus] = useState<Status>('checking');
   const [busy, setBusy] = useState(false);
   const [testing, setTesting] = useState(false);
   const [support, setSupport] = useState<WebPushSupportState | null>(null);
-  // Subscribe / unsubscribe / test are local-only, so a remote instance can read
-  // its push status but cannot register an endpoint for this host to call.
-  const canRegister = canRegisterWebPush({ remote });
+  const canRegister = canRegisterWebPush({
+    remote,
+    temporaryUnrestrictedOrgAccess: hasTemporaryUnrestrictedOrgAccess,
+  });
 
   const refresh = async () => {
     const nextSupport = getWebPushSupportState();

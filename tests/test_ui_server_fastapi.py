@@ -715,6 +715,20 @@ def _machine_coded_error_builders():
             "share_id_taken",
             409,
         ),
+        (
+            "show_page_missing",
+            lambda: ui_server._show_page_error_response(_Coded("missing", "show_page_not_found")),
+            "show_page_not_found",
+            404,
+        ),
+        (
+            "show_page_email_transient",
+            lambda: ui_server._show_page_error_response(
+                _Coded("temporary failure", "show_page_email_access_transient")
+            ),
+            "show_page_email_access_transient",
+            503,
+        ),
         ("dock", lambda: ui_server._dock_error_response(_Coded("nope", "show_page_not_found")), "show_page_not_found", 404),
         (
             "show_page_icon",
@@ -2562,6 +2576,50 @@ def test_workbench_events_filter_privileged_events_for_viewers(monkeypatch, tmp_
     assert "event: message.new" in body
     assert "hidden-project" not in body
     assert "hidden-secret" not in body
+
+
+def test_workbench_events_allow_show_events_to_temporary_org_viewers() -> None:
+    from vibe.authorization import AuthorizationContext
+    from vibe.sse_broker import broker
+    from vibe.ui_compat import g
+
+    async def collect_show_event() -> str:
+        with app.test_request_context("/api/events"):
+            g.authorization_context = AuthorizationContext(
+                instance_role="viewer",
+                instance_access_source="organization_group",
+                organization_id="org-1",
+                organization_member_id="member-1",
+                organization_role="member",
+                is_remote=True,
+            )
+            response = await ui_server.workbench_events()
+            iterator = response.body_iterator.__aiter__()
+            try:
+                for _ in range(3):
+                    await iterator.__anext__()
+                broker.publish(
+                    "show.event",
+                    {
+                        "session_id": "show-session-1",
+                        "payload": {
+                            "screenshot": {
+                                "path": "/private/host/path.png",
+                                "attachmentId": "attachment-1",
+                            }
+                        },
+                    },
+                )
+                chunk = await asyncio.wait_for(iterator.__anext__(), timeout=1)
+            finally:
+                await iterator.aclose()
+        return chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk
+
+    body = asyncio.run(collect_show_event())
+
+    assert "event: show.event" in body
+    assert "show-session-1" in body
+    assert "/private/host/path.png" not in body
 
 
 def test_workbench_events_end_at_authorization_refresh_deadline():
