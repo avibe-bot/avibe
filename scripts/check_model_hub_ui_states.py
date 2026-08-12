@@ -509,12 +509,14 @@ class Universe:
     it lives in rather than to whichever class happened to look first.
     """
 
-    def __init__(self, name: str, side: str, owner: str) -> None:
+    def __init__(self, name: str, side: str, owner: str, *, reject_repeats: bool = False) -> None:
         if side not in SIDES:
             raise ValueError(f"{side!r} is not one of {SIDES}")
         self.name = name
         self.side = side
         self.owner = owner
+        self.reject_repeats = reject_repeats
+        self.candidates = 0
         self._payload: dict[str, Any] = {}
         self._content: dict[str, Any] = {}
         self._where: dict[str, Any] = {}
@@ -550,7 +552,7 @@ class Universe:
         """
         body = payload if content is None else content
         if token in self._payload:
-            if self._content[token] != body:
+            if self.reject_repeats or self._content[token] != body:
                 self.duplicates.append((token, self._where[token], where))
         else:
             self._payload[token] = payload
@@ -981,7 +983,28 @@ class LiteralMember(NamedTuple):
     types: frozenset[str]
 
 
-def literal_members(text: str) -> dict[str, LiteralMember]:
+@dataclass(frozen=True)
+class LiteralMembers:
+    """A body literal's keyed view and its lossless member inventory."""
+
+    values: dict[str, LiteralMember]
+    occurrences: tuple[tuple[str, LiteralMember], ...]
+    duplicates: tuple[str, ...]
+
+    def __iter__(self):
+        return iter(self.values)
+
+    def __getitem__(self, name: str) -> LiteralMember:
+        return self.values[name]
+
+    def items(self):
+        return self.values.items()
+
+    def keys(self):
+        return self.values.keys()
+
+
+def literal_members(text: str) -> LiteralMembers:
     """The members a `{...}` literal declares, including requiredness and type.
 
     Every nonempty comma-delimited member is retained as a candidate. The old
@@ -998,6 +1021,8 @@ def literal_members(text: str) -> dict[str, LiteralMember]:
     lets an incompatible body look identical to the contracted one.
     """
     members: dict[str, LiteralMember] = {}
+    occurrences: list[tuple[str, LiteralMember]] = []
+    duplicates: list[str] = []
     for block in JSONISH_RE.findall(text):
         for part in block.strip("{}").split(","):
             declared, separator, member_type = part.partition(":")
@@ -1005,13 +1030,14 @@ def literal_members(text: str) -> dict[str, LiteralMember]:
             name = declared.rstrip("?").strip()
             if not name:
                 continue
-            previous = members.get(name)
             types = frozenset({re.sub(r"\s+", "", member_type)}) if separator else frozenset()
-            members[name] = LiteralMember(
-                required=(previous.required if previous else True) and not declared.endswith("?"),
-                types=(previous.types if previous else frozenset()) | types,
-            )
-    return members
+            member = LiteralMember(required=not declared.endswith("?"), types=types)
+            occurrences.append((name, member))
+            if name in members:
+                duplicates.append(name)
+                continue
+            members[name] = member
+    return LiteralMembers(members, tuple(occurrences), tuple(duplicates))
 
 
 def literal_keys(text: str) -> set[str]:
@@ -1031,7 +1057,7 @@ def spelled_shapes(api_text: str) -> dict[str, dict[str, dict[str, LiteralMember
     shapes: dict[str, dict[str, dict[str, LiteralMember]]] = {}
     for block in re.split(r"^## ", api_text, flags=re.M)[1:]:
         heading, _, body = block.partition("\n")
-        readings: dict[str, dict[str, LiteralMember]] = {"": literal_members(body)}
+        readings: dict[str, dict[str, LiteralMember]] = {"": literal_members(body).values}
         for selector, literal in SHAPE_VARIANT_RE.findall(body):
             for name in VARIANT_NAME_RE.findall(selector):
                 merged = dict(readings.get(name, {}))
@@ -1549,27 +1575,138 @@ class Document:
         return claim_scopes(self.scope("claims"))
 
 
+SEPARATOR_RE = re.compile(r"^\|[\s:|-]+\|$")
+
+
+class RegistryTable(NamedTuple):
+    """One section-owned table, including structural failures and every row."""
+
+    header_line: int | None
+    header: tuple[str, ...]
+    rows: tuple[tuple[int, tuple[str, ...], str], ...]
+    malformed: tuple[tuple[int | str, str], ...]
+
+
+def registry_table(
+    numbered: list[tuple[int, str]],
+    *,
+    label: str,
+    expected_header: tuple[str, ...],
+) -> RegistryTable:
+    """Inventory the one table in a registry section before validating its rows.
+
+    Table ownership comes from the section and expected column shape, not from a
+    valid identity cell. A damaged header, separator, identity, duplicate or
+    required semantic cell therefore changes findings, never the row inventory.
+    """
+
+    candidates: list[tuple[int, tuple[str, ...], bool]] = []
+    for pos, (line_no, line) in enumerate(numbered):
+        if not line.startswith("|"):
+            continue
+        cells = tuple(cell.strip() for cell in line.strip().strip("|").split("|"))
+        next_is_separator = (
+            pos + 1 < len(numbered) and SEPARATOR_RE.match(numbered[pos + 1][1].strip()) is not None
+        )
+        if next_is_separator or cells == expected_header:
+            candidates.append((pos, cells, next_is_separator))
+
+    if not candidates:
+        return RegistryTable(
+            None,
+            (),
+            (),
+            ((label, f"{label} has no {len(expected_header)}-column table header"),),
+        )
+
+    pos, header, separator_is_valid = min(
+        candidates,
+        key=lambda candidate: (
+            abs(len(candidate[1]) - len(expected_header))
+            + sum(
+                actual.lower() != expected.lower()
+                for actual, expected in zip(candidate[1], expected_header)
+            )
+        ),
+    )
+    header_line = numbered[pos][0]
+    malformed: list[tuple[int | str, str]] = []
+    if header != expected_header:
+        malformed.append(
+            (
+                header_line,
+                f"{label} header is {header!r}; expected {expected_header!r}",
+            )
+        )
+    if not separator_is_valid:
+        malformed.append((header_line, f"{label} header has no Markdown separator row"))
+
+    rows: list[tuple[int, tuple[str, ...], str]] = []
+    row_pos = pos + (2 if separator_is_valid else 1)
+    while row_pos < len(numbered):
+        line_no, line = numbered[row_pos]
+        if not line.startswith("|"):
+            break
+        if SEPARATOR_RE.match(line.strip()):
+            malformed.append((line_no, f"{label} contains an unexpected separator row"))
+            row_pos += 1
+            continue
+        cells = tuple(cell.strip() for cell in line.strip().strip("|").split("|"))
+        rows.append((line_no, cells, line))
+        row_pos += 1
+
+    return RegistryTable(header_line, header, tuple(rows), tuple(malformed))
+
+
+class CopyKeys(NamedTuple):
+    """The state register's explicit copy-key field type."""
+
+    keys: tuple[str, ...]
+    none: bool
+    malformed: tuple[str, ...]
+
+
+def copy_keys(cell: str) -> CopyKeys:
+    if cell == "—":
+        return CopyKeys((), True, ())
+    if not cell:
+        return CopyKeys((), False, ("is empty (use an em dash for typed none)",))
+
+    keys: list[str] = []
+    malformed: list[str] = []
+    without_quoted = re.sub(r"`[^`]*`", " ", cell)
+    for token in re.findall(r"`([^`]*)`", cell):
+        if re.fullmatch(r"[a-z][A-Za-z0-9]*(?:\.[A-Za-z0-9_*]+)+", token):
+            keys.append(token)
+        elif re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]*[.-][A-Za-z0-9_.-]+", token):
+            malformed.append(f"has malformed copy-key citation `{token}`")
+    for candidate in re.findall(r"(?<![\w`])([a-z][A-Za-z0-9_*]*(?:\.[A-Za-z0-9_*]+)+)(?![\w`])", without_quoted):
+        malformed.append(f"has unquoted copy-key citation `{candidate}`")
+    return CopyKeys(tuple(keys), False, tuple(malformed))
+
+
 def parse(doc: Document) -> dict[str, Any]:
     # --- §0.8 register -------------------------------------------------------
     register: list[dict[str, Any]] = []
     broken_rows: list[dict[str, Any]] = []
-    # Bounded by its own header, the way the copy reader is bounded by its own.
-    # §0.8 also holds the five-treatment table, and "any `|` row in this scope"
-    # took that in too — harmless while a wrong cell count was silently dropped,
-    # and six false findings the moment a wrong cell count became a finding. A
-    # reader that reports what it cannot read has to be sure the row was its own.
-    in_register = False
-    for n, line in doc.scope("register"):
-        if line.startswith("| Frame | State |"):
-            in_register = True
-            continue
-        if in_register and not line.startswith("|"):
-            in_register = False
-        if not in_register or not line.startswith("| "):
-            continue
-        cells = [c.strip() for c in line.strip().strip("|").split(" | ")]
-        if cells[0] in ("Frame", "---") or (len(cells) > 1 and cells[1] == "---"):
-            continue
+    state_table = registry_table(
+        doc.scope("register"),
+        label="§0.8 state register",
+        expected_header=(
+            "Frame",
+            "State",
+            "Entry condition",
+            "Failure / pending",
+            "Copy keys",
+            "Exit",
+        ),
+    )
+    for where, said in state_table.malformed:
+        broken_rows.append(
+            {"line": where, "frame": "", "state": "", "text": "", "said": said}
+        )
+    for n, row_cells, line in state_table.rows:
+        cells = list(row_cells)
         if len(cells) != 6:
             # The row count is this document's largest single input, and a row
             # that loses a cell used to leave the register silently one shorter.
@@ -1589,23 +1726,33 @@ def parse(doc: Document) -> dict[str, Any]:
                 }
             )
             continue
+        copy_field = copy_keys(cells[4])
         required = {
             "frame": cells[0],
             "state": cells[1],
             "entry": cells[2],
+            "failure": cells[3],
+            "copy": cells[4],
+            "exit": cells[5],
         }
         empty_required = [name for name, value in required.items() if not value]
-        if empty_required:
+        problems = [
+            *(f"has an empty required {name} cell" for name in empty_required),
+            *copy_field.malformed,
+        ]
+        if not re.fullmatch(r"§1\.\d+(?:\s*/\s*§1\.\d+)*", cells[0]):
+            problems.append(f"has malformed frame identity `{cells[0]}`")
+        for problem in problems:
             broken_rows.append(
                 {
                     "line": n,
                     "frame": cells[0],
                     "state": cells[1],
                     "text": line,
-                    "said": f"§0.8 row has an empty required "
-                    f"{' / '.join(empty_required)} cell",
+                    "said": f"§0.8 row {problem}",
                 }
             )
+        if problems:
             continue
         register.append(
             {
@@ -1615,6 +1762,7 @@ def parse(doc: Document) -> dict[str, Any]:
                 "entry": cells[2],
                 "failure": cells[3],
                 "copy": cells[4],
+                "copy keys": copy_field.keys,
                 "exit": cells[5],
             }
         )
@@ -1623,7 +1771,7 @@ def parse(doc: Document) -> dict[str, Any]:
     # A state's identity is its frame and its name together: 「Ready」 is a
     # different state in every frame that has one, and a universe keyed by the
     # bare name would call fifteen unrelated rows one contradictory definition.
-    states = Universe("states", "spec", "A")
+    states = Universe("states", "spec", "A", reject_repeats=True)
     for broken in broken_rows:
         states.malformed(broken["line"], broken["said"])
         # The row still names a frame and a state — the two leading columns,
@@ -1663,19 +1811,17 @@ def parse(doc: Document) -> dict[str, Any]:
                 ),
             )
 
-    treatments = Universe("treatments", "spec", "A")
-    in_treat = False
-    for n, line in doc.scope("treatments"):
-        if line.startswith("| # | Treatment |"):
-            in_treat = True
-            continue
-        if in_treat and not line.startswith("|"):
-            in_treat = False
-        if not in_treat:
-            continue
-        cells = [c.strip() for c in line.strip().strip("|").split("|")]
-        if not re.fullmatch(r"F\d+", cells[0]):
-            continue
+    treatments = Universe("treatments", "spec", "A", reject_repeats=True)
+    treatment_table = registry_table(
+        doc.scope("treatments"),
+        label="§0.8 failure-treatment register",
+        expected_header=("#", "Treatment", "What the user sees"),
+    )
+    for where, said in treatment_table.malformed:
+        treatments.malformed(where, said)
+    treatments.candidates = len(treatment_table.rows)
+    for n, row_cells, _line in treatment_table.rows:
+        cells = list(row_cells)
         if len(cells) != 3:
             # Not silent before this, but blamed on the wrong lines: dropping F2
             # left eleven register rows reported for naming a treatment 「§0.8's
@@ -1692,8 +1838,22 @@ def parse(doc: Document) -> dict[str, Any]:
             # rows reported for citing a treatment 「§0.8's closed set does not
             # define」. Registering the name keeps those citations resolvable;
             # the malformed line is the statement that the rest is unknown.
+            identity = cells[0] if cells else ""
             padded = (cells + ["", ""])[1:3]
-            treatments.define(cells[0], padded[0], content=tuple(padded), where=n)
+            if identity:
+                treatments.define(identity, padded[0], content=tuple(padded), where=n)
+            continue
+        problems: list[str] = []
+        if not re.fullmatch(r"F\d+", cells[0]):
+            problems.append(f"has malformed treatment identity `{cells[0]}`")
+        for col, value in zip(("identity", "treatment", "user-visible result"), cells):
+            if not value:
+                problems.append(f"has an empty required {col} cell")
+        for problem in problems:
+            treatments.malformed(n, f"§0.8 failure-treatment row {problem}")
+        if problems:
+            if cells[0]:
+                treatments.define(cells[0], cells[1], content=tuple(cells[1:]), where=n)
             continue
         treatments.define(cells[0], cells[1], content=(cells[1], cells[2]), where=n)
 
@@ -1714,34 +1874,44 @@ def parse(doc: Document) -> dict[str, Any]:
     # grain — one sentence covering four consumers reads true for whichever one
     # the author had in mind, and `{{status}}` held three HTTP statuses and one
     # supply health that way for nineteen rounds.
-    slots = Universe("slots", "spec", "B")
-    for n, line in doc.scope("slots"):
-        if line.startswith("| `{{"):
-            cells = [c.strip() for c in line.strip().strip("|").split("|")]
-            if len(cells) != 4:
-                # A slot row is a slot, its meaning, its presence rule and its
-                # consumers. Losing the last cell made the row declare 「no key
-                # interpolates me」, which is not a shape this reader can tell
-                # apart from a slot that genuinely has no consumers — so the
-                # consumer comparison fired on the keys instead, and named the
-                # two keys that were right.
-                slots.malformed(
-                    n, f"§0.9 slot row {cells[0]} has {len(cells)} cells where the table declares 4"
-                )
-                # Same reason as §0.8's treatments: the row still names its
-                # slot, and a slot left unnamed is reported again at every key
-                # that interpolates it.
-                for slot in SLOT_RE.findall(cells[0]):
-                    padded = tuple((cells + [None, None, None])[1:4])
-                    slots.define(slot, {"line": n, "cells": padded}, content=padded, where=n)
-                continue
-            for slot in SLOT_RE.findall(cells[0]):
-                slots.define(
-                    slot,
-                    {"line": n, "cells": tuple(cells[1:])},
-                    content=tuple(cells[1:]),
-                    where=n,
-                )
+    slots = Universe("slots", "spec", "B", reject_repeats=True)
+    slot_table = registry_table(
+        doc.scope("slots"),
+        label="§0.9 interpolation-slot register",
+        expected_header=("Slot", "Filled with", "Absent when", "Interpolated by"),
+    )
+    for where, said in slot_table.malformed:
+        slots.malformed(where, said)
+    slots.candidates = len(slot_table.rows)
+    for n, row_cells, _line in slot_table.rows:
+        cells = list(row_cells)
+        if len(cells) != 4:
+            slots.malformed(
+                n,
+                f"§0.9 slot row {cells[0] if cells else '(empty)'} has {len(cells)} cells "
+                "where the table declares 4",
+            )
+            for slot in SLOT_RE.findall(cells[0] if cells else ""):
+                padded = tuple((cells + [None, None, None])[1:4])
+                slots.define(slot, {"line": n, "cells": padded}, content=padded, where=n)
+            continue
+        identities = SLOT_RE.findall(cells[0])
+        problems: list[str] = []
+        expected_identity = f"`{{{{{identities[0]}}}}}`" if identities else ""
+        if len(identities) != 1 or cells[0] != expected_identity:
+            problems.append(f"has malformed slot identity `{cells[0]}`")
+        for col, value in zip(("identity", "meaning", "absence", "consumers"), cells):
+            if not value:
+                problems.append(f"has an empty required {col} cell")
+        for problem in problems:
+            slots.malformed(n, f"§0.9 interpolation-slot row {problem}")
+        for slot in identities:
+            slots.define(
+                slot,
+                {"line": n, "cells": tuple(cells[1:])},
+                content=tuple(cells[1:]),
+                where=n,
+            )
 
     # --- copy tables ---------------------------------------------------------
     # A copy row counts only inside a copy table, which starts at its own
@@ -1986,6 +2156,11 @@ def parse(doc: Document) -> dict[str, Any]:
     return {
         "register": register,
         "broken register rows": broken_rows,
+        "registry candidates": {
+            "state": len(state_table.rows),
+            "treatment": len(treatment_table.rows),
+            "slot": len(slot_table.rows),
+        },
         "universes": {u.name: u for u in (copy, slots, states, treatments, frames, registered_gaps(doc))},
         "tables": tables,
         "rows": rows,
@@ -2014,7 +2189,6 @@ MAPPING_HEADER_CANDIDATE_RE = re.compile(r"^\s*`([^`]+)`((?:\s*`\[[^`]+\]`)*)\s*
 MAPPING_HEADER_UNQUOTED_RE = re.compile(
     r"^\s*([A-Za-z][A-Za-z0-9_.\[\]]*)(\s+(?:`?\[[a-z-]+\]`?))?\s*$"
 )
-SEPARATOR_RE = re.compile(r"^\|[\s:|-]+\|$")
 LEADING_MAPPING_VALUE_RE = re.compile(r"\s*`([a-z][a-z0-9_]*)`")
 
 
@@ -2454,13 +2628,24 @@ def registered_gaps(doc: Document) -> Universe:
     missing", and `E` reports them, because a gap row is a claim about the
     contract and that is the class that checks those.
     """
-    gaps = Universe("gaps", "spec", "E")
-    registry = doc.scope("gap registry")
-    declared = declared_column(registry, MISSING_COLUMN_RE)
-    for n, line in registry:
-        if m := GAP_ROW_RE.match(line):
-            cells = line.split("|")
-            if len(cells) != 6:
+    gaps = Universe("gaps", "spec", "E", reject_repeats=True)
+    table = registry_table(
+        doc.scope("gap registry"),
+        label="§0.5 contract-gap register",
+        expected_header=(
+            "#",
+            "Surface",
+            "Missing",
+            "Evidence / disposition (contract baseline `ea26ee6a0`)",
+        ),
+    )
+    for where, said in table.malformed:
+        gaps.malformed(where, said)
+    gaps.candidates = len(table.rows)
+    for n, row_cells, line in table.rows:
+        cells = list(row_cells)
+        identity = cells[0] if cells else ""
+        if len(cells) != 4:
                 # This one was fully silent. A §0.5 row that loses a cell still
                 # matched the row pattern and still registered its number, so
                 # every citation of it resolved — while `cells[2:4]` quietly
@@ -2480,30 +2665,39 @@ def registered_gaps(doc: Document) -> Universe:
                 # reporting is the *point* — every one of them is a claim now
                 # checked as though the marker were not there, which is the
                 # direction to fail in when what was lost is the excuse itself.
-                gaps.malformed(
-                    n,
-                    f"§0.5 row {m.group(1)} has {len(cells) - 2} cells where the registry "
-                    f"declares 4",
-                )
-                continue
-            standing = STRUCK_RE.sub(" ", declared.get(n, "")).strip()
-            whole_row = STRUCK_RE.sub(" ", line)
-            gaps.define(
-                m.group(1),
-                GapRow(
-                    n,
-                    bool(standing and standing.lower() != "nothing"),
-                    frozenset(
-                        normalize_route(meth, path)
-                        for meth, path in ANY_ROUTE_RE.findall(whole_row)
-                    ),
-                    frozenset(
-                        token.split(".")[-1] for token in DOTTED_TOKEN_RE.findall(standing)
-                    ),
-                ),
-                content=line.strip(),
-                where=n,
+            gaps.malformed(
+                n,
+                f"§0.5 row {identity or '(empty)'} has {len(cells)} cells where the registry declares 4",
             )
+            continue
+        problems: list[str] = []
+        if not re.fullmatch(r"G-\d+", identity):
+            problems.append(f"has malformed gap identity `{identity}`")
+        for col, value in zip(("identity", "surface", "missing", "evidence"), cells):
+            if not value:
+                problems.append(f"has an empty required {col} cell")
+        for problem in problems:
+            gaps.malformed(n, f"§0.5 contract-gap row {problem}")
+        if not identity:
+            continue
+        standing = STRUCK_RE.sub(" ", cells[2]).strip()
+        whole_row = STRUCK_RE.sub(" ", line)
+        gaps.define(
+            identity,
+            GapRow(
+                n,
+                bool(standing and standing.lower() != "nothing"),
+                frozenset(
+                    normalize_route(meth, path)
+                    for meth, path in ANY_ROUTE_RE.findall(whole_row)
+                ),
+                frozenset(
+                    token.split(".")[-1] for token in DOTTED_TOKEN_RE.findall(standing)
+                ),
+            ),
+            content=line.strip(),
+            where=n,
+        )
     return gaps
 
 
@@ -2633,7 +2827,7 @@ def authority_claims(
     printed next to how many it rejected.
     """
     findings: list[dict[str, str]] = []
-    scale = {"routes": 0, "bodies": 0, "status branches": 0, "schema citations": 0,
+    scale = {"routes": 0, "bodies": 0, "body members": 0, "status branches": 0, "schema citations": 0,
              "vocabulary claims": 0, "attributed fields": 0,
              "contract mapping tables": 0, "repo symbols": 0, "authority lines": 0}
 
@@ -2721,7 +2915,14 @@ def authority_claims(
             literal = m_body.group(1)
             scale["bodies"] += 1
             claimed = literal_members(literal)
+            scale["body members"] += len(claimed.occurrences)
             keys = set(claimed)
+            if claimed.duplicates:
+                add(
+                    f"L{line_no}",
+                    f"`{literal}` repeats body member(s) {', '.join(sorted(set(claimed.duplicates)))}",
+                )
+                continue
             if not named:
                 # A gap row describes a body for a route that does not exist, so
                 # there is nothing to bind it to and nothing to compare. Anywhere
@@ -3493,7 +3694,7 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
         cited.add((k, f"§{sec} L{line}"))
     state_exit_candidates = 0
     for r in reg:
-        for k in KEY_REF_RE.findall(r["copy"]):
+        for k in r["copy keys"]:
             if k.startswith("models.") and (
                 "server-owned" in r["copy"] or "consumed verbatim" in r["copy"]
             ):
@@ -3840,7 +4041,7 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
         if not maps:
             continue
         cited: set[str] = set()
-        for cite in KEY_REF_RE.findall(r["copy"]):
+        for cite in r["copy keys"]:
             hit = copy_u.resolve(cite)
             if not hit.empty and not hit.ambiguous and not hit.wildcard:
                 cited.add(hit.hits[0])
@@ -4235,7 +4436,7 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
     # column alignment the broken row lost. Withholding it reports the key's own
     # line, which is not where the mistake is.
     reg_cited = cited_rows(
-        {t for r in reg for t in KEY_REF_RE.findall(r["copy"])}
+        {t for r in reg for t in r["copy keys"]}
         | {t for b in p["broken register rows"] for t in KEY_REF_RE.findall(b["text"])},
         copy_u,
     )
@@ -4281,6 +4482,11 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
 
     scale = {
         "register rows": len(reg),
+        "state-register candidates": p["registry candidates"]["state"],
+        "failure-treatment candidates": p["registry candidates"]["treatment"],
+        "interpolation-slot candidates": p["registry candidates"]["slot"],
+        "contract-gap candidates": gaps.candidates,
+        "body member candidates": e_scale["body members"],
         "distinct states": len(states),
         "frames with a register row": len(reg_frames),
         "frame sections with an element inventory": len(p["inventories"]),

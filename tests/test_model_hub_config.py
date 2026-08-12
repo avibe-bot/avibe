@@ -953,6 +953,188 @@ def test_model_hub_ui_gate_uses_only_mapping_cells_leading_domain_value(tmp_path
     )
 
 
+@pytest.mark.parametrize(
+    ("scale", "before", "after", "message"),
+    [
+        (
+            "state-register candidates",
+            "| §1.0 | Ready | `health` reads `ok`,",
+            "| frame one | Ready | `health` reads `ok`,",
+            "malformed frame identity",
+        ),
+        (
+            "state-register candidates",
+            "| §1.0 | Ready | `health` reads `ok`, both page reads answered, and at least one source `[contract]` | F5 | `shell.running` |",
+            "| §1.0 | Ready | `health` reads `ok`, both page reads answered, and at least one source `[contract]` | F5 | shell.running |",
+            "unquoted copy-key citation",
+        ),
+        (
+            "state-register candidates",
+            "| §1.0 | Ready | `health` reads `ok`, both page reads answered, and at least one source `[contract]` | F5 | `shell.running` |",
+            "| §1.0 | Ready | `health` reads `ok`, both page reads answered, and at least one source `[contract]` | F5 | `Shell.running` |",
+            "malformed copy-key citation",
+        ),
+        (
+            "failure-treatment candidates",
+            "| F1 | Retry in place | The surface stays open.",
+            "| F-one | Retry in place | The surface stays open.",
+            "malformed treatment identity",
+        ),
+        (
+            "failure-treatment candidates",
+            "| F1 | Retry in place | The surface stays open.",
+            "| F1 |  | The surface stays open.",
+            "empty required treatment cell",
+        ),
+        (
+            "interpolation-slot candidates",
+            "| `{{count}}` | A cardinality.",
+            "| count | A cardinality.",
+            "malformed slot identity",
+        ),
+        (
+            "interpolation-slot candidates",
+            "| `{{count}}` | A cardinality. The i18next plural family on the key picks the form; the number is never written into the singular text by hand. | Always present |",
+            "| `{{count}}` |  | Always present |",
+            "empty required meaning cell",
+        ),
+        (
+            "contract-gap candidates",
+            "| G-3 | 06 model inventory",
+            "| gap-three | 06 model inventory",
+            "malformed gap identity",
+        ),
+        (
+            "contract-gap candidates",
+            "| G-3 | 06 model inventory — **retirement is contracted; its discovered-row affordance remains open** |",
+            "| G-3 |  |",
+            "empty required surface cell",
+        ),
+    ],
+)
+def test_model_hub_ui_gate_registry_mutations_preserve_candidate_inventory(
+    tmp_path: Path, scale: str, before: str, after: str, message: str
+):
+    spec = Path("docs/plans/model-hub-ui-spec.md").read_text(encoding="utf-8")
+    baseline = check_model_hub_ui_states(Path.cwd())
+    assert spec.count(before) == 1
+    mutated = tmp_path / "mutated.md"
+    mutated.write_text(spec.replace(before, after, 1), encoding="utf-8")
+
+    result = check_model_hub_ui_states(mutated, authorities=Path.cwd())
+
+    assert result["input_scale"][scale] == baseline["input_scale"][scale]
+    assert any(message in finding["message"] for finding in result["findings"])
+
+
+@pytest.mark.parametrize(
+    ("scale", "before", "after", "message"),
+    [
+        (
+            "state-register candidates",
+            "| Frame | State | Entry condition | Failure / pending | Copy keys | Exit |",
+            "| Frame | State name | Entry condition | Failure / pending | Copy keys | Exit |",
+            "state register header",
+        ),
+        (
+            "failure-treatment candidates",
+            "| # | Treatment | What the user sees |",
+            "| # | Treatment name | What the user sees |",
+            "failure-treatment register header",
+        ),
+        (
+            "interpolation-slot candidates",
+            "| Slot | Filled with | Absent when | Interpolated by |",
+            "| Slot name | Filled with | Absent when | Interpolated by |",
+            "interpolation-slot register header",
+        ),
+        (
+            "contract-gap candidates",
+            "| # | Surface | Missing | Evidence / disposition (contract baseline `ea26ee6a0`) |",
+            "| # | Surface name | Missing | Evidence / disposition (contract baseline `ea26ee6a0`) |",
+            "contract-gap register header",
+        ),
+    ],
+)
+def test_model_hub_ui_gate_malformed_registry_headers_keep_rows(
+    tmp_path: Path, scale: str, before: str, after: str, message: str
+):
+    spec = Path("docs/plans/model-hub-ui-spec.md").read_text(encoding="utf-8")
+    baseline = check_model_hub_ui_states(Path.cwd())
+    assert spec.count(before) == 1
+    mutated = tmp_path / "mutated.md"
+    mutated.write_text(spec.replace(before, after, 1), encoding="utf-8")
+
+    result = check_model_hub_ui_states(mutated, authorities=Path.cwd())
+
+    assert result["input_scale"][scale] == baseline["input_scale"][scale]
+    assert any(message in finding["message"] for finding in result["findings"])
+
+
+def test_model_hub_ui_gate_missing_registry_separator_keeps_rows(tmp_path: Path):
+    spec = Path("docs/plans/model-hub-ui-spec.md").read_text(encoding="utf-8")
+    baseline = check_model_hub_ui_states(Path.cwd())
+    before = (
+        "| Slot | Filled with | Absent when | Interpolated by |\n"
+        "| --- | --- | --- | --- |"
+    )
+    after = "| Slot | Filled with | Absent when | Interpolated by |"
+    assert spec.count(before) == 1
+    mutated = tmp_path / "mutated.md"
+    mutated.write_text(spec.replace(before, after, 1), encoding="utf-8")
+
+    result = check_model_hub_ui_states(mutated, authorities=Path.cwd())
+
+    assert result["input_scale"]["interpolation-slot candidates"] == baseline["input_scale"][
+        "interpolation-slot candidates"
+    ]
+    assert any("has no Markdown separator row" in finding["message"] for finding in result["findings"])
+
+
+@pytest.mark.parametrize(
+    ("scale", "row_start", "message"),
+    [
+        ("state-register candidates", "| §1.0 | Ready |", "defined twice in states"),
+        ("failure-treatment candidates", "| F1 | Retry in place |", "defined twice in treatments"),
+        ("interpolation-slot candidates", "| `{{count}}` |", "defined twice in slots"),
+        ("contract-gap candidates", "| G-3 |", "defined twice in gaps"),
+    ],
+)
+def test_model_hub_ui_gate_reports_duplicate_registry_identity_without_shrinking(
+    tmp_path: Path, scale: str, row_start: str, message: str
+):
+    spec = Path("docs/plans/model-hub-ui-spec.md").read_text(encoding="utf-8")
+    baseline = check_model_hub_ui_states(Path.cwd())
+    row = next(line for line in spec.splitlines() if line.startswith(row_start))
+    assert spec.count(row) == 1
+    mutated = tmp_path / "mutated.md"
+    mutated.write_text(spec.replace(row, f"{row}\n{row}", 1), encoding="utf-8")
+
+    result = check_model_hub_ui_states(mutated, authorities=Path.cwd())
+
+    assert result["input_scale"][scale] == baseline["input_scale"][scale] + 1
+    assert any(message in finding["message"] for finding in result["findings"])
+
+
+def test_model_hub_ui_gate_reports_duplicate_body_members_before_type_comparison(
+    tmp_path: Path,
+):
+    spec = Path("docs/plans/model-hub-ui-spec.md").read_text(encoding="utf-8")
+    baseline = check_model_hub_ui_states(Path.cwd())
+    before = "`POST /api/models/oauth/submit` with the held `{flow_id, value}`"
+    after = "`POST /api/models/oauth/submit` with the held `{flow_id, flow_id: string, value}`"
+    assert spec.count(before) == 1
+    mutated = tmp_path / "mutated.md"
+    mutated.write_text(spec.replace(before, after, 1), encoding="utf-8")
+
+    result = check_model_hub_ui_states(mutated, authorities=Path.cwd())
+
+    assert result["input_scale"]["body member candidates"] == baseline["input_scale"][
+        "body member candidates"
+    ] + 1
+    assert any("repeats body member(s) flow_id" in finding["message"] for finding in result["findings"])
+
+
 def test_model_hub_ui_gate_line_citations_do_not_read_git_history(
     monkeypatch, tmp_path: Path
 ):
