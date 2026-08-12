@@ -28,7 +28,11 @@ import type { LucideIcon } from 'lucide-react';
 
 import { useWorkbenchInbox } from '../../context/WorkbenchInboxContext';
 import { useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
-import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
+import {
+  canUseAppsSurface,
+  canUseRuntimeSurfaces,
+  useInstanceAuthorization,
+} from '../../context/InstanceAuthorizationContext';
 import { useWindowManager } from '../../context/WindowManagerContext';
 import { useUnsavedChangesActionGuard } from '../../context/useUnsavedChangesActionGuard';
 import type { InboxSession, WorkbenchProject, WorkbenchSession } from '../../context/ApiContext';
@@ -395,11 +399,11 @@ const ProjectRow: React.FC<{
   canChat: boolean;
   canManageMetadata: boolean;
   canManageProjects: boolean;
-  /** Archiving is local-only (`DELETE /api/projects/{id}`), unlike rename. */
+  /** Whether the current runtime policy admits Project archiving. */
   canArchive: boolean;
-  /** The Editor app is a trusted-local surface. */
+  /** Whether the current runtime policy admits opening the Project in Editor. */
   canOpenInEditor: boolean;
-  /** Saving a project's AGENTS.md is local-only; the dialog has no read-only mode. */
+  /** Whether the current runtime policy admits saving a Project's AGENTS.md. */
   canEditAgentsMd: boolean;
   unreadBySession: Record<string, number>;
   onRename: (next: string) => Promise<void>;
@@ -660,16 +664,25 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
   const { t } = useTranslation();
   const navigate = useNavigate();
   const authorizeRouteAction = useUnsavedChangesActionGuard();
-  const { capabilities, remote } = useInstanceAuthorization();
-  const canCreateProject = canCreateLocalProject(capabilities);
+  const {
+    capabilities,
+    remote,
+    hasTemporaryUnrestrictedOrgAccess,
+  } = useInstanceAuthorization();
+  const canUseRuntime = canUseRuntimeSurfaces(remote, hasTemporaryUnrestrictedOrgAccess);
+  const canUseApps = canUseAppsSurface(remote, hasTemporaryUnrestrictedOrgAccess);
+  const canManageProjects = capabilities.can_manage_projects || canUseRuntime;
+  const canChat = capabilities.can_chat || canUseRuntime;
+  const canCreateProject = canUseRuntime || canCreateLocalProject(capabilities);
   const capabilityNav = CAPABILITY_NAV.filter(({ to }) => {
-    // Harness is trusted-local: the page opens on `/api/harness/bootstrap` and
-    // every task/watch/run route it drives is local-only, while
-    // `can_manage_agents` stays true for a remote Instance owner.
-    if (to === '/harness') return capabilities.can_manage_agents && canUseHarness({ remote });
-    if (to === '/agents') return capabilities.can_manage_agents;
-    if (to === '/skills') return capabilities.can_use_skills;
-    if (to === '/vaults') return capabilities.can_use_vault_secrets;
+    if (canUseRuntime) return true;
+    if (to === '/harness') return (capabilities.can_manage_agents || canUseRuntime) && canUseHarness({
+      remote,
+      temporaryUnrestrictedOrgAccess: hasTemporaryUnrestrictedOrgAccess,
+    });
+    if (to === '/agents') return capabilities.can_manage_agents || canUseRuntime;
+    if (to === '/skills') return capabilities.can_use_skills || canUseRuntime;
+    if (to === '/vaults') return capabilities.can_use_vault_secrets || canUseRuntime;
     return false;
   });
   const { totalUnread, unreadSessions, inboxSessions, markRead, unreadBySession } = useWorkbenchInbox();
@@ -800,7 +813,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
           unreadBySession={unreadBySession}
           unreadSessions={unreadSessions}
           totalUnread={totalUnread}
-          canMarkRead={capabilities.can_chat}
+          canMarkRead={canChat}
           onItemClick={onItemClick}
           onMarkAllRead={onMarkAllRead}
           onMouseEnter={openPopover}
@@ -858,7 +871,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
               row above to reclaim that space for the Projects list; ⌘K still
               works. Both are roomy 28px tap targets. */}
           <div className="flex items-center gap-0.5">
-            {capabilities.can_manage_projects && <Button
+            {canManageProjects && <Button
               type="button"
               variant="ghost"
               size="icon"
@@ -924,12 +937,18 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
                     }
                   }}
                   creatingSession={creatingSession(project.id)}
-                  canChat={capabilities.can_chat && project.capabilities.can_chat}
-                  canManageMetadata={project.capabilities.can_chat}
-                  canManageProjects={capabilities.can_manage_projects}
-                  canArchive={capabilities.can_manage_projects && canArchiveProjects({ remote })}
-                  canOpenInEditor
-                  canEditAgentsMd={capabilities.can_manage_projects && canEditProjectInstructions({ remote })}
+                  canChat={canChat && (canUseRuntime || project.capabilities.can_chat)}
+                  canManageMetadata={canUseRuntime || project.capabilities.can_chat}
+                  canManageProjects={canManageProjects}
+                  canArchive={canManageProjects && canArchiveProjects({
+                    remote,
+                    temporaryUnrestrictedOrgAccess: hasTemporaryUnrestrictedOrgAccess,
+                  })}
+                  canOpenInEditor={canUseApps}
+                  canEditAgentsMd={canManageProjects && canEditProjectInstructions({
+                    remote,
+                    temporaryUnrestrictedOrgAccess: hasTemporaryUnrestrictedOrgAccess,
+                  })}
                   unreadBySession={unreadBySession}
                   onRename={(next) => renameProject(project.id, next)}
                   onArchive={() => archiveProject(project.id)}

@@ -2077,7 +2077,7 @@ class ManagedWatchService:
     async def _run_watch(self, watch_id: str) -> None:
         from storage.resource_access_service import (
             REMOTE_AUTONOMOUS_HARNESS_DISABLED_CODE,
-            metadata_has_remote_resource_context,
+            metadata_allows_temporary_unrestricted_runtime,
         )
 
         lifetime_started: float | None = None
@@ -2099,7 +2099,7 @@ class ManagedWatchService:
             watch = self.store.get_watch(watch_id)
             if watch is None or not watch.enabled:
                 return
-            if metadata_has_remote_resource_context(watch.metadata):
+            if not metadata_allows_temporary_unrestricted_runtime(watch.metadata):
                 self._watch_store_call(
                     watch.id,
                     "suspend_remote_origin",

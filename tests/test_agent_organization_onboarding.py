@@ -119,7 +119,9 @@ def test_upgrade_onboarding_inventories_custom_and_system_agents_as_private(monk
                 user_context=_organization_context(subject="editor-1", instance_role="editor"),
             )
         }
-        assert visible == {legacy.name, builtins[0].name}
+        # Temporary full-access rollout (#1343): an active Organization member
+        # may list every agent regardless of the published/scope/private intent.
+        assert visible == {legacy.name, builtins[0].name, builtins[1].name}
     finally:
         store.close()
 
@@ -153,25 +155,23 @@ def test_fresh_install_onboarding_preserves_new_private_agent_and_authorizes_int
         visible = store.list_agents(
             user_context=_organization_context(subject="editor-1", instance_role="editor"),
         )
-        assert [agent.name for agent in visible] == [builtin.name]
-        assert custom.name not in {agent.name for agent in visible}
+        # Temporary full-access rollout (#1343): an active Organization member
+        # sees both the published builtin and the still-private custom agent.
+        assert {agent.name for agent in visible} == {builtin.name, custom.name}
     finally:
         store.close()
 
 
-def test_onboarding_is_owner_only_and_does_not_overwrite_existing_acl_revision(monkeypatch, tmp_path) -> None:
+def test_onboarding_preserves_existing_acl_revision(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     store = VibeAgentStore()
     try:
         agent = store.create(name="revisioned", backend="codex")
-        with pytest.raises(VibeAgentAccessError):
-            store.organization_onboarding_inventory(
-                user_context=_organization_context(subject="editor-1", instance_role="editor"),
-            )
-        with pytest.raises(VibeAgentAccessError):
-            store.onboard_organization_agents(
-                user_context=_organization_context(subject="editor-1", instance_role="editor"),
-            )
+        # Temporary full-access rollout (#1343): an active Organization member
+        # may inventory and onboard, so the editor no longer raises here.
+        editor_context = _organization_context(subject="editor-1", instance_role="editor")
+        assert store.organization_onboarding_inventory(user_context=editor_context)["counts"]
+        store.onboard_organization_agents(user_context=editor_context)
 
         store.onboard_organization_agents(user_context=_organization_context())
         _apply_agent_intent(
@@ -292,7 +292,7 @@ def test_agent_rename_and_delete_converge_in_full_resource_index(monkeypatch, tm
         store.close()
 
 
-def test_owner_http_workflow_lists_and_onboards_agents_while_editor_is_denied(monkeypatch, tmp_path) -> None:
+def test_owner_http_workflow_lists_and_onboards_agents_and_editor_is_admitted(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
     store = VibeAgentStore()
@@ -378,5 +378,7 @@ def test_owner_http_workflow_lists_and_onboards_agents_while_editor_is_denied(mo
         base_url="https://alex.avibe.bot",
         environ_base=_remote_peer(),
     )
-    assert denied.status_code == 403
-    assert denied.get_json()["error"] == "instance_access_forbidden"
+    # Temporary full-access rollout (#1343): an active Organization editor is
+    # admitted to the onboarding surface too.
+    assert denied.status_code == 200
+    assert denied.get_json()["available"] is True

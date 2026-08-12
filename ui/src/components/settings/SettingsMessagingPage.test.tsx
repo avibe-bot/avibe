@@ -65,6 +65,12 @@ const remoteOwner: InstanceAuthorizationValue = {
   },
 };
 
+const activeOrgMember: InstanceAuthorizationValue = {
+  ...remoteOwner,
+  instanceRole: 'viewer',
+  hasTemporaryUnrestrictedOrgAccess: true,
+};
+
 function renderPage(context: InstanceAuthorizationValue) {
   return render(
     <InstanceAuthorizationContext.Provider value={context}>
@@ -99,6 +105,14 @@ describe('SettingsMessagingPage locality gating', () => {
 
   it('shows the protected messaging controls to a trusted-local owner', async () => {
     renderPage(localOwner);
+
+    expect(await screen.findByText('dashboard.errorRetryLimit')).toBeTruthy();
+    expect(screen.getByText('dashboard.opencodeActiveTurnTimeout')).toBeTruthy();
+    expect(screen.getByText('dashboard.showPagesPrompt')).toBeTruthy();
+  });
+
+  it('shows every runtime messaging control to an active Organization member', async () => {
+    renderPage(activeOrgMember);
 
     expect(await screen.findByText('dashboard.errorRetryLimit')).toBeTruthy();
     expect(screen.getByText('dashboard.opencodeActiveTurnTimeout')).toBeTruthy();

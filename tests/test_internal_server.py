@@ -84,8 +84,19 @@ def _seed_project_workdir(conn, scope_id: str, workdir: Path, *, now: str = "202
 def _seed_remote_worker(*, backend: str = "claude") -> None:
     store = VibeAgentStore()
     try:
-        if store.get("worker") is None:
-            store.create(name="worker", backend=backend)
+        agent = store.get("worker")
+        if agent is None:
+            agent = store.create(name="worker", backend=backend)
+        with store.engine.begin() as conn:
+            resource_access_service.ensure_resource_policy(
+                conn,
+                resource_kind="agent",
+                resource_id=agent.id,
+                organization_id="org-1",
+                owner_user_id="remote-user",
+                owner_email="remote-user@example.com",
+                access_level="public",
+            )
     finally:
         store.close()
 
@@ -96,8 +107,12 @@ def _authorized_remote_message_metadata() -> dict:
         AuthorizationContext(
             subject="remote-user",
             email="remote-user@example.com",
-            instance_role="owner",
-            instance_access_source="owner",
+            instance_role="editor",
+            instance_access_source="organization_group",
+            organization_id="org-1",
+            organization_member_id="member-remote-user",
+            organization_role="member",
+            group_ids=frozenset({"group-engineering"}),
             claims_issued_at=int(time.time()),
             is_remote=True,
         ),

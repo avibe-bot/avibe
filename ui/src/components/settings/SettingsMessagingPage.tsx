@@ -71,8 +71,8 @@ function formatSavedAt(value: number | null, t: (key: string) => string) {
 export const SettingsMessagingPage: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
-  const { capabilities } = useInstanceAuthorization();
-  const canUseSystem = capabilities.can_use_system;
+  const { capabilities, hasTemporaryUnrestrictedOrgAccess } = useInstanceAuthorization();
+  const canUseSystem = capabilities.can_use_system || hasTemporaryUnrestrictedOrgAccess === true;
   const [config, setConfig] = useState<any>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [savedAt, setSavedAt] = useState<number | null>(null);

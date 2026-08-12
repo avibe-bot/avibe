@@ -37,12 +37,14 @@ const NAV = [
   { path: '/admin/organization/resources', key: 'resources', icon: Building2 },
 ] as const;
 
-// Organization is the surface a REMOTE Instance owner lives in, and the
-// Dashboard is trusted-local, so "back to control panel" has to resolve to an
-// admin page this caller can actually open instead of bouncing to the Workbench.
+// Resolve "back to control panel" against the temporary runtime admission.
+// Remote Access itself remains on the separate pairing/tunnel boundary below.
 function useBackToControlPanelPath(): string {
-  const { capabilities } = useInstanceAuthorization();
-  return adminLandingPath(capabilities.can_use_system);
+  const { capabilities, hasTemporaryUnrestrictedOrgAccess } = useInstanceAuthorization();
+  return adminLandingPath(
+    capabilities.can_use_system,
+    hasTemporaryUnrestrictedOrgAccess === true,
+  );
 }
 
 function GateState() {

@@ -346,7 +346,9 @@ def _badge_count_for_user_key(
         # Legacy remote messages predate persisted authorization claims. Keep
         # delivering eligible content, but never attach a machine-global count.
         return 0
-    if context.is_instance_owner:
+    from vibe.authorization import has_temporary_unrestricted_runtime_access
+
+    if context.is_instance_owner or has_temporary_unrestricted_runtime_access(context):
         return messages_service.total_unread(conn, platform="avibe")
 
     from storage import project_access_service

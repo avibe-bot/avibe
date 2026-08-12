@@ -6,6 +6,7 @@ import {
   isAdvancedSettingsPath,
   isLocalOnlyMessagingField,
   isLocalSystemPath,
+  isLocalSystemPathForAccess,
   isMemorySettingsPath,
 } from './adminNavigation';
 
@@ -35,7 +36,7 @@ describe('isAdvancedSettingsPath', () => {
 });
 
 describe('isLocalSystemPath', () => {
-  it('covers every destination whose page runs entirely on local-only routes', () => {
+  it('covers every destination with a historical trusted-local gate', () => {
     expect(isLocalSystemPath('/admin/dashboard')).toBe(true);
     expect(isLocalSystemPath('/admin/remote-access')).toBe(true);
     expect(isLocalSystemPath('/admin/groups')).toBe(true);
@@ -109,10 +110,28 @@ describe('adminLandingPath', () => {
     expect(destination).toBe('/admin/settings/messaging');
     expect(isLocalSystemPath(destination)).toBe(false);
   });
+
+  it('opens the Dashboard for the temporary Organization runtime policy', () => {
+    expect(adminLandingPath(false, true)).toBe('/admin/dashboard');
+  });
+});
+
+describe('isLocalSystemPathForAccess', () => {
+  it('opens known runtime administration while preserving Remote Access control', () => {
+    expect(isLocalSystemPathForAccess('/admin/dashboard', true)).toBe(false);
+    expect(isLocalSystemPathForAccess('/admin/users', true)).toBe(false);
+    expect(isLocalSystemPathForAccess('/admin/settings/models', true)).toBe(false);
+    expect(isLocalSystemPathForAccess('/admin/remote-access', true)).toBe(true);
+  });
+
+  it('keeps the baseline gate without the signed temporary signal', () => {
+    expect(isLocalSystemPathForAccess('/admin/users', false)).toBe(true);
+    expect(isLocalSystemPathForAccess('/admin/settings/models', false)).toBe(true);
+  });
 });
 
 describe('isLocalOnlyMessagingField', () => {
-  it('marks only the protected messaging controls as trusted-local', () => {
+  it('marks the messaging controls governed by the runtime admission signal', () => {
     expect(isLocalOnlyMessagingField('agents.opencode.error_retry_limit')).toBe(true);
     expect(isLocalOnlyMessagingField('agents.opencode.active_turn_timeout_seconds')).toBe(true);
     expect(isLocalOnlyMessagingField('show_pages_prompt')).toBe(true);

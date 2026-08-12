@@ -5,25 +5,17 @@ export const isMemorySettingsPath = (pathname: string): boolean =>
   matchesRoute(pathname, '/admin/settings/memory');
 
 /**
- * Destinations whose whole page runs on routes the remote HTTP policy classifies
- * local-only. `can_manage_instance` stays true for a remote Instance owner, so
- * the owner check alone still renders them: the Dashboard immediately requests
- * `/api/doctor`, `/api/logs`, `/api/settings`, `/api/users` and drives
- * `/api/control`; Remote Access drives pair / start / stop / optimize / settings
- * / diagnose (only its status read is remote-permitted); the service, platform,
- * backend, Model Hub, dependency, diagnostics, logs and users pages save or
- * reveal protected local state; and Harness opens on `/api/harness/bootstrap`.
- * They therefore need the trusted-local `can_use_system` capability on top,
- * otherwise a remote owner
- * gets partial or empty state and every mutation ends in
- * `remote_execution_disabled`.
+ * Destinations that historically depended on trusted-local APIs. Active
+ * Organization members are temporarily admitted to the runtime surfaces by
+ * the signed `temporary_unrestricted_org_access` signal; Remote Access
+ * pairing/tunnel management remains a separate control-plane boundary.
  *
  * This is the single source of truth for both halves of the gate — the route
  * redirect and the navigation entries that point at it — so a withheld page can
  * never still be advertised in the sidebar, mobile tabs or the More sheet.
- * Messaging settings are deliberately absent: the payload filter restricts most
- * of that page to remotely-mutable preference fields, and the remaining
- * protected controls are gated by `isLocalOnlyMessagingField` below.
+ * Messaging settings are deliberately absent: the page has its own field-level
+ * control-plane handling, and the remaining protected controls are gated by
+ * `isLocalOnlyMessagingField` below.
  */
 export const LOCAL_SYSTEM_ROUTES = [
   '/admin/dashboard',
@@ -64,16 +56,51 @@ export const filterLocalSystemNavItems = <T extends LocalSystemNavItem>(navItems
     )
     .filter((item) => item.to || item.onClick || (item.children?.length ?? 0) > 0);
 
+/**
+ * Temporary rollout exception for authenticated active Organization members.
+ * Remote-access pairing/tunnel management remains a control-plane boundary.
+ */
+export const isLocalSystemPathForAccess = (
+  pathname: string,
+  temporaryUnrestrictedOrgAccess: boolean,
+): boolean => {
+  if (!temporaryUnrestrictedOrgAccess) return isLocalSystemPath(pathname);
+  // Remote Access pairing and tunnel management retain their control-plane gate.
+  return matchesRoute(pathname, '/admin/remote-access');
+};
+
+export const filterRuntimeAccessNavItems = <T extends LocalSystemNavItem>(
+  navItems: T[],
+  temporaryUnrestrictedOrgAccess: boolean,
+): T[] => {
+  if (temporaryUnrestrictedOrgAccess) {
+    return navItems
+      .filter((item) => !item.to || !matchesRoute(item.to, '/admin/remote-access'))
+      .map((item) =>
+        item.children
+          ? { ...item, children: filterRuntimeAccessNavItems(item.children, true) }
+          : item,
+      )
+      .filter((item) => item.to || item.onClick || (item.children?.length ?? 0) > 0);
+  }
+  return filterLocalSystemNavItems(navItems);
+};
+
 export const isLocalOnlyMessagingField = (field: string): boolean =>
   LOCAL_ONLY_MESSAGING_FIELDS.has(field);
 
 /**
- * Where the "Control Panel" entry points. A remote owner cannot open the
- * Dashboard, so send them to the first admin page they can actually use rather
- * than through a redirect that bounces them back to the Workbench.
+ * Where the "Control Panel" entry points. A remote principal outside the
+ * temporary Organization rollout cannot open the Dashboard, so send it to the
+ * first admin page it can actually use instead of bouncing through a redirect.
  */
-export const adminLandingPath = (canUseSystem: boolean): string =>
-  canUseSystem ? '/admin/dashboard' : '/admin/settings/messaging';
+export const adminLandingPath = (
+  canUseSystem: boolean,
+  temporaryUnrestrictedOrgAccess = false,
+): string =>
+  canUseSystem || temporaryUnrestrictedOrgAccess
+    ? '/admin/dashboard'
+    : '/admin/settings/messaging';
 
 export const isAdvancedSettingsPath = (
   pathname: string,

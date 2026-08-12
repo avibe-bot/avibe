@@ -134,12 +134,13 @@ def test_memory_authenticated_avibe_cloud_uses_the_remote_workbench_principal(
         calls.append(("profile", user_key))
         return {"status_code": 200, "body": {"status": "ok", "items": []}}
 
-    async def clear(*, user_key: str):  # pragma: no cover - must stay unreached
+    async def clear(*, user_key: str):
         calls.append(("clear", user_key))
         return {"status_code": 200, "body": {"status": "completed", "epoch": 2}}
 
-    async def failures():  # pragma: no cover - must stay unreached
-        raise AssertionError("remote memory failures reached the local sidecar")
+    async def failures():
+        calls.append(("failures", "avibe:remote:user-1"))
+        return {"status_code": 200, "body": {"status": "ok", "items": []}}
 
     monkeypatch.setattr(internal_client, "memory_profile", profile)
     monkeypatch.setattr(internal_client, "memory_clear", clear)
@@ -147,7 +148,17 @@ def test_memory_authenticated_avibe_cloud_uses_the_remote_workbench_principal(
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        remote_session_cookie(config, "alex@example.com", "user-1"),
+        remote_session_cookie(
+            config,
+            "alex@example.com",
+            "user-1",
+            role="viewer",
+            access_source="organization_group",
+            organization_id="org-1",
+            organization_member_id="member-1",
+            organization_role="member",
+            group_ids=[],
+        ),
         domain="alex.avibe.bot",
     )
     remote_headers = {"Origin": "https://alex.avibe.bot"}
@@ -178,36 +189,35 @@ def test_memory_authenticated_avibe_cloud_uses_the_remote_workbench_principal(
         environ_base={"REMOTE_ADDR": "203.0.113.10"},
     )
 
-    assert settings_response.status_code == 403
-    assert settings_response.get_json()["code"] == "remote_execution_disabled"
-    assert failures_response.status_code == 403
-    assert failures_response.get_json()["code"] == "remote_execution_disabled"
+    assert settings_response.status_code == 200
+    assert failures_response.status_code == 200
     assert profile_response.status_code == 200
-    # The profile read is genuinely scoped to the remote principal, so it keeps
-    # crossing the tunnel under that principal's user key. `clear` only carries
-    # the key as proof of identity: the internal route discards it and calls the
-    # global `runtime.clear()`, which would erase every principal's memcells and
-    # the provider root, so the remote boundary refuses it before the handler.
-    assert clear_response.status_code == 403
-    assert clear_response.get_json()["code"] == "remote_execution_disabled"
-    assert calls == [("profile", "avibe:remote:user-1")]
+    assert clear_response.status_code == 200
+    assert calls == [
+        ("failures", "avibe:remote:user-1"),
+        ("profile", "avibe:remote:user-1"),
+        ("clear", "avibe:remote:user-1"),
+    ]
 
 
-def test_memory_settings_patch_is_rejected_for_remote_ui(monkeypatch, tmp_path) -> None:
-    """A remote principal cannot patch Memory settings at all, diagnostics included.
-
-    The patch repoints the shared LLM and embedding endpoints and immediately
-    reconciles the local sidecar, so the remote boundary refuses it before the
-    payload is even parsed; the diagnostics field it used to reject by hand is
-    only the most sensitive part of a record that is process-global throughout.
-    """
+def test_active_org_member_can_patch_memory_settings(monkeypatch, tmp_path) -> None:
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_remote_config(tmp_path)
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        remote_session_cookie(config, "alex@example.com", "user-1"),
+        remote_session_cookie(
+            config,
+            "alex@example.com",
+            "user-1",
+            role="viewer",
+            access_source="organization_group",
+            organization_id="org-1",
+            organization_member_id="member-1",
+            organization_role="member",
+            group_ids=[],
+        ),
         domain="alex.avibe.bot",
     )
     calls: list[bool] = []
@@ -219,16 +229,15 @@ def test_memory_settings_patch_is_rejected_for_remote_ui(monkeypatch, tmp_path) 
     monkeypatch.setattr(internal_client, "reconcile_memory", reconcile)
     response = client.patch(
         "/api/memory/settings",
-        json={"enabled": False, "diagnostics": {"log_provider_calls": True}},
+        json={"enabled": False},
         headers=csrf_headers(client, "https://alex.avibe.bot"),
         base_url="https://alex.avibe.bot",
         environ_base={"REMOTE_ADDR": "203.0.113.10"},
     )
 
-    assert response.status_code == 403
-    assert response.get_json()["code"] == "remote_execution_disabled"
-    assert calls == []
-    assert V2Config.load().memory.diagnostics.log_provider_calls is True
+    assert response.status_code == 200
+    assert calls == [True]
+    assert V2Config.load().memory.enabled is False
 
 
 def test_memory_diagnostics_patch_is_rejected_for_local_ui(monkeypatch, tmp_path) -> None:
@@ -854,14 +863,13 @@ def test_memory_restart_route_refuses_concurrent_remote_principals(
     monkeypatch,
     tmp_path,
 ) -> None:
-    """Restarting the sidecar is local-only, so no remote caller reaches the task.
+    """Non-member remote callers cannot reach the shared restart task.
 
     This route once served remote principals, and its retained request task made
     two concurrent remote callers share one Response, which mixed their session
-    cookie renewals. A restart acts on the whole local sidecar rather than on one
-    principal, so the boundary now refuses it outright and that cross-principal
-    renewal is unreachable rather than merely fixed - which is what this asserts,
-    with two overlapping remote callers so a partial gate cannot pass.
+    cookie renewals. Active Organization member admission is covered separately;
+    this regression keeps two overlapping legacy identities outside that policy,
+    so a partial membership gate cannot pass.
     """
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))

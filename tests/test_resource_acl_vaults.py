@@ -26,6 +26,7 @@ def _context(
     group_ids: frozenset[str] | None = frozenset({"group-engineering"}),
     role: str = "member",
     instance_role: str = "editor",
+    is_remote: bool = True,
 ) -> resource_access_service.ResourceUserContext:
     return resource_access_service.ResourceUserContext(
         subject=subject,
@@ -36,6 +37,15 @@ def _context(
         group_ids=group_ids,
         instance_role=instance_role,
         instance_access_source="organization_group",
+        is_remote=is_remote,
+    )
+
+
+def _external_guest_context() -> resource_access_service.ResourceUserContext:
+    return resource_access_service.ResourceUserContext(
+        subject="guest-1",
+        instance_role="viewer",
+        instance_access_source="email",
         is_remote=True,
     )
 
@@ -98,7 +108,7 @@ def _grant_from_request(conn, request: dict, *, user_context) -> dict:
     )
 
 
-def test_vault_list_filters_acl_rows_without_returning_envelopes(vault) -> None:
+def test_active_org_members_list_all_vault_metadata_without_envelopes(vault) -> None:
     with vault.begin() as conn:
         _create_secret(conn, "PRIVATE_KEY")
         _create_secret(conn, "PUBLIC_KEY")
@@ -113,8 +123,8 @@ def test_vault_list_filters_acl_rows_without_returning_envelopes(vault) -> None:
         no_group_rows = vault_service.list_secrets(conn, user_context=_context("member-2", group_ids=None))
 
     assert {row["name"] for row in owner_rows} == {"PRIVATE_KEY", "PUBLIC_KEY", "SCOPED_KEY"}
-    assert {row["name"] for row in member_rows} == {"PUBLIC_KEY", "SCOPED_KEY"}
-    assert {row["name"] for row in no_group_rows} == {"PUBLIC_KEY"}
+    assert {row["name"] for row in member_rows} == {"PRIVATE_KEY", "PUBLIC_KEY", "SCOPED_KEY"}
+    assert {row["name"] for row in no_group_rows} == {"PRIVATE_KEY", "PUBLIC_KEY", "SCOPED_KEY"}
     serialized = json.dumps(member_rows)
     assert "ciphertext-" not in serialized
     assert "nonce-" not in serialized
@@ -152,7 +162,7 @@ def test_editor_vault_use_keeps_protected_secret_behind_approval(vault) -> None:
     assert "wrap-PROTECTED_USE" not in serialized_metadata
 
 
-def test_inaccessible_vault_requests_and_grants_fail_before_mutating_state(vault) -> None:
+def test_active_org_members_create_private_vault_requests_and_grants(vault) -> None:
     owner = _context("owner-1", instance_role="owner")
     member = _context("member-1")
     with vault.begin() as conn:
@@ -161,38 +171,39 @@ def test_inaccessible_vault_requests_and_grants_fail_before_mutating_state(vault
         _set_policy(conn, "PRIVATE_ACCESS", access_level="private")
         _set_policy(conn, "PRIVATE_SIGN", access_level="private")
         owner_request = vault_service.create_access_request(conn, "PRIVATE_ACCESS", user_context=owner)
-
-        with pytest.raises(vault_service.VaultSecretAccessError):
-            vault_service.create_access_request(conn, "PRIVATE_ACCESS", user_context=member)
-        with pytest.raises(vault_service.VaultSecretAccessError):
-            vault_service.create_sign_request(
-                conn,
-                "PRIVATE_SIGN",
-                digest="00" * 32,
-                scheme="ecdsa-secp256k1-recoverable",
-                user_context=member,
-            )
-
-        option = owner_request["card"]["grant_options"][0]
-        with pytest.raises(vault_service.VaultSecretAccessError):
-            vault_service.create_grant(
-                conn,
-                member_names=option["member_snapshot"],
-                source_selector=option["source_selector"],
-                purpose=option["purpose"],
-                request_id=owner_request["id"],
-                user_context=member,
-            )
+        member_access_request = vault_service.create_access_request(
+            conn,
+            "PRIVATE_ACCESS",
+            user_context=member,
+        )
+        member_sign_request = vault_service.create_sign_request(
+            conn,
+            "PRIVATE_SIGN",
+            digest="00" * 32,
+            scheme="ecdsa-secp256k1-recoverable",
+            user_context=member,
+        )
+        member_grant = _grant_from_request(conn, owner_request, user_context=member)
 
         requests = list(conn.execute(select(vault_requests)).mappings())
         grants = list(conn.execute(select(vault_grants)).mappings())
 
-    assert [row["id"] for row in requests] == [owner_request["id"]]
-    assert requests[0]["status"] == "pending"
-    assert grants == []
+    assert {row["id"] for row in requests} == {
+        owner_request["id"],
+        member_access_request["id"],
+        member_sign_request["id"],
+    }
+    statuses = {row["id"]: row["status"] for row in requests}
+    assert statuses == {
+        owner_request["id"]: "approved",
+        member_access_request["id"]: "pending",
+        member_sign_request["id"]: "pending",
+    }
+    assert [row["id"] for row in grants] == [member_grant["id"]]
+    assert member_grant["status"] == "active"
 
 
-def test_vault_request_reads_and_denial_enforce_member_secret_acls(vault) -> None:
+def test_active_org_member_reads_and_denies_all_vault_requests(vault) -> None:
     owner = _context("owner-1", instance_role="owner")
     member = _context("member-1")
     with vault.begin() as conn:
@@ -204,66 +215,69 @@ def test_vault_request_reads_and_denial_enforce_member_secret_acls(vault) -> Non
         public_request = vault_service.create_access_request(conn, "PUBLIC_REQUEST", user_context=owner)
 
         visible = vault_service.list_requests(conn, user_context=member)
-        with pytest.raises(vault_service.VaultSecretAccessError):
-            vault_service.get_request(conn, private_request["id"], user_context=member)
-        with pytest.raises(vault_service.VaultSecretAccessError):
-            vault_service.deny_request(conn, private_request["id"], user_context=member)
-        with pytest.raises(vault_service.VaultSecretAccessError):
-            vault_service.deny_request(conn, public_request["id"], user_context=member)
-
-        statuses_before_owner_decision = dict(
+        private_payload = vault_service.get_request(
+            conn,
+            private_request["id"],
+            user_context=member,
+        )
+        private_denied = vault_service.deny_request(
+            conn,
+            private_request["id"],
+            user_context=member,
+        )
+        public_denied = vault_service.deny_request(
+            conn,
+            public_request["id"],
+            user_context=member,
+        )
+        statuses = dict(
             conn.execute(select(vault_requests.c.id, vault_requests.c.status)).all()
         )
-        owner_payload = vault_service.get_request(conn, private_request["id"], user_context=owner)
-        denied = vault_service.deny_request(conn, private_request["id"], user_context=owner)
 
-    assert [request["id"] for request in visible] == [public_request["id"]]
-    assert "secret_unlock_material" in owner_payload["card"]
-    assert statuses_before_owner_decision == {
-        private_request["id"]: "pending",
-        public_request["id"]: "pending",
+    assert {request["id"] for request in visible} == {
+        private_request["id"],
+        public_request["id"],
     }
-    assert denied["status"] == "denied"
+    assert "secret_unlock_material" in private_payload["card"]
+    assert statuses == {
+        private_request["id"]: "denied",
+        public_request["id"]: "denied",
+    }
+    assert private_denied["status"] == "denied"
+    assert public_denied["status"] == "denied"
 
 
-def test_pending_provision_lookups_require_instance_owner(vault, monkeypatch) -> None:
-    owner = _context("owner-1", instance_role="owner")
+def test_active_org_member_can_lookup_pending_provision_requests(vault, monkeypatch) -> None:
     member = _context("member-1")
     with vault.begin() as conn:
         provision = vault_service.create_provision_request(conn, "MISSING_SECRET")
-        with pytest.raises(vault_service.VaultSecretAccessError):
-            vault_service.resolve_pending_provision_request_by_name(
-                conn,
-                "MISSING_SECRET",
-                user_context=member,
-            )
-        with pytest.raises(vault_service.VaultSecretAccessError):
-            vault_service.get_pending_provision_request(
-                conn,
-                provision["id"],
-                user_context=member,
-            )
         visible, ambiguous = vault_service.resolve_pending_provision_request_by_name(
             conn,
             "MISSING_SECRET",
-            user_context=owner,
+            user_context=member,
+        )
+        visible_by_id = vault_service.get_pending_provision_request(
+            conn,
+            provision["id"],
+            user_context=member,
         )
 
     assert visible is not None
     assert visible["id"] == provision["id"]
     assert ambiguous is False
+    assert visible_by_id is not None
+    assert visible_by_id["id"] == provision["id"]
 
     monkeypatch.setattr(api, "_vault_engine", lambda: vault)
     monkeypatch.setattr(api, "resolve_resource_access_context", lambda: member)
-    with pytest.raises(api.VaultApiError) as by_name:
-        api.get_vault_provision_request_by_name("MISSING_SECRET")
-    with pytest.raises(api.VaultApiError) as by_id:
-        api.get_vault_provision_request(provision["id"])
-    assert by_name.value.status == 403
-    assert by_id.value.status == 403
+    api_by_name = api.get_vault_provision_request_by_name("MISSING_SECRET")
+    api_by_id = api.get_vault_provision_request(provision["id"])
+    assert api_by_name["request"]["id"] == provision["id"]
+    assert api_by_name["ambiguous"] is False
+    assert api_by_id["request"]["id"] == provision["id"]
 
 
-def test_vault_request_limit_applies_after_acl_filtering(vault) -> None:
+def test_active_org_vault_request_limit_applies_to_complete_result_set(vault) -> None:
     owner = _context("owner-1", instance_role="owner")
     member = _context("member-1")
     with vault.begin() as conn:
@@ -272,17 +286,26 @@ def test_vault_request_limit_applies_after_acl_filtering(vault) -> None:
         _set_policy(conn, "VISIBLE_REQUEST", access_level="public")
         _set_policy(conn, "HIDDEN_REQUEST", access_level="private")
         visible_request = vault_service.create_access_request(conn, "VISIBLE_REQUEST", user_context=owner)
-        vault_service.create_access_request(conn, "HIDDEN_REQUEST", user_context=owner)
+        private_request = vault_service.create_access_request(conn, "HIDDEN_REQUEST", user_context=owner)
+        conn.execute(
+            vault_requests.update()
+            .where(vault_requests.c.id == visible_request["id"])
+            .values(created_at="2026-01-01T00:00:00+00:00")
+        )
+        conn.execute(
+            vault_requests.update()
+            .where(vault_requests.c.id == private_request["id"])
+            .values(created_at="2026-01-01T00:00:01+00:00")
+        )
 
         visible = vault_service.list_requests(conn, limit=1, user_context=member)
 
-    assert [request["id"] for request in visible] == [visible_request["id"]]
+    assert [request["id"] for request in visible] == [private_request["id"]]
 
 
-def test_vault_grant_reads_and_revocation_enforce_all_member_secret_acls(vault) -> None:
+def test_active_org_member_lists_and_revokes_all_vault_grants(vault) -> None:
     owner = _context("owner-1", instance_role="owner")
     member = _context("member-1")
-    member_owner = _context("member-1", instance_role="owner")
     with vault.begin() as conn:
         _create_secret(conn, "OWNER_GRANT", protection="protected")
         _create_secret(conn, "MEMBER_GRANT", protection="protected")
@@ -294,21 +317,26 @@ def test_vault_grant_reads_and_revocation_enforce_all_member_secret_acls(vault) 
         member_grant = _grant_from_request(conn, member_request, user_context=member)
 
         visible = vault_service.list_grants(conn, user_context=member)
-        with pytest.raises(vault_service.VaultSecretAccessError):
-            vault_service.revoke_grant(conn, owner_grant["id"], user_context=member)
-        owner_status = conn.execute(
-            select(vault_grants.c.status).where(vault_grants.c.id == owner_grant["id"])
-        ).scalar_one()
-        with pytest.raises(vault_service.VaultSecretAccessError):
-            vault_service.revoke_grant(conn, member_grant["id"], user_context=member)
-        revoked = vault_service.revoke_grant(conn, member_grant["id"], user_context=member_owner)
+        revoked_owner = vault_service.revoke_grant(
+            conn,
+            owner_grant["id"],
+            user_context=member,
+        )
+        revoked_member = vault_service.revoke_grant(
+            conn,
+            member_grant["id"],
+            user_context=member,
+        )
 
-    assert [grant["id"] for grant in visible] == [member_grant["id"]]
-    assert owner_status == "active"
-    assert revoked["status"] == "revoked"
+    assert {grant["id"] for grant in visible} == {
+        owner_grant["id"],
+        member_grant["id"],
+    }
+    assert revoked_owner["status"] == "revoked"
+    assert revoked_member["status"] == "revoked"
 
 
-def test_vault_audit_filters_secret_request_and_grant_metadata_before_limit(vault) -> None:
+def test_active_org_member_audit_limit_uses_complete_event_stream(vault) -> None:
     owner = _context("owner-1", instance_role="owner")
     member = _context("member-1")
     with vault.begin() as conn:
@@ -318,10 +346,10 @@ def test_vault_audit_filters_secret_request_and_grant_metadata_before_limit(vaul
         _set_policy(conn, "MEMBER_AUDIT", access_level="private", owner_user_id="member-1")
         owner_request = vault_service.create_access_request(conn, "OWNER_AUDIT", user_context=owner)
         owner_grant = _grant_from_request(conn, owner_request, user_context=owner)
-        vault_service.audit(conn, "member-visible", secret_name="MEMBER_AUDIT")
+        vault_service.audit(conn, "member-event", secret_name="MEMBER_AUDIT")
         vault_service.audit(
             conn,
-            "owner-hidden",
+            "owner-event",
             request_id=owner_request["id"],
             grant_id=owner_grant["id"],
             delivery={"grant_id": owner_grant["id"]},
@@ -329,15 +357,16 @@ def test_vault_audit_filters_secret_request_and_grant_metadata_before_limit(vaul
 
         visible = vault_service.list_audit(conn, limit=1, user_context=member)
 
-    assert [row["event"] for row in visible] == ["member-visible"]
-    assert owner_request["id"] not in json.dumps(visible)
-    assert owner_grant["id"] not in json.dumps(visible)
+    assert [row["event"] for row in visible] == ["owner-event"]
+    assert visible[0]["request_id"] == owner_request["id"]
+    assert visible[0]["grant_id"] == owner_grant["id"]
 
 
-def test_deleted_secret_audit_history_uses_acl_tombstone_without_exposing_it(vault) -> None:
+def test_deleted_secret_audit_is_visible_to_active_org_members_without_exposing_tombstone(vault) -> None:
     owner = _context("member-1", instance_role="owner")
     admin = _context("admin-1", role="admin", instance_role="owner")
-    outsider = _context("member-2")
+    member = _context("member-2")
+    guest = _external_guest_context()
     with vault.begin() as conn:
         _create_secret(conn, "DELETED_AUDIT", protection="protected")
         _set_policy(conn, "DELETED_AUDIT", access_level="private", owner_user_id="member-1")
@@ -346,18 +375,21 @@ def test_deleted_secret_audit_history_uses_acl_tombstone_without_exposing_it(vau
 
         owner_rows = vault_service.list_audit(conn, secret_name="DELETED_AUDIT", user_context=owner)
         admin_rows = vault_service.list_audit(conn, secret_name="DELETED_AUDIT", user_context=admin)
-        outsider_rows = vault_service.list_audit(conn, secret_name="DELETED_AUDIT", user_context=outsider)
+        member_rows = vault_service.list_audit(conn, secret_name="DELETED_AUDIT", user_context=member)
+        guest_rows = vault_service.list_audit(conn, secret_name="DELETED_AUDIT", user_context=guest)
 
     expected_events = {"before-delete", "deleted"}
     assert expected_events <= {row["event"] for row in owner_rows}
     assert expected_events <= {row["event"] for row in admin_rows}
-    assert outsider_rows == []
+    assert expected_events <= {row["event"] for row in member_rows}
+    assert guest_rows == []
     assert vault_service._AUDIT_ACCESS_SNAPSHOT_KEY not in json.dumps(owner_rows)
     assert vault_service._AUDIT_ACCESS_SNAPSHOT_KEY not in json.dumps(admin_rows)
+    assert vault_service._AUDIT_ACCESS_SNAPSHOT_KEY not in json.dumps(member_rows)
 
 
-def test_remote_audit_uses_bounded_keyset_batches_until_limit_is_visible(vault, monkeypatch) -> None:
-    member = _context("member-1")
+def test_acl_filtered_audit_uses_bounded_keyset_batches_until_limit_is_visible(vault, monkeypatch) -> None:
+    member = _context("member-1", is_remote=False)
     monkeypatch.setattr(vault_service, "_REMOTE_AUDIT_MIN_BATCH_SIZE", 2)
     monkeypatch.setattr(vault_service, "_REMOTE_AUDIT_MAX_BATCH_SIZE", 2)
     with vault.begin() as conn:
@@ -379,7 +411,7 @@ def test_remote_audit_uses_bounded_keyset_batches_until_limit_is_visible(vault, 
     assert vault_service._AUDIT_ACCESS_SNAPSHOT_KEY not in json.dumps(visible)
 
 
-def test_vault_api_grant_and_audit_endpoints_use_current_resource_context(vault, monkeypatch) -> None:
+def test_vault_api_allows_active_org_member_full_grant_and_audit_access(vault, monkeypatch) -> None:
     owner = _context("owner-1", instance_role="owner")
     member = _context("member-1")
     with vault.begin() as conn:
@@ -404,20 +436,22 @@ def test_vault_api_grant_and_audit_endpoints_use_current_resource_context(vault,
 
     grants = api.get_vault_grants()["grants"]
     audit_rows = api.get_vault_audit()["events"]
-    with pytest.raises(api.VaultApiError) as exc:
-        api.revoke_vault_grant(owner_grant["id"])
+    revoked = api.revoke_vault_grant(owner_grant["id"])
 
     with vault.connect() as conn:
         owner_status = conn.execute(
             select(vault_grants.c.status).where(vault_grants.c.id == owner_grant["id"])
         ).scalar_one()
 
-    assert [grant["id"] for grant in grants] == [member_grant["id"]]
+    assert {grant["id"] for grant in grants} == {
+        owner_grant["id"],
+        member_grant["id"],
+    }
     assert "api-member-visible" in {row["event"] for row in audit_rows}
-    assert owner_grant["id"] not in json.dumps(audit_rows)
-    assert exc.value.status == 403
-    assert owner_status == "active"
-    assert releases == []
+    assert owner_grant["id"] in json.dumps(audit_rows)
+    assert revoked["grant"]["status"] == "revoked"
+    assert owner_status == "revoked"
+    assert releases == [[{"grant_id": owner_grant["id"]}]]
 
 
 @pytest.mark.parametrize(
@@ -428,18 +462,26 @@ def test_vault_api_grant_and_audit_endpoints_use_current_resource_context(vault,
         {"skills": ["release"]},
     ],
 )
-def test_cli_selector_resolution_rejects_inaccessible_secrets(vault, selector: dict) -> None:
+def test_active_org_member_resolves_private_secret_cli_selectors(vault, selector: dict) -> None:
     with vault.begin() as conn:
         _create_secret(conn, "PRIVATE_SELECTOR", tags=["deploy", "skill:release"])
         _set_policy(conn, "PRIVATE_SELECTOR", access_level="private")
-        with pytest.raises(vault_service.VaultSecretAccessError):
-            vault_service.expand_value_delivery_selector(
-                conn,
-                user_context=_context("member-1"),
-                **selector,
-            )
+        expanded = vault_service.expand_value_delivery_selector(
+            conn,
+            user_context=_context("member-1"),
+            **selector,
+        )
         assert list(conn.execute(select(vault_requests)).mappings()) == []
         assert list(conn.execute(select(vault_grants)).mappings()) == []
+
+    assert expanded["secrets"] == [
+        {
+            "name": "PRIVATE_SELECTOR",
+            "env": "PRIVATE_SELECTOR",
+            "kind": "static",
+            "protection": "standard",
+        }
+    ]
 
 
 def test_remote_created_secret_registers_private_organization_policy(vault) -> None:
@@ -490,57 +532,59 @@ def test_vault_secret_removal_deletes_resource_policy_and_groups(vault) -> None:
     assert groups == []
 
 
-def test_public_vault_use_does_not_grant_management(vault) -> None:
+def test_active_org_admin_can_manage_public_vault_secret(vault) -> None:
     with vault.begin() as conn:
         _create_secret(conn, "PUBLIC_MANAGEMENT")
         _set_policy(conn, "PUBLIC_MANAGEMENT", access_level="public")
 
+        # Reads stay open to every active Organization member.
         assert vault_service.get_secret_meta(
             conn,
             "PUBLIC_MANAGEMENT",
             user_context=_context("member-1"),
         )["name"] == "PUBLIC_MANAGEMENT"
+        # Writes stay reserved to admin/owner Organization roles under the
+        # Resource ACL boundary (see #1343).
         with pytest.raises(vault_service.VaultSecretAccessError):
             vault_service.update_secret_metadata(
                 conn,
                 "PUBLIC_MANAGEMENT",
-                description="not allowed",
+                description="member update",
                 user_context=_context("member-1"),
             )
-        with pytest.raises(vault_service.VaultSecretAccessError):
-            vault_service.delete_secret(
-                conn,
-                "PUBLIC_MANAGEMENT",
-                user_context=_context("member-1"),
-            )
-
         updated = vault_service.update_secret_metadata(
             conn,
             "PUBLIC_MANAGEMENT",
-            description="owner update",
-            user_context=_context("owner-1", instance_role="owner"),
+            description="admin update",
+            user_context=_context("admin-1", role="admin", instance_role="owner"),
         )
+        vault_service.delete_secret(
+            conn,
+            "PUBLIC_MANAGEMENT",
+            user_context=_context("admin-1", role="admin", instance_role="owner"),
+        )
+        stored = conn.execute(
+            select(vault_secrets).where(vault_secrets.c.name == "PUBLIC_MANAGEMENT")
+        ).first()
 
-    assert updated["description"] == "owner update"
+    assert updated["description"] == "admin update"
+    assert stored is None
 
 
-def test_remote_external_guest_cannot_create_vault_secret(vault) -> None:
-    guest = resource_access_service.ResourceUserContext(
-        subject="guest-1",
-        instance_role="viewer",
-        instance_access_source="email",
-        is_remote=True,
-    )
+def test_active_org_member_can_create_vault_secret_but_external_guest_cannot(vault) -> None:
+    guest = _external_guest_context()
 
     with vault.begin() as conn:
-        with pytest.raises(vault_service.VaultSecretAccessError):
-            _create_secret(
-                conn,
-                "EDITOR_CREATED",
-                user_context=_context("member-1"),
-            )
+        _create_secret(
+            conn,
+            "MEMBER_CREATED",
+            user_context=_context("member-1"),
+        )
         with pytest.raises(vault_service.VaultSecretAccessError):
             _create_secret(conn, "GUEST_CREATED", user_context=guest)
+        assert conn.execute(
+            select(vault_secrets).where(vault_secrets.c.name == "MEMBER_CREATED")
+        ).first() is not None
         assert conn.execute(select(vault_secrets).where(vault_secrets.c.name == "GUEST_CREATED")).first() is None
 
 

@@ -31,16 +31,14 @@ describe('CapabilityTabs', () => {
     expect(markup).toContain('workbench.modules.harness.title');
   });
 
-  it('hides the Harness tab from a remote owner even though can_manage_agents is true', () => {
-    // A remote Instance owner keeps can_manage_agents, which is exactly why the
-    // Harness tab needs the trusted-local canUseHarness predicate on top of it:
-    // without it the tab navigates into the AppShell local-only redirect.
+  it('shows the Harness tab for an active Organization member', () => {
     const remoteOwner: InstanceAuthorizationValue = {
       ...localOwner,
       remote: true,
+      hasTemporaryUnrestrictedOrgAccess: true,
     };
     const markup = renderWith(remoteOwner);
     expect(markup).toContain('workbench.modules.agents.title');
-    expect(markup).not.toContain('workbench.modules.harness.title');
+    expect(markup).toContain('workbench.modules.harness.title');
   });
 });

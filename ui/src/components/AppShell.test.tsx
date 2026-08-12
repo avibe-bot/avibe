@@ -31,6 +31,7 @@ const status = vi.hoisted(() => ({ state: 'ready' as const }));
 const inbox = vi.hoisted(() => ({ totalUnread: 0 }));
 const instanceAuth = vi.hoisted(() => ({
   remote: true,
+  hasTemporaryUnrestrictedOrgAccess: true,
   hasTemporaryUnrestrictedOrgAppAccess: true,
   capabilities: {
     can_manage_instance: true,
@@ -47,7 +48,11 @@ const instanceAuth = vi.hoisted(() => ({
 vi.mock('../context/ApiContext', () => ({ useApi: () => api }));
 vi.mock('../context/StatusContext', () => ({ useStatus: () => ({ status }) }));
 vi.mock('../context/WorkbenchInboxContext', () => ({ useWorkbenchInbox: () => inbox }));
-vi.mock('../context/InstanceAuthorizationContext', () => ({ useInstanceAuthorization: () => instanceAuth }));
+vi.mock('../context/InstanceAuthorizationContext', () => ({
+  useInstanceAuthorization: () => instanceAuth,
+  canUseAppsSurface: (remote: boolean, temporaryAccess: boolean | undefined) =>
+    !remote || temporaryAccess === true,
+}));
 vi.mock('../context/DockProvider', () => ({
   DockProvider: ({ children, enabled = true }: { children: ReactNode; enabled?: boolean }) => (
     <div data-testid="dock-provider" data-enabled={String(enabled)}>{children}</div>
@@ -64,6 +69,9 @@ vi.mock('./apps/MobileDockDrawer', () => ({
   MobileDockDrawer: () => <div data-testid="mobile-dock-drawer" />,
 }));
 vi.mock('./apps/WindowLayer', () => ({ WindowLayer: () => <div data-testid="window-layer" /> }));
+vi.mock('./workbench/NewSessionSheet', () => ({
+  NewSessionSheet: () => null,
+}));
 vi.mock('./workbench/WorkbenchSidebar', () => ({ WorkbenchSidebar: () => <div /> }));
 vi.mock('./workbench/search/SearchPalette', () => ({ SearchPalette: () => null }));
 vi.mock('react-i18next', () => ({
@@ -72,6 +80,7 @@ vi.mock('react-i18next', () => ({
 
 beforeEach(() => {
   instanceAuth.capabilities.can_manage_instance = true;
+  instanceAuth.hasTemporaryUnrestrictedOrgAccess = true;
   instanceAuth.hasTemporaryUnrestrictedOrgAppAccess = true;
   api.getConfig.mockResolvedValue({ platforms: { enabled: [] } });
   api.getMemorySettings.mockResolvedValue({
@@ -99,7 +108,7 @@ describe('AppShell setup recovery', () => {
 
     expect(await screen.findByText('setup.remoteOwner.title')).toBeTruthy();
     expect(screen.getByRole('link', { name: 'setup.remoteOwner.action' }).getAttribute('href')).toBe(
-      '/admin/settings/messaging',
+      '/admin/dashboard',
     );
     expect(screen.queryByTestId('wizard')).toBeNull();
   });
@@ -130,6 +139,7 @@ describe('AppShell remote Apps access', () => {
   });
 
   it('hides Apps surfaces and redirects App routes for non-Organization remote users', async () => {
+    instanceAuth.hasTemporaryUnrestrictedOrgAccess = false;
     instanceAuth.hasTemporaryUnrestrictedOrgAppAccess = false;
 
     render(

@@ -1216,11 +1216,10 @@ def client_config_payload(config: V2Config) -> dict:
     ``config_to_payload`` has to emit ``memory`` because the UI save path uses
     the same projection as its deep-merge base, and an omitted block resets the
     stored one (the ``agents.avault`` comment above records the same hazard).
-    A response is the opposite case: Memory settings — enablement, both
-    processing endpoint URLs and model names, and API-key-presence flags — are
-    reachable only through the direct-loopback-only ``/api/memory/*`` routes,
-    so returning them from a generic endpoint would hand them to any
-    authenticated remote caller over the tunnel.
+    A response is the opposite case: Memory settings have their own
+    ``/api/memory/*`` routes and lifecycle, so returning them from the generic
+    config endpoint would duplicate that contract and mix independently loaded
+    state into every settings response.
 
     Every endpoint that returns the generic config must project through this
     function, so a new one inherits the exclusion instead of having to repeat
@@ -1242,12 +1241,11 @@ _REMOTE_CONFIG_UI_FIELDS = (
 
 
 def remote_config_payload(config: V2Config) -> dict:
-    """Return the explicit remote-safe projection of generic configuration.
+    """Return the fallback projection for remote identities without rollout access.
 
-    Instance role determines which remote routes a caller may use, but it does
-    not make the caller trusted to inspect local filesystem layout, executable
-    paths, or runtime configuration. Keep this as an allowlist so new local
-    settings remain local by default.
+    Active Organization members use the full runtime projection with the
+    pairing/tunnel block removed. Keep this allowlist for every other remote
+    identity so a future caller cannot inherit host paths or runtime settings.
     """
 
     payload = client_config_payload(config)
@@ -1795,9 +1793,10 @@ def get_vibe_agents(
     backend: Optional[str] = None,
     include_disabled: bool = False,
     include_archived: bool = False,
+    user_context: Any = None,
 ) -> dict:
     _ensure_builtin_default_agents()
-    user_context = resolve_resource_access_context()
+    user_context = resolve_resource_access_context(user_context)
     store = VibeAgentStore()
     try:
         normalized_backend = validate_agent_backend(backend) if backend else None
@@ -1860,7 +1859,7 @@ def _agent_onboarding_resource_descriptors(
     return descriptors
 
 
-def get_vibe_agent_onboarding() -> dict:
+def get_vibe_agent_onboarding(*, user_context: Any = None) -> dict:
     """Return the safe owner inventory for Organization Agent onboarding."""
 
     config = V2Config.load()
@@ -1868,7 +1867,7 @@ def get_vibe_agent_onboarding() -> dict:
     store = VibeAgentStore()
     try:
         result = store.organization_onboarding_inventory(
-            user_context=resolve_resource_access_context(),
+            user_context=resolve_resource_access_context(user_context),
         )
     finally:
         store.close()
@@ -1881,14 +1880,14 @@ def get_vibe_agent_onboarding() -> dict:
     return result
 
 
-def onboard_vibe_agents() -> dict:
+def onboard_vibe_agents(*, user_context: Any = None) -> dict:
     """Register all existing Agents privately, then publish the safe index."""
 
     from vibe import remote_access
 
     config = V2Config.load()
     _ensure_builtin_default_agents(config)
-    context = resolve_resource_access_context()
+    context = resolve_resource_access_context(user_context)
     store = VibeAgentStore()
     try:
         result = store.onboard_organization_agents(user_context=context)
@@ -1914,8 +1913,10 @@ def onboard_vibe_agents() -> dict:
     return result
 
 
-def get_vibe_agent(name: str) -> dict:
-    user_context = resolve_resource_access_context()
+def get_vibe_agent(name: str, *, user_context: Any = None) -> dict:
+    user_context = resolve_resource_access_context(user_context)
+    from vibe.authorization import has_temporary_unrestricted_runtime_access
+
     store = VibeAgentStore()
     try:
         agent = store.require_accessible(name, user_context=user_context)
@@ -1927,14 +1928,20 @@ def get_vibe_agent(name: str) -> dict:
                 default_agent = None
         return {
             "ok": True,
-            "agent": _vibe_agent_payload(agent, remote_safe=user_context.is_remote),
+            "agent": _vibe_agent_payload(
+                agent,
+                remote_safe=(
+                    user_context.is_remote
+                    and not has_temporary_unrestricted_runtime_access(user_context)
+                ),
+            ),
             "default_agent_name": default_agent.name if default_agent else None,
         }
     finally:
         store.close()
 
 
-def create_vibe_agent(payload: dict) -> dict:
+def create_vibe_agent(payload: dict, *, user_context: Any = None) -> dict:
     if not isinstance(payload, dict):
         raise ValueError("Agent payload must be an object")
     metadata = payload.get("metadata") or payload.get("metadata_json") or {}
@@ -1952,7 +1959,7 @@ def create_vibe_agent(payload: dict) -> dict:
                 system_prompt=payload.get("system_prompt"),
                 metadata=metadata,
                 enabled=_parse_agent_enabled_field(payload, default=True),
-                user_context=resolve_resource_access_context(),
+                user_context=resolve_resource_access_context(user_context),
             )
         except AgentNameValidationError as exc:
             return _agent_name_validation_error(exc)
@@ -1961,7 +1968,7 @@ def create_vibe_agent(payload: dict) -> dict:
         store.close()
 
 
-def update_vibe_agent(name: str, payload: dict) -> dict:
+def update_vibe_agent(name: str, payload: dict, *, user_context: Any = None) -> dict:
     if not isinstance(payload, dict):
         raise ValueError("Agent payload must be an object")
     if "backend" in payload:
@@ -2007,7 +2014,7 @@ def update_vibe_agent(name: str, payload: dict) -> dict:
 
     store = VibeAgentStore()
     try:
-        context = resolve_resource_access_context()
+        context = resolve_resource_access_context(user_context)
         try:
             agent = (
                 store.rename(name, new_name, user_context=context)
@@ -2067,10 +2074,10 @@ def _agent_reference_rewrite_error(exc: AgentReferenceRewriteError) -> dict:
     }
 
 
-def remove_vibe_agent(name: str) -> dict:
+def remove_vibe_agent(name: str, *, user_context: Any = None) -> dict:
     store = VibeAgentStore()
     try:
-        context = resolve_resource_access_context()
+        context = resolve_resource_access_context(user_context)
         store.require_manageable(name, user_context=context)
         try:
             archived = store.archive(name, user_context=context)
@@ -2103,10 +2110,10 @@ def remove_vibe_agent(name: str) -> dict:
         store.close()
 
 
-def set_default_vibe_agent(name: str) -> dict:
+def set_default_vibe_agent(name: str, *, user_context: Any = None) -> dict:
     store = VibeAgentStore()
     try:
-        context = resolve_resource_access_context()
+        context = resolve_resource_access_context(user_context)
         agent = store.require_manageable(name, user_context=context)
         if not agent.enabled:
             raise ValueError(f"agent '{agent.name}' is disabled")
@@ -4788,7 +4795,7 @@ def store_vault_pubkey_pin(payload: dict) -> dict:
     return {"ok": True, "secret": meta}
 
 
-def import_vibe_agents(payload: dict) -> dict:
+def import_vibe_agents(payload: dict, *, user_context: Any = None) -> dict:
     if not isinstance(payload, dict):
         raise ValueError("Import payload must be an object")
     candidates = []
@@ -4829,7 +4836,10 @@ def import_vibe_agents(payload: dict) -> dict:
 
     store = VibeAgentStore()
     try:
-        result = store.import_candidates(candidates, user_context=resolve_resource_access_context())
+        result = store.import_candidates(
+            candidates,
+            user_context=resolve_resource_access_context(user_context),
+        )
         return {
             "ok": True,
             "imported": [_vibe_agent_payload(agent, brief=True) for agent in result.imported],
@@ -4839,13 +4849,16 @@ def import_vibe_agents(payload: dict) -> dict:
         store.close()
 
 
-def get_settings(platform: Optional[str] = None) -> dict:
+def get_settings(platform: Optional[str] = None, *, user_context: Any = None) -> dict:
     store = SettingsStore.get_instance()
     target_platform = platform or _current_platform()
     if target_platform == "discord":
         _migrate_discord_guild_scope_from_config(store)
     payload = _settings_to_payload(store, platform=target_platform)
-    payload["agent_catalog"] = get_vibe_agents(include_archived=True)
+    payload["agent_catalog"] = get_vibe_agents(
+        include_archived=True,
+        user_context=user_context,
+    )
     return payload
 
 

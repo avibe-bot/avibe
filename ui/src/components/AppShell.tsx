@@ -11,7 +11,10 @@ import { memoryNavShouldBeVisible } from '../lib/memorySettings';
 import { useApi } from '../context/ApiContext';
 import { useStatus } from '../context/StatusContext';
 import { useWorkbenchInbox } from '../context/WorkbenchInboxContext';
-import { useInstanceAuthorization } from '../context/InstanceAuthorizationContext';
+import {
+  canUseAppsSurface,
+  useInstanceAuthorization,
+} from '../context/InstanceAuthorizationContext';
 import { AccountMenu } from './AccountMenu';
 import { LanguageSwitcher } from './LanguageSwitcher';
 import { ThemeToggle } from './ThemeToggle';
@@ -37,7 +40,7 @@ import {
   adminLandingPath,
   filterLocalSystemNavItems,
   isAdvancedSettingsPath,
-  isLocalSystemPath,
+  isLocalSystemPathForAccess,
   isMemorySettingsPath,
 } from '../lib/adminNavigation';
 
@@ -236,7 +239,7 @@ export const AppShell: React.FC = () => {
   const {
     capabilities,
     remote,
-    hasTemporaryUnrestrictedOrgAppAccess,
+    hasTemporaryUnrestrictedOrgAccess,
   } = useInstanceAuthorization();
   const api = useApi();
   const location = useLocation();
@@ -266,12 +269,12 @@ export const AppShell: React.FC = () => {
   useViewportHeightVar();
 
   useEffect(() => {
-    if (!capabilities.can_manage_instance) return;
+    if (!capabilities.can_manage_instance && !hasTemporaryUnrestrictedOrgAccess) return;
     api.getConfig().then((c: any) => {
       setConfig(c);
       setEnabledPlatforms(getEnabledPlatforms(c));
     }).catch(() => {});
-  }, [api, capabilities.can_manage_instance]);
+  }, [api, capabilities.can_manage_instance, hasTemporaryUnrestrictedOrgAccess]);
 
   useEffect(() => {
     const refreshMemoryNav = () => {
@@ -343,7 +346,11 @@ export const AppShell: React.FC = () => {
     return <OrganizationShell />;
   }
 
-  if (location.pathname === '/setup' && remote && capabilities.can_manage_instance) {
+  if (
+    location.pathname === '/setup' &&
+    remote &&
+    (capabilities.can_manage_instance || hasTemporaryUnrestrictedOrgAccess)
+  ) {
     return (
       <main className="flex min-h-screen items-center justify-center bg-background p-4 text-foreground">
         <Card className="w-full max-w-md">
@@ -354,7 +361,7 @@ export const AppShell: React.FC = () => {
           <CardContent className="space-y-4">
             <p className="text-sm leading-relaxed text-muted">{t('setup.remoteOwner.hint')}</p>
             <Button asChild>
-              <Link to={adminLandingPath(capabilities.can_use_system)}>
+              <Link to={adminLandingPath(capabilities.can_use_system, hasTemporaryUnrestrictedOrgAccess === true)}>
                 {t('setup.remoteOwner.action')}
               </Link>
             </Button>
@@ -367,7 +374,8 @@ export const AppShell: React.FC = () => {
   const hasChannelPlatforms = enabledPlatforms.some((platform) => platformSupportsChannels(config, platform));
   const modelHubEnabled = modelHubEnabledFromConfig(config);
   const isRunning = status.state === 'running';
-  const canUseApps = !remote || hasTemporaryUnrestrictedOrgAppAccess === true;
+  const canUseApps = canUseAppsSurface(remote, hasTemporaryUnrestrictedOrgAccess);
+  const canUseRuntimeSurfaces = !remote || hasTemporaryUnrestrictedOrgAccess === true;
 
   const ownerOnlyPath =
     location.pathname === '/setup' ||
@@ -375,17 +383,19 @@ export const AppShell: React.FC = () => {
     ['/agents', '/harness'].some(
       (path) => location.pathname === path || location.pathname.startsWith(`${path}/`),
     );
-  // Owner is not enough for these: `can_manage_instance` stays true for a remote
-  // Instance owner, but every one of them runs on local-only routes. The list
-  // and its rationale live in `isLocalSystemPath` so this redirect and the
-  // navigation entries below cannot drift apart.
-  const localSystemPath = isLocalSystemPath(location.pathname);
+  // The temporary Organization rollout admits these runtime/admin surfaces for
+  // active members. Remote Access pairing/tunnel controls stay on their own
+  // control-plane route and remain gated by the projected system capability.
+  const localSystemPath = isLocalSystemPathForAccess(
+    location.pathname,
+    canUseRuntimeSurfaces,
+  );
   const resourceUseDenied =
-    (location.pathname.startsWith('/skills') && !capabilities.can_use_skills) ||
-    (location.pathname.startsWith('/vaults') && !capabilities.can_use_vault_secrets);
+    (location.pathname.startsWith('/skills') && !capabilities.can_use_skills && !canUseRuntimeSurfaces) ||
+    (location.pathname.startsWith('/vaults') && !capabilities.can_use_vault_secrets && !canUseRuntimeSurfaces);
   const appAccessDenied = location.pathname.startsWith('/apps/') && !canUseApps;
   if (
-    (ownerOnlyPath && !capabilities.can_manage_instance) ||
+    (ownerOnlyPath && !capabilities.can_manage_instance && !canUseRuntimeSurfaces) ||
     (localSystemPath && !capabilities.can_use_system) ||
     resourceUseDenied ||
     appAccessDenied
@@ -467,10 +477,11 @@ export const AppShell: React.FC = () => {
     },
   ];
 
-  // Second half of the trusted-local gate: a page the redirect above withholds
+  // Second half of the runtime-access gate: a page the redirect above withholds
   // must not still be advertised, or a remote owner taps a nav entry and lands
-  // back on the Workbench.
-  const visibleAdminItems = capabilities.can_use_system
+  // back on the Workbench. With the temporary Organization rollout every admin
+  // surface except remote-access pairing is admitted, so the nav stays full.
+  const visibleAdminItems = canUseRuntimeSurfaces || capabilities.can_use_system
     ? adminItems
     : filterLocalSystemNavItems(adminItems);
 
@@ -494,7 +505,7 @@ export const AppShell: React.FC = () => {
       match: (pathname) => isAdvancedSettingsPath(pathname, memoryNavVisible),
     },
   ];
-  const adminMobileTabs = capabilities.can_use_system
+  const adminMobileTabs = canUseRuntimeSurfaces || capabilities.can_use_system
     ? adminMobileTabsAll
     : filterLocalSystemNavItems(adminMobileTabsAll);
   // The More sheet shows the overflow: admin sections not already on the bottom
@@ -515,8 +526,8 @@ export const AppShell: React.FC = () => {
   const workbenchTabs: ShellNavItem[] = [
     { to: '/inbox', label: t('nav.inbox'), icon: Inbox, badge: totalUnread },
     { to: '/projects', label: t('nav.projects'), icon: FolderTree },
-    ...(capabilities.can_manage_agents || capabilities.can_use_skills || capabilities.can_use_vault_secrets ? [{
-      to: capabilities.can_manage_agents ? '/agents' : capabilities.can_use_skills ? '/skills' : '/vaults',
+    ...(capabilities.can_manage_agents || capabilities.can_use_skills || capabilities.can_use_vault_secrets || canUseRuntimeSurfaces ? [{
+      to: capabilities.can_manage_agents || canUseRuntimeSurfaces ? '/agents' : capabilities.can_use_skills ? '/skills' : '/vaults',
       label: t('nav.capabilities'),
       icon: LayoutGrid,
       match: (p: string) => ['/agents', '/skills', '/harness', '/vaults'].some((x) => p.startsWith(x)),
@@ -632,9 +643,9 @@ export const AppShell: React.FC = () => {
                   <Building2 className="size-[18px] text-muted group-hover:text-foreground" />
                 </Link>
               )}
-              {shellMode === 'workbench' && capabilities.can_manage_instance && (
+              {shellMode === 'workbench' && (capabilities.can_manage_instance || canUseRuntimeSurfaces) && (
                 <Link
-                  to={adminLandingPath(capabilities.can_use_system)}
+                  to={adminLandingPath(capabilities.can_use_system, canUseRuntimeSurfaces)}
                   title={t('appShell.openControlPanel')}
                   aria-label={t('appShell.openControlPanel')}
                   className="group flex w-11 shrink-0 items-center justify-center rounded-lg border border-border-strong text-foreground transition-colors hover:bg-foreground/[0.04]"
@@ -687,7 +698,7 @@ export const AppShell: React.FC = () => {
                 />
                 {isRunning ? t('common.running') : t('common.stopped')}
               </span>
-              {capabilities.can_manage_instance && <VersionBadge openUpward />}
+              {(capabilities.can_manage_instance || canUseRuntimeSurfaces) && <VersionBadge openUpward />}
             </div>
           </div>
         </div>
@@ -761,7 +772,7 @@ export const AppShell: React.FC = () => {
         ) : (
           <MobileTabBar
             items={workbenchTabs}
-            center={capabilities.can_chat
+            center={(capabilities.can_chat || canUseRuntimeSurfaces)
               ? { onClick: () => setNewSessionOpen(true), label: t('appShell.newSession'), icon: Plus }
               : undefined}
           />
@@ -808,7 +819,7 @@ export const AppShell: React.FC = () => {
         <MobileDockDrawer open={appsDrawerOpen} onClose={() => setAppsDrawerOpen(false)} />
       )}
 
-      {capabilities.can_chat && (
+      {(capabilities.can_chat || canUseRuntimeSurfaces) && (
         <NewSessionSheet
           open={newSessionOpen}
           onClose={() => setNewSessionOpen(false)}
