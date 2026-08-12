@@ -7902,10 +7902,7 @@ class ScheduledTaskService:
                 # that created this Run. Reload unconditionally before its result
                 # writer derives a full-row compare-and-set payload, so a process
                 # mirror cannot write the pre-consumption enabled state back.
-                if (
-                    request.source_kind == "scheduler"
-                    and request.schedule_type == "at"
-                ):
+                if request.source_kind == "scheduler":
                     self.store.load()
                 else:
                     self.store.maybe_reload()
