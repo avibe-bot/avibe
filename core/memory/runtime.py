@@ -18,7 +18,12 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 from config import paths
-from config.v2_config import MemoryConfig, V2Config, atomic_update_memory
+from config.v2_config import (
+    MEMORY_RECOVERY_INTENTS,
+    MemoryConfig,
+    V2Config,
+    atomic_update_memory,
+)
 from core.memory.artifact import (
     EVEROS_VERSION,
     MemoryArtifactCandidate,
@@ -419,7 +424,7 @@ class MemoryRuntime:
         self._store = opened
         self._module = module
         self._require_maintenance().attach_store(opened)
-        if self._maintenance_open() or self.factory_reset_pending:
+        if self._maintenance_open() or self.recovery_pending:
             module.pause_claims()
         self._store_error = None
         self._configure_insight_reader(self._config)
@@ -431,6 +436,15 @@ class MemoryRuntime:
         """Whether the local store opened. False keeps every read closed."""
 
         return self._module is not None and not self._retired
+
+    @property
+    def recovery_pending(self) -> bool:
+        """Whether this aggregate is fenced by any durable recovery intent."""
+
+        return any(
+            getattr(config, "recovery_intent", None) in MEMORY_RECOVERY_INTENTS
+            for config in (self._config, self._restart_config)
+        )
 
     @property
     def factory_reset_pending(self) -> bool:
@@ -2089,7 +2103,7 @@ class MemoryRuntime:
         replay = deepcopy(self._restart_config)
         if not replay.enabled:
             return {"ok": False, "error": "memory_disabled"}
-        if replay.recovery_intent in {"rebuild", "factory_reset"}:
+        if replay.recovery_intent in MEMORY_RECOVERY_INTENTS:
             if replay.recovery_intent == "factory_reset":
                 return {"ok": False, "error": "memory_operation_in_progress"}
             return {"ok": False, "error": "memory_embedding_rebuild_required"}
@@ -2601,13 +2615,10 @@ class MemoryRuntime:
     ) -> None:
         """Bridge the synchronous shared installer into the controller loop."""
 
-        # A durable factory-reset marker deliberately fences runtime activation.
-        # Repair still needs to publish an admitted pointer so the next reset
-        # attempt can proceed, but it must not resurrect the pending runtime.
-        if (
-            getattr(self._config, "recovery_intent", None) == "factory_reset"
-            or getattr(self._restart_config, "recovery_intent", None) == "factory_reset"
-        ):
+        # A durable recovery marker deliberately fences runtime activation.
+        # Repair still needs to publish an admitted pointer so explicit Retry
+        # can proceed, but it must not resurrect the pending runtime.
+        if self.recovery_pending:
             commit()
             return
 

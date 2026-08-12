@@ -70,6 +70,7 @@ from core.memory.types import (
 )
 from config.v2_config import (
     AgentsConfig,
+    MEMORY_RECOVERY_INTENTS,
     MemoryConfig,
     MemoryDiagnosticsConfig,
     MemoryEndpointConfig,
@@ -2341,12 +2342,14 @@ async def test_runtime_install_artifact_uses_controller_owned_manager(
     await memory_runtime_factory.close(runtime)
 
 
-async def test_runtime_repairs_artifact_without_activating_pending_factory_reset(
+@pytest.mark.parametrize("recovery_intent", sorted(MEMORY_RECOVERY_INTENTS))
+async def test_runtime_repairs_artifact_without_activating_pending_recovery(
     tmp_path: Path,
     memory_runtime_factory,
     monkeypatch: pytest.MonkeyPatch,
+    recovery_intent: str,
 ) -> None:
-    """Repair may admit the pointer while the durable reset fence remains set."""
+    """Repair admits only the pointer while every durable recovery fence remains set."""
 
     class _RepairArtifact(FakeMemoryArtifactManager):
         def ensure(self, *, force: bool = False) -> dict:
@@ -2375,14 +2378,15 @@ async def test_runtime_repairs_artifact_without_activating_pending_factory_reset
 
     artifact = _RepairArtifact(python=Path(sys.executable))
     runtime = memory_runtime_factory(
-        MemoryConfig(enabled=False, recovery_intent="factory_reset"),
+        MemoryConfig(enabled=False, recovery_intent=recovery_intent),
         artifact_manager=artifact,
         effective_home=tmp_path,
     )
+    assert runtime.module._worker._claims_paused is True
     monkeypatch.setattr(
         runtime,
         "_activate_artifact_candidate",
-        lambda *_args: pytest.fail("pending reset repair must not activate Runtime"),
+        lambda *_args: pytest.fail("pending recovery repair must not activate Runtime"),
     )
 
     result = await runtime.install_artifact()
@@ -2391,7 +2395,8 @@ async def test_runtime_repairs_artifact_without_activating_pending_factory_reset
     assert artifact.ensure_calls == [True]
     assert committed == [True]
     assert rolled_back == []
-    assert runtime._config.recovery_intent == "factory_reset"
+    assert runtime._config.recovery_intent == recovery_intent
+    assert runtime._restart_config.recovery_intent == recovery_intent
     await memory_runtime_factory.close(runtime)
 
 
@@ -2422,11 +2427,16 @@ async def test_failed_fresh_runtime_stays_available_for_pending_reset_repair(
     await memory_runtime_factory.close(runtime)
 
 
-async def test_pending_factory_reset_repair_reports_pointer_commit_failure(
+@pytest.mark.parametrize("recovery_intent", sorted(MEMORY_RECOVERY_INTENTS))
+async def test_pending_recovery_repair_reports_pointer_commit_failure(
     tmp_path: Path,
     memory_runtime_factory,
+    monkeypatch: pytest.MonkeyPatch,
+    recovery_intent: str,
 ) -> None:
     """A failed admission commit remains a failed Repair with the fence intact."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
     class _RepairArtifact(FakeMemoryArtifactManager):
         def ensure(self, *, force: bool = False) -> dict:
@@ -2448,8 +2458,17 @@ async def test_pending_factory_reset_repair_reports_pointer_commit_failure(
         raise OSError("simulated pointer commit failure")
 
     artifact = _RepairArtifact(python=Path(sys.executable))
+    pending = MemoryConfig(enabled=False, recovery_intent=recovery_intent)
+    V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+        memory=pending,
+    ).save()
     runtime = memory_runtime_factory(
-        MemoryConfig(enabled=False, recovery_intent="factory_reset"),
+        pending,
         artifact_manager=artifact,
         effective_home=tmp_path,
     )
@@ -2460,15 +2479,109 @@ async def test_pending_factory_reset_repair_reports_pointer_commit_failure(
         "download_error": None,
     }
     assert artifact.ensure_calls == [True]
-    assert runtime._config.recovery_intent == "factory_reset"
+    assert runtime._config.recovery_intent == recovery_intent
+    assert runtime._restart_config.recovery_intent == recovery_intent
+    assert V2Config.load().memory.recovery_intent == recovery_intent
     await memory_runtime_factory.close(runtime)
 
 
-async def test_artifact_repair_rejects_uninspectable_root_without_pending_reset(
+async def test_pending_rebuild_install_publishes_artifact_for_explicit_retry(
+    tmp_path: Path,
+    memory_runtime_factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Scenario: MEMORY-REBUILD-202"""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+
+    manifest = _artifact_manifest("everos-1.2.3", compatible_formats=[])
+    binary_contents = b"#!/bin/sh\nexit 0\n"
+    archive = ManagedRuntimeArchive(
+        platform=memory_artifact.runtime_platform_tag(),
+        name="memory-runtime.tar.gz",
+        url="file:///memory-runtime.tar.gz",
+        sha256="d" * 64,
+        binary_sha256=hashlib.sha256(binary_contents).hexdigest(),
+        size=1,
+        bin_path="bin/python",
+    )
+
+    class _MissingArtifact(MemoryArtifactManager):
+        def ensure(self, *, force: bool = False) -> dict:
+            assert force is True
+            self._write_current_pointer(install_dir, manifest, archive)
+            return {"ok": True, "reason": None, "download_error": None}
+
+    pending = MemoryConfig(
+        enabled=True,
+        processing=_processing_config(),
+        recovery_intent="rebuild",
+    )
+    V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+        memory=pending,
+    ).save()
+    artifact = _MissingArtifact(
+        runtime_dir=tmp_path / "runtime" / "memory-runtime",
+        provider_root=tmp_path / "memory" / "everos-root",
+        offline=True,
+    )
+    install_dir = artifact._manifest_install_dir(manifest, archive)
+    binary = install_dir / archive.bin_path
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(binary_contents)
+    binary.chmod(0o755)
+    artifact._write_manifest_install_metadata(
+        install_dir,
+        manifest,
+        archive,
+        binary_sha256=archive.binary_sha256,
+    )
+    factory = FakeEverOSProcessFactory()
+    runtime = memory_runtime_factory(
+        pending,
+        artifact_manager=artifact,
+        process_factory=factory,
+        effective_home=tmp_path,
+    )
+    assert runtime.module._worker._claims_paused is True
+
+    assert await runtime.install_artifact() == {
+        "ok": True,
+        "reason": None,
+        "download_error": None,
+    }
+    pointer = artifact._active_pointer()
+    assert pointer is not None
+    assert pointer["install_dir"] == str(install_dir)
+    assert pointer["admission_ok"] is True
+    assert artifact.resolve_python() == binary
+    assert factory.created == []
+    assert runtime.module._worker._claims_paused is True
+    assert V2Config.load().memory.recovery_intent == "rebuild"
+
+    monkeypatch.setattr(runtime, "_provider_data_exists_strict", lambda: False)
+    monkeypatch.setattr(runtime, "_probe_processing", lambda *_args: asyncio.sleep(0, result=True))
+    assert await runtime.rebuild() == {
+        "ok": True,
+        "result": "completed_empty",
+        "state": "ready",
+    }
+    assert V2Config.load().memory.recovery_intent is None
+    assert runtime._restart_config.recovery_intent is None
+    assert len(factory.supervised) == 1
+    await memory_runtime_factory.close(runtime)
+
+
+async def test_artifact_repair_rejects_uninspectable_root_without_pending_recovery(
     tmp_path: Path,
     memory_runtime_factory,
 ) -> None:
-    """Pointer-only admission is exclusive to the durable factory-reset fence."""
+    """Pointer-only admission is exclusive to a supported durable recovery fence."""
 
     runtime = memory_runtime_factory(
         MemoryConfig(enabled=False),
