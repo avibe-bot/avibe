@@ -536,6 +536,43 @@ async def test_hfr_284_runtime_work_stack_joins_controller_lanes_before_service_
     assert controller._runtime_work_tokens == []
 
 
+@pytest.mark.anyio
+async def test_runtime_work_stack_drains_run_activity_before_executor_stop() -> None:
+    controller = Controller.__new__(Controller)
+    controller._shutdown_tainted = False
+    controller._runtime_work_tokens = []
+    stopped: list[str] = []
+
+    class _Dispatcher:
+        async def drain_agent_run_activity(self) -> None:
+            stopped.append("activity")
+
+    class _Service:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        async def stop(self) -> None:
+            stopped.append(self.name)
+
+    class _Supervisor:
+        def quiesce(self) -> None:
+            stopped.append("quiesce")
+
+        async def stop(self) -> None:
+            stopped.append("supervisor")
+
+    controller.message_dispatcher = _Dispatcher()
+    controller.scheduled_task_service = _Service("tasks")
+    controller.watch_service = _Service("watch")
+    controller.runtime_work_supervisor = _Supervisor()
+
+    await controller._stop_runtime_work_stack()
+
+    assert stopped[0:2] == ["quiesce", "activity"]
+    assert set(stopped[2:4]) == {"tasks", "watch"}
+    assert stopped[4] == "supervisor"
+
+
 def test_request_shutdown_keeps_loop_owned_supervisor_join_alive_after_grace() -> None:
     controller = Controller.__new__(Controller)
     loop = asyncio.new_event_loop()

@@ -797,6 +797,21 @@ def test_a_forever_watch_retired_by_its_lifetime_says_it_timed_out(store) -> Non
     ) == "timeout"
 
 
+def test_a_legacy_scheduled_task_exit_124_requires_the_explicit_timeout_fact() -> None:
+    """A command may return 124 itself; missing timeout metadata is generic."""
+    assert (
+        definition_lifecycle_detail(
+            lifecycle_state="finished",
+            definition_type="scheduled",
+            last_run_at=NOW,
+            last_exit_code=124,
+            last_error="command returned status 124",
+            timed_out=None,
+        )
+        == "error"
+    )
+
+
 def test_re_enabling_a_fired_one_shot_task_does_not_make_it_waiting_again(store) -> None:
     """``enabled`` is not a promise of a future fire.
 

@@ -9,6 +9,7 @@ capability:
     - tests/test_dispatcher_stream_chunk.py
     - tests/test_message_dispatcher_result_fallback.py
     - tests/test_agent_stop_settlement.py
+    - tests/test_harness_live_status.py
   shared_harness: []
 status_legend:
   covered: deterministic scenario or contract coverage exists
@@ -4284,6 +4285,36 @@ scenarios:
     # Turn's sole initial accepted input. Steered or coalesced participants settle
     # locally, skip their callback, and leave the shared Session Turn untouched.
     test: tests/test_internal_server.py::test_hfr_476_run_cancel_does_not_stop_a_shared_turn
+  - id: HFR-480
+    name: persisted Run activity exposes missing live ownership
+    status: covered
+    kind: failure_recovery
+    layer: scenario
+    backend: shared
+    # Real non-terminal output advances a monotonic durable activity fact. The
+    # unified view compares a running row with the controller's exact owner set,
+    # and reports owner loss without guessing from elapsed time.
+    test: tests/test_harness_live_status.py::test_hfr_480_persisted_activity_exposes_owner_loss
+  - id: HFR-481
+    name: unified live view marks same-workdir and Watch anomalies
+    status: covered
+    kind: observability
+    layer: scenario
+    backend: shared
+    # Active runtime rows sharing one canonical workdir are marked rather than
+    # blocked, while dead Watch supervision and upcoming Task inventory remain in
+    # the same bounded operator response.
+    test: tests/test_harness_live_status.py::test_hfr_481_unified_view_marks_workdir_conflict_and_watch_failure
+  - id: HFR-482
+    name: create-per-run Delivery binding adopts its freshly reserved Session
+    status: covered
+    kind: lifecycle
+    layer: scenario
+    backend: shared
+    # A create-per-run row starts without a Session. Its first durable Delivery
+    # atomically records the runtime reservation while mismatched bound Runs stay
+    # protected by the existing hard refusal.
+    test: tests/test_internal_server.py::test_hfr_482_create_per_run_delivery_adopts_reserved_session
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor
@@ -4293,3 +4324,4 @@ plans:
   - docs/plans/agent-run-zombie-settlement.md
   - docs/plans/harness-watch-run-failure-boundary.md
   - docs/plans/watch-follow-up-circuit-breaker.md
+  - docs/plans/harness-live-anomalies.md

@@ -113,6 +113,7 @@ from storage.background import (
     SWEEP_REASON_ORPHANED,
     SWEEP_REASON_QUEUE_HOLD_EXPIRED,
     SWEEP_REASON_TRANSPORT_UNAVAILABLE,
+    TASK_LAST_RESULT_STATUS_METADATA_KEY,
     SweptRun,
     WATCH_HOOK_OUTCOME_CIRCUIT_REPAIR,
     WATCH_HOOK_OUTCOME_EVENT,
@@ -1861,6 +1862,7 @@ class ScheduledTaskStore:
         exit_code: Optional[int] = None,
         records_command_outcome: bool = False,
         timed_out: bool = False,
+        result_status: Optional[str] = None,
         queued_run: Optional[dict[str, Any]] = None,
         expected_uncanceled_run_id: Optional[str] = None,
     ) -> bool:
@@ -1875,6 +1877,10 @@ class ScheduledTaskStore:
         ``records_command_outcome`` marks the ONE stamp that is a command fire's own
         result, and it is what makes ``exit_code`` authoritative in both directions --
         see the write below.
+
+        ``result_status`` is the existing terminal Run verdict when this stamp is a
+        projection from that ledger. It is stored in definition metadata so read
+        surfaces never have to recover cancellation from localized ``error`` text.
 
         ``expected_uncanceled_run_id`` re-asserts, inside that same transaction, that
         the fire being stamped has not been stopped -- see
@@ -1895,6 +1901,18 @@ class ScheduledTaskStore:
         expect = self._read_state(task)
         task.last_run_at = _utc_now_iso()
         task.last_error = error
+        normalized_result_status = str(result_status or "").strip()
+        if normalized_result_status in TERMINAL_RUN_STATUSES:
+            task.metadata = {
+                **(task.metadata if isinstance(task.metadata, dict) else {}),
+                TASK_LAST_RESULT_STATUS_METADATA_KEY: normalized_result_status,
+            }
+        elif (
+            isinstance(task.metadata, dict)
+            and TASK_LAST_RESULT_STATUS_METADATA_KEY in task.metadata
+        ):
+            task.metadata = dict(task.metadata)
+            task.metadata.pop(TASK_LAST_RESULT_STATUS_METADATA_KEY, None)
         if records_command_outcome:
             # A COMMAND FIRE'S OWN STAMP OWNS THIS COLUMN, ``None`` included. A fire
             # that never reached a process -- a working directory that vanished, a
@@ -3133,6 +3151,13 @@ class TaskExecutionStore:
             if item.get("id") == run_id:
                 return item
         return None
+
+    def record_run_activity(self, run_ids: Sequence[str]) -> list[str]:
+        """Persist activity on the shared SQLite ledger when available."""
+
+        if self._sqlite is None:
+            return []
+        return self._sqlite.record_run_activity(run_ids)
 
     def cancel_run(self, run_id: str) -> bool:
         if self._sqlite is not None:
@@ -5194,7 +5219,12 @@ class ScheduledTaskService:
         except (TypeError, ValueError):
             return default
 
-    def _owned_agent_run_ids(self) -> set[str]:
+    def _owned_agent_run_ids(
+        self,
+        *,
+        reconcile_terminal: bool = True,
+        candidate_run_ids: Optional[set[str]] = None,
+    ) -> set[str]:
         """Every run id something in THIS process is still legitimately executing.
 
         Two lanes own a ``running`` row and neither can see the other:
@@ -5210,13 +5240,34 @@ class ScheduledTaskService:
         turns own anything", which would terminalize every streaming run.
         """
 
+        candidates = (
+            {str(run_id) for run_id in candidate_run_ids if str(run_id or "").strip()}
+            if candidate_run_ids is not None
+            else None
+        )
         owned = set(self._inflight_executions)
+        if candidates is not None:
+            owned &= candidates
         session_turns = getattr(self.controller, "session_turns", None)
-        provider = getattr(session_turns, "owned_agent_run_ids", None)
+        provider_name = (
+            "owned_agent_run_ids"
+            if reconcile_terminal
+            else "snapshot_owned_agent_run_ids"
+        )
+        provider = getattr(session_turns, provider_name, None)
         if not callable(provider):
-            raise RuntimeError("controller.session_turns.owned_agent_run_ids is unavailable")
-        owned |= {str(run_id) for run_id in provider() if run_id}
+            raise RuntimeError(f"controller.session_turns.{provider_name} is unavailable")
+        provided = provider() if candidates is None else provider(candidates)
+        owned |= {str(run_id) for run_id in provided if run_id}
         return owned
+
+    def snapshot_owned_agent_run_ids(self, candidate_run_ids: set[str]) -> set[str]:
+        """Expose the exact current ownership set to read-only operator views."""
+
+        return self._owned_agent_run_ids(
+            reconcile_terminal=False,
+            candidate_run_ids=candidate_run_ids,
+        )
 
     def _deliverable_queued_run_ids(self) -> set[str]:
         """Queued runs whose transport is ready RIGHT NOW, whatever the row remembers.
@@ -9197,6 +9248,7 @@ class ScheduledTaskService:
                 disable_one_shot=retire_one_shot,
                 exit_code=int(raw_exit_code) if raw_exit_code is not None else None,
                 records_command_outcome=records_command_outcome,
+                result_status=status,
                 expected_binding=(
                     task.session_id,
                     task.session_key,

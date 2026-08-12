@@ -620,6 +620,28 @@ def create_app(
 
         return await asyncio.to_thread(snapshot_running_agents, controller)
 
+    @app.post("/internal/running-agents/snapshot")
+    async def _running_agents_snapshot(request: Request) -> Any:
+        """Return live agents plus ownership for one bounded Run candidate set."""
+
+        from core.services.running_agents import (
+            HARNESS_OWNERSHIP_CANDIDATE_LIMIT,
+            snapshot_running_agents,
+        )
+
+        payload = await _safe_json(request)
+        run_ids = payload.get("run_ids") if isinstance(payload, dict) else None
+        if not isinstance(run_ids, list) or len(run_ids) > HARNESS_OWNERSHIP_CANDIDATE_LIMIT:
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": "invalid_run_candidates"},
+            )
+        return await asyncio.to_thread(
+            snapshot_running_agents,
+            controller,
+            ownership_candidate_run_ids=run_ids,
+        )
+
     @app.post("/internal/running-agents/end")
     async def _running_agents_end(request: Request) -> Any:
         """Terminate one running agent's live runtime (Stop turn / disconnect /
