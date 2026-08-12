@@ -104,6 +104,72 @@ _MEMORY_STORE_TRIGGERS = frozenset(
         "trg_memory_flush_settlements_no_delete",
     }
 )
+_V0_TABLES = frozenset({"memory_meta", "memory_capture_queue"})
+_V0_META_COLUMNS = frozenset(
+    {
+        "singleton",
+        "epoch",
+        "clear_in_progress",
+        "scope_key",
+        "provider_root_id",
+        "last_provider_timestamp_ms",
+        "missed_count",
+        "last_success_at",
+        "last_error",
+        "last_error_at",
+        "processing_fault_kind",
+        "processing_fault_since",
+        "processing_alert_active",
+        "updated_at",
+    }
+)
+_V0_QUEUE_COLUMNS = frozenset(
+    {
+        "source_message_digest",
+        "epoch",
+        "session_id",
+        "principal_id",
+        "project_ref",
+        "provenance",
+        "payload_text",
+        "payload_attachments",
+        "occurred_at_ms",
+        "provider_timestamp_ms",
+        "state",
+        "attempts",
+        "next_retry_at",
+        "lease_owner",
+        "lease_at",
+        "last_error",
+        "add_request_id",
+        "flush_observation",
+        "flush_status",
+        "flush_error_code",
+        "flush_request_id",
+        "flush_observed_at",
+        "created_at",
+        "completed_at",
+    }
+)
+_PERSISTED_MEMORY_ERRORS = frozenset(
+    {
+        "memory_disabled",
+        "memory_invalid_input",
+        "memory_input_too_large",
+        "memory_queue_full",
+        "memory_low_disk_space",
+        "memory_store_unavailable",
+        "memory_runtime_missing",
+        "memory_runtime_unsupported",
+        "memory_runtime_install_failed",
+        "memory_sidecar_unavailable",
+        "memory_provider_timeout",
+        "memory_provider_response_invalid",
+        "memory_processing_failed",
+        "memory_clear_failed",
+        "memory_capability_unavailable",
+    }
+)
 
 
 def memory_store_path() -> Path:
@@ -155,6 +221,314 @@ def _install_clean_schema(
         raise
     finally:
         conn.execute("PRAGMA foreign_keys = ON")
+
+
+def _execute_sql_script(conn: sqlite3.Connection, script: str) -> None:
+    """Execute a schema script without sqlite3.executescript's implicit commit."""
+
+    statement = ""
+    for line in script.splitlines(keepends=True):
+        statement += line
+        if sqlite3.complete_statement(statement):
+            conn.execute(statement)
+            statement = ""
+    if statement.strip():
+        conn.execute(statement)
+
+
+def _recognized_v0_shape(conn: sqlite3.Connection) -> tuple[bool, bool]:
+    """Recognize the two released, unversioned Memory foundation schemas."""
+
+    if _application_tables(conn) != _V0_TABLES:
+        return False, False
+    meta_columns = frozenset(
+        str(row[1]) for row in conn.execute("PRAGMA table_info(memory_meta)")
+    )
+    queue_columns = frozenset(
+        str(row[1]) for row in conn.execute("PRAGMA table_info(memory_capture_queue)")
+    )
+    if meta_columns != _V0_META_COLUMNS:
+        return False, False
+    if queue_columns == _V0_QUEUE_COLUMNS:
+        return True, False
+    if queue_columns == _V0_QUEUE_COLUMNS | {"provider_session_ref"}:
+        return True, True
+    return False, False
+
+
+def _legacy_provider_ref(
+    row: sqlite3.Row,
+    *,
+    has_provider_ref: bool,
+    scope_key: bytes,
+) -> ProviderSessionRef:
+    """Recover the canonical v2 identity from a v0 queue row."""
+
+    values = (
+        str(row["principal_id"]),
+        int(row["epoch"]),
+        str(row["project_ref"]),
+        str(row["session_id"]),
+    )
+    derived_session_id = _provider_session_ref(
+        scope_key,
+        values[0],
+        values[2],
+        values[3],
+        values[1],
+    )
+    if has_provider_ref and row["provider_session_ref"] is not None:
+        try:
+            candidate = ProviderSessionRef.deserialize(str(row["provider_session_ref"]))
+            if candidate.as_tuple() == (*values[:3], derived_session_id):
+                return candidate
+        except ValueError:
+            pass
+    return ProviderSessionRef(
+        principal_id=values[0],
+        epoch=values[1],
+        project_ref=values[2],
+        session_id=derived_session_id,
+    )
+
+
+def _migrate_v0_to_v2(
+    conn: sqlite3.Connection,
+    schema_sql: str,
+    *,
+    has_provider_ref: bool,
+) -> None:
+    """Project a recognized v0 foundation into v2 without dropping user state."""
+
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        conn.execute("DROP INDEX IF EXISTS ix_memory_capture_due")
+        conn.execute("ALTER TABLE memory_meta RENAME TO memory_meta_v0")
+        conn.execute("ALTER TABLE memory_capture_queue RENAME TO memory_capture_queue_v0")
+        _execute_sql_script(conn, schema_sql)
+
+        meta = conn.execute(
+            "SELECT * FROM memory_meta_v0 WHERE singleton = 1"
+        ).fetchone()
+        if meta is not None:
+            last_error = (
+                str(meta["last_error"])
+                if meta["last_error"] in _PERSISTED_MEMORY_ERRORS
+                else None
+            )
+            conn.execute(
+                """
+                INSERT INTO memory_meta (
+                    singleton, epoch, clear_in_progress, scope_key, provider_root_id,
+                    last_provider_timestamp_ms, missed_count, last_success_at,
+                    last_error, last_error_at, processing_fault_generation,
+                    processing_fault_kind, processing_fault_since, processing_alert_active,
+                    processing_recovery_pending_at, processing_recovery_generation, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)
+                """,
+                (
+                    meta["singleton"],
+                    meta["epoch"],
+                    meta["clear_in_progress"],
+                    meta["scope_key"],
+                    meta["provider_root_id"],
+                    meta["last_provider_timestamp_ms"],
+                    meta["missed_count"],
+                    meta["last_success_at"],
+                    last_error,
+                    meta["last_error_at"],
+                    1 if meta["processing_fault_since"] is not None else 0,
+                    meta["processing_fault_kind"],
+                    meta["processing_fault_since"],
+                    meta["processing_alert_active"],
+                    meta["updated_at"],
+                ),
+            )
+
+        queue_rows = conn.execute(
+            "SELECT * FROM memory_capture_queue_v0 ORDER BY created_at, source_message_digest"
+        ).fetchall()
+        if meta is None and queue_rows:
+            raise RuntimeError(
+                "Version-zero Memory store has queued data but no metadata; "
+                "preserving the existing file"
+            )
+        grouped: dict[str, list[tuple[sqlite3.Row, ProviderSessionRef, str | None]]] = {}
+        for row in queue_rows:
+            if meta is None:
+                raise RuntimeError(
+                    "Version-zero Memory store has queued data but no metadata; "
+                    "preserving the existing file"
+                )
+            provider_ref = _legacy_provider_ref(
+                row,
+                has_provider_ref=has_provider_ref,
+                scope_key=bytes(meta["scope_key"]),
+            )
+            observation = (
+                str(row["flush_observation"])
+                if row["flush_observation"] is not None
+                else None
+            )
+            old_state = str(row["state"])
+            state = "manual_required" if old_state in {"processing", "manual_required"} else old_state
+            add_status = None
+            if state in {"delivered", "dead"} and row["add_request_id"]:
+                add_status = (
+                    "extracted"
+                    if row["flush_status"] == "extracted"
+                    else "accumulated"
+                )
+            conn.execute(
+                """
+                INSERT INTO memory_capture_queue (
+                    source_message_digest, epoch, session_id, provider_session_ref,
+                    generation, principal_id, project_ref, provenance, payload_text,
+                    payload_attachments, attachment_bundle_id, occurred_at_ms,
+                    provider_timestamp_ms, state, attempts, next_retry_at, lease_owner,
+                    lease_at, lease_token, last_error, add_request_id, add_status,
+                    created_at, completed_at
+                ) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, NULL,
+                          NULL, 0, ?, ?, ?, ?, ?)
+                """,
+                (
+                    row["source_message_digest"],
+                    row["epoch"],
+                    provider_ref.session_id,
+                    provider_ref.serialize(),
+                    provider_ref.principal_id,
+                    provider_ref.project_ref,
+                    row["provenance"],
+                    row["payload_text"],
+                    row["payload_attachments"],
+                    row["occurred_at_ms"],
+                    row["provider_timestamp_ms"],
+                    state,
+                    row["attempts"],
+                    row["next_retry_at"] if state == "pending" else None,
+                    row["last_error"] if row["last_error"] in _PERSISTED_MEMORY_ERRORS else None,
+                    row["add_request_id"],
+                    add_status,
+                    row["created_at"],
+                    row["completed_at"],
+                ),
+            )
+            grouped.setdefault(provider_ref.serialize(), []).append((row, provider_ref, observation))
+
+        now = utc_now_iso()
+        for serialized_ref, entries in grouped.items():
+            provider_ref = entries[0][1]
+            manual = any(
+                str(row["state"]) in {"processing", "manual_required"}
+                or observation in {"unknown", "in_flight"}
+                for row, _, observation in entries
+            )
+            needs_flush = any(
+                str(row["state"]) == "delivered"
+                and observation in {None, "not_attempted", "rejected"}
+                for row, _, observation in entries
+            )
+            state = "manual_required" if manual else "due" if needs_flush else "idle"
+            delivered = [row for row, _, _ in entries if str(row["state"]) == "delivered"]
+            unflushed = sum(
+                1
+                for row, _, observation in entries
+                if str(row["state"]) == "delivered" and observation != "succeeded"
+            )
+            first_unflushed = min(
+                (
+                    str(row["completed_at"] or row["created_at"])
+                    for row, _, observation in entries
+                    if str(row["state"]) == "delivered" and observation != "succeeded"
+                ),
+                default=None,
+            )
+            last_ack = max(
+                (str(row["completed_at"] or row["created_at"]) for row in delivered),
+                default=None,
+            )
+            watermark = max(
+                (int(row["provider_timestamp_ms"]) for row in delivered),
+                default=0,
+            )
+            fence_token = (
+                f"migration-v0:{hashlib.sha256(serialized_ref.encode()).hexdigest()[:32]}"
+                if state != "idle"
+                else None
+            )
+            conn.execute(
+                """
+                INSERT INTO memory_session_flush_state (
+                    provider_session_ref, epoch, open_generation, target_generation,
+                    state, first_unflushed_at, last_add_ack_at, confirmed_add_watermark_ms,
+                    unflushed_count, due_at, next_attempt_at, retry_count, operation_epoch,
+                    fence_token, submission_started_at, updated_at
+                ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, NULL, 0, ?, ?, ?, ?)
+                """,
+                (
+                    serialized_ref,
+                    provider_ref.epoch,
+                    1 if state != "idle" else None,
+                    state,
+                    first_unflushed,
+                    last_ack,
+                    watermark or None,
+                    unflushed,
+                    now if state == "due" else None,
+                    1 if state != "idle" else 0,
+                    fence_token,
+                    now if state == "manual_required" else None,
+                    now,
+                ),
+            )
+            for row, _, observation in entries:
+                legacy_state = str(row["state"])
+                if observation not in {"succeeded", "rejected", "unknown", "in_flight"}:
+                    if legacy_state not in {"processing", "manual_required"}:
+                        continue
+                    observation = "manual_required"
+                if observation == "succeeded":
+                    mapped = "settled"
+                elif observation == "rejected":
+                    mapped = "rejected"
+                else:
+                    mapped = "manual_required"
+                observed_at = str(
+                    row["flush_observed_at"]
+                    or row["completed_at"]
+                    or row["created_at"]
+                )
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO memory_flush_settlements (
+                        provider_session_ref, epoch, generation, operation_kind,
+                        operation_token, observation, request_id, confirmed_watermark_ms,
+                        observed_at, error_code, recovery_origin, attempts
+                    ) VALUES (?, ?, 1, 'flush', ?, ?, ?, ?, ?, ?, ?, 0)
+                    """,
+                    (
+                        serialized_ref,
+                        provider_ref.epoch,
+                        f"migration-v0:{row['source_message_digest']}:{observation}",
+                        mapped,
+                        row["flush_request_id"],
+                        int(row["provider_timestamp_ms"])
+                        if observation == "succeeded"
+                        else None,
+                        observed_at,
+                        row["flush_error_code"]
+                        or ("memory_provider_timeout" if mapped == "manual_required" else None),
+                        "boot" if mapped == "manual_required" else None,
+                    ),
+                )
+        conn.execute("DROP TABLE memory_capture_queue_v0")
+        conn.execute("DROP TABLE memory_meta_v0")
+        conn.execute(f"PRAGMA user_version = {MEMORY_STORE_SCHEMA_VERSION}")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    else:
+        conn.execute("COMMIT")
 
 
 def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
@@ -2770,7 +3144,20 @@ class MemoryStore:
             elif version not in {0, MEMORY_STORE_SCHEMA_VERSION}:
                 raise RuntimeError(f"Unsupported Memory store schema version: {version}")
             elif version == 0:
-                _install_clean_schema(conn, schema_sql, application_tables)
+                if not application_tables:
+                    _install_clean_schema(conn, schema_sql, application_tables)
+                else:
+                    recognized, has_provider_ref = _recognized_v0_shape(conn)
+                    if not recognized:
+                        raise RuntimeError(
+                            "Unsupported non-empty version-zero Memory store shape; "
+                            "preserving the existing file"
+                        )
+                    _migrate_v0_to_v2(
+                        conn,
+                        schema_sql,
+                        has_provider_ref=has_provider_ref,
+                    )
             _verify_current_schema(conn)
 
     @contextmanager

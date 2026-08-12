@@ -259,7 +259,7 @@ def test_store_creates_exact_memory_tables_and_due_index(tmp_path: Path) -> None
 
 
 @pytest.mark.parametrize("foundation_schema", FOUNDATION_SCHEMAS, ids=("initial", "parent"))
-def test_store_clean_rebuilds_nonempty_foundation_v0_before_current_indexes(
+def test_store_migrates_nonempty_foundation_v0_without_dropping_state(
     tmp_path: Path,
     foundation_schema: Path,
 ) -> None:
@@ -278,10 +278,17 @@ def test_store_clean_rebuilds_nonempty_foundation_v0_before_current_indexes(
         queue_columns = {
             row[1] for row in conn.execute("PRAGMA table_info('memory_capture_queue')")
         }
+        principal_id = "u-11111111111111111111111111111111"
+        provider_ref = ProviderSessionRef(
+            principal_id=principal_id,
+            epoch=0,
+            project_ref=PROJECT,
+            session_id="src--4f619a27f96acb8854d2c1f4d2b301263832544740e2c0b176d1a1a05f5b997d--e0",
+        ).serialize()
         provider_column = (
             ", provider_session_ref" if "provider_session_ref" in queue_columns else ""
         )
-        provider_value = ", 'legacy-provider-session'" if provider_column else ""
+        provider_value = ", ?" if provider_column else ""
         conn.execute(
             f"""
             INSERT INTO memory_capture_queue (
@@ -291,19 +298,71 @@ def test_store_clean_rebuilds_nonempty_foundation_v0_before_current_indexes(
             ) VALUES (?, 0, 'legacy-session'{provider_value}, ?, ?,
                       'user_input', 'legacy payload', 1, 1, 'pending', 'now')
             """,
-            (
-                "legacy-digest",
-                "u-11111111111111111111111111111111",
-                PROJECT,
-            ),
+            ("legacy-digest", provider_ref, principal_id, PROJECT)
+            if provider_column
+            else ("legacy-digest", principal_id, PROJECT),
+        )
+        receipt_columns = (
+            ", flush_observation, flush_status, flush_request_id, flush_observed_at, completed_at"
+        )
+        receipt_provider_column = ", provider_session_ref" if provider_column else ""
+        receipt_provider_value = ", ?" if provider_column else ""
+        conn.execute(
+            f"""
+            INSERT INTO memory_capture_queue (
+                source_message_digest, epoch, session_id{receipt_provider_column},
+                principal_id, project_ref, provenance, occurred_at_ms,
+                provider_timestamp_ms, state, attempts, add_request_id,
+                created_at{receipt_columns}
+            ) VALUES (?, 0, 'legacy-session'{receipt_provider_value}, ?, ?,
+                      'agent', 2, 2, 'delivered', 1, 'add-legacy', 'now',
+                      'succeeded', 'extracted', 'flush-legacy', 'now', 'now')
+            """,
+            ("legacy-delivered", provider_ref, principal_id, PROJECT)
+            if provider_column
+            else ("legacy-delivered", principal_id, PROJECT),
         )
 
     store = MemoryStore(database)
 
     with sqlite3.connect(store.path) as conn:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == MEMORY_STORE_SCHEMA_VERSION
-        assert conn.execute("SELECT COUNT(*) FROM memory_meta").fetchone()[0] == 0
-        assert conn.execute("SELECT COUNT(*) FROM memory_capture_queue").fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT provider_root_id FROM memory_meta WHERE singleton = 1"
+        ).fetchone()[0] == "legacy-root"
+        migrated_row = conn.execute(
+            """
+            SELECT source_message_digest, session_id, provider_session_ref, state, payload_text
+            FROM memory_capture_queue
+            WHERE source_message_digest = 'legacy-digest'
+            """
+        ).fetchone()
+        assert migrated_row == (
+            "legacy-digest",
+            "src--4f619a27f96acb8854d2c1f4d2b301263832544740e2c0b176d1a1a05f5b997d--e0",
+            provider_ref,
+            "pending",
+            "legacy payload",
+        )
+        receipt_row = conn.execute(
+            """
+            SELECT source_message_digest, add_request_id, add_status, state
+            FROM memory_capture_queue
+            WHERE source_message_digest = 'legacy-delivered'
+            """
+        ).fetchone()
+        assert receipt_row == ("legacy-delivered", "add-legacy", "extracted", "delivered")
+        settlement = conn.execute(
+            """
+            SELECT observation, request_id, confirmed_watermark_ms
+            FROM memory_flush_settlements
+            WHERE operation_token LIKE 'migration-v0:legacy-delivered:%'
+            """
+        ).fetchone()
+        assert settlement == ("settled", "flush-legacy", 2)
+        assert conn.execute(
+            "SELECT state FROM memory_session_flush_state"
+        ).fetchone()[0] == "idle"
         queue_columns = {
             row[1] for row in conn.execute("PRAGMA table_info('memory_capture_queue')")
         }
@@ -319,6 +378,23 @@ def test_store_clean_rebuilds_nonempty_foundation_v0_before_current_indexes(
         assert {
             row[1] for row in conn.execute("PRAGMA table_info('memory_session_flush_state')")
         } >= {"provider_session_ref", "open_generation", "target_generation"}
+
+
+def test_store_rejects_unknown_nonempty_version_zero_without_mutating_file(
+    tmp_path: Path,
+) -> None:
+    database = _store_path(tmp_path / "unknown-v0")
+    database.parent.mkdir(parents=True)
+    with sqlite3.connect(database) as conn:
+        conn.execute("CREATE TABLE legacy_state (value TEXT NOT NULL)")
+        conn.execute("INSERT INTO legacy_state VALUES ('preserve')")
+
+    with pytest.raises(RuntimeError, match="version-zero"):
+        MemoryStore(database)
+
+    with sqlite3.connect(database) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 0
+        assert conn.execute("SELECT value FROM legacy_state").fetchone()[0] == "preserve"
 
 
 def test_store_initializes_an_empty_v0_database(tmp_path: Path) -> None:

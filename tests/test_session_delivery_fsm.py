@@ -1665,6 +1665,7 @@ def test_delivery_admission_context_restores_route_without_message_metadata(
     payload = manager._hydrate_delivery_context(context, delivery)
 
     assert payload["metadata"] == {"visible": "record metadata"}
+    assert context.user_id is None
     assert context.platform_specific["delivery_admission_context"] == {
         "message_handler_route": {
             "base_session_id": "slack_C1:reviewer",
@@ -1684,6 +1685,7 @@ def test_durable_workbench_turn_restores_memory_admission_facts(
 
     manager, _other, engine, _engine_b, _starts = managers
     classifications: list[bool | None] = []
+    hydrated_users: list[str | None] = []
     memory_cli_observations: list[tuple[bool, bool, tuple[str, str] | None]] = []
     principal_id = "u-" + ("1" * 32)
     project_id = "p-" + ("2" * 32)
@@ -1708,6 +1710,7 @@ def test_durable_workbench_turn_restores_memory_admission_facts(
 
     async def capture_start(_session_id, context, _text, **_kwargs):
         classifications.append(context.is_ordinary_text)
+        hydrated_users.append(context.user_id)
         prompt_admitted = memory_cli_prompt_admitted(prompt_controller, context)
         payload = context.platform_specific or {}
         memory_cli_observations.append(
@@ -1728,6 +1731,7 @@ def test_durable_workbench_turn_restores_memory_admission_facts(
                     priority="p3",
                     content="remember this",
                     metadata={
+                        "_memory_user_id": "local",
                         "_memory_cli_admitted": True,
                         "_memory_ordinary_text": True,
                     },
@@ -1752,6 +1756,7 @@ def test_durable_workbench_turn_restores_memory_admission_facts(
                     source="user",
                     text="remember this",
                     metadata={
+                        "_memory_user_id": "local",
                         "_memory_cli_admitted": True,
                         "_memory_ordinary_text": True,
                     },
@@ -1764,6 +1769,7 @@ def test_durable_workbench_turn_restores_memory_admission_facts(
             asyncio.run(manager.recover_durable_delivery_state(service_restart=True))
 
     assert classifications == [True]
+    assert hydrated_users == ["local"]
     assert memory_cli_observations == [
         (True, True, (principal_id, project_id)),
     ]
@@ -4433,6 +4439,51 @@ def test_pre_dispatch_hydration_failure_is_definitively_recoverable(managers) ->
 
     assert [text for _turn_id, text in starts] == ["retry safely"]
     assert _row(engine, str(admitted.delivery_id))["state"] == "claimed"
+
+
+def test_persisted_start_revalidation_failure_releases_lifecycle_admission(
+    managers,
+    monkeypatch,
+) -> None:
+    manager, _other, _engine, _engine_b, _starts = managers
+    original_begin = manager._sqlite_engine().begin
+    acquired = False
+
+    original_acquire = manager.acquire_lifecycle_admission
+
+    async def track_acquire(raw_session_id):
+        nonlocal acquired
+        admission = await original_acquire(raw_session_id)
+        acquired = True
+        return admission
+
+    monkeypatch.setattr(manager, "acquire_lifecycle_admission", track_acquire)
+
+    def failing_begin():
+        if acquired:
+            raise OSError("temporary sqlite outage")
+        return original_begin()
+
+    engine = manager._sqlite_engine()
+    monkeypatch.setattr(
+        manager,
+        "_sqlite_engine",
+        lambda: SimpleNamespace(connect=engine.connect, begin=failing_begin),
+    )
+    with pytest.raises(OSError, match="temporary sqlite outage"):
+        asyncio.run(
+            manager.deliver(
+                DeliveryRequest(
+                    session_id="ses_fsm",
+                    priority="p3",
+                    content="release the lock",
+                ),
+                context=_context(),
+            )
+        )
+
+    assert acquired
+    assert not manager._session_lifecycle_locks["ses_fsm"].locked()
 
 
 @pytest.mark.parametrize(
