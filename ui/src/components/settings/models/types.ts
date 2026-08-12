@@ -82,6 +82,8 @@ export type SuppliedModel = {
   display_name?: string | null;
   origin: ModelOrigin;
   reasoning_efforts: string[];
+  /** Persistent retirement tombstone; retired entries stay readable but are not callable. */
+  retired?: boolean;
   discovered_at?: string | null;
 };
 
@@ -586,6 +588,19 @@ export type SourcePatch = {
 export type AgentSourcesPut = { order: string[] };
 
 /** PUT /api/models/agents/<backend>/chain?model=<id> — replaces exact hops. */
+export type AgentChainPut = {
+  hops: RouteHop[];
+  force?: boolean;
+  would_remove_hops?: RouteHopRef[];
+  would_interrupt?: SupplyGap[];
+};
+
+export type AgentChainMutation = {
+  chain: AgentChain;
+  removed_hops: RouteHopRef[];
+  interrupted: SupplyGap[];
+};
+
 /**
  * PUT /api/models/sources/<id>/credential — hub-channel api_key sources only.
  * Also a TOTAL body that rejects unknown keys (`contract_version` included), so

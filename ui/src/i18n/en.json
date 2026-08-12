@@ -991,12 +991,34 @@
         "runtimeAction": "Resolve"
       },
       "routeDialog": {
-        "title": "{{model}} · Route chain",
+        "title": "{{menuModel}} · Route chain",
         "open": "Open {{model}} route chain",
         "label": "Route chain for this model",
+        "section": "Route chain for this model",
         "removeHop": "Remove hop",
         "addHop": "Add a hop",
-        "reseed": "Reorder by source order",
+        "add": { "source": "Source", "model": "Model", "confirm": "Add", "none": "No source/model pair is available to add" },
+        "sourceMissing": "Source missing",
+        "invalidAfterRefresh": "This edited hop is unavailable after the refresh. Remove it before saving.",
+        "reorder": {
+          "label": "Reorder by Source order",
+          "grabbed": "Hop {{position}} grabbed. Use arrow keys to move.",
+          "position": "Moved to hop {{position}}.",
+          "dropped": "Dropped at hop {{position}}.",
+          "cancelled": "Reorder cancelled. Restored to hop {{position}}.",
+          "sorted": "Reordered by Source order.",
+          "unchanged": "The route chain already matches Source order."
+        },
+        "grip": "Reorder this hop",
+        "loading": "Loading route chain…",
+        "cancel": "Cancel",
+        "save": "Save",
+        "saving": "Saving route chain…",
+        "refreshing": "Route chain saved. Refreshing the model surface…",
+        "fail": { "read": "The route chain could not be read", "save": "The route chain was not saved", "unconfirmed": "The save outcome is not confirmed", "reconcileRead": "The current model surface could not be read" },
+        "retry": "Retry",
+        "empty": "This route chain is empty. Add a hop, or leave it unconfigured.",
+        "impact": { "title": "The route chain was saved", "detail": "These are the items this save actually removed or interrupted.", "refreshFail": "The route chain was saved, but the model surface could not be refreshed.", "done": "Done" },
         "hint": "This chain is stored configuration. Later source-order changes do not change it."
       },
       "recent": {
@@ -1291,15 +1313,18 @@
         "cancel": "Cancel",
         "title": {
           "refetch": "Refetch models from {{source}}",
-          "removeModel": "Remove {{model}} from {{source}}"
+          "removeModel": "Remove {{model}} from {{source}}",
+          "saveRoute": "Save the route chain for {{menuModel}}"
         },
         "subtitle": {
           "refetch": "This refetch drops models from this source's inventory.",
-          "removeModel": "This model disappears from this source's inventory."
+          "removeModel": "This model disappears from this source's inventory.",
+          "saveRoute": "This save leaves a configured model with no usable source"
         },
         "confirm": {
           "refetch": "Refetch anyway",
-          "removeModel": "Remove anyway"
+          "removeModel": "Remove anyway",
+          "saveRoute": "Save anyway"
         }
       },
       "repair": {

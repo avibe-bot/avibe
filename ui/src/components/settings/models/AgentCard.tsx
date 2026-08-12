@@ -38,7 +38,7 @@ const ModelRow: React.FC<{
   modelId: string;
   sources: Source[];
   read: ModelChainRead | undefined;
-  onOpenRoute: (agent: AgentSupply, modelId: string) => void;
+  onOpenRoute: (agent: AgentSupply, modelId: string, opener: HTMLElement) => void;
 }> = ({ agent, modelId, sources, read, onOpenRoute }) => {
   const { t } = useTranslation();
   const current = currentLink(read);
@@ -58,7 +58,7 @@ const ModelRow: React.FC<{
   return (
     <button
       type="button"
-      onClick={() => onOpenRoute(agent, modelId)}
+      onClick={(event) => onOpenRoute(agent, modelId, event.currentTarget)}
       aria-label={t('settings.models.routeDialog.open', { model: modelId }) as string}
       className="model-hub-model-row flex h-9 w-full min-w-0 items-center gap-2.5 overflow-hidden rounded-lg border border-border px-3 text-left"
     >
@@ -82,7 +82,7 @@ const AgentModelCard: React.FC<{
   onConnectHub: (agent: AgentSupply) => void;
   onSwitchDirect: (agent: AgentSupply) => void;
   onOpenOrder: (agent: AgentSupply) => void;
-  onOpenRoute: (agent: AgentSupply, modelId: string) => void;
+  onOpenRoute: (agent: AgentSupply, modelId: string, opener: HTMLElement) => void;
   onProbeSettled: (agent: AgentSupply) => void;
 }> = ({ agent, runtime, sources, chains, pending, connecting, switchFailed, onConnectHub, onSwitchDirect, onOpenOrder, onOpenRoute, onProbeSettled }) => {
   const { t } = useTranslation();
@@ -162,7 +162,7 @@ export const AgentCard: React.FC<{
   onConnectHub: (agent: AgentSupply) => void;
   onSwitchDirect: (agent: AgentSupply) => void;
   onOpenOrder: (agent: AgentSupply) => void;
-  onOpenRoute: (agent: AgentSupply, modelId: string) => void;
+  onOpenRoute: (agent: AgentSupply, modelId: string, opener: HTMLElement) => void;
   onProbeSettled: (agent: AgentSupply) => void;
   connectingBackend: string | null;
 }> = ({ agents, pendingBackends, switchFailures, connectingBackend, ...props }) => <div className="flex flex-col gap-4">{agents.map((agent) => <AgentModelCard key={agent.backend} agent={agent} {...props} pending={pendingBackends.has(agent.backend)} switchFailed={switchFailures.has(agent.backend)} connecting={connectingBackend === agent.backend} />)}</div>;

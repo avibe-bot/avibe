@@ -26,6 +26,8 @@ import type {
   AgentBackend,
   AgentChain,
   AgentChainLink,
+  AgentChainMutation,
+  AgentChainPut,
   AgentMenu,
   AgentMode,
   AgentSourcesPut,
@@ -117,6 +119,8 @@ export type ModelsApi = {
   putAgentSources(backend: AgentBackend, body: AgentSourcesPut): Promise<AgentSupply>;
   /** Resolution chain for one model. Hub mode only — direct answers `direct_mode`. */
   getAgentChain(backend: AgentBackend, model: string): Promise<AgentChain>;
+  /** Total replacement of the exact stored chain. */
+  putAgentChain(backend: AgentBackend, model: string, body: AgentChainPut): Promise<AgentChainMutation>;
   /** One real request through the chain. Hub mode only, same reason. */
   probeAgent(backend: AgentBackend, model?: string): Promise<ProbeResult>;
   setAgentMode(backend: AgentBackend, mode: AgentMode): Promise<AgentSupply>;
@@ -141,7 +145,7 @@ export type ModelsApi = {
 const isLive = () => MODELS_API_MODE === 'live';
 
 // ── Live client ─────────────────────────────────────────────────────────
-class ApiCallError extends Error {
+export class ApiCallError extends Error {
   code: string;
   detail?: string;
   /**
@@ -384,6 +388,7 @@ const liveApi: ModelsApi = {
   // `contract_version` is deliberately absent (unlike every other write here).
   putAgentSources: (backend, body) => call<{ agent: AgentSupply }>(`/api/models/agents/${backend}/sources`, jsonInit('PUT', body)).then((r) => r.agent),
   getAgentChain: (backend, model) => call<{ chain: AgentChain }>(`/api/models/agents/${backend}/chain?model=${encodeURIComponent(model)}`).then((r) => r.chain),
+  putAgentChain: (backend, model, body) => call<AgentChainMutation>(`/api/models/agents/${backend}/chain?model=${encodeURIComponent(model)}`, jsonInit('PUT', body)),
   probeAgent: (backend, model) => call<{ probe: ProbeResult }>(`/api/models/agents/${backend}/probe`, jsonInit('POST', model ? { model } : {})).then((r) => r.probe),
   setAgentMode: (backend, mode) => call<{ agent?: AgentSupply } & AgentSupply>(`/api/models/agents/${backend}/mode`, jsonInit('PATCH', { mode })).then((r) => (r.agent ?? r) as AgentSupply),
   putMenu: (menu) => call<{ agent?: AgentSupply } & AgentSupply>('/api/models/agents/opencode/menu', jsonInit('PUT', { menu })).then((r) => (r.agent ?? r) as AgentSupply),
@@ -477,16 +482,13 @@ class MockStore {
       a.named_agents = (a.named_agents ?? []).map((n) => ({ ...n, effective_model_id: null, supply_status: null }));
       return;
     }
-    const byId = new Map(this.sources.map((s) => [s.id, s]));
     const routeFor = (model: string) => a.routes?.[model]?.hops ?? [];
-    const chainFor = (model: string) => routeFor(model)
-      .map((hop) => byId.get(hop.source_id))
-      .filter((s): s is Source => Boolean(s));
+    const chainFor = (model: string) => this.chainFor(a, model).chain;
     if (a.builtin_models) {
       a.model_supply = a.builtin_models.map((m) => ({
         model_id: m,
         chain_length: routeFor(m).length,
-        has_runnable_hop: chainFor(m).some(isRunnable),
+        has_runnable_hop: chainFor(m).some((link) => link.runnable),
       }));
     }
     const selected = a.selected_model_id ?? null;
@@ -494,13 +496,13 @@ class MockStore {
       a.supply_status = null;
     } else {
       const chain = chainFor(selected);
-      const head = chain.find(isRunnable) ?? null;
-      const blocked = chain.filter((s) => !isRunnable(s));
+      const head = chain.find((link) => link.runnable) ?? null;
+      const blocked = chain.filter((link) => !link.runnable);
       if (!head) {
         a.supply_status =
-          chain.length > 0 && blocked.every((s) => s.state.status === 'cooldown') ? 'waiting' : 'interrupted';
+          chain.length > 0 && blocked.every((link) => link.health === 'cooldown' && link.reason === null) ? 'waiting' : 'interrupted';
       } else {
-        a.supply_status = head.id === chain[0]?.id && blocked.length === 0 ? 'ok' : 'degraded';
+        a.supply_status = head === chain[0] && blocked.length === 0 ? 'ok' : 'degraded';
       }
     }
     const rollup = a.supply_status ?? null;
@@ -785,26 +787,28 @@ class MockStore {
     const hops = agent.routes?.[model]?.hops ?? [];
     const chain: AgentChainLink[] = hops
       .map((hop) => ({ hop, source: byId.get(hop.source_id) }))
-      .map(({ hop, source }) => ({
-        source_id: hop.source_id,
-        model_id: hop.model_id,
-        source,
-      }))
-      .map(({ source_id, model_id, source }) => ({
-        source_id,
-        model_id,
-        channel: source?.supply_channel ?? 'hub',
-        health: source ? chainHealth(source) : 'error',
-        runnable: source ? isRunnable(source) : false,
-        // v4: process availability is a fact about the serving process — which
-        // native CLI it can launch under its own login — and a browser mock has
-        // no way to observe it. So it stands in for a runtime where every
-        // configured CLI is launchable, rather than inventing an outage. The
-        // unavailable branch is asserted in the unit tests, which can state the
-        // fact instead of guessing it.
-        reason: source ? null : 'source_missing',
-        retry_at: source?.state.status === 'cooldown' ? source.state.retry_at ?? null : null,
-      }));
+      .map(({ hop, source }) => {
+        const modelEntry = source?.models.find((entry) => entry.id === hop.model_id);
+        const callable = modelEntry !== undefined && modelEntry.retired !== true;
+        const reason = !source
+          ? 'source_missing' as const
+          : callable ? null : 'model_unsupported' as const;
+        return {
+          source_id: hop.source_id,
+          model_id: hop.model_id,
+          channel: source?.supply_channel ?? 'hub',
+          health: source && callable ? chainHealth(source) : 'error',
+          runnable: source !== undefined && callable && isRunnable(source),
+          // v4: process availability is a fact about the serving process — which
+          // native CLI it can launch under its own login — and a browser mock has
+          // no way to observe it. So it stands in for a runtime where every
+          // configured CLI is launchable, rather than inventing an outage. The
+          // unavailable branch is asserted in the unit tests, which can state the
+          // fact instead of guessing it.
+          reason,
+          retry_at: source && callable && source.state.status === 'cooldown' ? source.state.retry_at ?? null : null,
+        };
+      });
     const supply_state: AgentChain['supply_state'] = chain.some((l) => l.runnable)
       ? 'ok'
       : chain.length > 0 && chain.every((l) => l.health === 'cooldown' && l.reason === null)
@@ -828,6 +832,54 @@ class MockStore {
       current,
       chain,
       supply_state,
+    });
+  }
+
+  putAgentChain(backend: AgentBackend, model: string, body: AgentChainPut) {
+    const agent = this.agentOr404(backend);
+    if (agent.mode === 'direct') throw new ApiCallError('direct_mode');
+    const byId = new Map(this.sources.map((source) => [source.id, source]));
+    const seen = new Set<string>();
+    for (const hop of body.hops) {
+      const source = byId.get(hop.source_id);
+      const supplied = source?.models.some((entry) => entry.id === hop.model_id && entry.retired !== true);
+      const identity = `${hop.source_id}\u0000${hop.model_id}`;
+      if (!source || !supplied || seen.has(identity)) throw new ApiCallError('model_unsupported');
+      seen.add(identity);
+    }
+    const previous = agent.routes?.[model]?.hops ?? [];
+    const removed_hops: RouteHopRef[] = previous.flatMap((hop, index) => body.hops.some((next) => equalHopIdentity(next, hop))
+      ? []
+      : [{ backend, menu_model: model, ...hop, position: index + 1 }]);
+    const impactedAgents = (agent.named_agents ?? [])
+      .filter((entry) => entry.effective_model_id === model)
+      .map((entry) => entry.name);
+    const hasRunnableHop = body.hops.some((hop) => {
+      const source = byId.get(hop.source_id);
+      return source?.models.some((entry) => entry.id === hop.model_id && entry.retired !== true) === true
+        && isRunnable(source);
+    });
+    const gaps: SupplyGap[] = impactedAgents.length > 0 && !hasRunnableHop
+      ? [{ backend, model_id: model, agents: impactedAgents }]
+      : [];
+    const confirmed = body.force === true
+      && JSON.stringify(body.would_interrupt ?? []) === JSON.stringify(gaps)
+      && JSON.stringify(body.would_remove_hops ?? []) === JSON.stringify(removed_hops);
+    if (gaps.length > 0 && !confirmed) throw new ApiCallError('source_last_supplier', undefined, true, gaps, [], removed_hops);
+    agent.routes = { ...(agent.routes ?? {}), [model]: { hops: body.hops.map((hop) => ({ ...hop })) } };
+    this.syncAgents();
+    const settled = this.chainFor(agent, model);
+    return delay({
+      chain: {
+        contract_version: AGENT_CHAIN_CONTRACT_VERSION,
+        backend,
+        model_id: model,
+        current: settled.current,
+        chain: settled.chain,
+        supply_state: settled.supply_state,
+      },
+      removed_hops,
+      interrupted: gaps,
     });
   }
 
@@ -1267,6 +1319,7 @@ const mockApi: ModelsApi = {
   getAgentSources: (backend) => mockStore.getAgentSources(backend),
   putAgentSources: (backend, body) => mockStore.putAgentSources(backend, body),
   getAgentChain: (backend, model) => mockStore.getAgentChain(backend, model),
+  putAgentChain: (backend, model, body) => mockStore.putAgentChain(backend, model, body),
   probeAgent: (backend, model) => mockStore.probeAgent(backend, model),
   setAgentMode: (backend, mode) => mockStore.setAgentMode(backend, mode),
   putMenu: (menu) => mockStore.putMenu(menu),
