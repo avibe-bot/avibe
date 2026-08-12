@@ -2411,9 +2411,12 @@ def _has_temporary_runtime_access(context: Any) -> bool:
 def _has_runtime_owner_access(context: Any) -> bool:
     if context is None:
         return False
-    if context.is_remote and not _has_temporary_runtime_access(context):
-        return False
-    return bool(context.is_instance_owner or _has_temporary_runtime_access(context))
+    # A signed Instance owner (local or remote) owns its runtime surfaces, as in
+    # the established model; the temporary Organization rollout additionally
+    # admits active members. This never restricts a pre-existing owner.
+    if context.is_trusted_local or context.instance_role == "owner":
+        return True
+    return _has_temporary_runtime_access(context)
 
 
 @app.before_request
@@ -2453,8 +2456,13 @@ def enforce_instance_role_capabilities():
     try:
         if context is None:
             raise InstanceAuthorizationError(minimum_role)
+        # The temporary Organization rollout admits active members. Other remote
+        # principals on API runtime routes fail the active-Organization admission
+        # check here, before role rank; a signed Instance owner retains its
+        # origin/org admission to viewer/editor-allowed reads.
         if (
             context.is_remote
+            and context.instance_role != "owner"
             and request.path.startswith("/api/")
             and not has_temporary_unrestricted_org_access(context)
         ):

@@ -590,7 +590,7 @@ _TEMPORARY_UNRESTRICTED_ORG_HTTP_RULES = tuple(
         # Projects, sessions, chat execution, and ASR.
         (_UNRESTRICTED_ORG_METHODS, r"^/api/projects(?:/[^/]+(?:/agents-md)?)?$"),
         (_UNRESTRICTED_ORG_METHODS, r"^/api/workbench/projects-bootstrap$"),
-        (_UNRESTRICTED_ORG_METHODS, r"^/api/sessions(?:/[^/]+(?:/(?:fork|bootstrap|archive-preview|messages|activity|cli-activity|cancel|mark-read|turn-state|queue(?:/[^/]+(?:/send-now)?)?|draft|attachments))?)?$"),
+        (_UNRESTRICTED_ORG_METHODS, r"^/api/sessions(?:/[^/]+(?:/(?:fork|cli-activity|cancel|mark-read|queue(?:/[^/]+(?:/send-now)?)?|draft|attachments))?)?$"),
         (_UNRESTRICTED_ORG_METHODS, r"^/api/(?:search/messages|events|inbox)$"),
         (_UNRESTRICTED_ORG_METHODS, r"^/api/asr/(?:transcribe|telemetry|status)$"),
         # Apps: Dock, Files, browse favorites, Terminal teardown, and Show Pages.
