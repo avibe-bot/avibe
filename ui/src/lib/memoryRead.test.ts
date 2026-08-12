@@ -47,8 +47,13 @@ describe('classifyMemoryResult', () => {
 
 
 describe('memoryErrorMessage', () => {
-  const t = ((key: string, options?: { defaultValue?: string }) =>
-    key === 'errors.memory_known' ? 'Known failure' : options?.defaultValue ?? key) as never;
+  const t = ((key: string, options?: { defaultValue?: string }) => {
+    if (key === 'errors.memory_known' || key === 'errors.memory_embedding_unavailable') {
+      return 'Known failure';
+    }
+    if (key === 'errors.provider_request_timed_out') return 'Localized timeout';
+    return options?.defaultValue ?? key;
+  }) as never;
 
   it('translates a known closed code', () => {
     expect(memoryErrorMessage(t, 'memory_known')).toBe('Known failure');
@@ -63,8 +68,14 @@ describe('memoryErrorMessage', () => {
   });
 
   it('appends a provider diagnostic only when one is present', () => {
-    expect(memoryErrorMessage(t, 'memory_embedding_unavailable', 'HTTP 404')).toBe(
-      'Known failure: HTTP 404',
-    );
+    expect(
+      memoryErrorMessage(
+        t,
+        'memory_embedding_unavailable',
+        'provider_request_timed_out',
+        404,
+        'model_not_supported',
+      ),
+    ).toBe('Known failure: Localized timeout · HTTP 404 · model_not_supported');
   });
 });

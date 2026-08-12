@@ -872,6 +872,35 @@ def test_processing_preflight_projects_sanitized_provider_error() -> None:
     assert "secret" not in result.failure.diagnostic.message
 
 
+def test_processing_preflight_scrubs_provider_error_code() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            401,
+            json={"error": {"code": "https://embed.example.test/v1?api_key=secret"}},
+        )
+
+    async def run():
+        return await EverOSPort(
+            Path("/tmp/everos.sock"),
+            llm_base_url="https://llm.example.test/v1",
+            llm_model="chat",
+            llm_api_key="secret",
+            embedding_base_url="https://embed.example.test/v1",
+            embedding_model="embed",
+            embedding_api_key="secret",
+        ).preflight()
+
+    real_async_client = httpx.AsyncClient
+    with patch("core.memory.everos.httpx.AsyncClient", autospec=True) as client_type:
+        client_type.side_effect = lambda **kwargs: real_async_client(
+            transport=httpx.MockTransport(handler), **kwargs
+        )
+        result = asyncio.run(run())
+    assert result.failure is not None
+    assert "https://" not in result.failure.diagnostic.provider_error_code
+    assert "secret" not in result.failure.diagnostic.provider_error_code
+
+
 def test_processing_preflight_preserves_http_status_for_non_json_errors() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(502, text="<html>gateway failure</html>")
@@ -897,6 +926,34 @@ def test_processing_preflight_preserves_http_status_for_non_json_errors() -> Non
     assert result.failure.error == "memory_llm_unavailable"
     assert result.failure.diagnostic.http_status == 502
     assert result.failure.diagnostic.message == "HTTP 502"
+
+
+def test_processing_preflight_accepts_large_bounded_embedding_vectors() -> None:
+    vector = [0.1] * 1536
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/chat/completions"):
+            return httpx.Response(200, json={"choices": [{"message": {"content": "OK"}}]})
+        return httpx.Response(200, json={"data": [{"embedding": vector}]})
+
+    async def run():
+        return await EverOSPort(
+            Path("/tmp/everos.sock"),
+            llm_base_url="https://llm.example.test/v1",
+            llm_model="chat",
+            llm_api_key="secret",
+            embedding_base_url="https://embed.example.test/v1",
+            embedding_model="embed",
+            embedding_api_key="secret",
+        ).preflight()
+
+    real_async_client = httpx.AsyncClient
+    with patch("core.memory.everos.httpx.AsyncClient", autospec=True) as client_type:
+        client_type.side_effect = lambda **kwargs: real_async_client(
+            transport=httpx.MockTransport(handler), **kwargs
+        )
+        result = asyncio.run(run())
+    assert result.ok is True
 
 
 def test_processing_health_rejects_llm_probe_without_completion_content() -> None:

@@ -600,6 +600,8 @@ def record_preflight_call(
     )
     row = normalize_provider_call(call, provider_base_urls=provider_base_urls, exact_redaction_values=exact_redaction_values)
     db_path.parent.mkdir(parents=True, exist_ok=True)
+    _validate_directory_chain(db_path.parent)
+    os.chmod(db_path.parent, 0o700)
     with _database_connection(db_path) as conn:
         _initialize_schema(conn)
         _write_batch(conn, [row], lambda: False)

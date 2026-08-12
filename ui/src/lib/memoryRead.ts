@@ -50,7 +50,14 @@ export const memoryErrorMessage = (
   t: TFunction,
   code: string | null | undefined,
   message?: string | null,
+  httpStatus?: number | null,
+  providerErrorCode?: string | null,
 ): string => {
   const base = code ? t(`errors.${code}`, { defaultValue: code }) : t('common.unknown');
-  return message ? `${base}: ${message}` : base;
+  const details = [
+    message ? t(`errors.${message}`, { defaultValue: message }) : '',
+    typeof httpStatus === 'number' ? `HTTP ${httpStatus}` : '',
+    providerErrorCode || '',
+  ].filter(Boolean);
+  return details.length > 0 ? `${base}: ${details.join(' · ')}` : base;
 };
