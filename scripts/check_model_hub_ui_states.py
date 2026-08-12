@@ -263,7 +263,9 @@ ANY_ROUTE_RE = re.compile(r"`(GET|POST|PUT|PATCH|DELETE) (/api/[^`]*)`")
 # Candidate first, validity second. A method typo still has the unmistakable
 # shape of a route claim and must reach the route universe instead of vanishing
 # before it can be rejected.
-ROUTE_CANDIDATE_RE = re.compile(r"`([A-Za-z][A-Za-z0-9_-]*) (/[^`\s][^`]*)`")
+ROUTE_CANDIDATE_RE = re.compile(
+    r"`([A-Z][A-Z0-9_-]*)([ \t]*)(/[^`\s][^`]*)`"
+)
 
 # A method word on its own, with no path after it. `ANY_ROUTE_RE` is what the
 # route arms resolve; this is what they cannot, and the two together are how many
@@ -812,7 +814,7 @@ BODY_RE = re.compile(r"`(\{[^`{}]*\})`")
 # A body claim owns every backticked brace-shaped candidate, including one
 # whose closing brace was damaged. Syntax is a property of the candidate, not
 # the condition for admitting it to the inventory.
-BODY_CANDIDATE_RE = re.compile(r"`(\{(?!\{)[^`\n]*)`")
+BODY_CANDIDATE_RE = re.compile(r"`(\{(?!\{)[^`\n]*|[^`{}\n]+\})`")
 # A response half that spells no body names its shape instead — "→ OAuth result"
 # — and the shape gets a section of its own further down. The subject word is
 # what links the two, so it has to be a word the file capitalises: matching on
@@ -859,6 +861,9 @@ DOTTED_TOKEN_RE = re.compile(r"`([a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*)`")
 # Python-file citation; restricting the extractor to valid path characters made
 # `$core/.../service.py:list_agents` disappear before the origin could reject it.
 PY_CITE_RE = re.compile(r"`([^`\s]*\.py)(?::([^`\s]+))?`")
+PY_CITE_CANDIDATE_RE = re.compile(
+    r"`([^`\s]*\.py[^`\s/:]*)(?::([^`\s]+))?`"
+)
 # Line-number citations are not a portable authority. They require the cited
 # revision's complete object history, while the CI checkout is deliberately
 # shallow, and a line can move without the contract concept changing. Reject the
@@ -1033,7 +1038,7 @@ def literal_members(text: str) -> LiteralMembers:
     occurrences: list[tuple[str, LiteralMember]] = []
     duplicates: list[str] = []
     blocks = JSONISH_RE.findall(text)
-    if not blocks and text.startswith("{"):
+    if not blocks and (text.startswith("{") or text.endswith("}")):
         blocks = [text]
     for block in blocks:
         for part in block.strip("{}").split(","):
@@ -1715,6 +1720,10 @@ def copy_keys(cell: str) -> CopyKeys:
             malformed.append(f"has malformed copy-key citation `{token}`")
     for candidate in re.findall(r"(?<![\w`])([a-z][A-Za-z0-9_*]*(?:\.[A-Za-z0-9_*]+)+)(?![\w`])", without_quoted):
         malformed.append(f"has unquoted copy-key citation `{candidate}`")
+    delegated = re.match(r"^as\s+[①-⑳](?:\s|$)", cell) is not None
+    server_owned = re.fullmatch(r"server-owned key", cell, re.I) is not None
+    if not keys and not delegated and not server_owned:
+        malformed.append("has no typed copy-key citation or delegation")
     return CopyKeys(tuple(keys), False, tuple(malformed))
 
 
@@ -1875,11 +1884,12 @@ def parse(doc: Document) -> dict[str, Any]:
             # the malformed line is the statement that the rest is unknown.
             identity = cells[0] if cells else ""
             padded = (cells + ["", ""])[1:3]
-            if identity:
+            if identity and re.fullmatch(r"F[1-5]", identity):
                 treatments.define(identity, padded[0], content=tuple(padded), where=n)
             continue
         problems: list[str] = []
-        if not re.fullmatch(r"F\d+", cells[0]):
+        valid_identity = re.fullmatch(r"F[1-5]", cells[0]) is not None
+        if not valid_identity:
             problems.append(f"has malformed treatment identity `{cells[0]}`")
         for col, value in zip(("identity", "treatment", "user-visible result"), cells):
             if not value:
@@ -1887,7 +1897,7 @@ def parse(doc: Document) -> dict[str, Any]:
         for problem in problems:
             treatments.malformed(n, f"§0.8 failure-treatment row {problem}")
         if problems:
-            if cells[0]:
+            if cells[0] and valid_identity:
                 treatments.define(cells[0], cells[1], content=tuple(cells[1:]), where=n)
             continue
         treatments.define(cells[0], cells[1], content=(cells[1], cells[2]), where=n)
@@ -2309,6 +2319,7 @@ def _mapping_scan(doc: Document) -> list[MappingScan]:
                     )
             elif candidate := MAPPING_HEADER_CANDIDATE_RE.match(cell):
                 candidate_columns.add(col)
+                fields[col] = (candidate.group(1), candidate.group(2) or "")
                 malformed.append(
                     (line_no, f"mapping header `{candidate.group(1)}` is not a valid field citation")
                 )
@@ -2318,6 +2329,7 @@ def _mapping_scan(doc: Document) -> list[MappingScan]:
                 ):
                     continue
                 candidate_columns.add(col)
+                fields[col] = (candidate.group(1), candidate.group(2) or "")
                 malformed.append(
                     (
                         line_no,
@@ -2339,18 +2351,41 @@ def _mapping_scan(doc: Document) -> list[MappingScan]:
                         f"{len(headers)}",
                     )
                 )
-            rows.append(
-                MappingRow(
-                    n,
-                    cells,
-                    {
-                        col: leading.group(1)
-                        for col in candidate_columns
-                        if col < len(cells)
-                        and (leading := LEADING_MAPPING_VALUE_RE.match(cells[col]))
-                    },
-                )
-            )
+            values: dict[int, str] = {}
+            value_columns = {
+                col
+                for col, (field, markers) in fields.items()
+                if "." in field or bool(markers.strip())
+            }
+            for col in value_columns:
+                if col >= len(cells):
+                    continue
+                cell = cells[col]
+                leading = LEADING_MAPPING_VALUE_RE.match(cell)
+                if leading:
+                    values[col] = leading.group(1)
+                    continue
+                quoted = re.match(r"\s*`([^`]+)`", cell)
+                unquoted = re.fullmatch(r"\s*([A-Za-z][A-Za-z0-9_]*)\s*", cell)
+                if quoted:
+                    values[col] = quoted.group(1)
+                    malformed.append(
+                        (
+                            n,
+                            f"mapping row `{cells[0].strip() or '<empty>'}` column "
+                            f"`{headers[col]}` has malformed value `{quoted.group(1)}`",
+                        )
+                    )
+                elif unquoted:
+                    values[col] = unquoted.group(1)
+                    malformed.append(
+                        (
+                            n,
+                            f"mapping row `{cells[0].strip() or '<empty>'}` column "
+                            f"`{headers[col]}` has unquoted value `{unquoted.group(1)}`",
+                        )
+                    )
+            rows.append(MappingRow(n, cells, values))
         # The lead-in paragraph is where these tables say whose field this is —
         # "`runtime-dependency.schema.json` enumerates five values", and then the
         # table. Reading it keeps the gate from calling a bound table ambiguous,
@@ -2740,13 +2775,29 @@ def registered_gaps(doc: Document) -> Universe:
             gaps.malformed(n, f"§0.5 contract-gap row {problem}")
         if not identity:
             continue
+        surface_has_strike = STRUCK_RE.search(cells[1]) is not None
+        surface_standing = STRUCK_RE.sub(" ", cells[1]).strip()
         standing = STRUCK_RE.sub(" ", cells[2]).strip()
+        missing_active = bool(standing and standing.lower() != "nothing")
+        surface_state = "active"
+        if surface_has_strike and not surface_standing:
+            surface_state = "malformed"
+        elif "withdrawn" in surface_standing.lower():
+            surface_state = "withdrawn"
+        if surface_state == "malformed" or (
+            surface_state == "withdrawn" and missing_active
+        ):
+            gaps.malformed(
+                n,
+                f"§0.5 contract-gap row {identity} has inconsistent "
+                "Surface/Missing withdrawal state",
+            )
         whole_row = STRUCK_RE.sub(" ", line)
         gaps.define(
             identity,
             GapRow(
                 n,
-                bool(standing and standing.lower() != "nothing"),
+                not problems and surface_state == "active" and missing_active,
                 frozenset(
                     normalize_route(meth, path)
                     for meth, path in ANY_ROUTE_RE.findall(whole_row)
@@ -2940,19 +2991,22 @@ def authority_claims(
             (
                 m.start(),
                 m.end(),
-                normalize_route(m.group(1), m.group(2)),
-                route_query(m.group(2)),
+                normalize_route(m.group(1), m.group(3)),
+                route_query(m.group(3)),
+                m.group(2),
             )
             for m in ROUTE_CANDIDATE_RE.finditer(scope)
         ]
-        mentions = [(start, end, route) for start, end, route, _query in route_claims]
+        mentions = [(start, end, route) for start, end, route, _query, _delimiter in route_claims]
         named = {route for _s, _e, route in mentions}
-        checked_claims: set[tuple[str, QueryScan]] = set()
-        for _start, _end, route, query in route_claims:
-            if (route, query) in checked_claims:
+        checked_claims: set[tuple[str, QueryScan, str]] = set()
+        for _start, _end, route, query, delimiter in route_claims:
+            if (route, query, delimiter) in checked_claims:
                 continue
-            checked_claims.add((route, query))
+            checked_claims.add((route, query, delimiter))
             scale["routes"] += 1
+            if delimiter != " ":
+                add(f"L{line_no}", f"`{route}` has malformed method/path delimiter")
             hit = auth["routes"].resolve(route)
             if hit.empty:
                 add(f"L{line_no}", f"`{route}` is contracted by no `api.md` route row")
@@ -3310,8 +3364,12 @@ def authority_claims(
             if field not in known:
                 add(f"L{line_no}", f"`{cited}` declares no `{field}`")
 
-        for rel, symbol in PY_CITE_RE.findall(scope):
+        for match in PY_CITE_CANDIDATE_RE.finditer(scope):
+            rel, symbol = match.group(1), match.group(2)
             scale["repo symbols"] += 1
+            if PY_CITE_RE.fullmatch(match.group(0)) is None:
+                add(f"L{line_no}", f"repo citation `{rel}` has malformed Python-file suffix")
+                continue
             source = origin.read(rel)
             if source is None:
                 add(f"L{line_no}", f"`{rel}` is not a file in {origin.label}")
@@ -3596,7 +3654,13 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
             continue
         goto = GOTO_RE.search(cell)
         if goto:
-            targets = [t.strip() for t in re.split(r"[/,]| or ", goto.group(1)) if t.strip()]
+            targets = []
+            for raw_target in re.split(r"[/,]| or ", goto.group(1)):
+                target = re.sub(
+                    r"\s+for\s+E\d+[a-z]?\b.*$", "", raw_target.strip()
+                ).strip()
+                if target:
+                    targets.append(target)
             # `any(st == t or st.startswith(t) or t in st ...)` — a state named
             # 「Ready」 vouched for a cell pointing at 「Read」, and a cell
             # pointing at 「Saving」 was answered by 「Saving order」 in a frame
@@ -3606,8 +3670,6 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
             # it points at two states at once, and neither is an exit.
             hits = [state_u.resolve(f"{frame} · {t}") for t in targets]
             if targets and all(not h.empty and not h.ambiguous for h in hits):
-                continue
-            if classifier_owned:
                 continue
             if cited_treatments:
                 add(
@@ -4219,6 +4281,7 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
             best = max((score for score, _row in scored), default=0)
             return [row for score, row in scored if score == best and score > 0]
 
+        explicitly_owned_landings: set[int] = set()
         for arrow in ARROW_SEGMENT_RE.finditer(r["exit"]):
             segment = arrow.group(1)
             prefix_text = r["exit"][: arrow.start()]
@@ -4275,11 +4338,30 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
                     continue
                 global_matches = best_rows(said, reg)
                 if len(global_matches) == 1:
+                    if global_matches[0]["line"] in explicitly_owned_landings:
+                        continue
                     target_frames = set(FRAME_REF_RE.findall(global_matches[0]["frame"]))
-                    classifier_owned = bool(
-                        re.search(r"\b(?:E\d+[a-z]?|M\d+|RR-\d+|PD-\d+|R\d+)\b", segment)
+                    if target_frames & explicit_foreign_frames:
+                        continue
+                    # Milestone ownership is an explicit typed qualification,
+                    # not a global classifier escape hatch. The owner token
+                    # must be written in this arrow segment and the uniquely
+                    # named destination row must itself cite that owner.
+                    owner_tokens = set(
+                        re.findall(r"\b(?:M\d+|R\d+|RR-\d+|PD-\d+)\b", segment)
                     )
-                    if target_frames & explicit_foreign_frames or classifier_owned:
+                    destination_owners = " ".join(
+                        (
+                            global_matches[0]["entry"],
+                            global_matches[0]["failure"],
+                            global_matches[0]["exit"],
+                        )
+                    )
+                    if any(
+                        re.search(rf"(?<![\w-]){re.escape(owner)}(?![\w-])", destination_owners)
+                        for owner in owner_tokens
+                    ):
+                        explicitly_owned_landings.add(global_matches[0]["line"])
                         continue
                 add(
                     "C",

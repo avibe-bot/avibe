@@ -879,12 +879,33 @@ def test_model_hub_ui_gate_preserves_malformed_query_candidates(
             "contracted by no `api.md` route row",
         ),
         (
+            ("authority: route claims",),
+            "`DELETE /api/models/sources/<source_id>/models/<model_id>` now persists",
+            "`DELETE/api/models/sources/<source_id>/models/<model_id>` now persists",
+            "malformed method/path delimiter",
+        ),
+        (
+            ("authority: route claims",),
+            "`DELETE /api/models/sources/<source_id>/models/<model_id>` now persists",
+            "`DELETE  /api/models/sources/<source_id>/models/<model_id>` now persists",
+            "malformed method/path delimiter",
+        ),
+        (
             (
                 "authority: request/response body claims",
                 "body member candidates",
             ),
             "with the held `{flow_id, value}` `[contract]`",
             "with the held `{flow_id, value` `[contract]`",
+            "malformed body literal",
+        ),
+        (
+            (
+                "authority: request/response body claims",
+                "body member candidates",
+            ),
+            "with the held `{flow_id, value}` `[contract]`",
+            "with the held `flow_id, value}` `[contract]`",
             "malformed body literal",
         ),
         (
@@ -898,6 +919,12 @@ def test_model_hub_ui_gate_preserves_malformed_query_candidates(
             "`agent-supply.schema.json` does not",
             "`agent-supply.schema.jso` does not",
             "malformed schema-file citation",
+        ),
+        (
+            ("authority: repo symbol citations",),
+            "`scripts/check_model_hub_ui_states.py` regenerates",
+            "`scripts/check_model_hub_ui_states.pyx` regenerates",
+            "malformed Python-file suffix",
         ),
     ],
 )
@@ -939,6 +966,29 @@ def test_model_hub_ui_gate_preserves_unquoted_mapping_table_candidate(tmp_path: 
         assert result["input_scale"][scale] == baseline["input_scale"][scale]
     assert any(
         "unquoted field citation" in finding["message"]
+        for finding in result["findings"]
+    )
+
+
+@pytest.mark.parametrize("replacement", ("`Anthropic`", "anthropic"))
+def test_model_hub_ui_gate_preserves_malformed_mapping_values(
+    tmp_path: Path, replacement: str
+):
+    spec = Path("docs/plans/model-hub-ui-spec.md").read_text(encoding="utf-8")
+    baseline = check_model_hub_ui_states(Path.cwd())
+    before = "| Claude | `anthropic` |"
+    after = f"| Claude | {replacement} |"
+    assert spec.count(before) == 1
+    mutated = tmp_path / "mutated.md"
+    mutated.write_text(spec.replace(before, after, 1), encoding="utf-8")
+
+    result = check_model_hub_ui_states(mutated, authorities=Path.cwd())
+
+    scale = "frame mapping-table domain values"
+    assert result["input_scale"][scale] == baseline["input_scale"][scale]
+    assert any(
+        "mapping row `Claude`" in finding["message"]
+        and ("malformed value" in finding["message"] or "unquoted value" in finding["message"])
         for finding in result["findings"]
     )
 
@@ -1048,10 +1098,22 @@ def test_model_hub_ui_gate_uses_only_mapping_cells_leading_domain_value(tmp_path
             "malformed copy-key citation",
         ),
         (
+            "state-register candidates",
+            "| §1.0 | Ready | `health` reads `ok`, both page reads answered, and at least one source `[contract]` | F5 | `shell.running` |",
+            "| §1.0 | Ready | `health` reads `ok`, both page reads answered, and at least one source `[contract]` | F5 | shell |",
+            "no typed copy-key citation or delegation",
+        ),
+        (
             "failure-treatment candidates",
             "| F1 | Retry in place | The surface stays open.",
             "| F-one | Retry in place | The surface stays open.",
             "malformed treatment identity",
+        ),
+        (
+            "failure-treatment candidates",
+            "| F5 | No request | The state issues nothing, so it cannot fail.",
+            "| F6 | No request | The state issues nothing, so it cannot fail.",
+            "malformed treatment identity `F6`",
         ),
         (
             "failure-treatment candidates",
@@ -1082,6 +1144,12 @@ def test_model_hub_ui_gate_uses_only_mapping_cells_leading_domain_value(tmp_path
             "| G-3 | 06 model inventory — **retirement is contracted; its discovered-row affordance remains open** |",
             "| G-3 |  |",
             "empty required surface cell",
+        ),
+        (
+            "contract-gap candidates",
+            "| G-3 | 06 model inventory — **retirement is contracted; its discovered-row affordance remains open** |",
+            "| G-3 | ~~06 model inventory — **retirement is contracted; its discovered-row affordance remains open**~~ |",
+            "inconsistent Surface/Missing withdrawal state",
         ),
     ],
 )
@@ -1400,6 +1468,70 @@ def test_model_hub_ui_gate_rejects_malformed_cross_frame_candidates(
     assert any(
         "malformed cross-frame identity" in finding["message"]
         and frame in finding["message"]
+        for finding in result["findings"]
+    )
+
+
+def test_model_hub_ui_gate_classifier_does_not_bypass_failure_destination(
+    tmp_path: Path,
+):
+    spec = Path("docs/plans/model-hub-ui-spec.md").read_text(encoding="utf-8")
+    baseline = check_model_hub_ui_states(Path.cwd())
+    before = "F1 → Paste-back failed for E2; only E6"
+    after = "F1 → Vanished forever for E2; only E6"
+    assert spec.count(before) == 1
+    mutated = tmp_path / "mutated.md"
+    mutated.write_text(spec.replace(before, after, 1), encoding="utf-8")
+
+    result = check_model_hub_ui_states(mutated, authorities=Path.cwd())
+
+    scale = "state-register candidates"
+    assert result["input_scale"][scale] == baseline["input_scale"][scale]
+    assert any(
+        "then lands nowhere" in finding["message"]
+        and "Vanished forever" in finding["message"]
+        for finding in result["findings"]
+    )
+
+
+def test_model_hub_ui_gate_classifier_does_not_globalize_exit_destination(
+    tmp_path: Path,
+):
+    spec = Path("docs/plans/model-hub-ui-spec.md").read_text(encoding="utf-8")
+    baseline = check_model_hub_ui_states(Path.cwd())
+    before = "first source → Ready"
+    after = "first source → Awaiting paste-back for E2"
+    assert spec.count(before) == 1
+    mutated = tmp_path / "mutated.md"
+    mutated.write_text(spec.replace(before, after, 1), encoding="utf-8")
+
+    result = check_model_hub_ui_states(mutated, authorities=Path.cwd())
+
+    scale = "state-register exit candidates"
+    assert result["input_scale"][scale] == baseline["input_scale"][scale]
+    assert any(
+        "exits to 「Awaiting paste-back for E2」" in finding["message"]
+        for finding in result["findings"]
+    )
+
+
+def test_model_hub_ui_gate_transition_owner_must_match_foreign_destination(
+    tmp_path: Path,
+):
+    spec = Path("docs/plans/model-hub-ui-spec.md").read_text(encoding="utf-8")
+    baseline = check_model_hub_ui_states(Path.cwd())
+    before = "Then absent → M0 / Source gone; a held"
+    after = "Then absent → M0 / Awaiting paste-back; a held"
+    assert spec.count(before) == 1
+    mutated = tmp_path / "mutated.md"
+    mutated.write_text(spec.replace(before, after, 1), encoding="utf-8")
+
+    result = check_model_hub_ui_states(mutated, authorities=Path.cwd())
+
+    scale = "state-register exit candidates"
+    assert result["input_scale"][scale] == baseline["input_scale"][scale]
+    assert any(
+        "exits to 「Awaiting paste-back」" in finding["message"]
         for finding in result["findings"]
     )
 
