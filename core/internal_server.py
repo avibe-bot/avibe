@@ -1084,6 +1084,8 @@ def create_app(
 
     @app.post("/internal/memory/preflight")
     async def _memory_preflight(request: Request) -> Any:
+        if _verified_memory_ui_user_key(request) is None:
+            return JSONResponse(status_code=403, content={"ok": False, "error": "memory_access_denied"})
         payload = await _safe_json(request)
         try:
             from config.v2_config import memory_config_from_payload

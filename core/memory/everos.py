@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import math
 import time
 from collections import deque
@@ -494,11 +495,12 @@ class EverOSPort:
                 "model": self._embedding_model, "input": "OK",
             }, _valid_embedding_probe_response),
         )
+        first_failure = None
         for side, base_url, api_key, path, payload, validator in checks:
             failure = await self._preflight_endpoint(side, base_url, api_key, path, payload, validator)
-            if failure is not None:
-                return MemoryPreflightResult(False, failure)
-        return MemoryPreflightResult(True)
+            if failure is not None and first_failure is None:
+                first_failure = failure
+        return MemoryPreflightResult(first_failure is None, first_failure)
 
     def _processing_configured(self) -> bool:
         return all(
@@ -666,7 +668,8 @@ class EverOSPort:
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(_PREFLIGHT_TIMEOUT_SECONDS, connect=2.0), trust_env=False) as client:
                 response = await client.post(f"{base_url}/{path}", json=payload, headers={"Authorization": f"Bearer {api_key}"})
-            value = json.loads(response.content[:4096]) if response.content else None
+            raw = await _read_bounded_response(response)
+            value = json.loads(raw[:4096]) if raw else None
             if 200 <= response.status_code < 300 and validator(value):
                 self._record_preflight(side, payload, value, None)
                 return None
@@ -675,7 +678,7 @@ class EverOSPort:
             if isinstance(value, dict) and isinstance(value.get("error"), dict):
                 error = value["error"]
                 code = _bounded_opaque_string(error.get("code"))
-                message = _bounded_preflight_message(error.get("message"), api_key=api_key)
+                message = _bounded_preflight_message(error.get("message"), api_key=api_key) or f"HTTP {response.status_code}"
             failure = MemoryPreflightFailure(error_name, MemoryPreflightDiagnostic(side, response.status_code, code, message))
             self._record_preflight(side, payload, value if isinstance(value, dict) else None, failure)
             return failure
@@ -703,6 +706,8 @@ def _bounded_preflight_message(value: object, *, api_key: str | None = None) -> 
     message = " ".join(value.split())
     if api_key:
         message = message.replace(api_key, "[REDACTED]")
+    message = re.sub(r"https?://[^\s]+", "[URL]", message)
+    message = re.sub(r"([?&](?:api[_-]?key|token|secret|password)=)[^&\s]+", r"\1[REDACTED]", message, flags=re.IGNORECASE)
     return message[:512]
 
 

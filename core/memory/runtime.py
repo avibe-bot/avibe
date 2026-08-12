@@ -2184,6 +2184,7 @@ class MemoryRuntime:
         if preflight.get("ok") is not True:
             self._config = active_config
             self._restart_config = active_config
+            self._configure_insight_reader(active_config)
             return {**preflight, "result": "failed"}
         self.module.pause_claims()
         rebuild_settings = _process_settings(

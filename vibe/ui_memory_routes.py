@@ -286,7 +286,11 @@ def _memory_rebuild_result(
     error = payload.get("error")
     if payload.get("status") == "failed" and status_code >= 500:
         if isinstance(error, str) and is_memory_error_code(error):
-            return {"ok": False, "error": error, "result": "failed"}, 503
+            public = {"ok": False, "error": error, "result": "failed"}
+            diagnostic = _memory_preflight_projection(payload)
+            if diagnostic:
+                public["diagnostic"] = diagnostic
+            return public, 503
         return protocol_failure, 503
 
     result = payload.get("result")
@@ -315,6 +319,9 @@ def _memory_rebuild_result(
     if not isinstance(error, str) or not is_memory_error_code(error):
         return protocol_failure, 503
     public["error"] = error
+    diagnostic = _memory_preflight_projection(payload)
+    if diagnostic:
+        public["diagnostic"] = diagnostic
     return public, 503 if status_code >= 500 else 409
 
 
@@ -780,14 +787,16 @@ async def _apply_memory_settings_patch(
             from config.v2_config import memory_config_to_payload
             preflight = await _memory_internal_result(
                 lambda: internal_client.memory_preflight(
-                    payload={"memory": memory_config_to_payload(candidate, include_secrets=True)}
+                    payload={"memory": memory_config_to_payload(candidate, include_secrets=True)},
+                    user_key=user_key,
                 )
             )
             if preflight[0].get("ok") is not True:
                 failure = dict(preflight[0])
                 failure["status"] = "failed"
                 failure["diagnostic"] = _memory_preflight_projection(preflight[0])
-                return _memory_response(failure, status_code=409)
+                failure_code = preflight[1] if preflight[1] >= 500 else 409
+                return _memory_response(failure, status_code=failure_code)
 
         try:
             # Persist a durable marker before asking the controller to inspect
