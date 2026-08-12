@@ -90,6 +90,29 @@ class _StubController:
 
 
 class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
+    async def test_nonterminal_agent_output_records_run_activity(self):
+        controller = _StubController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(
+            user_id="scheduled",
+            channel_id="C123",
+            platform="slack",
+            platform_specific={
+                "task_trigger_kind": "agent_run",
+                "task_execution_id": "run-live",
+            },
+        )
+        calls = []
+
+        class _Store:
+            def record_run_activity(self, run_ids):
+                calls.append(list(run_ids))
+
+        controller.scheduled_task_service = SimpleNamespace(request_store=_Store())
+        await dispatcher.emit_agent_message(context, "system", "working")
+
+        self.assertEqual(calls, [["run-live"]])
+
     async def test_detached_output_uses_explicit_run_lineage_over_receiver_context(self):
         controller = _StubController()
         controller.agent_service = SimpleNamespace(

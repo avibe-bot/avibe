@@ -3100,6 +3100,13 @@ class TaskExecutionStore:
                 return item
         return None
 
+    def record_run_activity(self, run_ids: Sequence[str]) -> list[str]:
+        """Persist activity on the shared SQLite ledger when available."""
+
+        if self._sqlite is None:
+            return []
+        return self._sqlite.record_run_activity(run_ids)
+
     def cancel_run(self, run_id: str) -> bool:
         if self._sqlite is not None:
             return self._sqlite.cancel_run(run_id)
@@ -5183,6 +5190,11 @@ class ScheduledTaskService:
             raise RuntimeError("controller.session_turns.owned_agent_run_ids is unavailable")
         owned |= {str(run_id) for run_id in provider() if run_id}
         return owned
+
+    def snapshot_owned_agent_run_ids(self) -> set[str]:
+        """Expose the exact current ownership set to read-only operator views."""
+
+        return self._owned_agent_run_ids()
 
     def _deliverable_queued_run_ids(self) -> set[str]:
         """Queued runs whose transport is ready RIGHT NOW, whatever the row remembers.

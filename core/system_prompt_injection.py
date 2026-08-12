@@ -298,7 +298,7 @@ Relationship: Scope routes work; Agent defines who acts; Session holds continuit
 - Current session id: `{default_session_id}`
 
 ### Inspecting Harness state
-Use `vibe data query` to inspect Avibe state with guarded read-only SQL before changing a Harness: confirm existing Agents, Sessions, Runs, scopes, tasks, watches, and routing facts instead of guessing.
+Use `vibe harness status` first for active Runs, armed Watches, upcoming Tasks, controller ownership, and explicit live anomalies. Use `vibe data query` for deeper guarded read-only SQL before changing a Harness: confirm Agents, Sessions, scopes, history, and routing facts instead of guessing.
 
 Examples: use `vibe data query --sql "select name from sqlite_master where type='table' order by name" --limit 100` for a broad schema inventory; use `vibe data query --sql "select name, sql from sqlite_master where type='table' and name in ('agents','agent_sessions','agent_runs','messages','scopes','scope_settings','run_definitions') order by name" --limit 20` for the focused Harness tables. Follow `pagination.next_command` if either result has more pages.
 
@@ -316,6 +316,7 @@ Useful Harness queries include schema discovery, current session lookup, existin
 | Remove one queued Workbench Session input | `vibe session queue remove <session-id> <message-id>` |
 | Promote an existing queued Session head now | `vibe session send-now <session-id>` |
 | Branch from current Session context | `vibe agent run --fork-self ...` |
+| Live/anomaly inspection | `vibe harness status` |
 | State/history inspection | `vibe data query`, `vibe runs list --current-session`, `vibe runs show` |
 | Recurring specialist workflow | `vibe agent create/update` plus tasks, watches, or runs |
 
@@ -339,7 +340,7 @@ Use `vibe session update --visible|--hidden` (`--visibility foreground|backgroun
 
 For tasks, use `--message "..."` or `--message-file <path>` as the stored message. For watches, use `--message "..."` or `--message-file <path>` as the follow-up instruction template sent with waiter output. Prefer `--same-scope` or `--scope-id <scopes.id>` for new Session placement.
 
-Manage existing work with `vibe task <list|show|pause|resume|run|remove>`, `vibe watch <list|show|pause|resume|remove>`, and `vibe runs <list|show|cancel>`. For current-session run history, use `vibe runs list --current-session`. `vibe runs show` can default to the current Run from the injected environment; `vibe runs cancel` still requires an explicit run id.
+Manage existing work with `vibe task <list|show|pause|resume|run|remove>`, `vibe watch <list|show|pause|resume|remove>`, and `vibe runs <list|show|cancel>`. Use `vibe harness status` for one unified live/anomaly snapshot. For current-session run history, use `vibe runs list --current-session`. `vibe runs show` can default to the current Run from the injected environment; `vibe runs cancel` still requires an explicit run id.
 
 The CLI exposes more options than this prompt lists. Before creating or changing Harness state, or whenever syntax/runtime effects are uncertain, read the relevant help: `vibe <command> --help` or `vibe <command> <subcommand> --help`.
 

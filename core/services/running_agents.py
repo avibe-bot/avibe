@@ -1282,9 +1282,34 @@ def snapshot_running_agents(controller: "Controller") -> dict[str, Any]:
         states[r["state"]] = states.get(r["state"], 0) + 1
         by_backend[r["backend"]] = by_backend.get(r["backend"], 0) + 1
 
+    ownership_available = False
+    ownership_error = "ownership_provider_unavailable"
+    owned_run_ids: list[str] = []
+    scheduled_tasks = getattr(controller, "scheduled_task_service", None)
+    ownership_provider = getattr(
+        scheduled_tasks,
+        "snapshot_owned_agent_run_ids",
+        None,
+    )
+    if callable(ownership_provider):
+        try:
+            owned_run_ids = sorted(
+                str(run_id)
+                for run_id in ownership_provider()
+                if str(run_id or "").strip()
+            )
+            ownership_available = True
+            ownership_error = None
+        except Exception:
+            logger.warning("running-agents ownership snapshot failed", exc_info=True)
+            ownership_error = "ownership_probe_failed"
+
     return {
         "ok": True,
         "agents": rows,
+        "owned_run_ids": owned_run_ids,
+        "ownership_available": ownership_available,
+        "ownership_error": ownership_error,
         "counts": {
             "total": len(rows),
             "active": states["active"],

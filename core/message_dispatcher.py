@@ -1562,6 +1562,32 @@ class ConsolidatedMessageDispatcher:
             if store is not None:
                 store.close()
 
+    def _record_agent_run_activity(
+        self,
+        context: MessageContext,
+        output_semantics: MessageOutput,
+    ) -> None:
+        """Persist one real non-terminal output as Run liveness evidence."""
+
+        if not output_semantics.records_run_output or output_semantics.settles_run:
+            return
+        run_ids = self._terminal_agent_run_ids(context, output_semantics)
+        if not run_ids:
+            return
+        scheduled_tasks = getattr(self.controller, "scheduled_task_service", None)
+        runtime_store = getattr(scheduled_tasks, "request_store", None)
+        record_activity = getattr(runtime_store, "record_run_activity", None)
+        if not callable(record_activity):
+            return
+        try:
+            record_activity(run_ids)
+        except Exception:
+            logger.warning(
+                "Failed to record Run activity for %s",
+                ",".join(run_ids),
+                exc_info=True,
+            )
+
     def _durable_accepted_agent_run_ids(self, context: MessageContext) -> list[str]:
         turn_id = str((context.platform_specific or {}).get("turn_token") or "").strip()
         if not turn_id:
@@ -2067,6 +2093,8 @@ class ConsolidatedMessageDispatcher:
                     self._get_session_key(context),
                 )
                 return None
+        if current_runtime_turn or output_semantics.detached:
+            self._record_agent_run_activity(context, output_semantics)
         raw_text = text
         enhanced = None
         if visible_output_type and level != "silent":

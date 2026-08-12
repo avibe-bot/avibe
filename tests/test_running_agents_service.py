@@ -155,6 +155,28 @@ def test_safe_call_retries_runtime_error_then_falls_back():
     assert running_agents._safe_call(_always, []) == []
 
 
+def test_snapshot_projects_exact_run_ownership_and_probe_failure():
+    controller = _make_controller()
+    controller.scheduled_task_service = types.SimpleNamespace(
+        snapshot_owned_agent_run_ids=lambda: {"run-b", "run-a"}
+    )
+
+    snapshot = running_agents.snapshot_running_agents(controller)
+
+    assert snapshot["ownership_available"] is True
+    assert snapshot["owned_run_ids"] == ["run-a", "run-b"]
+    assert snapshot["ownership_error"] is None
+
+    def _failed_probe():
+        raise RuntimeError("turn provider unavailable")
+
+    controller.scheduled_task_service.snapshot_owned_agent_run_ids = _failed_probe
+    failed = running_agents.snapshot_running_agents(controller)
+    assert failed["ownership_available"] is False
+    assert failed["owned_run_ids"] == []
+    assert failed["ownership_error"] == "ownership_probe_failed"
+
+
 def test_claude_active_and_idle_rows():
     c_active = _FakeClaudeClient("slack_111", "nat-a", "opus")
     c_active._fake_pid = 4242
