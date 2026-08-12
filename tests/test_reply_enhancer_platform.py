@@ -293,7 +293,21 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         # request; enabling Memory now grants the proactive contract directly.
         self.assertNotIn("explicitly requested by the user", prompt)
         self.assertIn("### When to remember", prompt)
-        self.assertIn("Call `remember` proactively, without being asked", prompt)
+        # Explicit requests use Memory only after the existing eligibility,
+        # safety, and surface filters, and success is acknowledged only after
+        # the CLI confirms that the queue accepted the write.
+        self.assertIn(
+            "When the user explicitly asks you to remember, note, or keep track of something",
+            prompt,
+        )
+        self.assertIn("first apply the same eligibility, safety, and surface rules below", prompt)
+        self.assertIn("a durable, non-secret personal fact or stable user habit", prompt)
+        self.assertIn("overrides only the plain-text no-paraphrase rule below", prompt)
+        self.assertIn("it never makes project knowledge, one-off task detail, transient state, or secrets eligible", prompt)
+        self.assertIn("After `remember` reports `accepted` or `duplicate`", prompt)
+        self.assertIn("If it returns any nonzero outcome, do not claim the fact was saved", prompt)
+        self.assertIn("do not start an unbounded retry loop", prompt)
+        self.assertIn("Also call `remember` proactively, without being asked", prompt)
         self.assertIn("a correction of your own behavior", prompt)
         self.assertIn("a decision, conclusion, or agreement the conversation arrived at", prompt)
         # Project knowledge stays on the AGENTS.md surface; only user/machine
@@ -313,7 +327,10 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             prompt,
         )
         self.assertIn("a fact stated outright in one of those is in Memory already", prompt)
-        self.assertIn("never queue a paraphrase of it", prompt)
+        self.assertIn(
+            "never queue a paraphrase of it, unless the user explicitly asked you to remember it",
+            prompt,
+        )
         self.assertIn("only for a conclusion automatic capture cannot reach", prompt)
         self.assertIn(
             "never restate a fact one of their plain text messages already carries on its own",
@@ -359,19 +376,36 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
                 context=context,
             )
 
-        # Proactive capture routes to Memory's managed lifecycle in one
-        # direction only; the preferences file stays explicit-request.
+        # With Memory admitted, eligible user-fact writes route to Memory, and
+        # the preferences file drops to read-only unless the user names it as
+        # the destination themselves.
         self.assertIn(
-            "anything you decide to record proactively goes through `vibe memory remember`",
+            "Anything you decide to record proactively goes through `vibe memory remember`",
             prompt,
         )
         self.assertIn("Everything you record proactively belongs here", prompt)
-        # Memory is project-scoped, so cross-project preferences are offered to
-        # the user-global preferences file — but only written on agreement.
-        self.assertIn("Memory is scoped to the current project", prompt)
-        self.assertIn("offer to save it to the shared user preferences file", prompt)
-        self.assertIn("write there only once the user agrees", prompt)
-        self.assertIn("You may also update it when explicitly asked", prompt)
+        self.assertIn(
+            "personal facts and stable user habits — including ones the user asks you to remember — "
+            "go to Avibe Memory through `vibe memory remember`",
+            prompt,
+        )
+        self.assertIn("do not write user facts or habits here while Memory is enabled", prompt)
+        self.assertIn(
+            "Write to this file only when the user explicitly names it as the destination",
+            prompt,
+        )
+        self.assertIn(
+            "a general request to remember something is fulfilled with `vibe memory remember`, never here",
+            prompt,
+        )
+        self.assertNotIn("You may also update it when explicitly asked", prompt)
+        self.assertNotIn("offer to save it to the shared user preferences file", prompt)
+        self.assertNotIn("write there only once the user agrees", prompt)
+        # Memory never routes through Avibe's runtime-owned state files or
+        # SQLite, while the explicitly named preferences file remains usable.
+        self.assertIn("Never store memories by writing Avibe's SQLite state", prompt)
+        self.assertIn("Memory's runtime-owned files under the Avibe state directory", prompt)
+        self.assertIn("The shared preferences file named above is the only file exception", prompt)
 
     def test_preferences_prompt_stays_passive_without_memory(self):
         context = MessageContext(
@@ -392,10 +426,19 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         # Memory section grants proactive writes would point the Agent at
         # behavior the injected guidance never authorized.
         self.assertIn("You may also update it when explicitly asked", prompt)
-        self.assertNotIn(
-            "anything you decide to record proactively goes through `vibe memory remember`",
+        self.assertIn(
+            "stable user habits the user asks you to keep go to the shared preferences file",
             prompt,
         )
+        self.assertIn(
+            "Use it only when stable cross-project user context would improve the decision",
+            prompt,
+        )
+        self.assertNotIn(
+            "Anything you decide to record proactively goes through `vibe memory remember`",
+            prompt,
+        )
+        self.assertNotIn("do not write user facts or habits here while Memory is enabled", prompt)
 
     def test_memory_cli_prompt_admission_is_turn_and_surface_scoped(self):
         controller = SimpleNamespace(
@@ -1595,7 +1638,11 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("--session-key", prompt)
         self.assertNotIn("Channel-level session key:", prompt)
         self.assertIn("### Inspecting Harness state", prompt)
-        self.assertIn("Use `vibe data query` to inspect Avibe state with guarded read-only SQL", prompt)
+        self.assertIn("Use `vibe harness status` first for active Runs", prompt)
+        self.assertIn(
+            "Use `vibe data query` for deeper guarded read-only SQL before changing a Harness",
+            prompt,
+        )
         self.assertIn("select name from sqlite_master where type='table' order by name", prompt)
         self.assertIn("schema discovery, current session lookup, existing task/watch inspection, Agent run history", prompt)
         self.assertIn("### Choosing the right Harness shape", prompt)

@@ -986,7 +986,11 @@ async def turn_state(session_id: str, *, socket_path: Optional[Path] = None) -> 
     return {"status_code": resp.status_code, "body": resp.json() if resp.content else {}}
 
 
-async def list_running_agents(*, socket_path: Optional[Path] = None) -> dict[str, Any]:
+async def list_running_agents(
+    *,
+    run_ids: Optional[list[str]] = None,
+    socket_path: Optional[Path] = None,
+) -> dict[str, Any]:
     """Fetch the controller's read-only running-agents snapshot.
 
     Returns ``{status_code, body}``; raises ``InternalServerUnavailable`` on
@@ -1004,7 +1008,13 @@ async def list_running_agents(*, socket_path: Optional[Path] = None) -> dict[str
             base_url="http://localhost",
             timeout=httpx.Timeout(3.0, connect=0.5),
         ) as client:
-            resp = await client.get("/internal/running-agents")
+            if run_ids is None:
+                resp = await client.get("/internal/running-agents")
+            else:
+                resp = await client.post(
+                    "/internal/running-agents/snapshot",
+                    json={"run_ids": run_ids},
+                )
     except httpx.ReadTimeout as exc:
         raise InternalServerTimeout(str(exc)) from exc
     except _SOCKET_CONNECT_ERRORS as exc:

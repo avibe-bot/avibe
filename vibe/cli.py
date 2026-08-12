@@ -340,7 +340,7 @@ def _print_cli_payload(kind: str, **fields) -> None:
     print(json.dumps(_cli_payload(kind, **fields), indent=2))
 
 
-def _memory_cli_language() -> str:
+def _configured_cli_language() -> str:
     """Read an optional configured language without creating or migrating state."""
 
     try:
@@ -350,6 +350,10 @@ def _memory_cli_language() -> str:
         return normalize_language(language if isinstance(language, str) else None)
     except Exception:
         return "en"
+
+
+def _memory_cli_language() -> str:
+    return _configured_cli_language()
 
 
 _MEMORY_CLI_SOURCE_STATE_I18N_KEYS = {
@@ -3199,6 +3203,12 @@ def _agent_payload(agent, *, brief: bool = False) -> dict:
 def _run_payload(run: dict, *, brief: bool = False) -> dict:
     normalized = dict(run)
     normalized["status"] = normalize_run_status(normalized.get("status"))
+    activity_at = normalized.get("last_activity_at") or normalized.get("started_at")
+    activity_basis = (
+        "output"
+        if normalized.get("last_activity_at")
+        else ("start" if activity_at else None)
+    )
     if brief:
         return {
             "id": normalized.get("id"),
@@ -3209,6 +3219,9 @@ def _run_payload(run: dict, *, brief: bool = False) -> dict:
             "definition_id": normalized.get("definition_id") or normalized.get("task_id"),
             "created_at": normalized.get("created_at"),
             "started_at": normalized.get("started_at"),
+            "last_activity_at": activity_at,
+            "activity_basis": activity_basis,
+            "activity_age_seconds": _seconds_since_iso(activity_at),
             "completed_at": normalized.get("completed_at"),
             "error": normalized.get("error"),
             "callback_session_id": normalized.get("callback_session_id"),
@@ -3218,11 +3231,95 @@ def _run_payload(run: dict, *, brief: bool = False) -> dict:
     return normalized
 
 
+def cmd_harness_status(_args) -> int:
+    """Print one bounded operational snapshot across Harness work types."""
+
+    from core.services.harness_status import build_harness_status
+    from vibe import internal_client
+
+    try:
+        language = _configured_cli_language()
+        request_store = _task_request_store()
+        sqlite_store = request_store.sqlite_backend
+        if sqlite_store is None:
+            raise RuntimeError(i18n_t("harness.cli.error.sqliteRequired", language))
+        fetch_limit = MAX_PAGE_LIMIT + 1
+        raw_runs = sqlite_store.list_active_runs(limit=fetch_limit)
+        raw_watches = sqlite_store.list_enabled_definitions(
+            "watch",
+            limit=fetch_limit,
+        )
+        raw_tasks = sqlite_store.list_enabled_definitions(
+            "scheduled",
+            limit=fetch_limit,
+        )
+        runs_truncated = len(raw_runs) > MAX_PAGE_LIMIT
+
+        try:
+            response = asyncio.run(
+                internal_client.list_running_agents(
+                    run_ids=[str(row.get("id")) for row in raw_runs if row.get("id")]
+                )
+            )
+            body = response.get("body") if isinstance(response, dict) else None
+            runtime_snapshot = dict(body) if isinstance(body, dict) else {}
+            status_code = response.get("status_code") if isinstance(response, dict) else None
+            runtime_snapshot["available"] = status_code == 200 and bool(
+                runtime_snapshot.get("ok")
+            )
+            if not runtime_snapshot["available"]:
+                runtime_snapshot["error"] = i18n_t(
+                    "harness.cli.error.controllerStatus",
+                    language,
+                    status=status_code,
+                )
+        except internal_client.InternalServerTimeout:
+            runtime_snapshot = {
+                "available": False,
+                "error": i18n_t("harness.cli.error.controllerTimeout", language),
+            }
+        except internal_client.InternalServerUnavailable:
+            runtime_snapshot = {
+                "available": False,
+                "error": i18n_t("harness.cli.error.controllerUnavailable", language),
+            }
+
+        # Ownership is a point-in-time controller fact. Keep only Runs that were
+        # active on both sides of that snapshot so a Run completing during the
+        # request cannot be mislabeled as owner-missing.
+        active_run_ids_after = sqlite_store.active_run_ids(
+            row.get("id") for row in raw_runs
+        )
+        raw_runs = [
+            row for row in raw_runs if str(row.get("id")) in active_run_ids_after
+        ]
+
+        snapshot = build_harness_status(
+            runs=raw_runs[:MAX_PAGE_LIMIT],
+            watches=raw_watches[:MAX_PAGE_LIMIT],
+            tasks=raw_tasks[:MAX_PAGE_LIMIT],
+            runtime_snapshot=runtime_snapshot,
+            truncated={
+                "runs": runs_truncated,
+                "watches": len(raw_watches) > MAX_PAGE_LIMIT,
+                "tasks": len(raw_tasks) > MAX_PAGE_LIMIT,
+            },
+        )
+        _print_cli_payload("harness_status", **snapshot)
+        return 0
+    except Exception as exc:
+        _print_task_error(exc, help_command="vibe harness status --help")
+        return 1
+
+
 def _seconds_since_iso(timestamp: object) -> float | None:
     if not isinstance(timestamp, str) or not timestamp.strip():
         return None
+    text = timestamp.strip()
+    if text.endswith(("Z", "z")):
+        text = f"{text[:-1]}+00:00"
     try:
-        started_at = datetime.fromisoformat(timestamp)
+        started_at = datetime.fromisoformat(text)
     except ValueError:
         return None
     if started_at.tzinfo is None:
@@ -14478,6 +14575,24 @@ def build_parser():
     runs_cancel_parser.add_argument("run_id")
     _add_json_noop(runs_cancel_parser)
 
+    harness_help_language = _configured_cli_language()
+    harness_parser = subparsers.add_parser(
+        "harness",
+        help=i18n_t("harness.cli.help.command", harness_help_language),
+        description=i18n_t("harness.cli.help.description", harness_help_language),
+        error_help_command="vibe harness --help",
+    )
+    harness_subparsers = harness_parser.add_subparsers(
+        dest="harness_command",
+        metavar="{status}",
+    )
+    harness_subparsers.required = True
+    harness_status_parser = harness_subparsers.add_parser(
+        "status",
+        help=i18n_t("harness.cli.help.status", harness_help_language),
+    )
+    _add_json_noop(harness_status_parser)
+
     session_parser = subparsers.add_parser(
         "session",
         help="Inspect, control, and update Agent sessions",
@@ -15770,6 +15885,10 @@ def main():
         if args.runs_command == "cancel":
             sys.exit(cmd_runs_cancel(args))
         parser.error("runs command is required")
+    if args.command == "harness":
+        if args.harness_command == "status":
+            sys.exit(cmd_harness_status(args))
+        parser.error("harness command is required")
     if args.command == "session":
         if args.session_command == "list":
             sys.exit(cmd_session_list(args))

@@ -116,6 +116,8 @@ jobs:
           python-version: "3.12"
 
       - name: Build Memory Runtime bundle
+        env:
+          TMPDIR: ${{ runner.temp }}
         run: |
           python scripts/build_memory_runtime.py \
             --output-dir runtime-artifacts \

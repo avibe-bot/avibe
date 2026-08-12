@@ -3238,6 +3238,13 @@ class TaskExecutionStore:
                 return item
         return None
 
+    def record_run_activity(self, run_ids: Sequence[str]) -> list[str]:
+        """Persist activity on the shared SQLite ledger when available."""
+
+        if self._sqlite is None:
+            return []
+        return self._sqlite.record_run_activity(run_ids)
+
     def cancel_run(self, run_id: str) -> bool:
         if self._sqlite is not None:
             return self._sqlite.cancel_run(run_id)
@@ -5314,7 +5321,12 @@ class ScheduledTaskService:
         except (TypeError, ValueError):
             return default
 
-    def _owned_agent_run_ids(self) -> set[str]:
+    def _owned_agent_run_ids(
+        self,
+        *,
+        reconcile_terminal: bool = True,
+        candidate_run_ids: Optional[set[str]] = None,
+    ) -> set[str]:
         """Every run id something in THIS process is still legitimately executing.
 
         Two lanes own a ``running`` row and neither can see the other:
@@ -5330,13 +5342,34 @@ class ScheduledTaskService:
         turns own anything", which would terminalize every streaming run.
         """
 
+        candidates = (
+            {str(run_id) for run_id in candidate_run_ids if str(run_id or "").strip()}
+            if candidate_run_ids is not None
+            else None
+        )
         owned = set(self._inflight_executions)
+        if candidates is not None:
+            owned &= candidates
         session_turns = getattr(self.controller, "session_turns", None)
-        provider = getattr(session_turns, "owned_agent_run_ids", None)
+        provider_name = (
+            "owned_agent_run_ids"
+            if reconcile_terminal
+            else "snapshot_owned_agent_run_ids"
+        )
+        provider = getattr(session_turns, provider_name, None)
         if not callable(provider):
-            raise RuntimeError("controller.session_turns.owned_agent_run_ids is unavailable")
-        owned |= {str(run_id) for run_id in provider() if run_id}
+            raise RuntimeError(f"controller.session_turns.{provider_name} is unavailable")
+        provided = provider() if candidates is None else provider(candidates)
+        owned |= {str(run_id) for run_id in provided if run_id}
         return owned
+
+    def snapshot_owned_agent_run_ids(self, candidate_run_ids: set[str]) -> set[str]:
+        """Expose the exact current ownership set to read-only operator views."""
+
+        return self._owned_agent_run_ids(
+            reconcile_terminal=False,
+            candidate_run_ids=candidate_run_ids,
+        )
 
     def _deliverable_queued_run_ids(self) -> set[str]:
         """Queued runs whose transport is ready RIGHT NOW, whatever the row remembers.

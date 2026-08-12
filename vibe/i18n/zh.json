@@ -21,6 +21,19 @@
   },
   "harness": {
     "agentInitiatedContinuation": "Agent 主动发起的续接",
+    "cli": {
+      "help": {
+        "command": "检查统一的 Harness 实时状态和异常",
+        "description": "检查活跃 Run、已启用 Watch、即将触发的 Task 和实时异常。",
+        "status": "显示有界的实时状态与异常快照"
+      },
+      "error": {
+        "sqliteRequired": "Harness 状态需要 SQLite Task 存储。",
+        "controllerStatus": "控制器返回状态码 {status}。",
+        "controllerTimeout": "控制器请求超时。",
+        "controllerUnavailable": "无法连接控制器。"
+      }
+    },
     "promptEcho": {
       "scheduled": "⏰ 定时任务",
       "watch": "👀 监听",

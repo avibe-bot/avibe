@@ -52,8 +52,11 @@ what it records stays useful.
    text message automatic capture already holds, no one-off task detail, nothing
    derivable from code or git, no secrets, a small per-turn budget, and silence
    when in doubt.
-4. Keep the shared preferences file an explicit-request surface, and have the
-   two sections route to each other instead of competing.
+4. On Memory-admitted turns, route eligible explicit requests for durable,
+   non-secret personal facts and stable habits to `vibe memory remember` unless
+   the user names another permitted destination. The shared preferences file
+   remains writable only when the user names that file itself; project knowledge,
+   transient details, and secrets keep their existing exclusions and surfaces.
 
 ## Non-goals
 
@@ -96,7 +99,11 @@ rule is scoped to plain text messages on purpose: automatic capture drops IM
 turns carrying files while the prompt gate does not, so a durable fact stated
 only alongside an attachment is still the Agent's to record. The exception is
 phrased in terms the Agent can observe — whether the message arrived with a
-file — rather than internal admission state.
+file — rather than internal admission state. An explicit request overrides only
+that no-paraphrase rule: the existing durability, secret, task-detail, and
+surface filters still apply. The Agent confirms a requested write only after
+`remember` returns `accepted` or `duplicate`; any nonzero outcome is reported as
+a failure without an unbounded retry.
 
 `build_system_prompt_injection` injects it whenever `include_memory_cli` is
 true. The three backends resolve `memory_cli_prompt_admitted` once per turn —
@@ -105,9 +112,12 @@ pass the result straight through.
 
 ### `_USER_PREFERENCES_PROMPT`
 
-The file stays an explicit-request surface on every turn. The only variation is
-a routing rule, injected whenever Memory is admitted, pointing anything the
-Agent decides to record on its own at `vibe memory remember`.
+Without Memory admission, the file keeps its historical explicit-request role.
+When Memory is admitted, eligible general remember requests and proactive writes
+route to `vibe memory remember`; the file becomes read-only unless the user names
+it as the destination. This named-file exception is explicit because the file
+lives under the Avibe state directory, while Memory's SQLite and runtime-owned
+state files remain prohibited write targets.
 
 ### Test coverage
 
@@ -121,8 +131,9 @@ cases.
 
 - [x] Inject the proactive contract whenever Memory is admitted, as the single
       Memory prompt.
-- [x] Keep the preferences file explicit-request, with the routing rule on
-      Memory-admitted turns.
+- [x] Route eligible explicit remember requests to Memory on admitted turns,
+      while preserving the named preferences-file destination and all existing
+      eligibility and safety filters.
 - [x] Drop the retired `proactive_capture` flag on config load and reject it in
       the settings PATCH whitelist.
 - [x] Describe Agent-recorded facts unconditionally in the Settings disclosure,
@@ -174,7 +185,9 @@ history; they are not normative.
       project-scoped, so "Choosing the surface" now tells the Agent to offer
       saving a clearly cross-project preference to the user-global preferences
       file and write it there only once the user agrees, keeping that file an
-      explicit-request surface.
+      explicit-request surface. This was the round-3 behavior; the later
+      admitted explicit-request routing contract below supersedes the automatic
+      cross-project offer while retaining writes when the user names the file.
 
 ## Review follow-ups, round 4 (Codex review of a9994cf6)
 
@@ -328,3 +341,16 @@ machinery are removed:
 Consent posture: the Memory enable disclosure now states Agent-recorded
 durable facts as part of what enabling Memory means, instead of gating them
 behind a second toggle.
+
+## Follow-up: admitted explicit-request routing (2026-08-12)
+
+General requests to remember durable, non-secret personal facts and stable
+habits now use Memory whenever the CLI is admitted for the turn. This does not
+broaden eligibility: project knowledge still goes to `AGENTS.md`, transient and
+one-off task details remain out, and secrets are never queued. A user who names
+the shared preferences file can still select it directly, despite its location
+under Avibe state; runtime-owned Memory files and SQLite remain off-limits.
+
+The acknowledgement contract follows the CLI outcome: `accepted` and
+`duplicate` permit a short success confirmation, while every nonzero outcome is
+reported as a failure and must not be described as saved.

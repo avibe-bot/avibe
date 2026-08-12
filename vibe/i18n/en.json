@@ -21,6 +21,19 @@
   },
   "harness": {
     "agentInitiatedContinuation": "Agent-initiated continuation",
+    "cli": {
+      "help": {
+        "command": "Inspect unified Harness live state and anomalies",
+        "description": "Inspect active Runs, armed Watches, upcoming Tasks, and live anomalies.",
+        "status": "Show the bounded live/anomaly snapshot"
+      },
+      "error": {
+        "sqliteRequired": "Harness status requires the SQLite task store.",
+        "controllerStatus": "The controller returned status {status}.",
+        "controllerTimeout": "The controller request timed out.",
+        "controllerUnavailable": "The controller is unreachable."
+      }
+    },
     "promptEcho": {
       "scheduled": "⏰ Scheduled task",
       "watch": "👀 Watch",
