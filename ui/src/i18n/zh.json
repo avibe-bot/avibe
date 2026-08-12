@@ -1575,7 +1575,14 @@
     "memory_rebuild_root_busy": "另一个进程正在使用记忆根目录。请稍后重试重建。",
     "memory_operation_in_progress": "记忆操作正在进行中，请等待完成。",
     "memory_factory_reset_failed": "重新初始化记忆未能完成。记忆数据可能已部分删除；请从「设置 → 依赖」重试。",
-    "memory_embedding_rebuild_required": "更改 Embedding 端点或模型会重建记忆索引。请确认后继续。"
+    "memory_embedding_rebuild_required": "更改 Embedding 端点或模型会重建记忆索引。请确认后继续。",
+    "memory_embedding_unavailable": "Embedding 提供商不可用",
+    "memory_llm_unavailable": "LLM 提供商不可用",
+    "provider_request_timed_out": "提供商请求超时。",
+    "provider_response_too_large": "提供商响应超过安全限制。",
+    "provider_unavailable": "提供商不可用。",
+    "provider_error": "提供商拒绝了请求。",
+    "endpoint_not_configured": "尚未配置提供商端点。"
   },
   "apps": {
     "title": "应用",
@@ -4110,6 +4117,14 @@
         "helpLabel": "关于数据来源",
         "description": "某一项暂时不可用，不代表记忆功能出了问题。"
       },
+      "providerChecks": {
+        "title": "服务商检查",
+        "help": "这些安装级检查用于验证已配置的语言模型和向量模型服务，不会关联到任何对话。",
+        "helpLabel": "关于服务商检查",
+        "description": "验证记忆设置或重建时最近执行的检查。",
+        "empty": "暂无服务商检查记录。",
+        "unavailable": "暂时无法读取服务商检查记录。"
+      },
       "anomalies": {
         "title": "异常记录",
         "help": "处理过程中出现的问题会记录在这里。请查看每条记录的状态：「已放弃」「已拒绝」和「需要人工检查」的记录不会自动恢复。",
@@ -4261,6 +4276,7 @@
         "embedding": "向量模型"
       },
       "callStage": {
+        "processingPreflight": "服务商检查",
         "boundary": "请求预处理",
         "strategy": "处理策略",
         "cascade": "构建记忆",

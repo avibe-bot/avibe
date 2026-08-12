@@ -28,6 +28,7 @@ from core.memory.processing_record import (
     MemoryProcessingRecordPort,
     ProcessingRecordSummary,
     ProcessingSourceObservations,
+    ProviderCheckProjection,
     RuntimeHealthObservation,
     RuntimeHealthProjection,
     SourceObservation,
@@ -71,6 +72,10 @@ class _RuntimeObservations:
             "reason": None,
         }
         self.sources = _sources()
+        self.provider_checks = ProviderCheckProjection(
+            SourceObservation("available", observed_at="checks-now"),
+            (),
+        )
         self.maintenance = MaintenanceResult(False, True, None)
         self.maintenance_observation = MaintenanceObservation(None, None, True)
         self.operator_refs: list[str | None] = []
@@ -136,6 +141,17 @@ class _RuntimeObservations:
             raise self.maintenance_error
         return self.maintenance
 
+    async def observe_provider_checks(
+        self,
+        maintenance_reason: str | None,
+    ) -> ProviderCheckProjection:
+        if maintenance_reason is not None:
+            return ProviderCheckProjection(
+                SourceObservation("unavailable", reason=maintenance_reason),
+                (),
+            )
+        return self.provider_checks
+
     def port(self) -> MemoryProcessingRecordPort:
         return MemoryProcessingRecordPort(
             resolve_operator=self.resolve_operator,
@@ -144,6 +160,7 @@ class _RuntimeObservations:
             failure_log=self.failure_log,
             recorder_health=self.recorder_health,
             observe_sources=self.observe_sources,
+            provider_checks=self.observe_provider_checks,
             maintenance=self.maintenance_payload,
         )
 
@@ -156,7 +173,7 @@ class _ConcurrentRuntimeObservations(_RuntimeObservations):
 
     def _mark_independent_read(self) -> None:
         self._independent_reads += 1
-        if self._independent_reads == 3:
+        if self._independent_reads == 4:
             self._independent_reads_started.set()
 
     async def observe_health(
@@ -180,6 +197,13 @@ class _ConcurrentRuntimeObservations(_RuntimeObservations):
     ) -> ProcessingSourceObservations:
         self._mark_independent_read()
         return await super().observe_sources(maintenance_reason)
+
+    async def observe_provider_checks(
+        self,
+        maintenance_reason: str | None,
+    ) -> ProviderCheckProjection:
+        self._mark_independent_read()
+        return await super().observe_provider_checks(maintenance_reason)
 
     async def maintenance_payload(
         self,
@@ -345,6 +369,10 @@ async def test_sources_anomalies_and_maintenance_degrade_independently() -> None
     assert summary.runtime.health is not None
     assert summary.sources.capture.reason == "busy"
     assert summary.sources.calls.status == "available"
+    assert summary.provider_checks.source == SourceObservation(
+        "available",
+        observed_at="checks-now",
+    )
     assert summary.anomalies.source == SourceObservation(
         "unavailable",
         reason="memory_store_unavailable",
@@ -556,6 +584,7 @@ async def test_runtime_serializes_one_composite_and_compatibility_projections(
         "sources",
         "anomalies",
         "maintenance",
+        "provider_checks",
     }
     assert set(composite["sources"]) == {"everos", "capture", "calls"}
     assert status == {"status": "ok", **composite["runtime"]}

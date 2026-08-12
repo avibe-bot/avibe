@@ -519,6 +519,19 @@ async def test_processing_probe_reaps_child_when_its_caller_is_cancelled(monkeyp
     assert cleanup_calls
 
 
+async def test_probe_stderr_drain_keeps_only_bounded_tail() -> None:
+    reader = asyncio.StreamReader()
+    payload = b"head-secret\n" + (b"x" * 100_000) + b"\ntail-marker"
+    reader.feed_data(payload)
+    reader.feed_eof()
+
+    tail = await memory_process._drain_probe_stderr(reader)
+
+    assert len(tail) <= memory_process._PROCESSING_PROBE_STDERR_BYTES
+    assert b"head-secret" not in tail
+    assert tail.endswith(b"tail-marker")
+
+
 async def test_sidecar_stop_signals_isolated_child_group(tmp_path: Path) -> None:
     child_pid_path = tmp_path / "child.pid"
     script = (

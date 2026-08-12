@@ -699,6 +699,16 @@ async def memory_rebuild(
         timeout=None,
     )
 
+async def memory_preflight(
+    *, payload: dict, user_key: str, socket_path: Optional[Path] = None,
+) -> dict[str, Any]:
+    path = "/internal/memory/preflight"
+    return await _memory_request(
+        "POST", path, payload=payload,
+        headers=_memory_user_key_headers("POST", path, user_key),
+        socket_path=socket_path, timeout=None,
+    )
+
 
 async def memory_factory_reset(
     *,

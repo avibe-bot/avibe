@@ -13,6 +13,7 @@ from concurrent.futures import TimeoutError as FutureTimeoutError
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -35,7 +36,7 @@ from core.memory.everos import (
     ProviderHealthSnapshot,
 )
 from core.memory.everos_insight import MemoryInsightPaths, MemoryInsightReader
-from core.memory.everos_insight.recorder import clear_call_log, maintain_call_log
+from core.memory.everos_insight.recorder import clear_call_log, maintain_call_log, record_preflight_call
 from core.memory.module import MemoryModule, MemorySessionLifecycleBusyError
 from core.memory.operation_lock import MemoryOperationBusy, MemoryOperationLease
 from core.memory.maintenance import (
@@ -66,6 +67,7 @@ from core.memory.processing_record import (
     MemoryProcessingRecordPort,
     ProcessingRecordSummary,
     ProcessingSourceObservations,
+    ProviderCheckProjection,
     RuntimeHealthObservation,
     RuntimeHealthProjection,
     SourceObservation,
@@ -265,6 +267,10 @@ def _processing_record_payload(summary: ProcessingRecordSummary) -> dict[str, An
         },
         "anomalies": _anomaly_projection_payload(summary.anomalies),
         "maintenance": _maintenance_projection_payload(summary.maintenance),
+        "provider_checks": {
+            "source": _source_observation_payload(summary.provider_checks.source),
+            "items": list(summary.provider_checks.items),
+        },
     }
 
 
@@ -630,6 +636,7 @@ class MemoryRuntime:
             failure_log=self._processing_record_failure_log,
             recorder_health=lambda: dict(self._recorder_health),
             observe_sources=self._processing_record_sources,
+            provider_checks=self._processing_record_provider_checks,
             maintenance=self._processing_record_maintenance,
         )
 
@@ -1160,6 +1167,39 @@ class MemoryRuntime:
                 calls=unavailable,
             )
         return observation
+
+    async def _processing_record_provider_checks(
+        self,
+        maintenance_reason: str | None,
+    ) -> ProviderCheckProjection:
+        before = self._processing_runtime_snapshot()
+        reason = before.local_observation_reason(maintenance_reason)
+        if reason is not None:
+            return ProviderCheckProjection(
+                source=SourceObservation("unavailable", reason=reason),
+                items=(),
+            )
+        reader = self._insight_reader
+        if reader is None:
+            raise self._unavailable()
+        items = await run_blocking(reader.installation_preflight_calls)
+        after = self._processing_runtime_snapshot()
+        current_reason = after.local_observation_reason(maintenance_reason)
+        if after.generation != before.generation or current_reason is not None:
+            return ProviderCheckProjection(
+                source=SourceObservation(
+                    "unavailable",
+                    reason=current_reason or "busy",
+                ),
+                items=(),
+            )
+        return ProviderCheckProjection(
+            source=SourceObservation(
+                "available",
+                observed_at=datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+            ),
+            items=items,
+        )
 
     async def _processing_record_maintenance(
         self,
@@ -1774,6 +1814,46 @@ class MemoryRuntime:
             task.add_done_callback(clear_restart)
         return await asyncio.shield(task)
 
+    async def preflight(self, config: MemoryConfig | None = None) -> dict[str, Any]:
+        candidate = deepcopy(config or self._config)
+        provider = EverOSPort(
+            self._socket_path,
+            llm_base_url=candidate.processing.llm.base_url,
+            llm_model=candidate.processing.llm.model,
+            llm_api_key=candidate.processing.llm.api_key,
+            embedding_base_url=candidate.processing.embedding.base_url,
+            embedding_model=candidate.processing.embedding.model,
+            embedding_api_key=candidate.processing.embedding.api_key,
+            preflight_call_recorder=self._record_preflight_call,
+        )
+        return (await provider.preflight()).payload()
+
+    def _record_preflight_call(
+        self,
+        *,
+        side,
+        request,
+        response,
+        failure,
+        base_url=None,
+        api_key=None,
+        started_at_ms,
+        duration_ms,
+    ) -> None:
+        record_preflight_call(
+            self._call_log_db_path,
+            started_at_ms=started_at_ms,
+            duration_ms=duration_ms,
+            kind="embedding" if side == "embedding" else "llm",
+            model=request.get("model") if isinstance(request, dict) else None,
+            request=request,
+            response=response,
+            status="error" if failure is not None else "ok",
+            error=failure.diagnostic.message if failure is not None else None,
+            provider_base_urls=(base_url,) if base_url else (),
+            exact_redaction_values=(api_key,) if api_key else (),
+        )
+
     async def rebuild(self) -> dict[str, Any]:
         """Join or start one retained embedding-index rebuild over the cascade child."""
 
@@ -1998,8 +2078,10 @@ class MemoryRuntime:
 
         self._activation_loop = asyncio.get_running_loop()
         if not self.available or self._store is None or self._module is None:
+            logger.warning("Memory rebuild failed branch=store_unavailable")
             return {"ok": False, "error": "memory_store_unavailable"}
         if self._artifact_installing:
+            logger.warning("Memory rebuild failed branch=artifact_installing")
             return {"ok": False, "error": "memory_restart_failed"}
         if self._rebuild_running() and asyncio.current_task() is not self._rebuild_task:
             return {"ok": False, "error": "memory_operation_in_progress"}
@@ -2139,7 +2221,21 @@ class MemoryRuntime:
         # failure must leave restart fenced against the same candidate.
         self._config = deepcopy(candidate)
         self._restart_config = deepcopy(candidate)
-        self._configure_insight_reader(self._config)
+        if candidate.enabled or _memory_processing_complete(candidate):
+            preflight = await self.preflight(candidate)
+        else:
+            # A disabled, incomplete candidate can be persisted while the
+            # operator fills in its providers. An empty root needs no network
+            # admission check; data-bearing roots are rejected below.
+            preflight = {"ok": True}
+        if preflight.get("ok") is not True:
+            # Keep the durable candidate and recovery fence visible to every
+            # later restart, while the retained sidecar and its reader keep
+            # using the active settings until Retry succeeds.
+            self._config = deepcopy(candidate)
+            self._restart_config = deepcopy(candidate)
+            self.module.pause_claims()
+            return {**preflight, "result": "failed"}
         self.module.pause_claims()
         rebuild_settings = _process_settings(
             candidate,
@@ -2160,6 +2256,7 @@ class MemoryRuntime:
             except Exception:
                 quiesced = False
             if not quiesced:
+                logger.warning("Memory rebuild failed branch=quiesce")
                 self._runtime_error = "memory_rebuild_failed"
                 return {
                     "ok": False,
@@ -2171,6 +2268,7 @@ class MemoryRuntime:
             # run under the claim fence while the old sidecar is still owned.
             python = await asyncio.to_thread(self._artifact_manager.resolve_python)
             if python is None:
+                logger.warning("Memory rebuild failed branch=artifact_resolution")
                 error = _runtime_error_for_status(
                     await asyncio.to_thread(self._artifact_manager.status)
                 )
@@ -2197,10 +2295,13 @@ class MemoryRuntime:
                         "result": "failed",
                     }
 
-            try:
-                candidate_healthy = await self._probe_processing(python, candidate)
-            except Exception:
-                candidate_healthy = False
+            if _memory_processing_complete(candidate):
+                try:
+                    candidate_healthy = await self._probe_processing(python, candidate)
+                except Exception:
+                    candidate_healthy = False
+            else:
+                candidate_healthy = True
             if not candidate_healthy:
                 self._runtime_error = "memory_rebuild_failed"
                 return {
@@ -2962,6 +3063,12 @@ def _rebuild_settings_usable(settings: EverOSProcessSettings) -> bool:
             settings.embedding_api_key,
         )
     )
+
+
+def _memory_processing_complete(config: MemoryConfig) -> bool:
+    """Return whether both configured processing providers can be contacted."""
+
+    return config.processing.llm.complete() and config.processing.embedding.complete()
 
 
 def _rebuild_public_result(result: RebuildProcessResult) -> dict[str, Any]:

@@ -162,6 +162,39 @@ class MemoryInsightReader:
             calls=_source_observation(sections["calls"]),
         )
 
+    def installation_preflight_calls(self) -> tuple[dict[str, Any], ...]:
+        """Project recent installation-level checks without conversation scope."""
+
+        with _read_only(self._paths.call_log_db_path) as conn:
+            _validate_provider_call_source(conn)
+            rows = conn.execute(
+                """
+                SELECT id, started_at_ms, duration_ms, kind, stage, model, status,
+                       error, finish_reason, prompt_tokens, completion_tokens,
+                       request_json, response_json, request_bytes, response_bytes,
+                       dropped_before
+                FROM provider_call
+                WHERE stage = 'processing_preflight'
+                  AND request_id IS NULL AND strategy_name IS NULL
+                  AND run_id IS NULL AND attempt IS NULL
+                  AND memcell_id IS NULL AND app_id IS NULL
+                  AND project_id IS NULL AND owner_id IS NULL
+                  AND md_path IS NULL AND entry_id IS NULL
+                  AND parent_type IS NULL AND parent_id IS NULL
+                ORDER BY started_at_ms DESC, id DESC
+                LIMIT ?
+                """,
+                (_MAX_DETAIL_CALLS,),
+            ).fetchall()
+        return tuple(
+            _call_projection(
+                row,
+                base_urls=self._provider_base_urls,
+                exact_values=self._exact_redaction_values,
+            )
+            for row in rows
+        )
+
     def list_entries(
         self,
         scope: MemoryReadScope,

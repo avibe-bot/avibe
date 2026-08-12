@@ -4,7 +4,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
-import type { MemoryClearRecovery, MemoryFailureLogEntry, MemoryStatus } from '../../../context/ApiContext';
+import type {
+  MemoryClearRecovery,
+  MemoryFailureLogEntry,
+  MemoryProviderCall,
+  MemoryStatus,
+} from '../../../context/ApiContext';
 import { memoryCascadeHealth } from '../../../test/memoryFixtures';
 import { MemoryStatusPanel } from './MemoryStatusPanel';
 
@@ -49,6 +54,25 @@ const MANUAL_FAILURE: MemoryFailureLogEntry = {
   request_id: 'request-7',
 };
 
+const PREFLIGHT_CALL: MemoryProviderCall = {
+  id: 'preflight-1',
+  started_at_ms: 1_722_816_005_000,
+  duration_ms: 237,
+  kind: 'embedding',
+  stage: 'processing_preflight',
+  model: 'embed-model',
+  status: 'error',
+  error: 'provider_request_timed_out',
+  finish_reason: null,
+  prompt_tokens: null,
+  completion_tokens: null,
+  request: { model: 'embed-model', input: 'OK' },
+  response: null,
+  request_bytes: 36,
+  response_bytes: null,
+  dropped_before: 0,
+};
+
 const baseProps: React.ComponentProps<typeof MemoryStatusPanel> = {
   status: STATUS,
   failures: [],
@@ -57,6 +81,12 @@ const baseProps: React.ComponentProps<typeof MemoryStatusPanel> = {
     everos: { status: 'available', observed_at: '2026-08-08T12:00:00Z' },
     capture: { status: 'stale', observed_at: '2026-08-08T11:00:00Z', reason: 'locked' },
     calls: { status: 'unavailable', observed_at: null, reason: 'malformed' },
+  },
+  providerChecks: [],
+  providerChecksSource: {
+    status: 'available',
+    observed_at: '2026-08-08T12:00:00Z',
+    reason: null,
   },
   statusLoading: false,
   failuresLoading: false,
@@ -96,10 +126,18 @@ describe('MemoryStatusPanel', () => {
       'memory.processingRecord.runtime.cascadeHelpLabel',
       'memory.processingRecord.runtime.recorderHelpLabel',
       'memory.processingRecord.sources.helpLabel',
+      'memory.processingRecord.providerChecks.helpLabel',
       'memory.processingRecord.anomalies.helpLabel',
     ]) {
       expect(screen.getByRole('button', { name: label })).toBeTruthy();
     }
+  });
+
+  it('renders installation-level provider checks with their recorded duration', () => {
+    render(<MemoryStatusPanel {...baseProps} providerChecks={[PREFLIGHT_CALL]} />);
+
+    expect(screen.getByText('237 ms')).toBeTruthy();
+    expect(screen.getByText('memory.log.callStage.processingPreflight')).toBeTruthy();
   });
 
   it('only exposes Repair index when the backend capability is explicitly available', () => {
@@ -196,6 +234,7 @@ describe('MemoryStatusPanel', () => {
     expect(Array.from(container.querySelectorAll('section')).map((section) => section.getAttribute('aria-labelledby'))).toEqual([
       'memory-runtime-title',
       'memory-sources-title',
+      'memory-provider-checks-title',
       'memory-anomalies-title',
     ]);
     // The title now sits inside a flex row (title + InfoHint) within the header div.

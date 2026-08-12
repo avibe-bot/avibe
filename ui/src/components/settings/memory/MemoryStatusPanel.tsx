@@ -22,9 +22,11 @@ import type {
   MemoryFailureLogEntry,
   MemoryLogSections,
   MemoryLogSourceStatus,
+  MemoryProviderCall,
   MemoryCascadeHealth,
   MemoryStatus,
 } from '../../../context/ApiContext';
+import { ProviderCallRow } from './MemoryLogPanel';
 import { memoryErrorMessage } from '../../../lib/memoryRead';
 import {
   formatMemoryStatusRuntimeFact,
@@ -214,6 +216,8 @@ export const MemoryStatusPanel: React.FC<{
   failures: MemoryFailureLogEntry[];
   recovery: MemoryClearRecovery | null;
   logSections: MemoryLogSections | null;
+  providerChecks: MemoryProviderCall[];
+  providerChecksSource: MemoryLogSourceStatus | null;
   statusLoading: boolean;
   failuresLoading: boolean;
   statusError: string | null;
@@ -234,6 +238,8 @@ export const MemoryStatusPanel: React.FC<{
   failures,
   recovery,
   logSections,
+  providerChecks = [],
+  providerChecksSource = null,
   statusLoading,
   failuresLoading,
   statusError,
@@ -433,6 +439,36 @@ export const MemoryStatusPanel: React.FC<{
         <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
           {sources.map((source) => <SourceCard key={source.key} label={source.label} source={source.value} />)}
         </div>
+      </section>
+
+      <section className="flex flex-col gap-2" aria-labelledby="memory-provider-checks-title">
+        <div>
+          <div className="flex items-center gap-1.5">
+            <h3 id="memory-provider-checks-title" className="text-[13px] font-semibold text-foreground">
+              {t('memory.processingRecord.providerChecks.title')}
+            </h3>
+            <InfoHint
+              label={t('memory.processingRecord.providerChecks.helpLabel')}
+              content={t('memory.processingRecord.providerChecks.help')}
+            />
+          </div>
+          <p className="mt-0.5 text-[11.5px] text-muted">
+            {t('memory.processingRecord.providerChecks.description')}
+          </p>
+        </div>
+        {providerChecksSource?.status === 'unavailable' ? (
+          <div className="rounded-md border border-border bg-surface px-3 py-3 text-[12px] text-muted">
+            {t('memory.processingRecord.providerChecks.unavailable')}
+          </div>
+        ) : providerChecks.length === 0 ? (
+          <div className="rounded-md border border-dashed border-border bg-surface px-3 py-3 text-[12px] text-muted">
+            {t('memory.processingRecord.providerChecks.empty')}
+          </div>
+        ) : (
+          <div className="flex flex-col gap-2">
+            {providerChecks.map((call) => <ProviderCallRow key={call.id} call={call} />)}
+          </div>
+        )}
       </section>
 
       <section className="flex flex-col gap-2" aria-labelledby="memory-anomalies-title">

@@ -1874,7 +1874,18 @@ export type MemorySettingsPatch = {
   confirm_rebuild?: boolean;
 };
 
-export type MemoryFailure = { status: 'failed'; error: string };
+export type MemoryFailureDiagnostic = {
+  side?: 'embedding' | 'llm';
+  http_status?: number | null;
+  provider_error_code?: string | null;
+  message?: string;
+};
+export type MemoryFailure = {
+  status: 'failed';
+  error: string;
+  diagnostic?: MemoryFailureDiagnostic;
+  rebuild_required?: boolean;
+};
 
 export type MemorySettingsResult =
   | (MemorySettings & { runtime?: { ok?: boolean; [key: string]: unknown } })
@@ -1958,6 +1969,10 @@ export type MemoryProcessingRecordSummary = {
     data_exists: boolean;
     can_clear: boolean;
     clear_recovery: MemoryClearRecovery | null;
+  };
+  provider_checks?: {
+    source: MemoryLogSourceStatus;
+    items: MemoryProviderCall[];
   };
 };
 
@@ -2120,7 +2135,7 @@ export type MemoryRuntimeRestartResult = { ok: true; state?: string } | { ok: fa
 
 export type MemoryRuntimeRebuildResult =
   | { ok: true; result?: string; state?: string }
-  | { ok: false; error?: string; result?: string };
+  | { ok: false; error?: string; result?: string; diagnostic?: MemoryFailureDiagnostic };
 
 export type MemoryRuntimeRepairResult =
   | {
