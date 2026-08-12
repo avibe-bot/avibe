@@ -71,6 +71,22 @@ SOURCE_DETAIL_EVENT_REASONS = {
     "models.source.error.unclassified": "unclassified_error",
 }
 
+# Released v5 records are normalized only at their persistence read boundary.
+RETIRED_PERSISTED_REASON_DEGRADATIONS = {
+    "permission_denied": "unclassified_error",
+}
+
+
+def degrade_persisted_event(event: dict) -> dict:
+    degraded = dict(event)
+    reason = degraded.get("reason")
+    if isinstance(reason, str):
+        degraded["reason"] = RETIRED_PERSISTED_REASON_DEGRADATIONS.get(
+            reason,
+            reason,
+        )
+    return degraded
+
 
 def event_reason_label(reason: str, language: str) -> str:
     if reason not in EVENT_REASON_AUTHORITY:
@@ -265,7 +281,11 @@ class BoundedEventLog:
             return []
         if not isinstance(payload, list):
             return []
-        return [item for item in payload if isinstance(item, dict) and not contains_credential_material(item)]
+        return [
+            degrade_persisted_event(item)
+            for item in payload
+            if isinstance(item, dict) and not contains_credential_material(item)
+        ]
 
     def _write(self, payload: list[dict]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)

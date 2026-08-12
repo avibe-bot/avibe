@@ -18,6 +18,7 @@ from core.handlers.model_hub.stream_wire import (
     ProtocolSSEState,
     ProtocolStreamTaxonomy,
 )
+from core.handlers.model_hub.events import RETIRED_PERSISTED_REASON_DEGRADATIONS
 
 
 ROOT = Path(__file__).parents[1]
@@ -27,6 +28,16 @@ PROVENANCE = ROOT / "core/handlers/model_hub/provenance.py"
 ROUTER = ROOT / "modules/agents/model_hub.py"
 ADAPTER = ROOT / "vibe/model_hub_runtime/adapter.py"
 CLIENT = ROOT / "vibe/model_hub_runtime/client.py"
+FIXTURES = Path(__file__).parent / "fixtures" / "model_hub"
+STREAM_TRANSPORT_FIXTURES = json.loads((FIXTURES / "stream_transport_boundaries.json").read_text(encoding="utf-8"))[
+    "cases"
+]
+TERMINAL_SETTLEMENT_FIXTURES = json.loads(
+    (FIXTURES / "terminal_settlement_boundaries.json").read_text(encoding="utf-8")
+)["cases"]
+RELEASED_V5_PERMISSION_DENIED = json.loads(
+    (FIXTURES / "released_v5_permission_denied.json").read_text(encoding="utf-8")
+)
 
 # Owner rulings 19:50-00:06: guard expectations must never derive from guarded code.
 # Wire sources:
@@ -200,6 +211,35 @@ def test_g5_terminalizer_fail_is_validation_only() -> None:
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "fail":
             assert any(isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) and fn.name == "_run_request_turn" and fn.lineno <= node.lineno <= fn.end_lineno for fn in ast.walk(tree))
+
+
+def test_nonstream_transport_cannot_enter_the_sse_parser() -> None:
+    # Finding 3763339612: only the stream fixture may reach _response_stream.
+    source = CLIENT.read_text(encoding="utf-8")
+    nonstream = source[source.index("if not stream:") : source.index("loop = asyncio")]
+    assert "_response_stream" not in nonstream
+    assert {case["stream"] for case in STREAM_TRANSPORT_FIXTURES} == {False, True}
+
+
+def test_forwarded_terminal_fact_guards_every_settlement_shape() -> None:
+    # Finding 3763339614: the settlement call must pass the tracked terminal fact.
+    source = TURN_GATEWAY.read_text(encoding="utf-8")
+    assert source.count("await self._write_stream_terminal_copy(") == 1
+    assert "forwarded_terminal=wire_state.terminal_outcome" in source
+    assert all(
+        case["write_terminal"] is (case["forwarded_terminal"] is None and case["settlement"] == "copy")
+        for case in TERMINAL_SETTLEMENT_FIXTURES
+    )
+
+
+def test_released_reason_fixture_and_read_degradation_match_both_ways() -> None:
+    # Finding 3763339617: released expectations are independent of runtime enums.
+    released = {
+        RELEASED_V5_PERMISSION_DENIED["provenance"][0]["failed_attempts"][0]["reason"],
+        RELEASED_V5_PERMISSION_DENIED["resolution_events"][0]["reason"],
+    }
+    assert released == set(RETIRED_PERSISTED_REASON_DEGRADATIONS)
+    assert set(RETIRED_PERSISTED_REASON_DEGRADATIONS.values()) == {RELEASED_V5_PERMISSION_DENIED["degraded_reason"]}
 
 
 def test_auth_status_heuristics_are_parser_only() -> None:

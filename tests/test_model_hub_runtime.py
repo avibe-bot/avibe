@@ -32,6 +32,7 @@ from core.handlers.model_hub.classification import (
     terminal_outcome_category,
 )
 from core.handlers.model_hub.request import ModelHubRequest
+from core.handlers.model_hub.stream_wire import SSE_MAX_LINE_BYTES
 from vibe.model_hub_runtime import client as client_module
 from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
 from vibe.model_hub_runtime.client import EngineClient, EngineClientError, EngineConnection
@@ -44,6 +45,12 @@ from vibe.model_hub_runtime.state import (
     SourceRecord,
 )
 from vibe.model_hub_runtime.supervisor import EngineSupervisor, EngineUnavailableError
+
+
+MODEL_HUB_FIXTURES = Path(__file__).parent / "fixtures" / "model_hub"
+STREAM_TRANSPORT_BOUNDARIES = json.loads(
+    (MODEL_HUB_FIXTURES / "stream_transport_boundaries.json").read_text(encoding="utf-8")
+)["cases"]
 
 
 def _write_fixture_archive(tmp_path: Path, *, version: str = "7.2.95") -> tuple[Path, bytes]:
@@ -2057,6 +2064,67 @@ def test_engine_client_non_stream_failures_after_first_byte_block_retry(
         assert outcome.http_status == 200
         assert outcome.stream_started is True
         supervisor.stop()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("case", STREAM_TRANSPORT_BOUNDARIES, ids=lambda case: case["name"])
+def test_engine_client_applies_sse_limits_only_to_streams(
+    monkeypatch: pytest.MonkeyPatch,
+    case: dict[str, object],
+) -> None:
+    async def run() -> None:
+        payload = (
+            b'{"payload":"' + b"x" * (SSE_MAX_LINE_BYTES + 1) + b'"}'
+            if not case["stream"]
+            else b"data: " + b"x" * (SSE_MAX_LINE_BYTES + 1)
+        )
+
+        class Content:
+            reads = 0
+
+            async def read(self, _size: int) -> bytes:
+                self.reads += 1
+                return payload if self.reads == 1 else b""
+
+            async def iter_chunked(self, _size: int):
+                if False:
+                    yield b""
+
+        class Response:
+            status = 200
+            content = Content()
+
+            def close(self) -> None:
+                return None
+
+        class Session:
+            async def post(self, *_args, **_kwargs):
+                return Response()
+
+            async def close(self) -> None:
+                return None
+
+        monkeypatch.setattr(client_module.aiohttp, "ClientSession", lambda **_: Session())
+        source = SourceRecord(
+            source_id="src_fixture123",
+            vendor="custom",
+            protocol="openai_chat",
+            base_url="https://api.example.test/v1",
+            credential_ref="cred_fixture123",
+            allowed_origins=(),
+            model_ids=("model-a",),
+            prefix="source-fixture123",
+        )
+        handle = await EngineClient(EngineConnection("http://127.0.0.1:15220", "management", "gateway")).invoke(
+            source, "model-a", {}, stream=bool(case["stream"])
+        )
+
+        assert handle.stream is not None
+        chunks = [chunk async for chunk in handle.stream]
+        outcome = await handle.outcome()
+        assert outcome.kind.value == case["expected_outcome"]
+        assert chunks == ([payload] if outcome.kind is RawOutcomeKind.SUCCESS else [])
 
     asyncio.run(run())
 

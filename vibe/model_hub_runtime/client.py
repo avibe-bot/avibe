@@ -14,7 +14,11 @@ from typing import Any, AsyncIterator, Mapping
 import aiohttp
 
 from config.v2_config import normalize_model_hub_base_url
-from core.handlers.model_hub.adapter import RawCallOutcome, RawOutcomeKind
+from core.handlers.model_hub.adapter import (
+    ENGINE_TRANSPORT_TIMEOUT_SECONDS,
+    RawCallOutcome,
+    RawOutcomeKind,
+)
 from core.handlers.model_hub.stream_wire import ProtocolSSEState, SSEFrameLimitError
 from vibe.model_hub_runtime.state import SourceRecord
 
@@ -128,7 +132,12 @@ class EngineInvokeHandle:
 class EngineClient:
     """Narrow loopback-only client for the engine data and management APIs."""
 
-    def __init__(self, connection: EngineConnection, *, timeout: float = 60.0) -> None:
+    def __init__(
+        self,
+        connection: EngineConnection,
+        *,
+        timeout: float = ENGINE_TRANSPORT_TIMEOUT_SECONDS,
+    ) -> None:
         parsed = urllib.parse.urlparse(connection.base_url)
         if parsed.scheme != "http" or parsed.hostname != "127.0.0.1" or parsed.username or parsed.password:
             raise ValueError("engine client requires a credential-free 127.0.0.1 URL")
@@ -293,6 +302,19 @@ class EngineClient:
                             stream_started=True,
                         )
                     )
+                response.close()
+                await session.close()
+                ownership_transferred = True
+                return buffered_handle(
+                    first,
+                    _outcome(
+                        kind=RawOutcomeKind.SUCCESS,
+                        source=source,
+                        model_id=model_id,
+                        http_status=response.status,
+                        stream_started=True,
+                    ),
+                )
 
             loop = asyncio.get_running_loop()
             outcome_future: asyncio.Future[RawCallOutcome] = loop.create_future()
@@ -303,7 +325,6 @@ class EngineClient:
                 source=source,
                 model_id=model_id,
                 protocol=request_protocol,
-                require_terminal_event=stream,
                 outcome_future=outcome_future,
             )
 
@@ -494,7 +515,6 @@ async def _response_stream(
     source: SourceRecord,
     model_id: str,
     protocol: str,
-    require_terminal_event: bool,
     outcome_future: asyncio.Future[RawCallOutcome],
 ) -> AsyncIterator[bytes]:
     outcome: RawCallOutcome | None = None
@@ -514,19 +534,11 @@ async def _response_stream(
         )
         if outcome is None:
             outcome = _outcome(
-                kind=(
-                    RawOutcomeKind.NETWORK_ERROR
-                    if require_terminal_event
-                    else RawOutcomeKind.SUCCESS
-                ),
+                kind=RawOutcomeKind.NETWORK_ERROR,
                 source=source,
                 model_id=model_id,
                 http_status=response.status,
-                message=(
-                    "upstream stream ended before a protocol terminal event"
-                    if require_terminal_event
-                    else None
-                ),
+                message="upstream stream ended before a protocol terminal event",
                 stream_started=True,
             )
     except SSEFrameLimitError as exc:
@@ -632,6 +644,15 @@ def completed_handle(outcome: RawCallOutcome) -> EngineInvokeHandle:
     future = asyncio.get_running_loop().create_future()
     future.set_result(outcome)
     return EngineInvokeHandle(stream=None, outcome=future)
+
+
+def buffered_handle(payload: bytes, outcome: RawCallOutcome) -> EngineInvokeHandle:
+    async def body() -> AsyncIterator[bytes]:
+        yield payload
+
+    future = asyncio.get_running_loop().create_future()
+    future.set_result(outcome)
+    return EngineInvokeHandle(stream=body(), outcome=future)
 
 
 def _outcome(

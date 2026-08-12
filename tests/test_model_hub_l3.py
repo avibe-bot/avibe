@@ -45,6 +45,7 @@ from core.handlers.model_hub.events import (
 )
 from core.handlers.model_hub.provenance import (
     BoundedProvenanceStore,
+    ENGINE_DOWN_TURN_OUTCOME,
     ExactHopBlocker,
     TURN_OUTCOME_RENDERING_AUTHORITY,
     TurnOutcomeProductionError,
@@ -96,6 +97,13 @@ from vibe.model_hub_runtime.state import EngineStateStore
 
 
 CONTRACTS = Path(__file__).parents[1] / "docs" / "plans" / "model-hub-contracts"
+MODEL_HUB_FIXTURES = Path(__file__).parent / "fixtures" / "model_hub"
+TERMINAL_SETTLEMENT_BOUNDARIES = json.loads(
+    (MODEL_HUB_FIXTURES / "terminal_settlement_boundaries.json").read_text(encoding="utf-8")
+)["cases"]
+RELEASED_V5_PERMISSION_DENIED = json.loads(
+    (MODEL_HUB_FIXTURES / "released_v5_permission_denied.json").read_text(encoding="utf-8")
+)
 NOW = datetime(2026, 7, 29, 12, 0, tzinfo=timezone.utc)
 
 
@@ -938,6 +946,41 @@ class RepeatedCancellationHandle:
         return self._outcome
 
 
+class NeverResolvingCloseHandle:
+    def __init__(self, outcome: RawCallOutcome):
+        self._outcome = outcome
+        self.started = asyncio.Event()
+        self.close_started = asyncio.Event()
+        self.release_close = asyncio.Event()
+        self.closed = asyncio.Event()
+        self._stream = self._iterate()
+
+    async def _iterate(self):
+        yield b"data: [DONE]\n\n"
+        self.started.set()
+        await asyncio.Event().wait()
+
+    @property
+    def stream(self):
+        return self._stream
+
+    @property
+    def outcome_available(self) -> bool:
+        return False
+
+    async def close_stream(self) -> None:
+        self.close_started.set()
+        while not self.release_close.is_set():
+            try:
+                await self.release_close.wait()
+            except asyncio.CancelledError:
+                continue
+        self.closed.set()
+
+    async def outcome(self) -> RawCallOutcome:
+        return self._outcome
+
+
 def _prepared_gateway_request(
     gateway: ModelHubTurnGateway,
     *,
@@ -1190,6 +1233,65 @@ def test_process_credentials_record_only_exact_turns(tmp_path: Path) -> None:
     assert record is not None
     assert record["outcome"] == "served"
     _assert_valid("turn-provenance.schema.json", record)
+
+
+def test_stopped_settlement_cannot_erase_committed_served_history(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store = BoundedProvenanceStore(tmp_path / "stop-after-served.json")
+    registry = TurnCorrelationRegistry(store)
+    turn_id = "turn_stop_after_served"
+    exact_turn = _begin_hub_attempt(registry, turn_id=turn_id)
+    success = _outcome(RawOutcomeKind.SUCCESS)
+    registry.finish_attempt(
+        exact_turn,
+        outcome=success,
+        decision=classify_outcome(success),
+    )
+    registry.record_turn_outcome(turn_id, produce_turn_outcome("turn.served"))
+
+    with caplog.at_level("INFO", logger="core.handlers.model_hub.provenance"):
+        registry.settle(
+            turn_id,
+            settled_by=SETTLED_BY_STOPPED,
+            ts=NOW.isoformat(),
+        )
+
+    record = store.get(turn_id)
+    assert record is not None
+    assert record["outcome"] == "served"
+    assert record["served"]["source_id"] == "src_primary01"
+    assert record["canceled_attempt"] is None
+    assert "Ignored stopped settlement" in caplog.text
+    _assert_valid("turn-provenance.schema.json", record)
+
+
+def test_released_v5_permission_denied_records_degrade_at_read_boundary(
+    tmp_path: Path,
+) -> None:
+    provenance_path = tmp_path / "provenance.json"
+    events_path = tmp_path / "events.json"
+    provenance_path.write_text(
+        json.dumps(RELEASED_V5_PERMISSION_DENIED["provenance"]),
+        encoding="utf-8",
+    )
+    events_path.write_text(
+        json.dumps(RELEASED_V5_PERMISSION_DENIED["resolution_events"]),
+        encoding="utf-8",
+    )
+
+    record = BoundedProvenanceStore(provenance_path).get("turn_01k9x6db")
+    event = BoundedEventLog(events_path).list()[0]
+    degraded_reason = RELEASED_V5_PERMISSION_DENIED["degraded_reason"]
+
+    assert record is not None
+    assert record["failed_attempts"][0]["reason"] == degraded_reason
+    assert event["reason"] == degraded_reason
+    _assert_valid("turn-provenance.schema.json", record)
+    _assert_valid("resolution-event.schema.json", event)
+    assert RELEASED_V5_PERMISSION_DENIED["provenance"][0]["failed_attempts"][0]["reason"] == "permission_denied"
+    assert RELEASED_V5_PERMISSION_DENIED["resolution_events"][0]["reason"] == "permission_denied"
 
 
 def test_retired_process_scope_revokes_token_and_fails_closed(
@@ -1941,6 +2043,33 @@ def test_gateway_live_settlement_emits_matrix_copy_before_eof(
         assert payload["sequence_number"] == 8
         assert payload["code"] == "modelHub.launch.retry"
         assert response.eof_called
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize(
+    "case",
+    TERMINAL_SETTLEMENT_BOUNDARIES,
+    ids=lambda case: f"{case['forwarded_terminal']}-{case['settlement']}",
+)
+def test_gateway_emits_at_most_one_wire_terminal(case: dict[str, object]) -> None:
+    async def exercise() -> None:
+        gateway = ModelHubTurnGateway(SimpleNamespace())  # type: ignore[arg-type]
+        response = FakeStreamResponse()
+        outcomes = {
+            "none": None,
+            "silent": produce_turn_outcome("turn.served"),
+            "copy": ENGINE_DOWN_TURN_OUTCOME,
+        }
+        forwarded = case["forwarded_terminal"]
+        await gateway._write_stream_terminal_copy(
+            response,  # type: ignore[arg-type]
+            "openai_responses",
+            outcomes[str(case["settlement"])],
+            _SSEWireState("openai_responses"),
+            forwarded_terminal=cast(str | None, forwarded),  # type: ignore[arg-type]
+        )
+        assert bool(response.writes) is case["write_terminal"]
 
     asyncio.run(exercise())
 
@@ -2727,6 +2856,61 @@ def test_gateway_repeated_cancellation_drains_settlement_before_reraise(
         assert handle.outcome_calls == 1
 
     asyncio.run(exercise())
+
+
+def test_gateway_abandons_never_resolving_teardown_at_transport_deadline(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    async def exercise() -> None:
+        source = _source("src_teardown_timeout", "Teardown timeout")
+        handle = NeverResolvingCloseHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=source.id))
+        service = _service(tmp_path, sources=[source], live_handles=[handle])
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        gateway = ModelHubTurnGateway(service, transport_timeout=0.02)
+        turn_id = "turn_teardown_timeout"
+        request = _prepared_gateway_request(
+            gateway,
+            turn_id=turn_id,
+            requested_model=requested_model,
+            source_id=source.id,
+            stream=True,
+        )
+
+        with patch(
+            "core.handlers.model_hub.turn_gateway.web.StreamResponse",
+            return_value=FakeStreamResponse(),
+        ):
+            task = asyncio.create_task(gateway._handle_request(request))
+            await asyncio.wait_for(handle.started.wait(), timeout=1)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, timeout=1)
+
+        assert gateway.resource_leak_records == (("resource_teardown", turn_id),)
+        gateway.correlation.settle(
+            turn_id,
+            settled_by=SETTLED_BY_STOPPED,
+            ts=NOW.isoformat(),
+        )
+        record = service.provenance.get(turn_id)
+        assert record is not None
+        assert record["outcome"] == "failed_terminal"
+        assert record["terminal_error"] == {
+            "source_id": None,
+            "configured_model_id": None,
+            "channel": None,
+            "reason": "engine_down",
+            "stream_started": True,
+        }
+        assert service.store.load().sources[0].state.status == "standby"
+        assert service.events.list() == []
+        handle.release_close.set()
+        await asyncio.wait_for(handle.closed.wait(), timeout=1)
+
+    with caplog.at_level("ERROR", logger="core.handlers.model_hub.turn_gateway"):
+        asyncio.run(exercise())
+    assert "Abandoned Model Hub turn resource" in caplog.text
 
 
 def test_gateway_eof_disconnect_after_upstream_outcome_keeps_upstream_history(

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import socket
+from collections import deque
 from collections.abc import Callable
 from contextlib import AsyncExitStack, suppress
 from dataclasses import dataclass
@@ -15,7 +17,12 @@ from aiohttp import web
 from config import paths
 from vibe.i18n import t as i18n_t
 
-from .adapter import InvokeHandle, RawCallOutcome, RawOutcomeKind
+from .adapter import (
+    ENGINE_TRANSPORT_TIMEOUT_SECONDS,
+    InvokeHandle,
+    RawCallOutcome,
+    RawOutcomeKind,
+)
 from .provenance import (
     BoundedProvenanceStore,
     ENGINE_DOWN_TURN_OUTCOME,
@@ -27,7 +34,11 @@ from .provenance import (
     render_turn_outcome_copy,
 )
 from .request import ModelHubRequest
-from .stream_wire import ProtocolSSEState, render_protocol_terminal_event
+from .stream_wire import (
+    ProtocolSSEState,
+    StreamTerminalOutcome,
+    render_protocol_terminal_event,
+)
 from .service import (
     HandleSettlement,
     HandleTerminationOrigin,
@@ -50,6 +61,7 @@ _REQUEST_PROTOCOLS: Final = {
     "responses": "openai_responses",
     "chat/completions": "openai_chat",
 }
+logger = logging.getLogger(__name__)
 
 
 _PROTOCOL_HEADERS: Final = frozenset(
@@ -89,9 +101,12 @@ class ModelHubTurnGateway:
         *,
         correlation: Optional[TurnCorrelationRegistry] = None,
         language_provider: Callable[[], str] | None = None,
+        transport_timeout: float = ENGINE_TRANSPORT_TIMEOUT_SECONDS,
     ) -> None:
         self.service = service
         self._language_provider = language_provider or (lambda: "en")
+        self._transport_timeout = transport_timeout
+        self._resource_leak_records: deque[tuple[str, str | None]] = deque(maxlen=100)
         self.correlation = correlation or TurnCorrelationRegistry(
             getattr(
                 service,
@@ -105,6 +120,36 @@ class ModelHubTurnGateway:
         self._runner: web.AppRunner | None = None
         self._site: web.SockSite | None = None
         self._base_url: str | None = None
+
+    @property
+    def resource_leak_records(self) -> tuple[tuple[str, str | None], ...]:
+        return tuple(self._resource_leak_records)
+
+    def _abandon_owned_task(
+        self,
+        task: asyncio.Task,
+        *,
+        phase: str,
+        terminalizer: GatewayTurnTerminalizer,
+        execution: _TurnExecution,
+    ) -> HandleSettlement | None:
+        task.cancel()
+        if phase == "settlement" and execution.settlement_task is not None:
+            execution.settlement_task.cancel()
+        self._resource_leak_records.append((phase, terminalizer.turn_id))
+        logger.error(
+            "Abandoned Model Hub turn resource after the engine transport deadline",
+            extra={"phase": phase, "turn_id": terminalizer.turn_id},
+        )
+        if execution.settlement_recorded:
+            return None
+        terminalizer.engine_down()
+        execution.settlement_origin = "upstream_terminal"
+        return HandleSettlement(
+            outcome=None,
+            decision=None,
+            turn_outcome=ENGINE_DOWN_TURN_OUTCOME,
+        )
 
     async def endpoint(
         self,
@@ -218,8 +263,25 @@ class ModelHubTurnGateway:
                         error.__traceback__ if error is not None else None,
                     )
                 )
-                await asyncio.shield(exit_task)
-                exit_task.result()
+                exit_done, _pending = await asyncio.wait(
+                    {exit_task},
+                    timeout=self._transport_timeout,
+                )
+                if not exit_done:
+                    timeout_settlement = self._abandon_owned_task(
+                        exit_task,
+                        phase="resource_teardown",
+                        terminalizer=terminalizer,
+                        execution=execution,
+                    )
+                    if timeout_settlement is not None:
+                        self._record_handle_settlement(
+                            execution,
+                            terminalizer,
+                            timeout_settlement,
+                        )
+                else:
+                    exit_task.result()
                 if isinstance(error, _DownstreamDisconnected):
                     await self._settle_boundary_termination(
                         execution,
@@ -228,7 +290,7 @@ class ModelHubTurnGateway:
                     )
                     raise error
                 if error is not None:
-                    if execution.handle is not None:
+                    if execution.handle is not None and not execution.settlement_recorded:
                         _outcome, settlement = await self._settle_turn_handle(
                             execution,
                             terminalizer,
@@ -247,13 +309,34 @@ class ModelHubTurnGateway:
                 # close/finally -> t4 settlement/history -> t5 render -> t6 EOF.
                 # Only the request is canceled. Owned teardown and settlement
                 # are shielded and drained before this boundary re-raises.
+                drain_deadline = asyncio.get_running_loop().time() + self._transport_timeout
                 if not request_task.done():
                     request_task.cancel()
-                while not request_task.done():
+                while not request_task.done() and asyncio.get_running_loop().time() < drain_deadline:
                     with suppress(asyncio.CancelledError):
-                        await asyncio.shield(request_task)
-                with suppress(BaseException):
-                    request_task.result()
+                        await asyncio.wait(
+                            {request_task},
+                            timeout=max(
+                                0.0,
+                                drain_deadline - asyncio.get_running_loop().time(),
+                            ),
+                        )
+                if request_task.done():
+                    with suppress(BaseException):
+                        request_task.result()
+                else:
+                    timeout_settlement = self._abandon_owned_task(
+                        request_task,
+                        phase="request",
+                        terminalizer=terminalizer,
+                        execution=execution,
+                    )
+                    if timeout_settlement is not None:
+                        self._record_handle_settlement(
+                            execution,
+                            terminalizer,
+                            timeout_settlement,
+                        )
                 if exit_task is None:
                     exit_task = asyncio.create_task(
                         resources.__aexit__(
@@ -262,21 +345,63 @@ class ModelHubTurnGateway:
                             cancelled.__traceback__,
                         )
                     )
-                while not exit_task.done():
+                while not exit_task.done() and asyncio.get_running_loop().time() < drain_deadline:
                     with suppress(asyncio.CancelledError):
-                        await asyncio.shield(exit_task)
-                exit_task.result()
-                settlement_task = asyncio.create_task(
-                    self._settle_boundary_termination(
-                        execution,
-                        terminalizer,
-                        termination_origin="downstream_cancel",
+                        await asyncio.wait(
+                            {exit_task},
+                            timeout=max(
+                                0.0,
+                                drain_deadline - asyncio.get_running_loop().time(),
+                            ),
+                        )
+                if exit_task.done():
+                    with suppress(BaseException):
+                        exit_task.result()
+                else:
+                    timeout_settlement = self._abandon_owned_task(
+                        exit_task,
+                        phase="resource_teardown",
+                        terminalizer=terminalizer,
+                        execution=execution,
                     )
-                )
-                while not settlement_task.done():
-                    with suppress(asyncio.CancelledError):
-                        await asyncio.shield(settlement_task)
-                settlement_task.result()
+                    if timeout_settlement is not None:
+                        self._record_handle_settlement(
+                            execution,
+                            terminalizer,
+                            timeout_settlement,
+                        )
+                if not execution.settlement_recorded:
+                    settlement_task = asyncio.create_task(
+                        self._settle_boundary_termination(
+                            execution,
+                            terminalizer,
+                            termination_origin="downstream_cancel",
+                        )
+                    )
+                    while not settlement_task.done() and asyncio.get_running_loop().time() < drain_deadline:
+                        with suppress(asyncio.CancelledError):
+                            await asyncio.wait(
+                                {settlement_task},
+                                timeout=max(
+                                    0.0,
+                                    drain_deadline - asyncio.get_running_loop().time(),
+                                ),
+                            )
+                    if settlement_task.done():
+                        settlement_task.result()
+                    else:
+                        timeout_settlement = self._abandon_owned_task(
+                            settlement_task,
+                            phase="settlement",
+                            terminalizer=terminalizer,
+                            execution=execution,
+                        )
+                        if timeout_settlement is not None:
+                            self._record_handle_settlement(
+                                execution,
+                                terminalizer,
+                                timeout_settlement,
+                            )
                 raise cancelled
 
     async def _run_request_turn(
@@ -471,6 +596,7 @@ class ModelHubTurnGateway:
             protocol,
             settlement.turn_outcome,
             wire_state,
+            forwarded_terminal=wire_state.terminal_outcome,
         )
         await self._downstream_io(response.write_eof())
         return response
@@ -481,8 +607,10 @@ class ModelHubTurnGateway:
         protocol: str,
         turn_outcome: TurnOutcomeProjectionInput | None,
         wire_state: _SSEWireState,
+        *,
+        forwarded_terminal: StreamTerminalOutcome | None,
     ) -> None:
-        if turn_outcome is None:
+        if turn_outcome is None or forwarded_terminal is not None:
             return
         copy = project_turn_outcome_copy(turn_outcome)
         message = render_turn_outcome_copy(turn_outcome, self._language_provider() or "en")
@@ -522,6 +650,8 @@ class ModelHubTurnGateway:
         *,
         termination_origin: HandleTerminationOrigin,
     ) -> None:
+        if execution.settlement_recorded:
+            return
         _outcome, settlement = await self._settle_turn_handle(
             execution,
             terminalizer,

@@ -12,8 +12,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, AsyncIterator, Literal, Mapping, Protocol, Sequence
+from typing import Any, AsyncIterator, Final, Literal, Mapping, Protocol, Sequence
 
+ENGINE_TRANSPORT_TIMEOUT_SECONDS: Final = 60.0
 SOURCE_PROTOCOLS = ("anthropic", "openai_responses", "openai_chat")
 OBSERVATION_OUTCOMES = (
     "observed",

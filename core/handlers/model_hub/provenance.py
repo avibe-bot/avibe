@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import secrets
 import tempfile
@@ -27,6 +28,7 @@ from .adapter import RawCallOutcome
 from .classification import ResolutionDecision, ResolutionReason
 from .events import (
     EVENT_REASON_AUTHORITY,
+    RETIRED_PERSISTED_REASON_DEGRADATIONS,
     SOURCE_DETAIL_EVENT_REASONS,
     event_reason_label,
 )
@@ -37,6 +39,7 @@ BackendName = Literal["claude", "codex", "opencode"]
 SupplyChannel = Literal["native_cli", "hub"]
 SupplyState = Literal["waiting", "interrupted"]
 ScopeKey = tuple[BackendName, str]
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -645,6 +648,28 @@ def _terminal_reason(decision: ResolutionDecision) -> str:
     return "protocol_error"
 
 
+def _degrade_persisted_provenance(record: dict) -> dict:
+    degraded = dict(record)
+    attempts = degraded.get("failed_attempts")
+    if not isinstance(attempts, list):
+        return degraded
+    degraded_attempts = []
+    for attempt in attempts:
+        if not isinstance(attempt, dict):
+            degraded_attempts.append(attempt)
+            continue
+        degraded_attempt = dict(attempt)
+        reason = degraded_attempt.get("reason")
+        if isinstance(reason, str):
+            degraded_attempt["reason"] = RETIRED_PERSISTED_REASON_DEGRADATIONS.get(
+                reason,
+                reason,
+            )
+        degraded_attempts.append(degraded_attempt)
+    degraded["failed_attempts"] = degraded_attempts
+    return degraded
+
+
 class BoundedProvenanceStore:
     """Atomic, bounded persistence for exact turn records."""
 
@@ -663,7 +688,7 @@ class BoundedProvenanceStore:
             return []
         if not isinstance(payload, list):
             return []
-        return [item for item in payload if isinstance(item, dict)]
+        return [_degrade_persisted_provenance(item) for item in payload if isinstance(item, dict)]
 
     def _read(self) -> list[dict]:
         return self._read_path(self.path)
@@ -1249,7 +1274,10 @@ class TurnCorrelationRegistry:
             terminal_error = trace.terminal_error
             canceled_attempt = None
             supply_state = None
-            if settled_by == SETTLED_BY_STOPPED:
+            terminal_history_committed = (
+                trace.terminal_outcome is not None and trace.terminal_outcome.outcome != "canceled"
+            )
+            if settled_by == SETTLED_BY_STOPPED and not terminal_history_committed:
                 outcome = "canceled"
                 canceled_attempt = (
                     trace.pending_attempt.payload()
@@ -1258,6 +1286,25 @@ class TurnCorrelationRegistry:
                 )
                 served = None
                 terminal_error = None
+            elif settled_by == SETTLED_BY_STOPPED:
+                logger.info(
+                    "Ignored stopped settlement after terminal Model Hub history was committed",
+                    extra={"turn_id": normalized_turn_id},
+                )
+                if trace.model_supply_state is not None:
+                    outcome = "no_candidate"
+                    served = None
+                    terminal_error = None
+                    supply_state = trace.model_supply_state
+                elif terminal_error is not None:
+                    outcome = "failed_terminal"
+                    served = None
+                elif served is not None:
+                    outcome = "served"
+                elif trace.failed_attempts:
+                    outcome = "exhausted"
+                else:
+                    return
             elif trace.model_supply_state is not None:
                 outcome = "no_candidate"
                 served = None
