@@ -92,6 +92,21 @@ class MessageHandler(BaseHandler):
 
         task.add_done_callback(_on_done)
 
+    async def _acquire_memory_capture_admission(
+        self,
+        session_id: str,
+        lifecycle_admission: Any,
+    ) -> Any:
+        """Fence a first-pass capture when durable dispatch has not admitted it."""
+
+        if lifecycle_admission is not None:
+            return lifecycle_admission
+        manager = getattr(self.controller, "session_turns", None)
+        acquire = getattr(manager, "acquire_lifecycle_admission", None)
+        if not callable(acquire):
+            return None
+        return await acquire(session_id)
+
     async def drain_memory_capture_tasks(self) -> None:
         """Settle captures accepted before controller shutdown closes Memory."""
 
@@ -293,6 +308,10 @@ class MessageHandler(BaseHandler):
             if is_human:
                 capture_memory = getattr(self.controller, "capture_user_memory", None)
                 if callable(capture_memory):
+                    turn_lifecycle_admission = await self._acquire_memory_capture_admission(
+                        base_session_id,
+                        turn_lifecycle_admission,
+                    )
                     capture_task = asyncio.create_task(
                         capture_memory(context, control_message, base_session_id),
                         name="memory-capture",
