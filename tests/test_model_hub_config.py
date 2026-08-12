@@ -58,13 +58,23 @@ def test_protocol_vocabulary_matches_authority_and_rejects_removed_alias():
     assert SOURCE_PROTOCOLS == protocols
 
     type_source = (UI_MODEL_CONSUMERS / "types.ts").read_text(encoding="utf-8")
+    tuple_match = re.search(
+        r"export const SOURCE_PROTOCOLS\s*=\s*\[(.*?)\]\s*as const",
+        type_source,
+        re.DOTALL,
+    )
+    assert tuple_match is not None
+    ui_protocols = tuple(re.findall(r"'([^']+)'", tuple_match.group(1)))
+    assert frozenset(ui_protocols) == frozenset(protocols)
+    assert len(ui_protocols) == len(set(ui_protocols))
+
     type_match = re.search(
         r"export type SourceProtocol\s*=\s*(.*?);",
         type_source,
         re.DOTALL,
     )
     assert type_match is not None
-    assert tuple(re.findall(r"'([^']+)'", type_match.group(1))) == protocols
+    assert re.sub(r"\s+", "", type_match.group(1)) == "(typeofSOURCE_PROTOCOLS)[number]"
 
     retired_alias = "openai" + "_compatible"
     for filename in (

@@ -8,8 +8,9 @@ import { describe, expect, it } from 'vitest';
 
 import en from '../../../i18n/en.json';
 import zh from '../../../i18n/zh.json';
-import { eventAccent } from './eventFeed';
+import { emptyFeed, eventAccent } from './eventFeed';
 import { RecentSwitchesCard } from './RecentSwitchesCard';
+import { readyRegion, unreadRegion } from './regionRead';
 import type { ResolutionEvent, Source } from './types';
 
 const instance = (lng: 'en' | 'zh') => {
@@ -58,7 +59,7 @@ const render = (
 ) =>
   renderToStaticMarkup(
     <I18nextProvider i18n={instance(lng)}>
-      <RecentSwitchesCard events={events} sources={sources} hasMore={hasMore} />
+      <RecentSwitchesCard events={readyRegion({ ...emptyFeed, events, exhausted: !hasMore })} sources={readyRegion(sources)} hasMore={hasMore} />
     </I18nextProvider>,
   );
 
@@ -80,6 +81,26 @@ describe('RecentSwitchesCard (AC-18)', () => {
   it('marks nothing when both endpoints still resolve', () => {
     const html = render([event()], [source('src_gone01'), source('src_live01')]);
     expect(html).not.toContain(zh.settings.models.recent.deletedSource);
+  });
+
+  it('does not call a source deleted while the inventory read is unavailable', () => {
+    const html = renderToStaticMarkup(
+      <I18nextProvider i18n={instance('en')}>
+        <RecentSwitchesCard events={readyRegion({ ...emptyFeed, events: [event()] })} sources={unreadRegion()} />
+      </I18nextProvider>,
+    );
+    expect(html).not.toContain(en.settings.models.recent.deletedSource);
+  });
+
+  it('renders an event-read failure with a retry instead of an authoritative empty feed', () => {
+    const html = renderToStaticMarkup(
+      <I18nextProvider i18n={instance('en')}>
+        <RecentSwitchesCard events={unreadRegion()} sources={readyRegion([])} />
+      </I18nextProvider>,
+    );
+    expect(html).toContain('Couldn&#x27;t refresh, please retry');
+    expect(html).toContain(en.settings.models.upstream.retry);
+    expect(html).not.toContain(en.settings.models.recent.empty);
   });
 
   it('marks nothing for an event that names no source at all', () => {
@@ -104,19 +125,10 @@ describe('RecentSwitchesCard (AC-18)', () => {
     expect(render(four, [source('src_live01')])).toContain(zh.settings.models.recent.viewAll);
   });
 
-  it('keeps route configuration out of the user event feed', () => {
-    const configured = event({ kind: 'mapping_applied', human_zh: '内部路由配置已变更' });
-    const html = render([configured, event({ id: 'evt_2', human_zh: '已自动换到 openai' })], [source('src_live01')]);
-    expect(html).not.toContain(configured.human_zh);
-    expect(html).toContain('已自动换到 openai');
-  });
-
-  it('keeps a paging door open when the fetched page contains only route configuration', () => {
-    const configured = event({ kind: 'mapping_applied', human_zh: '内部路由配置已变更' });
-    const html = render([configured], [source('src_live01')], 'zh', true);
-    expect(html).not.toContain(configured.human_zh);
+  it('keeps a paging door open when more events exist', () => {
+    const html = render([event()], [source('src_live01')], 'zh', true);
     expect(html).not.toContain(zh.settings.models.recent.empty);
-    expect(html).toContain(zh.settings.models.recent.loadMore);
+    expect(html).toContain(zh.settings.models.recent.viewAll);
   });
 });
 

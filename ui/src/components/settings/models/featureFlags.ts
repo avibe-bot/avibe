@@ -20,12 +20,3 @@ export const modelHubEnabledFromConfig = (config: unknown): boolean => {
  * to 'mock' only for hermetic pixel/screenshot runs with no backend.)
  */
 export const MODELS_API_MODE: 'mock' | 'live' = 'live';
-
-/**
- * Offers the consent-gated hub-held subscription option (`subscription_hub_
- * experimental`, spec §4.1/§7) inside the connect-subscription dialog. OFF by
- * default: subscriptions connect via the sanctioned native_cli channel only.
- * When ON, choosing "hub" for a subscription requires the ban-risk consent
- * dialog (copy from S2 §9) and marks the resulting source 实验.
- */
-export const SUBSCRIPTION_HUB_EXPERIMENTAL = false;

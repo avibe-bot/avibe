@@ -629,26 +629,246 @@
       "subtitle": "See whether each agent model can run now and which source serves it; set a route for one model when needed.",
       "addSource": "Add source",
       "loadError": "Failed to load: {{detail}}",
+      "tabs": {
+        "sources": "Sources & gateway",
+        "usage": "Usage & quota"
+      },
+      "sourceKind": {
+        "api_key": "API key",
+        "subscription": "Subscription"
+      },
+      "shell": {
+        "title": "Models",
+        "running": "Gateway running",
+        "stopped": "Gateway stopped · click to start",
+        "degraded": "Gateway running degraded",
+        "unread": "Gateway status unavailable",
+        "notStarted": "Gateway not started · click to start",
+        "notInstalled": "Gateway component not installed · click to install",
+        "allDirect_one": "The only backend is direct",
+        "allDirect_other": "All {{count}} backends are direct",
+        "starting": "Starting…",
+        "unsupported": "No gateway component for this platform yet",
+        "gatewayInfo": {
+          "label": "What the gateway is",
+          "body": "The gateway is a dispatch layer on this machine: it holds the sources you add and supplies them to your Agents in the order you configure."
+        },
+        "tab": {
+          "hub": "Sources & gateway",
+          "usage": "Usage & quota"
+        }
+      },
+      "direct": {
+        "card": {
+          "current": "Currently: direct",
+          "current.sub": "Each agent backend uses its own login and connects to the vendor directly."
+        },
+        "pill": {
+          "direct": "Direct"
+        },
+        "backend": {
+          "claude": { "detail": "Uses its own Claude login" },
+          "codex": { "detail": "Uses its own ChatGPT login" },
+          "opencode": { "detail": "Uses its own model configuration" }
+        },
+        "action": {
+          "switchToGateway": "Switch to gateway"
+        },
+        "benefits": {
+          "title": "Switch to the gateway and you gain three things",
+          "1": "Your session survives a quota running out",
+          "1.detail": "When your Claude subscription is exhausted, it moves to the next source you added and the conversation continues.",
+          "2": "One key supplies several backends",
+          "2.detail": "The same API key can serve Claude Code, Codex and OpenCode at once.",
+          "3": "Decide per backend and per model",
+          "3.detail": "You can specify which source each model on each backend uses."
+        },
+        "note": {
+          "perBackend": "Switch one backend at a time — the others stay direct. You can switch back at any time."
+        },
+        "empty": {
+          "title": "No agent backend was found on this machine",
+          "body": "Install Claude Code, Codex or OpenCode, come back to this page, and they will appear here.",
+          "install": "Install a backend CLI, then reload this page."
+        }
+      },
+      "adopt": {
+        "title": "Switch {{backend}} to the gateway",
+        "subtitle": "Affects {{backend}} only; the other backends are unchanged.",
+        "vendor": {
+          "claude": "Claude",
+          "chatgpt": "ChatGPT"
+        },
+        "section": {
+          "effects": "What will happen",
+          "undo": "You can undo this"
+        },
+        "effects": {
+          "1": "Your current {{vendor}} login becomes the first source and keeps priority",
+          "2": "Once you add other sources, it moves to them when this login is exhausted",
+          "1.opencode": "OpenCode's own model configuration is kept as it is; this switch does not change it",
+          "2.opencode": "Its models are supplied from the sources on this page; if there are none yet, add one first",
+          "3": "The model menu does not change",
+          "4": "Conversations in progress are unaffected; the change applies from the next request",
+          "install": "The gateway component ({{component}}, about {{duration}}) is installed first, then the switch happens"
+        },
+        "undo": {
+          "1": "You can switch back to direct at any time",
+          "2": "Where to undo: the {{backend}} card on this page → Switch to direct",
+          "3": "If you switch back, the sources you added stay; they just stop supplying {{backend}}"
+        },
+        "cancel": "Cancel",
+        "confirm": "Switch to gateway",
+        "confirm.install": "Install and switch",
+        "fail": {
+          "title": "The switch to the gateway did not go through",
+          "detail": "{{request}} · {{status}} · {{reason}}",
+          "reason": {
+            "transport": "The gateway could not be reached",
+            "refused": "The gateway did not accept the switch",
+            "notReady": "The gateway started but did not become ready",
+            "unknown": "No reason was given"
+          }
+        }
+      },
+      "install": {
+        "duration": "1 minute",
+        "title": "Install the gateway component",
+        "subtitle": "Installs the component only; the backends keep working the way they do now",
+        "section": {
+          "effects": "What will happen"
+        },
+        "effects": {
+          "1": "{{component}} is downloaded and installed, about {{duration}}",
+          "2": "The gateway starts automatically once it is installed",
+          "3": "No backend is switched and the model menu does not change"
+        },
+        "confirm": "Install and start",
+        "cancel": "Cancel",
+        "progress": "Installing…",
+        "fail": {
+          "title": "The install did not finish",
+          "detail": "The install did not finish, and the component may be left incomplete. Retrying installs it again from scratch."
+        },
+        "retry": "Try again"
+      },
+      "gateway": {
+        "heading": "Gateway",
+        "sourceOrder": "Source order",
+        "switchToGateway": "Switch to gateway",
+        "switchToDirect": "Switch to direct",
+        "fail": {
+          "switchToDirect": "The switch back to direct did not go through"
+        },
+        "modelCount_one": "{{count}} model",
+        "modelCount_other": "{{count}} models",
+        "moreModels_one": "{{count}} more model",
+        "moreModels_other": "{{count}} more models",
+        "collapse_one": "{{count}} more model",
+        "collapse_other": "{{count}} more models",
+        "retry": "Retry",
+        "supply": {
+          "none": "No usable source",
+          "unread": "Could not read this backend's supply · the gateway itself is fine"
+        },
+        "row": {
+          "current": "Now: {{source}}",
+          "currentTakeover": "Now: {{source}} (takeover)"
+        },
+        "group": {
+          "subtitle": {
+            "direct": "{{mode}}",
+            "gateway": "{{mode}} · {{health}}"
+          },
+          "mode": {
+            "direct": "Direct",
+            "gateway": "Gateway"
+          },
+          "status": {
+            "ok": "Healthy",
+            "degraded": "Degraded",
+            "waiting": "All sources are cooling down",
+            "interrupted": "No source is available",
+            "noSelection": "No model selected"
+          },
+          "emptyModels": "This backend has no models"
+        }
+      },
+      "takeover": {
+        "pill_one": "{{count}} takeover active",
+        "pill_other": "{{count}} takeovers active",
+        "chip": "Taken over"
+      },
+      "legend": {
+        "native": "Native",
+        "viaGateway": "Gateway supply",
+        "connectedUnused": "Enabled · not currently used",
+        "takeover": "Taken over · temporarily rerouted",
+        "unavailable": "Supply paused",
+        "note": "Route chains are each backend's configured source order."
+      },
+      "usageTab": {
+        "title": "Usage and quota",
+        "detail": "Usage appears after a gateway source serves a request."
+      },
       "status": {
         "allHealthy": "All healthy",
-        "needsAction": "{{count}} model(s) need attention",
+        "needsAction_one": "{{count}} model needs attention",
+        "needsAction_other": "{{count}} models need attention",
         "noIssues": "No models need attention"
       },
       "statusPill": {
-        "ok": "All good · {{count}} on the Hub",
-        "none": "No agent is on the Hub yet",
-        "engineDown": "Supply engine isn't ready · the Hub can't serve",
-        "interrupted": "{{count}} with no supply · needs attention",
-        "waiting": "{{count}} awaiting source recovery",
+        "ok_one": "All good · {{count}} on the gateway",
+        "ok_other": "All good · {{count}} on the gateway",
+        "none": "No Agent is using the gateway yet",
+        "engineDown": "The gateway isn't ready to serve",
+        "interrupted_one": "{{count}} with no supply · needs attention",
+        "interrupted_other": "{{count}} with no supply · needs attention",
+        "waiting_one": "{{count}} awaiting source recovery",
+        "waiting_other": "{{count}} awaiting source recovery",
         "needsAction": "{{source}} — {{detail}}",
         "cooldown": "{{source}} — {{detail}} · switched over, will switch back",
-        "andMore": "{{count}} more"
+        "andMore_one": "{{count}} more",
+        "andMore_other": "{{count}} more"
+      },
+      "upstream": {
+        "heading": "Sources",
+        "count_one": "{{count}} source",
+        "count_other": "{{count}} sources",
+        "group": {
+          "native": "Native · on this machine",
+          "hub": "Held by the gateway"
+        },
+        "kind": {
+          "nativeCredential": "Native · local credential",
+          "subscription": "Subscription",
+          "apiKey": "API key"
+        },
+        "empty": "No sources yet. Add a subscription or an API key first.",
+        "unread": "Could not read the source list · the gateway itself is fine",
+        "retry": "Retry",
+        "addSubscription": "Add subscription",
+        "addApiKey": "Add API key",
+        "state": {
+          "supplyingNative": "Supplying {{backend}} (native)",
+          "supplying": "Supplying {{backends}}",
+          "standby": "Standby",
+          "unavailableRetry": "Unavailable · retrying automatically after {{delay}}",
+          "unavailableDue": "Unavailable · the retry is due"
+        }
       },
       "sources": {
         "title": "Sources",
+        "info": "Accounts and credentials available to gateway routes",
+        "count_one": "{{count}} source",
+        "count_other": "{{count}} sources",
+        "group": {
+          "native": "Native · on this machine",
+          "hub": "Held by the gateway"
+        },
         "subtitle": "Manage shared accounts and model inventories; source order is set on each agent card",
-        "empty": "No sources yet — use “Add source” to connect a subscription or API key.",
-        "modelCount": "{{count}} model(s)",
+        "modelCount_one": "{{count}} model",
+        "modelCount_other": "{{count}} models",
         "lastDiscovery": "Last fetched {{time}}",
         "neverDiscovered": "Not fetched yet",
         "addModel": "Add model",
@@ -657,7 +877,7 @@
       },
       "source": {
         "nativeSupply": "Native supply",
-        "hubHosted": "Hub-hosted",
+        "hubHosted": "Gateway-held",
         "officialEndpoint": "Official endpoint",
         "customEndpoint": "Custom endpoint",
         "retryIn": "retry in {{minutes}} min",
@@ -665,20 +885,36 @@
         "oauthSignedOut": "CLI subscription is signed out"
       },
       "order": {
-        "title": "Source order · {{backend}}",
-        "subtitle": "Used top to bottom; a failure switches to the next one and switches back once it recovers. This order only affects {{backend}}.",
-        "subtitleShort": "Used top to bottom; failures switch over and back. Affects {{backend}} only.",
-        "groupEnabled": "Enabled · {{count}}",
-        "groupDisabled": "Not enabled · {{count}}",
-        "groupIneligible": "Not applicable · {{count}}",
-        "customized": "Changed manually",
-        "restore": "Restore default",
-        "enable": "Enable",
-        "enableAria": "Enable {{name}}",
-        "disable": "Disable",
-        "enabledEmpty": "{{backend}} has no source enabled, so its next turn will fail. Enable one from the list below.",
-        "ineligibleUnknown": "Cannot supply {{backend}}",
-        "ineligibleClientUnknown": "{{vendor}} subscriptions only work in their own official client"
+        "title": "{{backend}} · Source order",
+        "subtitle": "The Source order this backend stores. Changing it changes no configured Route chain.",
+        "reorder": "Reorder source",
+        "section": {
+          "ordered": "In this order",
+          "ordered.note": "Drag to reorder",
+          "heldOut": "Not in this order"
+        },
+        "action": {
+          "include": "Add to order",
+          "exclude": "Remove from order"
+        },
+        "empty": {
+          "noEligible": "No source is available to this backend yet.",
+          "ordered": "This order is empty. Add a source from below."
+        },
+        "cancel": "Cancel",
+        "save": "Save order",
+        "fail": {
+          "read": "The source list could not be read",
+          "save": "The order was not saved"
+        },
+        "retry": "Retry",
+        "grabbed_one": "Grabbed {{source}}, position {{position}} of {{count}}.",
+        "grabbed_other": "Grabbed {{source}}, position {{position}} of {{count}}.",
+        "moved_one": "Moved {{source}} to position {{position}} of {{count}}.",
+        "moved_other": "Moved {{source}} to position {{position}} of {{count}}.",
+        "dropped_one": "Dropped {{source}} at position {{position}} of {{count}}.",
+        "dropped_other": "Dropped {{source}} at position {{position}} of {{count}}.",
+        "grabCancelled": "Cancelled moving {{source}} and restored its original position."
       },
       "billing": {
         "monthly": "Subscription",
@@ -698,7 +934,7 @@
         "label": "Supplies: "
       },
       "mode": {
-        "hub": "Hub",
+        "hub": "Gateway",
         "direct": "Direct"
       },
       "errors": {
@@ -710,32 +946,25 @@
         "startNow": "Start now",
         "starting": "Starting"
       },
-      "install": {
-        "fail": {
-          "detail": "The install did not finish, and the component may be left incomplete. Retrying installs it again from scratch."
-        }
-      },
       "experimental": "Experimental",
       "agents": {
         "title": "Agent",
         "subtitle": "Each agent picks its own sources and order; a failure moves to the next one",
         "backendSettings": "Backend settings",
-        "connectHub": "Connect to Hub",
-        "modelCount": "{{count}} model(s)",
-        "hubNoSupply": "On Hub · no source enabled, the next turn will fail",
-        "directNote": "Still supplied by the CLI's own config — not connected to the Hub",
+        "connectHub": "Switch to gateway",
+        "modelCount_one": "{{count}} model",
+        "modelCount_other": "{{count}} models",
+        "hubNoSupply": "On the gateway · no source enabled, the next turn will fail",
+        "directNote": "Uses the CLI's native configuration",
         "sourceOrder": "Source order",
-        "modelListCount": "{{count}} model(s)",
+        "modelListCount_one": "{{count}} model",
+        "modelListCount_other": "{{count}} models",
         "enableManaged": "Manage centrally",
         "emptyModels": "This agent has no models yet.",
         "manageModels": "Manage models",
         "menuKind": {
           "fixed": "Fixed menu",
           "open": "Open menu"
-        },
-        "policy": {
-          "follow": "Recommended",
-          "custom": "Custom"
         },
         "attribution": {
           "interrupted": "No supply for {{names}}",
@@ -753,41 +982,22 @@
         "blocked": "Current source unavailable",
         "currentSwitched": "Currently switched to {{source}}",
         "currentSource": "Currently served by {{source}}",
+        "takeover": "Now: {{source}} (takeover)",
+        "waiting": "Waiting for a source to recover",
         "source": "Served by {{source}}",
         "unknown": "Unable to confirm",
         "retry": "Retry",
         "runtime": "Model service is not ready",
         "runtimeAction": "Resolve"
       },
-      "routes": {
-        "title": "Supply method",
-        "global": "Follow {{backend}}'s source order",
-        "manual": "Set route",
-        "liveSource": "Currently served by {{source}} · {{model}}",
-        "globalPending": "Restoring {{backend}}'s source order…",
-        "globalActual": "{{backend}}'s source order currently resolves to {{source}}.",
-        "globalUnavailable": "No source in {{backend}}'s source order can serve right now.",
-        "chooseTarget": "Choose target model",
-        "searchPlaceholder": "Search sources or models",
-        "empty": "No matching models",
-        "availableCount": "{{count}} available",
-        "manualBadge": "Manual",
-        "addManual": "Enter a model manually",
-        "multipleSources": "{{model}} · sources available: {{count}}",
-        "orderDecidesSource": "Actual source follows {{backend}}'s source order",
-        "compatibility": "Reasoning, cache, and tool semantics may differ from the original model.",
-        "openMenuGlobal": "Open models use {{backend}}'s source order; {{source}} currently serves this one.",
-        "none": "no source",
-        "expand": "Expand supply method"
-      },
-      "probe": {
-        "action": "Try it",
-        "running": "Testing",
-        "nativeReady": "{{source}} is ready and can run directly.",
-        "hubOk": "{{source}} responded successfully · {{ms}} ms",
-        "failed": "{{source}} failed: {{detail}}",
-        "unknown": "Source did not pass the test",
-        "error": "Test failed, please retry"
+      "routeDialog": {
+        "title": "{{model}} · Route chain",
+        "open": "Open {{model}} route chain",
+        "label": "Route chain for this model",
+        "removeHop": "Remove hop",
+        "addHop": "Add a hop",
+        "reseed": "Reorder by source order",
+        "hint": "This chain is stored configuration. Later source-order changes do not change it."
       },
       "recent": {
         "title": "Recent switches",
@@ -805,53 +1015,107 @@
         "detail": "Cross-vendor auto-substitution (off) · Request log · Diagnostics",
         "comingSoon": "Advanced settings are coming soon"
       },
-      "addMenu": {
-        "claude": {
-          "title": "Connect Claude subscription",
-          "subtitle": "Pro / Max · browser sign-in"
-        },
-        "chatgpt": {
-          "title": "Connect ChatGPT subscription",
-          "subtitle": "Plus / Pro · browser sign-in"
-        },
-        "apiKey": {
-          "title": "Add API Key…",
-          "subtitle": "Any vendor or compatible service, editable URL"
-        },
-        "sheetTitle": "Add source",
-        "sheetSubtitle": "There are only two kinds: a subscription account, or a key. A relay is just a key with a different URL.",
-        "vendorTitle": "Connect a subscription",
-        "vendorSubtitle": "Uses the CLI's own sign-in; the credential stays on this machine.",
-        "apiKeySheetSubtitle": "Official or third-party URLs both work; filling in a custom URL makes it a relay.",
-        "subscription": {
-          "title": "Subscription account",
-          "subtitle": "Claude Pro, ChatGPT Plus and the like. Uses the CLI's own sign-in; the credential stays in the local CLI.",
-          "recommended": "Recommended"
-        }
-      },
       "addKey": {
-        "title": "Add API Key",
-        "subtitle": "Any vendor or compatible service; connect once, shared by every agent.",
-        "vendorLabel": "Vendor",
-        "vendorHint": "Choosing Anthropic / OpenAI / Zhipu / Kimi etc. prefills the official URL.",
-        "keyLabel": "API KEY",
-        "baseUrlLabel": "SERVICE URL (BASE URL)",
-        "baseUrlHint": "Official vendors are prefilled and editable; for a compatible service (relay, self-hosted gateway) enter the URL it gives you.",
-        "discovered": "Connected · discovered {{count}} model(s), added to the supply list",
-        "failed": "Connection failed: {{detail}}",
-        "testing": "Connecting…",
-        "vendors": {
-          "custom": "Custom · OpenAI / Anthropic compatible",
-          "anthropic": "Anthropic",
-          "openai": "OpenAI",
-          "zhipuai": "Zhipu",
-          "kimi": "Kimi",
-          "xai": "xAI"
-        }
+        "title": "Add API key",
+        "subtitle": "Add connects once: it identifies the interface and fetches the model list",
+        "field": {
+          "name": "Name (optional)",
+          "baseUrl": "Base URL",
+          "baseUrl.hint": "Paste any relay, aggregator or self-hosted address — Avibe identifies the interface itself",
+          "apiKey": "API key",
+          "apiKey.reveal": "Show API key",
+          "apiKey.conceal": "Hide API key"
+        },
+        "test": "Fetch models",
+        "test.hint": "Optional · Add fetches once anyway",
+        "pull": {
+          "result_one": "Fetched {{count}} model",
+          "result_other": "Fetched {{count}} models",
+          "empty": "Connected, but this source lists no models"
+        },
+        "submit": "Add",
+        "adding": "Connecting…",
+        "adding.detail": "Connect, identify the interface, fetch the model list · usually 1–3s",
+        "fail": {
+          "subtitle": "Identifying the interface is a precondition of Add · fix what the line below names, then retry",
+          "auth": "Authentication failed: 401 Unauthorized",
+          "auth.detail": "Check whether the API key is valid",
+          "address": "Wrong address: 404 Not Found",
+          "network": "Could not connect to this address (unreachable or timed out)",
+          "unclassified": "It did not connect, and the cause could not be identified",
+          "engineDown": "The gateway is not responding — try again",
+          "save": "The source is not confirmed saved"
+        },
+        "retry": "Retry",
+        "undetermined": {
+          "title": "Connected and authenticated — but we cannot tell which interface it speaks",
+          "detail": "The response shape matches no interface we know",
+          "label": "Interface type · you hint it this once",
+          "hint": "The hint only reorders the probe · it still has to really connect before anything is saved, and it cannot be changed afterwards"
+        },
+        "protocol": {
+          "anthropicMessages": "Anthropic Messages",
+          "openaiResponses": "OpenAI Responses",
+          "openaiChatCompletions": "OpenAI Chat Completions"
+        },
+        "inventory": {
+          "title": "The interface is identified — but its model list did not come back this time"
+        },
+        "addAnyway": "Add anyway",
+        "success": {
+          "title": "Done → the dialog closes and you land on Source details · Models",
+          "detail": "The model list, refetch and reasoning tiers are all maintained there"
+        },
+        "cancel": "Cancel"
       },
       "field": {
         "apiKeyPlaceholder": "sk-…",
         "baseUrlPlaceholder": "https://api.example.com/v1"
+      },
+      "addSub": {
+        "title": "Add {{vendor}} subscription",
+        "subtitle": {
+          "claude": "claude.ai / Max · Pro",
+          "chatgpt": "chatgpt.com / Plus · Pro"
+        },
+        "opt": {
+          "added": "Already added",
+          "native": {
+            "label": "Use natively",
+            "desc": {
+              "claude": "Claude Code uses this subscription directly; the credential stays on this machine.",
+              "chatgpt": "Codex signs in with this ChatGPT account directly."
+            }
+          },
+          "hub": {
+            "label": "Sign in as a gateway source",
+            "desc": {
+              "claude": "Hand this subscription to the gateway so it can supply Codex, OpenCode and other Agents.",
+              "chatgpt": "The gateway supplies it to Codex and other Agents, with usage, quota and takeover all visible."
+            }
+          }
+        },
+        "badge": {
+          "recommended": "Recommended",
+          "secondary": "Second choice",
+          "supportedNotRecommended": "Supported, not recommended"
+        },
+        "tos": {
+          "claude": "The subscription terms authorize only you, inside Claude's official clients. Supplying it to other Agents is out-of-scope use and the account may be restricted."
+        },
+        "hint": {
+          "claude": "You can have both — add them one at a time.",
+          "chatgpt": "Nothing takes over when the quota runs out, and usage stays invisible."
+        },
+        "signIn": "Sign in",
+        "cancel": "Cancel",
+        "retry": "Retry",
+        "error": {
+          "oauthFailed": "Sign-in did not complete. You can retry.",
+          "startFailed": "Could not confirm the sign-in started — you can retry",
+          "engineDown": "The gateway is not responding. Please retry.",
+          "alreadyBound": "This backend's native login slot is already taken. Add it as a gateway-held source instead."
+        }
       },
       "oauth": {
         "title": {
@@ -886,142 +1150,70 @@
           "timeout": "Authorization timed out, please reconnect",
           "generic": "Connection failed, please retry",
           "finalize": "Authorized, but couldn't create the source — please retry",
-          "finalizeReauth": "Signed in, but this source still isn't working — please retry",
-          "consent": "A hub-hosted subscription needs experimental consent — restart the connect and enable the hub option."
-        },
-        "hubOption": {
-          "title": "Let the Hub hold this subscription (experimental)",
-          "subtitle": "The Hub stores and forwards the credential; may violate vendor terms",
-          "on": "On",
-          "off": "Off"
+          "finalizeReauth": "Signed in, but this source still isn't working — please retry"
         }
-      },
-      "consent": {
-        "title": "Hub-held subscription · risk notice",
-        "subtitle": "Please confirm you understand the risks before enabling.",
-        "points": [
-          "This source uses your own subscription login. Vendor terms generally intend a subscription for personal use inside the official client; routing it through the hub proxy is an unofficial use that may violate those terms.",
-          "There is a real risk of rate-limiting, review, or account suspension (Claude subscriptions used via proxies have been auto-disabled). Enabling this is your choice and at your own risk.",
-          "For the safest setup, use Direct mode for subscriptions (official client, direct connection), or add an API Key source instead — vendors explicitly permit programmatic / proxied use of API keys."
-        ],
-        "confirm": "I understand the risks, continue"
       },
       "toast": {
         "reorderFailed": "Couldn't save the new order",
-        "connected": "Connected to the Hub",
+        "connected": "Connected to the gateway",
         "connectFailed": "Couldn't connect, please retry",
         "refreshFailed": "Couldn't refresh, please retry"
       },
       "supply": {
-        "degraded": "On the Hub · a source is down, already switched to the next one",
-        "waiting": "On the Hub · every source is cooling down; turns fail until one recovers",
-        "interrupted": "On the Hub · supply interrupted, the next turn will fail",
-        "noSources": "On the Hub · no source enabled yet, the next turn will fail",
-        "nothingRunnable": "On the Hub · no enabled source can serve right now, the next turn will fail"
+        "degraded": "On the gateway · a source is down, already switched to the next one",
+        "waiting": "On the gateway · every source is cooling down; turns fail until one recovers",
+        "interrupted": "On the gateway · supply interrupted, the next turn will fail",
+        "noSources": "On the gateway · no source enabled yet, the next turn will fail",
+        "nothingRunnable": "On the gateway · no enabled source can serve right now, the next turn will fail"
       },
       "adoption": {
-        "enabled": "Added to the source order of {{list}}",
-        "entry": "{{name}} (#{{position}})",
-        "none": "No agent has enabled it yet · add it to an agent's source order for it to be used",
-        "noneSkipped": "No agent has enabled it yet · skipped for {{skipped}} (hand-picked order) — add it there to use it",
-        "partlySkipped": "Added to the source order of {{list}} · skipped for {{skipped}} (hand-picked order) — add it there to use it"
-      },
-      "menus": {
-        "done": "Done",
-        "resetAll": "Reset all to default",
-        "saveFailed": "Couldn't save your changes, please retry",
-        "enrolled": "Added {{sources}} to {{backend}}’s source order so your selection has a supplier",
-        "mapping": {
-          "title": "{{backend}} · Model menu",
-          "subtitle": "Fixed menu: {{backend}} only recognizes these built-in model IDs. Each ID can be redirected to another model — this affects {{backend}} only.",
-          "builtinCol": "Built-in model ID",
-          "supplyCol": "Actual supply",
-          "followNative": "Follow native · supply by source order",
-          "candidates": "Source order · {{sources}}",
-          "candidatesUnavailable": "No source can supply this model yet",
-          "warning": "Reasoning, cache and tool semantics aren't fully equivalent after remapping",
-          "resetRow": "Reset to default",
-          "footnote": "Remapping affects only this ID in {{backend}}; the Hub converts protocols automatically."
-        },
-        "opencode": {
-          "title": "OpenCode · Model menu",
-          "subtitle": "Open menu: grouped by provider prefix. Prefix + model ID = the full identifier, identical to native OpenCode. Checked = shown in the model picker.",
-          "viewLabel": "Menu scope",
-          "featured": "Featured · {{count}}",
-          "full": "All · {{count}}",
-          "addCustom": "Custom model",
-          "empty": "No models here yet.",
-          "footnote": "Prefix = the standard vendor ID (identical to native OpenCode; unrecognized vendors fall under custom/). Switching Hub/Direct never changes the identifier; dots = supplying sources.",
-          "customBadge": "Custom",
-          "provider": {
-            "anthropic": "Anthropic protocol · Claude family",
-            "openai": "OpenAI protocol · GPT family",
-            "zhipuai": "OpenAI-compatible · GLM family",
-            "custom": "Custom endpoints"
-          }
-        },
-        "custom": {
-          "title": "Add model manually",
-          "subtitle": "Register a model missing from this source so it can be selected or used as a route target.",
-          "sourceLabel": "Source (able to supply this model)",
-          "modelIdLabel": "Model ID",
-          "modelIdPlaceholder": "glm-5.2-air",
-          "displayNameLabel": "Display name (optional)",
-          "displayNamePlaceholder": "GLM 5.2 Air",
-          "previewLabel": "OpenCode identifier · generated",
-          "previewEmpty": "Enter a model ID to preview",
-          "previewHint": "The provider segment is chosen automatically: a recognized vendor uses its standard ID (identical to native OpenCode), otherwise it falls under custom/. Adding or removing sources and switching modes never change the identifier.",
-          "add": "Add model",
-          "failed": "Couldn't add the model, please retry",
-          "delete": "Remove model",
-          "deleteConfirmTitle": "Remove custom model?",
-          "deleteConfirmBody": "This removes {{model}} from “{{source}}”.",
-          "deleted": "Custom model removed",
-          "deleteFailed": "Couldn't remove the model, please retry",
-          "deleteInUse": "This model is still selected by an agent — unselect it in that menu/mapping first."
-        }
+        "enabled": "Added to {{list}}",
+        "route": "{{backend}} · {{model}} · hop {{position}}",
+        "none": "Connected. Add it to a model's route when you want to use it."
       },
       "supplyMode": {
         "title": "Supply mode",
-        "currentHub": "Current: Hub",
+        "currentHub": "Current: Gateway",
         "currentDirect": "Current: Direct",
-        "switchedHub": "Switched to Hub",
+        "switchedHub": "Switched to Gateway",
         "switchedDirect": "Switched to Direct",
         "switchFailed": "Couldn't switch mode, please retry",
         "hub": {
-          "title": "Hub mode",
+          "title": "Gateway mode",
           "recommended": "Recommended · default",
           "openModels": "Open Models page",
-          "description": "Model tokens are supplied from Settings → Models: sign-ins, API keys, source order and mappings all live there. {{backend}}'s native config is left untouched, and you can switch away anytime."
+          "description": "Sign-ins, API keys and per-model Routes are managed in Settings → Models. {{backend}}'s native config is left untouched, and you can switch away anytime."
         },
         "direct": {
           "title": "Direct mode",
           "description": "{{backend}} uses its own native config (settings.json / CLI sign-in); Avibe only launches the process and doesn't manage models. Good for troubleshooting or fully self-managed setups.",
-          "detected": "Existing direct config detected: {{detail}} — import it into the Hub in one click",
-          "import": "Import to Hub…"
+          "detected": "Existing direct config detected: {{detail}} — import it into the gateway in one click",
+          "import": "Import to gateway…"
         },
         "fixHint": "Add or enable a source on the Models page to bring it back."
       },
       "migration": {
-        "title": "Connect to the Model Hub",
-        "subtitle": "Move your existing sign-ins and API keys into the Models Hub in one pass — each agent then picks its own sources and their order.",
+        "title": "Connect to the model gateway",
+        "subtitle": "Move your existing sign-ins and API keys into the gateway in one pass — each Agent then keeps its own sources and order.",
         "empty": "No native configuration detected to migrate.",
         "scanFailed": "Couldn't scan native configs, please retry",
         "applyFailed": "Import failed, please retry",
-        "applied": "Imported {{count}} item(s)",
+        "applied_one": "Imported {{count}} item",
+        "applied_other": "Imported {{count}} items",
         "later": "Maybe later",
-        "apply": "Import {{count}} & enable Hub",
+        "apply_one": "Import {{count}} item and enable the gateway",
+        "apply_other": "Import {{count}} items and enable the gateway",
         "nonDestructive": "Non-destructive: native configs are never changed or deleted — importing only copies them; you can switch back to Direct on the Backends page anytime.",
         "action": {
           "import": "Import as source",
-          "controlledImport": "Controlled import · experimental",
+          "controlledImport": "Controlled import · reserved",
           "keepNative": "Keep native",
           "reauth": "Re-authorize · one-click in browser"
         },
         "notes": {
           "customBaseUrl": "Includes a custom Base URL",
           "keepNativeSanctioned": "Stays in the CLI's own store (sanctioned)",
-          "keepNativeReauthHint": "Kept native; re-authorize inside the hub to make it hub-held (experimental)",
+          "keepNativeReauthHint": "Kept native; add a separate gateway-held subscription explicitly",
           "fromOpencode": "From the opencode config"
         }
       },
@@ -1030,33 +1222,85 @@
         "codex": "Codex",
         "opencode": "OpenCode"
       },
-      "sourceActions": {
-        "more": "More actions",
-        "rename": "Rename",
-        "refresh": "Refresh models",
-        "refreshing": "Refreshing models",
-        "reauth": "Sign in again",
-        "replaceKey": "Replace API key",
-        "delete": "Delete source",
-        "renameTitle": "Rename source",
-        "renameLabel": "Display name",
-        "renamePlaceholder": "e.g. Production key",
-        "renamed": "Renamed",
-        "renameFailed": "Couldn't rename, please retry",
-        "refreshed": "Updated {{count}} model(s)",
-        "refreshFailed": "Couldn't fetch the latest models. The last successful list is still shown.",
-        "deleteTitle": "Delete source?",
-        "deleteBody": "This removes “{{name}}” from the Hub and revokes its credential. This can't be undone.",
-        "deleteConfirm": "Delete",
-        "deleteForceTitle": "Delete this source anyway?",
-        "deleteForceBody": "“{{name}}” is the only supplier of a selected model; deleting it leaves that agent with no source. Force delete?",
-        "deleteForceConfirm": "Force delete",
-        "deleted": "Source deleted",
-        "deleteFailed": "Couldn't delete, please retry",
-        "renameHint": "Changes the display name only — the credential is untouched",
-        "deleteHint": "You'll be asked to confirm first",
-        "reauthHint": "The old sign-in stops working right away",
-        "replaceKeyHint": "Enter a new key — the endpoint and name stay"
+      "sourceDetail": {
+        "back": "Back to sources",
+        "status": {
+          "inUse": "In use",
+          "needsAction": {
+            "oauthExpired": "Sign in again",
+            "balanceExhausted": "Out of balance",
+            "credentialRevoked": "Credential revoked",
+            "accountBanned": "Account restricted"
+          },
+          "error": "Error",
+          "listUpdated": "· model list updated {{time}}"
+        },
+        "summary_one": "{{host}} · {{count}} model",
+        "summary_other": "{{host}} · {{count}} models",
+        "action": {
+          "refetch": "Refetch",
+          "addModel": "Add model"
+        },
+        "refetch": {
+          "added": "New",
+          "removed_one": "This fetch removed {{count}} model: {{models}}",
+          "removed_other": "This fetch removed {{count}} models: {{models}}",
+          "unchangedOnly": "Nothing changed in this fetch"
+        },
+        "row": { "remove": "Remove" },
+        "fail": {
+          "refetch": "The fetch did not come back. The list below is the last one this page actually read",
+          "tier": "The tier was not saved",
+          "addModel": "The model was not added",
+          "removeModel": "The model was not removed"
+        },
+        "retry": "Try again",
+        "search": "Search model IDs",
+        "col": {
+          "id": "Model ID",
+          "entry": "Entry",
+          "tiers": "Reasoning tiers"
+        },
+        "entry": { "auto": "Auto-fetched", "manual": "Added manually" },
+        "tiers": {
+          "empty": "No tiers set",
+          "addFirst": "+ Add tier",
+          "add": "+ Tier",
+          "inputHint": "Enter to add · any text",
+          "remove": "Remove {{tier}}"
+        },
+        "addRow": { "hint": "Use this when a model is not discoverable, or when you only want one of them" },
+        "empty": "This source returned no models. Add one by hand, or refetch.",
+        "emptyNeverFetched": "This source's model list has never come back. Deal with the status above, fetch again, or add a model by hand.",
+        "footnote": "This page answers only \"which models does this source have\". Which routing chain a model takes is set in the gateway module. Tiers are yours to type, the same for both entry kinds. The interface type is identified when the source is added and fixed there — it is neither shown on this page nor editable."
+      },
+      "guard": {
+        "label": "Hops that will be removed",
+        "count_one": "{{count}} hop",
+        "count_other": "{{count}} hops",
+        "hop": { "position": "Order #{{n}}" },
+        "hint": {
+          "safe": "These models still have another source available.",
+          "interrupt": "Some models will be left with no usable source."
+        },
+        "gap": {
+          "label": "Models that will be left with no source",
+          "subject": "{{backend}} · {{menuModel}}",
+          "agents": "Agents pinned to it: {{agents}}"
+        },
+        "cancel": "Cancel",
+        "title": {
+          "refetch": "Refetch models from {{source}}",
+          "removeModel": "Remove {{model}} from {{source}}"
+        },
+        "subtitle": {
+          "refetch": "This refetch drops models from this source's inventory.",
+          "removeModel": "This model disappears from this source's inventory."
+        },
+        "confirm": {
+          "refetch": "Refetch anyway",
+          "removeModel": "Remove anyway"
+        }
       },
       "repair": {
         "reauth": "Sign in",
@@ -1084,19 +1328,11 @@
         "unresolved": "Still not working",
         "failed": "Couldn't do that, please retry"
       },
-      "dryRun": {
-        "action": "Run a test turn",
-        "running": "Testing…",
-        "ok": "{{name}} is reachable · {{ms}} ms",
-        "okNoLatency": "{{name}} is reachable",
-        "failed": "{{name}} didn't go through · {{detail}}",
-        "failedUnknown": "{{name}} didn't go through",
-        "error": "Couldn't run the test, please retry"
-      },
       "migrationBanner": {
         "title": "Native configs ready to import",
-        "body": "Found {{count}} native sign-in(s) / API key(s) you can move into the Hub — each agent then picks its own sources and their order.",
-        "import": "Import to Hub",
+        "body_one": "Found {{count}} native sign-in or API key you can move into the gateway.",
+        "body_other": "Found {{count}} native sign-ins or API keys you can move into the gateway.",
+        "import": "Import to gateway",
         "dismiss": "Dismiss"
       }
     }
@@ -1225,8 +1461,6 @@
     },
     "source": {
       "cooldown": {
-        "network": "Network unreachable",
-        "timeout": "Repeated timeouts",
         "rate_limited": "Rate limited",
         "quota_exhausted": "Cycle quota used up",
         "server_error": "Upstream server error"
