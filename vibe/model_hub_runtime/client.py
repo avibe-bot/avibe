@@ -24,6 +24,7 @@ from core.handlers.model_hub.stream_wire import (
     PROTOCOL_STREAM_TAXONOMY,
     ErrorEnvelopePath,
     ProtocolSSEState,
+    SSE_MAX_FRAME_BYTES,
     SSEFrameLimitError,
 )
 from vibe.model_hub_runtime.state import SourceRecord
@@ -194,6 +195,7 @@ class EngineClient:
         session = aiohttp.ClientSession(timeout=timeout, trust_env=False)
         response: aiohttp.ClientResponse | None = None
         first_received = False
+        model_output_started = False
         ownership_transferred = False
         try:
             response = await asyncio.wait_for(
@@ -311,16 +313,35 @@ class EngineClient:
                     ),
                 )
 
+            prelude, wire_state, prelude_outcome = await _read_stream_prelude(
+                response=response,
+                first=first,
+                source=source,
+                model_id=model_id,
+                protocol=request_protocol,
+                timeout=self.timeout,
+            )
+            model_output_started = wire_state.model_output_started
+            if prelude_outcome is not None:
+                response.close()
+                await session.close()
+                return (
+                    buffered_handle(prelude, prelude_outcome)
+                    if prelude_outcome.kind == RawOutcomeKind.SUCCESS
+                    else completed_handle(prelude_outcome)
+                )
+
             loop = asyncio.get_running_loop()
             outcome_future: asyncio.Future[RawCallOutcome] = loop.create_future()
             response_stream = _response_stream(
                 response=response,
                 session=session,
-                first=first,
+                first=prelude,
                 source=source,
                 model_id=model_id,
                 protocol=request_protocol,
                 outcome_future=outcome_future,
+                wire_state=wire_state,
             )
 
             async def close_response_stream() -> None:
@@ -345,7 +366,21 @@ class EngineClient:
                     model_id=model_id,
                     http_status=response.status if response is not None and first_received else None,
                     message="upstream request timed out",
-                    stream_started=first_received,
+                    stream_started=model_output_started if stream else first_received,
+                )
+            )
+        except SSEFrameLimitError as exc:
+            if response is not None:
+                response.close()
+            await session.close()
+            return completed_handle(
+                _outcome(
+                    kind=RawOutcomeKind.PROTOCOL_ERROR,
+                    source=source,
+                    model_id=model_id,
+                    http_status=response.status if response is not None else None,
+                    message=str(exc),
+                    stream_started=model_output_started if stream else first_received,
                 )
             )
         except aiohttp.ClientError:
@@ -360,7 +395,7 @@ class EngineClient:
                     error_code="engine_down",
                     http_status=response.status if response is not None and first_received else None,
                     message="upstream request failed",
-                    stream_started=first_received,
+                    stream_started=model_output_started if stream else first_received,
                 )
             )
         finally:
@@ -502,6 +537,61 @@ async def _read_limited(
             raise _ResponseTooLargeError
 
 
+async def _read_stream_prelude(
+    *,
+    response: aiohttp.ClientResponse,
+    first: bytes,
+    source: SourceRecord,
+    model_id: str,
+    protocol: str,
+    timeout: float,
+) -> tuple[bytes, ProtocolSSEState, RawCallOutcome | None]:
+    """Buffer transport metadata until the sole first-model-output fact."""
+
+    wire_state = ProtocolSSEState(protocol)
+    payload = bytearray(first)
+    wire_state.observe(first)
+    while not wire_state.model_output_started:
+        outcome = _observed_stream_terminal_outcome(
+            wire_state,
+            source,
+            model_id,
+            response.status,
+        )
+        if outcome is not None:
+            return bytes(payload), wire_state, outcome
+        chunk = await asyncio.wait_for(
+            response.content.read(_STREAM_CHUNK_BYTES),
+            timeout=timeout,
+        )
+        if not chunk:
+            completion = _observed_stream_terminal_outcome(
+                wire_state,
+                source,
+                model_id,
+                response.status,
+                allow_completion=True,
+            )
+            if completion is not None:
+                return bytes(payload), wire_state, completion
+            return (
+                b"",
+                wire_state,
+                _outcome(
+                    kind=RawOutcomeKind.NETWORK_ERROR,
+                    source=source,
+                    model_id=model_id,
+                    http_status=response.status,
+                    message="upstream stream ended before model output",
+                ),
+            )
+        payload.extend(chunk)
+        if len(payload) > SSE_MAX_FRAME_BYTES:
+            raise SSEFrameLimitError("SSE prelude exceeds the configured limit")
+        wire_state.observe(chunk)
+    return bytes(payload), wire_state, None
+
+
 async def _response_stream(
     *,
     response: aiohttp.ClientResponse,
@@ -511,11 +601,10 @@ async def _response_stream(
     model_id: str,
     protocol: str,
     outcome_future: asyncio.Future[RawCallOutcome],
+    wire_state: ProtocolSSEState,
 ) -> AsyncIterator[bytes]:
     outcome: RawCallOutcome | None = None
-    wire_state = ProtocolSSEState(protocol)
     try:
-        wire_state.observe(first)
         yield first
         async for chunk in response.content.iter_chunked(_STREAM_CHUNK_BYTES):
             if chunk:
@@ -526,6 +615,7 @@ async def _response_stream(
             source,
             model_id,
             response.status,
+            allow_completion=True,
         )
         if outcome is None:
             outcome = _outcome(
@@ -534,7 +624,7 @@ async def _response_stream(
                 model_id=model_id,
                 http_status=response.status,
                 message="upstream stream ended before a protocol terminal event",
-                stream_started=True,
+                stream_started=wire_state.model_output_started,
             )
     except SSEFrameLimitError as exc:
         outcome = _outcome(
@@ -543,7 +633,7 @@ async def _response_stream(
             model_id=model_id,
             http_status=response.status,
             message=str(exc),
-            stream_started=True,
+            stream_started=wire_state.model_output_started,
         )
     except asyncio.TimeoutError:
         outcome = _observed_stream_terminal_outcome(
@@ -551,6 +641,7 @@ async def _response_stream(
             source,
             model_id,
             response.status,
+            allow_completion=True,
         )
         if outcome is None:
             outcome = _outcome(
@@ -559,7 +650,7 @@ async def _response_stream(
                 model_id=model_id,
                 http_status=response.status,
                 message="upstream response timed out after streaming started",
-                stream_started=True,
+                stream_started=wire_state.model_output_started,
             )
     except aiohttp.ClientError:
         outcome = _observed_stream_terminal_outcome(
@@ -567,6 +658,7 @@ async def _response_stream(
             source,
             model_id,
             response.status,
+            allow_completion=True,
         )
         if outcome is not None:
             logger.debug("ignoring transport error after protocol terminal marker")
@@ -578,7 +670,7 @@ async def _response_stream(
                 http_status=response.status,
                 error_code="engine_down",
                 message="upstream response failed after streaming started",
-                stream_started=True,
+                stream_started=wire_state.model_output_started,
             )
     finally:
         if outcome is None:
@@ -587,6 +679,7 @@ async def _response_stream(
                 source,
                 model_id,
                 response.status,
+                allow_completion=True,
             )
         response.close()
         await session.close()
@@ -599,6 +692,8 @@ def _observed_stream_terminal_outcome(
     source: SourceRecord,
     model_id: str,
     http_status: int,
+    *,
+    allow_completion: bool = False,
 ) -> RawCallOutcome | None:
     if wire_state.invalid_after_terminal:
         return _outcome(
@@ -607,7 +702,7 @@ def _observed_stream_terminal_outcome(
             model_id=model_id,
             http_status=http_status,
             message="upstream emitted data after a protocol terminal event",
-            stream_started=True,
+            stream_started=wire_state.model_output_started,
         )
     if wire_state.invalid_protocol_shape:
         return _outcome(
@@ -616,15 +711,15 @@ def _observed_stream_terminal_outcome(
             model_id=model_id,
             http_status=http_status,
             message="upstream emitted an invalid protocol event shape",
-            stream_started=True,
+            stream_started=wire_state.model_output_started,
         )
-    if wire_state.terminal_outcome == "served":
+    if wire_state.terminal_outcome == "served" or (allow_completion and wire_state.completion_observed):
         return _outcome(
             kind=RawOutcomeKind.SUCCESS,
             source=source,
             model_id=model_id,
             http_status=http_status,
-            stream_started=True,
+            stream_started=wire_state.model_output_started,
         )
     if wire_state.terminal_outcome == "failed_terminal":
         error_type, error_code, candidates = _raw_error_fields(
@@ -640,7 +735,7 @@ def _observed_stream_terminal_outcome(
             error_code=error_code,
             error_candidates=candidates,
             message="upstream returned a protocol error event",
-            stream_started=True,
+            stream_started=wire_state.model_output_started,
         )
     return None
 

@@ -139,11 +139,23 @@ class ProtocolTerminalEnvelope:
     selector_value: str | None
     terminal_outcome: StreamTerminalOutcome
     error_envelope_paths: tuple[ErrorEnvelopePath, ...] = ()
+    required_error_path: ErrorEnvelopePath | None = None
+    required_error_code_path: ErrorEnvelopePath | None = None
+    wire_terminal: bool = True
+
+
+@dataclass(frozen=True)
+class ProtocolModelOutputEnvelope:
+    event_name: str | None
+    selector_path: tuple[str, ...]
+    selector_value: str | None
+    require_nonempty: bool = False
 
 
 @dataclass(frozen=True)
 class ProtocolStreamTaxonomy:
     terminal_envelopes: tuple[ProtocolTerminalEnvelope, ...]
+    model_output_envelopes: tuple[ProtocolModelOutputEnvelope, ...]
     success_literal: tuple[str | None, bytes] | None
     buffered_error_envelope_paths: tuple[ErrorEnvelopePath, ...]
     terminal_event_name: str | None
@@ -169,6 +181,20 @@ PROTOCOL_STREAM_TAXONOMY: Final[Mapping[str, ProtocolStreamTaxonomy]] = {
                 (("error",),),
             ),
         ),
+        model_output_envelopes=(
+            ProtocolModelOutputEnvelope(
+                # https://platform.claude.com/docs/en/build-with-claude/streaming#content-block-start-event
+                "content_block_start",
+                ("type",),
+                "content_block_start",
+            ),
+            ProtocolModelOutputEnvelope(
+                # https://platform.claude.com/docs/en/build-with-claude/streaming#content-block-delta-event
+                "content_block_delta",
+                ("type",),
+                "content_block_delta",
+            ),
+        ),
         success_literal=None,
         buffered_error_envelope_paths=(("error",),),
         terminal_event_name="error",
@@ -184,19 +210,12 @@ PROTOCOL_STREAM_TAXONOMY: Final[Mapping[str, ProtocolStreamTaxonomy]] = {
                 "served",
             ),
             ProtocolTerminalEnvelope(
-                # https://platform.openai.com/docs/api-reference/realtime-server-events/response/done
-                "response.done",
-                ("type",),
-                "response.done",
-                "served",
-            ),
-            ProtocolTerminalEnvelope(
                 # https://platform.openai.com/docs/api-reference/responses-streaming/error
                 "error",
                 ("type",),
                 "error",
                 "failed_terminal",
-                ((), ("error",)),
+                ((),),
             ),
             ProtocolTerminalEnvelope(
                 # https://platform.openai.com/docs/api-reference/responses-streaming/response/failed
@@ -204,7 +223,7 @@ PROTOCOL_STREAM_TAXONOMY: Final[Mapping[str, ProtocolStreamTaxonomy]] = {
                 ("type",),
                 "response.failed",
                 "failed_terminal",
-                ((), ("response", "error"), ("error",)),
+                (("response", "error"),),
             ),
             ProtocolTerminalEnvelope(
                 # https://platform.openai.com/docs/api-reference/responses-streaming/response/incomplete
@@ -212,7 +231,44 @@ PROTOCOL_STREAM_TAXONOMY: Final[Mapping[str, ProtocolStreamTaxonomy]] = {
                 ("type",),
                 "response.incomplete",
                 "failed_terminal",
-                ((), ("response", "error"), ("error",)),
+                (("response", "error"),),
+                ("response", "error"),
+                ("response", "error", "code"),
+            ),
+            ProtocolTerminalEnvelope(
+                # https://platform.openai.com/docs/api-reference/responses-streaming/response/incomplete
+                # Incomplete output without an error envelope is completed
+                # output and does not change Source health.
+                "response.incomplete",
+                ("type",),
+                "response.incomplete",
+                "served",
+            ),
+        ),
+        model_output_envelopes=(
+            ProtocolModelOutputEnvelope(
+                # https://platform.openai.com/docs/api-reference/responses-streaming/response/output-text/delta
+                "response.output_text.delta",
+                ("type",),
+                "response.output_text.delta",
+            ),
+            ProtocolModelOutputEnvelope(
+                # https://platform.openai.com/docs/api-reference/responses-streaming/response/refusal/delta
+                "response.refusal.delta",
+                ("type",),
+                "response.refusal.delta",
+            ),
+            ProtocolModelOutputEnvelope(
+                # https://platform.openai.com/docs/api-reference/responses-streaming/response/reasoning-summary-text/delta
+                "response.reasoning_summary_text.delta",
+                ("type",),
+                "response.reasoning_summary_text.delta",
+            ),
+            ProtocolModelOutputEnvelope(
+                # https://platform.openai.com/docs/api-reference/responses-streaming/response/function-call-arguments/delta
+                "response.function_call_arguments.delta",
+                ("type",),
+                "response.function_call_arguments.delta",
             ),
         ),
         success_literal=None,
@@ -232,6 +288,76 @@ PROTOCOL_STREAM_TAXONOMY: Final[Mapping[str, ProtocolStreamTaxonomy]] = {
                 "failed_terminal",
                 (("error",),),
             ),
+            ProtocolTerminalEnvelope(
+                # https://platform.openai.com/docs/api-reference/chat/create#chat-create-stream
+                None,
+                ("choices", "*", "finish_reason"),
+                "stop",
+                "served",
+                wire_terminal=False,
+            ),
+            ProtocolTerminalEnvelope(
+                # https://platform.openai.com/docs/api-reference/chat/create#chat-create-stream
+                None,
+                ("choices", "*", "finish_reason"),
+                "length",
+                "served",
+                wire_terminal=False,
+            ),
+            ProtocolTerminalEnvelope(
+                # https://platform.openai.com/docs/api-reference/chat/create#chat-create-stream
+                None,
+                ("choices", "*", "finish_reason"),
+                "content_filter",
+                "served",
+                wire_terminal=False,
+            ),
+            ProtocolTerminalEnvelope(
+                # https://platform.openai.com/docs/api-reference/chat/create#chat-create-stream
+                None,
+                ("choices", "*", "finish_reason"),
+                "tool_calls",
+                "served",
+                wire_terminal=False,
+            ),
+            ProtocolTerminalEnvelope(
+                # https://platform.openai.com/docs/api-reference/chat/create#chat-create-stream
+                None,
+                ("choices", "*", "finish_reason"),
+                "function_call",
+                "served",
+                wire_terminal=False,
+            ),
+        ),
+        model_output_envelopes=(
+            ProtocolModelOutputEnvelope(
+                # https://platform.openai.com/docs/api-reference/chat/create#chat-create-stream
+                None,
+                ("choices", "*", "delta", "content"),
+                None,
+                require_nonempty=True,
+            ),
+            ProtocolModelOutputEnvelope(
+                # https://platform.openai.com/docs/api-reference/chat/create#chat-create-stream
+                None,
+                ("choices", "*", "delta", "refusal"),
+                None,
+                require_nonempty=True,
+            ),
+            ProtocolModelOutputEnvelope(
+                # https://platform.openai.com/docs/api-reference/chat/create#chat-create-stream
+                None,
+                ("choices", "*", "delta", "tool_calls"),
+                None,
+                require_nonempty=True,
+            ),
+            ProtocolModelOutputEnvelope(
+                # https://platform.openai.com/docs/api-reference/chat/create#chat-create-stream
+                None,
+                ("choices", "*", "delta", "function_call"),
+                None,
+                require_nonempty=True,
+            ),
         ),
         # https://platform.openai.com/docs/api-reference/chat/create#chat-create-stream
         success_literal=(None, b"[DONE]"),
@@ -242,16 +368,53 @@ PROTOCOL_STREAM_TAXONOMY: Final[Mapping[str, ProtocolStreamTaxonomy]] = {
 }
 
 
-def _path_value(document: Mapping[str, object], path: tuple[str, ...]) -> object:
-    value: object = document
+def _path_values(document: Mapping[str, object], path: tuple[str, ...]) -> tuple[object, ...]:
+    values: tuple[object, ...] = (document,)
     for component in path:
-        if not isinstance(value, Mapping) or component not in value:
-            return _MISSING
-        value = value[component]
-    return value
+        next_values: list[object] = []
+        for value in values:
+            if component == "*" and isinstance(value, list):
+                next_values.extend(value)
+            elif isinstance(value, Mapping) and component in value:
+                next_values.append(value[component])
+        values = tuple(next_values)
+        if not values:
+            break
+    return values
 
 
-_MISSING: Final = object()
+def _selector_matches(
+    payload: Mapping[str, object],
+    *,
+    selector_path: tuple[str, ...],
+    selector_value: str | None,
+    require_nonempty: bool = False,
+) -> bool:
+    values = _path_values(payload, selector_path)
+    if selector_value is not None:
+        return selector_value in values
+    if require_nonempty:
+        return any(bool(value) for value in values)
+    return any(isinstance(value, Mapping) for value in values)
+
+
+def is_protocol_model_output(
+    protocol: str,
+    event_name: str | None,
+    payload: Mapping[str, object],
+) -> bool:
+    """Return the sole table-backed first-model-output boundary fact."""
+
+    return any(
+        envelope.event_name == event_name
+        and _selector_matches(
+            payload,
+            selector_path=envelope.selector_path,
+            selector_value=envelope.selector_value,
+            require_nonempty=envelope.require_nonempty,
+        )
+        for envelope in PROTOCOL_STREAM_TAXONOMY[protocol].model_output_envelopes
+    )
 
 
 @dataclass
@@ -266,6 +429,8 @@ class ProtocolSSEState:
     last_sequence_number: int = -1
     invalid_after_terminal: bool = False
     invalid_protocol_shape: bool = False
+    model_output_started: bool = False
+    completion_observed: bool = False
 
     def observe(self, chunk: bytes) -> None:
         for frame in self.tokenizer.feed(chunk):
@@ -304,17 +469,29 @@ class ProtocolSSEState:
         if "type" in payload and not isinstance(payload["type"], str):
             self.invalid_protocol_shape = True
             return
+        if is_protocol_model_output(self.protocol, event_name, payload):
+            self.model_output_started = True
         for envelope in taxonomy.terminal_envelopes:
             if envelope.event_name != event_name:
                 continue
-            selector = _path_value(payload, envelope.selector_path)
-            matched = (
-                isinstance(selector, Mapping)
-                if envelope.selector_value is None
-                else selector == envelope.selector_value
-            )
-            if not matched:
+            if not _selector_matches(
+                payload,
+                selector_path=envelope.selector_path,
+                selector_value=envelope.selector_value,
+            ):
                 continue
+            if envelope.required_error_path is not None and not any(
+                isinstance(value, Mapping) for value in _path_values(payload, envelope.required_error_path)
+            ):
+                continue
+            if envelope.required_error_code_path is not None and not any(
+                isinstance(value, str) and value
+                for value in _path_values(payload, envelope.required_error_code_path)
+            ):
+                continue
+            if envelope.terminal_outcome == "served" and not envelope.wire_terminal:
+                self.completion_observed = True
+                break
             self.terminal_outcome = envelope.terminal_outcome
             if envelope.terminal_outcome == "failed_terminal":
                 self.error_payload = data

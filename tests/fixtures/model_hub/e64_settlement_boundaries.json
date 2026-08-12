@@ -3,7 +3,6 @@
   "partial_terminals": [
     { "protocol": "anthropic", "payload": { "type": "message_stop" } },
     { "protocol": "openai_responses", "payload": { "type": "response.completed" } },
-    { "protocol": "openai_responses", "payload": { "type": "response.done" } },
     { "protocol": "openai_chat", "payload": "[DONE]" }
   ],
   "stream_errors": [

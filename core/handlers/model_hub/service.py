@@ -4098,9 +4098,6 @@ class ModelHubService:
             raise AssertionError("post-handle settlement requires a hub stream")
         if outcome is None:
             raise AssertionError("upstream handle termination requires an outcome")
-        # A consumed non-null handle is first-byte evidence even if an adapter
-        # omitted the redundant flag from its terminal report.
-        outcome = replace(outcome, stream_started=True)
         decision = classify_outcome(outcome)
         record_attempt(outcome, decision)
         if decision.action == "return":

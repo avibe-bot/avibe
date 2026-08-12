@@ -300,12 +300,14 @@ class OAuthFlowState:
 class InvokeHandle(Protocol):
     """One in-flight upstream call.
 
-    ``stream`` is None iff the call failed before the first byte (outcome is
-    then immediately awaitable). When ``stream`` is not None, the settlement
-    owner closes it before reading the outcome. A never-started stream may have
-    no outcome after closing; ``outcome_available`` is the non-blocking guard.
-    A consumed stream reports ``stream_started=True`` — per spec §4.2 no
-    transparent retry then. ``close_stream()`` is idempotent.
+    ``stream`` is None when a streaming failure settles before its first model
+    output (the outcome is then immediately awaitable). When ``stream`` is not
+    None, the settlement owner closes it before reading the outcome. A
+    never-started stream may have no outcome after closing;
+    ``outcome_available`` is the non-blocking guard.
+    For streaming calls, ``stream_started`` becomes true only when the
+    protocol taxonomy observes the first model output; transport metadata and
+    error frames remain pre-output. ``close_stream()`` is idempotent.
     """
 
     @property

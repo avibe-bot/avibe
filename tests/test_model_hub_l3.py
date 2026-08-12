@@ -64,6 +64,7 @@ from core.handlers.model_hub.service import (
 )
 from core.handlers.model_hub.turn_gateway import (
     ModelHubTurnGateway,
+    _RenderedTurnOutcome,
     _SSEWireState,
     render_protocol_terminal_event,
 )
@@ -2092,8 +2093,11 @@ def test_gateway_emits_at_most_one_wire_terminal(case: dict[str, object]) -> Non
         response = FakeStreamResponse()
         outcomes = {
             "none": None,
-            "silent": produce_turn_outcome("turn.served"),
-            "copy": ENGINE_DOWN_TURN_OUTCOME,
+            "silent": _RenderedTurnOutcome(None, None),
+            "copy": _RenderedTurnOutcome(
+                "modelHub.errors.engine_down",
+                i18n_t("modelHub.errors.engine_down", "en"),
+            ),
         }
         forwarded = case["forwarded_terminal"]
         await gateway._write_stream_terminal_copy(
@@ -2263,6 +2267,9 @@ def test_gateway_handle_terminal_matrix_always_uses_service_settlement(
                         "en",
                     )
                     assert b"request_incompatible" not in payload
+                if stream and kind is RawOutcomeKind.PROTOCOL_ERROR:
+                    assert b"event: error" in payload
+                    assert b"upstream_protocol_error" in payload
         finally:
             await gateway.close()
 
@@ -2341,7 +2348,11 @@ def test_handle_settlement_records_history_before_source_transition_event(
             handle=None,
             outcome=None,
         )
-        outcome = _outcome(RawOutcomeKind.NETWORK_ERROR, source_id=source.id)
+        outcome = _outcome(
+            RawOutcomeKind.NETWORK_ERROR,
+            source_id=source.id,
+            stream_started=True,
+        )
         order: list[str] = []
         record_event = service._record_event
         settle_source = service._settle_fallback_source
@@ -2479,6 +2490,7 @@ def test_gateway_closes_producer_before_downstream_cancel_settlement(
         outcome = _outcome(
             RawOutcomeKind.NETWORK_ERROR,
             source_id=source.id,
+            stream_started=failure_phase == "write",
         )
         handle = DeferredLifecycleHandle(outcome)
         service = _service(
@@ -2551,6 +2563,7 @@ def test_gateway_close_barrier_preserves_terminal_error_seen_on_failed_write(
             status=429,
             code="rate_limit_error",
             source_id=source.id,
+            stream_started=True,
         )
         handle = DeferredLifecycleHandle(outcome)
         service = _service(tmp_path, sources=[source], live_handles=[handle])
@@ -2811,6 +2824,7 @@ def test_gateway_repeated_cancellation_drains_settlement_before_reraise(
                 else RawOutcomeKind.SUCCESS
             ),
             source_id=source.id,
+            stream_started=True,
         )
         handle = RepeatedCancellationHandle(outcome, blocked_phase)
         service = _service(tmp_path, sources=[source], live_handles=[handle])
@@ -2902,6 +2916,7 @@ def test_settlement_timeout_preserves_an_already_committed_upstream_fact(
             status=429,
             code="rate_limit_error",
             source_id=source.id,
+            stream_started=True,
         )
         handle = LiveInvokeHandle(
             outcome,
@@ -2996,7 +3011,7 @@ def test_gateway_abandons_never_resolving_teardown_at_transport_deadline(
             "configured_model_id": None,
             "channel": None,
             "reason": "engine_down",
-            "stream_started": True,
+            "stream_started": False,
         }
         assert service.store.load().sources[0].state.status == "standby"
         assert service.events.list() == []
@@ -3065,6 +3080,7 @@ def test_gateway_upstream_stream_failure_remains_source_attributable(
         outcome = _outcome(
             RawOutcomeKind.NETWORK_ERROR,
             source_id=source.id,
+            stream_started=True,
         )
         handle = BrokenUpstreamInvokeHandle(outcome)
         service = _service(tmp_path, sources=[source])
@@ -3116,7 +3132,11 @@ def test_shared_source_transition_event_is_emitted_once_for_concurrent_turns(
             handle=None,
             outcome=None,
         )
-        outcome = _outcome(RawOutcomeKind.NETWORK_ERROR, source_id=source.id)
+        outcome = _outcome(
+            RawOutcomeKind.NETWORK_ERROR,
+            source_id=source.id,
+            stream_started=True,
+        )
         record_attempts = [Mock(), Mock()]
 
         await asyncio.gather(
@@ -3153,7 +3173,11 @@ def test_live_handle_settlement_survives_concurrent_source_deletion(
 ) -> None:
     async def exercise() -> None:
         source = _source("src_deletedlive1", "Deleted during live call")
-        outcome = _outcome(kind, source_id=source.id)
+        outcome = _outcome(
+            kind,
+            source_id=source.id,
+            stream_started=kind is RawOutcomeKind.NETWORK_ERROR,
+        )
         handle = BlockingLiveInvokeHandle(outcome)
         service = _service(
             tmp_path,

@@ -85,6 +85,13 @@ class _TurnExecution:
     settlement_origin: HandleTerminationOrigin | None = None
     settlement_recorded: bool = False
     terminal_fact_committed: bool = False
+    rendered_turn_outcome: _RenderedTurnOutcome | None = None
+
+
+@dataclass(frozen=True)
+class _RenderedTurnOutcome:
+    key: str | None
+    message: str | None
 
 
 class _SSEWireState(ProtocolSSEState):
@@ -114,9 +121,7 @@ class ModelHubTurnGateway:
             getattr(
                 service,
                 "provenance",
-                BoundedProvenanceStore(
-                    paths.get_state_dir() / "model_hub_turn_provenance.json"
-                ),
+                BoundedProvenanceStore(paths.get_state_dir() / "model_hub_turn_provenance.json"),
             )
         )
         self._start_lock = asyncio.Lock()
@@ -278,7 +283,7 @@ class ModelHubTurnGateway:
                         execution=execution,
                     )
                     if timeout_settlement is not None:
-                        self._record_handle_settlement(
+                        self._commit_and_render_handle_settlement(
                             execution,
                             terminalizer,
                             timeout_settlement,
@@ -299,7 +304,7 @@ class ModelHubTurnGateway:
                             terminalizer,
                             termination_origin="upstream_terminal",
                         )
-                        self._record_handle_settlement(
+                        self._commit_and_render_handle_settlement(
                             execution,
                             terminalizer,
                             settlement,
@@ -335,7 +340,7 @@ class ModelHubTurnGateway:
                         execution=execution,
                     )
                     if timeout_settlement is not None:
-                        self._record_handle_settlement(
+                        self._commit_and_render_handle_settlement(
                             execution,
                             terminalizer,
                             timeout_settlement,
@@ -368,7 +373,7 @@ class ModelHubTurnGateway:
                         execution=execution,
                     )
                     if timeout_settlement is not None:
-                        self._record_handle_settlement(
+                        self._commit_and_render_handle_settlement(
                             execution,
                             terminalizer,
                             timeout_settlement,
@@ -400,7 +405,7 @@ class ModelHubTurnGateway:
                             execution=execution,
                         )
                         if timeout_settlement is not None:
-                            self._record_handle_settlement(
+                            self._commit_and_render_handle_settlement(
                                 execution,
                                 terminalizer,
                                 timeout_settlement,
@@ -419,7 +424,9 @@ class ModelHubTurnGateway:
         endpoint = request.match_info["endpoint"].strip("/")
         if backend not in {"claude", "codex", "opencode"} or endpoint not in _SUPPORTED_PATHS:
             terminalizer.fail("protocol_error")
-            return self._error_response(
+            return self._terminal_error_response(
+                execution,
+                terminalizer,
                 status=404,
                 code="not_found_error",
                 turn_outcome=REQUEST_NONFALLBACK_TURN_OUTCOME,
@@ -428,14 +435,18 @@ class ModelHubTurnGateway:
             payload = await request.json(loads=json.loads)
         except (json.JSONDecodeError, UnicodeDecodeError):
             terminalizer.fail("invalid_parameter")
-            return self._error_response(
+            return self._terminal_error_response(
+                execution,
+                terminalizer,
                 status=400,
                 code="invalid_request_error",
                 turn_outcome=REQUEST_NONFALLBACK_TURN_OUTCOME,
             )
         if not isinstance(payload, dict):
             terminalizer.fail("invalid_parameter")
-            return self._error_response(
+            return self._terminal_error_response(
+                execution,
+                terminalizer,
                 status=400,
                 code="invalid_request_error",
                 turn_outcome=REQUEST_NONFALLBACK_TURN_OUTCOME,
@@ -444,7 +455,9 @@ class ModelHubTurnGateway:
         stream = payload.get("stream", False)
         if not isinstance(model_id, str) or not model_id or not isinstance(stream, bool):
             terminalizer.fail("invalid_parameter")
-            return self._error_response(
+            return self._terminal_error_response(
+                execution,
+                terminalizer,
                 status=400,
                 code="invalid_request_error",
                 turn_outcome=REQUEST_NONFALLBACK_TURN_OUTCOME,
@@ -474,9 +487,7 @@ class ModelHubTurnGateway:
 
         try:
             protocol_headers = {
-                name.lower(): value
-                for name, value in request.headers.items()
-                if name.lower() in _PROTOCOL_HEADERS
+                name.lower(): value for name, value in request.headers.items() if name.lower() in _PROTOCOL_HEADERS
             }
             resolved = await self.service.resolve(
                 backend=backend,
@@ -494,18 +505,13 @@ class ModelHubTurnGateway:
             turn_outcome = exc.turn_outcome
             if turn_outcome is None and exc.code == "engine_down":
                 turn_outcome = ENGINE_DOWN_TURN_OUTCOME
-            if (
-                turn_outcome is not None
-                and turn_outcome.discriminator == "engine_down"
-            ):
+            if turn_outcome is not None and turn_outcome.discriminator == "engine_down":
                 terminalizer.engine_down()
-            elif (
-                turn_outcome is not None
-                and turn_outcome.outcome == "no_candidate"
-                and exc.supply_state is not None
-            ):
+            elif turn_outcome is not None and turn_outcome.outcome == "no_candidate" and exc.supply_state is not None:
                 terminalizer.mark_no_candidate(exc.supply_state, exc.blockers)
-            return self._error_response(
+            return self._terminal_error_response(
+                execution,
+                terminalizer,
                 status=exc.status,
                 code=exc.code,
                 turn_outcome=turn_outcome,
@@ -541,7 +547,9 @@ class ModelHubTurnGateway:
         handle = resolved.handle
         if handle is None or handle.stream is None:
             terminalizer.engine_down()
-            return self._error_response(
+            return self._terminal_error_response(
+                execution,
+                terminalizer,
                 status=502,
                 code="engine_down",
                 turn_outcome=ENGINE_DOWN_TURN_OUTCOME,
@@ -556,7 +564,11 @@ class ModelHubTurnGateway:
                 terminalizer,
                 termination_origin="upstream_terminal",
             )
-            self._record_handle_settlement(execution, terminalizer, settlement)
+            rendered = self._commit_and_render_handle_settlement(
+                execution,
+                terminalizer,
+                settlement,
+            )
             assert outcome is not None
             assert settlement.decision is not None
             if settlement.decision.action != "return":
@@ -564,7 +576,7 @@ class ModelHubTurnGateway:
                     outcome,
                     error_code=settlement.decision.error_code,
                     status_override=settlement.decision.downstream_status,
-                    turn_outcome=settlement.turn_outcome,
+                    rendered=rendered,
                 )
             return web.Response(
                 status=200,
@@ -585,19 +597,25 @@ class ModelHubTurnGateway:
         await self._downstream_io(response.prepare(request))
         wire_state = _SSEWireState(protocol)
         async for chunk in handle.stream:
-            terminalizer.mark_stream_started()
-            await self._downstream_io(response.write(chunk))
+            output_started_before = wire_state.model_output_started
             wire_state.observe(chunk)
+            if wire_state.model_output_started and not output_started_before:
+                terminalizer.mark_stream_started()
+            await self._downstream_io(response.write(chunk))
         _outcome, settlement = await self._settle_turn_handle(
             execution,
             terminalizer,
             termination_origin="upstream_terminal",
         )
-        self._record_handle_settlement(execution, terminalizer, settlement)
+        rendered = self._commit_and_render_handle_settlement(
+            execution,
+            terminalizer,
+            settlement,
+        )
         await self._write_stream_terminal_copy(
             response,
             protocol,
-            settlement.turn_outcome,
+            rendered,
             wire_state,
             forwarded_terminal=wire_state.terminal_outcome,
         )
@@ -608,33 +626,27 @@ class ModelHubTurnGateway:
         self,
         response: web.StreamResponse,
         protocol: str,
-        turn_outcome: TurnOutcomeProjectionInput | None,
+        rendered: _RenderedTurnOutcome | None,
         wire_state: _SSEWireState,
         *,
         forwarded_terminal: StreamTerminalOutcome | None,
     ) -> None:
-        if turn_outcome is None or forwarded_terminal is not None:
+        if rendered is None or forwarded_terminal is not None:
             return
-        copy = project_turn_outcome_copy(turn_outcome)
-        message = render_turn_outcome_copy(turn_outcome, self._language_provider() or "en")
-        if copy is None or message is None:
+        if rendered.key is None or rendered.message is None:
             return
         frame_prefix = wire_state.invalidate_partial_frame()
         payload = json.dumps(
             render_protocol_terminal_event(
                 protocol,
-                copy.key,
-                message,
+                rendered.key,
+                rendered.message,
                 wire_state.next_sequence_number,
             ),
             ensure_ascii=False,
             separators=(",", ":"),
         ).encode("utf-8")
-        await self._downstream_io(
-            response.write(
-                frame_prefix + render_protocol_terminal_frame(protocol, payload)
-            )
-        )
+        await self._downstream_io(response.write(frame_prefix + render_protocol_terminal_frame(protocol, payload)))
 
     @staticmethod
     async def _downstream_io(operation):
@@ -657,22 +669,79 @@ class ModelHubTurnGateway:
             terminalizer,
             termination_origin=termination_origin,
         )
-        self._record_handle_settlement(execution, terminalizer, settlement)
+        self._commit_and_render_handle_settlement(
+            execution,
+            terminalizer,
+            settlement,
+        )
         if execution.settlement_origin == "downstream_cancel":
             terminalizer.mark_downstream_canceled()
 
-    @staticmethod
-    def _record_handle_settlement(
+    def _commit_and_render_handle_settlement(
+        self,
         execution: _TurnExecution,
         terminalizer: GatewayTurnTerminalizer,
         settlement: HandleSettlement,
-    ) -> None:
-        """Consume a handle settlement projection exactly once per turn."""
+    ) -> _RenderedTurnOutcome | None:
+        """Commit and render a handle settlement at the sole projection choke."""
 
         if execution.settlement_recorded:
-            return
-        terminalizer.record_turn_outcome(settlement.turn_outcome)
+            return execution.rendered_turn_outcome
+        rendered = self._commit_and_render_turn_outcome(
+            execution,
+            terminalizer,
+            settlement.turn_outcome,
+            fallback_code=(settlement.decision.error_code if settlement.decision is not None else None),
+        )
+        return rendered
+
+    def _commit_and_render_turn_outcome(
+        self,
+        execution: _TurnExecution,
+        terminalizer: GatewayTurnTerminalizer,
+        turn_outcome: TurnOutcomeProjectionInput | None,
+        *,
+        fallback_code: str | None = None,
+    ) -> _RenderedTurnOutcome:
+        """Commit terminal history before deriving any user-visible copy."""
+
+        if execution.settlement_recorded:
+            return execution.rendered_turn_outcome or _RenderedTurnOutcome(None, None)
+        if turn_outcome is not None:
+            terminalizer.record_turn_outcome(turn_outcome)
+        language = self._language_provider() or "en"
+        copy = project_turn_outcome_copy(turn_outcome) if turn_outcome is not None else None
+        message = render_turn_outcome_copy(turn_outcome, language) if turn_outcome is not None else None
+        key = copy.key if copy is not None else None
+        if message is None and fallback_code is not None:
+            fallback_key = f"modelHub.errors.{fallback_code}"
+            fallback_message = i18n_t(fallback_key, language)
+            if fallback_message == fallback_key:
+                fallback_key = "modelHub.errors.upstream_error"
+                fallback_message = i18n_t(fallback_key, language)
+            key = fallback_key
+            message = fallback_message
+        rendered = _RenderedTurnOutcome(key, message)
+        execution.rendered_turn_outcome = rendered
         execution.settlement_recorded = True
+        return rendered
+
+    def _terminal_error_response(
+        self,
+        execution: _TurnExecution,
+        terminalizer: GatewayTurnTerminalizer,
+        *,
+        status: int,
+        code: str,
+        turn_outcome: TurnOutcomeProjectionInput | None,
+    ) -> web.Response:
+        rendered = self._commit_and_render_turn_outcome(
+            execution,
+            terminalizer,
+            turn_outcome,
+            fallback_code=code,
+        )
+        return self._error_response(status=status, code=code, rendered=rendered)
 
     async def _settle_turn_handle(
         self,
@@ -710,20 +779,13 @@ class ModelHubTurnGateway:
         # settlement/history -> t5 render settlement -> t6 downstream EOF.
         if handle is not None:
             await handle.close_stream()
-        if (
-            termination_origin == "downstream_cancel"
-            and handle is not None
-            and handle.outcome_available
-        ):
+        if termination_origin == "downstream_cancel" and handle is not None and handle.outcome_available:
             # A producer outcome that became available during close owns history;
             # a downstream write/cancel after that barrier cannot rewrite it.
             termination_origin = "upstream_terminal"
             execution.settlement_origin = termination_origin
-        outcome = (
-            await handle.outcome()
-            if handle is not None and handle.outcome_available
-            else None
-        )
+        outcome = await handle.outcome() if handle is not None and handle.outcome_available else None
+
         def record_attempt(
             terminal_outcome: RawCallOutcome,
             decision: ResolutionDecision,
@@ -752,19 +814,17 @@ class ModelHubTurnGateway:
         *,
         error_code: Optional[str] = None,
         status_override: int | None = None,
-        turn_outcome: TurnOutcomeProjectionInput | None = None,
+        rendered: _RenderedTurnOutcome | None = None,
     ) -> web.Response:
         if outcome.kind == RawOutcomeKind.SUCCESS:
             return web.Response(status=200, body=b"{}", content_type="application/json")
         status = status_override or (
-            outcome.http_status
-            if outcome.http_status and 400 <= outcome.http_status <= 599
-            else 502
+            outcome.http_status if outcome.http_status and 400 <= outcome.http_status <= 599 else 502
         )
         return self._error_response(
             status=status,
             code=error_code or outcome.error_code or "api_error",
-            turn_outcome=turn_outcome,
+            rendered=rendered,
         )
 
     def _error_response(
@@ -772,14 +832,10 @@ class ModelHubTurnGateway:
         *,
         status: int,
         code: str,
-        turn_outcome: TurnOutcomeProjectionInput | None = None,
+        rendered: _RenderedTurnOutcome | None = None,
     ) -> web.Response:
         language = self._language_provider() or "en"
-        message = (
-            render_turn_outcome_copy(turn_outcome, language)
-            if turn_outcome is not None
-            else None
-        )
+        message = rendered.message if rendered is not None else None
         message_key = f"modelHub.errors.{code}"
         if message is None:
             message = i18n_t(message_key, language)

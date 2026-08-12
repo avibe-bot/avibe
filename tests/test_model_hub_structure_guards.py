@@ -17,6 +17,7 @@ from core.handlers.model_hub.stream_wire import (
     SSEFrameTokenizer,
     ProtocolTerminalEnvelope,
     ProtocolSSEState,
+    ProtocolModelOutputEnvelope,
     ProtocolStreamTaxonomy,
 )
 from core.handlers.model_hub.adapter import RawCallOutcome, RawOutcomeKind
@@ -52,7 +53,6 @@ E64_SETTLEMENT_BOUNDARIES = json.loads((FIXTURES / "e64_settlement_boundaries.js
 # Wire sources:
 # - https://platform.claude.com/docs/en/build-with-claude/streaming
 # - https://platform.openai.com/docs/api-reference/responses-streaming
-# - https://platform.openai.com/docs/api-reference/realtime-server-events/response/done
 # - https://platform.openai.com/docs/api-reference/chat/create#chat-create-stream
 STREAM_ENVELOPE_FIXTURES = (
     {
@@ -87,21 +87,11 @@ STREAM_ENVELOPE_FIXTURES = (
     },
     {
         "protocol": "openai_responses",
-        "terminal_fact": "served",
-        "event_name": "response.done",
-        "selector_path": ("type",),
-        "selector_value": "response.done",
-        "error_paths": (),
-        "payload": b'{"type":"response.done"}',
-        "source": "https://platform.openai.com/docs/api-reference/realtime-server-events/response/done",
-    },
-    {
-        "protocol": "openai_responses",
         "terminal_fact": "failed_terminal",
         "event_name": "error",
         "selector_path": ("type",),
         "selector_value": "error",
-        "error_paths": ((), ("error",)),
+        "error_paths": ((),),
         "payload": b'{"type":"error","code":"permission_error"}',
         "source": "https://platform.openai.com/docs/api-reference/responses-streaming/error",
     },
@@ -111,7 +101,7 @@ STREAM_ENVELOPE_FIXTURES = (
         "event_name": "response.failed",
         "selector_path": ("type",),
         "selector_value": "response.failed",
-        "error_paths": ((), ("response", "error"), ("error",)),
+        "error_paths": (("response", "error"),),
         "payload": b'{"type":"response.failed","response":{"error":{"code":"permission_error"}}}',
         "source": "https://platform.openai.com/docs/api-reference/responses-streaming/response/failed",
     },
@@ -121,8 +111,20 @@ STREAM_ENVELOPE_FIXTURES = (
         "event_name": "response.incomplete",
         "selector_path": ("type",),
         "selector_value": "response.incomplete",
-        "error_paths": ((), ("response", "error"), ("error",)),
+        "error_paths": (("response", "error"),),
+        "required_error_path": ("response", "error"),
+        "required_error_code_path": ("response", "error", "code"),
         "payload": b'{"type":"response.incomplete","response":{"error":{"code":"permission_error"}}}',
+        "source": "https://platform.openai.com/docs/api-reference/responses-streaming/response/incomplete",
+    },
+    {
+        "protocol": "openai_responses",
+        "terminal_fact": "served",
+        "event_name": "response.incomplete",
+        "selector_path": ("type",),
+        "selector_value": "response.incomplete",
+        "error_paths": (),
+        "payload": b'{"type":"response.incomplete","response":{"incomplete_details":{"reason":"max_output_tokens"}}}',
         "source": "https://platform.openai.com/docs/api-reference/responses-streaming/response/incomplete",
     },
     {
@@ -143,6 +145,85 @@ STREAM_ENVELOPE_FIXTURES = (
         "payload": b'{"error":{"type":"permission_error"}}',
         "source": "https://developers.openai.com/api/reference/resources/chat",
     },
+    {
+        "protocol": "openai_chat",
+        "terminal_fact": "served",
+        "event_name": None,
+        "selector_path": ("choices", "*", "finish_reason"),
+        "selector_value": "stop",
+        "error_paths": (),
+        "wire_terminal": False,
+        "payload": b'{"choices":[{"finish_reason":"stop","delta":{}}]}',
+        "source": "https://platform.openai.com/docs/api-reference/chat/create#chat-create-stream",
+    },
+    {
+        "protocol": "openai_chat",
+        "terminal_fact": "served",
+        "event_name": None,
+        "selector_path": ("choices", "*", "finish_reason"),
+        "selector_value": "length",
+        "error_paths": (),
+        "wire_terminal": False,
+        "payload": b'{"choices":[{"finish_reason":"length","delta":{}}]}',
+        "source": "https://platform.openai.com/docs/api-reference/chat/create#chat-create-stream",
+    },
+    {
+        "protocol": "openai_chat",
+        "terminal_fact": "served",
+        "event_name": None,
+        "selector_path": ("choices", "*", "finish_reason"),
+        "selector_value": "content_filter",
+        "error_paths": (),
+        "wire_terminal": False,
+        "payload": b'{"choices":[{"finish_reason":"content_filter","delta":{}}]}',
+        "source": "https://platform.openai.com/docs/api-reference/chat/create#chat-create-stream",
+    },
+    {
+        "protocol": "openai_chat",
+        "terminal_fact": "served",
+        "event_name": None,
+        "selector_path": ("choices", "*", "finish_reason"),
+        "selector_value": "tool_calls",
+        "error_paths": (),
+        "wire_terminal": False,
+        "payload": b'{"choices":[{"finish_reason":"tool_calls","delta":{}}]}',
+        "source": "https://platform.openai.com/docs/api-reference/chat/create#chat-create-stream",
+    },
+    {
+        "protocol": "openai_chat",
+        "terminal_fact": "served",
+        "event_name": None,
+        "selector_path": ("choices", "*", "finish_reason"),
+        "selector_value": "function_call",
+        "error_paths": (),
+        "wire_terminal": False,
+        "payload": b'{"choices":[{"finish_reason":"function_call","delta":{}}]}',
+        "source": "https://platform.openai.com/docs/api-reference/chat/create#chat-create-stream",
+    },
+)
+MODEL_OUTPUT_ENVELOPE_FIXTURES = (
+    ("anthropic", "content_block_start", ("type",), "content_block_start", False),
+    ("anthropic", "content_block_delta", ("type",), "content_block_delta", False),
+    ("openai_responses", "response.output_text.delta", ("type",), "response.output_text.delta", False),
+    ("openai_responses", "response.refusal.delta", ("type",), "response.refusal.delta", False),
+    (
+        "openai_responses",
+        "response.reasoning_summary_text.delta",
+        ("type",),
+        "response.reasoning_summary_text.delta",
+        False,
+    ),
+    (
+        "openai_responses",
+        "response.function_call_arguments.delta",
+        ("type",),
+        "response.function_call_arguments.delta",
+        False,
+    ),
+    ("openai_chat", None, ("choices", "*", "delta", "content"), None, True),
+    ("openai_chat", None, ("choices", "*", "delta", "refusal"), None, True),
+    ("openai_chat", None, ("choices", "*", "delta", "tool_calls"), None, True),
+    ("openai_chat", None, ("choices", "*", "delta", "function_call"), None, True),
 )
 BUFFERED_ERROR_TRUST_ROOT_FIXTURES = {
     protocol: (("error",),) for protocol in ("anthropic", "openai_responses", "openai_chat")
@@ -163,7 +244,9 @@ STREAM_BOUNDARY_CASES = tuple(
         else tuple(
             (fixture["event_name"], fixture["payload"])
             for fixture in STREAM_ENVELOPE_FIXTURES
-            if fixture["protocol"] == protocol and fixture["terminal_fact"] == settlement_state
+            if fixture["protocol"] == protocol
+            and fixture["terminal_fact"] == settlement_state
+            and fixture.get("wire_terminal", True)
         )
     )
 )
@@ -315,6 +398,52 @@ def test_g3_settlement_returns_are_consumed() -> None:
     settle_at = source.index("self._settle_boundary_termination", exit_at)
     reraise_at = source.index("raise cancelled", settle_at)
     assert cancel_at < exit_at < settle_at < reraise_at
+
+
+def test_terminal_projection_commit_and_render_have_one_choke_point() -> None:
+    # Review 4913624792: render-before-commit and orphaned projections must fail.
+    tree = _tree(TURN_GATEWAY)
+    parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+    owner = _functions(tree)["_commit_and_render_turn_outcome"]
+    owned = set(ast.walk(owner))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        name = (
+            node.func.id
+            if isinstance(node.func, ast.Name)
+            else node.func.attr
+            if isinstance(node.func, ast.Attribute)
+            else ""
+        )
+        if name in {"project_turn_outcome_copy", "render_turn_outcome_copy", "record_turn_outcome"}:
+            assert node in owned, (name, node.lineno)
+    source = ast.get_source_segment(TURN_GATEWAY.read_text(encoding="utf-8"), owner)
+    assert source is not None
+    commit_at = source.index("terminalizer.record_turn_outcome")
+    project_at = source.index("project_turn_outcome_copy")
+    render_at = source.index("render_turn_outcome_copy")
+    assert commit_at < project_at < render_at
+
+
+def test_first_model_output_has_one_table_backed_owner() -> None:
+    # Review 4913624792: transport/error frames cannot set stream_started.
+    stream_tree = _tree(ROOT / "core/handlers/model_hub/stream_wire.py")
+    owner = _functions(stream_tree)["is_protocol_model_output"]
+    source = ast.get_source_segment(
+        (ROOT / "core/handlers/model_hub/stream_wire.py").read_text(encoding="utf-8"),
+        owner,
+    )
+    assert source is not None and "model_output_envelopes" in source
+    for name in ("_response_stream", "_observed_stream_terminal_outcome"):
+        client_owner = _functions(_tree(CLIENT))[name]
+        assert not any(
+            isinstance(node, ast.keyword)
+            and node.arg == "stream_started"
+            and isinstance(node.value, ast.Constant)
+            and node.value.value is True
+            for node in ast.walk(client_owner)
+        )
 
 
 def test_g4_terminal_projection_has_no_execution_channel() -> None:
@@ -488,6 +617,9 @@ def _assert_stream_taxonomy_matches(
             selector_value=fixture["selector_value"],
             terminal_outcome=fixture["terminal_fact"],
             error_envelope_paths=fixture["error_paths"],
+            required_error_path=fixture.get("required_error_path"),
+            required_error_code_path=fixture.get("required_error_code_path"),
+            wire_terminal=fixture.get("wire_terminal", True),
         )
         for fixture in fixtures
         if "literal" not in fixture
@@ -497,6 +629,11 @@ def _assert_stream_taxonomy_matches(
         None,
     )
     assert taxonomy.terminal_envelopes == expected_envelopes
+    assert taxonomy.model_output_envelopes == tuple(
+        ProtocolModelOutputEnvelope(event_name, selector_path, selector_value, require_nonempty)
+        for fixture_protocol, event_name, selector_path, selector_value, require_nonempty in MODEL_OUTPUT_ENVELOPE_FIXTURES
+        if fixture_protocol == protocol
+    )
     assert taxonomy.success_literal == (None if literal is None else (literal["event_name"], literal["literal"]))
     assert taxonomy.buffered_error_envelope_paths == BUFFERED_ERROR_TRUST_ROOT_FIXTURES[protocol]
 
@@ -535,6 +672,46 @@ def test_stream_authority_guard_rejects_an_orphaned_acceptance_fixture() -> None
     )
     with pytest.raises(AssertionError):
         _assert_stream_taxonomy_matches("openai_responses", mutated)
+
+
+def test_realtime_terminal_is_not_accepted_by_responses_streaming() -> None:
+    state = ProtocolSSEState("openai_responses")
+    state.observe(b'event: response.done\ndata: {"type":"response.done"}\n\n')
+    assert state.terminal_outcome is None
+
+
+def test_chat_role_metadata_does_not_cross_the_model_output_boundary() -> None:
+    state = ProtocolSSEState("openai_chat")
+    state.observe(b'data: {"choices":[{"delta":{"role":"assistant"}}]}\n\n')
+    assert state.model_output_started is False
+
+
+@pytest.mark.parametrize(
+    ("event_name", "payload", "expected_outcome"),
+    (
+        ("error", b'{"type":"error","error":{"code":"permission_error"}}', "failed_terminal"),
+        ("response.failed", b'{"type":"response.failed","code":"permission_error","response":{}}', "failed_terminal"),
+        ("response.incomplete", b'{"type":"response.incomplete","response":{"error":null}}', "served"),
+        ("response.incomplete", b'{"type":"response.incomplete","response":{"error":{}}}', "served"),
+    ),
+)
+def test_responses_terminal_trust_roots_ignore_unofficial_error_locations(
+    event_name: str,
+    payload: bytes,
+    expected_outcome: str,
+) -> None:
+    state = ProtocolSSEState("openai_responses")
+    state.observe(b"event: " + event_name.encode() + b"\ndata: " + payload + b"\n\n")
+    assert state.terminal_outcome == expected_outcome
+    assert state.error_envelope_paths in {((),), (), (("response", "error"),)}
+
+    from vibe.model_hub_runtime.client import _raw_error_fields
+
+    _error_type, _error_code, candidates = _raw_error_fields(
+        state.error_payload or b"",
+        state.error_envelope_paths,
+    )
+    assert "permission_error" not in candidates
 
 
 def test_sse_tokenizer_bounds_lines_and_frames() -> None:

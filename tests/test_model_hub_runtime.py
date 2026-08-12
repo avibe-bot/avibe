@@ -876,7 +876,7 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
         if payload['model'].endswith('/slow-stream'):
-            first = b'data: {{"object":"chat.completion.chunk","choices":[]}}\\n\\n'
+            first = b'data: {{"object":"chat.completion.chunk","choices":[{{"delta":{{"content":"slow"}}}}]}}\\n\\n'
             second = b'data: [DONE]\\n\\n'
             self.send_response(200)
             self.send_header('Content-Type', 'text/event-stream')
@@ -1422,7 +1422,7 @@ def test_adapter_applies_changed_install_to_running_engine(
     asyncio.run(run())
 
 
-def test_adapter_stream_outcome_commits_after_first_byte(tmp_path: Path) -> None:
+def test_adapter_stream_outcome_commits_at_model_output_boundary(tmp_path: Path) -> None:
     async def run() -> None:
         supervisor, store = _fixture_supervisor(tmp_path)
         adapter = CLIProxyEngineAdapter(supervisor=supervisor, state_store=store)
@@ -1444,7 +1444,7 @@ def test_adapter_stream_outcome_commits_after_first_byte(tmp_path: Path) -> None
         await handle.close_stream()
         outcome = await handle.outcome()
         assert outcome.kind is RawOutcomeKind.SUCCESS
-        assert outcome.stream_started is True
+        assert outcome.stream_started is False
         await adapter.stop()
 
     asyncio.run(run())
@@ -1484,7 +1484,7 @@ def test_engine_client_marks_loopback_stream_disconnect_as_engine_down(
     async def run() -> None:
         class Content:
             async def read(self, _size: int) -> bytes:
-                return b"data: first\n\n"
+                return b'data: {"choices":[{"delta":{"content":"first"}}]}\n\n'
 
             async def iter_chunked(self, _size: int):
                 raise client_module.aiohttp.ClientConnectionError("loopback engine closed")
@@ -1529,7 +1529,7 @@ def test_engine_client_marks_loopback_stream_disconnect_as_engine_down(
         ).invoke(source, "model-a", {}, stream=True)
 
         assert handle.stream is not None
-        assert [chunk async for chunk in handle.stream] == [b"data: first\n\n"]
+        assert [chunk async for chunk in handle.stream] == [b'data: {"choices":[{"delta":{"content":"first"}}]}\n\n']
         outcome = await handle.outcome()
         assert outcome.kind is RawOutcomeKind.NETWORK_ERROR
         assert outcome.error_code == "engine_down"
@@ -1539,36 +1539,39 @@ def test_engine_client_marks_loopback_stream_disconnect_as_engine_down(
 
 
 @pytest.mark.parametrize(
-    ("protocol", "terminal_chunk"),
+    ("protocol", "output_chunk", "terminal_chunk"),
     [
         (
             "anthropic",
+            b'event: content_block_delta\ndata: {"type":"content_block_delta"}\n\n',
             b'event: message_stop\ndata: {"type":"message_stop"}\n\n',
         ),
         (
             "openai_responses",
+            b'event: response.output_text.delta\ndata: {"type":"response.output_text.delta"}\n\n',
             b'event: response.completed\ndata: {"type":"response.completed","sequence_number":4}\n\n',
         ),
         (
-            "openai_responses",
-            b'event: response.done\ndata: {"type":"response.done","sequence_number":4}\n\n',
+            "openai_chat",
+            b'data: {"choices":[{"delta":{"content":"first"}}]}\n\n',
+            b"data: [DONE]\n\n",
         ),
-        ("openai_chat", b"data: [DONE]\n\n"),
     ],
 )
 def test_engine_client_keeps_served_after_terminal_marker_then_disconnect(
     monkeypatch: pytest.MonkeyPatch,
     protocol: str,
+    output_chunk: bytes,
     terminal_chunk: bytes,
 ) -> None:
     async def run() -> None:
         class Content:
             async def read(self, _size: int) -> bytes:
-                return terminal_chunk
+                return output_chunk
 
             async def iter_chunked(self, _size: int):
+                yield terminal_chunk
                 raise client_module.aiohttp.ClientConnectionError("late disconnect")
-                yield b""
 
         class Response:
             status = 200
@@ -1609,7 +1612,7 @@ def test_engine_client_keeps_served_after_terminal_marker_then_disconnect(
         ).invoke(source, "model-a", {}, stream=True, request_protocol=protocol)
 
         assert handle.stream is not None
-        assert [chunk async for chunk in handle.stream] == [terminal_chunk]
+        assert [chunk async for chunk in handle.stream] == [output_chunk, terminal_chunk]
         outcome = await handle.outcome()
         assert outcome.kind is RawOutcomeKind.SUCCESS
         assert outcome.stream_started is True
@@ -1618,23 +1621,56 @@ def test_engine_client_keeps_served_after_terminal_marker_then_disconnect(
 
 
 @pytest.mark.parametrize(
-    ("event_type", "error_code", "expected_reason"),
+    ("event_type", "terminal_payload", "error_code", "expected_action", "expected_reason"),
     [
-        ("response.failed", "permission_error", None),
-        ("response.incomplete", "permission_error", None),
-        ("error", "authentication_error", "credential_revoked"),
-        ("error", "invalid_api_key", "credential_revoked"),
+        (
+            "response.failed",
+            {"type": "response.failed", "response": {"error": {"code": "permission_error"}}},
+            "permission_error",
+            "surface",
+            None,
+        ),
+        (
+            "response.incomplete",
+            {"type": "response.incomplete", "response": {"error": {"code": "permission_error"}}},
+            "permission_error",
+            "surface",
+            None,
+        ),
+        (
+            "error",
+            {"type": "error", "code": "authentication_error"},
+            "authentication_error",
+            "refresh",
+            None,
+        ),
+        (
+            "error",
+            {"type": "error", "code": "invalid_api_key"},
+            "invalid_api_key",
+            "refresh",
+            None,
+        ),
+        (
+            "error",
+            {"type": "error", "code": "server_error"},
+            "server_error",
+            "fallback",
+            "server_error",
+        ),
     ],
 )
 def test_engine_client_recognizes_responses_failure_terminals(
     monkeypatch: pytest.MonkeyPatch,
     event_type: str,
+    terminal_payload: dict[str, object],
     error_code: str,
+    expected_action: str,
     expected_reason: str | None,
 ) -> None:
     async def run() -> None:
         terminal = json.dumps(
-            {"type": event_type, "code": error_code},
+            terminal_payload,
             separators=(",", ":"),
         ).encode()
 
@@ -1675,24 +1711,104 @@ def test_engine_client_recognizes_responses_failure_terminals(
         handle = await EngineClient(EngineConnection("http://127.0.0.1:15220", "management", "gateway")).invoke(
             source, "model-a", {}, stream=True
         )
-        assert handle.stream is not None
-        assert [chunk async for chunk in handle.stream]
+        assert handle.stream is None
         outcome = await handle.outcome()
         assert outcome.kind is RawOutcomeKind.HTTP_ERROR
         assert outcome.error_code == error_code
         decision = classify_outcome(outcome)
-        assert decision.action == "surface"
+        assert decision.action == expected_action
         assert decision.reason == expected_reason
         assert decision.downstream_status == (403 if error_code == "permission_error" else None)
 
     asyncio.run(run())
 
 
+@pytest.mark.parametrize(
+    ("protocol", "event_name", "payload"),
+    (
+        (
+            "openai_responses",
+            "response.incomplete",
+            {"type": "response.incomplete", "response": {"error": None}},
+        ),
+        (
+            "openai_responses",
+            "response.incomplete",
+            {"type": "response.incomplete", "response": {"error": {}}},
+        ),
+        (
+            "openai_chat",
+            None,
+            {"choices": [{"finish_reason": "stop", "delta": {}}]},
+        ),
+        (
+            "openai_chat",
+            None,
+            {"choices": [{"finish_reason": "length", "delta": {}}]},
+        ),
+        (
+            "openai_chat",
+            None,
+            {"choices": [{"finish_reason": "content_filter", "delta": {}}]},
+        ),
+        (
+            "openai_chat",
+            None,
+            {"choices": [{"finish_reason": "tool_calls", "delta": {}}]},
+        ),
+        (
+            "openai_chat",
+            None,
+            {"choices": [{"finish_reason": "function_call", "delta": {}}]},
+        ),
+    ),
+)
+def test_documented_incomplete_output_is_served_without_source_failure(
+    protocol: str,
+    event_name: str | None,
+    payload: dict[str, object],
+) -> None:
+    wire_state = client_module.ProtocolSSEState(protocol)
+    event = b"" if event_name is None else b"event: " + event_name.encode() + b"\n"
+    wire_state.observe(event + b"data: " + json.dumps(payload, separators=(",", ":")).encode() + b"\n\n")
+    source = SourceRecord(
+        source_id="src_fixture123",
+        vendor="custom",
+        protocol=protocol,
+        base_url="https://api.example.test/v1",
+        credential_ref="cred_fixture123",
+        allowed_origins=(),
+        model_ids=("model-a",),
+        prefix="source-fixture123",
+    )
+    outcome = client_module._observed_stream_terminal_outcome(
+        wire_state,
+        source,
+        "model-a",
+        200,
+        allow_completion=True,
+    )
+    assert outcome is not None
+    assert outcome.kind is RawOutcomeKind.SUCCESS
+    assert classify_outcome(outcome).action == "return"
+
+
+def test_chat_finish_reason_remains_valid_before_done_sentinel() -> None:
+    state = client_module.ProtocolSSEState("openai_chat")
+    state.observe(b'data: {"choices":[{"finish_reason":"length","delta":{}}]}\n\n')
+    assert state.completion_observed is True
+    assert state.terminal_outcome is None
+    state.observe(b"data: [DONE]\n\n")
+    assert state.terminal_outcome == "served"
+    assert state.invalid_after_terminal is False
+
+
 def test_engine_client_rejects_complete_frame_after_success_terminal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def run() -> None:
-        first = b'event: response.completed\ndata: {"type":"response.completed"}\n\n'
+        first = b'event: response.output_text.delta\ndata: {"type":"response.output_text.delta"}\n\n'
+        terminal = b'event: response.completed\ndata: {"type":"response.completed"}\n\n'
         extra = b'data: {"type":"response.output_text.delta"}\n\n'
 
         class Content:
@@ -1700,6 +1816,7 @@ def test_engine_client_rejects_complete_frame_after_success_terminal(
                 return first
 
             async def iter_chunked(self, _size: int):
+                yield terminal
                 yield extra
 
         class Response:
@@ -1732,7 +1849,7 @@ def test_engine_client_rejects_complete_frame_after_success_terminal(
             source, "model-a", {}, stream=True
         )
         assert handle.stream is not None
-        assert [chunk async for chunk in handle.stream] == [first, extra]
+        assert [chunk async for chunk in handle.stream] == [first, terminal, extra]
         outcome = await handle.outcome()
         assert outcome.kind is RawOutcomeKind.PROTOCOL_ERROR
 
@@ -1757,8 +1874,11 @@ def test_engine_client_requires_terminal_event_name_and_payload_identity(
         terminal = event_line + f'data: {{"type":"{payload_type}"}}\n\n'.encode()
 
         class Content:
+            reads = 0
+
             async def read(self, _size: int) -> bytes:
-                return terminal
+                self.reads += 1
+                return terminal if self.reads == 1 else b""
 
             async def iter_chunked(self, _size: int):
                 if False:
@@ -1793,8 +1913,7 @@ def test_engine_client_requires_terminal_event_name_and_payload_identity(
         handle = await EngineClient(EngineConnection("http://127.0.0.1:15220", "management", "gateway")).invoke(
             source, "model-a", {}, stream=True
         )
-        assert handle.stream is not None
-        assert [chunk async for chunk in handle.stream] == [terminal]
+        assert handle.stream is None
         assert (await handle.outcome()).kind is RawOutcomeKind.NETWORK_ERROR
 
     asyncio.run(run())
@@ -1888,8 +2007,11 @@ def test_engine_client_requires_a_protocol_terminal_event_before_clean_eof(
 ) -> None:
     async def run() -> None:
         class Content:
+            reads = 0
+
             async def read(self, _size: int) -> bytes:
-                return first
+                self.reads += 1
+                return first if self.reads == 1 else b""
 
             async def iter_chunked(self, _size: int):
                 if False:
@@ -1933,8 +2055,7 @@ def test_engine_client_requires_a_protocol_terminal_event_before_clean_eof(
             )
         ).invoke(source, "model-a", {}, stream=True, request_protocol=protocol)
 
-        assert handle.stream is not None
-        assert [chunk async for chunk in handle.stream] == [first]
+        assert handle.stream is None
         outcome = await handle.outcome()
         assert outcome.kind is expected_kind
         decision = classify_outcome(outcome)
@@ -1962,8 +2083,11 @@ def test_engine_client_rejects_non_string_stream_event_types(
         )
 
         class Content:
+            reads = 0
+
             async def read(self, _size: int) -> bytes:
-                return first
+                self.reads += 1
+                return first if self.reads == 1 else b""
 
             async def iter_chunked(self, _size: int):
                 if False:
@@ -1998,8 +2122,7 @@ def test_engine_client_rejects_non_string_stream_event_types(
         handle = await EngineClient(EngineConnection("http://127.0.0.1:15220", "management", "gateway")).invoke(
             source, "model-a", {}, stream=True
         )
-        assert handle.stream is not None
-        assert [chunk async for chunk in handle.stream] == [first]
+        assert handle.stream is None
         outcome = await handle.outcome()
         assert outcome.kind is RawOutcomeKind.PROTOCOL_ERROR
         assert outcome.error_code is None
@@ -2319,8 +2442,12 @@ def test_engine_client_applies_sse_limits_only_to_streams(
             source, "model-a", {}, stream=bool(case["stream"])
         )
 
-        assert handle.stream is not None
-        chunks = [chunk async for chunk in handle.stream]
+        if case["stream"]:
+            assert handle.stream is None
+            chunks = []
+        else:
+            assert handle.stream is not None
+            chunks = [chunk async for chunk in handle.stream]
         outcome = await handle.outcome()
         assert outcome.kind.value == case["expected_outcome"]
         assert chunks == ([payload] if outcome.kind is RawOutcomeKind.SUCCESS else [])
