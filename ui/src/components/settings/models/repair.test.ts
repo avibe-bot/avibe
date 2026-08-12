@@ -531,7 +531,7 @@ describe('probeArrival — an answer nobody wants can still be one the page owes
     const frame = readFileSync(join(here, 'RouteChainDialog.tsx'), 'utf8');
 
     expect(row).not.toMatch(/probeAgent|probeArrival/);
-    expect(frame).not.toMatch(/probeAgent|probeArrival|modelsApi/);
+    expect(frame).not.toMatch(/probeAgent|probeArrival/);
   });
 });
 

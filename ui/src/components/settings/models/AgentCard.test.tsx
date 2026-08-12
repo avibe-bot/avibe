@@ -147,7 +147,7 @@ describe('AgentCard', () => {
 
     await userEvent.click(screen.getByRole('button', { name: /Open claude-opus-4-6 route chain/i }));
 
-    expect(onOpenRoute).toHaveBeenCalledWith(hubAgent, 'claude-opus-4-6');
+    expect(onOpenRoute).toHaveBeenCalledWith(hubAgent, 'claude-opus-4-6', expect.any(HTMLElement));
   });
 
   it('replaces the gateway status slot and action with an in-place retry after leaving fails', async () => {

@@ -997,13 +997,35 @@
         "runtimeAction": "去处理"
       },
       "routeDialog": {
-        "title": "{{model}} · 路由链",
+        "title": "{{menuModel}} · 路由链",
         "open": "打开 {{model}} 的路由链",
         "label": "这个型号的路由链",
+        "section": "这个型号的路由链",
         "removeHop": "移除这一跳",
         "addHop": "添加一跳",
-        "reseed": "按来源顺序重排",
-        "hint": "这条链是写下来的配置。以后来源顺序怎么变，它都不变。"
+        "add": { "source": "来源", "model": "型号", "confirm": "添加", "none": "没有可添加的来源型号" },
+        "sourceMissing": "来源不存在",
+        "invalidAfterRefresh": "这个已编辑的跳在刷新后的来源中不可用。移除它后再保存。",
+        "reorder": {
+          "label": "按来源顺序重排",
+          "grabbed": "已抓取第 {{position}} 跳。使用方向键移动。",
+          "position": "已移到第 {{position}} 跳。",
+          "dropped": "已放到第 {{position}} 跳。",
+          "cancelled": "已取消重排,恢复到第 {{position}} 跳。",
+          "sorted": "已按来源顺序重排。",
+          "unchanged": "路由链已经符合来源顺序。"
+        },
+        "grip": "调整这一跳的顺序",
+        "loading": "正在读取路由链…",
+        "cancel": "取消",
+        "save": "保存",
+        "saving": "正在保存路由链…",
+        "refreshing": "路由链已保存,正在刷新模型页面…",
+        "fail": { "read": "路由链没读到", "save": "路由链没保存上", "unconfirmed": "保存结果还没确认", "reconcileRead": "当前模型页面暂时没读到" },
+        "retry": "重试",
+        "empty": "这条路由链是空的。添加一跳,或保持为空配置。",
+        "impact": { "title": "路由链已保存", "detail": "以下是这次保存实际移除或中断的项目。", "refreshFail": "路由链已保存,但模型页面暂时无法刷新。", "done": "完成" },
+        "hint": "这条链是写下来的配置。以后来源顺序怎么变,它都不变。"
       },
       "recent": {
         "title": "最近切换",
@@ -1306,15 +1328,18 @@
         "cancel": "取消",
         "title": {
           "refetch": "重新拉取 {{source}} 的型号",
-          "removeModel": "从 {{source}} 移除 {{model}}"
+          "removeModel": "从 {{source}} 移除 {{model}}",
+          "saveRoute": "保存 {{menuModel}} 的路由链"
         },
         "subtitle": {
           "refetch": "这次拉取会让部分型号从这个来源的清单里消失。",
-          "removeModel": "这个型号会从这个来源的清单里消失。"
+          "removeModel": "这个型号会从这个来源的清单里消失。",
+          "saveRoute": "这次保存会让已配置的型号没有可用来源"
         },
         "confirm": {
           "refetch": "仍要拉取",
-          "removeModel": "仍要移除"
+          "removeModel": "仍要移除",
+          "saveRoute": "仍要保存"
         }
       },
       "repair": {
