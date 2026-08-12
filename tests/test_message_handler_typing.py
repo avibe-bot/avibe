@@ -573,6 +573,53 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
             {"id": "agent-default", "name": "default", "backend": "codex"},
         )
 
+    async def test_first_pass_memory_capture_holds_session_lifecycle_admission(self):
+        controller = _StubController(platform="slack", ack_mode="reaction", typing_result=True)
+        lifecycle_lock = asyncio.Lock()
+        capture_started = asyncio.Event()
+        release_capture = asyncio.Event()
+
+        async def acquire_lifecycle_admission(session_id):
+            assert session_id == "base-session"
+            await lifecycle_lock.acquire()
+
+            class Admission:
+                def release(self):
+                    lifecycle_lock.release()
+
+            return Admission()
+
+        async def capture_user_memory(_context, _text, _session_id):
+            capture_started.set()
+            await release_capture.wait()
+
+        controller.session_turns = types.SimpleNamespace(
+            acquire_lifecycle_admission=acquire_lifecycle_admission,
+        )
+        controller.capture_user_memory = capture_user_memory
+        handler = MessageHandler(controller)
+        handler.set_session_handler(_StubSessionHandler())
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            message_id="m-capture-admission",
+            platform="slack",
+        )
+
+        await handler.handle_user_message(context, "remember this")
+        await asyncio.wait_for(capture_started.wait(), timeout=1.0)
+
+        blocked_lifecycle = asyncio.create_task(
+            controller.session_turns.acquire_lifecycle_admission("base-session")
+        )
+        await asyncio.sleep(0)
+        assert not blocked_lifecycle.done()
+
+        release_capture.set()
+        await handler.drain_memory_capture_tasks()
+        admission = await asyncio.wait_for(blocked_lifecycle, timeout=1.0)
+        admission.release()
+
     async def test_scope_model_and_reasoning_override_vibe_agent_defaults(self):
         controller = _StubController(platform="slack", ack_mode="reaction", typing_result=True)
         controller.settings_manager.routing = type(

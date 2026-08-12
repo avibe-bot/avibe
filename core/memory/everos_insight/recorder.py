@@ -15,16 +15,20 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Literal, TypeAlias
-from urllib.parse import urlsplit, urlunsplit
+from core.memory.secret_scrubber import REDACTED as _REDACTED
+from core.memory.secret_scrubber import scrub_text as _canonical_scrub_text
+
+from core.memory.confined_filesystem import (
+    ConfinedFilesystemError,
+    required_no_follow_flag,
+    strict_file_create_flags,
+)
 
 JsonPrimitive: TypeAlias = None | bool | int | float | str
 JsonValue: TypeAlias = JsonPrimitive | list["JsonValue"] | dict[str, "JsonValue"]
 ProviderKind: TypeAlias = Literal["llm", "multimodal_llm", "embedding"]
 
-_REDACTED = "[REDACTED]"
 _ATTACHMENT_OMITTED = "[ATTACHMENT_OMITTED]"
-_LOCAL_PATH = "[LOCAL_PATH]"
-_PROVIDER_BASE_URL = "[PROVIDER_BASE_URL]"
 _LLM_MESSAGE_BYTES = 16 * 1024
 _LLM_PAYLOAD_BYTES = 64 * 1024
 _MULTIMODAL_STRING_BYTES = 4 * 1024
@@ -90,18 +94,6 @@ _ATTACHMENT_PART_TYPES = frozenset(
         "input_image",
     }
 )
-_BEARER_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+")
-_AUTHORIZATION_VALUE_RE = re.compile(r"(?im)(\b(?:proxy[-_ ]?)?authorization\s*[:=]\s*)[^\r\n]*")
-_LABELED_SECRET_RE = re.compile(
-    r"(?i)(\b(?:api[-_ ]?key|access[-_ ]?token|auth[-_ ]?token|refresh[-_ ]?token)\s*[:=]\s*)"
-    r"([^\s,;]+)"
-)
-_PREFIXED_KEY_RE = re.compile(r"(?<![A-Za-z0-9])(?:sk|rk|pk|api)-[A-Za-z0-9_-]{8,}")
-_FILE_URL_RE = re.compile(r"(?i)\bfile:///(?:[^\s\"'<>]|\\ )+")
-_POSIX_PATH_RE = re.compile(
-    r"(?<![:/\w])(?<!\[PROVIDER_BASE_URL\])/(?:[^\s\"'<>]|\\ )+"
-)
-_WINDOWS_PATH_RE = re.compile(r"(?<!\w)(?:[A-Za-z]:[\\/]|\\\\)[^\s\"'<>]+")
 
 
 class _CallLogIncompatibleError(RuntimeError):
@@ -908,39 +900,11 @@ def _scrub_text(
     base_urls: tuple[str, ...],
     exact_values: tuple[str, ...] = (),
 ) -> str:
-    scrubbed = value
-    for exact_value in exact_values:
-        scrubbed = scrubbed.replace(exact_value, _REDACTED)
-    for base_url in sorted(base_urls, key=len, reverse=True):
-        normalized = _normalize_provider_base_url(base_url)
-        if normalized:
-            parts = urlsplit(normalized)
-            if parts.scheme and parts.netloc:
-                pattern = re.compile(
-                    "(?i:" + re.escape(f"{parts.scheme}://{parts.netloc}") + ")"
-                    + re.escape(parts.path),
-                )
-                scrubbed = pattern.sub(_PROVIDER_BASE_URL, scrubbed)
-            else:
-                scrubbed = scrubbed.replace(normalized, _PROVIDER_BASE_URL)
-    scrubbed = _AUTHORIZATION_VALUE_RE.sub(lambda match: match.group(1) + _REDACTED, scrubbed)
-    scrubbed = _BEARER_RE.sub("Bearer " + _REDACTED, scrubbed)
-    scrubbed = _LABELED_SECRET_RE.sub(lambda match: match.group(1) + _REDACTED, scrubbed)
-    scrubbed = _PREFIXED_KEY_RE.sub(_REDACTED, scrubbed)
-    scrubbed = _FILE_URL_RE.sub(_LOCAL_PATH, scrubbed)
-    scrubbed = _WINDOWS_PATH_RE.sub(_LOCAL_PATH, scrubbed)
-    return _POSIX_PATH_RE.sub(_LOCAL_PATH, scrubbed)
-
-
-def _normalize_provider_base_url(value: str) -> str:
-    """Normalize only the case-insensitive provider URL components."""
-    try:
-        parts = urlsplit(value.rstrip("/"))
-    except ValueError:
-        return value.rstrip("/")
-    if not parts.scheme or not parts.netloc:
-        return value.rstrip("/")
-    return urlunsplit((parts.scheme.casefold(), parts.netloc.casefold(), parts.path, "", ""))
+    return _canonical_scrub_text(
+        value,
+        base_urls=base_urls,
+        exact_values=exact_values,
+    )
 
 
 def _normalized_key(value: str) -> str:
@@ -1185,6 +1149,12 @@ def _encode_json(value: JsonValue) -> str:
 
 
 def _prepare_private_database_path(db_path: Path) -> None:
+    try:
+        required_no_follow_flag()
+    except ConfinedFilesystemError as error:
+        raise OSError(
+            "Call-log persistence requires no-follow filesystem support"
+        ) from error
     if not db_path.is_absolute() or ".." in db_path.parts:
         raise OSError("Call-log database path must be a lexical absolute path")
     _validate_directory_chain(db_path.parent)
@@ -1197,9 +1167,10 @@ def _prepare_private_database_path(db_path: Path) -> None:
     try:
         os.lstat(db_path)
     except FileNotFoundError:
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
+        try:
+            flags = strict_file_create_flags()
+        except ConfinedFilesystemError as error:  # pragma: no cover - guarded above
+            raise OSError("Call-log persistence is unavailable") from error
         fd = os.open(db_path, flags, 0o600)
         try:
             info = os.fstat(fd)

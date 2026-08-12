@@ -17,6 +17,8 @@ Current contents:
   Auth/setup-specific harness built on top of the generic layer
 - `message_delivery.py`
   Result/scheduled-delivery harness built on top of the generic layer
+- `memory_repair.py`
+  Public-ASGI Memory Repair harness with a hermetic internal runtime boundary
 
 Recommended layering:
 
