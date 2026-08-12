@@ -9,7 +9,7 @@ import math
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Deque, Literal, Protocol, runtime_checkable
@@ -25,6 +25,7 @@ from core.memory.types import (
     MemoryProfileTrait,
     ProviderSessionRef,
     is_memory_error_code,
+    MemoryPreflightDiagnostic,
 )
 from core.memory.observations import (
     AddAck,
@@ -49,6 +50,7 @@ _SIDECAR_TIMEOUT_SECONDS = 20.0
 _ADD_TIMEOUT_SECONDS = 30.0
 _FLUSH_TIMEOUT_SECONDS = 300.0
 _PROCESSING_TIMEOUT_SECONDS = 8.0
+_PREFLIGHT_TIMEOUT_SECONDS = 5.0
 _PROFILE_QUERY = "profile"
 _MAX_PROFILE_TIMESTAMP_MS = 4_102_444_800_000
 _RECORDER_HEALTH_FALLBACK = {"state": "degraded", "reason": "writer_failures"}
@@ -123,6 +125,23 @@ class MemoryProviderSystemFailure(MemoryProviderFailure):
             error if is_memory_error_code(error) else "memory_sidecar_unavailable"
         )
         super().__init__(closed_error, retryable=True, ambiguous=ambiguous)
+
+
+@dataclass(frozen=True)
+class MemoryPreflightFailure:
+    error: Literal["memory_embedding_unavailable", "memory_llm_unavailable"]
+    diagnostic: MemoryPreflightDiagnostic
+
+
+@dataclass(frozen=True)
+class MemoryPreflightResult:
+    ok: bool
+    failure: MemoryPreflightFailure | None = None
+
+    def payload(self) -> dict[str, object]:
+        if self.ok or self.failure is None:
+            return {"ok": True}
+        return {"ok": False, "error": self.failure.error, "diagnostic": self.failure.diagnostic.payload()}
 
 
 class EverOSPort:
@@ -463,6 +482,22 @@ class EverOSPort:
                 validator=_valid_embedding_probe_response,
             )
 
+    async def preflight(self) -> MemoryPreflightResult:
+        """Run one bounded request for each configured processing endpoint."""
+        checks = (
+            ("llm", self._llm_base_url, self._llm_api_key, "chat/completions", {
+                "model": self._llm_model, "messages": [{"role": "user", "content": "OK"}], "max_tokens": 1, "temperature": 0,
+            }, _valid_chat_probe_response),
+            ("embedding", self._embedding_base_url, self._embedding_api_key, "embeddings", {
+                "model": self._embedding_model, "input": "OK",
+            }, _valid_embedding_probe_response),
+        )
+        for side, base_url, api_key, path, payload, validator in checks:
+            failure = await self._preflight_endpoint(side, base_url, api_key, path, payload, validator)
+            if failure is not None:
+                return MemoryPreflightResult(False, failure)
+        return MemoryPreflightResult(True)
+
     def _processing_configured(self) -> bool:
         return all(
             (
@@ -618,6 +653,38 @@ class EverOSPort:
             logger.info("Memory processing probe unavailable endpoint=%s", path)
             return False
         return bool(validator(value))
+
+    async def _preflight_endpoint(self, side, base_url, api_key, path, payload, validator):
+        error_name = "memory_llm_unavailable" if side == "llm" else "memory_embedding_unavailable"
+        diagnostic = MemoryPreflightDiagnostic(side)
+        if not base_url or not api_key:
+            return MemoryPreflightFailure(error_name, replace(diagnostic, message="endpoint is not configured"))
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(_PREFLIGHT_TIMEOUT_SECONDS, connect=2.0), trust_env=False) as client:
+                response = await client.post(f"{base_url}/{path}", json=payload, headers={"Authorization": f"Bearer {api_key}"})
+            value = json.loads(response.content[:4096]) if response.content else None
+            if 200 <= response.status_code < 300 and validator(value):
+                return None
+            code = None
+            message = f"HTTP {response.status_code}"
+            if isinstance(value, dict) and isinstance(value.get("error"), dict):
+                error = value["error"]
+                code = _bounded_opaque_string(error.get("code"))
+                message = _bounded_preflight_message(error.get("message"), api_key=api_key)
+            return MemoryPreflightFailure(error_name, MemoryPreflightDiagnostic(side, response.status_code, code, message))
+        except httpx.TimeoutException:
+            return MemoryPreflightFailure(error_name, MemoryPreflightDiagnostic(side, message="provider request timed out"))
+        except (httpx.HTTPError, OSError, TypeError, ValueError) as exc:
+            return MemoryPreflightFailure(error_name, MemoryPreflightDiagnostic(side, message=_bounded_preflight_message(str(exc), api_key=api_key) or "provider unavailable"))
+
+
+def _bounded_preflight_message(value: object, *, api_key: str | None = None) -> str:
+    if not isinstance(value, str):
+        return ""
+    message = " ".join(value.split())
+    if api_key:
+        message = message.replace(api_key, "[REDACTED]")
+    return message[:512]
 
 
 async def _read_bounded_response(response: httpx.Response) -> bytes:

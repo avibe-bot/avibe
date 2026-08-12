@@ -259,6 +259,14 @@ def _memory_closed_error(payload: dict, *, fallback: str) -> str:
     return value if is_memory_error_code(value) else fallback
 
 
+def _memory_preflight_projection(payload: dict) -> dict:
+    diagnostic = payload.get("diagnostic")
+    if not isinstance(diagnostic, dict):
+        return {}
+    allowed = {"side", "http_status", "provider_error_code", "message"}
+    return {key: diagnostic[key] for key in allowed if key in diagnostic}
+
+
 def _memory_rebuild_result(
     payload: dict,
     status_code: int,
@@ -480,6 +488,8 @@ def _memory_repair_result(payload: dict, status_code: int) -> tuple[dict, int]:
         "memory_store_unavailable": 503,
         "memory_sidecar_unavailable": 503,
         "memory_repair_failed": 503,
+        "memory_embedding_unavailable": 409,
+        "memory_llm_unavailable": 409,
     }.get(error)
     if expected_status is None or expected_status != status_code:
         return protocol_failure, 503
@@ -765,6 +775,20 @@ async def _apply_memory_settings_patch(
             return _memory_response(await _settings_ok_payload(saved.memory))
 
         recovery_intent = "rebuild" if pending_marker or identity_changed else None
+
+        if identity_changed and confirm_rebuild:
+            from config.v2_config import memory_config_to_payload
+            preflight = await _memory_internal_result(
+                lambda: internal_client.memory_preflight(
+                    payload={"memory": memory_config_to_payload(candidate, include_secrets=True)}
+                )
+            )
+            if preflight[0].get("ok") is not True:
+                failure = dict(preflight[0])
+                failure["status"] = "failed"
+                failure["diagnostic"] = _memory_preflight_projection(preflight[0])
+                return _memory_response(failure, status_code=409)
+
         try:
             # Persist a durable marker before asking the controller to inspect
             # the root. If Avibe exits in this interval, startup must re-run

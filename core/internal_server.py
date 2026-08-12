@@ -1082,6 +1082,21 @@ def create_app(
             logger.exception("internal memory runtime install failed")
             return JSONResponse(status_code=503, content={"ok": False, "reason": "memory_runtime_install_failed"})
 
+    @app.post("/internal/memory/preflight")
+    async def _memory_preflight(request: Request) -> Any:
+        payload = await _safe_json(request)
+        try:
+            from config.v2_config import memory_config_from_payload
+            from core.memory.runtime import MemoryRuntime
+            config = memory_config_from_payload(payload.get("memory", payload) if isinstance(payload, dict) else {})
+            runtime = _memory_runtime()
+            if runtime is None:
+                return JSONResponse(status_code=503, content={"ok": False, "error": "memory_runtime_missing"})
+            return JSONResponse(status_code=200, content=await runtime.preflight(config))
+        except Exception:
+            logger.exception("internal memory preflight failed")
+            return JSONResponse(status_code=503, content={"ok": False, "error": "memory_rebuild_failed"})
+
     def _memory_cli_scope(request: Request) -> tuple[str, str] | None:
         from core.memory.http_headers import CALLER_SESSION_HEADER
 

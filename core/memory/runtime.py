@@ -1774,6 +1774,19 @@ class MemoryRuntime:
             task.add_done_callback(clear_restart)
         return await asyncio.shield(task)
 
+    async def preflight(self, config: MemoryConfig | None = None) -> dict[str, Any]:
+        candidate = deepcopy(config or self._config)
+        provider = EverOSPort(
+            self._socket_path,
+            llm_base_url=candidate.processing.llm.base_url,
+            llm_model=candidate.processing.llm.model,
+            llm_api_key=candidate.processing.llm.api_key,
+            embedding_base_url=candidate.processing.embedding.base_url,
+            embedding_model=candidate.processing.embedding.model,
+            embedding_api_key=candidate.processing.embedding.api_key,
+        )
+        return (await provider.preflight()).payload()
+
     async def rebuild(self) -> dict[str, Any]:
         """Join or start one retained embedding-index rebuild over the cascade child."""
 
@@ -2137,9 +2150,15 @@ class MemoryRuntime:
 
         # Publish the durable fence before any further await. Every preflight
         # failure must leave restart fenced against the same candidate.
+        active_config = deepcopy(self._config)
         self._config = deepcopy(candidate)
         self._restart_config = deepcopy(candidate)
         self._configure_insight_reader(self._config)
+        preflight = await self.preflight(candidate)
+        if preflight.get("ok") is not True:
+            self._config = active_config
+            self._restart_config = active_config
+            return {**preflight, "result": "failed"}
         self.module.pause_claims()
         rebuild_settings = _process_settings(
             candidate,

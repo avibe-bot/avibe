@@ -1559,7 +1559,9 @@
     "memory_rebuild_root_busy": "另一个进程正在使用记忆根目录。请稍后重试重建。",
     "memory_operation_in_progress": "记忆操作正在进行中，请等待完成。",
     "memory_factory_reset_failed": "重新初始化记忆未能完成。记忆数据可能已部分删除；请从「设置 → 依赖」重试。",
-    "memory_embedding_rebuild_required": "更改 Embedding 端点或模型会重建记忆索引。请确认后继续。"
+    "memory_embedding_rebuild_required": "更改 Embedding 端点或模型会重建记忆索引。请确认后继续。",
+    "memory_embedding_unavailable": "Embedding 提供商不可用：{{message}}",
+    "memory_llm_unavailable": "LLM 提供商不可用：{{message}}"
   },
   "apps": {
     "title": "应用",

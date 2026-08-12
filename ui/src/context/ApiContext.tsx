@@ -1811,7 +1811,13 @@ export type MemorySettingsPatch = {
   confirm_rebuild?: boolean;
 };
 
-export type MemoryFailure = { status: 'failed'; error: string };
+export type MemoryFailureDiagnostic = {
+  side?: 'embedding' | 'llm';
+  http_status?: number | null;
+  provider_error_code?: string | null;
+  message?: string;
+};
+export type MemoryFailure = { status: 'failed'; error: string; diagnostic?: MemoryFailureDiagnostic };
 
 export type MemorySettingsResult =
   | (MemorySettings & { runtime?: { ok?: boolean; [key: string]: unknown } })

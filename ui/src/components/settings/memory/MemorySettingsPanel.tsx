@@ -230,7 +230,12 @@ export const MemorySettingsPanel: React.FC<{
         setConfirmRebuildOpen(false);
         setPendingPatch(null);
       } else {
-        setError(memoryErrorMessage(t, (res as { error?: string })?.error));
+        const failure = res as { error?: string; diagnostic?: { message?: string } };
+        setError(
+          failure.diagnostic?.message
+            ? `${memoryErrorMessage(t, failure.error)}: ${failure.diagnostic.message}`
+            : memoryErrorMessage(t, failure.error),
+        );
         // Confirmed rebuild keeps the candidate on failure. Exit the confirm
         // modal so a second click cannot re-submit a now-non-identity patch;
         // Retry rebuild is the recovery control under the pending marker.
