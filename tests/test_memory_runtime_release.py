@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import os
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -185,13 +186,41 @@ def test_build_outputs_metadata_accepted_by_manifest_generator(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    for platform in PLATFORMS:
-        archive, _ = _write_archive(tmp_path, platform)
-        metadata_path = archive.with_suffix("").with_suffix(".json")
-        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        metadata_path.unlink()
+    def fake_run(
+        command: list[str],
+        *,
+        cwd: Path,
+        capture_output: bool = False,
+    ) -> subprocess.CompletedProcess[str]:
+        if command == ["uv", "--version"]:
+            stdout = f"uv {UV_VERSION}\n"
+        elif command[:3] == ["uv", "python", "install"]:
+            binary = cwd / "managed" / "bin" / "python"
+            binary.parent.mkdir(parents=True)
+            binary.write_bytes(b"embedded-python")
+            binary.chmod(0o755)
+            stdout = ""
+        elif command[:3] == ["uv", "python", "find"]:
+            stdout = f"{cwd / 'managed' / 'bin' / 'python'}\n"
+        elif command[:2] == ["uv", "export"]:
+            output = Path(command[command.index("--output-file") + 1])
+            output.write_text("", encoding="utf-8")
+            stdout = ""
+        elif command[:3] == ["uv", "pip", "sync"]:
+            stdout = ""
+        elif command[1:4] == ["-I", "-B", "-c"]:
+            stdout = f"{EVEROS_VERSION}\n{PYTHON_VERSION}\n"
+        elif command[1:] == ["-c", "import platform; print(platform.python_version())"]:
+            stdout = f"{PYTHON_VERSION}\n"
+        else:
+            raise AssertionError(f"Unexpected Memory Runtime subprocess: {command}")
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
 
-        monkeypatch.setattr(runtime_builder, "build_runtime", lambda **kwargs: (archive, metadata))
+    monkeypatch.setattr(runtime_builder, "_run", fake_run)
+    monkeypatch.setattr(runtime_builder, "_sidecar_health_smoke", lambda *args, **kwargs: None)
+
+    for platform in PLATFORMS:
+        metadata_path = tmp_path / f"memory-runtime-{EVEROS_VERSION}-{platform}.json"
         monkeypatch.setattr(
             sys,
             "argv",
@@ -210,7 +239,6 @@ def test_build_outputs_metadata_accepted_by_manifest_generator(
         output = json.loads(capsys.readouterr().out)
 
         assert set(output) == {"ok", "archive", "metadata"}
-        assert output["metadata"] == metadata
         assert json.loads(metadata_path.read_text(encoding="utf-8")) == output["metadata"]
 
     manifest = manifest_generator.build_manifest(
