@@ -1952,6 +1952,25 @@ class ScheduledTaskStore:
             task.schedule_type,
         ) != expected_binding:
             return False
+        if (
+            expected_schedule_generation is None
+            and task.schedule_type == "at"
+            and task.retired_at is not None
+        ):
+            # A manual or legacy Run can still settle after a one-shot retires, but
+            # without the immutable consumed-generation marker it owns only its Run
+            # history. Keep every terminal definition fact byte-for-byte unchanged.
+            # If this command failure authorises an Agent escalation, commit that
+            # outbox row through the existing guarded transaction without changing
+            # the definition payload it is paired with.
+            if queued_run is None:
+                return True
+            return self._write_task(
+                task,
+                self._read_state(task),
+                queued_run=queued_run,
+                expected_uncanceled_run_id=expected_uncanceled_run_id,
+            )
         if expected_schedule_generation is not None:
             if (
                 expected_terminal_run_id is None
@@ -5739,6 +5758,15 @@ class ScheduledTaskService:
         self.store.load()
         return True
 
+    async def _reconcile_rejected_one_shot_fire(self, task_id: str) -> None:
+        """Return a rejected DateTrigger callback to the existing scheduler owner."""
+
+        # The store invalidation may already have been consumed by the fallback
+        # loop before this callback observes the stale generation. Force a fresh
+        # mirror so reconciliation sees the replacement even in that ordering.
+        await self._run_runtime_sync(self.store.load)
+        self.reconcile_jobs()
+
     async def _run_task(
         self,
         task_id: str,
@@ -5750,9 +5778,13 @@ class ScheduledTaskService:
         if not self._owns_service_instance():
             return
         if expected_job_id is not None and self._job_ids.get(task_id) != expected_job_id:
+            if expected_run_at is not None:
+                await self._reconcile_rejected_one_shot_fire(task_id)
             return
         task = await self._run_runtime_sync(self.store.refresh_task, task_id)
         if not task or not task.enabled:
+            if expected_run_at is not None:
+                await self._reconcile_rejected_one_shot_fire(task_id)
             return
         if expected_run_at is not None and (
             task.schedule_type != "at"
@@ -5760,6 +5792,7 @@ class ScheduledTaskService:
             or task.timezone != expected_timezone
             or task.updated_at != expected_updated_at
         ):
+            await self._reconcile_rejected_one_shot_fire(task_id)
             return
         try:
             queued = await self._run_runtime_sync(
@@ -5799,6 +5832,8 @@ class ScheduledTaskService:
                 await self._run_runtime_sync(self.store.load)
                 _publish_task_definitions_updated()
             self._wake_runtime_work(RuntimeWorkLane.REQUESTS)
+        elif expected_run_at is not None:
+            await self._reconcile_rejected_one_shot_fire(task_id)
 
     def _request_partition_key(self, request: TaskExecutionRequest) -> str:
         lock_key = self._execution_lock_key(request)

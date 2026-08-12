@@ -10171,6 +10171,66 @@ def test_hfr_477_manual_rerun_of_retired_one_shot_preserves_terminal_owner(
     assert (current.retired_at, current.retirement_reason, current.last_run_id) == terminal
 
 
+@pytest.mark.parametrize("retirement_reason", ["schedule_missed", "schedule_consumed"])
+def test_hfr_477_non_owner_manual_failure_preserves_retired_one_shot_projection(
+    tmp_path: Path,
+    monkeypatch,
+    retirement_reason: str,
+) -> None:
+    """HFR-477/HFR-478 -- a manual Run owns history, never retired definition facts."""
+
+    _command_task_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    requests = TaskExecutionStore()
+    task = _add_command_task(
+        store,
+        shell_command="echo manual failure >&2; exit 7",
+        cwd=str(tmp_path),
+        schedule_type="at",
+    )
+    if retirement_reason == "schedule_consumed":
+        owner = requests.enqueue_task_run(
+            task.id,
+            source_kind="scheduler",
+            task=task,
+            expected_run_at=task.run_at,
+            expected_timezone=task.timezone,
+            expected_job_id="generation-a",
+        )
+        assert owner is not None
+    else:
+        assert store.sqlite_backend is not None
+        assert store.sqlite_backend.retire_missed_one_shot(
+            task.id,
+            expected_run_at=str(task.run_at),
+            expected_timezone=task.timezone,
+            expected_updated_at=task.updated_at,
+            retired_at="2026-07-28T09:00:01+00:00",
+        )
+    store.load()
+    retired = store.get_task(task.id)
+    assert retired is not None
+    assert retired.retirement_reason == retirement_reason
+    definition_before = _stored_definition_row(task.id)
+
+    manual = requests.enqueue_task_run(task.id, source_kind="cli", task=retired)
+    assert manual is not None
+    claimed = requests.claim(manual.id)
+    assert claimed is not None
+    service = _scheduled_service_with_ledger(tmp_path, store, [])
+    asyncio.run(service._execute_claimed_request(claimed))
+
+    definition_after = _stored_definition_row(task.id)
+    assert definition_after == definition_before
+    run = requests.get_run(manual.id)
+    assert run is not None
+    assert (run["status"], run["exit_code"]) == ("failed", 7)
+    assert "manual failure" in str(run["error"])
+    assert TASK_SCHEDULE_CONSUMED_METADATA_KEY not in (run["metadata"] or {})
+    notice = requests.sqlite_backend.owed_failure_notice(manual.id)
+    assert notice is not None and notice["state"] == "pending"
+
+
 def test_hfr_477_old_queued_run_does_not_suppress_replacement_generation(
     tmp_path: Path,
     monkeypatch,
@@ -10755,6 +10815,149 @@ def test_hfr_478_stale_event_reconciles_the_current_replacement_schedule(
         assert replacement_job_id == task.id
         assert tuple(replacement_job.args[1:4]) == (None, None, None)
     assert original_job_id not in service._one_shot_job_identities
+
+
+@pytest.mark.parametrize("replacement_schedule", ["cron", "at"])
+def test_hfr_477_normal_stale_callback_reconciles_the_current_replacement_schedule(
+    tmp_path: Path,
+    monkeypatch,
+    replacement_schedule: str,
+) -> None:
+    """HFR-477 -- a rejected normal DateTrigger returns current intent to its owner."""
+
+    _binding_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    task = store.add_task(
+        session_key="",
+        prompt="original",
+        schedule_type="at",
+        run_at=(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+        timezone_name="UTC",
+        session_policy="create_per_run",
+    )
+    service = ScheduledTaskService(
+        controller=SimpleNamespace(platform_settings_managers={}),
+        store=store,
+        request_store=TaskExecutionStore(),
+    )
+    service.scheduler = _StubScheduler()
+    service.reconcile_jobs()
+    original_job_id = service._job_ids[task.id]
+    original_identity = service._one_shot_job_identities[original_job_id]
+
+    writer = ScheduledTaskStore()
+    current = writer.get_task(task.id)
+    assert current is not None
+    replacement_run_at = (
+        (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+        if replacement_schedule == "at"
+        else None
+    )
+    replacement = writer.update_task(
+        task.id,
+        name=current.name,
+        session_key=current.session_key,
+        session_id=current.session_id,
+        prompt="replacement",
+        schedule_type=replacement_schedule,
+        post_to=current.post_to,
+        deliver_key=current.deliver_key,
+        cron="0 * * * *" if replacement_schedule == "cron" else None,
+        run_at=replacement_run_at,
+        timezone_name="UTC",
+        agent_name=current.agent_name,
+        session_policy=current.session_policy,
+    )
+    service.scheduler.remove_job(original_job_id)
+
+    asyncio.run(service._run_task(task.id, *original_identity[1:], original_job_id))
+
+    assert service.request_store.list_pending() == []
+    jobs = service.scheduler.get_jobs()
+    assert len(jobs) == 1
+    replacement_job = jobs[0]
+    assert replacement_job.args[0] == task.id
+    assert service._job_ids[task.id] == replacement_job.id
+    if replacement_schedule == "at":
+        assert replacement_job.id != original_job_id
+        assert tuple(replacement_job.args[1:4]) == (
+            replacement_run_at,
+            "UTC",
+            replacement.updated_at,
+        )
+    else:
+        assert replacement_job.id == task.id
+        assert tuple(replacement_job.args[1:4]) == (None, None, None)
+
+
+def test_hfr_477_enqueue_race_reconciles_the_current_replacement_schedule(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """HFR-477 -- losing the atomic enqueue CAS still restores current intent."""
+
+    _binding_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    task = store.add_task(
+        session_key="",
+        prompt="original",
+        schedule_type="at",
+        run_at=(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+        timezone_name="UTC",
+        session_policy="create_per_run",
+    )
+    service = ScheduledTaskService(
+        controller=SimpleNamespace(platform_settings_managers={}),
+        store=store,
+        request_store=TaskExecutionStore(),
+    )
+    service.scheduler = _StubScheduler()
+    service.reconcile_jobs()
+    original_job_id = service._job_ids[task.id]
+    original_identity = service._one_shot_job_identities[original_job_id]
+    replacement_run_at = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+
+    def _replace_before_atomic_enqueue(*_args, **_kwargs):
+        writer = ScheduledTaskStore()
+        current = writer.get_task(task.id)
+        assert current is not None
+        writer.update_task(
+            task.id,
+            name=current.name,
+            session_key=current.session_key,
+            session_id=current.session_id,
+            prompt="replacement",
+            schedule_type="at",
+            post_to=current.post_to,
+            deliver_key=current.deliver_key,
+            cron=None,
+            run_at=replacement_run_at,
+            timezone_name="UTC",
+            agent_name=current.agent_name,
+            session_policy=current.session_policy,
+        )
+        return None
+
+    monkeypatch.setattr(
+        service.request_store,
+        "enqueue_task_run",
+        _replace_before_atomic_enqueue,
+    )
+    service.scheduler.remove_job(original_job_id)
+
+    asyncio.run(service._run_task(task.id, *original_identity[1:], original_job_id))
+
+    replacement = store.refresh_task(task.id)
+    assert replacement is not None and replacement.run_at == replacement_run_at
+    jobs = service.scheduler.get_jobs()
+    assert len(jobs) == 1
+    replacement_job = jobs[0]
+    assert replacement_job.id != original_job_id
+    assert tuple(replacement_job.args[1:4]) == (
+        replacement_run_at,
+        "UTC",
+        replacement.updated_at,
+    )
 
 
 def test_hfr_477_stale_scheduler_enqueue_cannot_consume_a_replacement_generation(
