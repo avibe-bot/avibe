@@ -1968,6 +1968,9 @@ def test_draft_upsert_get_and_clear(isolated_state):
         assert message_deliveries.set_draft(conn, "ses_d", "   ") is True
     with engine.connect() as conn:
         assert message_deliveries.get_draft(conn, "ses_d") is None
+        cleared = message_deliveries.get_draft_state(conn, "ses_d")
+    assert cleared["text"] == ""
+    assert cleared["updated_at"] is not None
 
     # clear_draft is idempotent.
     with engine.begin() as conn:
@@ -1976,6 +1979,7 @@ def test_draft_upsert_get_and_clear(isolated_state):
         message_deliveries.set_draft(conn, "ses_d", None)
     with engine.connect() as conn:
         assert message_deliveries.get_draft(conn, "ses_d") is None
+        assert message_deliveries.get_draft_state(conn, "ses_d")["updated_at"] is not None
 
 
 def test_inbox_ignores_draft_and_queued_delivery_activity(isolated_state):

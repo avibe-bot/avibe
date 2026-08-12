@@ -813,7 +813,8 @@ export const ChatPage: React.FC = () => {
   // subscription, including the ones issued by components this page owns rather
   // than by the page itself. ``sendMessage`` is the exception by construction: it
   // uses a raw ``apiFetch`` so it can read ``queued``/``already_answered`` off a
-  // non-2xx-aware response, so it calls the same converger directly.
+  // non-2xx-aware response, so it reports the terminal state back through the
+  // ApiContext converger explicitly.
   useEffect(() => api.onSessionArchived(convergeSessionArchived), [api, convergeSessionArchived]);
 
   useEffect(() => {
@@ -967,12 +968,12 @@ export const ChatPage: React.FC = () => {
     }
   }, [api, sessionId, scheduleActivityRefresh]);
 
-  // Persist the composer's unsent text server-side (debounced) so it survives a
-  // reload / device switch. The send path clears it server-side; this only
-  // saves while typing.
+  // Cache every edit synchronously so navigation, a tab close, or a disconnected
+  // network cannot lose it. Cloud persistence remains debounced and serialized.
   const onDraftChange = useCallback(
     (text: string) => {
       if (!sessionId) return;
+      api.cacheSessionDraft(sessionId, text);
       // Tag the pending save with THIS session so the timer (and the
       // session-change flush) save to the right session even if the user has
       // since navigated away.
@@ -1176,7 +1177,7 @@ export const ChatPage: React.FC = () => {
     setWorking(false);
     setRuntimeState(emptyRuntimeState());
     setQueue([]);
-    setInitialDraft(null);
+    setInitialDraft(sessionId ? api.getCachedSessionDraft(sessionId) : null);
     // Clear all Agent Activity state so the previous session's groups / live buffer
     // never leak into the new chat (refresh re-reads the toggle + summary).
     setActivityGroups([]);
@@ -1197,7 +1198,7 @@ export const ChatPage: React.FC = () => {
       window.clearTimeout(graceResyncRef.current);
       graceResyncRef.current = null;
     }
-  }, [sessionId]);
+  }, [api, sessionId]);
 
   // Persistent per-session subscription: append every transcript-visible
   // ``message.new`` for THIS session for as long as the page is open. An agent
@@ -1455,42 +1456,62 @@ export const ChatPage: React.FC = () => {
           body: JSON.stringify(requestBody),
         });
         const body = await response.json().catch(() => null);
+        if (isSessionArchivedConflict(response.status, body)) {
+          // Archive is terminal. Clear the original session's draft even when
+          // this response settles after navigation, and do not return false:
+          // false tells Composer to restore a retryable submission.
+          api.convergeSessionArchived(sessionId);
+          if (sessionId === sessionIdRef.current) {
+            setWorking(false);
+            setError(t('chat.archived.sendBlocked'));
+          }
+          return;
+        }
+        if (!response.ok) {
+          // A reserved ordinary message may already have cleared the server
+          // draft. Start recovery for its original session before any page
+          // staleness decision; the old Composer will then persist its restore
+          // even if navigation unmounted it. Quick replies never advance drafts.
+          if (!metadata?.quick_reply_for && body?.draft_advanced !== false) {
+            void api.recoverSessionDraftAfterRejectedSend(sessionId);
+          }
+          if (sessionId === sessionIdRef.current) {
+            void syncTurnStateRef.current?.();
+            setWorking(false);
+            // Routes answer either the flat ``{"error": "<sentence>"}`` or the shared
+            // CODED shape (``{"error": {code, message}, code, message}``) — the
+            // runtime-owned session's ``403 reserved_session`` is the latter, and
+            // ``String(body.error)`` renders that object as literal "[object Object]".
+            const parsed = body ? selectApiErrorFields(body, `HTTP ${response.status}`) : null;
+            setError(
+              parsed
+                ? parsed.code
+                  ? t(`errors.${parsed.code}`, { defaultValue: parsed.fallback })
+                  : parsed.fallback
+                : body?.detail
+                  ? String(body.detail)
+                  : `HTTP ${response.status}`,
+            );
+          }
+          return false;
+        }
+        // Reserving an accepted message advances the server draft to a blank
+        // revision. Apply that exact causal revision before handling this chat's
+        // UI response, so text typed while the POST was in flight is rebased and
+        // synced even if the user has already navigated to another session.
+        if (
+          response.ok
+          && body?.draft_advanced === true
+          && body?.draft
+          && typeof body.draft === 'object'
+        ) {
+          void api.reconcileSessionDraftAfterSend(sessionId, body.draft);
+        }
         // If the user switched chats while this POST was in flight, the response
         // belongs to the previous session — don't append it / mutate working /
         // error on the chat they moved to (Codex P2). The turn still ran for the
         // original session; its rows live there.
         if (sessionId !== sessionIdRef.current) return;
-        if (isSessionArchivedConflict(response.status, body)) {
-          // Archive is terminal, so this is not a retryable failure — it is state
-          // this tab missed. Raw ``apiFetch`` never reaches ``handleApiError``, so
-          // the shared subscription can't see this one: call the same converger
-          // directly. Only the turn state and the message are send-specific.
-          setWorking(false);
-          setError(t('chat.archived.sendBlocked'));
-          convergeSessionArchived(sessionId);
-          return false;
-        }
-        if (!response.ok) {
-          setWorking(false);
-          // Routes answer either the flat ``{"error": "<sentence>"}`` or the shared
-          // CODED shape (``{"error": {code, message}, code, message}``) — the
-          // runtime-owned session's ``403 reserved_session`` is the latter, and
-          // ``String(body.error)`` renders that object as literal "[object Object]".
-          // This is a raw ``apiFetch``, so ``handleApiError`` never runs; reuse its own
-          // selector instead of re-deriving the precedence, and localize by code the
-          // same way, so a coded refusal reads as a sentence here too. ``detail`` is
-          // only FastAPI's own validation shape.
-          const parsed = body ? selectApiErrorFields(body, `HTTP ${response.status}`) : null;
-          throw new Error(
-            parsed
-              ? parsed.code
-                ? t(`errors.${parsed.code}`, { defaultValue: parsed.fallback })
-                : parsed.fallback
-              : body?.detail
-                ? String(body.detail)
-                : `HTTP ${response.status}`,
-          );
-        }
         if (body?.already_answered) {
           // A duplicate quick-reply the backend already had (stale tab / missed
           // event): no turn started HERE. Reconcile authoritatively rather than
@@ -1524,19 +1545,23 @@ export const ChatPage: React.FC = () => {
           }
         }
       } catch (err) {
+        if (!metadata?.quick_reply_for) {
+          void api.recoverSessionDraftAfterRejectedSend(sessionId);
+        }
         if (sessionId === sessionIdRef.current) {
           // The request may have raced a turn owned by another tab or source.
           // Reconcile rather than clearing that turn's Stop state optimistically.
           void syncTurnStateRef.current?.();
           setWorking(false);
           setError(errorMessage(err) ?? String(err));
-          // Signal the composer the send didn't start so it restores the text +
-          // uploaded chips — the user can retry without re-uploading (Codex r5).
-          return false;
         }
+        // Recovery belongs to the original session, while UI mutation is gated
+        // above. Returning false also lets an unmounted old Composer persist its
+        // submitted text after navigation.
+        return false;
       }
     },
-    [sessionId, appendMessage, refreshQueue, markWorking, reloadLatestMessages, convergeSessionArchived, t],
+    [sessionId, api, appendMessage, refreshQueue, markWorking, reloadLatestMessages, t],
   );
 
   // @ mention source: all enabled Agents, filtered client-side (the set is small

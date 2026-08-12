@@ -107,3 +107,52 @@ describe('Composer attachment retry', () => {
     expect(uploadWorkbenchAttachment).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('Composer draft retry', () => {
+  it('re-caches optimistically cleared text when a send cannot start', async () => {
+    const onDraftChange = vi.fn();
+    render(providers(
+      <Composer
+        onSend={async () => false}
+        onDraftChange={onDraftChange}
+      />,
+    ));
+
+    const textbox = screen.getByRole('textbox') as HTMLTextAreaElement;
+    fireEvent.change(textbox, { target: { value: 'keep this' } });
+    fireEvent.click(screen.getByLabelText(en.chat.compose.send));
+
+    await waitFor(() => expect(textbox.value).toBe('keep this'));
+    expect(onDraftChange.mock.calls.map(([text]) => text)).toEqual([
+      'keep this',
+      '',
+      'keep this',
+    ]);
+  });
+
+  it('persists rejected text after navigation unmounts the old composer', async () => {
+    let rejectSend!: () => void;
+    const onDraftChange = vi.fn();
+    const view = render(providers(
+      <Composer
+        onSend={() => new Promise<boolean>((resolve) => {
+          rejectSend = () => resolve(false);
+        })}
+        onDraftChange={onDraftChange}
+      />,
+    ));
+
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'survive navigation' } });
+    fireEvent.click(screen.getByLabelText(en.chat.compose.send));
+    await waitFor(() => expect(onDraftChange).toHaveBeenLastCalledWith(''));
+
+    view.unmount();
+    await act(async () => rejectSend());
+
+    expect(onDraftChange.mock.calls.map(([text]) => text)).toEqual([
+      'survive navigation',
+      '',
+      'survive navigation',
+    ]);
+  });
+});
