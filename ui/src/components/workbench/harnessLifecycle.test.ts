@@ -130,6 +130,11 @@ describe('definitionFailureSummaryKey', () => {
       'harness.failure.timeout',
     ],
     [
+      'legacy task timeout detail without explicit fact',
+      { lifecycle_detail: 'timeout', last_exit_code: 124, last_error: 'command returned status 124' },
+      'harness.failure.generic',
+    ],
+    [
       'watch timeout',
       { lifecycle_state: 'finished', lifecycle_detail: 'timeout', retry_exit_codes: [], last_exit_code: 124, last_error: 'permission denied' },
       'harness.failure.generic',

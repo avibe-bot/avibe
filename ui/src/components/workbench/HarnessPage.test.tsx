@@ -817,6 +817,25 @@ describe('TaskDetail command task', () => {
     expect(html).toMatch(/<details(?![^>]*\bopen\b)[^>]*>/);
   });
 
+  it('keeps a legacy Task timeout detail generic without the explicit timeout fact', () => {
+    const raw = 'command returned status 124';
+    const html = detail(
+      task({
+        shell_command: 'backup --self-timeout',
+        lifecycle_detail: 'timeout',
+        last_exit_code: 124,
+        last_error: raw,
+        metadata: {},
+      }),
+    );
+
+    expect(html).toContain(en.harness.failure.generic);
+    expect(html).not.toContain(en.harness.failure.timeout);
+    expect(html).toContain(`>${en.harness.detail.technicalDetails}<`);
+    expect(html).toContain(raw);
+    expect(html).toMatch(/<details(?![^>]*\bopen\b)[^>]*>/);
+  });
+
   it('keeps a canceled Task diagnostic collapsed without calling it a failure', () => {
     const raw = 'Run canceled by user';
     const html = detail(

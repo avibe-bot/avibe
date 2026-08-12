@@ -962,15 +962,14 @@ def definition_lifecycle_detail(
     one consumer — the row — and never a ``GROUP BY``: the filter groups by
     state, and the row alone says which of the three endings it was.
 
-    ``timed_out`` is THE ANSWER when the row has one, and the three states are
-    distinct on purpose. 124 is the code the runner synthesizes for a limit it
-    enforced itself, but it is also an exit status a command is free to return —
-    ``timeout 5 ...`` inside a ``--shell`` script returns exactly that — so reading
-    the code alone told a user their backup had been cut short by Avibe when it had
-    in fact cut itself short. ``False`` therefore SUPPRESSES the old inference rather
-    than merely not triggering it; ``None`` means the row never recorded the fact
-    (a watch, or a task stamped before this key existed) and keeps the inference,
-    which is still the best guess available for those rows.
+    ``timed_out`` is THE ANSWER for scheduled tasks when the row has one. 124 is
+    the code the runner synthesizes for a limit it enforced itself, but it is also
+    an exit status a command is free to return — ``timeout 5 ...`` inside a
+    ``--shell`` script returns exactly that. Inferring a Task timeout from the
+    code therefore mislabels rows written before the explicit fact existed. Watch
+    rows retain their legacy code inference because their waiter contract owns
+    that exit code; ``False`` suppresses it when the scheduler explicitly records
+    that its limit was not reached.
     """
 
     if lifecycle_state != "finished":
@@ -979,7 +978,7 @@ def definition_lifecycle_detail(
         return None
     if timed_out:
         return "timeout"
-    if timed_out is None and last_exit_code == _TIMEOUT_EXIT_CODE:
+    if definition_type != "scheduled" and timed_out is None and last_exit_code == _TIMEOUT_EXIT_CODE:
         return "timeout"
     # 64 is a completion, not a failure: the waiter finished its cycle and decided
     # it had nothing worth an Agent turn. Reading it as an ending that "went wrong"

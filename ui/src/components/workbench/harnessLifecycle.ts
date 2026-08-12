@@ -410,11 +410,10 @@ export function definitionFailureSummaryKey(
 ): HarnessFailureSummaryKey | null {
   if (definitionIsCircuitPaused(row)) return 'harness.failure.circuitPaused';
   if (definitionLastResultWasCanceled(row)) return null;
-  const isWatch = Array.isArray(row.retry_exit_codes);
-  // A Watch lifecycle timeout can be its overall lifetime expiring before a
-  // cycle starts. Only the scheduler's explicit command fact proves a run timed
-  // out; insufficiently evidenced Watch endings stay in the generic category.
-  const timedOut = row.metadata?.last_command_timed_out === true || (!isWatch && row.lifecycle_detail === 'timeout');
+  // A lifecycle timeout is insufficient for a Task because legacy rows can carry
+  // exit code 124 from the command itself. Only the scheduler's explicit fact
+  // proves a run timed out; Watch lifetime expiry also remains generic.
+  const timedOut = row.metadata?.last_command_timed_out === true;
   const exitCode = row.last_exit_code;
   const successfulWatchExit = definitionHasNeutralWatchExit(row);
   const lifecycleFailure =
