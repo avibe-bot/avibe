@@ -117,6 +117,7 @@ from storage.background import (
     TASK_RETIREMENT_SCHEDULE_CONSUMED,
     TASK_RETIREMENT_SCHEDULE_MISSED,
     TASK_SCHEDULE_CONSUMED_METADATA_KEY,
+    TASK_LAST_RESULT_STATUS_METADATA_KEY,
     SweptRun,
     WATCH_HOOK_OUTCOME_CIRCUIT_REPAIR,
     WATCH_HOOK_OUTCOME_EVENT,
@@ -1908,6 +1909,7 @@ class ScheduledTaskStore:
         exit_code: Optional[int] = None,
         records_command_outcome: bool = False,
         timed_out: bool = False,
+        result_status: Optional[str] = None,
         queued_run: Optional[dict[str, Any]] = None,
         expected_uncanceled_run_id: Optional[str] = None,
         expected_schedule_generation: Optional[dict[str, str]] = None,
@@ -1924,6 +1926,10 @@ class ScheduledTaskStore:
         ``records_command_outcome`` marks the ONE stamp that is a command fire's own
         result, and it is what makes ``exit_code`` authoritative in both directions --
         see the write below.
+
+        ``result_status`` is the existing terminal Run verdict when this stamp is a
+        projection from that ledger. It is stored in definition metadata so read
+        surfaces never have to recover cancellation from localized ``error`` text.
 
         ``expected_uncanceled_run_id`` re-asserts, inside that same transaction, that
         the fire being stamped has not been stopped -- see
@@ -1956,6 +1962,18 @@ class ScheduledTaskStore:
         expect = self._read_state(task)
         task.last_run_at = _utc_now_iso()
         task.last_error = error
+        normalized_result_status = str(result_status or "").strip()
+        if normalized_result_status in TERMINAL_RUN_STATUSES:
+            task.metadata = {
+                **(task.metadata if isinstance(task.metadata, dict) else {}),
+                TASK_LAST_RESULT_STATUS_METADATA_KEY: normalized_result_status,
+            }
+        elif (
+            isinstance(task.metadata, dict)
+            and TASK_LAST_RESULT_STATUS_METADATA_KEY in task.metadata
+        ):
+            task.metadata = dict(task.metadata)
+            task.metadata.pop(TASK_LAST_RESULT_STATUS_METADATA_KEY, None)
         if records_command_outcome:
             # A COMMAND FIRE'S OWN STAMP OWNS THIS COLUMN, ``None`` included. A fire
             # that never reached a process -- a working directory that vanished, a
@@ -9478,6 +9496,7 @@ class ScheduledTaskService:
                 disable_one_shot=retire_one_shot,
                 exit_code=int(raw_exit_code) if raw_exit_code is not None else None,
                 records_command_outcome=records_command_outcome,
+                result_status=status,
                 expected_binding=(
                     task.session_id,
                     task.session_key,

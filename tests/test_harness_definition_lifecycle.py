@@ -464,6 +464,7 @@ def test_legacy_consumed_one_shot_without_owner_stays_visible_in_compact(store) 
         ("succeeded", None, None, "normal"),
         ("canceled", None, None, "canceled"),
         ("failed", 1, False, "error"),
+        ("failed", 124, False, "error"),
         ("failed", 124, True, "timeout"),
     ],
 )
@@ -915,6 +916,21 @@ def test_a_forever_watch_retired_by_its_lifetime_says_it_timed_out(store) -> Non
         last_exit_code=row["last_exit_code"],
         last_error=row["last_error"],
     ) == "timeout"
+
+
+def test_a_legacy_scheduled_task_exit_124_claims_no_terminal_outcome() -> None:
+    """Neither exit 124 nor old result text proves who consumed the schedule."""
+    assert (
+        definition_lifecycle_detail(
+            lifecycle_state="finished",
+            definition_type="scheduled",
+            last_run_at=NOW,
+            last_exit_code=124,
+            last_error="command returned status 124",
+            timed_out=None,
+        )
+        is None
+    )
 
 
 def test_re_enabling_a_retired_one_shot_task_does_not_make_it_waiting_again(store) -> None:
