@@ -3226,64 +3226,44 @@ class ModelHubService:
             )
         return "models.source.error.unclassified", "unclassified_error"
 
-    async def _set_source_blocker(
+    def _write_source_blocker_locked(
         self,
-        source_id: str,
+        config: ModelHubConfig,
+        source: ModelHubSourceConfig,
         *,
         backend: BackendName,
         model_id: str,
         detail_key: str,
         reason: EventReason,
         emit_event: bool = True,
-        settlement_generation: Optional[int] = None,
     ) -> bool:
-        generation = (
-            settlement_generation
-            if settlement_generation is not None
-            else self._reserve_settlement_generation(source_id)
+        status: Literal["error", "needs_action"] = (
+            "error"
+            if reason == "unclassified_error"
+            else "needs_action"
         )
-        async with self._mutation_lock:
-            config = self.store.load()
-            try:
-                source = self._source(config, source_id)
-            except ModelHubError:
-                return False
-            if not source_settlement_allowed(source.state.status, reason):
-                return False
-            settlement_rule = source_settlement_rule(reason)
-            latest_generation = self._latest_source_attempt_generation.get(
-                source.id,
-                generation,
+        unchanged = (
+            source.state.status == status
+            and source.state.detail_key == detail_key
+        )
+        if unchanged:
+            return False
+        source.state = ModelHubSourceStateConfig(
+            status=status,
+            detail_key=detail_key,
+        )
+        persisted = self._save_runtime_config(config)
+        if persisted and emit_event:
+            self._record_event(
+                agent=cast(EventAgent, backend),
+                kind="needs_action",
+                model_id=model_id,
+                reason=reason,
+                from_source=source.id,
+                from_label=source.display_name,
+                now=self.now(),
             )
-            if generation < latest_generation:
-                return False
-            status: Literal["error", "needs_action"] = (
-                "error"
-                if reason == "unclassified_error"
-                else "needs_action"
-            )
-            unchanged = (
-                source.state.status == status
-                and source.state.detail_key == detail_key
-            )
-            if unchanged:
-                return False
-            source.state = ModelHubSourceStateConfig(
-                status=status,
-                detail_key=detail_key,
-            )
-            persisted = self._save_runtime_config(config)
-            if persisted and not unchanged and emit_event:
-                self._record_event(
-                    agent=cast(EventAgent, backend),
-                    kind="needs_action",
-                    model_id=model_id,
-                    reason=reason,
-                    from_source=source.id,
-                    from_label=source.display_name,
-                    now=self.now(),
-                )
-            return persisted
+        return persisted
 
     async def probe_agent(self, backend: str, model_id: object = None) -> dict:
         if backend not in MODEL_HUB_BACKENDS:
@@ -3908,8 +3888,9 @@ class ModelHubService:
                             now=self.now(),
                         )
 
-    async def _cooldown(
+    def _write_cooldown_locked(
         self,
+        config: ModelHubConfig,
         source: ModelHubSourceConfig,
         decision: ResolutionDecision,
         *,
@@ -3918,42 +3899,31 @@ class ModelHubService:
         detail_key: Optional[str] = None,
         emit_event: bool = True,
     ) -> bool:
-        async with self._mutation_lock:
-            config = self.store.load()
-            try:
-                current = self._source(config, source.id)
-            except ModelHubError:
-                return False
-            if decision.reason is not None and not source_settlement_allowed(
-                current.state.status,
-                decision.reason,
-            ):
-                return False
-            retry_at = self.now() + timedelta(seconds=decision.cooldown_seconds)
-            if (
-                current.state.status == "cooldown"
-                and current.state.retry_at is not None
-                and _parse_datetime(current.state.retry_at) >= retry_at
-            ):
-                return False
-            already_cooling = current.state.status == "cooldown"
-            current.state = ModelHubSourceStateConfig(
-                status="cooldown",
-                retry_at=retry_at.isoformat(),
-                detail_key=detail_key or f"models.source.cooldown.{decision.reason}",
+        retry_at = self.now() + timedelta(seconds=decision.cooldown_seconds)
+        if (
+            source.state.status == "cooldown"
+            and source.state.retry_at is not None
+            and _parse_datetime(source.state.retry_at) >= retry_at
+        ):
+            return False
+        already_cooling = source.state.status == "cooldown"
+        source.state = ModelHubSourceStateConfig(
+            status="cooldown",
+            retry_at=retry_at.isoformat(),
+            detail_key=detail_key or f"models.source.cooldown.{decision.reason}",
+        )
+        persisted = self._save_runtime_config(config)
+        if persisted and not already_cooling and emit_event:
+            self._record_event(
+                agent=agent,
+                kind="cooldown",
+                model_id=model_id,
+                reason=cast(EventReason, decision.reason),
+                from_source=source.id,
+                from_label=source.display_name,
+                now=self.now(),
             )
-            persisted = self._save_runtime_config(config)
-            if persisted and not already_cooling and emit_event:
-                self._record_event(
-                    agent=agent,
-                    kind="cooldown",
-                    model_id=model_id,
-                    reason=cast(EventReason, decision.reason),
-                    from_source=current.id,
-                    from_label=current.display_name,
-                    now=self.now(),
-                )
-            return persisted
+        return persisted
 
     async def _settle_fallback_source(
         self,
@@ -3974,32 +3944,52 @@ class ModelHubService:
         settlement_rule = source_settlement_rule(event_reason)
         if not settlement_rule.may_write_health:
             return event_reason, False
-        if settlement_rule.status == "cooldown":
-            persisted = await self._cooldown(
-                source,
-                decision,
-                agent=cast(EventAgent, backend),
-                model_id=model_id,
-                detail_key=detail_key,
-                emit_event=emit_event,
+        generation = (
+            settlement_generation
+            if settlement_generation is not None
+            else self._reserve_settlement_generation(source.id)
+        )
+        async with self._mutation_lock:
+            config = self.store.load()
+            try:
+                current = self._source(config, source.id)
+            except ModelHubError:
+                return event_reason, False
+            latest_generation = self._latest_source_attempt_generation.get(
+                current.id,
+                generation,
             )
-        else:
-            blocker_detail_key = detail_key or {
-                "credential_expired": "models.source.needs_action.oauth_expired",
-                "credential_revoked": "models.source.needs_action.credential_revoked",
-                "balance_exhausted": "models.source.needs_action.balance_exhausted",
-                "account_banned": "models.source.needs_action.account_banned",
-                "unclassified_error": "models.source.error.unclassified",
-            }[event_reason]
-            persisted = await self._set_source_blocker(
-                source.id,
-                backend=backend,
-                model_id=model_id,
-                detail_key=blocker_detail_key,
-                reason=event_reason,
-                emit_event=emit_event,
-                settlement_generation=settlement_generation,
-            )
+            if generation < latest_generation:
+                return event_reason, False
+            if not source_settlement_allowed(current.state.status, event_reason):
+                return event_reason, False
+            if settlement_rule.status == "cooldown":
+                persisted = self._write_cooldown_locked(
+                    config,
+                    current,
+                    decision,
+                    agent=cast(EventAgent, backend),
+                    model_id=model_id,
+                    detail_key=detail_key,
+                    emit_event=emit_event,
+                )
+            else:
+                blocker_detail_key = detail_key or {
+                    "credential_expired": "models.source.needs_action.oauth_expired",
+                    "credential_revoked": "models.source.needs_action.credential_revoked",
+                    "balance_exhausted": "models.source.needs_action.balance_exhausted",
+                    "account_banned": "models.source.needs_action.account_banned",
+                    "unclassified_error": "models.source.error.unclassified",
+                }[event_reason]
+                persisted = self._write_source_blocker_locked(
+                    config,
+                    current,
+                    backend=backend,
+                    model_id=model_id,
+                    detail_key=blocker_detail_key,
+                    reason=event_reason,
+                    emit_event=emit_event,
+                )
         return event_reason, persisted
 
     def _inspect_terminal_chain(

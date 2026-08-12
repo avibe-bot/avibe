@@ -2676,6 +2676,54 @@ def test_streamed_blocker_rejected_by_generation_reports_unpersisted(
     asyncio.run(exercise())
 
 
+def test_streamed_cooldown_rejected_by_generation_reports_unpersisted(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        source = _source("src_stalecool01", "Stale cooldown")
+        service = _service(tmp_path, sources=[source])
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        older_generation = service._reserve_settlement_generation(source.id)
+        service._reserve_settlement_generation(source.id)
+        resolved = ResolvedInvocation(
+            backend="codex",
+            requested_model_id=requested_model,
+            source_id=source.id,
+            source_label=source.display_name,
+            model_id="shared-model",
+            handle=None,
+            outcome=None,
+            credential_ref=source.credential_ref,
+            settlement_generation=older_generation,
+        )
+        outcome = _outcome(
+            RawOutcomeKind.HTTP_ERROR,
+            status=429,
+            code="rate_limit_error",
+            source_id=source.id,
+            stream_started=True,
+        )
+        record_attempt = Mock()
+
+        settlement = await service.settle_handle_outcome(
+            resolved,
+            outcome,
+            termination_origin="upstream_terminal",
+            record_attempt=record_attempt,
+        )
+
+        projection = settlement.turn_outcome
+        assert projection is not None
+        assert projection.source_transition_persisted is False
+        assert projection.next_current_changed is False
+        assert projection.supply_facts is None
+        assert service.store.load().sources[0].state.status == "standby"
+        assert service.events.list() == []
+        record_attempt.assert_called_once()
+
+    asyncio.run(exercise())
+
+
 @pytest.mark.parametrize(
     ("failure_phase", "expected_outcome_calls"),
     [("prepare", 0), ("write", 1)],
@@ -5650,16 +5698,16 @@ def test_shared_source_cooldown_emits_only_on_state_transition(
     )
 
     async def cool_twice() -> tuple[bool, bool]:
-        first_persisted = await service._cooldown(
+        _first_reason, first_persisted = await service._settle_fallback_source(
             source,
             decision,
-            agent="claude",
+            backend="claude",
             model_id=menu_models["claude"],
         )
-        repeated_persisted = await service._cooldown(
+        _repeated_reason, repeated_persisted = await service._settle_fallback_source(
             source,
             decision,
-            agent="codex",
+            backend="codex",
             model_id=menu_models["codex"],
         )
         return first_persisted, repeated_persisted
@@ -5683,16 +5731,16 @@ def test_late_shorter_cooldown_keeps_the_longest_concurrent_deadline(
     async def cool_in_completion_order() -> None:
         for backend, seconds, reason in (
             ("claude", fixture["first_seconds"], "quota_exhausted"),
-            ("codex", fixture["late_seconds"], "network"),
+            ("codex", fixture["late_seconds"], "server_error"),
         ):
-            await service._cooldown(
+            await service._settle_fallback_source(
                 source,
                 ResolutionDecision(
                     "fallback",
                     reason=reason,
                     cooldown_seconds=seconds,
                 ),
-                agent=backend,
+                backend=backend,
                 model_id=menu_models[backend],
             )
 
@@ -5721,17 +5769,17 @@ def test_late_transient_settlement_preserves_needs_action_state(
     )
 
     async def settle_in_order() -> None:
-        await service._set_source_blocker(
-            source.id,
+        await service._settle_fallback_source(
+            source,
+            ResolutionDecision("fallback", reason="credential_revoked"),
             backend="claude",
             model_id=menu_models["claude"],
             detail_key="models.source.needs_action.credential_revoked",
-            reason="credential_revoked",
         )
-        await service._cooldown(
+        await service._settle_fallback_source(
             source,
             transient,
-            agent="codex",
+            backend="codex",
             model_id=menu_models["codex"],
         )
 
@@ -5752,20 +5800,20 @@ def test_late_equal_priority_blocker_preserves_the_newer_reason(
     newer_generation = service._reserve_settlement_generation(source.id)
 
     async def settle_in_completion_order() -> tuple[bool, bool]:
-        newer_persisted = await service._set_source_blocker(
-            source.id,
+        _newer_reason, newer_persisted = await service._settle_fallback_source(
+            source,
+            ResolutionDecision("fallback", reason="account_banned"),
             backend="claude",
             model_id=menu_models["claude"],
             detail_key="models.source.needs_action.account_banned",
-            reason="account_banned",
             settlement_generation=newer_generation,
         )
-        older_persisted = await service._set_source_blocker(
-            source.id,
+        _older_reason, older_persisted = await service._settle_fallback_source(
+            source,
+            ResolutionDecision("fallback", reason="credential_expired"),
             backend="codex",
             model_id=menu_models["codex"],
             detail_key="models.source.needs_action.oauth_expired",
-            reason="credential_expired",
             settlement_generation=older_generation,
         )
         return newer_persisted, older_persisted
