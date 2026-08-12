@@ -35,7 +35,7 @@ from core.memory.everos import (
     ProviderHealthSnapshot,
 )
 from core.memory.everos_insight import MemoryInsightPaths, MemoryInsightReader
-from core.memory.everos_insight.recorder import clear_call_log, maintain_call_log
+from core.memory.everos_insight.recorder import clear_call_log, maintain_call_log, record_preflight_call
 from core.memory.module import MemoryModule, MemorySessionLifecycleBusyError
 from core.memory.operation_lock import MemoryOperationBusy, MemoryOperationLease
 from core.memory.maintenance import (
@@ -1784,8 +1784,32 @@ class MemoryRuntime:
             embedding_base_url=candidate.processing.embedding.base_url,
             embedding_model=candidate.processing.embedding.model,
             embedding_api_key=candidate.processing.embedding.api_key,
+            preflight_call_recorder=self._record_preflight_call,
         )
         return (await provider.preflight()).payload()
+
+    def _record_preflight_call(self, *, side, request, response, failure) -> None:
+        record_preflight_call(
+            self._call_log_db_path,
+            kind="embedding" if side == "embedding" else "llm",
+            model=request.get("model") if isinstance(request, dict) else None,
+            request=request,
+            response=response,
+            status="error" if failure is not None else "ok",
+            error=failure.diagnostic.message if failure is not None else None,
+            provider_base_urls=tuple(
+                value for value in (
+                    self._config.processing.llm.base_url,
+                    self._config.processing.embedding.base_url,
+                ) if value
+            ),
+            exact_redaction_values=tuple(
+                value for value in (
+                    self._config.processing.llm.api_key,
+                    self._config.processing.embedding.api_key,
+                ) if value
+            ),
+        )
 
     async def rebuild(self) -> dict[str, Any]:
         """Join or start one retained embedding-index rebuild over the cascade child."""
@@ -2011,8 +2035,10 @@ class MemoryRuntime:
 
         self._activation_loop = asyncio.get_running_loop()
         if not self.available or self._store is None or self._module is None:
+            logger.warning("Memory rebuild failed branch=store_unavailable")
             return {"ok": False, "error": "memory_store_unavailable"}
         if self._artifact_installing:
+            logger.warning("Memory rebuild failed branch=artifact_installing")
             return {"ok": False, "error": "memory_restart_failed"}
         if self._rebuild_running() and asyncio.current_task() is not self._rebuild_task:
             return {"ok": False, "error": "memory_operation_in_progress"}
@@ -2179,6 +2205,7 @@ class MemoryRuntime:
             except Exception:
                 quiesced = False
             if not quiesced:
+                logger.warning("Memory rebuild failed branch=quiesce")
                 self._runtime_error = "memory_rebuild_failed"
                 return {
                     "ok": False,
@@ -2190,6 +2217,7 @@ class MemoryRuntime:
             # run under the claim fence while the old sidecar is still owned.
             python = await asyncio.to_thread(self._artifact_manager.resolve_python)
             if python is None:
+                logger.warning("Memory rebuild failed branch=artifact_resolution")
                 error = _runtime_error_for_status(
                     await asyncio.to_thread(self._artifact_manager.status)
                 )

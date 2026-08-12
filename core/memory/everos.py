@@ -167,6 +167,7 @@ class EverOSPort:
         add_timeout_seconds: float = _ADD_TIMEOUT_SECONDS,
         flush_timeout_seconds: float = _FLUSH_TIMEOUT_SECONDS,
         processing_timeout_seconds: float = _PROCESSING_TIMEOUT_SECONDS,
+        preflight_call_recorder: Callable[..., None] | None = None,
     ) -> None:
         self._socket_path = Path(socket_path)
         self._llm_base_url = _normalized_endpoint_url(llm_base_url)
@@ -183,6 +184,7 @@ class EverOSPort:
             processing_timeout_seconds,
             _PROCESSING_TIMEOUT_SECONDS,
         )
+        self._preflight_call_recorder = preflight_call_recorder
         self._processing_lock = asyncio.Lock()
 
     @property
@@ -658,12 +660,15 @@ class EverOSPort:
         error_name = "memory_llm_unavailable" if side == "llm" else "memory_embedding_unavailable"
         diagnostic = MemoryPreflightDiagnostic(side)
         if not base_url or not api_key:
-            return MemoryPreflightFailure(error_name, replace(diagnostic, message="endpoint is not configured"))
+            failure = MemoryPreflightFailure(error_name, replace(diagnostic, message="endpoint is not configured"))
+            self._record_preflight(side, payload, None, failure)
+            return failure
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(_PREFLIGHT_TIMEOUT_SECONDS, connect=2.0), trust_env=False) as client:
                 response = await client.post(f"{base_url}/{path}", json=payload, headers={"Authorization": f"Bearer {api_key}"})
             value = json.loads(response.content[:4096]) if response.content else None
             if 200 <= response.status_code < 300 and validator(value):
+                self._record_preflight(side, payload, value, None)
                 return None
             code = None
             message = f"HTTP {response.status_code}"
@@ -671,11 +676,25 @@ class EverOSPort:
                 error = value["error"]
                 code = _bounded_opaque_string(error.get("code"))
                 message = _bounded_preflight_message(error.get("message"), api_key=api_key)
-            return MemoryPreflightFailure(error_name, MemoryPreflightDiagnostic(side, response.status_code, code, message))
+            failure = MemoryPreflightFailure(error_name, MemoryPreflightDiagnostic(side, response.status_code, code, message))
+            self._record_preflight(side, payload, value if isinstance(value, dict) else None, failure)
+            return failure
         except httpx.TimeoutException:
-            return MemoryPreflightFailure(error_name, MemoryPreflightDiagnostic(side, message="provider request timed out"))
+            failure = MemoryPreflightFailure(error_name, MemoryPreflightDiagnostic(side, message="provider request timed out"))
+            self._record_preflight(side, payload, None, failure)
+            return failure
         except (httpx.HTTPError, OSError, TypeError, ValueError) as exc:
-            return MemoryPreflightFailure(error_name, MemoryPreflightDiagnostic(side, message=_bounded_preflight_message(str(exc), api_key=api_key) or "provider unavailable"))
+            failure = MemoryPreflightFailure(error_name, MemoryPreflightDiagnostic(side, message=_bounded_preflight_message(str(exc), api_key=api_key) or "provider unavailable"))
+            self._record_preflight(side, payload, None, failure)
+            return failure
+
+    def _record_preflight(self, side, request, response, failure) -> None:
+        if self._preflight_call_recorder is None:
+            return
+        try:
+            self._preflight_call_recorder(side=side, request=request, response=response, failure=failure)
+        except Exception:
+            logger.debug("memory preflight call recorder failed", exc_info=True)
 
 
 def _bounded_preflight_message(value: object, *, api_key: str | None = None) -> str:

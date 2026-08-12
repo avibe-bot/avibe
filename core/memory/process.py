@@ -45,12 +45,29 @@ from core.memory.types import MemoryErrorCode
 
 logger = logging.getLogger(__name__)
 
+
+async def _probe_stderr_tail(process: object) -> str:
+    stream = getattr(process, "stderr", None)
+    if stream is None:
+        return ""
+    try:
+        reader = getattr(stream, "read", None)
+        data = await reader(_PROCESSING_PROBE_STDERR_BYTES) if callable(reader) else b""
+        if isinstance(data, bytes):
+            text = data.decode("utf-8", "replace")
+        else:
+            text = str(data)
+        return " ".join(text.split())[-_PROCESSING_PROBE_STDERR_BYTES:]
+    except Exception:
+        return ""
+
 _STARTUP_TIMEOUT_SECONDS = 30.0
 _STOP_TIMEOUT_SECONDS = 10.0
 _HEALTHY_RESET_SECONDS = 5 * 60.0
 _RESTART_DELAYS_SECONDS = (1.0, 5.0, 30.0, 120.0)
 _MAX_CONSECUTIVE_FAILURES = 5
 _PROCESSING_PROBE_TIMEOUT_SECONDS = 20.0
+_PROCESSING_PROBE_STDERR_BYTES = 2048
 _SOCKET_MODE = 0o600
 _OWNER_DIR_MODE = 0o700
 _SAFETY_MONITOR_INTERVAL_SECONDS = 0.2
@@ -391,6 +408,7 @@ class _ProcessHost(Protocol):
         cwd: Path,
         env: Mapping[str, str],
         socket_path: Path | None = None,
+        capture_stderr: bool = False,
     ) -> asyncio.subprocess.Process: ...
 
     def process_group(self, pid: int) -> int | None: ...
@@ -616,14 +634,23 @@ class EverOSProcess:
         if not self._python.is_file() or not _settings_complete(self._settings):
             return False
         try:
-            probe = await self._host.spawn(
-                _ProcessKind.PROCESSING_PROBE,
-                self._python,
-                cwd=self._effective_home,
-                env=self._child_environment(),
-            )
+            try:
+                probe = await self._host.spawn(
+                    _ProcessKind.PROCESSING_PROBE,
+                    self._python,
+                    cwd=self._effective_home,
+                    env=self._child_environment(),
+                    capture_stderr=True,
+                )
+            except TypeError:
+                probe = await self._host.spawn(
+                    _ProcessKind.PROCESSING_PROBE,
+                    self._python,
+                    cwd=self._effective_home,
+                    env=self._child_environment(),
+                )
         except (OSError, ValueError):
-            logger.warning("EverOS processing probe could not start")
+            logger.warning("EverOS processing probe could not start; branch=probe_spawn")
             return False
 
         process_group = self._host.process_group(probe.pid)
@@ -631,7 +658,7 @@ class EverOSProcess:
         try:
             await asyncio.wait_for(probe.wait(), timeout=_PROCESSING_PROBE_TIMEOUT_SECONDS)
         except asyncio.TimeoutError:
-            logger.warning("EverOS processing probe timed out")
+            logger.warning("EverOS processing probe timed out; stderr_tail=%s", await _probe_stderr_tail(probe))
             try:
                 await self._terminate_owned_tree(
                     probe,
@@ -665,6 +692,8 @@ class EverOSProcess:
         except Exception:
             logger.warning("EverOS processing probe cleanup failed")
             return False
+        if probe.returncode != 0:
+            logger.warning("EverOS processing probe failed exit_code=%s stderr_tail=%s", probe.returncode, await _probe_stderr_tail(probe))
         return probe.returncode == 0
 
     async def _start_locked(self) -> bool:
@@ -3429,6 +3458,7 @@ class _SystemProcessHost:
         cwd: Path,
         env: Mapping[str, str],
         socket_path: Path | None = None,
+        capture_stderr: bool = False,
     ) -> asyncio.subprocess.Process:
         if kind is _ProcessKind.CASCADE_REBUILD:
             arguments = [
@@ -3462,7 +3492,7 @@ class _SystemProcessHost:
             env=dict(env),
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE if capture_stderr else asyncio.subprocess.DEVNULL,
             start_new_session=True,
         )
 

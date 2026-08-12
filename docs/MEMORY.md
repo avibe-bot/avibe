@@ -1,5 +1,14 @@
 # Memory
 
+## Processing preflight and rebuild recovery
+
+Confirmed embedding identity changes and retained rebuild retries validate the
+candidate with one bounded chat request and one bounded embeddings request
+before the active sidecar is quiesced. Provider failures identify the side,
+HTTP status, provider code, and a sanitized message; the durable candidate and
+rebuild intent remain available for Retry. Ordinary runtime restart keeps its
+existing behavior.
+
 Avibe Memory distills eligible Workbench and private-IM messages into a
 per-user profile, episodes, and facts. Open **Settings > Memory** to inspect its
 Processing Record, current profile, search results, and settings.

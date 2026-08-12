@@ -13,6 +13,15 @@ status_legend:
   manual: currently validated only by human regression
   gap: not covered yet
 scenarios:
+  - id: MEMORY-REBUILD-301
+    name: Candidate preflight rejects unavailable providers without changing durable config
+    status: covered
+    kind: validation
+    layer: scenario
+    test: tests/test_memory_everos.py::test_processing_preflight_projects_sanitized_provider_error
+    given: A candidate processing identity is submitted
+    when: The provider returns a bounded error response
+    then: The side-specific error is projected and credentials/raw payloads are absent
   - id: MEMORY-REBUILD-001
     name: Confirmed embedding identity write persists intent and reaches a closed rebuild result
     status: covered
