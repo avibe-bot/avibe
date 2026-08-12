@@ -1249,6 +1249,12 @@ COMMAND_WORKER_REAP_ATTEMPTS_KEY = "reap_attempts"
 #: needs those three states apart.
 COMMAND_TIMED_OUT_METADATA_KEY = "last_command_timed_out"
 
+#: The terminal Run status most recently projected onto a scheduled definition.
+#: This reuses the Run ledger's existing status vocabulary; it lets read surfaces
+#: distinguish a user-canceled fire from an arbitrary ``last_error`` without parsing
+#: localized diagnostic text.
+TASK_LAST_RESULT_STATUS_METADATA_KEY = "last_result_status"
+
 
 def command_snapshot_from_definition_row(row: Any) -> Optional[dict[str, Any]]:
     """The ``{"shell", "argv"}`` record of what a scheduled definition row would run.

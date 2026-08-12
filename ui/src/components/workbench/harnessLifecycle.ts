@@ -322,6 +322,7 @@ export type HarnessDefinitionFacts = {
   last_run_at?: string | null;
   last_started_at?: string | null;
   last_finished_at?: string | null;
+  retired_at?: string | null;
   last_error?: string | null;
   updated_at?: string | null;
   // Derived server-side from the definition's own run history, because
@@ -349,17 +350,25 @@ export type HarnessDefinitionFacts = {
   retry_exit_codes?: number[] | null;
 };
 
-export type HarnessFailureSummaryKey = 'harness.failure.timeout' | 'harness.failure.generic';
+export type HarnessFailureSummaryKey =
+  | 'harness.failure.timeout'
+  | 'harness.failure.generic'
+  | 'harness.failure.circuitPaused';
 
 export function definitionHasNeutralWatchExit(
-  row: Pick<HarnessDefinitionFacts, 'health' | 'lifecycle_detail' | 'last_exit_code' | 'retry_exit_codes'>,
+  row: Pick<
+    HarnessDefinitionFacts,
+    'health' | 'lifecycle_detail' | 'lifecycle_state' | 'last_exit_code' | 'retired_at' | 'retry_exit_codes'
+  >,
 ): boolean {
   if (!Array.isArray(row.retry_exit_codes)) return false;
   // A terminal pre-cycle failure (for example a missing cwd) can reuse the
-  // configured code, but its projected health must remain visible. A healthy
-  // once-watch may be finished after a successful no-event cycle, so lifecycle
-  // state is intentionally not required here.
-  if (row.health !== 'healthy') return false;
+  // configured code, but its projected health must remain visible. A manually
+  // paused Watch preserves its most recent healthy cycle even though disabled
+  // rows project failing health; paused + explicitly unretired is the durable
+  // evidence that separates that history from supervisor retirement.
+  const preservedManualPause = row.lifecycle_state === 'paused' && row.retired_at === null;
+  if (row.health !== 'healthy' && !preservedManualPause) return false;
   if (row.lifecycle_detail != null && row.lifecycle_detail !== 'normal') return false;
   const exitCode = row.last_exit_code;
   return exitCode === 64 || (typeof exitCode === 'number' && row.retry_exit_codes.includes(exitCode));
@@ -376,6 +385,12 @@ function definitionIsCircuitPaused(
   );
 }
 
+function definitionLastResultWasCanceled(
+  row: Pick<HarnessDefinitionFacts, 'metadata' | 'retry_exit_codes'>,
+): boolean {
+  return !Array.isArray(row.retry_exit_codes) && row.metadata?.last_result_status === 'canceled';
+}
+
 // The UI can only name a timeout when the scheduler's structured fact or the
 // already-projected lifecycle detail proves it. The remaining structured
 // failure facts collapse to one generic category; last_error is deliberately
@@ -383,11 +398,18 @@ function definitionIsCircuitPaused(
 export function definitionFailureSummaryKey(
   row: Pick<
     HarnessDefinitionFacts,
-    'health' | 'lifecycle_detail' | 'lifecycle_state' | 'last_exit_code' | 'metadata' | 'retry_exit_codes'
+    | 'health'
+    | 'lifecycle_detail'
+    | 'lifecycle_state'
+    | 'last_exit_code'
+    | 'metadata'
+    | 'retired_at'
+    | 'retry_exit_codes'
   >,
   technicalErrorPresent = false,
 ): HarnessFailureSummaryKey | null {
-  if (definitionIsCircuitPaused(row)) return null;
+  if (definitionIsCircuitPaused(row)) return 'harness.failure.circuitPaused';
+  if (definitionLastResultWasCanceled(row)) return null;
   const isWatch = Array.isArray(row.retry_exit_codes);
   // A Watch lifecycle timeout can be its overall lifetime expiring before a
   // cycle starts. Only the scheduler's explicit command fact proves a run timed
@@ -410,7 +432,13 @@ export function definitionFailureSummaryKey(
 export function definitionExitCodeTone(
   row: Pick<
     HarnessDefinitionFacts,
-    'health' | 'lifecycle_detail' | 'lifecycle_state' | 'last_exit_code' | 'metadata' | 'retry_exit_codes'
+    | 'health'
+    | 'lifecycle_detail'
+    | 'lifecycle_state'
+    | 'last_exit_code'
+    | 'metadata'
+    | 'retired_at'
+    | 'retry_exit_codes'
   >,
 ): 'neutral' | 'failure' {
   if (definitionHasNeutralWatchExit(row)) return 'neutral';

@@ -3312,7 +3312,8 @@
     },
     "failure": {
       "timeout": "The last run timed out.",
-      "generic": "The last run failed."
+      "generic": "The last run failed.",
+      "circuitPaused": "This Watch was paused after repeated events."
     },
     "kind": {
       "task": "Scheduled task",

@@ -3312,7 +3312,8 @@
     },
     "failure": {
       "timeout": "最近一次运行已超时。",
-      "generic": "最近一次运行失败。"
+      "generic": "最近一次运行失败。",
+      "circuitPaused": "此 Watch 因短时间内重复事件而暂停。"
     },
     "kind": {
       "task": "定时任务",

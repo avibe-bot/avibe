@@ -817,6 +817,24 @@ describe('TaskDetail command task', () => {
     expect(html).toMatch(/<details(?![^>]*\bopen\b)[^>]*>/);
   });
 
+  it('keeps a canceled Task diagnostic collapsed without calling it a failure', () => {
+    const raw = 'Run canceled by user';
+    const html = detail(
+      task({
+        shell_command: 'make release',
+        health: 'healthy',
+        last_error: raw,
+        metadata: { last_result_status: 'canceled' },
+      }),
+    );
+
+    expect(html).not.toContain(en.harness.failure.generic);
+    expect(html).not.toContain(en.harness.failure.timeout);
+    expect(html).toContain(`>${en.harness.detail.technicalDetails}<`);
+    expect(html).toContain(raw);
+    expect(html).toMatch(/<details(?![^>]*\bopen\b)[^>]*>/);
+  });
+
   it('leaves a message task rendering exactly as it does today', () => {
     const html = detail(task({ name: 'Nightly digest', prompt: 'Summarize #ops', message: 'Summarize #ops' }));
 
@@ -973,6 +991,31 @@ describe('WatchDetail runtime', () => {
     expect(html).toMatch(/<details(?![^>]*\bopen\b)[^>]*>/);
   });
 
+  it('keeps retry history neutral after the user manually pauses a Watch', () => {
+    const raw = 'avibe-watch: still waiting';
+    const html = render(
+      <WatchDetail
+        watch={watch({
+          enabled: false,
+          retry_exit_codes: [75],
+          health: 'failing',
+          lifecycle_state: 'paused',
+          lifecycle_detail: null,
+          retired_at: null,
+          last_exit_code: 75,
+          last_error: raw,
+        })}
+        onToggleEnabled={() => undefined}
+        pending={false}
+      />,
+    );
+
+    expect(html).not.toContain(en.harness.failure.generic);
+    expect(html).toContain('<span class="font-mono text-[11px] text-muted">75</span>');
+    expect(html).toContain(raw);
+    expect(html).toMatch(/<details(?![^>]*\bopen\b)[^>]*>/);
+  });
+
   it('keeps a terminal missing-cwd retry exit as a failure', () => {
     const raw = 'working directory is unavailable';
     const html = render(
@@ -983,6 +1026,7 @@ describe('WatchDetail runtime', () => {
           health: 'failing',
           lifecycle_state: 'finished',
           lifecycle_detail: 'error',
+          retired_at: '2026-08-12T00:00:00Z',
           last_exit_code: 1,
           last_error: raw,
         })}
@@ -1017,7 +1061,7 @@ describe('WatchDetail runtime', () => {
     expect(html).not.toContain(en.harness.failure.timeout);
   });
 
-  it('keeps a circuit-breaker pause explanation technical without a false run failure', () => {
+  it('shows a stable circuit-pause summary and keeps the reason technical', () => {
     const raw = 'Watch paused after rapid event burst';
     const html = render(
       <WatchDetail
@@ -1035,8 +1079,11 @@ describe('WatchDetail runtime', () => {
       />,
     );
 
+    expect(html).toContain(en.harness.failure.circuitPaused);
     expect(html).not.toContain(en.harness.failure.generic);
     expect(html).not.toContain(en.harness.failure.timeout);
+    expect(html).toContain('text-amber');
+    expect(html).toContain(`>${en.harness.detail.technicalDetails}<`);
     expect(html).toContain(raw);
     expect(html).toMatch(/<details(?![^>]*\bopen\b)[^>]*>/);
   });

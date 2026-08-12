@@ -2163,6 +2163,7 @@ const FailureDetails: React.FC<{
   // structure still proves an unclassified failure, so keep the default copy
   // generic instead of letting raw stderr choose a category.
   const summaryKey = definitionFailureSummaryKey(row, Boolean(row.last_error));
+  const circuitPaused = summaryKey === 'harness.failure.circuitPaused';
   const disclosureKey = `${'retry_exit_codes' in row ? 'watch' : 'task'}:${row.id}`;
   if (!summaryKey && !row.last_error) return null;
   return (
@@ -2170,9 +2171,14 @@ const FailureDetails: React.FC<{
       {summaryKey && (
         <>
           <div className="font-mono text-[10px] font-bold uppercase tracking-[0.12em] text-muted">
-            {t('harness.detail.failureSummary')}
+            {t(circuitPaused ? 'harness.detail.pauseReason' : 'harness.detail.failureSummary')}
           </div>
-          <div className="flex min-w-0 flex-wrap items-center gap-2 text-[12px] text-pink">
+          <div
+            className={clsx(
+              'flex min-w-0 flex-wrap items-center gap-2 text-[12px]',
+              circuitPaused ? 'text-amber' : 'text-pink',
+            )}
+          >
             <span>{t(summaryKey)}</span>
           </div>
         </>

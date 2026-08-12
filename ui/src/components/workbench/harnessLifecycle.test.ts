@@ -182,7 +182,7 @@ describe('definitionFailureSummaryKey', () => {
   });
 
   it('keeps the summary key set translated and in parity', () => {
-    expect(Object.keys(en.harness.failure).sort()).toEqual(['generic', 'timeout']);
+    expect(Object.keys(en.harness.failure).sort()).toEqual(['circuitPaused', 'generic', 'timeout']);
     expect(Object.keys(zh.harness.failure).sort()).toEqual(Object.keys(en.harness.failure).sort());
     for (const detailKey of ['failureSummary', 'technicalDetails', 'lastExitCode'] as const) {
       expect(typeof en.harness.detail[detailKey]).toBe('string');
@@ -190,6 +190,26 @@ describe('definitionFailureSummaryKey', () => {
     }
     expect(zh.harness.failure.timeout).toBe('最近一次运行已超时。');
     expect(zh.harness.failure.generic).toBe('最近一次运行失败。');
+    expect(zh.harness.failure.circuitPaused).toBe('此 Watch 因短时间内重复事件而暂停。');
+  });
+
+  it('uses structured pause and cancellation facts without parsing diagnostics', () => {
+    expect(
+      definitionFailureSummaryKey(
+        {
+          lifecycle_state: 'paused',
+          retry_exit_codes: [75],
+          metadata: { watch_circuit_breaker: { status: 'tripped' } },
+        },
+        true,
+      ),
+    ).toBe('harness.failure.circuitPaused');
+    expect(
+      definitionFailureSummaryKey({ metadata: { last_result_status: 'canceled' } }, true),
+    ).toBeNull();
+    expect(
+      definitionFailureSummaryKey({ metadata: { last_result_status: 'failed' } }, true),
+    ).toBe('harness.failure.generic');
   });
 });
 
@@ -198,7 +218,9 @@ describe('definitionHasNeutralWatchExit', () => {
     ['no-event completion', { health: 'healthy', lifecycle_state: 'waiting', lifecycle_detail: null, last_exit_code: 64, retry_exit_codes: [] }, true],
     ['default retry exit', { health: 'healthy', lifecycle_state: 'waiting', lifecycle_detail: null, last_exit_code: 75, retry_exit_codes: [75] }, true],
     ['custom retry exit', { health: 'healthy', lifecycle_state: 'waiting', lifecycle_detail: null, last_exit_code: 90, retry_exit_codes: [75, 90] }, true],
-    ['terminal retry exit', { health: 'failing', lifecycle_state: 'finished', last_exit_code: 1, retry_exit_codes: [1] }, false],
+    ['manual pause preserves retry history', { health: 'failing', lifecycle_state: 'paused', lifecycle_detail: null, retired_at: null, last_exit_code: 75, retry_exit_codes: [75] }, true],
+    ['legacy pause without retirement evidence', { health: 'failing', lifecycle_state: 'paused', lifecycle_detail: null, last_exit_code: 75, retry_exit_codes: [75] }, false],
+    ['terminal retry exit', { health: 'failing', lifecycle_state: 'finished', retired_at: '2026-08-12T00:00:00Z', last_exit_code: 1, retry_exit_codes: [1] }, false],
     ['unconfigured watch exit', { health: 'healthy', lifecycle_state: 'waiting', lifecycle_detail: null, last_exit_code: 9, retry_exit_codes: [75] }, false],
     ['finished error with no-event code', { health: 'healthy', lifecycle_state: 'finished', lifecycle_detail: 'error', last_exit_code: 64, retry_exit_codes: [] }, false],
     ['task exit without watch evidence', { last_exit_code: 75 }, false],
