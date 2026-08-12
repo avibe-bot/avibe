@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import heapq
 import json
 import logging
 from contextlib import contextmanager, nullcontext
@@ -277,6 +278,25 @@ def compute_next_run_at(
         return next_fire.isoformat() if next_fire else None
     except Exception:
         return None
+
+
+def _scheduled_next_fire_sort_key(row: dict[str, Any]) -> tuple[bool, datetime, str]:
+    """Project and sort one enabled Task by its actual next fire instant."""
+
+    next_run_at = compute_next_run_at(
+        enabled=bool(row.get("enabled")),
+        schedule_type=row.get("schedule_type"),
+        cron=row.get("cron"),
+        run_at=row.get("run_at"),
+        timezone_name=row.get("timezone"),
+    )
+    row["next_run_at"] = next_run_at
+    instant = _parse_iso_instant(next_run_at)
+    return (
+        instant is None,
+        instant or datetime.max.replace(tzinfo=timezone.utc),
+        str(row.get("id") or ""),
+    )
 
 
 RUN_STATUS_ALIASES: dict[str, str] = {
@@ -3824,6 +3844,24 @@ class SQLiteBackgroundTaskStore:
                 [self._run_from_row(row) for row in conn.execute(stmt).mappings()], conn
             )
 
+    def active_run_ids(self, run_ids: Iterable[str]) -> set[str]:
+        """Revalidate a bounded Run snapshot without admitting newer rows."""
+
+        normalized = {str(run_id) for run_id in run_ids if str(run_id or "").strip()}
+        if not normalized:
+            return set()
+        stmt = (
+            select(agent_runs.c.id)
+            .where(agent_runs.c.id.in_(normalized))
+            .where(
+                agent_runs.c.status.in_(
+                    _status_query_values("queued") + _status_query_values("running")
+                )
+            )
+        )
+        with self.engine.connect() as conn:
+            return {str(run_id) for run_id in conn.execute(stmt).scalars()}
+
     def list_enabled_definitions(
         self,
         definition_type: str,
@@ -3834,11 +3872,9 @@ class SQLiteBackgroundTaskStore:
 
         if definition_type not in {"scheduled", "watch"}:
             raise ValueError("definition_type must be scheduled or watch")
-        stmt = (
-            self._definitions_query(definition_type)
-            .where(run_definitions.c.enabled != 0)
-            .order_by(run_definitions.c.updated_at.desc(), run_definitions.c.id.desc())
-            .limit(max(0, int(limit)))
+        row_limit = max(0, int(limit))
+        stmt = self._definitions_query(definition_type).where(
+            run_definitions.c.enabled != 0
         )
         converter = (
             self._scheduled_task_from_row
@@ -3846,7 +3882,21 @@ class SQLiteBackgroundTaskStore:
             else self._watch_from_row
         )
         with self.engine.connect() as conn:
-            rows = [converter(row) for row in conn.execute(stmt).mappings()]
+            if definition_type == "scheduled":
+                # Cron next-fire instants are computed by APScheduler, so SQLite
+                # cannot order them correctly. Keep the response/enrichment bounded
+                # while selecting the true earliest rows from the enabled live set.
+                rows = heapq.nsmallest(
+                    row_limit,
+                    (converter(row) for row in conn.execute(stmt).mappings()),
+                    key=_scheduled_next_fire_sort_key,
+                )
+            else:
+                stmt = stmt.order_by(
+                    run_definitions.c.updated_at.desc(),
+                    run_definitions.c.id.desc(),
+                ).limit(row_limit)
+                rows = [converter(row) for row in conn.execute(stmt).mappings()]
             return self._enrich_definitions(
                 rows,
                 conn,

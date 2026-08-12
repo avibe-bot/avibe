@@ -177,6 +177,23 @@ def test_snapshot_projects_exact_run_ownership_and_probe_failure():
     assert failed["ownership_error"] == "ownership_probe_failed"
 
 
+def test_scheduled_service_ownership_snapshot_uses_pure_turn_projection():
+    from core.scheduled_tasks import ScheduledTaskService
+
+    calls = []
+    service = object.__new__(ScheduledTaskService)
+    service._inflight_executions = {"run-drain": object()}
+    service.controller = types.SimpleNamespace(
+        session_turns=types.SimpleNamespace(
+            snapshot_owned_agent_run_ids=lambda: calls.append("snapshot") or {"run-turn"},
+            owned_agent_run_ids=lambda: calls.append("reconcile") or {"run-turn"},
+        )
+    )
+
+    assert service.snapshot_owned_agent_run_ids() == {"run-drain", "run-turn"}
+    assert calls == ["snapshot"]
+
+
 def test_claude_active_and_idle_rows():
     c_active = _FakeClaudeClient("slack_111", "nat-a", "opus")
     c_active._fake_pid = 4242

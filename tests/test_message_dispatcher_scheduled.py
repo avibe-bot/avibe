@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import asyncio
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -103,15 +104,17 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
             },
         )
         calls = []
+        event_loop_thread = threading.get_ident()
 
         class _Store:
             def record_run_activity(self, run_ids):
-                calls.append(list(run_ids))
+                calls.append((list(run_ids), threading.get_ident()))
 
         controller.scheduled_task_service = SimpleNamespace(request_store=_Store())
         await dispatcher.emit_agent_message(context, "system", "working")
 
-        self.assertEqual(calls, [["run-live"]])
+        self.assertEqual(calls[0][0], ["run-live"])
+        self.assertNotEqual(calls[0][1], event_loop_thread)
 
     async def test_detached_output_uses_explicit_run_lineage_over_receiver_context(self):
         controller = _StubController()

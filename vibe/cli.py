@@ -338,7 +338,7 @@ def _print_cli_payload(kind: str, **fields) -> None:
     print(json.dumps(_cli_payload(kind, **fields), indent=2))
 
 
-def _memory_cli_language() -> str:
+def _configured_cli_language() -> str:
     """Read an optional configured language without creating or migrating state."""
 
     try:
@@ -348,6 +348,10 @@ def _memory_cli_language() -> str:
         return normalize_language(language if isinstance(language, str) else None)
     except Exception:
         return "en"
+
+
+def _memory_cli_language() -> str:
+    return _configured_cli_language()
 
 
 _MEMORY_CLI_SOURCE_STATE_I18N_KEYS = {
@@ -3221,10 +3225,11 @@ def cmd_harness_status(_args) -> int:
     from vibe import internal_client
 
     try:
+        language = _configured_cli_language()
         request_store = _task_request_store()
         sqlite_store = request_store.sqlite_backend
         if sqlite_store is None:
-            raise RuntimeError("harness status requires the SQLite task store")
+            raise RuntimeError(i18n_t("harness.cli.error.sqliteRequired", language))
         fetch_limit = MAX_PAGE_LIMIT + 1
         raw_runs = sqlite_store.list_active_runs(limit=fetch_limit)
         raw_watches = sqlite_store.list_enabled_definitions(
@@ -3245,11 +3250,31 @@ def cmd_harness_status(_args) -> int:
                 runtime_snapshot.get("ok")
             )
             if not runtime_snapshot["available"]:
-                runtime_snapshot["error"] = f"controller returned status {status_code}"
+                runtime_snapshot["error"] = i18n_t(
+                    "harness.cli.error.controllerStatus",
+                    language,
+                    status=status_code,
+                )
         except internal_client.InternalServerTimeout:
-            runtime_snapshot = {"available": False, "error": "controller request timed out"}
+            runtime_snapshot = {
+                "available": False,
+                "error": i18n_t("harness.cli.error.controllerTimeout", language),
+            }
         except internal_client.InternalServerUnavailable:
-            runtime_snapshot = {"available": False, "error": "controller is unreachable"}
+            runtime_snapshot = {
+                "available": False,
+                "error": i18n_t("harness.cli.error.controllerUnavailable", language),
+            }
+
+        # Ownership is a point-in-time controller fact. Keep only Runs that were
+        # active on both sides of that snapshot so a Run completing during the
+        # request cannot be mislabeled as owner-missing.
+        active_run_ids_after = sqlite_store.active_run_ids(
+            row.get("id") for row in raw_runs
+        )
+        raw_runs = [
+            row for row in raw_runs if str(row.get("id")) in active_run_ids_after
+        ]
 
         snapshot = build_harness_status(
             runs=raw_runs[:MAX_PAGE_LIMIT],
@@ -14517,10 +14542,11 @@ def build_parser():
     runs_cancel_parser.add_argument("run_id")
     _add_json_noop(runs_cancel_parser)
 
+    harness_help_language = _configured_cli_language()
     harness_parser = subparsers.add_parser(
         "harness",
-        help="Inspect unified Harness live state and anomalies",
-        description="Inspect active Runs, armed Watches, upcoming Tasks, and live anomalies.",
+        help=i18n_t("harness.cli.help.command", harness_help_language),
+        description=i18n_t("harness.cli.help.description", harness_help_language),
         error_help_command="vibe harness --help",
     )
     harness_subparsers = harness_parser.add_subparsers(
@@ -14530,7 +14556,7 @@ def build_parser():
     harness_subparsers.required = True
     harness_status_parser = harness_subparsers.add_parser(
         "status",
-        help="Show the bounded live/anomaly snapshot",
+        help=i18n_t("harness.cli.help.status", harness_help_language),
     )
     _add_json_noop(harness_status_parser)
 

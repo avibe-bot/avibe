@@ -5167,7 +5167,7 @@ class ScheduledTaskService:
         except (TypeError, ValueError):
             return default
 
-    def _owned_agent_run_ids(self) -> set[str]:
+    def _owned_agent_run_ids(self, *, reconcile_terminal: bool = True) -> set[str]:
         """Every run id something in THIS process is still legitimately executing.
 
         Two lanes own a ``running`` row and neither can see the other:
@@ -5185,16 +5185,21 @@ class ScheduledTaskService:
 
         owned = set(self._inflight_executions)
         session_turns = getattr(self.controller, "session_turns", None)
-        provider = getattr(session_turns, "owned_agent_run_ids", None)
+        provider_name = (
+            "owned_agent_run_ids"
+            if reconcile_terminal
+            else "snapshot_owned_agent_run_ids"
+        )
+        provider = getattr(session_turns, provider_name, None)
         if not callable(provider):
-            raise RuntimeError("controller.session_turns.owned_agent_run_ids is unavailable")
+            raise RuntimeError(f"controller.session_turns.{provider_name} is unavailable")
         owned |= {str(run_id) for run_id in provider() if run_id}
         return owned
 
     def snapshot_owned_agent_run_ids(self) -> set[str]:
         """Expose the exact current ownership set to read-only operator views."""
 
-        return self._owned_agent_run_ids()
+        return self._owned_agent_run_ids(reconcile_terminal=False)
 
     def _deliverable_queued_run_ids(self) -> set[str]:
         """Queued runs whose transport is ready RIGHT NOW, whatever the row remembers.

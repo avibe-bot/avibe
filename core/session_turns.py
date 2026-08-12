@@ -907,15 +907,15 @@ class SessionTurnManager:
             if str(sink.get("turn_token") or "") == turn_id:
                 self._append_accepted_agent_run_ids(sink, run_ids)
 
-    def owned_agent_run_ids(self) -> set[str]:
-        """Run ids owned by a durable Delivery or a live process projection."""
+    def _project_owned_agent_run_ids(self) -> set[str]:
+        """Read Run ownership without reconciling or settling lifecycle state."""
+
         owned: set[str] = set()
         for turn in list(self.in_flight.values()):
             owned |= self._agent_run_ids_from_spec(getattr(turn.context, "platform_specific", None))
         for sink in list(self.active_turn_sinks.values()):
             owned |= self._agent_run_ids_from_spec(sink)
         if self._durable_schema_available():
-            self._reconcile_terminal_agent_runs()
             with self._sqlite_engine().connect() as conn:
                 owned.update(
                     str(run_id)
@@ -934,6 +934,18 @@ class SessionTurnManager:
                     ).scalars()
                 )
         return owned
+
+    def snapshot_owned_agent_run_ids(self) -> set[str]:
+        """Expose the side-effect-free ownership projection to operator views."""
+
+        return self._project_owned_agent_run_ids()
+
+    def owned_agent_run_ids(self) -> set[str]:
+        """Reconcile terminal turns, then return every currently owned Run id."""
+
+        if self._durable_schema_available():
+            self._reconcile_terminal_agent_runs()
+        return self._project_owned_agent_run_ids()
 
     def accepted_agent_run_ids_for_turn(self, turn_id: str) -> list[str]:
         """Read restart-stable Run attribution for one exact logical Turn."""

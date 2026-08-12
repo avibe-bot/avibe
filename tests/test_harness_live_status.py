@@ -6,6 +6,7 @@ import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
+import pytest
 from sqlalchemy import select, update
 
 from core.services.harness_status import build_harness_status
@@ -242,9 +243,66 @@ def test_same_backend_shared_process_is_not_a_workdir_conflict() -> None:
     assert snapshot["anomalies"] == []
 
 
+def test_same_backend_known_and_pidless_owners_are_a_workdir_conflict() -> None:
+    snapshot = build_harness_status(
+        runs=[],
+        watches=[],
+        tasks=[],
+        runtime_snapshot={
+            "available": True,
+            "ownership_available": True,
+            "owned_run_ids": [],
+            "agents": [
+                {
+                    "backend": "codex",
+                    "state": "active",
+                    "session_id": "ses-known",
+                    "workdir": "/repo/project",
+                    "pid": 4242,
+                },
+                {
+                    "backend": "codex",
+                    "state": "active",
+                    "session_id": "ses-pidless",
+                    "workdir": "/repo/project",
+                    "pid": None,
+                },
+            ],
+        },
+    )
+
+    assert [row["code"] for row in snapshot["anomalies"]] == [
+        "active_workdir_conflict"
+    ]
+
+
+def test_activity_age_accepts_utc_z_timestamps() -> None:
+    snapshot = build_harness_status(
+        runs=[
+            {
+                "id": "run-z",
+                "status": "running",
+                "last_activity_at": "2026-08-12T05:04:00Z",
+            }
+        ],
+        watches=[],
+        tasks=[],
+        runtime_snapshot={
+            "available": True,
+            "ownership_available": True,
+            "owned_run_ids": ["run-z"],
+            "agents": [],
+        },
+        now=datetime(2026, 8, 12, 5, 5, tzinfo=timezone.utc),
+    )
+
+    assert snapshot["runs"][0]["activity_age_seconds"] == 60
+
+
 def test_harness_status_cli_returns_one_unified_payload(monkeypatch, capsys) -> None:
     sqlite_store = SimpleNamespace(
         list_active_runs=lambda *, limit: [],
+        active_run_ids=lambda run_ids: set(run_ids),
         list_enabled_definitions=lambda definition_type, *, limit: [],
     )
     monkeypatch.setattr(
@@ -277,3 +335,77 @@ def test_harness_status_cli_returns_one_unified_payload(monkeypatch, capsys) -> 
         "error": None,
     }
     assert payload["anomalies"] == []
+
+
+def test_harness_status_cli_revalidates_runs_after_ownership_snapshot(
+    monkeypatch, capsys
+) -> None:
+    run = {"id": "run-finished", "status": "running"}
+    sqlite_store = SimpleNamespace(
+        list_active_runs=lambda *, limit: [run],
+        active_run_ids=lambda run_ids: set(),
+        list_enabled_definitions=lambda definition_type, *, limit: [],
+    )
+    monkeypatch.setattr(
+        cli,
+        "_task_request_store",
+        lambda: SimpleNamespace(sqlite_backend=sqlite_store),
+    )
+
+    async def _controller_snapshot():
+        return {
+            "status_code": 200,
+            "body": {
+                "ok": True,
+                "agents": [],
+                "owned_run_ids": [],
+                "ownership_available": True,
+            },
+        }
+
+    monkeypatch.setattr(internal_client, "list_running_agents", _controller_snapshot)
+
+    assert cli.cmd_harness_status(SimpleNamespace()) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["runs"] == []
+    assert payload["anomalies"] == []
+
+
+def test_harness_cli_help_uses_configured_language(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(cli, "_configured_cli_language", lambda: "zh")
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.build_parser().parse_args(["harness", "--help"])
+
+    assert exc_info.value.code == 0
+    output = capsys.readouterr().out
+    assert "检查活跃 Run、已启用 Watch、即将触发的 Task 和实时异常" in output
+    assert "显示有界的实时状态与异常快照" in output
+
+
+def test_enabled_tasks_are_bounded_after_next_fire_ordering(tmp_path) -> None:
+    store = SQLiteBackgroundTaskStore(tmp_path / "state.sqlite")
+    try:
+        for task_id, run_at, updated_at in (
+            ("task-imminent", "2099-01-01T00:00:00+00:00", "2020-01-01T00:00:00+00:00"),
+            ("task-later", "2099-02-01T00:00:00+00:00", "2026-08-12T00:00:00+00:00"),
+            ("task-latest", "2099-03-01T00:00:00+00:00", "2026-08-13T00:00:00+00:00"),
+        ):
+            store.upsert_scheduled_task(
+                {
+                    "id": task_id,
+                    "name": task_id,
+                    "schedule_type": "at",
+                    "run_at": run_at,
+                    "timezone": "UTC",
+                    "enabled": True,
+                    "created_at": updated_at,
+                    "updated_at": updated_at,
+                }
+            )
+
+        tasks = store.list_enabled_definitions("scheduled", limit=2)
+
+        assert [task["id"] for task in tasks] == ["task-imminent", "task-later"]
+    finally:
+        store.close()

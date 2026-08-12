@@ -10,8 +10,11 @@ from typing import Any, Iterable
 def _seconds_since(timestamp: object, now: datetime) -> float | None:
     if not isinstance(timestamp, str) or not timestamp.strip():
         return None
+    text = timestamp.strip()
+    if text.endswith(("Z", "z")):
+        text = f"{text[:-1]}+00:00"
     try:
-        observed = datetime.fromisoformat(timestamp)
+        observed = datetime.fromisoformat(text)
     except ValueError:
         return None
     if observed.tzinfo is None:
@@ -157,7 +160,7 @@ def build_harness_status(
             {
                 "code": "controller_unavailable",
                 "severity": "error",
-                "detail": runtime_snapshot.get("error") or "controller is unreachable",
+                "detail": runtime_snapshot.get("error") or "controller_unavailable",
             }
         )
     elif not ownership_available:
@@ -166,7 +169,7 @@ def build_harness_status(
                 "code": "run_ownership_unknown",
                 "severity": "error",
                 "detail": runtime_snapshot.get("ownership_error")
-                or "controller ownership snapshot is unavailable",
+                or "ownership_unavailable",
             }
         )
 
@@ -227,10 +230,15 @@ def build_harness_status(
         # (Codex is cwd-scoped). That is one writer, not a conflict. Distinct
         # backends or distinct process ids are the evidence this read-only view has
         # for concurrent writers; pid-less rows remain separate runtime owners.
+        pidless_identities = {
+            _runtime_identity(member)
+            for member in members
+            if not isinstance(member.get("pid"), int)
+        }
         writer_count = (
             len(backends)
             if len(backends) > 1
-            else (len(pids) if pids else len(identities))
+            else len(pids) + len(pidless_identities)
         )
         if writer_count < 2:
             continue

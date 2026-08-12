@@ -1562,7 +1562,7 @@ class ConsolidatedMessageDispatcher:
             if store is not None:
                 store.close()
 
-    def _record_agent_run_activity(
+    async def _record_agent_run_activity(
         self,
         context: MessageContext,
         output_semantics: MessageOutput,
@@ -1580,7 +1580,7 @@ class ConsolidatedMessageDispatcher:
         if not callable(record_activity):
             return
         try:
-            record_activity(run_ids)
+            await asyncio.to_thread(record_activity, run_ids)
         except Exception:
             logger.warning(
                 "Failed to record Run activity for %s",
@@ -2094,7 +2094,7 @@ class ConsolidatedMessageDispatcher:
                 )
                 return None
         if current_runtime_turn or output_semantics.detached:
-            self._record_agent_run_activity(context, output_semantics)
+            await self._record_agent_run_activity(context, output_semantics)
         raw_text = text
         enhanced = None
         if visible_output_type and level != "silent":
