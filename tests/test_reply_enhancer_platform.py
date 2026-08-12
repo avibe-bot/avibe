@@ -1944,6 +1944,12 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    def test_angle_wrapped_file_links_unescape_angle_brackets_in_paths(self):
+        enhanced = process_reply(r"[report](<file:///tmp/a\>b.md>)")
+
+        self.assertEqual(enhanced.text, "report")
+        self.assertEqual([file.path for file in enhanced.files], ["/tmp/a>b.md"])
+
     def test_angle_wrapped_file_links_reject_malformed_markdown_and_code(self):
         specimens = [
             "[missing close](<file:///tmp/report.md)",

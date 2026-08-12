@@ -147,7 +147,7 @@ class EnhancedReply:
 # The lookahead validates the complete destination form before the shared URL
 # capture consumes it, keeping malformed or half-paired brackets unmatched.
 _BARE_FILE_URI = r"file://(?:[^()]+|\([^)]*\))+"
-_ANGLE_FILE_URI = r"file://[^<>\r\n]+"
+_ANGLE_FILE_URI = r"file://(?:\\[<>]|[^()<>\\\r\n]+|\([^)]*\))+"
 _FILE_LINK_RE = re.compile(
     rf"(!?)\[([^\]]*)\]\("
     rf"(?=(?:<{_ANGLE_FILE_URI}>|{_BARE_FILE_URI})\))"
@@ -311,7 +311,9 @@ def _extract_file_links(
 
 def _file_uri_to_local_path(parsed) -> str:
     """Convert a parsed file URI into a local path for the current OS."""
-    path = unquote(parsed.path)
+    # CommonMark pointy destinations permit backslash-escaped angle brackets;
+    # those escapes are Markdown syntax, not part of the local filename.
+    path = re.sub(r"\\([<>])", r"\1", unquote(parsed.path))
     if os.name != "nt":
         return path
 
@@ -345,6 +347,21 @@ def _strip_file_links_with_mask(text: str, markdown_mask: str) -> Tuple[str, str
     text_parts.append(text[cursor:])
     mask_parts.append(markdown_mask[cursor:])
     return "".join(text_parts), "".join(mask_parts)
+
+
+def _replace_file_links(text: str, replacement) -> str:
+    """Replace eligible file links while preserving Markdown code regions."""
+    matches = _file_link_matches(text)
+    if not matches:
+        return text
+    parts: List[str] = []
+    cursor = 0
+    for match in matches:
+        parts.append(text[cursor : match.start()])
+        parts.append(replacement(match))
+        cursor = match.end()
+    parts.append(text[cursor:])
+    return "".join(parts)
 
 
 def _file_link_matches(

@@ -166,6 +166,23 @@ def test_rewrite_angle_wrapped_file_links(tmp_path):
     assert sorted(row["kind"] for row in rows) == ["file", "image"]
 
 
+def test_rewrite_does_not_materialize_file_links_inside_code(tmp_path):
+    db = tmp_path / "vibe.sqlite"
+    run_migrations(db)
+    engine = create_sqlite_engine(db)
+    image = tmp_path / "code.png"
+    image.write_bytes(b"image")
+    text = f"Example `![code](<file://{image}>)` and:\n\n```md\n![fenced](<file://{image}>)\n```"
+
+    with engine.begin() as conn:
+        scope_id = _seed_scope_and_session(conn)
+        out = rewrite_agent_media(conn, scope_id=scope_id, session_id="sess_x", text=text)
+
+    assert out == text
+    with engine.connect() as conn:
+        assert conn.execute(select(media_objects)).first() is None
+
+
 def test_resolve_attachment_specs(tmp_path):
     db = tmp_path / "vibe.sqlite"
     run_migrations(db)

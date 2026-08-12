@@ -33,7 +33,7 @@ from urllib.parse import urlparse
 from sqlalchemy.engine import Connection
 
 from config import paths
-from core.reply_enhancer import _FILE_LINK_RE, _file_uri_to_local_path
+from core.reply_enhancer import _file_uri_to_local_path, _replace_file_links
 from storage import media_service
 
 logger = logging.getLogger(__name__)
@@ -415,7 +415,7 @@ def rewrite_agent_media(conn: Connection, *, scope_id: str | None, session_id: s
                 logger.debug("workbench_media: no dimensions for %s", safe_path, exc_info=True)
         return f"{bang}[{label}]({url})"
 
-    return _FILE_LINK_RE.sub(_replace, text)
+    return _replace_file_links(text, _replace)
 
 
 def resolve_attachment_specs(conn: Connection, *, session_id: str, attachments) -> list[dict]:
