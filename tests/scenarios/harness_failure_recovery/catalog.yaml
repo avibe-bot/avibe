@@ -4293,10 +4293,12 @@ scenarios:
     # A manual early run leaves the future schedule armed. The scheduler writes
     # retired_at and schedule_consumed in the same transaction as its Run; the
     # definition points at that exact consuming Run for terminal status, time, and
-    # compact-list success. Registered schedule identity and definition revision
-    # reject a stale callback after an edit or a switch to cron; the retired
-    # one-shot requires a new schedule before it can be resumed, and a late result
-    # from the old Run cannot retire that replacement schedule.
+    # compact-list success. The consuming Run retains the registered run_at,
+    # timezone, definition revision, physical job id, and retirement time. That
+    # exact identity rejects stale enqueue, execution, successor suppression, and
+    # result writes after replacement. A manual rerun of a retired one-shot adds
+    # only CLI Run history, while a callback failure before enqueue atomically
+    # records a failed owner Run and retires the exact schedule generation.
     test: tests/test_scheduled_tasks.py::test_hfr_477_scheduler_consumes_one_shot_atomically_but_manual_run_does_not
   - id: HFR-478
     name: missed one-shot recovery records the exact observed schedule

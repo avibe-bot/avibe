@@ -96,6 +96,7 @@ from storage.background import (
     TASK_SCHEDULE_CONSUMED_METADATA_KEY,
     definition_lifecycle_detail,
     resolve_run_at,
+    task_schedule_generation,
 )
 from storage.models import (
     agent_events,
@@ -2691,6 +2692,7 @@ def test_service_stop_terminalizes_inflight_run_without_replay(
         task=task,
         expected_run_at=task.run_at,
         expected_timezone=task.timezone,
+        expected_job_id="test-one-shot",
     )
     successor = request_store.enqueue_hook_send(
         session_key="slack::channel::C123",
@@ -2854,6 +2856,7 @@ def test_service_stop_keeps_claim_cancelled_before_execution_starts_queued(
         task=task,
         expected_run_at=task.run_at,
         expected_timezone=task.timezone,
+        expected_job_id="test-one-shot",
     )
     service = ScheduledTaskService(
         controller=SimpleNamespace(platform_settings_managers={}),
@@ -2991,6 +2994,7 @@ def test_task_definition_projection_follows_the_exact_terminal_cas_winner(
         task=task,
         expected_run_at=task.run_at,
         expected_timezone=task.timezone,
+        expected_job_id="test-one-shot",
     )
     started = asyncio.Event()
 
@@ -3465,6 +3469,11 @@ def test_restart_recovery_terminalizes_started_rows_and_preserves_other_owners(
             ),
             expected_timezone=(
                 task.timezone
+                if source_kind == "scheduler" and task.schedule_type == "at"
+                else None
+            ),
+            expected_job_id=(
+                f"test:{task.id}"
                 if source_kind == "scheduler" and task.schedule_type == "at"
                 else None
             ),
@@ -9929,8 +9938,15 @@ def test_hfr_477_scheduler_consumes_one_shot_atomically_but_manual_run_does_not(
         store=store,
         request_store=requests,
     )
+    service._job_ids[task.id] = "test-one-shot"
     asyncio.run(
-        service._run_task(task.id, task.run_at, task.timezone, task.updated_at)
+        service._run_task(
+            task.id,
+            task.run_at,
+            task.timezone,
+            task.updated_at,
+            "test-one-shot",
+        )
     )
 
     stored = requests._sqlite.get_scheduled_task(task.id)
@@ -9946,7 +9962,11 @@ def test_hfr_477_scheduler_consumes_one_shot_atomically_but_manual_run_does_not(
     assert {row["source_kind"] for row in runs} == {"cli", "scheduler"}
     by_source = {row["source_kind"]: row for row in runs}
     assert TASK_SCHEDULE_CONSUMED_METADATA_KEY not in by_source["cli"]["metadata"]
-    assert by_source["scheduler"]["metadata"][TASK_SCHEDULE_CONSUMED_METADATA_KEY] is True
+    generation = by_source["scheduler"]["metadata"][
+        TASK_SCHEDULE_CONSUMED_METADATA_KEY
+    ]
+    assert generation["job_id"] == "test-one-shot"
+    assert generation["run_at"] == task.run_at
     assert stored["last_run_id"] == by_source["scheduler"]["id"]
 
 
@@ -9981,6 +10001,7 @@ def test_hfr_477_only_a_consumed_one_shot_forces_the_executor_mirror_reload(
         task=one_shot,
         expected_run_at=one_shot.run_at,
         expected_timezone=one_shot.timezone,
+        expected_job_id="test-one-shot",
     )
     queued_cron = requests.enqueue_task_run(
         cron.id,
@@ -10053,8 +10074,15 @@ def test_hfr_477_late_consumed_run_cannot_retire_replacement_schedule(
         store=store,
         request_store=requests,
     )
+    service._job_ids[task.id] = "test-one-shot"
     asyncio.run(
-        service._run_task(task.id, first_run_at, "UTC", task.updated_at)
+        service._run_task(
+            task.id,
+            first_run_at,
+            "UTC",
+            task.updated_at,
+            "test-one-shot",
+        )
     )
 
     consumed = store.refresh_task(task.id)
@@ -10076,13 +10104,374 @@ def test_hfr_477_late_consumed_run_cannot_retire_replacement_schedule(
     )
     store.set_enabled(task.id, True)
 
-    assert store.mark_task_result(task.id, error=None, disable_one_shot=True)
+    consumed_run = next(
+        row
+        for row in requests._sqlite.list_runs()
+        if row["definition_id"] == task.id and row["source_kind"] == "scheduler"
+    )
+    generation = consumed_run["metadata"][TASK_SCHEDULE_CONSUMED_METADATA_KEY]
+    assert not store.mark_task_result(
+        task.id,
+        error=None,
+        disable_one_shot=True,
+        expected_schedule_generation=generation,
+        expected_terminal_run_id=consumed_run["id"],
+    )
 
     replacement = store.refresh_task(task.id)
     assert replacement is not None
     assert (replacement.enabled, replacement.run_at) == (True, replacement_run_at)
     assert (replacement.retired_at, replacement.retirement_reason) == (None, None)
-    assert replacement.last_run_at is not None
+    assert replacement.last_run_at is None
+
+
+def test_hfr_477_manual_rerun_of_retired_one_shot_preserves_terminal_owner(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """HFR-477 -- a manual rerun adds history without reviving the schedule."""
+
+    _binding_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    requests = TaskExecutionStore()
+    task = store.add_task(
+        session_key="",
+        prompt="send digest",
+        schedule_type="at",
+        run_at=(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+        timezone_name="UTC",
+        session_policy="create_per_run",
+    )
+    consumed = requests.enqueue_task_run(
+        task.id,
+        source_kind="scheduler",
+        task=task,
+        expected_run_at=task.run_at,
+        expected_timezone=task.timezone,
+        expected_job_id="generation-a",
+    )
+    assert consumed is not None
+    store.load()
+    retired = store.refresh_task(task.id)
+    assert retired is not None
+    terminal = (retired.retired_at, retired.retirement_reason, retired.last_run_id)
+
+    manual = requests.enqueue_task_run(task.id, source_kind="cli", task=retired)
+
+    assert manual is not None
+    assert TASK_SCHEDULE_CONSUMED_METADATA_KEY not in manual.metadata
+    current = store.refresh_task(task.id)
+    assert current is not None
+    assert current.enabled is False
+    assert (current.retired_at, current.retirement_reason, current.last_run_id) == terminal
+
+
+def test_hfr_477_old_queued_run_does_not_suppress_replacement_generation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """HFR-477 -- successor suppression is scoped to one exact DateTrigger."""
+
+    _binding_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    requests = TaskExecutionStore()
+    task = store.add_task(
+        session_key="",
+        prompt="generation A",
+        schedule_type="at",
+        run_at=(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+        timezone_name="UTC",
+        session_policy="create_per_run",
+    )
+    first = requests.enqueue_task_run(
+        task.id,
+        source_kind="scheduler",
+        task=task,
+        suppress_scheduler_successor=True,
+        expected_run_at=task.run_at,
+        expected_timezone=task.timezone,
+        expected_job_id="generation-a",
+    )
+    assert first is not None
+    store.load()
+    retired = store.refresh_task(task.id)
+    replacement_run_at = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+    replacement = store.update_task(
+        task.id,
+        name=retired.name,
+        session_key=retired.session_key,
+        session_id=retired.session_id,
+        prompt="generation B",
+        schedule_type="at",
+        post_to=retired.post_to,
+        deliver_key=retired.deliver_key,
+        cron=None,
+        run_at=replacement_run_at,
+        timezone_name="UTC",
+        agent_name=retired.agent_name,
+        session_policy=retired.session_policy,
+    )
+    store.set_enabled(task.id, True)
+    replacement = store.refresh_task(task.id)
+    second = requests.enqueue_task_run(
+        task.id,
+        source_kind="scheduler",
+        task=replacement,
+        suppress_scheduler_successor=True,
+        expected_run_at=replacement.run_at,
+        expected_timezone=replacement.timezone,
+        expected_job_id="generation-b",
+    )
+
+    assert second is not None
+    assert second.id != first.id
+    assert requests.get_run(first.id)["status"] == "queued"
+    current = store.refresh_task(task.id)
+    assert current is not None and current.last_run_id == second.id
+
+
+def test_hfr_477_old_queued_run_cannot_execute_replacement_definition(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """HFR-477 -- a claimed old fire keeps its history but cannot run generation B."""
+
+    _binding_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    requests = TaskExecutionStore()
+    task = store.add_task(
+        session_key="",
+        prompt="generation A",
+        schedule_type="at",
+        run_at=(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+        timezone_name="UTC",
+        session_policy="create_per_run",
+    )
+    queued = requests.enqueue_task_run(
+        task.id,
+        source_kind="scheduler",
+        task=task,
+        expected_run_at=task.run_at,
+        expected_timezone=task.timezone,
+        expected_job_id="generation-a",
+    )
+    assert queued is not None
+    store.load()
+    retired = store.get_task(task.id)
+    store.update_task(
+        task.id,
+        name=retired.name,
+        session_key=retired.session_key,
+        session_id=retired.session_id,
+        prompt="generation B",
+        schedule_type="cron",
+        post_to=retired.post_to,
+        deliver_key=retired.deliver_key,
+        cron="0 * * * *",
+        run_at=None,
+        timezone_name="UTC",
+        agent_name=retired.agent_name,
+        session_policy=retired.session_policy,
+    )
+    store.set_enabled(task.id, True)
+    dispatched: list[str] = []
+    service = ScheduledTaskService(
+        controller=SimpleNamespace(platform_settings_managers={}),
+        store=store,
+        request_store=requests,
+    )
+
+    async def _execute_request(**kwargs):
+        dispatched.append(kwargs["prompt"])
+        return None
+
+    service._execute_request = _execute_request
+    claimed = requests.claim(queued.id)
+    assert claimed is not None
+    asyncio.run(service._execute_claimed_request(claimed))
+
+    assert dispatched == []
+    old_run = requests.get_run(queued.id)
+    assert old_run is not None and old_run["status"] == "failed"
+    replacement = store.refresh_task(task.id)
+    assert replacement is not None
+    assert (replacement.enabled, replacement.schedule_type, replacement.prompt) == (
+        True,
+        "cron",
+        "generation B",
+    )
+    assert replacement.last_run_at is None
+
+
+def test_hfr_477_result_cas_rejects_replacement_after_mirror_read(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """HFR-477 -- replacement in the result read/write window wins atomically."""
+
+    _binding_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    requests = TaskExecutionStore()
+    task = store.add_task(
+        session_key="",
+        prompt="generation A",
+        schedule_type="at",
+        run_at=(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+        timezone_name="UTC",
+        session_policy="create_per_run",
+    )
+    queued = requests.enqueue_task_run(
+        task.id,
+        source_kind="scheduler",
+        task=task,
+        expected_run_at=task.run_at,
+        expected_timezone=task.timezone,
+        expected_job_id="generation-a",
+    )
+    assert queued is not None
+    generation = task_schedule_generation(queued.metadata)
+    assert generation is not None
+    store.load()
+    real_upsert = store.sqlite_backend.upsert_scheduled_task
+
+    def _replace_then_write(payload, **kwargs):
+        writer = ScheduledTaskStore()
+        current = writer.get_task(task.id)
+        writer.update_task(
+            task.id,
+            name=current.name,
+            session_key=current.session_key,
+            session_id=current.session_id,
+            prompt="generation B",
+            schedule_type="cron",
+            post_to=current.post_to,
+            deliver_key=current.deliver_key,
+            cron="0 * * * *",
+            run_at=None,
+            timezone_name="UTC",
+            agent_name=current.agent_name,
+            session_policy=current.session_policy,
+        )
+        writer.set_enabled(task.id, True)
+        return real_upsert(payload, **kwargs)
+
+    monkeypatch.setattr(store.sqlite_backend, "upsert_scheduled_task", _replace_then_write)
+    landed = store.mark_task_result(
+        task.id,
+        error=None,
+        expected_schedule_generation=generation,
+        expected_terminal_run_id=queued.id,
+    )
+
+    assert landed is False
+    replacement = store.refresh_task(task.id)
+    assert replacement is not None
+    assert (replacement.enabled, replacement.schedule_type, replacement.prompt) == (
+        True,
+        "cron",
+        "generation B",
+    )
+    assert replacement.last_run_at is None
+
+
+def test_hfr_477_enqueue_exception_records_failed_terminal_owner(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """HFR-477 -- a DateTrigger callback cannot disappear before enqueue."""
+
+    _binding_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    requests = TaskExecutionStore()
+    task = store.add_task(
+        session_key="",
+        prompt="send digest",
+        schedule_type="at",
+        run_at=(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+        timezone_name="UTC",
+        session_policy="create_per_run",
+    )
+    service = ScheduledTaskService(
+        controller=SimpleNamespace(platform_settings_managers={}),
+        store=store,
+        request_store=requests,
+    )
+    service._job_ids[task.id] = "generation-a"
+    real_enqueue = requests._sqlite.enqueue_definition_run
+
+    def _fail_enqueue(payload, **kwargs):
+        if kwargs.get("terminal_error") is None:
+            raise RuntimeError("queue unavailable")
+        return real_enqueue(payload, **kwargs)
+
+    monkeypatch.setattr(requests._sqlite, "enqueue_definition_run", _fail_enqueue)
+    asyncio.run(
+        service._run_task(
+            task.id,
+            task.run_at,
+            task.timezone,
+            task.updated_at,
+            "generation-a",
+        )
+    )
+
+    current = requests._sqlite.get_scheduled_task(task.id)
+    assert current is not None
+    assert current["lifecycle_state"] == "finished"
+    assert current["lifecycle_detail"] == "error"
+    owner = requests.get_run(current["last_run_id"])
+    assert owner is not None and owner["status"] == "failed"
+    assert "queue unavailable" in owner["error"]
+    assert task_schedule_generation(owner["metadata"])["job_id"] == "generation-a"
+    compact = requests._sqlite.list_scheduled_tasks_page(
+        page_request=PageRequest(limit=20),
+        include_successful_finished=False,
+    )
+    assert task.id in {item["id"] for item in compact.items}
+
+
+def test_hfr_477_job_error_event_recovers_only_registered_generation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """HFR-477 -- EVENT_JOB_ERROR carries the same exact DateTrigger owner."""
+
+    from apscheduler.events import EVENT_JOB_ERROR, JobExecutionEvent
+
+    _binding_env(tmp_path, monkeypatch)
+    store = ScheduledTaskStore()
+    task = store.add_task(
+        session_key="",
+        prompt="send digest",
+        schedule_type="at",
+        run_at=(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+        timezone_name="UTC",
+        session_policy="create_per_run",
+    )
+    service = ScheduledTaskService(
+        controller=SimpleNamespace(platform_settings_managers={}),
+        store=store,
+        request_store=TaskExecutionStore(),
+    )
+    service.scheduler = _StubScheduler()
+    service.reconcile_jobs()
+    job_id = service._job_ids[task.id]
+    event = JobExecutionEvent(
+        EVENT_JOB_ERROR,
+        job_id,
+        "default",
+        resolve_run_at(task.run_at, task.timezone),
+        exception=RuntimeError("callback failed"),
+    )
+
+    service._on_scheduler_event(event)
+
+    current = service.request_store._sqlite.get_scheduled_task(task.id)
+    assert current is not None and current["lifecycle_detail"] == "error"
+    owner = service.request_store.get_run(current["last_run_id"])
+    assert owner is not None and owner["status"] == "failed"
+    generation = task_schedule_generation(owner["metadata"])
+    assert generation is not None and generation["job_id"] == job_id
 
 
 def test_hfr_478_misfire_retires_only_the_schedule_apscheduler_observed(
@@ -10213,6 +10602,7 @@ def test_hfr_477_stale_scheduler_enqueue_cannot_consume_a_replacement_generation
         expected_run_at=run_at,
         expected_timezone="UTC",
         expected_updated_at=original_updated_at,
+        expected_job_id="stale-job",
     )
     assert stale is None
     assert store.refresh_task(task.id).enabled is True
@@ -10239,6 +10629,7 @@ def test_hfr_477_stale_scheduler_enqueue_cannot_consume_a_replacement_generation
         expected_run_at=run_at,
         expected_timezone="UTC",
         expected_updated_at=replacement.updated_at,
+        expected_job_id="stale-job",
     )
     assert stale_after_cron is None
     assert store.refresh_task(task.id).schedule_type == "cron"
@@ -10274,6 +10665,7 @@ def test_hfr_477_consumed_terminal_outcome_belongs_to_the_consuming_run(
         task=task,
         expected_run_at=task.run_at,
         expected_timezone=task.timezone,
+        expected_job_id="test-one-shot",
     )
     assert consumed is not None
     assert requests.cancel_run(consumed.id)
@@ -13571,6 +13963,7 @@ def test_a_refused_result_stamp_cannot_complete_the_run_ok(tmp_path: Path, monke
         task=task,
         expected_run_at=task.run_at,
         expected_timezone=task.timezone,
+        expected_job_id="test-one-shot",
     )
     claimed = service.request_store.claim(queued.id)
     assert claimed is not None
@@ -13651,6 +14044,7 @@ def test_refused_task_stamp_fails_durable_run_and_reconciles_its_delivery(
         task=task,
         expected_run_at=task.run_at,
         expected_timezone=task.timezone,
+        expected_job_id="test-one-shot",
     )
     claimed = service.request_store.claim(queued.id)
     assert claimed is not None
@@ -15281,6 +15675,7 @@ def _fire_command_task(
         task=task,
         expected_run_at=task.run_at if task.schedule_type == "at" else None,
         expected_timezone=task.timezone if task.schedule_type == "at" else None,
+        expected_job_id=(f"test:{task.id}" if task.schedule_type == "at" else None),
     )
     claimed = service.request_store.claim(queued.id)
     assert claimed is not None

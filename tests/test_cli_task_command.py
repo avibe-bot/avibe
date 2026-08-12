@@ -1294,6 +1294,7 @@ def test_task_list_hides_completed_one_shots_by_default(tmp_path: Path, capsys) 
         task=done,
         expected_run_at=done.run_at,
         expected_timezone=done.timezone,
+        expected_job_id="done-job",
     )
     assert done_run is not None
     claimed_done = requests.claim(done_run.id)
@@ -1312,6 +1313,7 @@ def test_task_list_hides_completed_one_shots_by_default(tmp_path: Path, capsys) 
         task=failed,
         expected_run_at=failed.run_at,
         expected_timezone=failed.timezone,
+        expected_job_id="failed-job",
     )
     assert failed_run is not None
     claimed_failed = requests.claim(failed_run.id)
@@ -1616,6 +1618,48 @@ def test_task_run_enqueues_request(tmp_path: Path, capsys) -> None:
     assert payload["ok"] is True
     assert payload["task_id"] == task.id
     assert (request_root / "pending" / f"{payload['execution_id']}.json").exists()
+
+
+def test_task_run_enqueues_manual_rerun_for_retired_one_shot(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store = cli.ScheduledTaskStore()
+    requests = cli.TaskExecutionStore()
+    task = store.add_task(
+        session_key="slack::channel::C123",
+        prompt="hello",
+        schedule_type="at",
+        run_at="2026-03-31T09:00:00+08:00",
+        timezone_name="Asia/Shanghai",
+    )
+    owner = requests.enqueue_task_run(
+        task.id,
+        source_kind="scheduler",
+        task=task,
+        expected_run_at=task.run_at,
+        expected_timezone=task.timezone,
+        expected_job_id="generation-a",
+    )
+    assert owner is not None
+    store.load()
+    retired = store.get_task(task.id)
+    terminal = (retired.retired_at, retired.retirement_reason, retired.last_run_id)
+
+    with (
+        patch("vibe.cli._task_store", return_value=store),
+        patch("vibe.cli._task_request_store", return_value=requests),
+    ):
+        result = cli.cmd_task_run(task.id)
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    manual = requests.get_run(payload["execution_id"])
+    assert manual is not None and manual["source_kind"] == "cli"
+    assert "task_schedule_consumed" not in manual["metadata"]
+    current = cli.ScheduledTaskStore().get_task(task.id)
+    assert current is not None and current.enabled is False
+    assert (current.retired_at, current.retirement_reason, current.last_run_id) == terminal
 
 
 def test_task_update_requires_at_least_one_change(tmp_path: Path) -> None:

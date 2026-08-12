@@ -67,6 +67,24 @@ TASK_RETIREMENT_SCHEDULE_MISSED = "schedule_missed"
 TASK_SCHEDULE_CONSUMED_METADATA_KEY = "task_schedule_consumed"
 
 
+def task_schedule_generation(metadata: Any) -> Optional[dict[str, str]]:
+    """Return the exact one-shot generation owned by a scheduler Run.
+
+    Older Runs used a boolean marker. That proves only that some schedule was
+    consumed, not which generation owned the result, so it deliberately remains
+    unknown instead of being reconstructed from mutable definition history.
+    """
+
+    if not isinstance(metadata, dict):
+        return None
+    raw = metadata.get(TASK_SCHEDULE_CONSUMED_METADATA_KEY)
+    if not isinstance(raw, dict):
+        return None
+    fields = ("run_at", "timezone", "updated_at", "job_id", "retired_at")
+    generation = {field: str(raw.get(field) or "").strip() for field in fields}
+    return generation if all(generation.values()) else None
+
+
 def _json_dumps(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
@@ -783,6 +801,88 @@ def definition_state_unchanged(expect: DefinitionWriteExpectation) -> list[Any]:
     ]
 
 
+def task_schedule_owner_unchanged(
+    generation: dict[str, str], run_id: str
+) -> list[Any]:
+    """Predicates proving a result still owns the consumed one-shot row."""
+
+    marker_path = f"$.{TASK_SCHEDULE_CONSUMED_METADATA_KEY}"
+    exact_owner_run = (
+        select(agent_runs.c.id)
+        .where(agent_runs.c.id == run_id)
+        .where(agent_runs.c.definition_id == run_definitions.c.id)
+        .where(agent_runs.c.source_kind == "scheduler")
+        .where(func.json_valid(agent_runs.c.metadata_json) == 1)
+        .where(func.json_type(agent_runs.c.metadata_json, marker_path) == "object")
+        .where(
+            func.json_extract(agent_runs.c.metadata_json, f"{marker_path}.run_at")
+            == generation["run_at"]
+        )
+        .where(
+            func.json_extract(agent_runs.c.metadata_json, f"{marker_path}.timezone")
+            == generation["timezone"]
+        )
+        .where(
+            func.json_extract(agent_runs.c.metadata_json, f"{marker_path}.updated_at")
+            == generation["updated_at"]
+        )
+        .where(
+            func.json_extract(agent_runs.c.metadata_json, f"{marker_path}.job_id")
+            == generation["job_id"]
+        )
+        .where(
+            func.json_extract(agent_runs.c.metadata_json, f"{marker_path}.retired_at")
+            == generation["retired_at"]
+        )
+        .exists()
+    )
+    return [
+        run_definitions.c.definition_type == "scheduled",
+        run_definitions.c.schedule_type == "at",
+        run_definitions.c.enabled == 0,
+        unchanged_text(run_definitions.c.run_at, generation["run_at"]),
+        unchanged_text(run_definitions.c.timezone, generation["timezone"]),
+        unchanged_text(run_definitions.c.retired_at, generation["retired_at"]),
+        unchanged_text(run_definitions.c.updated_at, generation["retired_at"]),
+        run_definitions.c.retirement_reason == TASK_RETIREMENT_SCHEDULE_CONSUMED,
+        run_definitions.c.last_run_id == run_id,
+        exact_owner_run,
+    ]
+
+
+def task_schedule_generation_matches_definition() -> list[Any]:
+    """SQL predicates accepting only a complete owner marker for this row."""
+
+    marker_path = f"$.{TASK_SCHEDULE_CONSUMED_METADATA_KEY}"
+    return [
+        func.json_type(agent_runs.c.metadata_json, marker_path) == "object",
+        func.json_extract(agent_runs.c.metadata_json, f"{marker_path}.run_at")
+        == run_definitions.c.run_at,
+        func.json_extract(agent_runs.c.metadata_json, f"{marker_path}.timezone")
+        == run_definitions.c.timezone,
+        func.json_extract(agent_runs.c.metadata_json, f"{marker_path}.retired_at")
+        == run_definitions.c.retired_at,
+        func.trim(
+            func.coalesce(
+                func.json_extract(
+                    agent_runs.c.metadata_json, f"{marker_path}.updated_at"
+                ),
+                "",
+            )
+        )
+        != "",
+        func.trim(
+            func.coalesce(
+                func.json_extract(
+                    agent_runs.c.metadata_json, f"{marker_path}.job_id"
+                ),
+                "",
+            )
+        )
+        != "",
+    ]
+
+
 def definition_lifecycle_expression(definition_type: str):
     """The single declaration of a task/watch lifecycle state, as SQL.
 
@@ -873,13 +973,7 @@ def _successful_finished_definition_expression(definition_type: str, lifecycle: 
             .where(agent_runs.c.definition_id == run_definitions.c.id)
             .where(agent_runs.c.source_kind == "scheduler")
             .where(func.json_valid(agent_runs.c.metadata_json) == 1)
-            .where(
-                func.json_extract(
-                    agent_runs.c.metadata_json,
-                    f"$.{TASK_SCHEDULE_CONSUMED_METADATA_KEY}",
-                )
-                == 1
-            )
+            .where(*task_schedule_generation_matches_definition())
             .limit(1)
             .scalar_subquery()
         )
@@ -2998,6 +3092,7 @@ def upsert_definition_in_connection(
     *,
     expect: DefinitionWriteExpectation | None,
     definition_type: str,
+    extra_predicates: Sequence[Any] = (),
 ) -> bool:
     """The one full-row ``run_definitions`` write, guarded, in a CALLER'S transaction.
 
@@ -3021,6 +3116,8 @@ def upsert_definition_in_connection(
         # (pysqlite emits no ``BEGIN`` for a bare SELECT), so the lock is first taken
         # here.
         stmt = stmt.where(*definition_state_unchanged(expect))
+    if extra_predicates:
+        stmt = stmt.where(*extra_predicates)
     result = conn.execute(stmt.values(**values))
     if result.rowcount:
         return True
@@ -3188,6 +3285,8 @@ class SQLiteBackgroundTaskStore:
         expect: DefinitionWriteExpectation | None = None,
         expected_enabled_agent_id: Optional[str] = None,
         expected_reference_agent_id: Optional[str] = None,
+        expected_schedule_generation: Optional[dict[str, str]] = None,
+        expected_terminal_run_id: Optional[str] = None,
     ) -> bool:
         """Write a whole scheduled-task row. ``False`` means the write was REFUSED.
 
@@ -3203,6 +3302,14 @@ class SQLiteBackgroundTaskStore:
             definition_type="scheduled task",
             expected_enabled_agent_id=expected_enabled_agent_id,
             expected_reference_agent_id=expected_reference_agent_id,
+            extra_predicates=(
+                task_schedule_owner_unchanged(
+                    expected_schedule_generation, expected_terminal_run_id
+                )
+                if expected_schedule_generation is not None
+                and expected_terminal_run_id is not None
+                else ()
+            ),
         )
 
     def upsert_scheduled_task_with_binding_notice(
@@ -3441,6 +3548,7 @@ class SQLiteBackgroundTaskStore:
         definition_type: str,
         expected_enabled_agent_id: Optional[str] = None,
         expected_reference_agent_id: Optional[str] = None,
+        extra_predicates: Sequence[Any] = (),
     ) -> bool:
         """The one full-row ``run_definitions`` write, guarded once for both types."""
 
@@ -3460,7 +3568,11 @@ class SQLiteBackgroundTaskStore:
                 )
                 values["agent_name"] = identity["name"]
             return upsert_definition_in_connection(
-                conn, values, expect=expect, definition_type=definition_type
+                conn,
+                values,
+                expect=expect,
+                definition_type=definition_type,
+                extra_predicates=extra_predicates,
             )
 
     def upsert_watch_with_queued_run(
@@ -3531,6 +3643,8 @@ class SQLiteBackgroundTaskStore:
         expect: DefinitionWriteExpectation | None,
         run_payload: dict[str, Any],
         expected_uncanceled_run_id: Optional[str] = None,
+        expected_schedule_generation: Optional[dict[str, str]] = None,
+        expected_terminal_run_id: Optional[str] = None,
     ) -> bool:
         """A guarded task stamp and the outbox row it authorises, ONE transaction.
 
@@ -3583,6 +3697,14 @@ class SQLiteBackgroundTaskStore:
                 values,
                 expect=expect,
                 definition_type="scheduled task",
+                extra_predicates=(
+                    task_schedule_owner_unchanged(
+                        expected_schedule_generation, expected_terminal_run_id
+                    )
+                    if expected_schedule_generation is not None
+                    and expected_terminal_run_id is not None
+                    else ()
+                ),
             ):
                 return False
             _pin_run_to_definition_agent(
@@ -3694,6 +3816,8 @@ class SQLiteBackgroundTaskStore:
         expected_run_at: Optional[str] = None,
         expected_timezone: Optional[str] = None,
         expected_updated_at: Optional[str] = None,
+        expected_job_id: Optional[str] = None,
+        terminal_error: Optional[str] = None,
     ) -> Optional[dict[str, Any]]:
         """Enqueue one internally consistent snapshot of a live definition."""
 
@@ -3703,35 +3827,18 @@ class SQLiteBackgroundTaskStore:
             raise ValueError(
                 "expected run_at and definition updated_at must be supplied together"
             )
+        if (expected_run_at is None) != (expected_job_id is None):
+            raise ValueError(
+                "expected run_at and scheduler job id must be supplied together"
+            )
+        if terminal_error is not None and expected_run_at is None:
+            raise ValueError("a terminal enqueue error requires a one-shot identity")
         values = self._run_values(payload)
         definition_id = str(values.get("definition_id") or "").strip()
         if not definition_id:
             raise ValueError("definition id is required")
         with run_update_event_transaction(self.engine) as conn:
             reserve_write_lock(conn)
-            if suppress_scheduler_successor:
-                unstarted = conn.execute(
-                    select(agent_runs.c.id)
-                    .where(agent_runs.c.definition_id == definition_id)
-                    .where(agent_runs.c.source_kind == "scheduler")
-                    .where(
-                        or_(
-                            agent_runs.c.status.in_(_status_query_values("queued")),
-                            and_(
-                                agent_runs.c.status.in_(_status_query_values("running")),
-                                agent_runs.c.delivery_id.is_(None),
-                                agent_runs.c.pid.is_(None),
-                                func.json_extract(
-                                    agent_runs.c.metadata_json,
-                                    f"$.{COMMAND_WORKER_METADATA_KEY}",
-                                ).is_(None),
-                            ),
-                        )
-                    )
-                    .limit(1)
-                ).scalar_one_or_none()
-                if unstarted is not None:
-                    return None
             definition = conn.execute(
                 select(
                     run_definitions.c.definition_type,
@@ -3780,7 +3887,13 @@ class SQLiteBackgroundTaskStore:
                     scheduled_one_shot and definition["retired_at"] is not None
                 ):
                     return None
-                if not bool(definition["enabled"]):
+                manual_retired_one_shot = bool(
+                    values.get("source_kind") in {"cli", "manual"}
+                    and definition["definition_type"] == "scheduled"
+                    and definition["schedule_type"] == "at"
+                    and definition["retired_at"] is not None
+                )
+                if not bool(definition["enabled"]) and not manual_retired_one_shot:
                     raise ValueError(f"definition '{definition_id}' is disabled")
                 if (
                     scheduled_one_shot
@@ -3828,6 +3941,58 @@ class SQLiteBackgroundTaskStore:
                     message_payload_json=definition["message_payload_json"],
                     metadata_json=_json_dumps(metadata),
                 )
+            if suppress_scheduler_successor:
+                unstarted_stmt = (
+                    select(agent_runs.c.id)
+                    .where(agent_runs.c.definition_id == definition_id)
+                    .where(agent_runs.c.source_kind == "scheduler")
+                    .where(
+                        or_(
+                            agent_runs.c.status.in_(_status_query_values("queued")),
+                            and_(
+                                agent_runs.c.status.in_(_status_query_values("running")),
+                                agent_runs.c.delivery_id.is_(None),
+                                agent_runs.c.pid.is_(None),
+                                func.json_extract(
+                                    agent_runs.c.metadata_json,
+                                    f"$.{COMMAND_WORKER_METADATA_KEY}",
+                                ).is_(None),
+                            ),
+                        )
+                    )
+                )
+                if expected_run_at is not None:
+                    marker_path = f"$.{TASK_SCHEDULE_CONSUMED_METADATA_KEY}"
+                    unstarted_stmt = (
+                        unstarted_stmt.where(func.json_valid(agent_runs.c.metadata_json) == 1)
+                        .where(func.json_type(agent_runs.c.metadata_json, marker_path) == "object")
+                        .where(
+                            func.json_extract(
+                                agent_runs.c.metadata_json, f"{marker_path}.run_at"
+                            )
+                            == expected_run_at
+                        )
+                        .where(
+                            func.json_extract(
+                                agent_runs.c.metadata_json, f"{marker_path}.timezone"
+                            )
+                            == expected_timezone
+                        )
+                        .where(
+                            func.json_extract(
+                                agent_runs.c.metadata_json, f"{marker_path}.updated_at"
+                            )
+                            == expected_updated_at
+                        )
+                        .where(
+                            func.json_extract(
+                                agent_runs.c.metadata_json, f"{marker_path}.job_id"
+                            )
+                            == expected_job_id
+                        )
+                    )
+                if conn.execute(unstarted_stmt.limit(1)).scalar_one_or_none() is not None:
+                    return None
             schedule_consumed = bool(
                 definition is not None
                 and scheduled_one_shot
@@ -3863,8 +4028,21 @@ class SQLiteBackgroundTaskStore:
                 run_metadata = _json_loads(values["metadata_json"], {})
                 if not isinstance(run_metadata, dict):
                     run_metadata = {}
-                run_metadata[TASK_SCHEDULE_CONSUMED_METADATA_KEY] = True
+                run_metadata[TASK_SCHEDULE_CONSUMED_METADATA_KEY] = {
+                    "run_at": expected_run_at,
+                    "timezone": expected_timezone,
+                    "updated_at": expected_updated_at,
+                    "job_id": expected_job_id,
+                    "retired_at": now,
+                }
                 values["metadata_json"] = _json_dumps(run_metadata)
+                if terminal_error is not None:
+                    values.update(
+                        status="failed",
+                        error=terminal_error,
+                        completed_at=now,
+                        updated_at=now,
+                    )
             enqueue_run_in_connection(conn, values)
         return {
             "agent_name": values["agent_name"],
@@ -4334,13 +4512,7 @@ class SQLiteBackgroundTaskStore:
                 .where(agent_runs.c.definition_id == run_definitions.c.id)
                 .where(agent_runs.c.source_kind == "scheduler")
                 .where(func.json_valid(agent_runs.c.metadata_json) == 1)
-                .where(
-                    func.json_extract(
-                        agent_runs.c.metadata_json,
-                        f"$.{TASK_SCHEDULE_CONSUMED_METADATA_KEY}",
-                    )
-                    == 1
-                )
+                .where(*task_schedule_generation_matches_definition())
             ).mappings()
             for row in rows:
                 definition_id = str(row["definition_id"] or "")

@@ -19,7 +19,7 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.events import EVENT_JOB_MISSED, JobExecutionEvent
+from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_MISSED, JobExecutionEvent
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 from sqlalchemy import select
@@ -127,6 +127,7 @@ from storage.background import (
     owed_notice_eligible,
     require_task_resumable,
     resolve_run_at,
+    task_schedule_generation,
 )
 from storage.models import agent_sessions, scope_settings, scopes
 from storage.pagination import PageRequest, PageResult, page_sequence
@@ -1466,6 +1467,8 @@ class ScheduledTaskStore:
         expected_uncanceled_run_id: Optional[str] = None,
         expected_enabled_agent_id: Optional[str] = None,
         expected_reference_agent_id: Optional[str] = None,
+        expected_schedule_generation: Optional[dict[str, str]] = None,
+        expected_terminal_run_id: Optional[str] = None,
     ) -> bool:
         """Persist a whole task row; ``False`` means the guard refused the write.
 
@@ -1503,6 +1506,8 @@ class ScheduledTaskStore:
                     expect=expect,
                     expected_enabled_agent_id=expected_enabled_agent_id,
                     expected_reference_agent_id=expected_reference_agent_id,
+                    expected_schedule_generation=expected_schedule_generation,
+                    expected_terminal_run_id=expected_terminal_run_id,
                 )
             else:
                 # No agent-guard kwargs: the only caller that passes a queued run is
@@ -1512,6 +1517,8 @@ class ScheduledTaskStore:
                     expect=expect,
                     run_payload=queued_run,
                     expected_uncanceled_run_id=expected_uncanceled_run_id,
+                    expected_schedule_generation=expected_schedule_generation,
+                    expected_terminal_run_id=expected_terminal_run_id,
                 )
         except Exception:
             self._reload_after_lost_write(task.id)
@@ -1903,6 +1910,8 @@ class ScheduledTaskStore:
         timed_out: bool = False,
         queued_run: Optional[dict[str, Any]] = None,
         expected_uncanceled_run_id: Optional[str] = None,
+        expected_schedule_generation: Optional[dict[str, str]] = None,
+        expected_terminal_run_id: Optional[str] = None,
     ) -> bool:
         """Stamp a fire's outcome; ``False`` means the store refused the write.
 
@@ -1932,6 +1941,19 @@ class ScheduledTaskStore:
             task.schedule_type,
         ) != expected_binding:
             return False
+        if expected_schedule_generation is not None:
+            if (
+                expected_terminal_run_id is None
+                or task.schedule_type != "at"
+                or task.enabled
+                or task.run_at != expected_schedule_generation["run_at"]
+                or task.timezone != expected_schedule_generation["timezone"]
+                or task.retired_at != expected_schedule_generation["retired_at"]
+                or task.updated_at != expected_schedule_generation["retired_at"]
+                or task.retirement_reason != TASK_RETIREMENT_SCHEDULE_CONSUMED
+                or task.last_run_id != expected_terminal_run_id
+            ):
+                return False
         expect = self._read_state(task)
         task.last_run_at = _utc_now_iso()
         task.last_error = error
@@ -1978,6 +2000,8 @@ class ScheduledTaskStore:
             expect,
             queued_run=queued_run,
             expected_uncanceled_run_id=expected_uncanceled_run_id,
+            expected_schedule_generation=expected_schedule_generation,
+            expected_terminal_run_id=expected_terminal_run_id,
         )
 
 
@@ -2392,6 +2416,8 @@ class TaskExecutionStore:
         expected_run_at: Optional[str] = None,
         expected_timezone: Optional[str] = None,
         expected_updated_at: Optional[str] = None,
+        expected_job_id: Optional[str] = None,
+        terminal_error: Optional[str] = None,
     ) -> Optional[TaskExecutionRequest]:
         if task is None:
             request = TaskExecutionRequest(
@@ -2442,6 +2468,8 @@ class TaskExecutionStore:
                 if expected_updated_at is not None
                 else task.updated_at if expected_run_at is not None else None
             ),
+            expected_job_id=expected_job_id,
+            terminal_error=terminal_error,
         )
 
     def enqueue_definition_run(
@@ -2464,6 +2492,8 @@ class TaskExecutionStore:
         expected_run_at: Optional[str] = None,
         expected_timezone: Optional[str] = None,
         expected_updated_at: Optional[str] = None,
+        expected_job_id: Optional[str] = None,
+        terminal_error: Optional[str] = None,
     ) -> Optional[TaskExecutionRequest]:
         request = TaskExecutionRequest(
             id=uuid4().hex[:12],
@@ -2496,6 +2526,8 @@ class TaskExecutionStore:
             expected_run_at=expected_run_at,
             expected_timezone=expected_timezone,
             expected_updated_at=expected_updated_at,
+            expected_job_id=expected_job_id,
+            terminal_error=terminal_error,
         )
         if snapshot is None:
             return None
@@ -3925,7 +3957,9 @@ class ScheduledTaskService:
         self.store = store or ScheduledTaskStore()
         self.request_store = request_store or TaskExecutionStore()
         self.scheduler = AsyncIOScheduler(timezone="UTC")
-        self.scheduler.add_listener(self._on_scheduler_event, EVENT_JOB_MISSED)
+        self.scheduler.add_listener(
+            self._on_scheduler_event, EVENT_JOB_MISSED | EVENT_JOB_ERROR
+        )
         self._reconcile_task: Optional[asyncio.Task] = None
         self._service_teardown_task: Optional["asyncio.Task[None]"] = None
         self._request_recovery_token: RuntimeWorkRegistrationToken | None = None
@@ -5551,12 +5585,11 @@ class ScheduledTaskService:
         raise ValueError(f"unknown schedule type: {task.schedule_type}")
 
     def _on_scheduler_event(self, event: JobExecutionEvent) -> None:
-        """Persist an APScheduler-observed one-shot misfire.
+        """Persist an APScheduler-observed one-shot misfire or callback failure.
 
         A clock comparison cannot tell whether the scheduler consumed a fire.
-        This callback runs only for ``EVENT_JOB_MISSED`` and re-asserts the
-        current schedule identity before retiring it, so an event queued before
-        an edit cannot terminalize the replacement definition.
+        Both paths re-assert the registered schedule identity, so an event queued
+        before an edit cannot terminalize the replacement definition.
         """
 
         job_id = str(event.job_id)
@@ -5568,32 +5601,83 @@ class ScheduledTaskService:
             scheduled = resolve_run_at(expected_run_at, expected_timezone)
         except Exception:
             logger.warning(
-                "Ignoring misfire for task %s with an invalid registered run_at",
+                "Ignoring scheduler event for task %s with an invalid registered run_at",
                 task_id,
                 exc_info=True,
             )
             return
         if scheduled != event.scheduled_run_time:
             logger.info(
-                "Ignoring stale misfire for task %s: event=%s registered=%s",
+                "Ignoring stale scheduler event for task %s: event=%s registered=%s",
                 task_id,
                 event.scheduled_run_time,
                 scheduled,
             )
             return
-        self.store.refresh_task(task_id)
-        if self.store.retire_missed_one_shot(
-            task_id,
-            expected_run_at=expected_run_at,
-            expected_timezone=expected_timezone,
-            expected_updated_at=expected_updated_at,
-        ):
+        changed = False
+        if event.code == EVENT_JOB_ERROR:
+            detail = str(event.exception or "unknown scheduler callback error")
+            changed = self._recover_failed_one_shot_fire(
+                task_id,
+                expected_run_at=expected_run_at,
+                expected_timezone=expected_timezone,
+                expected_updated_at=expected_updated_at,
+                expected_job_id=job_id,
+                error=self._t("harness.task.schedulerCallbackFailed", detail=detail),
+            )
+        else:
+            self.store.refresh_task(task_id)
+            changed = self.store.retire_missed_one_shot(
+                task_id,
+                expected_run_at=expected_run_at,
+                expected_timezone=expected_timezone,
+                expected_updated_at=expected_updated_at,
+            )
+        if changed:
             self._job_signatures.pop(task_id, None)
             _publish_task_definitions_updated()
         if self._job_ids.get(task_id) == job_id:
             self._job_ids.pop(task_id, None)
             self._job_signatures.pop(task_id, None)
         self._one_shot_job_identities.pop(job_id, None)
+
+    def _recover_failed_one_shot_fire(
+        self,
+        task_id: str,
+        *,
+        expected_run_at: str,
+        expected_timezone: str,
+        expected_updated_at: str,
+        expected_job_id: str,
+        error: str,
+    ) -> bool:
+        """Atomically retire an exact fire with a failed owner Run."""
+
+        task = self.store.refresh_task(task_id)
+        if (
+            task is None
+            or not task.enabled
+            or task.schedule_type != "at"
+            or task.run_at != expected_run_at
+            or task.timezone != expected_timezone
+            or task.updated_at != expected_updated_at
+        ):
+            return False
+        recovered = self.request_store.enqueue_task_run(
+            task.id,
+            source_kind="scheduler",
+            task=task,
+            suppress_scheduler_successor=True,
+            expected_run_at=expected_run_at,
+            expected_timezone=expected_timezone,
+            expected_updated_at=expected_updated_at,
+            expected_job_id=expected_job_id,
+            terminal_error=error,
+        )
+        if recovered is None:
+            return False
+        self.store.load()
+        return True
 
     async def _run_task(
         self,
@@ -5617,16 +5701,37 @@ class ScheduledTaskService:
             or task.updated_at != expected_updated_at
         ):
             return
-        queued = await self._run_runtime_sync(
-            self.request_store.enqueue_task_run,
-            task.id,
-            source_kind="scheduler",
-            task=task,
-            suppress_scheduler_successor=True,
-            expected_run_at=expected_run_at,
-            expected_timezone=expected_timezone,
-            expected_updated_at=expected_updated_at,
-        )
+        try:
+            queued = await self._run_runtime_sync(
+                self.request_store.enqueue_task_run,
+                task.id,
+                source_kind="scheduler",
+                task=task,
+                suppress_scheduler_successor=True,
+                expected_run_at=expected_run_at,
+                expected_timezone=expected_timezone,
+                expected_updated_at=expected_updated_at,
+                expected_job_id=expected_job_id,
+            )
+        except Exception as exc:
+            if expected_run_at is None or expected_job_id is None:
+                raise
+            error = self._t(
+                "harness.task.schedulerCallbackFailed", detail=str(exc)
+            )
+            recovered = await self._run_runtime_sync(
+                self._recover_failed_one_shot_fire,
+                task.id,
+                expected_run_at=expected_run_at,
+                expected_timezone=str(expected_timezone),
+                expected_updated_at=str(expected_updated_at),
+                expected_job_id=expected_job_id,
+                error=error,
+            )
+            if recovered:
+                _publish_task_definitions_updated()
+                return
+            raise
         if queued is not None:
             if expected_run_at is not None:
                 # The SQLite enqueue atomically retired the definition with this
@@ -7968,11 +8073,8 @@ class ScheduledTaskService:
                 # A scheduled one-shot is retired in the same SQLite transaction
                 # that created this Run. Only that transaction stamps the Run as
                 # its owner; cron fires keep the invalidation-aware fast path.
-                consumed_one_shot = bool(
-                    isinstance(request.metadata, dict)
-                    and request.metadata.get(TASK_SCHEDULE_CONSUMED_METADATA_KEY)
-                    is True
-                )
+                consumed_generation = task_schedule_generation(request.metadata)
+                consumed_one_shot = consumed_generation is not None
                 if consumed_one_shot:
                     self.store.load()
                 else:
@@ -7983,6 +8085,16 @@ class ScheduledTaskService:
                 task_id = task.id
                 session_key = task.session_key
                 session_id = task.session_id
+                if consumed_generation is not None and (
+                    task.schedule_type != "at"
+                    or task.enabled
+                    or task.run_at != consumed_generation["run_at"]
+                    or task.timezone != consumed_generation["timezone"]
+                    or task.retired_at != consumed_generation["retired_at"]
+                    or task.retirement_reason != TASK_RETIREMENT_SCHEDULE_CONSUMED
+                    or task.last_run_id != request.id
+                ):
+                    raise ValueError(self._t("harness.task.scheduleReplaced"))
                 task_agent_id = (
                     request.agent_id
                     if task.agent_name and task.agent_name == request.agent_name
@@ -7993,6 +8105,7 @@ class ScheduledTaskService:
                     execution_id=request.id,
                     disable_one_shot=request.source_kind == "scheduler",
                     agent_id=task_agent_id,
+                    schedule_generation=consumed_generation,
                 )
                 error = result.error
                 session_key = result.session_key
@@ -8322,7 +8435,12 @@ class ScheduledTaskService:
         return str(row.get("workdir") or "").strip() or None
 
     async def _execute_command_task(
-        self, task: ScheduledTask, *, execution_id: str, disable_one_shot: bool
+        self,
+        task: ScheduledTask,
+        *,
+        execution_id: str,
+        disable_one_shot: bool,
+        schedule_generation: Optional[dict[str, str]] = None,
     ) -> TaskExecutionResult:
         """Run one command definition's fire and record its outcome.
 
@@ -8545,6 +8663,10 @@ class ScheduledTaskService:
                 if escalation_request is not None
                 else None
             ),
+            expected_schedule_generation=schedule_generation,
+            expected_terminal_run_id=(
+                execution_id if schedule_generation is not None else None
+            ),
         )
         # ONLY when the stamp landed. A refusal rolled the escalation row back with it,
         # so claiming an escalation id here would suppress the failure notice in favour
@@ -8640,6 +8762,7 @@ class ScheduledTaskService:
         execution_id: str,
         disable_one_shot: bool,
         agent_id: Optional[str] = None,
+        schedule_generation: Optional[dict[str, str]] = None,
     ) -> TaskExecutionResult:
         error: Optional[str] = None
         complete_on_return = True
@@ -8661,7 +8784,10 @@ class ScheduledTaskService:
             # there, in the same transaction as its result stamp -- it does not dispatch
             # one from here.
             return await self._execute_command_task(
-                task, execution_id=execution_id, disable_one_shot=disable_one_shot
+                task,
+                execution_id=execution_id,
+                disable_one_shot=disable_one_shot,
+                schedule_generation=schedule_generation,
             )
         try:
             if task.session_policy == "create_per_run":
@@ -8743,7 +8869,15 @@ class ScheduledTaskService:
         except Exception as exc:
             error = str(exc)
             logger.error("Scheduled task %s failed: %s", task.id, exc, exc_info=True)
-        if not self.store.mark_task_result(task.id, error=error, disable_one_shot=disable_one_shot):
+        if not self.store.mark_task_result(
+            task.id,
+            error=error,
+            disable_one_shot=disable_one_shot,
+            expected_schedule_generation=schedule_generation,
+            expected_terminal_run_id=(
+                execution_id if schedule_generation is not None else None
+            ),
+        ):
             # The TERMINAL STAMP was refused (HFR-261): the definition was reclaimed,
             # repointed, soft-deleted or removed while this fire was running, so
             # ``last_run_at`` / ``last_error`` / the one-shot disable are NOT stored.
@@ -9303,9 +9437,29 @@ class ScheduledTaskService:
                 definition_id,
             )
             return
+        metadata = run.get("metadata")
+        schedule_generation = task_schedule_generation(metadata)
+        legacy_consumed_marker = bool(
+            isinstance(metadata, dict)
+            and metadata.get(TASK_SCHEDULE_CONSUMED_METADATA_KEY)
+            and schedule_generation is None
+        )
+        if legacy_consumed_marker:
+            logger.warning(
+                "Run %s has no exact one-shot generation; skipping definition %s projection",
+                execution_id,
+                definition_id,
+            )
+            return
         retire_one_shot = (
             str(run.get("source_kind") or "") == "scheduler"
-            and task.schedule_type == "at"
+            and (
+                schedule_generation is not None
+                or (
+                    self.store.sqlite_backend is None
+                    and task.schedule_type == "at"
+                )
+            )
         )
         # A COMMAND fire that ends here ended without reaching its own result stamp --
         # cancelled, or interrupted by shutdown -- so this projection IS that fire's
@@ -9329,6 +9483,10 @@ class ScheduledTaskService:
                     task.session_id,
                     task.session_key,
                     task.schedule_type,
+                ),
+                expected_schedule_generation=schedule_generation,
+                expected_terminal_run_id=(
+                    execution_id if schedule_generation is not None else None
                 ),
             )
         except Exception:
