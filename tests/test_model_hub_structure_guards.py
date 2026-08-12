@@ -33,6 +33,7 @@ from core.handlers.model_hub.events import RETIRED_PERSISTED_REASON_DEGRADATIONS
 
 
 ROOT = Path(__file__).parents[1]
+DEEP_JSON_ARRAY = b"[" * 10_000 + b"0" + b"]" * 10_000
 TURN_GATEWAY = ROOT / "core/handlers/model_hub/turn_gateway.py"
 SERVICE = ROOT / "core/handlers/model_hub/service.py"
 PROVENANCE = ROOT / "core/handlers/model_hub/provenance.py"
@@ -762,6 +763,7 @@ def test_realtime_terminal_is_not_accepted_by_responses_streaming() -> None:
         b"null",
         b'{"type":"response.created","type":"response.completed"}',
         b'{"sequence_number":NaN}',
+        DEEP_JSON_ARRAY,
     ),
 )
 def test_malformed_stream_data_is_transparent_to_a_later_terminal(data: bytes) -> None:

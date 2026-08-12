@@ -51,6 +51,7 @@ MODEL_HUB_FIXTURES = Path(__file__).parent / "fixtures" / "model_hub"
 STREAM_TRANSPORT_BOUNDARIES = json.loads(
     (MODEL_HUB_FIXTURES / "stream_transport_boundaries.json").read_text(encoding="utf-8")
 )["cases"]
+DEEP_JSON_ARRAY = b"[" * 10_000 + b"0" + b"]" * 10_000
 
 
 def _write_fixture_archive(tmp_path: Path, *, version: str = "7.2.95") -> tuple[Path, bytes]:
@@ -1682,6 +1683,7 @@ def test_engine_client_classifies_buffered_2xx_native_error_before_success(
         b"event: response.in_progress\ndata: {\n\n",
         b"event: response.in_progress\ndata: []\n\n",
         b'event: response.in_progress\ndata: {"type":"response.in_progress","sequence_number":1}\n\n',
+        b"event: future.event\ndata: " + DEEP_JSON_ARRAY + b"\n\n",
     ),
 )
 def test_engine_client_transparently_forwards_unvalidated_stream_data(
@@ -1739,6 +1741,59 @@ def test_engine_client_transparently_forwards_unvalidated_stream_data(
         outcome = await handle.outcome()
         assert outcome.kind is RawOutcomeKind.SUCCESS
         assert outcome.stream_started is True
+
+    asyncio.run(run())
+
+
+def test_engine_client_ignores_deep_json_before_model_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> None:
+        unknown = b"event: future.event\ndata: " + DEEP_JSON_ARRAY + b"\n\n"
+        terminal = b'event: response.completed\ndata: {"type":"response.completed"}\n\n'
+
+        class Content:
+            reads = 0
+
+            async def read(self, _size: int) -> bytes:
+                self.reads += 1
+                return unknown if self.reads == 1 else terminal if self.reads == 2 else b""
+
+        class Response:
+            status = 200
+            content = Content()
+            headers = {"Content-Type": "text/event-stream"}
+
+            def close(self) -> None:
+                return None
+
+        class Session:
+            async def post(self, *_args, **_kwargs):
+                return Response()
+
+            async def close(self) -> None:
+                return None
+
+        monkeypatch.setattr(client_module.aiohttp, "ClientSession", lambda **_: Session())
+        source = SourceRecord(
+            source_id="src_fixture123",
+            vendor="custom",
+            protocol="openai_responses",
+            base_url="https://api.example.test/v1",
+            credential_ref="cred_fixture123",
+            allowed_origins=(),
+            model_ids=("model-a",),
+            prefix="source-fixture123",
+        )
+        handle = await EngineClient(
+            EngineConnection("http://127.0.0.1:15220", "management", "gateway")
+        ).invoke(source, "model-a", {}, stream=True)
+
+        assert handle.stream is not None
+        assert [chunk async for chunk in handle.stream] == [unknown + terminal]
+        outcome = await handle.outcome()
+        assert outcome.kind is RawOutcomeKind.SUCCESS
+        assert outcome.stream_started is False
 
     asyncio.run(run())
 

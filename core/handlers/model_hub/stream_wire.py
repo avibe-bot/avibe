@@ -445,6 +445,15 @@ def is_protocol_model_output(
     )
 
 
+def _try_parse_payload(data: bytes) -> object | None:
+    """Parse untrusted observation data without leaking parser failures."""
+
+    try:
+        return json.loads(data)
+    except (TypeError, ValueError, RecursionError):
+        return None
+
+
 def observe_protocol_response(
     protocol: str,
     *,
@@ -460,10 +469,7 @@ def observe_protocol_response(
         return ProtocolObservation()
     if streamed and taxonomy.success_literal == (event_name, data):
         return ProtocolObservation(outcome="served")
-    try:
-        payload = json.loads(data)
-    except (TypeError, ValueError):
-        return ProtocolObservation(outcome="served" if not streamed else None)
+    payload = _try_parse_payload(data)
     if not isinstance(payload, dict):
         return ProtocolObservation(outcome="served" if not streamed else None)
 
