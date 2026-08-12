@@ -3136,7 +3136,12 @@ def test_async_dispatch_flushes_one_compatible_queue_segment_on_turn_end(monkeyp
     assert seen_texts == ["first turn", "q1\nq2"]
     with engine.connect() as conn:
         assert message_deliveries.list_queued(conn, session_id) == []
-        transcript = messages_service.list_session_messages(conn, session_id=session_id, types=("user",))
+        transcript = messages_service.list_session_messages(
+            conn,
+            session_id=session_id,
+            types=("user",),
+            include_private_metadata=True,
+        )
     assert [m["text"] for m in transcript["messages"]] == ["first turn", "q1\nq2"]
     assert transcript["messages"][1]["author_id"] == "remote:user-a"
     assert transcript["messages"][1]["metadata"]["_web_push_user_key"] == "remote:user-a"

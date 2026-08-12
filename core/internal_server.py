@@ -1855,7 +1855,9 @@ def _bind_socket(socket_path: Optional[Path] = None) -> tuple[socket.socket, Pat
     uvicorn's path chmod while keeping the endpoint local-only.
     """
 
-    target = (socket_path or default_socket_path()).expanduser()
+    # Bind and report the canonical path so platform aliases (for example
+    # macOS ``/var`` -> ``/private/var``) do not produce a mismatched endpoint.
+    target = (socket_path or default_socket_path()).expanduser().resolve()
     target.parent.mkdir(parents=True, exist_ok=True)
     _remove_stale_owned_socket(target)
 

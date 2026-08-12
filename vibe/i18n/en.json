@@ -255,6 +255,7 @@
     },
     "sessionArchived": "This session is archived and can no longer be changed.",
     "sessionArchiveUnavailable": "This session cannot be archived while the Avibe controller is unavailable. Please try again shortly.",
+    "projectAccessDenied": "You do not have permission to create a session in this project.",
     "workbenchAttachment": {
       "session_not_found": "This session is no longer available.",
       "file_required": "Choose a file to upload.",
