@@ -1462,6 +1462,52 @@ def test_harness_task_resume_rejects_orphaned_owner_without_target(
     }
 
 
+def test_harness_task_resume_rejects_retired_one_shot(monkeypatch, tmp_path):
+    from storage.background import SQLiteBackgroundTaskStore
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    store = SQLiteBackgroundTaskStore()
+    try:
+        store.upsert_scheduled_task(
+            {
+                "id": "retired-task",
+                "name": "Retired task",
+                "prompt": "run it",
+                "schedule_type": "at",
+                "run_at": "2026-08-11T00:00:00+00:00",
+                "timezone": "UTC",
+                "enabled": False,
+                "retired_at": "2026-08-11T00:00:01+00:00",
+                "retirement_reason": "schedule_missed",
+                "created_at": "2026-08-11T00:00:00+00:00",
+                "updated_at": "2026-08-11T00:00:01+00:00",
+            }
+        )
+    finally:
+        store.close()
+
+    client = app.test_client()
+    response = client.patch(
+        "/api/harness/tasks/retired-task",
+        json={"enabled": True},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 409
+    body = response.get_json()
+    assert body["code"] == "task_schedule_retired"
+    assert body["details"] == {"task_id": "retired-task"}
+    store = SQLiteBackgroundTaskStore()
+    try:
+        saved = store.get_scheduled_task("retired-task")
+    finally:
+        store.close()
+    assert saved is not None
+    assert saved["enabled"] is False
+    assert saved["retirement_reason"] == "schedule_missed"
+
+
 def test_harness_bootstrap_returns_counts_and_selected_page(monkeypatch, tmp_path):
     from storage.background import SQLiteBackgroundTaskStore
 

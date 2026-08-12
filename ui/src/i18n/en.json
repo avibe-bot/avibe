@@ -3314,6 +3314,8 @@
       "normal": "Finished",
       "timeout": "Timed out",
       "error": "Failed",
+      "missed": "Missed",
+      "canceled": "Canceled",
       "unknown": "Unknown"
     },
     "failure": {

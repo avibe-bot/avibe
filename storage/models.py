@@ -222,6 +222,7 @@ run_definitions = Table(
     Column("last_started_at", String, nullable=True),
     Column("last_finished_at", String, nullable=True),
     Column("retired_at", String, nullable=True),
+    Column("retirement_reason", String, nullable=True),
     Column("last_event_at", String, nullable=True),
     Column("last_run_at", String, nullable=True),
     Column("last_error", Text, nullable=True),

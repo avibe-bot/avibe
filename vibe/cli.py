@@ -75,7 +75,9 @@ from storage.db import create_sqlite_engine
 from storage.background import (
     DefinitionWriteConflict,
     SQLiteBackgroundTaskStore,
+    TASK_RETIREMENT_SCHEDULE_MISSED,
     TaskResumeBlocked,
+    TaskScheduleRetired,
     compute_next_run_at,
     normalize_run_status,
 )
@@ -1908,12 +1910,12 @@ def _task_display_name(task) -> str:
 
 
 def _task_state(task) -> str:
-    if task.enabled:
-        return "active"
     if _is_failed_one_shot(task):
         return "failed"
     if _is_completed_one_shot(task):
         return "completed"
+    if task.enabled:
+        return "active"
     return "paused"
 
 
@@ -2017,6 +2019,7 @@ def _task_payload(task, *, brief: bool = False):
 _CANONICAL_DEFINITION_FIELDS = (
     "lifecycle_state",
     "lifecycle_detail",
+    "lifecycle_finished_at",
     "next_run_at",
     "waiting_since",
     "running_since",
@@ -2063,7 +2066,14 @@ def _task_projection_state(task: Mapping[str, object]) -> str:
     if lifecycle_state in {"waiting", "running"}:
         return "active"
     if lifecycle_state == "finished":
-        return "failed" if task.get("lifecycle_detail") in {"timeout", "error"} else "completed"
+        lifecycle_detail = task.get("lifecycle_detail")
+        if lifecycle_detail == "canceled":
+            return "canceled"
+        if lifecycle_detail in {"timeout", "error", "missed"}:
+            return "failed"
+        if lifecycle_detail == "normal":
+            return "completed"
+        return "unknown"
     if lifecycle_state == "paused":
         return "paused"
     return "unknown"
@@ -2226,18 +2236,21 @@ def _supported_task_platforms() -> set[str]:
 def _is_completed_one_shot(task) -> bool:
     return (
         task.schedule_type == "at"
-        and not task.enabled
+        and bool(task.retired_at)
         and bool(task.last_run_at)
         and not task.last_error
+        and task.retirement_reason != TASK_RETIREMENT_SCHEDULE_MISSED
     )
 
 
 def _is_failed_one_shot(task) -> bool:
     return (
         task.schedule_type == "at"
-        and not task.enabled
-        and bool(task.last_run_at)
-        and bool(task.last_error)
+        and bool(task.retired_at)
+        and (
+            task.retirement_reason == TASK_RETIREMENT_SCHEDULE_MISSED
+            or (bool(task.last_run_at) and bool(task.last_error))
+        )
     )
 
 
@@ -3862,6 +3875,18 @@ def cmd_task_set_enabled(task_id: str, enabled: bool):
                     "task_id": task_id,
                     "owner_session_id": exc.owner_session_id,
                 },
+            )
+        )
+        return 1
+    except TaskScheduleRetired as exc:
+        lang = _memory_cli_language()
+        _print_task_error(
+            TaskCliError(
+                i18n_t("error.taskScheduleRetired.message", lang),
+                code=exc.code,
+                hint=i18n_t("error.taskScheduleRetired.hint", lang, id=task_id),
+                help_command=f"vibe task update {task_id} --help",
+                details={"task_id": task_id},
             )
         )
         return 1

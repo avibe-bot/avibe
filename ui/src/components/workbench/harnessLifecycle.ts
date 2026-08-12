@@ -10,7 +10,7 @@ import { formatElapsed } from '../../lib/agentGraph';
 // ---------------------------------------------------------------------------
 
 export type HarnessLifecycleState = 'running' | 'waiting' | 'paused' | 'finished';
-export type HarnessLifecycleDetail = 'normal' | 'timeout' | 'error';
+export type HarnessLifecycleDetail = 'normal' | 'timeout' | 'error' | 'missed' | 'canceled';
 
 // The filter chips, and the lifecycle states each one selects.
 //
@@ -107,7 +107,7 @@ export function lifecycleLabel(
 }
 
 const STATES = new Set<string>(['running', 'waiting', 'paused', 'finished']);
-export const LIFECYCLE_DETAILS = ['normal', 'timeout', 'error'] as const;
+export const LIFECYCLE_DETAILS = ['normal', 'timeout', 'error', 'missed', 'canceled'] as const;
 const DETAILS = new Set<string>(LIFECYCLE_DETAILS);
 
 // ---------------------------------------------------------------------------
@@ -323,6 +323,7 @@ export type HarnessDefinitionFacts = {
   last_started_at?: string | null;
   last_finished_at?: string | null;
   retired_at?: string | null;
+  lifecycle_finished_at?: string | null;
   last_error?: string | null;
   updated_at?: string | null;
   // Derived server-side from the definition's own run history, because
@@ -629,12 +630,18 @@ export function definitionStateSince(
     // can prove when the pause began.
     case 'paused':
       return null;
-    // Prefer the most specific recorded event. A one-shot deadline is only the
-    // fallback when neither a stored finish nor an actual run exists.
+    // A missed one-shot may carry results from an earlier manual run. Its
+    // retirement transition is the only clock that owns the Missed state.
     case 'finished':
+      if (row.lifecycle_detail === 'missed') return row.lifecycle_finished_at ?? row.retired_at ?? null;
+      if (row.schedule_type === 'at') {
+        return row.lifecycle_finished_at ?? null;
+      }
       return (
+        row.lifecycle_finished_at ??
         row.last_finished_at ??
         row.last_run_at ??
+        row.retired_at ??
         (row.schedule_type === 'at' ? (row.run_at ?? null) : null) ??
         definitionActivityAt(row)
       );
@@ -740,7 +747,7 @@ export function definitionRowLine(
     return {
       primary: lifecycleLabel('finished', detail, t),
       secondary: humanizeTime(since, t, now),
-      alert: detail === 'error' || detail === 'timeout' ? detail : unhealthy,
+      alert: detail === 'error' || detail === 'timeout' ? detail : detail === 'missed' ? 'error' : unhealthy,
     };
   }
 
