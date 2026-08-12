@@ -2158,8 +2158,11 @@ def test_credential_target_and_refresh_capability_have_single_service_consumers(
         }
 
     assert "retarget_api_key_credential" in calls(methods["patch_source"])
-    assert "credential_supports_refresh" in calls(
+    assert "_classify_credential_outcome" in calls(
         methods["_classify_source_outcome"]
+    )
+    assert "credential_supports_refresh" in calls(
+        methods["_classify_credential_outcome"]
     )
     assert "_classify_source_outcome" in calls(methods["probe_agent"])
     assert "_classify_source_outcome" in calls(methods["resolve"])
@@ -2168,7 +2171,7 @@ def test_credential_target_and_refresh_capability_have_single_service_consumers(
         for name, method in methods.items()
         if "credential_supports_refresh" in calls(method)
     }
-    assert capability_callers == {"_classify_source_outcome"}
+    assert capability_callers == {"_classify_credential_outcome"}
 
 
 def test_direct_mode_refuses_chain_and_probe(tmp_path):

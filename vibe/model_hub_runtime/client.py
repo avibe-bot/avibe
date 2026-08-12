@@ -558,7 +558,6 @@ async def _read_stream_prelude(
                 source,
                 model_id,
                 response.status,
-                allow_completion=True,
             )
             if completion is not None:
                 return bytes(payload), wire_state, completion
@@ -603,7 +602,6 @@ async def _response_stream(
             source,
             model_id,
             response.status,
-            allow_completion=True,
         )
         if outcome is None:
             outcome = _outcome(
@@ -628,7 +626,6 @@ async def _response_stream(
             source,
             model_id,
             response.status,
-            allow_completion=True,
         )
         if outcome is None:
             outcome = _outcome(
@@ -645,7 +642,6 @@ async def _response_stream(
             source,
             model_id,
             response.status,
-            allow_completion=True,
         )
         if outcome is not None:
             logger.debug("ignoring transport error after protocol terminal marker")
@@ -666,7 +662,6 @@ async def _response_stream(
                 source,
                 model_id,
                 response.status,
-                allow_completion=True,
             )
         response.close()
         await session.close()
@@ -679,10 +674,8 @@ def _observed_stream_terminal_outcome(
     source: SourceRecord,
     model_id: str,
     http_status: int,
-    *,
-    allow_completion: bool = False,
 ) -> RawCallOutcome | None:
-    observation = wire_state.terminal_observation(allow_completion=allow_completion)
+    observation = wire_state.terminal_observation()
     return _reduce_protocol_observation(
         observation,
         source=source,

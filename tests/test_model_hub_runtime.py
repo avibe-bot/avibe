@@ -1960,31 +1960,6 @@ def test_engine_client_recognizes_responses_failure_terminals(
             "response.incomplete",
             {"type": "response.incomplete", "response": {"error": {}}},
         ),
-        (
-            "openai_chat",
-            None,
-            {"choices": [{"finish_reason": "stop", "delta": {}}]},
-        ),
-        (
-            "openai_chat",
-            None,
-            {"choices": [{"finish_reason": "length", "delta": {}}]},
-        ),
-        (
-            "openai_chat",
-            None,
-            {"choices": [{"finish_reason": "content_filter", "delta": {}}]},
-        ),
-        (
-            "openai_chat",
-            None,
-            {"choices": [{"finish_reason": "tool_calls", "delta": {}}]},
-        ),
-        (
-            "openai_chat",
-            None,
-            {"choices": [{"finish_reason": "function_call", "delta": {}}]},
-        ),
     ),
 )
 def test_documented_incomplete_output_is_served_without_source_failure(
@@ -2010,20 +1985,78 @@ def test_documented_incomplete_output_is_served_without_source_failure(
         source,
         "model-a",
         200,
-        allow_completion=True,
     )
     assert outcome is not None
     assert outcome.kind is RawOutcomeKind.SUCCESS
     assert classify_outcome(outcome).action == "return"
 
 
-def test_chat_finish_reason_remains_valid_before_done_sentinel() -> None:
+@pytest.mark.parametrize(
+    "finish_reason",
+    ("stop", "length", "content_filter", "tool_calls", "function_call"),
+)
+def test_chat_finish_reason_is_not_a_wire_terminal(finish_reason: str) -> None:
     state = client_module.ProtocolSSEState("openai_chat")
-    state.observe(b'data: {"choices":[{"finish_reason":"length","delta":{}}]}\n\n')
-    assert state.completion_observed is True
+    state.observe(
+        b'data: {"choices":[{"finish_reason":"'
+        + finish_reason.encode()
+        + b'","delta":{}}]}\n\n'
+    )
     assert state.terminal_outcome is None
+    assert state.terminal_observation() is None
     state.observe(b"data: [DONE]\n\n")
     assert state.terminal_outcome == "served"
+
+
+def test_downstream_close_after_chat_finish_reason_does_not_fabricate_success() -> None:
+    async def run() -> None:
+        first = b'data: {"choices":[{"finish_reason":"stop","delta":{}}]}\n\n'
+        wire_state = client_module.ProtocolSSEState("openai_chat")
+        wire_state.observe(first)
+
+        class Content:
+            async def iter_chunked(self, _size: int):
+                if False:
+                    yield b""
+
+        class Response:
+            status = 200
+            content = Content()
+
+            def close(self) -> None:
+                return None
+
+        class Session:
+            async def close(self) -> None:
+                return None
+
+        source = SourceRecord(
+            source_id="src_fixture123",
+            vendor="custom",
+            protocol="openai_chat",
+            base_url="https://api.example.test/v1",
+            credential_ref="cred_fixture123",
+            allowed_origins=(),
+            model_ids=("model-a",),
+            prefix="source-fixture123",
+        )
+        outcome_future = asyncio.get_running_loop().create_future()
+        stream = client_module._response_stream(
+            response=Response(),
+            session=Session(),
+            first=first,
+            source=source,
+            model_id="model-a",
+            protocol="openai_chat",
+            outcome_future=outcome_future,
+            wire_state=wire_state,
+        )
+
+        assert await anext(stream) == first
+        await stream.aclose()
+        assert outcome_future.done() is False
+
+    asyncio.run(run())
 
 
 def test_engine_client_keeps_success_after_a_later_complete_frame(

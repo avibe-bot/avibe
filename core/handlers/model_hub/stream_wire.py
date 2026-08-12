@@ -149,7 +149,6 @@ ErrorEnvelopePath = tuple[str, ...]
 class ProtocolObservation:
     outcome: ProtocolObservationOutcome | None = None
     model_output_started: bool = False
-    completion_observed: bool = False
     error_payload: bytes | None = None
     error_envelope_paths: tuple[ErrorEnvelopePath, ...] = ()
     sequence_number: int | None = None
@@ -165,7 +164,6 @@ class ProtocolTerminalEnvelope:
     error_envelope_paths: tuple[ErrorEnvelopePath, ...] = ()
     required_error_path: ErrorEnvelopePath | None = None
     required_error_code_path: ErrorEnvelopePath | None = None
-    wire_terminal: bool = True
 
 
 @dataclass(frozen=True)
@@ -314,46 +312,6 @@ PROTOCOL_STREAM_TAXONOMY: Final[Mapping[str, ProtocolStreamTaxonomy]] = {
                 None,
                 "failed_terminal",
                 (("error",),),
-            ),
-            ProtocolTerminalEnvelope(
-                # https://platform.openai.com/docs/api-reference/chat/create#chat-create-stream
-                None,
-                ("choices", "*", "finish_reason"),
-                "stop",
-                "served",
-                wire_terminal=False,
-            ),
-            ProtocolTerminalEnvelope(
-                # https://platform.openai.com/docs/api-reference/chat/create#chat-create-stream
-                None,
-                ("choices", "*", "finish_reason"),
-                "length",
-                "served",
-                wire_terminal=False,
-            ),
-            ProtocolTerminalEnvelope(
-                # https://platform.openai.com/docs/api-reference/chat/create#chat-create-stream
-                None,
-                ("choices", "*", "finish_reason"),
-                "content_filter",
-                "served",
-                wire_terminal=False,
-            ),
-            ProtocolTerminalEnvelope(
-                # https://platform.openai.com/docs/api-reference/chat/create#chat-create-stream
-                None,
-                ("choices", "*", "finish_reason"),
-                "tool_calls",
-                "served",
-                wire_terminal=False,
-            ),
-            ProtocolTerminalEnvelope(
-                # https://platform.openai.com/docs/api-reference/chat/create#chat-create-stream
-                None,
-                ("choices", "*", "finish_reason"),
-                "function_call",
-                "served",
-                wire_terminal=False,
             ),
         ),
         model_output_envelopes=(
@@ -512,12 +470,6 @@ def observe_protocol_response(
             for value in _path_values(payload, envelope.required_error_code_path)
         ):
             continue
-        if envelope.terminal_outcome == "served" and not envelope.wire_terminal:
-            return ProtocolObservation(
-                model_output_started=model_output_started,
-                completion_observed=True,
-                sequence_number=sequence_number,
-            )
         return ProtocolObservation(
             outcome=envelope.terminal_outcome,
             model_output_started=model_output_started,
@@ -544,7 +496,6 @@ class ProtocolSSEState:
     error_envelope_paths: tuple[ErrorEnvelopePath, ...] = ()
     last_sequence_number: int = -1
     model_output_started: bool = False
-    completion_observed: bool = False
 
     def observe(self, chunk: bytes) -> None:
         for frame in self.tokenizer.feed(chunk):
@@ -576,8 +527,6 @@ class ProtocolSSEState:
         )
         if observation.model_output_started:
             self.model_output_started = True
-        if observation.completion_observed:
-            self.completion_observed = True
         if observation.outcome in {"served", "failed_terminal"}:
             self.terminal_outcome = observation.outcome
         if observation.error_payload is not None:
@@ -586,15 +535,13 @@ class ProtocolSSEState:
         if observation.sequence_number is not None:
             self.last_sequence_number = observation.sequence_number
 
-    def terminal_observation(self, *, allow_completion: bool = False) -> ProtocolObservation | None:
+    def terminal_observation(self) -> ProtocolObservation | None:
         if self.terminal_outcome is not None:
             return ProtocolObservation(
                 outcome=self.terminal_outcome,
                 error_payload=self.error_payload,
                 error_envelope_paths=self.error_envelope_paths,
             )
-        if allow_completion and self.completion_observed:
-            return ProtocolObservation(outcome="served")
         return None
 
 

@@ -307,9 +307,7 @@ def classify_outcome(
             error_code="stream_interrupted",
         )
     if decision.action == "refresh":
-        return ResolutionDecision(
-            "surface",
-            reason="credential_revoked",
-            error_code="stream_interrupted",
-        )
+        # Credential capability belongs to the service boundary. Preserve the
+        # refresh fact until that boundary can inspect the exact credential.
+        return decision
     return decision

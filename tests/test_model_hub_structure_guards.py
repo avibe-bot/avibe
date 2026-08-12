@@ -148,61 +148,6 @@ STREAM_ENVELOPE_FIXTURES = (
         "payload": b'{"error":{"type":"permission_error"}}',
         "source": "https://developers.openai.com/api/reference/resources/chat",
     },
-    {
-        "protocol": "openai_chat",
-        "terminal_fact": "served",
-        "event_name": None,
-        "selector_path": ("choices", "*", "finish_reason"),
-        "selector_value": "stop",
-        "error_paths": (),
-        "wire_terminal": False,
-        "payload": b'{"choices":[{"finish_reason":"stop","delta":{}}]}',
-        "source": "https://platform.openai.com/docs/api-reference/chat/create#chat-create-stream",
-    },
-    {
-        "protocol": "openai_chat",
-        "terminal_fact": "served",
-        "event_name": None,
-        "selector_path": ("choices", "*", "finish_reason"),
-        "selector_value": "length",
-        "error_paths": (),
-        "wire_terminal": False,
-        "payload": b'{"choices":[{"finish_reason":"length","delta":{}}]}',
-        "source": "https://platform.openai.com/docs/api-reference/chat/create#chat-create-stream",
-    },
-    {
-        "protocol": "openai_chat",
-        "terminal_fact": "served",
-        "event_name": None,
-        "selector_path": ("choices", "*", "finish_reason"),
-        "selector_value": "content_filter",
-        "error_paths": (),
-        "wire_terminal": False,
-        "payload": b'{"choices":[{"finish_reason":"content_filter","delta":{}}]}',
-        "source": "https://platform.openai.com/docs/api-reference/chat/create#chat-create-stream",
-    },
-    {
-        "protocol": "openai_chat",
-        "terminal_fact": "served",
-        "event_name": None,
-        "selector_path": ("choices", "*", "finish_reason"),
-        "selector_value": "tool_calls",
-        "error_paths": (),
-        "wire_terminal": False,
-        "payload": b'{"choices":[{"finish_reason":"tool_calls","delta":{}}]}',
-        "source": "https://platform.openai.com/docs/api-reference/chat/create#chat-create-stream",
-    },
-    {
-        "protocol": "openai_chat",
-        "terminal_fact": "served",
-        "event_name": None,
-        "selector_path": ("choices", "*", "finish_reason"),
-        "selector_value": "function_call",
-        "error_paths": (),
-        "wire_terminal": False,
-        "payload": b'{"choices":[{"finish_reason":"function_call","delta":{}}]}',
-        "source": "https://platform.openai.com/docs/api-reference/chat/create#chat-create-stream",
-    },
 )
 MODEL_OUTPUT_ENVELOPE_FIXTURES = (
     ("anthropic", "content_block_start", ("type",), "content_block_start", False),
@@ -249,7 +194,6 @@ STREAM_BOUNDARY_CASES = tuple(
             for fixture in STREAM_ENVELOPE_FIXTURES
             if fixture["protocol"] == protocol
             and fixture["terminal_fact"] == settlement_state
-            and fixture.get("wire_terminal", True)
         )
     )
 )
@@ -493,6 +437,12 @@ def test_first_model_output_has_one_table_backed_owner() -> None:
             and node.value.value is True
             for node in ast.walk(client_owner)
         )
+    stream_source = (ROOT / "core/handlers/model_hub/stream_wire.py").read_text(
+        encoding="utf-8"
+    )
+    client_source = CLIENT.read_text(encoding="utf-8")
+    assert "completion_observed" not in stream_source
+    assert "allow_completion" not in client_source
 
 
 def test_protocol_observation_and_outcome_reduction_have_one_owner() -> None:
@@ -671,8 +621,8 @@ def test_machine_error_family_product_is_complete_across_transports() -> None:
             observed.add((family, code, transport))
             assert decision.reason != "unclassified_error"
             if family == "auth" and code in {"authentication_error", "invalid_api_key"}:
-                assert decision.action == ("surface" if transport == "streamed" else "refresh")
-                assert decision.reason == ("credential_revoked" if transport == "streamed" else None)
+                assert decision.action == "refresh"
+                assert decision.reason is None
     assert observed == {
         (family, code, transport)
         for family, codes in MACHINE_ERROR_FAMILY_FIXTURES.items()
@@ -694,7 +644,6 @@ def _assert_stream_taxonomy_matches(
             error_envelope_paths=fixture["error_paths"],
             required_error_path=fixture.get("required_error_path"),
             required_error_code_path=fixture.get("required_error_code_path"),
-            wire_terminal=fixture.get("wire_terminal", True),
         )
         for fixture in fixtures
         if "literal" not in fixture

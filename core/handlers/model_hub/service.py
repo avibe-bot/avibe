@@ -261,6 +261,7 @@ class ResolvedInvocation:
     handle: Optional[InvokeHandle]
     outcome: Optional[RawCallOutcome]
     supply_channel: Literal["native_cli", "hub"] = "hub"
+    credential_ref: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -3228,15 +3229,15 @@ class ModelHubService:
         detail_key: str,
         reason: EventReason,
         emit_event: bool = True,
-    ) -> None:
+    ) -> bool:
         async with self._mutation_lock:
             config = self.store.load()
             try:
                 source = self._source(config, source_id)
             except ModelHubError:
-                return
+                return True
             if not source_settlement_allowed(source.state.status, reason):
-                return
+                return True
             status: Literal["error", "needs_action"] = (
                 "error"
                 if reason == "unclassified_error"
@@ -3261,6 +3262,7 @@ class ModelHubService:
                     from_label=source.display_name,
                     now=self.now(),
                 )
+            return persisted
 
     async def probe_agent(self, backend: str, model_id: object = None) -> dict:
         if backend not in MODEL_HUB_BACKENDS:
@@ -3905,25 +3907,25 @@ class ModelHubService:
         model_id: str,
         detail_key: Optional[str] = None,
         emit_event: bool = True,
-    ) -> None:
+    ) -> bool:
         async with self._mutation_lock:
             config = self.store.load()
             try:
                 current = self._source(config, source.id)
             except ModelHubError:
-                return
+                return True
             if decision.reason is not None and not source_settlement_allowed(
                 current.state.status,
                 decision.reason,
             ):
-                return
+                return True
             retry_at = self.now() + timedelta(seconds=decision.cooldown_seconds)
             if (
                 current.state.status == "cooldown"
                 and current.state.retry_at is not None
                 and _parse_datetime(current.state.retry_at) >= retry_at
             ):
-                return
+                return True
             already_cooling = current.state.status == "cooldown"
             current.state = ModelHubSourceStateConfig(
                 status="cooldown",
@@ -3941,6 +3943,7 @@ class ModelHubService:
                     from_label=current.display_name,
                     now=self.now(),
                 )
+            return persisted
 
     async def _settle_fallback_source(
         self,
@@ -3950,7 +3953,7 @@ class ModelHubService:
         backend: BackendName,
         model_id: str,
         emit_event: bool = True,
-    ) -> EventReason:
+    ) -> tuple[EventReason, bool]:
         """Persist one fallback-class Source result before the turn settles."""
 
         if decision.reason is None:
@@ -3958,7 +3961,7 @@ class ModelHubService:
         event_reason = cast(EventReason, decision.reason)
         settlement_rule = source_settlement_rule(event_reason)
         if settlement_rule.status == "cooldown":
-            await self._cooldown(
+            persisted = await self._cooldown(
                 source,
                 decision,
                 agent=cast(EventAgent, backend),
@@ -3973,7 +3976,7 @@ class ModelHubService:
                 "account_banned": "models.source.needs_action.account_banned",
                 "unclassified_error": "models.source.error.unclassified",
             }[event_reason]
-            await self._set_source_blocker(
+            persisted = await self._set_source_blocker(
                 source.id,
                 backend=backend,
                 model_id=model_id,
@@ -3981,7 +3984,7 @@ class ModelHubService:
                 reason=event_reason,
                 emit_event=emit_event,
             )
-        return event_reason
+        return event_reason, persisted
 
     def _inspect_terminal_chain(
         self,
@@ -4013,9 +4016,18 @@ class ModelHubService:
         source_model_id: str,
         outcome: RawCallOutcome,
         decision: ResolutionDecision,
+        source_transition_persisted: bool | None = None,
     ) -> TurnOutcomeProjectionInput | None:
         """Produce the sole complete terminal projection after attempt settlement."""
 
+        if (
+            outcome.stream_started
+            and decision.reason is None
+            and decision.error_code == "stream_interrupted"
+        ):
+            # A refresh-capable credential remains usable for a later turn,
+            # while replay after output is still forbidden for this turn.
+            return None
         category = terminal_outcome_category(outcome, decision)
         if category == "served":
             return produce_turn_outcome("turn.served")
@@ -4030,6 +4042,15 @@ class ModelHubService:
                 "turn.engine_down",
                 stream_started=outcome.stream_started,
             )
+        if (
+            category == "fallback_source"
+            and outcome.stream_started
+            and outcome.kind == RawOutcomeKind.NETWORK_ERROR
+            and decision.reason == "network"
+        ):
+            # G-34 owns the future projection for a truncated stream whose
+            # transport failure leaves the same hop current.
+            return None
         if category != "fallback_source":
             raise AssertionError("attempt terminal producer received a non-failure")
 
@@ -4042,6 +4063,7 @@ class ModelHubService:
             config=config,
             resolution=resolution,
             attempted_hop=(source_id, source_model_id),
+            source_transition_persisted=source_transition_persisted,
         )
 
     @staticmethod
@@ -4098,7 +4120,10 @@ class ModelHubService:
             raise AssertionError("post-handle settlement requires a hub stream")
         if outcome is None:
             raise AssertionError("upstream handle termination requires an outcome")
-        decision = classify_outcome(outcome)
+        decision = await self._classify_credential_outcome(
+            resolved.credential_ref,
+            outcome,
+        )
         record_attempt(outcome, decision)
         if decision.action == "return":
             return HandleSettlement(
@@ -4115,14 +4140,15 @@ class ModelHubService:
             )
         if decision.action != "surface":
             raise AssertionError("consumed streams cannot retry or fall through")
-        if decision.reason is not None:
+        source_transition_persisted: bool | None = None
+        if decision.reason is not None and outcome.kind != RawOutcomeKind.NETWORK_ERROR:
             config = self.store.load()
             source = next(
                 (item for item in config.sources if item.id == resolved.source_id),
                 None,
             )
             if source is not None:
-                await self._settle_fallback_source(
+                _reason, source_transition_persisted = await self._settle_fallback_source(
                     source,
                     decision,
                     backend=resolved.backend,
@@ -4138,6 +4164,7 @@ class ModelHubService:
                 source_model_id=resolved.model_id,
                 outcome=outcome,
                 decision=decision,
+                source_transition_persisted=source_transition_persisted,
             ),
         )
 
@@ -4194,14 +4221,42 @@ class ModelHubService:
         decision = classify_outcome(outcome)
         if decision.action != "refresh":
             return decision
-        credential_ref = source.credential_ref
+        return await self._classify_credential_outcome(
+            source.credential_ref,
+            outcome,
+            decision=decision,
+        )
+
+    async def _classify_credential_outcome(
+        self,
+        credential_ref: Optional[str],
+        outcome: RawCallOutcome,
+        *,
+        decision: Optional[ResolutionDecision] = None,
+    ) -> ResolutionDecision:
+        """Resolve one credential failure using its exact refresh capability."""
+
+        decision = decision or classify_outcome(outcome)
+        if decision.action != "refresh":
+            return decision
         if not credential_ref:
             raise ModelHubError("engine_down", status=503)
         refreshable = await self._engine_call(
             self.adapter.credential_supports_refresh(credential_ref)
         )
         if refreshable:
+            if outcome.stream_started:
+                return ResolutionDecision(
+                    "surface",
+                    error_code="stream_interrupted",
+                )
             return decision
+        if outcome.stream_started:
+            return ResolutionDecision(
+                "surface",
+                reason="credential_revoked",
+                error_code="stream_interrupted",
+            )
         return ResolutionDecision("fallback", reason="credential_revoked")
 
     @staticmethod
@@ -4392,6 +4447,7 @@ class ModelHubService:
                     model_id=target_model,
                     handle=handle,
                     outcome=None,
+                    credential_ref=source.credential_ref,
                 )
             decision = await self._classify_source_outcome(source, outcome)
             if decision.action == "refresh":
@@ -4420,6 +4476,7 @@ class ModelHubService:
                         model_id=target_model,
                         handle=handle,
                         outcome=None,
+                        credential_ref=source.credential_ref,
                     )
                 decision = classify_outcome(outcome, refresh_attempted=True)
             if attempt_observer is not None:
@@ -4447,10 +4504,16 @@ class ModelHubService:
                     model_id=target_model,
                     handle=handle,
                     outcome=outcome,
+                    credential_ref=source.credential_ref,
                 )
             if decision.action == "surface":
-                if outcome.stream_started and decision.reason is not None:
-                    await self._settle_fallback_source(
+                source_transition_persisted: bool | None = None
+                if (
+                    outcome.stream_started
+                    and decision.reason is not None
+                    and outcome.kind != RawOutcomeKind.NETWORK_ERROR
+                ):
+                    _reason, source_transition_persisted = await self._settle_fallback_source(
                         source,
                         decision,
                         backend=cast(BackendName, backend),
@@ -4470,15 +4533,19 @@ class ModelHubService:
                         source_model_id=target_model,
                         outcome=outcome,
                         decision=decision,
+                        source_transition_persisted=source_transition_persisted,
                     ),
                 )
             if decision.action == "fallback":
-                event_reason = await self._settle_fallback_source(
-                    source,
-                    decision,
-                    backend=cast(BackendName, backend),
-                    model_id=model_id,
-                )
+                if outcome.kind == RawOutcomeKind.NETWORK_ERROR:
+                    event_reason = cast(EventReason, "network")
+                else:
+                    event_reason, _persisted = await self._settle_fallback_source(
+                        source,
+                        decision,
+                        backend=cast(BackendName, backend),
+                        model_id=model_id,
+                    )
                 globally_blocked_source_ids.add(source.id)
                 failed_source = source
                 failed_reason = event_reason

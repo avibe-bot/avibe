@@ -1071,7 +1071,7 @@ switch, remedy, or message branch absent from it.
 | `turn.exhausted` | `exhausted` | final model `supply_state` from the §4.5 taxonomy | fallback walked to the end; no attempt completed | `waiting` renders `models.launch.waiting`; `interrupted` renders `models.launch.interrupted` with the classified blockers |
 | `turn.request_nonfallback` | `failed_terminal` | any non-fallback request-level failure | the attempted Source remains runnable and no switch occurred | `models.launch.request_incompatible`: this request is incompatible; switching Sources will not help |
 | `turn.engine_down` | `failed_terminal` | local `engine_down` at any request phase, including after an upstream attempt or streamed output | no Source is blamed or mutated; no replay or next-hop walk occurs | `models.errors.engine_down`; after output began it also states that this turn's output may be incomplete |
-| `turn.streamed_fallback` | `failed_terminal` | streamed fallback-class Source failure; its cooldown or `needs_action` was persisted | replay is forbidden; render `models.launch.retry` only when live inspection of the same stored chain makes a different hop current for the next turn; otherwise no switch exists | different current hop: “The next turn has switched Sources; retry.” No runnable hop: use the same `waiting`/`interrupted` rendering selected for `exhausted` |
+| `turn.streamed_fallback` | `failed_terminal` | streamed fallback-class Source failure, plus `source_transition_persisted: boolean` recording whether its cooldown or `needs_action` transition was committed | replay is forbidden. When `source_transition_persisted=true`, render `models.launch.retry` only when live inspection of the same stored chain makes a different hop current for the next turn; otherwise no switch exists. When `false`, attempt history remains committed, no switch/current change is claimed, and the existing config-recovery warning owns remediation | persisted with a different current hop: “The next turn has switched Sources; retry.” Persisted with no runnable hop: use the same `waiting`/`interrupted` rendering selected for `exhausted`. Not persisted: `modelHub.errors.stream_interrupted`, with no route-change or new-remedy claim |
 | `turn.no_candidate.unconfigured` | `no_candidate` | configured chain is empty | no Source was attempted because no hop is configured | `models.launch.route_unconfigured`, naming the requested model and pointing to Models |
 | `turn.no_candidate.blocked` | `no_candidate` | configured chain is nonempty and model `supply_state` is `waiting` or `interrupted` | no Source was attempted because every exact hop is currently blocked | derive copy from the exact blocker set and reuse `_launch_failure` remedies: reauthorize, replace the key, or top up; `waiting` uses `models.launch.waiting`, while `interrupted` uses `models.launch.interrupted` |
 | `turn.canceled` | `canceled` | the turn FSM, never a transport inference, settled Stop/cancel | no Source failure or route switch is fabricated | no Model Hub supply copy; the existing turn-canceled surface owns the message |
@@ -1081,6 +1081,12 @@ outcome/discriminator → copy-key relation is closed in the final mirror regist
 checked mechanically against both `vibe/i18n` locale files. A new outcome, discriminator,
 or supply message ships as one new matrix row plus its enum/key/mirror fixtures; none may
 land as standalone prose.
+
+`source_transition_persisted` is an optional backend projection fact whose presence is
+required only for `turn.streamed_fallback`. UI consumers deliberately do not consume it:
+the selected copy key already carries the complete user-visible truth, following the
+same optional-consumer discipline as `AgentSupply.routes`. It does not change
+`contract_version`, which remains `5`.
 
 One asymmetry has to be named, because it is easy to implement wrong: an Agent can enter
 `interrupted` with **no Source changing state at all** — its route is unconfigured, a

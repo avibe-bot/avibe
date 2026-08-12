@@ -166,6 +166,7 @@ TURN_OUTCOME_RENDERING_AUTHORITY: dict[str, TurnOutcomeRenderingRule] = {
             ("next_current", "modelHub.launch.retry"),
             ("waiting", "modelHub.launch.waiting"),
             ("interrupted", "modelHub.launch.interrupted"),
+            ("transition_unpersisted", "modelHub.errors.stream_interrupted"),
         ),
     ),
     "turn.no_candidate.unconfigured": TurnOutcomeRenderingRule(
@@ -197,6 +198,7 @@ class TurnOutcomeProjectionInput:
     supply_facts: TurnSupplyFacts | None = None
     stream_started: bool = False
     next_current_changed: bool = False
+    source_transition_persisted: bool | None = None
 
 
 class TurnOutcomeProductionError(ValueError):
@@ -224,6 +226,11 @@ def _turn_outcome_variant(
     rule: TurnOutcomeRenderingRule,
 ) -> str:
     copy_keys = dict(rule.copy_keys)
+    if (
+        projection.source_transition_persisted is False
+        and "transition_unpersisted" in copy_keys
+    ):
+        return "transition_unpersisted"
     if projection.next_current_changed and "next_current" in copy_keys:
         return "next_current"
     if projection.stream_started and "stream_started" in copy_keys:
@@ -250,6 +257,7 @@ def produce_turn_outcome(
     resolution: ModelHubTurnResolution | None = None,
     attempted_hop: tuple[str, str] | None = None,
     stream_started: bool = False,
+    source_transition_persisted: bool | None = None,
 ) -> TurnOutcomeProjectionInput:
     """Produce complete terminal facts from one authoritative matrix row."""
 
@@ -257,9 +265,13 @@ def produce_turn_outcome(
     if rule is None:
         raise TurnOutcomeProductionError("Unknown turn-outcome matrix decision")
     variants = {variant for variant, _key in rule.copy_keys}
+    if decision == "turn.streamed_fallback" and source_transition_persisted is None:
+        raise TurnOutcomeProductionError(
+            "Streamed fallback is missing its Source-transition persistence fact"
+        )
     requires_exact_supply = bool(
         variants & {"next_current", "waiting", "interrupted"}
-    )
+    ) and source_transition_persisted is not False
     if requires_exact_supply and (config is None or resolution is None):
         raise TurnOutcomeProductionError(
             "Turn outcome production is missing its exact-chain inspection"
@@ -311,6 +323,7 @@ def produce_turn_outcome(
         supply_facts=supply_facts,
         stream_started=stream_started,
         next_current_changed=next_current_changed,
+        source_transition_persisted=source_transition_persisted,
     )
     if _turn_outcome_variant(projection, rule) not in dict(rule.copy_keys):
         raise TurnOutcomeProductionError(

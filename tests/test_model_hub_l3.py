@@ -546,6 +546,9 @@ def test_every_turn_outcome_matrix_variant_projects_or_stays_silent(
                 "src_attempted01",
                 "shared-model",
             )
+            producer_kwargs["source_transition_persisted"] = True
+    elif variant == "transition_unpersisted":
+        producer_kwargs = {"source_transition_persisted": False}
     elif variant == "waiting_without_retry":
         source = _source("src_matrix_ready", "Recovered source")
         config = _config([source])
@@ -567,6 +570,7 @@ def test_every_turn_outcome_matrix_variant_projects_or_stays_silent(
             "config": config,
             "resolution": resolution,
             "attempted_hop": ("src_attempted02", "shared-model"),
+            "source_transition_persisted": True,
         }
     projection = produce_turn_outcome(
         decision,
@@ -700,6 +704,7 @@ def test_structural_blocker_copy_uses_its_reason_instead_of_source_status() -> N
 class MemoryStore:
     def __init__(self, config: ModelHubConfig):
         self.config = config
+        self.recovery_warning = False
         self.requested_models = {
             "claude": "shared-model",
             "codex": "shared-model",
@@ -707,9 +712,13 @@ class MemoryStore:
         }
 
     def load(self) -> ModelHubConfig:
+        if self.recovery_warning:
+            return ModelHubConfig.from_payload(self.config.to_payload())
         return self.config
 
     def save(self, config: ModelHubConfig) -> None:
+        if self.recovery_warning:
+            raise ValueError("Config was loaded with recovery warnings")
         self.config = config
 
     def requested_model(self, backend: str) -> str:
@@ -2137,7 +2146,9 @@ def test_terminal_reinspection_uses_every_channel_in_a_mixed_chain(
             sources=[hub, native],
             outcomes=[
                 _outcome(
-                    RawOutcomeKind.NETWORK_ERROR,
+                    RawOutcomeKind.HTTP_ERROR,
+                    status=429,
+                    code="rate_limit_error",
                     source_id=hub.id,
                     stream_started=stream_started,
                 )
@@ -2175,6 +2186,48 @@ def test_terminal_reinspection_uses_every_channel_in_a_mixed_chain(
             "source_id": native.id,
             "model_id": "shared-model",
         }
+
+    asyncio.run(exercise())
+
+
+def test_preoutput_network_fallback_does_not_mutate_source_health(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        first = _source("src_network001", "Network source")
+        second = _source("src_network002", "Backup source")
+        service = _service(
+            tmp_path,
+            sources=[first, second],
+            outcomes=[
+                _outcome(
+                    RawOutcomeKind.NETWORK_ERROR,
+                    source_id=first.id,
+                ),
+                _outcome(RawOutcomeKind.SUCCESS, source_id=second.id),
+            ],
+        )
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+
+        resolved = await service.resolve(
+            backend="codex",
+            model_id=requested_model,
+            request=ModelHubRequest(
+                {"model": requested_model, "input": "ping"},
+                protocol="openai_responses",
+            ),
+            supply_channel="hub",
+        )
+
+        assert resolved.source_id == second.id
+        assert [source.state.status for source in service.store.load().sources] == [
+            "standby",
+            "standby",
+        ]
+        assert service.adapter.invocations == [
+            (first.id, "shared-model", "codex"),
+            (second.id, "shared-model", "codex"),
+        ]
 
     asyncio.run(exercise())
 
@@ -2349,7 +2402,9 @@ def test_handle_settlement_records_history_before_source_transition_event(
             outcome=None,
         )
         outcome = _outcome(
-            RawOutcomeKind.NETWORK_ERROR,
+            RawOutcomeKind.HTTP_ERROR,
+            status=429,
+            code="rate_limit_error",
             source_id=source.id,
             stream_started=True,
         )
@@ -2429,7 +2484,7 @@ def test_engine_down_settlement_does_not_mutate_source(
     asyncio.run(exercise())
 
 
-def test_bare_stream_network_settlement_keeps_existing_cooldown_projection(
+def test_bare_stream_network_settlement_keeps_source_health_unchanged(
     tmp_path: Path,
 ) -> None:
     async def exercise() -> None:
@@ -2462,15 +2517,114 @@ def test_bare_stream_network_settlement_keeps_existing_cooldown_projection(
 
         assert settlement.decision is not None
         assert settlement.decision.reason == "network"
-        assert service.store.load().sources[0].state.status == "cooldown"
-        assert settlement.turn_outcome is not None
-        assert settlement.turn_outcome.discriminator == "streamed_fallback"
-        assert project_turn_outcome_copy(settlement.turn_outcome).key == (
-            "modelHub.launch.waiting"
+        assert service.store.load().sources[0].state.status == "standby"
+        assert settlement.turn_outcome is None
+        assert service.events.list() == []
+        record_attempt.assert_called_once()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("refreshable", (True, False))
+def test_streamed_auth_settlement_uses_exact_credential_capability(
+    tmp_path: Path,
+    refreshable: bool,
+) -> None:
+    async def exercise() -> None:
+        source = _source("src_streamauth1", "Stream auth")
+        service = _service(tmp_path, sources=[source])
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        assert source.credential_ref is not None
+        if refreshable:
+            service.adapter.refreshable_credential_refs.add(source.credential_ref)
+        resolved = ResolvedInvocation(
+            backend="codex",
+            requested_model_id=requested_model,
+            source_id=source.id,
+            source_label=source.display_name,
+            model_id="shared-model",
+            handle=None,
+            outcome=None,
+            credential_ref=source.credential_ref,
         )
-        # I7 will replace this persisted cooldown under the owner-approved
-        # bare-network policy once K4 adds its matching matrix row.
-        assert [event["reason"] for event in service.events.list()] == ["network"]
+        outcome = _outcome(
+            RawOutcomeKind.HTTP_ERROR,
+            status=401,
+            code="authentication_error",
+            source_id=source.id,
+            stream_started=True,
+        )
+        record_attempt = Mock()
+
+        settlement = await service.settle_handle_outcome(
+            resolved,
+            outcome,
+            termination_origin="upstream_terminal",
+            record_attempt=record_attempt,
+        )
+
+        assert settlement.decision is not None
+        assert settlement.decision.action == "surface"
+        assert settlement.decision.error_code == "stream_interrupted"
+        persisted = service.store.load().sources[0]
+        if refreshable:
+            assert settlement.decision.reason is None
+            assert settlement.turn_outcome is None
+            assert persisted.state.status == "standby"
+        else:
+            assert settlement.decision.reason == "credential_revoked"
+            assert settlement.turn_outcome is not None
+            assert persisted.state.status == "needs_action"
+        assert service.adapter.capability_queries == [source.credential_ref]
+        record_attempt.assert_called_once()
+
+    asyncio.run(exercise())
+
+
+def test_streamed_fallback_reports_an_unpersisted_recovery_transition_honestly(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        source = _source("src_recoverytx1", "Recovery warning")
+        service = _service(tmp_path, sources=[source])
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        service.store.recovery_warning = True
+        resolved = ResolvedInvocation(
+            backend="codex",
+            requested_model_id=requested_model,
+            source_id=source.id,
+            source_label=source.display_name,
+            model_id="shared-model",
+            handle=None,
+            outcome=None,
+            credential_ref=source.credential_ref,
+        )
+        outcome = _outcome(
+            RawOutcomeKind.HTTP_ERROR,
+            status=429,
+            code="rate_limit_error",
+            source_id=source.id,
+            stream_started=True,
+        )
+        record_attempt = Mock()
+
+        settlement = await service.settle_handle_outcome(
+            resolved,
+            outcome,
+            termination_origin="upstream_terminal",
+            record_attempt=record_attempt,
+        )
+
+        projection = settlement.turn_outcome
+        assert projection is not None
+        assert projection.source_transition_persisted is False
+        assert projection.next_current_changed is False
+        assert projection.supply_facts is None
+        assert project_turn_outcome_copy(projection).key == (
+            "modelHub.errors.stream_interrupted"
+        )
+        assert service.store.config.sources[0].state.status == "standby"
+        assert service.events.list() == []
         record_attempt.assert_called_once()
 
     asyncio.run(exercise())
@@ -2544,8 +2698,8 @@ def test_gateway_closes_producer_before_downstream_cancel_settlement(
             == expected_origin
         )
         if failure_phase == "write":
-            assert service.store.load().sources[0].state.status == "cooldown"
-            assert [event["reason"] for event in service.events.list()] == ["network"]
+            assert service.store.load().sources[0].state.status == "standby"
+            assert service.events.list() == []
         else:
             assert service.store.load().sources[0].state.status == "standby"
             assert service.events.list() == []
@@ -2819,9 +2973,15 @@ def test_gateway_repeated_cancellation_drains_settlement_before_reraise(
         source = _source("src_canceldr1", "Repeated cancellation")
         outcome = _outcome(
             (
-                RawOutcomeKind.NETWORK_ERROR
+                RawOutcomeKind.HTTP_ERROR
                 if blocked_phase == "service_transition"
                 else RawOutcomeKind.SUCCESS
+            ),
+            status=(429 if blocked_phase == "service_transition" else None),
+            code=(
+                "rate_limit_error"
+                if blocked_phase == "service_transition"
+                else None
             ),
             source_id=source.id,
             stream_started=True,
@@ -2896,7 +3056,9 @@ def test_gateway_repeated_cancellation_drains_settlement_before_reraise(
         if blocked_phase == "service_transition":
             assert record["outcome"] == "failed_terminal"
             assert service.store.load().sources[0].state.status == "cooldown"
-            assert [event["reason"] for event in service.events.list()] == ["network"]
+            assert [event["reason"] for event in service.events.list()] == [
+                "rate_limited"
+            ]
         else:
             assert record["outcome"] == "served"
             assert record["terminal_error"] is None
@@ -3110,8 +3272,8 @@ def test_gateway_upstream_stream_failure_remains_source_attributable(
             service.settle_handle_outcome.await_args.kwargs["termination_origin"]
             == "upstream_terminal"
         )
-        assert service.store.load().sources[0].state.status == "cooldown"
-        assert [event["reason"] for event in service.events.list()] == ["network"]
+        assert service.store.load().sources[0].state.status == "standby"
+        assert service.events.list() == []
 
     asyncio.run(exercise())
 
@@ -3133,7 +3295,9 @@ def test_shared_source_transition_event_is_emitted_once_for_concurrent_turns(
             outcome=None,
         )
         outcome = _outcome(
-            RawOutcomeKind.NETWORK_ERROR,
+            RawOutcomeKind.HTTP_ERROR,
+            status=429,
+            code="rate_limit_error",
             source_id=source.id,
             stream_started=True,
         )
@@ -3153,7 +3317,9 @@ def test_shared_source_transition_event_is_emitted_once_for_concurrent_turns(
 
         assert all(record_attempt.call_count == 1 for record_attempt in record_attempts)
         assert service.store.load().sources[0].state.status == "cooldown"
-        assert [event["reason"] for event in service.events.list()] == ["network"]
+        assert [event["reason"] for event in service.events.list()] == [
+            "rate_limited"
+        ]
 
     asyncio.run(exercise())
 
