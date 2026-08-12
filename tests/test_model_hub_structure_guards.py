@@ -15,10 +15,12 @@ from core.handlers.model_hub.stream_wire import (
     SSE_LINE_ENDINGS,
     SSEFrameLimitError,
     SSEFrameTokenizer,
+    ProtocolObservation,
     ProtocolTerminalEnvelope,
     ProtocolSSEState,
     ProtocolModelOutputEnvelope,
     ProtocolStreamTaxonomy,
+    observe_protocol_response,
 )
 from core.handlers.model_hub.adapter import RawCallOutcome, RawOutcomeKind
 from core.handlers.model_hub.classification import (
@@ -228,6 +230,11 @@ MODEL_OUTPUT_ENVELOPE_FIXTURES = (
 BUFFERED_ERROR_TRUST_ROOT_FIXTURES = {
     protocol: (("error",),) for protocol in ("anthropic", "openai_responses", "openai_chat")
 }
+PROTOCOL_OBSERVATION_AUTHORITY_FIXTURES = {
+    "anthropic": {"payload_must_be_object": True, "sequence_number_path": None},
+    "openai_responses": {"payload_must_be_object": True, "sequence_number_path": ("sequence_number",)},
+    "openai_chat": {"payload_must_be_object": True, "sequence_number_path": None},
+}
 ACCEPTED_SSE_LINE_ENDINGS = (b"\r\n", b"\n", b"\r")
 STREAM_BOUNDARY_DIMENSIONS = {
     "transport_event": ("eof", "client_error"),
@@ -306,6 +313,44 @@ def _owner_name(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> str | None:
     while owner is not None and not isinstance(owner, (ast.FunctionDef, ast.AsyncFunctionDef)):
         owner = parents.get(owner)
     return owner.name if owner is not None else None
+
+
+def _call_name(node: ast.AST) -> str | None:
+    if not isinstance(node, ast.Call):
+        return None
+    if isinstance(node.func, ast.Name):
+        return node.func.id
+    if isinstance(node.func, ast.Attribute):
+        return node.func.attr
+    return None
+
+
+def _bool_keyword(call: ast.Call, name: str) -> bool | None:
+    return next(
+        (
+            keyword.value.value
+            for keyword in call.keywords
+            if keyword.arg == name
+            and isinstance(keyword.value, ast.Constant)
+            and isinstance(keyword.value.value, bool)
+        ),
+        None,
+    )
+
+
+def _success_outcome_calls(tree: ast.AST) -> tuple[ast.Call, ...]:
+    return tuple(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and _call_name(node) == "_outcome"
+        and any(
+            keyword.arg == "kind"
+            and isinstance(keyword.value, ast.Attribute)
+            and keyword.value.attr == "SUCCESS"
+            for keyword in node.keywords
+        )
+    )
 
 
 def _auth_status_branch(node: ast.AST) -> bool:
@@ -444,6 +489,20 @@ def test_first_model_output_has_one_table_backed_owner() -> None:
             and node.value.value is True
             for node in ast.walk(client_owner)
         )
+
+
+def test_protocol_observation_and_success_reduction_have_one_owner() -> None:
+    # Review 4914187655: buffered and streamed facts cannot bypass observation.
+    client_tree = _tree(CLIENT)
+    stream_tree = _tree(ROOT / "core/handlers/model_hub/stream_wire.py")
+    owners = (_functions(client_tree)["invoke"], _functions(stream_tree)["_observe_frame"])
+    calls = [node for tree in (client_tree, stream_tree) for node in ast.walk(tree) if _call_name(node) == "observe_protocol_response"]
+    assert all(any(call in set(ast.walk(owner)) for owner in owners) for call in calls)
+    assert {value for call in calls if (value := _bool_keyword(call, "streamed")) is not None} == {
+        case["stream"] for case in STREAM_TRANSPORT_FIXTURES
+    }
+    reducer = _functions(client_tree)["_reduce_protocol_observation"]
+    assert all(call in set(ast.walk(reducer)) for call in _success_outcome_calls(client_tree))
 
 
 def test_g4_terminal_projection_has_no_execution_channel() -> None:
@@ -635,6 +694,12 @@ def _assert_stream_taxonomy_matches(
         if fixture_protocol == protocol
     )
     assert taxonomy.success_literal == (None if literal is None else (literal["event_name"], literal["literal"]))
+    assert taxonomy.payload_must_be_object is PROTOCOL_OBSERVATION_AUTHORITY_FIXTURES[protocol][
+        "payload_must_be_object"
+    ]
+    assert taxonomy.sequence_number_path == PROTOCOL_OBSERVATION_AUTHORITY_FIXTURES[protocol][
+        "sequence_number_path"
+    ]
     assert taxonomy.buffered_error_envelope_paths == BUFFERED_ERROR_TRUST_ROOT_FIXTURES[protocol]
 
 
@@ -674,10 +739,91 @@ def test_stream_authority_guard_rejects_an_orphaned_acceptance_fixture() -> None
         _assert_stream_taxonomy_matches("openai_responses", mutated)
 
 
+def test_protocol_observation_guard_rejects_a_missing_sequence_invariant() -> None:
+    taxonomy = replace(PROTOCOL_STREAM_TAXONOMY["openai_responses"], sequence_number_path=None)
+    with pytest.raises(AssertionError):
+        _assert_stream_taxonomy_matches("openai_responses", taxonomy)
+
+
 def test_realtime_terminal_is_not_accepted_by_responses_streaming() -> None:
     state = ProtocolSSEState("openai_responses")
     state.observe(b'event: response.done\ndata: {"type":"response.done"}\n\n')
     assert state.terminal_outcome is None
+
+
+@pytest.mark.parametrize(
+    "data",
+    (
+        b"{",
+        b"[]",
+        b"null",
+        b'{"type":"response.created","type":"response.completed"}',
+        b'{"sequence_number":NaN}',
+    ),
+)
+def test_malformed_stream_data_cannot_be_repaired_by_a_later_terminal(data: bytes) -> None:
+    state = ProtocolSSEState("openai_responses")
+    state.observe(b"event: response.created\ndata: " + data + b"\n\n")
+    state.observe(
+        b'event: response.completed\ndata: {"type":"response.completed","sequence_number":1}\n\n'
+    )
+    observation = state.terminal_observation()
+    assert observation is not None and observation.outcome == "protocol_error"
+
+
+@pytest.mark.parametrize("next_sequence", (1, 0))
+def test_responses_sequence_numbers_must_strictly_increase(next_sequence: int) -> None:
+    state = ProtocolSSEState("openai_responses")
+    state.observe(b'event: response.created\ndata: {"type":"response.created","sequence_number":1}\n\n')
+    state.observe(
+        b'event: response.in_progress\ndata: {"type":"response.in_progress","sequence_number":'
+        + str(next_sequence).encode()
+        + b"}\n\n"
+    )
+    observation = state.terminal_observation()
+    assert observation is not None and observation.outcome == "protocol_error"
+
+
+def test_responses_sequence_numbers_accept_a_strictly_increasing_stream() -> None:
+    state = ProtocolSSEState("openai_responses")
+    state.observe(b'event: response.created\ndata: {"type":"response.created","sequence_number":0}\n\n')
+    state.observe(
+        b'event: response.completed\ndata: {"type":"response.completed","sequence_number":1}\n\n'
+    )
+    assert state.terminal_observation() == ProtocolObservation(outcome="served")
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    (
+        b": keep-alive\n\n",
+        b"event: ping\n\n",
+        b'event: future.event\ndata: {"future":"shape"}\n\n',
+    ),
+)
+def test_spec_ignorable_stream_frames_do_not_poison_terminal_proof(prefix: bytes) -> None:
+    state = ProtocolSSEState("openai_responses")
+    state.observe(prefix)
+    state.observe(
+        b'event: response.completed\ndata: {"type":"response.completed","sequence_number":0}\n\n'
+    )
+    assert state.terminal_observation() == ProtocolObservation(outcome="served")
+
+
+@pytest.mark.parametrize("protocol", tuple(BUFFERED_ERROR_TRUST_ROOT_FIXTURES))
+def test_buffered_protocol_observation_classifies_native_error_envelopes(protocol: str) -> None:
+    observation = observe_protocol_response(
+        protocol,
+        streamed=False,
+        data=b'{"error":{"type":"permission_error"}}',
+    )
+    assert observation.outcome == "failed_terminal"
+    assert observation.error_envelope_paths == BUFFERED_ERROR_TRUST_ROOT_FIXTURES[protocol]
+
+
+@pytest.mark.parametrize("protocol", tuple(BUFFERED_ERROR_TRUST_ROOT_FIXTURES))
+def test_buffered_protocol_observation_accepts_valid_success(protocol: str) -> None:
+    assert observe_protocol_response(protocol, streamed=False, data=b'{"id":"response"}').outcome == "served"
 
 
 def test_chat_role_metadata_does_not_cross_the_model_output_boundary() -> None:

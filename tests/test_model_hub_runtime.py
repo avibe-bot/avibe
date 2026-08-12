@@ -1620,6 +1620,128 @@ def test_engine_client_keeps_served_after_terminal_marker_then_disconnect(
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("protocol", ("anthropic", "openai_responses", "openai_chat"))
+def test_engine_client_classifies_buffered_2xx_native_error_before_success(
+    monkeypatch: pytest.MonkeyPatch,
+    protocol: str,
+) -> None:
+    async def run() -> None:
+        payload = b'{"error":{"type":"permission_error"}}'
+
+        class Content:
+            reads = 0
+
+            async def read(self, _size: int) -> bytes:
+                self.reads += 1
+                return payload if self.reads == 1 else b""
+
+        class Response:
+            status = 200
+            content = Content()
+            headers = {"Content-Type": "application/json"}
+
+            def close(self) -> None:
+                return None
+
+        class Session:
+            async def post(self, *_args, **_kwargs):
+                return Response()
+
+            async def close(self) -> None:
+                return None
+
+        monkeypatch.setattr(client_module.aiohttp, "ClientSession", lambda **_: Session())
+        source = SourceRecord(
+            source_id="src_fixture123",
+            vendor="custom",
+            protocol=protocol,
+            base_url="https://api.example.test/v1",
+            credential_ref="cred_fixture123",
+            allowed_origins=(),
+            model_ids=("model-a",),
+            prefix="source-fixture123",
+        )
+        handle = await EngineClient(
+            EngineConnection("http://127.0.0.1:15220", "management", "gateway")
+        ).invoke(source, "model-a", {}, stream=False, request_protocol=protocol)
+        assert handle.stream is None
+        outcome = await handle.outcome()
+        assert outcome.kind is RawOutcomeKind.HTTP_ERROR
+        assert outcome.error_type == "permission_error"
+        decision = classify_outcome(outcome)
+        assert decision.action == "surface"
+        assert decision.downstream_status == 403
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "invalid_chunk",
+    (
+        b"event: response.in_progress\ndata: {\n\n",
+        b"event: response.in_progress\ndata: []\n\n",
+        b'event: response.in_progress\ndata: {"type":"response.in_progress","sequence_number":1}\n\n',
+    ),
+)
+def test_engine_client_cannot_settle_served_after_an_invalid_stream_fact(
+    monkeypatch: pytest.MonkeyPatch,
+    invalid_chunk: bytes,
+) -> None:
+    async def run() -> None:
+        output = (
+            b'event: response.output_text.delta\ndata: {"type":"response.output_text.delta",'
+            b'"sequence_number":1}\n\n'
+        )
+        terminal = (
+            b'event: response.completed\ndata: {"type":"response.completed","sequence_number":2}\n\n'
+        )
+
+        class Content:
+            async def read(self, _size: int) -> bytes:
+                return output
+
+            async def iter_chunked(self, _size: int):
+                yield invalid_chunk
+                yield terminal
+
+        class Response:
+            status = 200
+            content = Content()
+            headers = {"Content-Type": "text/event-stream"}
+
+            def close(self) -> None:
+                return None
+
+        class Session:
+            async def post(self, *_args, **_kwargs):
+                return Response()
+
+            async def close(self) -> None:
+                return None
+
+        monkeypatch.setattr(client_module.aiohttp, "ClientSession", lambda **_: Session())
+        source = SourceRecord(
+            source_id="src_fixture123",
+            vendor="custom",
+            protocol="openai_responses",
+            base_url="https://api.example.test/v1",
+            credential_ref="cred_fixture123",
+            allowed_origins=(),
+            model_ids=("model-a",),
+            prefix="source-fixture123",
+        )
+        handle = await EngineClient(
+            EngineConnection("http://127.0.0.1:15220", "management", "gateway")
+        ).invoke(source, "model-a", {}, stream=True)
+        assert handle.stream is not None
+        assert [chunk async for chunk in handle.stream] == [output, invalid_chunk, terminal]
+        outcome = await handle.outcome()
+        assert outcome.kind is RawOutcomeKind.PROTOCOL_ERROR
+        assert outcome.stream_started is True
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize(
     ("event_type", "terminal_payload", "error_code", "expected_action", "expected_reason"),
     [

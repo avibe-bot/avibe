@@ -21,11 +21,12 @@ from core.handlers.model_hub.adapter import (
 )
 from core.handlers.model_hub.classification import UPSTREAM_MACHINE_ERROR_CODES
 from core.handlers.model_hub.stream_wire import (
-    PROTOCOL_STREAM_TAXONOMY,
     ErrorEnvelopePath,
+    ProtocolObservation,
     ProtocolSSEState,
     SSE_MAX_FRAME_BYTES,
     SSEFrameLimitError,
+    observe_protocol_response,
 )
 from vibe.model_hub_runtime.state import SourceRecord
 
@@ -215,9 +216,14 @@ class EngineClient:
                     )
                 except (_ResponseTooLargeError, asyncio.TimeoutError, aiohttp.ClientError):
                     payload = b""
+                observation = observe_protocol_response(
+                    request_protocol,
+                    streamed=False,
+                    data=payload,
+                )
                 error_type, error_code, error_candidates = _raw_error_fields(
                     payload,
-                    PROTOCOL_STREAM_TAXONOMY[request_protocol].buffered_error_envelope_paths,
+                    observation.error_envelope_paths,
                 )
                 outcome = _outcome(
                     kind=RawOutcomeKind.HTTP_ERROR,
@@ -286,31 +292,26 @@ class EngineClient:
                             stream_started=True,
                         )
                     )
-                if not _is_json(first):
-                    response.close()
-                    await session.close()
-                    return completed_handle(
-                        _outcome(
-                            kind=RawOutcomeKind.PROTOCOL_ERROR,
-                            source=source,
-                            model_id=model_id,
-                            http_status=response.status,
-                            message="upstream returned an invalid JSON response",
-                            stream_started=True,
-                        )
-                    )
+                observation = observe_protocol_response(
+                    request_protocol,
+                    streamed=False,
+                    data=first,
+                )
+                outcome = _reduce_protocol_observation(
+                    observation,
+                    source=source,
+                    model_id=model_id,
+                    http_status=response.status,
+                    stream_started=True,
+                )
+                assert outcome is not None
                 response.close()
                 await session.close()
                 ownership_transferred = True
-                return buffered_handle(
-                    first,
-                    _outcome(
-                        kind=RawOutcomeKind.SUCCESS,
-                        source=source,
-                        model_id=model_id,
-                        http_status=response.status,
-                        stream_started=True,
-                    ),
+                return (
+                    buffered_handle(first, outcome)
+                    if outcome.kind == RawOutcomeKind.SUCCESS
+                    else completed_handle(outcome)
                 )
 
             prelude, wire_state, prelude_outcome = await _read_stream_prelude(
@@ -695,36 +696,40 @@ def _observed_stream_terminal_outcome(
     *,
     allow_completion: bool = False,
 ) -> RawCallOutcome | None:
-    if wire_state.invalid_after_terminal:
-        return _outcome(
-            kind=RawOutcomeKind.PROTOCOL_ERROR,
-            source=source,
-            model_id=model_id,
-            http_status=http_status,
-            message="upstream emitted data after a protocol terminal event",
-            stream_started=wire_state.model_output_started,
-        )
-    if wire_state.invalid_protocol_shape:
-        return _outcome(
-            kind=RawOutcomeKind.PROTOCOL_ERROR,
-            source=source,
-            model_id=model_id,
-            http_status=http_status,
-            message="upstream emitted an invalid protocol event shape",
-            stream_started=wire_state.model_output_started,
-        )
-    if wire_state.terminal_outcome == "served" or (allow_completion and wire_state.completion_observed):
+    observation = wire_state.terminal_observation(allow_completion=allow_completion)
+    return _reduce_protocol_observation(
+        observation,
+        source=source,
+        model_id=model_id,
+        http_status=http_status,
+        stream_started=wire_state.model_output_started,
+    )
+
+
+def _reduce_protocol_observation(
+    observation: ProtocolObservation | None,
+    *,
+    source: SourceRecord,
+    model_id: str,
+    http_status: int,
+    stream_started: bool,
+) -> RawCallOutcome | None:
+    """Sole conversion from protocol observations to runtime call outcomes."""
+
+    if observation is None or observation.outcome is None:
+        return None
+    if observation.outcome == "served":
         return _outcome(
             kind=RawOutcomeKind.SUCCESS,
             source=source,
             model_id=model_id,
             http_status=http_status,
-            stream_started=wire_state.model_output_started,
+            stream_started=stream_started,
         )
-    if wire_state.terminal_outcome == "failed_terminal":
+    if observation.outcome == "failed_terminal":
         error_type, error_code, candidates = _raw_error_fields(
-            wire_state.error_payload or b"",
-            wire_state.error_envelope_paths,
+            observation.error_payload or b"",
+            observation.error_envelope_paths,
         )
         return _outcome(
             kind=RawOutcomeKind.HTTP_ERROR,
@@ -735,9 +740,16 @@ def _observed_stream_terminal_outcome(
             error_code=error_code,
             error_candidates=candidates,
             message="upstream returned a protocol error event",
-            stream_started=wire_state.model_output_started,
+            stream_started=stream_started,
         )
-    return None
+    return _outcome(
+        kind=RawOutcomeKind.PROTOCOL_ERROR,
+        source=source,
+        model_id=model_id,
+        http_status=http_status,
+        message=observation.message or "upstream emitted invalid protocol data",
+        stream_started=stream_started,
+    )
 
 
 def completed_handle(outcome: RawCallOutcome) -> EngineInvokeHandle:
@@ -830,11 +842,3 @@ def _safe_error_code(value: object) -> str | None:
 def _is_event_stream_response(response: aiohttp.ClientResponse) -> bool:
     content_type = str(response.headers.get("Content-Type", ""))
     return content_type.split(";", 1)[0].strip().lower() == "text/event-stream"
-
-
-def _is_json(payload: bytes) -> bool:
-    try:
-        json.loads(payload.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
-        return False
-    return True
