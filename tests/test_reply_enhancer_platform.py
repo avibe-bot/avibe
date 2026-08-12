@@ -1456,6 +1456,14 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reply.text, text)
         self.assertEqual(reply.buttons, [])
 
+    def test_process_reply_preserves_whitespace_only_body_without_rule(self):
+        text = "\n[A] | [B]"
+
+        reply = process_reply(text)
+
+        self.assertEqual(reply.text, text)
+        self.assertEqual(reply.buttons, [])
+
     def test_process_reply_preserves_final_row_of_markdown_table(self):
         text = (
             "Option | Status\n"

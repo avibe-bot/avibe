@@ -992,6 +992,9 @@ def _extract_buttons(
     if m is None:
         return [], text
 
+    if pattern is _UNSEPARATED_BUTTON_ROW_RE and not text[: m.start()].strip():
+        return [], text
+
     if pattern is _UNSEPARATED_BUTTON_ROW_RE and _is_markdown_table_delimiter_before(
         mask, m.start()
     ):
