@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -30,6 +32,17 @@ class _Response:
 
     def read(self) -> bytes:
         return self.content
+
+
+def _load_prepare_script(monkeypatch: pytest.MonkeyPatch):
+    repository = Path(__file__).resolve().parents[1]
+    script = repository / "scripts" / "prepare_local_show_runtime_manifest.py"
+    monkeypatch.syspath_prepend(str(script.parent))
+    spec = importlib.util.spec_from_file_location("prepare_local_show_runtime_manifest", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _manifest() -> dict:
@@ -103,6 +116,29 @@ def test_prepare_manifest_verifies_release_asset_digest_and_writes_output(tmp_pa
 
     assert result["runtime_version"] == RUNTIME_VERSION
     assert output.read_bytes() == manifest_content
+
+
+@pytest.mark.parametrize("invocation_directory", ["repository", "scripts"])
+def test_prepare_local_manifest_default_output_is_repository_relative(
+    invocation_directory: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repository = Path(__file__).resolve().parents[1]
+    module = _load_prepare_script(monkeypatch)
+    captured_output: list[Path] = []
+
+    def fake_prepare_manifest(output: Path, *, release_tag: str | None = None):
+        captured_output.append(output)
+        return {"runtime_version": RUNTIME_VERSION, "archives": {"linux-x64": {}}}
+
+    monkeypatch.setattr(module, "prepare_manifest", fake_prepare_manifest)
+    monkeypatch.setattr(sys, "argv", ["prepare_local_show_runtime_manifest.py"])
+    monkeypatch.chdir(repository if invocation_directory == "repository" else repository / "scripts")
+
+    assert module.main() == 0
+    assert captured_output == [repository / "vibe" / "show_runtime_manifest.json"]
+    assert json.loads(capsys.readouterr().out)["output"] == str(captured_output[0])
 
 
 def test_prepare_manifest_rejects_a_release_asset_digest_mismatch(tmp_path: Path) -> None:

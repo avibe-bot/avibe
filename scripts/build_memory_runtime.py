@@ -424,6 +424,16 @@ def build_runtime(
     return archive, metadata
 
 
+def build_output(*, archive: Path, metadata: dict[str, object]) -> dict[str, object]:
+    """Return transport status with reusable manifest metadata kept explicit."""
+
+    return {
+        "ok": True,
+        "archive": str(archive),
+        "metadata": metadata,
+    }
+
+
 def main() -> int:
     repository = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(description="Build an Avibe-managed EverOS Memory Runtime archive.")
@@ -436,7 +446,11 @@ def main() -> int:
     parser.add_argument("--uv", default="uv")
     parser.add_argument("--python-version", default=PYTHON_VERSION)
     parser.add_argument("--platform", choices=sorted(EXPECTED_PLATFORMS))
-    parser.add_argument("--metadata-output", type=Path)
+    parser.add_argument(
+        "--metadata-output",
+        type=Path,
+        help="Write generator-compatible Memory Runtime metadata JSON to this path.",
+    )
     args = parser.parse_args()
     archive, metadata = build_runtime(
         output_dir=args.output_dir,
@@ -448,7 +462,7 @@ def main() -> int:
     if args.metadata_output is not None:
         args.metadata_output.parent.mkdir(parents=True, exist_ok=True)
         args.metadata_output.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    print(json.dumps({"ok": True, "archive": str(archive), **metadata}, indent=2, sort_keys=True))
+    print(json.dumps(build_output(archive=archive, metadata=metadata), indent=2, sort_keys=True))
     return 0
 
 
