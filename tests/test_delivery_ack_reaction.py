@@ -22,9 +22,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core.processing_indicator import (
     _ADMISSION_ACK_REGISTRY_LIMIT,
     ACK_REACTION_EMOJI,
+    INTERRUPTED_REACTION_EMOJI,
     NOT_DELIVERED_REACTION_EMOJI,
     QUEUED_REACTION_EMOJI,
     STEERED_REACTION_EMOJI,
+    STOPPED_REACTION_EMOJI,
     UNCONFIRMED_REACTION_EMOJI,
     ProcessingIndicatorService,
 )
@@ -315,30 +317,61 @@ class AdmissionAckTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(applied)
         self.assertEqual(im.calls, [])
 
-    async def test_final_receipts_do_not_accumulate_registry_entries(self):
-        # accepted/retired deliveries never start a turn, so nothing would ever
-        # read these entries back; keeping them grows the registry by one key
-        # per mid-turn message for the life of the process.
+    async def test_terminal_receipt_is_replaced_rather_than_stacked(self):
+        # Two Deliveries can share one reaction target: a quick-reply callback
+        # reacts on its bot echo, so a second click settles on the message a
+        # first one already decorated. A platform shows one reaction per
+        # (message, emoji, bot), so the receipt describes the message — the
+        # terminal ✍️ is removed rather than left next to the new 👌.
         im = _FakeIM()
         svc = _svc(im)
+        context = _ctx(message_id="echo-7")
 
-        for index in range(5):
-            await svc.ack_delivery_state(
-                _ctx(message_id=f"steered-{index}"),
-                state="accepted",
-                admission="steered",
-            )
-            await svc.ack_delivery_state(_ctx(message_id=f"retired-{index}"), state="retired")
+        await svc.ack_delivery_state(context, state="accepted", admission="steered")
+        await svc.ack_delivery_state(context, state="queued")
 
-        self.assertEqual(svc._admission_acks, {})
-        self.assertEqual(len(im.calls), 10)
+        self.assertEqual(
+            im.calls,
+            [
+                ("add", "echo-7", STEERED_REACTION_EMOJI),
+                ("remove", "echo-7", STEERED_REACTION_EMOJI),
+                ("add", "echo-7", QUEUED_REACTION_EMOJI),
+            ],
+        )
 
-    async def test_replaceable_receipts_are_bounded(self):
+    async def test_terminal_receipt_is_cleared_when_a_turn_takes_the_message(self):
+        # Same shared-target case, other ordering: the second Delivery is the one
+        # that dispatches, so its turn's own indicator replaces the stale ✍️.
+        im = _FakeIM()
+        svc = _svc(im)
+        context = _ctx(message_id="echo-7")
+
+        await svc.ack_delivery_state(context, state="retired")
+        await svc.clear_admission_ack(context)
+
+        self.assertEqual(
+            im.calls,
+            [
+                ("add", "echo-7", NOT_DELIVERED_REACTION_EMOJI),
+                ("remove", "echo-7", NOT_DELIVERED_REACTION_EMOJI),
+            ],
+        )
+
+    async def test_receipts_are_bounded(self):
+        # Terminal receipts are remembered too, so the FIFO cap is the only thing
+        # keeping one entry per mid-turn message from living for the life of the
+        # process. Evicting the oldest only forfeits a later replace or clear.
         im = _FakeIM()
         svc = _svc(im)
 
         for index in range(_ADMISSION_ACK_REGISTRY_LIMIT + 10):
             await svc.ack_delivery_state(_ctx(message_id=f"q-{index}"), state="queued")
+        for index in range(_ADMISSION_ACK_REGISTRY_LIMIT + 10):
+            await svc.ack_delivery_state(
+                _ctx(message_id=f"s-{index}"),
+                state="accepted",
+                admission="steered",
+            )
 
         self.assertLessEqual(len(svc._admission_acks), _ADMISSION_ACK_REGISTRY_LIMIT)
 
@@ -446,6 +479,37 @@ class ReceiptEmojiMappingTests(unittest.TestCase):
             with self.subTest(emoji=emoji):
                 normalized = TelegramBot._normalize_reaction_emoji(None, emoji)
                 self.assertIn(normalized, allowed)
+
+
+class TerminalReceiptEmojiMappingTests(unittest.TestCase):
+    """Terminal receipts must resolve to adapter-native reaction values."""
+
+    receipts = (STOPPED_REACTION_EMOJI, INTERRUPTED_REACTION_EMOJI)
+
+    def test_slack_maps_both_forms_to_short_names(self):
+        from modules.im.slack import SlackBot
+
+        expected = {
+            STOPPED_REACTION_EMOJI: "black_square_for_stop",
+            STOPPED_REACTION_EMOJI.replace("️", ""): "black_square_for_stop",
+            INTERRUPTED_REACTION_EMOJI: "warning",
+            INTERRUPTED_REACTION_EMOJI.replace("️", ""): "warning",
+        }
+        self.assertEqual(
+            {emoji: SlackBot._slack_reaction_name(emoji) for emoji in expected},
+            expected,
+        )
+
+    def test_telegram_maps_to_supported_distinct_reactions(self):
+        from modules.im.telegram import TelegramBot
+
+        self.assertEqual(
+            [
+                TelegramBot._normalize_reaction_emoji(None, emoji)
+                for emoji in self.receipts
+            ],
+            ["🙊", "😱"],
+        )
 
 
 class DeliveryAdmissionContractTests(unittest.TestCase):

@@ -2149,7 +2149,18 @@ def test_materialize_agent_session_route_fills_empty_columns_only(tmp_path: Path
 
         # First turn resolves the Agent default → empty columns fill in.
         assert service.materialize_agent_session_route(
-            reserved_id, model="gpt-5.5", reasoning_effort="xhigh"
+            reserved_id,
+            model="gpt-5.5",
+            reasoning_effort="xhigh",
+            expected_route={
+                "agent_id": row["agent_id"],
+                "agent_name": row["agent_name"],
+                "agent_backend": row["agent_backend"],
+                "agent_variant": row["agent_variant"],
+                "model": None,
+                "reasoning_effort": None,
+                "explicit_overrides": [],
+            },
         )
         row = service.get_agent_session_by_id(reserved_id)
         assert row is not None
@@ -2179,6 +2190,386 @@ def test_materialize_agent_session_route_fills_empty_columns_only(tmp_path: Path
         # No-op call shapes: nothing to pin → False, row untouched.
         assert not service.materialize_agent_session_route(reserved_id)
         assert not service.materialize_agent_session_route("ses_missing", model="gpt-5.5")
+    finally:
+        service.close()
+
+
+def test_materialize_agent_session_route_pins_resolved_agent_identity(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    service = SQLiteSessionsService(db_path)
+    try:
+        with service.engine.begin() as conn:
+            scope_id = resolve_scope_from_legacy_key(
+                conn, "avibe::project::proj_abc", now="2026-08-10T00:00:00Z"
+            )
+            assert scope_id is not None
+            session_id = create_agent_session_row(
+                conn,
+                scope_id=scope_id,
+                session_anchor="avibe_ses_identity",
+                agent_backend="",
+                agent_variant="default",
+                agent_name=None,
+                model=None,
+                reasoning_effort=None,
+                native_session_id="",
+                workdir=str(tmp_path),
+                metadata={"created_via": "workbench"},
+            )
+
+        assert service.materialize_agent_session_route(
+            session_id,
+            agent_id="agent-default",
+            agent_name="default",
+            model="gpt-5.4",
+            reasoning_effort="high",
+            expected_route={
+                "agent_id": None,
+                "agent_name": None,
+                "agent_backend": None,
+                "agent_variant": "default",
+                "model": None,
+                "reasoning_effort": None,
+                "explicit_overrides": [],
+            },
+        )
+        row = service.get_agent_session_by_id(session_id)
+        assert row is not None
+        assert row["agent_id"] == "agent-default"
+        assert row["agent_name"] == "default"
+        assert row["model"] == "gpt-5.4"
+        assert row["reasoning_effort"] == "high"
+    finally:
+        service.close()
+
+
+def test_materialize_agent_session_route_rejects_stale_agent_route(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    service = SQLiteSessionsService(db_path)
+    try:
+        with service.engine.begin() as conn:
+            scope_id = resolve_scope_from_legacy_key(
+                conn, "avibe::project::proj_abc", now="2026-08-10T00:00:00Z"
+            )
+            assert scope_id is not None
+            session_id = create_agent_session_row(
+                conn,
+                scope_id=scope_id,
+                session_anchor="avibe_ses1",
+                agent_backend="codex",
+                agent_variant="codex",
+                agent_name="old-agent",
+                model=None,
+                reasoning_effort=None,
+                native_session_id="",
+                workdir=str(tmp_path),
+                metadata={},
+            )
+        stale_route = {
+            "agent_id": None,
+            "agent_name": "old-agent",
+            "agent_backend": "codex",
+            "agent_variant": "codex",
+            "model": None,
+            "reasoning_effort": None,
+            "explicit_overrides": [],
+        }
+
+        with service.engine.begin() as conn:
+            conn.execute(
+                agent_sessions.update()
+                .where(agent_sessions.c.id == session_id)
+                .values(agent_name="new-agent")
+            )
+
+        assert not service.materialize_agent_session_route(
+            session_id,
+            model="gpt-5.5",
+            reasoning_effort="xhigh",
+            expected_route=stale_route,
+        )
+        row = service.get_agent_session_by_id(session_id)
+        assert row is not None
+        assert row["agent_name"] == "new-agent"
+        assert row["model"] is None
+        assert row["reasoning_effort"] is None
+    finally:
+        service.close()
+
+
+def test_materialize_agent_session_route_rejects_stale_same_agent_settings(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    service = SQLiteSessionsService(db_path)
+    try:
+        with service.engine.begin() as conn:
+            scope_id = resolve_scope_from_legacy_key(
+                conn, "avibe::project::proj_abc", now="2026-08-10T00:00:00Z"
+            )
+            assert scope_id is not None
+            session_id = create_agent_session_row(
+                conn,
+                scope_id=scope_id,
+                session_anchor="avibe_ses2",
+                agent_backend="codex",
+                agent_variant="codex",
+                agent_name="codex",
+                model=None,
+                reasoning_effort=None,
+                native_session_id="native-1",
+                workdir=str(tmp_path),
+                metadata={},
+            )
+        stale_route = {
+            "agent_id": None,
+            "agent_name": "codex",
+            "agent_backend": "codex",
+            "agent_variant": "codex",
+            "model": None,
+            "reasoning_effort": None,
+            "explicit_overrides": [],
+        }
+
+        from storage.workbench_sessions_service import update_session
+
+        with service.engine.begin() as conn:
+            update_session(
+                conn,
+                session_id,
+                model="gpt-5.5",
+                reasoning_effort=None,
+            )
+
+        assert not service.materialize_agent_session_route(
+            session_id,
+            model="gpt-5.4",
+            reasoning_effort="high",
+            expected_route=stale_route,
+        )
+        row = service.get_agent_session_by_id(session_id)
+        assert row is not None
+        assert row["model"] == "gpt-5.5"
+        assert row["reasoning_effort"] is None
+    finally:
+        service.close()
+
+
+def test_materialize_agent_session_route_rejects_changed_explicit_pin_snapshot(
+    tmp_path: Path,
+) -> None:
+    from storage.session_reclaim import SESSION_SETTINGS_OVERRIDE_KEY
+    from storage.workbench_sessions_service import update_session
+
+    db_path = tmp_path / "vibe.sqlite"
+    service = SQLiteSessionsService(db_path)
+    try:
+        with service.engine.begin() as conn:
+            scope_id = resolve_scope_from_legacy_key(
+                conn, "avibe::project::proj_abc", now="2026-08-10T00:00:00Z"
+            )
+            assert scope_id is not None
+            session_id = create_agent_session_row(
+                conn,
+                scope_id=scope_id,
+                session_anchor="avibe_ses_pin",
+                agent_backend="codex",
+                agent_variant="codex",
+                agent_name="codex",
+                model=None,
+                reasoning_effort=None,
+                native_session_id="native-1",
+                workdir=str(tmp_path),
+                metadata={SESSION_SETTINGS_OVERRIDE_KEY: ["reasoning_effort"]},
+            )
+        stale_route = {
+            "agent_id": None,
+            "agent_name": "codex",
+            "agent_backend": "codex",
+            "agent_variant": "codex",
+            "model": None,
+            "reasoning_effort": None,
+            "explicit_overrides": ["reasoning_effort"],
+        }
+
+        # The picker replaces the explicit-null effort with inherited NULL. The
+        # columns are byte-for-byte unchanged; only the route marker proves that
+        # the hydrated Turn snapshot is stale.
+        with service.engine.begin() as conn:
+            update_session(conn, session_id, reasoning_effort=None)
+
+        assert not service.materialize_agent_session_route(
+            session_id,
+            model="gpt-5.4",
+            reasoning_effort="high",
+            expected_route=stale_route,
+        )
+        row = service.get_agent_session_by_id(session_id)
+        assert row is not None
+        assert row["model"] is None
+        assert row["reasoning_effort"] is None
+    finally:
+        service.close()
+
+
+@pytest.mark.parametrize("placeholder_backend", ["", "default", "unknown"])
+def test_first_backend_adoption_preserves_materialized_global_agent_route(
+    tmp_path: Path,
+    placeholder_backend: str,
+) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    service = SQLiteSessionsService(db_path)
+    try:
+        with service.engine.begin() as conn:
+            scope_id = resolve_scope_from_legacy_key(
+                conn, "avibe::project::proj_abc", now="2026-08-10T00:00:00Z"
+            )
+            assert scope_id is not None
+            session_id = create_agent_session_row(
+                conn,
+                scope_id=scope_id,
+                session_anchor="avibe_ses3",
+                agent_backend=placeholder_backend,
+                agent_variant="default",
+                agent_name=None,
+                model=None,
+                reasoning_effort=None,
+                native_session_id="",
+                workdir=str(tmp_path),
+                metadata={"created_via": "workbench"},
+            )
+
+        assert service.materialize_agent_session_route(
+            session_id,
+            model="gpt-5.4",
+            reasoning_effort="high",
+            expected_route={
+                "agent_id": None,
+                "agent_name": None,
+                "agent_backend": placeholder_backend or None,
+                "agent_variant": "default",
+                "model": None,
+                "reasoning_effort": None,
+                "explicit_overrides": [],
+            },
+        )
+        assert service.bind_agent_session_by_id(
+            session_id=session_id,
+            native_session_id="codex-native-1",
+            vibe_agent_id="agent-codex",
+            vibe_agent_name="codex",
+            vibe_agent_backend="codex",
+        ) == session_id
+
+        row = service.get_agent_session_by_id(session_id)
+        assert row is not None
+        assert row["agent_backend"] == "codex"
+        assert row["model"] == "gpt-5.4"
+        assert row["reasoning_effort"] == "high"
+    finally:
+        service.close()
+
+
+@pytest.mark.parametrize("placeholder_backend", ["", "default", "unknown"])
+def test_placeholder_backend_adoption_clears_non_workbench_route(
+    tmp_path: Path,
+    placeholder_backend: str,
+) -> None:
+    from storage.session_reclaim import SESSION_SETTINGS_OVERRIDE_KEY
+
+    db_path = tmp_path / "vibe.sqlite"
+    service = SQLiteSessionsService(db_path)
+    try:
+        with service.engine.begin() as conn:
+            scope_id = resolve_scope_from_legacy_key(
+                conn, "slack::channel::C123", now="2026-08-10T00:00:00Z"
+            )
+            assert scope_id is not None
+            session_id = create_agent_session_row(
+                conn,
+                scope_id=scope_id,
+                session_anchor="slack_123.456",
+                agent_backend=placeholder_backend,
+                agent_variant="default",
+                agent_name=None,
+                model="stale-model",
+                reasoning_effort="high",
+                native_session_id="",
+                workdir=str(tmp_path),
+                metadata={SESSION_SETTINGS_OVERRIDE_KEY: ["model", "reasoning_effort"]},
+            )
+
+        assert service.bind_agent_session_by_id(
+            session_id=session_id,
+            native_session_id="codex-native-im",
+            vibe_agent_id="agent-codex",
+            vibe_agent_name="codex",
+            vibe_agent_backend="codex",
+        ) == session_id
+
+        row = service.get_agent_session_by_id(session_id)
+        assert row is not None
+        assert row["agent_backend"] == "codex"
+        assert row["model"] is None
+        assert row["reasoning_effort"] is None
+        with service.engine.connect() as conn:
+            metadata_json = conn.execute(
+                select(agent_sessions.c.metadata_json).where(agent_sessions.c.id == session_id)
+            ).scalar_one()
+        assert SESSION_SETTINGS_OVERRIDE_KEY not in json.loads(metadata_json or "{}")
+    finally:
+        service.close()
+
+
+@pytest.mark.parametrize("raw_metadata_json", ["[]", '"legacy"'])
+def test_backend_adoption_normalizes_non_object_route_metadata(
+    tmp_path: Path,
+    raw_metadata_json: str,
+) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    service = SQLiteSessionsService(db_path)
+    try:
+        with service.engine.begin() as conn:
+            scope_id = resolve_scope_from_legacy_key(
+                conn, "slack::channel::C123", now="2026-08-10T00:00:00Z"
+            )
+            assert scope_id is not None
+            session_id = create_agent_session_row(
+                conn,
+                scope_id=scope_id,
+                session_anchor="slack_123.456",
+                agent_backend="default",
+                agent_variant="default",
+                model="stale-model",
+                reasoning_effort="high",
+                native_session_id="",
+                workdir=str(tmp_path),
+                metadata={},
+            )
+            conn.execute(
+                agent_sessions.update()
+                .where(agent_sessions.c.id == session_id)
+                .values(metadata_json=raw_metadata_json)
+            )
+
+        assert service.bind_agent_session_by_id(
+            session_id=session_id,
+            native_session_id="codex-native-im",
+            vibe_agent_id="agent-codex",
+            vibe_agent_name="codex",
+            vibe_agent_backend="codex",
+        ) == session_id
+
+        row = service.get_agent_session_by_id(session_id)
+        assert row is not None
+        assert row["agent_backend"] == "codex"
+        assert row["model"] is None
+        assert row["reasoning_effort"] is None
+        with service.engine.connect() as conn:
+            metadata_json = conn.execute(
+                select(agent_sessions.c.metadata_json).where(agent_sessions.c.id == session_id)
+            ).scalar_one()
+        assert json.loads(metadata_json or "{}") == {}
     finally:
         service.close()
 
@@ -5504,8 +5895,9 @@ def _bind_definition(
     conn,  # noqa: ANN001
     *,
     definition_id: str,
-    session_id: str,
+    session_id: str | None,
     metadata: dict | None = None,
+    enabled: int = 1,
 ) -> None:
     """A scheduled task pinned to ``session_id``, in the shape reclaim reads."""
     conn.execute(
@@ -5521,7 +5913,7 @@ def _bind_definition(
             prompt="run the nightly check",
             schedule_type="cron",
             cron="0 3 * * *",
-            enabled=1,
+            enabled=enabled,
             created_at="2026-07-28T00:00:00Z",
             updated_at="2026-07-28T00:00:00Z",
             metadata_json=json.dumps(metadata or {"origin": "cli"}),
@@ -5529,14 +5921,18 @@ def _bind_definition(
     )
 
 
-#: The decision read of ``reclaim_bound_definitions``: every live definition bound to
-#: the session going away. Everything the loop then writes -- pause / soft-delete, the
-#: settings snapshot, the summary counters and the teardown ledger -- is decided from
-#: this one row set.
+#: The decision read of ``reclaim_bound_definitions``: every live definition that
+#: either belongs to the session or targets it for execution. Everything the loop then
+#: writes -- pause / soft-delete, the settings snapshot, the summary counters and the
+#: teardown ledger -- is decided from this one row set.
 _RECLAIM_DECISION_SELECT = (
     "SELECT run_definitions.id, run_definitions.definition_type, run_definitions.enabled, "
-    "run_definitions.metadata_json FROM run_definitions WHERE run_definitions.session_id = ? "
-    "AND run_definitions.deleted_at IS NULL"
+    "run_definitions.session_id, run_definitions.metadata_json FROM run_definitions WHERE ("
+    "run_definitions.definition_type = ? AND run_definitions.session_id = ? OR "
+    "run_definitions.definition_type = ? AND (CASE WHEN (json_valid(run_definitions.metadata_json) = ?) "
+    "THEN CASE WHEN (json_type(run_definitions.metadata_json, ?) = ?) THEN "
+    "nullif(trim(json_extract(run_definitions.metadata_json, ?), ?), ?) END END = ? OR "
+    "run_definitions.session_id = ?)) AND run_definitions.deleted_at IS NULL"
 )
 
 
@@ -6152,6 +6548,16 @@ def test_new_teardown_keeps_a_session_superseded_inside_its_window(tmp_path: Pat
                 workdir=str(tmp_path),
             )
             _bind_definition(conn, definition_id="def-pinned", session_id=superseded_id)
+            _bind_definition(
+                conn,
+                definition_id="def-owner-only",
+                session_id=None,
+                enabled=0,
+                metadata={
+                    "created_by": {"caller": {"session_id": superseded_id}},
+                    "origin": "cli",
+                },
+            )
 
         def _winner_supersedes(other_conn) -> None:  # noqa: ANN001
             other_conn.execute(
@@ -6192,6 +6598,24 @@ def test_new_teardown_keeps_a_session_superseded_inside_its_window(tmp_path: Pat
                 .mappings()
                 .first()
             )
+            owner_only = (
+                conn.execute(select(run_definitions).where(run_definitions.c.id == "def-owner-only"))
+                .mappings()
+                .one()
+            )
+        from storage.background import SQLiteBackgroundTaskStore, task_resume_block
+
+        metadata = json.loads(owner_only["metadata_json"])
+        assert task_resume_block(metadata, owner_only["session_id"]) is None
+        task_store = SQLiteBackgroundTaskStore(db_path)
+        try:
+            assert task_store.set_definition_enabled(
+                "def-owner-only",
+                True,
+                definition_type="scheduled",
+            )
+        finally:
+            task_store.close()
     finally:
         service.close()
 
@@ -6218,6 +6642,13 @@ def test_new_teardown_keeps_a_session_superseded_inside_its_window(tmp_path: Pat
     assert [entry["definition_id"] for entry in ledger_entries] == ["def-pinned"], (
         f"the /new reply counts {ledger_entries!r}, which is not what the teardown did"
     )
+
+
+_DEFINITION_RESUME_SELECT = (
+    "SELECT run_definitions.definition_type, run_definitions.mode, run_definitions.enabled, "
+    "run_definitions.session_id, run_definitions.metadata_json FROM run_definitions "
+    "WHERE run_definitions.id = ? AND run_definitions.deleted_at IS NULL"
+)
 
 
 # --- Meta-guard: every writer of the session ROUTE must stay marker-aware ---
@@ -6582,6 +7013,72 @@ def _refuse_a_competing_writer_at(engine, db_path: Path, *, read: str, write) ->
             other.dispose()
 
     return state
+
+
+def test_direct_task_resume_reserves_write_lock_before_resumability_read(tmp_path: Path) -> None:
+    """A Harness resume cannot overtake an orphan marker from Session teardown."""
+
+    from storage.background import SQLiteBackgroundTaskStore
+
+    db_path = tmp_path / "vibe.sqlite"
+    service = SQLiteSessionsService(db_path)
+    try:
+        with service.engine.begin() as conn:
+            _bind_definition(
+                conn,
+                definition_id="def-resume-race",
+                session_id=None,
+                enabled=0,
+                metadata={
+                    "created_by": {"caller": {"session_id": "ses-owner"}},
+                    "origin": "cli",
+                },
+            )
+    finally:
+        service.close()
+
+    store = SQLiteBackgroundTaskStore(db_path)
+    try:
+        def _stamp_orphan_marker(other_conn) -> None:  # noqa: ANN001
+            other_conn.execute(
+                run_definitions.update()
+                .where(run_definitions.c.id == "def-resume-race")
+                .values(
+                    enabled=0,
+                    metadata_json=json.dumps(
+                        {
+                            "created_by": {"caller": {"session_id": "ses-owner"}},
+                            "origin": "cli",
+                            "orphaned_task_owner": {
+                                "reason_code": "task_owner_session_unavailable",
+                                "owner_session_id": "ses-owner",
+                            },
+                        }
+                    ),
+                    updated_at="2026-08-11T00:00:01Z",
+                )
+            )
+
+        race = _refuse_a_competing_writer_at(
+            store.engine,
+            db_path,
+            read=_DEFINITION_RESUME_SELECT,
+            write=_stamp_orphan_marker,
+        )
+
+        assert store.set_definition_enabled(
+            "def-resume-race",
+            True,
+            definition_type="scheduled",
+        )
+        saved = store.get_scheduled_task("def-resume-race")
+    finally:
+        store.close()
+
+    assert race["fired"] == 1, "the test did not observe the resumability decision read"
+    assert race["committed"] == 0, "Session teardown wrote inside the resume window"
+    assert race["refused"], "the resume path did not hold SQLite's writer slot"
+    assert saved is not None and saved["enabled"] is True
 
 
 def _record_statements(engine) -> list[str]:

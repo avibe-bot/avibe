@@ -3,51 +3,55 @@
 // (case included); the UI consumes these types and never edits the schemas.
 //
 // Contract versions are PER OBJECT, not per file. `_model_hub_success` stamps
-// the envelope and nests the payload, so one response carries both numbers: the
-// envelope is still v3 while the two payload schemas below moved to v4. Mirrored
-// under the backend's own constant names (`core/handlers/model_hub/service.py`
-// spells them CONTRACT_VERSION / AGENT_CHAIN_CONTRACT_VERSION /
-// PROBE_RESULT_CONTRACT_VERSION) so a bump is greppable across the boundary.
-// Never bump one of these to cover another: a shared constant would claim v4
-// for every route that did not move. This file changes in lockstep with the
-// schemas — never ahead of them.
+// the envelope and nests the payload, so one response carries both numbers.
+// Mirror the backend's own constant names so a bump is greppable across the
+// boundary; never bump one object to cover another. When a frozen contract PR
+// is staged ahead of this UI's merge base, optional members stay presence-gated
+// and the PR records the server implementation and feature-flag activation
+// edge. The client never synthesizes a fallback payload shape.
 
-export const CONTRACT_VERSION = 3 as const;
-export const AGENT_CHAIN_CONTRACT_VERSION = 4 as const;
-export const PROBE_RESULT_CONTRACT_VERSION = 4 as const;
+export const CONTRACT_VERSION = 5 as const;
+export const AGENT_CHAIN_CONTRACT_VERSION = CONTRACT_VERSION;
+export const PROBE_RESULT_CONTRACT_VERSION = CONTRACT_VERSION;
 
 // ── source.schema.json ──────────────────────────────────────────────────
 export type SourceKind = 'subscription' | 'api_key';
-export type SourceProtocol =
-  | 'anthropic'
-  | 'openai_responses'
-  | 'openai_chat'
-  | 'openai_compatible';
+export const SOURCE_PROTOCOLS = [
+  'anthropic',
+  'openai_responses',
+  'openai_chat',
+] as const;
+export type SourceProtocol = (typeof SOURCE_PROTOCOLS)[number];
+export const SOURCE_DISPLAY_NAME_MAX_LENGTH = 64 as const;
 export type SupplyChannel = 'native_cli' | 'hub';
 /** v3 (§4.5): classified by whether the state heals itself. cooldown carries a
  *  `retry_at` and clears on its own; needs_action never recovers unattended;
  *  error is an unclassified failure and equally a blocker. */
-export type SourceStatus = 'active' | 'standby' | 'cooldown' | 'needs_action' | 'error';
-export type ModelProvenance = 'discovered' | 'manual';
+export const SOURCE_STATUSES = ['active', 'standby', 'cooldown', 'needs_action', 'error'] as const;
+export type SourceStatus = (typeof SOURCE_STATUSES)[number];
+export type ModelOrigin = 'discovered' | 'manual';
 
 /** Optional cause of a self-healing cooldown. A closed vocabulary, not a
  *  prefix: the key is rendered through i18n, never as raw upstream text. */
-export type CooldownDetailKey =
-  | 'models.source.cooldown.network'
-  | 'models.source.cooldown.timeout'
-  | 'models.source.cooldown.rate_limited'
-  | 'models.source.cooldown.quota_exhausted'
-  | 'models.source.cooldown.server_error';
+export const COOLDOWN_DETAIL_KEYS = [
+  'models.source.cooldown.rate_limited',
+  'models.source.cooldown.quota_exhausted',
+  'models.source.cooldown.server_error',
+] as const;
+export type CooldownDetailKey = (typeof COOLDOWN_DETAIL_KEYS)[number];
 
 /** Required on `needs_action`: the state's whole point is that the user must
  *  act, which is unrenderable without naming the action. */
-export type NeedsActionDetailKey =
-  | 'models.source.needs_action.oauth_expired'
-  | 'models.source.needs_action.balance_exhausted'
-  | 'models.source.needs_action.credential_revoked'
-  | 'models.source.needs_action.account_banned';
+export const NEEDS_ACTION_DETAIL_KEYS = [
+  'models.source.needs_action.oauth_expired',
+  'models.source.needs_action.balance_exhausted',
+  'models.source.needs_action.credential_revoked',
+  'models.source.needs_action.account_banned',
+] as const;
+export type NeedsActionDetailKey = (typeof NEEDS_ACTION_DETAIL_KEYS)[number];
 
-export type ErrorDetailKey = 'models.source.error.unclassified';
+export const ERROR_DETAIL_KEYS = ['models.source.error.unclassified'] as const;
+export type ErrorDetailKey = (typeof ERROR_DETAIL_KEYS)[number];
 
 /** The complete set `state.detail_key` (and `ProbeResult.error`) can hold. */
 export type SourceDetailKey = CooldownDetailKey | NeedsActionDetailKey | ErrorDetailKey;
@@ -76,16 +80,16 @@ export type SuppliedModel = {
   /** Bare model id (no provider prefix). */
   id: string;
   display_name?: string | null;
-  provenance: ModelProvenance;
+  origin: ModelOrigin;
+  reasoning_efforts: string[];
   discovered_at?: string | null;
 };
 
 export type Source = {
   id: string;
-  /** v3, immutable once written: the `follow` policy recommends api_key sources
-   *  by creation time ascending, so the rule needs a persisted stamp (the
-   *  sources array itself is explicitly unordered). May be null on rows
-   *  persisted before the field existed; `id` ascending is the tie-breaker. */
+  /** Exact optional create correlation used only for lost-response recovery. */
+  client_nonce?: string | null;
+  /** Source creation time; ordinary audit/display metadata only. */
   created_at?: string | null;
   /** Latest successful full model discovery for this source. null means the
    *  source predates the field or has no known successful discovery. */
@@ -98,8 +102,6 @@ export type Source = {
   /** api_key kind only. null = vendor official default. */
   base_url?: string | null;
   supply_channel: SupplyChannel;
-  /** Set iff a hub-held subscription the user explicitly consented to. */
-  experimental_consent_at?: string | null;
   billing: 'monthly' | 'metered';
   state: SourceState;
   usage?: SourceUsage;
@@ -113,6 +115,8 @@ export type Source = {
   models: SuppliedModel[];
   /** Opaque handle. Secret material NEVER appears here. */
   credential_ref?: string | null;
+  /** Server-derived persisted Route-reference projection. */
+  adopted_by?: AdoptedBy[];
 };
 
 // `priority.schema.json` does not exist in v3: there is no global source order,
@@ -124,30 +128,16 @@ export type AgentBackend = 'claude' | 'codex' | 'opencode';
 export type AgentMode = 'hub' | 'direct';
 export type MenuKind = 'fixed' | 'open';
 
-export type AgentMapping = {
-  /** real built-in model id, e.g. claude-opus-4-6. */
-  builtin_id: string;
-  target_model_id: string;
-  enabled: boolean;
-};
-
 export type AgentMenu = {
   view: 'featured' | 'full';
   /** prefixed identifiers, e.g. zhipuai/glm-5.2. */
   checked: string[];
 };
 
-/** Whether the per-backend order is server-recommended or user-owned. `follow`
- *  recomputes on every read, so a newly eligible source joins automatically;
- *  `custom` is a frozen subset the server never reorders and never extends. */
-export type SourcePolicy = 'follow' | 'custom';
-
 /** Why a source cannot serve this backend at all. A closed vocabulary — a new
  *  cause ships its enum member and its locale copy in the same change. */
 export type EligibilityReasonKey =
-  | 'models.eligibility.subscription_wrong_client'
-  | 'models.eligibility.opencode_api_key_only'
-  | 'models.eligibility.consent_required';
+  'models.eligibility.subscription_wrong_client';
 
 /** Why a source that MAY serve this backend still cannot be launched on this
  *  machine. Independent of eligibility and of the source's own health: the
@@ -171,13 +161,28 @@ export type SourceEligibility = {
 };
 
 export type AgentSources = {
-  policy: SourcePolicy;
   /** Enabled source ids for THIS backend, position 0 = tried first. A subset:
    *  ids absent from it are not enabled here, not merely lower-priority. */
   order: string[];
   /** Every source the hub holds, eligible or not — the drawer's 不适用 section
    *  reads its `reason_key` from here. */
   eligibility?: SourceEligibility[] | null;
+};
+
+export type RouteHop = {
+  source_id: string;
+  model_id: string;
+};
+
+export type RouteHopRef = RouteHop & {
+  backend: AgentBackend;
+  menu_model: string;
+  /** One-based position in the Route before the guarded mutation. */
+  position: number;
+};
+
+export type AgentRoute = {
+  hops: RouteHop[];
 };
 
 /** Agent-level supply rollup (§4.5). `waiting` = every enabled source is
@@ -201,10 +206,13 @@ export type NamedAgentSupply = {
 export type ModelSupply = {
   model_id: string;
   chain_length: number;
+  has_runnable_hop: boolean;
 };
 
 export type AgentSupply = {
   backend: AgentBackend;
+  /** Server-authoritative CLI installation fact for this backend. */
+  cli_present: boolean;
   mode: AgentMode;
   menu_kind: MenuKind;
   /** The named Agent whose explicit selection `selected_model_id` came from.
@@ -216,8 +224,10 @@ export type AgentSupply = {
   /** TRUE iff `selected_model_id` originates from the Agent's explicit
    *  configuration. FALSE covers a resolver-picked value. */
   selected_model_explicit?: boolean;
-  /** Per-backend enabled subset + order + policy. null when mode=direct. */
+  /** Per-backend enabled subset + order. null when mode=direct. */
   sources?: AgentSources | null;
+  /** Exact configured Route for each menu model. Runtime reads this verbatim. */
+  routes?: Record<string, AgentRoute> | null;
   /** Rollup over `sources.order` for the current selection. null in direct mode
    *  and whenever `selected_model_id` is null. */
   supply_status?: SupplyStatus | null;
@@ -226,11 +236,10 @@ export type AgentSupply = {
   /** AC-9 attribution source. Always present; every entry's `supply_status` is
    *  null in direct mode. */
   named_agents?: NamedAgentSupply[];
-  mappings?: AgentMapping[];
   menu?: AgentMenu | null;
   /** v1.2 read-only projection: fixed-menu backends only — the backend's real
    *  built-in model ids (from vibe/backend_model_catalog.py). null for open-menu
-   *  backends. The mapping drawer renders these; the UI never hardcodes menus. */
+   *  backends. The route editor renders these; the UI never hardcodes menus. */
   builtin_models?: string[] | null;
   /** v1.2 read-only projection: opencode only — server mirror of
    *  STANDARD_OPENCODE_VENDOR_IDS, so the UI never hand-mirrors vendor prefixes.
@@ -240,9 +249,8 @@ export type AgentSupply = {
 
 // ── migration-scan.schema.json ──────────────────────────────────────────
 export type MigrationKind = 'api_key' | 'oauth_native' | 'opencode_provider';
-/** Option 1 (spec v1.1): Claude oauth_native → keep_native (sanctioned as-is);
- *  Codex auth.json → controlled_import behind the consent-gated flag, else
- *  keep_native; keys / base URLs → import. */
+/** Native OAuth remains native; controlled_import is reserved and not
+ *  applicable in v3. Keys and base URLs may be imported. */
 export type MigrationAction = 'import' | 'controlled_import' | 'keep_native' | 'reauth';
 
 export type MigrationItem = {
@@ -265,7 +273,6 @@ export type ResolutionEventKind =
   | 'cooldown'
   | 'recover'
   | 'skip'
-  | 'mapping_applied'
   | 'channel_switch'
   /** v3: a source stopped in a way that will never heal unattended. */
   | 'needs_action'
@@ -278,17 +285,17 @@ export type ResolutionReason =
   | 'network'
   | 'recovery'
   | 'manual'
-  | 'mapping'
-  // v3 — the five non-self-healing causes, a bijection with the needs_action /
-  // error detail keys above.
+  // Non-self-healing causes mirror the source-state detail vocabulary.
   | 'credential_expired'
   | 'credential_revoked'
   | 'balance_exhausted'
   | 'account_banned'
+  | 'permission_denied'
   | 'unclassified_error'
-  // v3 — supply exhaustion causes.
   | 'no_enabled_source'
   | 'no_eligible_source'
+  | 'route_unconfigured'
+  | 'source_missing'
   | 'model_unsupported';
 export type BillingNote = null | 'entered_metered' | 'left_metered';
 /** v3: `action_required` on needs_action / supply_interrupted, `info` on the six
@@ -315,23 +322,27 @@ export type ResolutionEvent = {
 };
 
 // ── agent-chain.schema.json ─────────────────────────────────────────────
-export type ChainHealth = 'healthy' | 'cooldown' | 'needs_action' | 'error';
+export const CHAIN_HEALTHS = ['healthy', 'cooldown', 'backoff', 'needs_action', 'error'] as const;
+export type ChainHealth = (typeof CHAIN_HEALTHS)[number];
 
-/** v4: the only process-unavailability state in v2. `chain[].reason` is its
- *  VOCABULARY HOME; `ProbeResult.error` carries the i18n spelling of the same
- *  fact (`models.probe.native_cli_unavailable`), a mapping registered as M8 in
- *  mirror-registry.json. */
-export type ChainUnavailableReason = 'native_cli_unavailable';
+/** Closed runtime-unavailability vocabulary shared by chain and probe results. */
+export const CHAIN_UNAVAILABLE_REASONS = [
+  'native_cli_unavailable',
+  'models.source.backoff.connection_failed',
+  'source_missing',
+  'model_unsupported',
+  ...NEEDS_ACTION_DETAIL_KEYS,
+  ...ERROR_DETAIL_KEYS,
+] as const;
+export type ChainUnavailableReason = (typeof CHAIN_UNAVAILABLE_REASONS)[number];
 
 export type AgentChainLink = {
   source_id: string;
+  model_id: string;
   /** v4: the source's serving channel, mirroring `Source.supply_channel`. `hub`
    *  is definitionally process-available; `native_cli` is additionally gated by
    *  whether this process can launch the sanctioned CLI under its own login. */
   channel: SupplyChannel;
-  via_mapping: boolean;
-  /** The id actually sent upstream. Non-null whenever `via_mapping` is true. */
-  resolved_model_id: string | null;
   health: ChainHealth;
   /** Health permits the turn AND this process can serve the channel. Always
    *  false for needs_action / error, and whenever `reason` is non-null; true for
@@ -354,6 +365,7 @@ export type AgentChain = {
   contract_version: typeof AGENT_CHAIN_CONTRACT_VERSION;
   backend: AgentBackend;
   model_id: string;
+  current: RouteHop | null;
   chain: AgentChainLink[];
   /** v4 pins this to the array it summarises: `ok` iff some member is runnable,
    *  the two blocked values iff none is. */
@@ -363,7 +375,10 @@ export type AgentChain = {
 // ── probe-result.schema.json ────────────────────────────────────────────
 /** v4 widened this beyond `state.detail_key`: the native_cli branch reports
  *  process unavailability, which no source-state key can express. */
-export type ProbeErrorKey = SourceDetailKey | 'models.probe.native_cli_unavailable';
+export type ProbeErrorKey =
+  | SourceDetailKey
+  | 'models.source.backoff.connection_failed'
+  | 'models.probe.native_cli_unavailable';
 
 /** POST /api/models/agents/<backend>/probe — hub mode only, same reason as the
  *  chain route: there is no `src_*` identity to report in direct mode. */
@@ -384,37 +399,25 @@ export type ProbeResult = {
    *  because nothing upstream is timed — a local number would impersonate
    *  completion evidence. */
   latency_ms: number | null;
-  via_mapping: boolean;
   /** Closed vocabulary, null on every reachable result. hub: the ten
    *  `state.detail_key` values. native_cli: only the unavailability key. */
   error: ProbeErrorKey | null;
 };
 
-/** api.md — returned by the source-creation routes: which backends adopted the
- *  new source into their order, and where. `position` is ONE-based. A `custom`
- *  backend is absent (the UI hints 「有新来源未启用」 instead). */
-export type AdoptedBy = {
+/** api.md — the exact Route hops materialized by Add Source. */
+export type AddedTo = {
   backend: AgentBackend;
-  policy: SourcePolicy;
+  menu_model: string;
+  source_id: string;
+  model_id: string;
+  /** One-based position in the persisted Route chain. */
   position: number;
 };
 
-/**
- * api.md — the eligible-but-skipped complement of `adopted_by`, returned beside it
- * by both creation routes.
- *
- * It exists because absence in `adopted_by` says two different things: a backend
- * that could never use this source, and one that could and was left out. Only the
- * second is worth telling the user about, and only the server can tell them apart —
- * `_skipped_by` filters on `_eligible_for_agent` before reporting a `custom` order
- * that omits the id.
- */
-export type SkippedBy = {
+/** api.md — stable Source-card projection of persisted Route references. */
+export type AdoptedBy = {
   backend: AgentBackend;
-  /** v2's only cause: the backend keeps a `custom` order, which the server never
-   *  extends on its own. An INELIGIBLE backend is not 「skipped」 — it was never a
-   *  candidate, and it appears in neither list. */
-  reason: 'custom_order';
+  menu_model: string;
 };
 
 // ── oauth-flow.schema.json ──────────────────────────────────────────────
@@ -462,10 +465,12 @@ export type OAuthFlow = {
 };
 
 // ── runtime-dependency.schema.json ──────────────────────────────────────
-export type RuntimeHealth = 'ok' | 'degraded' | 'down' | 'not_started' | 'not_installed';
+export type RuntimeHealth = 'ok' | 'degraded' | 'down' | 'not_started' | 'not_installed' | 'installing';
 
 export type RuntimeDependency = {
-  contract_version: 4;
+  contract_version: typeof CONTRACT_VERSION;
+  /** Server host platform, never the browser platform. */
+  host_platform?: string;
   manifest: {
     name: 'cliproxyapi';
     version: string;
@@ -483,6 +488,7 @@ export type RuntimeDependency = {
     listening?: { host: '127.0.0.1'; port: number } | null;
     health: RuntimeHealth;
     last_check?: string | null;
+    error_key?: 'settings.models.install.fail.detail' | null;
   };
 };
 
@@ -507,12 +513,48 @@ export type SupplyGap = {
   agents: string[];
 };
 
-/** POST /api/models/sources — api_key create validates + discovers models. */
-export type ApiKeySourceCreate = {
-  kind: 'api_key';
+// ── observation-result.schema.json ─────────────────────────────────────
+export type ObservationOutcome =
+  | 'observed'
+  | 'ambiguous'
+  | 'unreachable'
+  | 'authentication_failed'
+  | 'adapter_error'
+  | 'timeout';
+
+export type ObservationAuthentication = 'authenticated' | 'rejected' | 'unknown';
+export type ObservationDiscovery = 'succeeded' | 'failed' | 'not_attempted';
+
+export type SourceObservation = {
+  contract_version: typeof CONTRACT_VERSION;
+  outcome: ObservationOutcome;
+  reachable: boolean | null;
+  authenticated: ObservationAuthentication;
+  protocol: SourceProtocol | null;
+  discovery: ObservationDiscovery;
+  models: string[];
+};
+
+/** POST /api/models/sources/observe — never persists a Source. */
+export type ApiKeySourceObservation = {
   vendor: string;
   base_url?: string | null;
   key: string;
+  /** Probe order only. Every member occurs exactly once. */
+  protocol_order?: SourceProtocol[];
+};
+
+/** POST /api/models/sources — api_key create observes again before persisting. */
+export type ApiKeySourceCreate = {
+  kind: 'api_key';
+  vendor: string;
+  display_name?: string;
+  base_url?: string | null;
+  key: string;
+  /** Stable across a create retry; persisted only when the Source commits. */
+  client_nonce?: string;
+  /** Probe order only; the client never sends a protocol conclusion. */
+  protocol_order?: SourceProtocol[];
 };
 
 /**
@@ -531,7 +573,6 @@ export type OAuthSourceCreate = {
   oauth_flow_ref: string;
   supply_channel: SupplyChannel;
   display_name?: string;
-  experimental_consent?: boolean;
 };
 
 /** PATCH /api/models/sources/<id> — display_name and/or base_url only
@@ -541,11 +582,10 @@ export type SourcePatch = {
   base_url?: string | null;
 };
 
-/** PUT /api/models/agents/<backend>/sources — a TOTAL body: `follow` hands the
- *  order back to the server, `custom` freezes exactly the ids sent. The route
- *  rejects unknown keys, so `contract_version` is deliberately NOT part of it. */
-export type AgentSourcesPut = { policy: 'follow' } | { policy: 'custom'; order: string[] };
+/** PUT /api/models/agents/<backend>/sources — replaces the complete order. */
+export type AgentSourcesPut = { order: string[] };
 
+/** PUT /api/models/agents/<backend>/chain?model=<id> — replaces exact hops. */
 /**
  * PUT /api/models/sources/<id>/credential — hub-channel api_key sources only.
  * Also a TOTAL body that rejects unknown keys (`contract_version` included), so
@@ -576,12 +616,12 @@ export type SourceRepaired = {
   interrupted_pairs: SupplyGap[];
 };
 
-/** POST /api/models/custom-models — appends a manual-provenance model entry to
- *  a source's supply list (frame 08). */
+/** POST /api/models/sources/<source_id>/models — appends a user-authored model
+ *  entry to a Source inventory (frame 08). */
 export type CustomModelCreate = {
-  source_id: string;
   model_id: string;
   display_name?: string | null;
+  reasoning_efforts: string[];
 };
 
 /** POST /api/models/migration/apply response. */

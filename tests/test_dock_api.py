@@ -2,8 +2,8 @@
 
 Mutations are exercised at the ``vibe.api`` layer (like the sibling Show Pages
 admin tests); the route layer is covered for the GET round-trip and, crucially,
-for auth parity — a remote request without a session is bounced to login, so a
-``/api/dock`` route can never be an unauthenticated native endpoint.
+for auth parity — a remote request without a session gets the login-required API
+contract, so a ``/api/dock`` route can never be an unauthenticated native endpoint.
 """
 
 import pytest
@@ -11,7 +11,7 @@ import pytest
 from core.dock_store import BUILTIN_DOCK_IDS, DockError
 from core.show_pages import ShowPageError, ShowPageStore, ensure_show_page_dir
 from tests.test_ui_remote_access_auth import _remote_peer, _save_config
-from vibe import api
+from vibe import api, ui_server
 from vibe.ui_server import app
 
 
@@ -440,8 +440,8 @@ def test_dock_route_round_trip_via_client(monkeypatch, tmp_path):
 
 def test_dock_route_blocked_for_remote_without_session(monkeypatch, tmp_path):
     """Auth parity: the Dock routes inherit ``enforce_remote_access_cookie`` — a
-    remote request without a session is bounced to the OAuth login, never served
-    as an unauthenticated native endpoint."""
+    remote request without a session gets the login-required API contract, never
+    an OAuth side effect or an unauthenticated native response."""
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
 
@@ -451,8 +451,10 @@ def test_dock_route_blocked_for_remote_without_session(monkeypatch, tmp_path):
         environ_base=_remote_peer(),
         follow_redirects=False,
     )
-    assert get_resp.status_code == 302
-    assert get_resp.headers["Location"].startswith("https://backend.test/oauth/authorize?")
+    assert get_resp.status_code == 401
+    assert get_resp.get_json()["error"] == "remote_access_login_required"
+    assert get_resp.headers.get("Location") is None
+    assert ui_server.REMOTE_OAUTH_COOKIE_NAME not in get_resp.headers.get("Set-Cookie", "")
 
     # The mutating routes are gated by the same before-request hook.
     post_resp = app.test_client().post(

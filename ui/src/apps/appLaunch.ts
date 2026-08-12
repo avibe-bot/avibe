@@ -4,7 +4,7 @@
 // results — shares ONE rule and one testable mapping instead of re-deriving it.
 
 import { dockIdToSession } from '../context/dockDoc';
-import { IS_APPLE } from '../lib/platform';
+import { IS_APPLE, isIosDevice, isStandalonePwa } from '../lib/platform';
 import { showPagePrivatePath } from './showPageAvatar';
 
 /**
@@ -78,6 +78,14 @@ export interface AppTabTarget {
   sessionId?: string | null;
 }
 
+export interface AppTabContext {
+  iosStandalone: boolean;
+}
+
+function currentAppTabContext(): AppTabContext {
+  return { iosStandalone: isIosDevice() && isStandalonePwa() };
+}
+
 /**
  * Built-ins whose `/apps/<id>` route really renders the app STANDALONE on desktop
  * (App.tsx: `AppsFileBrowserPage` / `AppsTerminalPage` / `AppsEditorPage`).
@@ -105,8 +113,14 @@ const STANDALONE_BUILTIN_ROUTES = new Set(['files', 'terminal', 'editor']);
 export const APP_TAB_PARAM = 'standalone';
 
 /**
- * The URL that shows an app on its OWN browser tab, or null when it has no
- * standalone surface (so the caller can fall back to a window).
+ * The URL that shows an app on its OWN browser tab, or null when it has no safe
+ * standalone surface (so the caller can fall back to an in-app route/window).
+ *
+ * Installed iOS PWAs deliberately return null for every internal app. WebKit
+ * opens `_blank` from a Home-Screen app in a secondary browser context and can
+ * restore that context after process eviction, including its transient blank
+ * document. Internal Avibe apps already have first-class in-shell routes and
+ * windows, so there is no reason to expose that restoration failure mode.
  *
  *  - a Show Page → its private `/show/<sid>/` page, the SAME target as the tile's
  *    "Open in New Tab" menu item and the window titlebar's external-open button
@@ -115,9 +129,14 @@ export const APP_TAB_PARAM = 'standalone';
  *    desktop (see `STANDALONE_BUILTIN_ROUTES`) — flagged with `APP_TAB_PARAM` so the
  *    shell suppresses the restored window layer over it.
  *
- * Pure.
+ * Supplying `context` makes the policy deterministic in tests; production
+ * callers default to the current display context.
  */
-export function appTabHref(target: AppTabTarget): string | null {
+export function appTabHref(
+  target: AppTabTarget,
+  context: AppTabContext = currentAppTabContext(),
+): string | null {
+  if (context.iosStandalone) return null;
   if (target.appId === 'showpage') {
     const sessionId = (target.sessionId ?? '').trim();
     return sessionId ? showPagePrivatePath(sessionId) : null;
@@ -143,8 +162,35 @@ export function isStandaloneAppTab(search: string): boolean {
   }
 }
 
-/** `appTabHref` for a persisted Dock id (`files` / `show:<session_id>`). Pure. */
-export function appTabHrefForDockId(dockId: string): string | null {
+/**
+ * Whether a pathname is one of the built-in app routes a standalone tab can land on
+ * (`STANDALONE_BUILTIN_ROUTES`). Combined with `isStandaloneAppTab`, this is what tells
+ * the shell to drop ALL chrome — sidebar, mobile header/tab bar, page padding — so the
+ * app owns the whole viewport. Kept here, next to the allowlist it reads, so a new
+ * standalone app opts into both behaviors in one place.
+ *
+ * Only the exact route matches: a standalone tab that navigates elsewhere (e.g. Files →
+ * `/chat/<id>`) is an ordinary page again and gets the chrome back.
+ *
+ * The pathname is normalized to what React Router actually MOUNTED first — trailing
+ * slashes stripped (as `isApplicationRouteHref` does) and case folded, since the router
+ * matches case-insensitively by default. `/Apps/Files/?standalone=1` mounts the Files
+ * page, so it must get the standalone layout too; disagreeing would leave the document
+ * half-standalone (windows suppressed, chrome restored).
+ */
+export function isStandaloneAppRoutePath(pathname: string): boolean {
+  const normalized = pathname.replace(/\/+$/, '').toLowerCase() || '/';
+  const id = normalized.startsWith('/apps/') ? normalized.slice('/apps/'.length) : '';
+  return STANDALONE_BUILTIN_ROUTES.has(id);
+}
+
+/** `appTabHref` for a persisted Dock id (`files` / `show:<session_id>`). */
+export function appTabHrefForDockId(
+  dockId: string,
+  context?: AppTabContext,
+): string | null {
   const sessionId = dockIdToSession(dockId);
-  return sessionId !== null ? appTabHref({ appId: 'showpage', sessionId }) : appTabHref({ appId: dockId });
+  return sessionId !== null
+    ? appTabHref({ appId: 'showpage', sessionId }, context)
+    : appTabHref({ appId: dockId }, context);
 }

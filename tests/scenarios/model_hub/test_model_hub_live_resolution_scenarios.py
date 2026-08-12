@@ -17,8 +17,11 @@ from config.v2_config import (
     ModelHubAgentSupplyConfig,
     ModelHubConfig,
     ModelHubModelConfig,
+    ModelHubRouteConfig,
+    ModelHubRouteHopConfig,
     ModelHubSourceConfig,
     ModelHubSourceStateConfig,
+    model_hub_fixed_menu_ids,
 )
 from core.handlers.model_hub.adapter import (
     EngineHealth,
@@ -42,6 +45,18 @@ class MemoryStore:
 
     def save(self, config: ModelHubConfig) -> None:
         self.config = config
+
+
+def _requested_model(backend: str) -> str:
+    if backend == "opencode":
+        return "anthropic/model-live"
+    return model_hub_fixed_menu_ids(backend)[0]
+
+
+def _source_model_id(backend: str) -> str:
+    if backend == "opencode":
+        return "model-live"
+    return _requested_model(backend)
 
 
 @dataclass(frozen=True)
@@ -73,10 +88,16 @@ class InvokeHandle:
 
 
 class AdapterBoundaryFake:
-    def __init__(self, results: list[AdapterResult]) -> None:
+    def __init__(
+        self,
+        results: list[AdapterResult],
+        *,
+        refreshable_credential_refs: tuple[str, ...] = (),
+    ) -> None:
         self.results = deque(results)
         self.invocations: list[tuple[str, str, str]] = []
         self.requests: list[object] = []
+        self.refreshable_credential_refs = frozenset(refreshable_credential_refs)
 
     async def start(self) -> EngineStatus:
         return EngineStatus(EngineHealth.OK, "test", True, "127.0.0.1", 18443, None)
@@ -89,6 +110,9 @@ class AdapterBoundaryFake:
 
     async def revoke_credential(self, credential_ref: str) -> None:
         return None
+
+    async def credential_supports_refresh(self, credential_ref: str) -> bool:
+        return credential_ref in self.refreshable_credential_refs
 
     async def invoke(self, source_id, model_id, request, stream, origin) -> InvokeHandle:
         self.invocations.append((source_id, model_id, origin))
@@ -121,7 +145,14 @@ def _source(
         supply_channel=channel,
         billing="monthly" if kind == "subscription" else "metered",
         state=ModelHubSourceStateConfig(status="standby"),
-        models=[ModelHubModelConfig(id="model-live", provenance="discovered")],
+        models=[
+            ModelHubModelConfig(id=model_id, provenance="discovered")
+            for model_id in (
+                _source_model_id("claude"),
+                _source_model_id("codex"),
+                _source_model_id("opencode"),
+            )
+        ],
         credential_ref=f"cred_{source_id}" if channel == "hub" else None,
     )
 
@@ -134,10 +165,20 @@ def _config(*sources: ModelHubSourceConfig) -> ModelHubConfig:
             for backend in ("claude", "codex", "opencode")
         },
     )
-    for agent in config.agents.values():
+    for backend, agent in config.agents.items():
+        eligible_sources = tuple(
+            source
+            for source in sources
+            if ModelHubConfig.source_eligible_for_backend(source, backend)
+        )
         agent.sources = ModelHubAgentSourcesConfig(
-            policy="custom",
-            order=[source.id for source in sources],
+            order=[source.id for source in eligible_sources],
+        )
+        agent.routes[_requested_model(backend)] = ModelHubRouteConfig(
+            hops=tuple(
+                ModelHubRouteHopConfig(source.id, _source_model_id(backend))
+                for source in eligible_sources
+            )
         )
     return config
 
@@ -174,48 +215,6 @@ async def _post_turn(
             return response.status, await response.read()
 
 
-def test_mh_pri_001_order_mutations_change_the_next_turn(tmp_path: Path) -> None:
-    """MH-PRI-001: custom edits and follow restoration affect the next turn."""
-
-    async def exercise() -> None:
-        alpha = _source("src_alpha001")
-        zulu = _source("src_zulu0001")
-        store = MemoryStore(_config(alpha, zulu))
-        adapter = AdapterBoundaryFake([])
-        service = _service(
-            tmp_path,
-            store,
-            adapter,
-            now=lambda: datetime(2026, 7, 25, tzinfo=timezone.utc),
-        )
-        gateway = ModelHubTurnGateway(service)
-        router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
-        try:
-            initial = await router.resolve("claude", "model-live")
-            assert initial.source_id == alpha.id
-
-            custom = await service.set_agent_sources(
-                "claude",
-                {"policy": "custom", "order": [zulu.id, alpha.id]},
-            )
-            assert custom["sources"]["policy"] == "custom"
-            reordered = await router.resolve("claude", "model-live")
-            assert reordered.source_id == zulu.id
-
-            restored = await service.set_agent_sources(
-                "claude",
-                {"policy": "follow"},
-            )
-            assert restored["sources"]["policy"] == "follow"
-            assert restored["sources"]["order"] == [alpha.id, zulu.id]
-            recommended = await router.resolve("claude", "model-live")
-            assert recommended.source_id == alpha.id
-        finally:
-            await gateway.close()
-
-    asyncio.run(exercise())
-
-
 def test_unpinned_hub_projection_is_null_while_explicit_turn_resolves(
     tmp_path: Path,
 ) -> None:
@@ -242,9 +241,9 @@ def test_unpinned_hub_projection_is_null_while_explicit_turn_resolves(
         gateway = ModelHubTurnGateway(service)
         router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
         try:
-            launch = await router.resolve("claude", "model-live")
+            launch = await router.resolve("claude", _requested_model("claude"))
             assert launch.source_id == source.id
-            assert launch.target_model == "model-live"
+            assert launch.target_model == _source_model_id("claude")
         finally:
             await gateway.close()
 
@@ -254,9 +253,9 @@ def test_unpinned_hub_projection_is_null_while_explicit_turn_resolves(
 @pytest.mark.parametrize(
     ("backend", "requested_model", "endpoint"),
     [
-        ("claude", "model-live", "messages"),
-        ("codex", "model-live", "responses"),
-        ("opencode", "anthropic/model-live", "messages"),
+        ("claude", _requested_model("claude"), "messages"),
+        ("codex", _requested_model("codex"), "responses"),
+        ("opencode", _requested_model("opencode"), "messages"),
     ],
 )
 @pytest.mark.parametrize(
@@ -287,7 +286,7 @@ def test_mh_res_live_001_pre_stream_failure_falls_back_within_turn(
                 AdapterResult(RawOutcomeKind.SUCCESS, status=200, body=b'{"recovered":true}'),
             ]
         )
-        store = MemoryStore(_config(_source("src_primary"), _source("src_backup")))
+        store = MemoryStore(_config(_source("src_primary1"), _source("src_backup01")))
         assert store.config.agents["opencode"].menu is not None
         store.config.agents["opencode"].menu.checked = ["anthropic/model-live"]
         service = _service(tmp_path, store, adapter, now=lambda: clock[0])
@@ -303,7 +302,7 @@ def test_mh_res_live_001_pre_stream_failure_falls_back_within_turn(
             status, body = await _post_turn(launch, endpoint=endpoint)
             assert status == 200
             assert body == b'{"ok":true}'
-            assert [call[0] for call in adapter.invocations] == ["src_primary", "src_backup"]
+            assert [call[0] for call in adapter.invocations] == ["src_primary1", "src_backup01"]
             assert store.load().sources[0].state.status == "cooldown"
             assert [event["kind"] for event in service.list_events(limit=5)[:2]] == ["switch", "cooldown"]
             assert service.list_events(limit=5)[1]["reason"] == reason
@@ -324,7 +323,7 @@ def test_mh_res_live_001_pre_stream_failure_falls_back_within_turn(
             )
             assert recovered_status == 200
             assert recovered_body == b'{"recovered":true}'
-            assert adapter.invocations[-1][0] == "src_primary"
+            assert adapter.invocations[-1][0] == "src_primary1"
         finally:
             await gateway.close()
 
@@ -339,9 +338,15 @@ def test_mh_res_live_002_401_refreshes_once_in_live_turn(tmp_path: Path) -> None
             [
                 AdapterResult(RawOutcomeKind.HTTP_ERROR, status=401),
                 AdapterResult(RawOutcomeKind.SUCCESS, status=200, body=b'{"ok":true}'),
-            ]
+            ],
+            refreshable_credential_refs=("cred_src_primary1",),
         )
-        store = MemoryStore(_config(_source("src_primary"), _source("src_backup")))
+        store = MemoryStore(
+            _config(
+                _source("src_primary1", kind="subscription"),
+                _source("src_backup01", kind="subscription"),
+            )
+        )
         service = _service(
             tmp_path,
             store,
@@ -351,10 +356,12 @@ def test_mh_res_live_002_401_refreshes_once_in_live_turn(tmp_path: Path) -> None
         gateway = ModelHubTurnGateway(service)
         router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
         try:
-            status, body = await _post_turn(await router.resolve("claude", "model-live"))
+            status, body = await _post_turn(
+                await router.resolve("claude", _requested_model("claude"))
+            )
             assert status == 200
             assert body == b'{"ok":true}'
-            assert [call[0] for call in adapter.invocations] == ["src_primary", "src_primary"]
+            assert [call[0] for call in adapter.invocations] == ["src_primary1", "src_primary1"]
             assert store.load().sources[0].state.status == "standby"
         finally:
             await gateway.close()
@@ -373,9 +380,15 @@ def test_mh_res_live_002_second_401_blocks_source_and_falls_back(
                 AdapterResult(RawOutcomeKind.HTTP_ERROR, status=401),
                 AdapterResult(RawOutcomeKind.HTTP_ERROR, status=401),
                 AdapterResult(RawOutcomeKind.SUCCESS, status=200, body=b'{"backup":true}'),
-            ]
+            ],
+            refreshable_credential_refs=("cred_src_primary1", "cred_src_backup01"),
         )
-        store = MemoryStore(_config(_source("src_primary"), _source("src_backup")))
+        store = MemoryStore(
+            _config(
+                _source("src_primary1", kind="subscription"),
+                _source("src_backup01", kind="subscription"),
+            )
+        )
         service = _service(
             tmp_path,
             store,
@@ -385,12 +398,14 @@ def test_mh_res_live_002_second_401_blocks_source_and_falls_back(
         gateway = ModelHubTurnGateway(service)
         router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
         try:
-            status, _body = await _post_turn(await router.resolve("claude", "model-live"))
+            status, _body = await _post_turn(
+                await router.resolve("claude", _requested_model("claude"))
+            )
             assert status == 200
             assert [call[0] for call in adapter.invocations] == [
-                "src_primary",
-                "src_primary",
-                "src_backup",
+                "src_primary1",
+                "src_primary1",
+                "src_backup01",
             ]
             primary = store.load().sources[0]
             assert primary.state.status == "needs_action"
@@ -423,7 +438,7 @@ def test_mh_res_live_003_started_stream_never_retries(tmp_path: Path) -> None:
                 AdapterResult(RawOutcomeKind.SUCCESS, status=200, body=b"data: backup\n\n"),
             ]
         )
-        store = MemoryStore(_config(_source("src_primary"), _source("src_backup")))
+        store = MemoryStore(_config(_source("src_primary1"), _source("src_backup01")))
         service = _service(
             tmp_path,
             store,
@@ -433,10 +448,13 @@ def test_mh_res_live_003_started_stream_never_retries(tmp_path: Path) -> None:
         gateway = ModelHubTurnGateway(service)
         router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
         try:
-            status, body = await _post_turn(await router.resolve("claude", "model-live"), stream=True)
+            status, body = await _post_turn(
+                await router.resolve("claude", _requested_model("claude")),
+                stream=True,
+            )
             assert status == 200
             assert body == b"data: partial\n\n"
-            assert [call[0] for call in adapter.invocations] == ["src_primary"]
+            assert [call[0] for call in adapter.invocations] == ["src_primary1"]
             assert store.load().sources[0].state.status == "standby"
         finally:
             await gateway.close()
@@ -459,7 +477,7 @@ def test_turn_gateway_nonstream_buffer_surfaces_terminal_failure(
                 ),
             ]
         )
-        store = MemoryStore(_config(_source("src_primary")))
+        store = MemoryStore(_config(_source("src_primary1")))
         service = _service(
             tmp_path,
             store,
@@ -470,7 +488,7 @@ def test_turn_gateway_nonstream_buffer_surfaces_terminal_failure(
         router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
         try:
             status, body = await _post_turn(
-                await router.resolve("claude", "model-live"),
+                await router.resolve("claude", _requested_model("claude")),
             )
             assert status == 429
             assert json.loads(body)["error"]["code"] == "stream_interrupted"
@@ -483,7 +501,7 @@ def test_turn_gateway_nonstream_buffer_surfaces_terminal_failure(
 def test_turn_gateway_tokens_are_bound_to_backend_origin(tmp_path: Path) -> None:
     async def exercise() -> None:
         adapter = AdapterBoundaryFake([AdapterResult(RawOutcomeKind.SUCCESS, status=200, body=b'{"ok":true}')])
-        store = MemoryStore(_config(_source("src_primary")))
+        store = MemoryStore(_config(_source("src_primary1")))
         service = _service(
             tmp_path,
             store,
@@ -498,7 +516,7 @@ def test_turn_gateway_tokens_are_bound_to_backend_origin(tmp_path: Path) -> None
                 async with client.post(
                     f"{claude_url}/v1/messages",
                     headers={"Authorization": f"Bearer {codex_token}"},
-                    json={"model": "model-live", "messages": []},
+                    json={"model": _requested_model("claude"), "messages": []},
                 ) as response:
                     assert response.status == 401
             assert adapter.invocations == []
@@ -511,7 +529,7 @@ def test_turn_gateway_tokens_are_bound_to_backend_origin(tmp_path: Path) -> None
 def test_turn_gateway_preserves_only_protocol_capability_headers(tmp_path: Path) -> None:
     async def exercise() -> None:
         adapter = AdapterBoundaryFake([AdapterResult(RawOutcomeKind.SUCCESS, status=200, body=b'{"ok":true}')])
-        store = MemoryStore(_config(_source("src_primary")))
+        store = MemoryStore(_config(_source("src_primary1")))
         service = _service(
             tmp_path,
             store,
@@ -529,7 +547,7 @@ def test_turn_gateway_preserves_only_protocol_capability_headers(tmp_path: Path)
                         "Authorization": "Bearer upstream-must-not-cross",
                         "anthropic-beta": "interleaved-thinking",
                     },
-                    json={"model": "model-live", "messages": []},
+                    json={"model": _requested_model("claude"), "messages": []},
                 ) as response:
                     assert response.status == 200
             request = adapter.requests[0]
@@ -547,8 +565,8 @@ def test_mh_evt_002_switch_events_survive_router_and_service_restart(tmp_path: P
 
     async def exercise() -> None:
         clock = datetime(2026, 7, 25, tzinfo=timezone.utc)
-        native = _source("src_native", channel="native_cli", kind="subscription")
-        backup = _source("src_backup")
+        native = _source("src_native01", channel="native_cli", kind="subscription")
+        backup = _source("src_backup01")
         store = MemoryStore(_config(native, backup))
         first_adapter = AdapterBoundaryFake([])
         first_service = _service(tmp_path, store, first_adapter, now=lambda: clock)
@@ -558,7 +576,7 @@ def test_mh_evt_002_switch_events_survive_router_and_service_restart(tmp_path: P
             turn_gateway=first_gateway,
             native_cli_ready=lambda backend: True,
         )
-        launch = await first_router.resolve("codex", "model-live")
+        launch = await first_router.resolve("codex", _requested_model("codex"))
         assert launch.channel == "native_cli"
         context = SimpleNamespace()
         bind_launch(context, launch)
@@ -574,15 +592,18 @@ def test_mh_evt_002_switch_events_survive_router_and_service_restart(tmp_path: P
             native_cli_ready=lambda backend: True,
         )
         try:
-            fallback = await second_router.resolve("codex", "model-live")
+            fallback = await second_router.resolve(
+                "codex",
+                _requested_model("codex"),
+            )
             assert fallback.channel == "hub"
             persisted = BoundedEventLog(tmp_path / "events.json").list(limit=10)
             assert [event["kind"] for event in persisted[:2]] == [
                 "switch",
                 "cooldown",
             ]
-            assert persisted[0]["from_source"] == "src_native"
-            assert persisted[0]["to_source"] == "src_backup"
+            assert persisted[0]["from_source"] == "src_native01"
+            assert persisted[0]["to_source"] == "src_backup01"
         finally:
             await second_gateway.close()
 

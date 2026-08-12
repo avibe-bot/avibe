@@ -51,16 +51,22 @@ from vibe.message_types import spec_for, types_with
 MESSAGE_SCAN_LIMIT = 500
 EVENT_SCAN_LIMIT = 2000
 
-# Message types that participate in turn structure: turn openers (user/harness),
-# terminals (result/error/notify/silent-marker), and the interim assistant activity
-# rows. The invisible ``silent`` marker is fetched here (it is NOT in TRANSCRIPT_TYPES)
-# so a turn that completed with no user-visible reply still has a terminal to close on.
+# Message types that participate in turn structure: visible or hidden turn openers,
+# terminals (result/error/notify/silent-marker), and interim assistant activity rows.
+# Hidden lifecycle rows are fetched even though they are not in TRANSCRIPT_TYPES so
+# the activity projection preserves the complete Turn boundary.
 _CONDITIONAL_TERMINAL_TYPES = types_with("terminalWhenEvents")
 _TRANSCRIPT_ACTIVITY_TYPES = tuple(
     message_type
     for message_type in types_with("transcript")
     if spec_for(message_type)["activityRole"] != "none"
     or spec_for(message_type)["terminalWhenEvents"]
+)
+_NON_TRANSCRIPT_START_TYPES = tuple(
+    message_type
+    for message_type in types_with("activityRole")
+    if spec_for(message_type)["activityRole"] == "turn_start"
+    and message_type not in _TRANSCRIPT_ACTIVITY_TYPES
 )
 _NON_TRANSCRIPT_TERMINAL_TYPES = tuple(
     message_type
@@ -75,6 +81,7 @@ _ACTIVITY_TYPES = tuple(
 )
 _RELEVANT_MESSAGE_TYPES = (
     *_TRANSCRIPT_ACTIVITY_TYPES,
+    *_NON_TRANSCRIPT_START_TYPES,
     *_NON_TRANSCRIPT_TERMINAL_TYPES,
     *_ACTIVITY_TYPES,
 )
@@ -166,7 +173,13 @@ def _terminal_status(msg_type: Any, metadata: Optional[dict] = None) -> str:
 
 # Fallback tiebreak only (used when a row's microsecond id prefix can't be decoded,
 # e.g. format drift): within a single turn the order is open → work → close.
-_PHASE_RANK = {"turn_start": 0, "activity": 1, "terminal": 2, "ignore": 3}
+_PHASE_RANK = {
+    "turn_start": 0,
+    "activity": 1,
+    "boundary": 2,
+    "terminal": 3,
+    "ignore": 4,
+}
 
 
 def _emit_micros(row_id: Optional[str], ts: datetime) -> int:
@@ -264,6 +277,8 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
             )
         elif activity_role == "activity":
             kind = "activity"
+        elif activity_role == "boundary":
+            kind = "boundary"
         else:
             kind = "ignore"
         created_at = msg.get("created_at")
@@ -288,6 +303,9 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
                 "kind": kind,
                 "id": msg.get("id"),
                 "mtype": mtype,
+                "is_transcript": bool(
+                    spec_for(mtype if isinstance(mtype, str) else "")["transcript"]
+                ),
                 "row_kind": "assistant",
                 "text": msg.get("text") if include_text else None,
                 # The silent marker is a terminal that is INVISIBLE in the transcript,
@@ -460,7 +478,29 @@ def _build_groups(items: list[dict[str, Any]], *, include_rows: bool) -> list[di
                 )
                 pending = []
             turn_start_iso = item["created_at"]
-            last_boundary_id = item["id"]
+            if item["is_transcript"]:
+                last_boundary_id = item["id"]
+        elif kind == "boundary":
+            if pending:
+                groups.append(
+                    _make_group(
+                        pending,
+                        status="done",
+                        anchor_id=item["id"],
+                        anchor_position="before",
+                        open_turn=False,
+                        started_iso=turn_start_iso,
+                        ended_iso=item["created_at"],
+                        include_rows=include_rows,
+                    )
+                )
+                pending = []
+            # This output completes the preceding visible work without ending the
+            # logical Turn. Later activity belongs after this boundary and times
+            # from it until the eventual terminal or interruption.
+            turn_start_iso = item["created_at"]
+            if item["is_transcript"]:
+                last_boundary_id = item["id"]
         elif kind == "terminal":
             if pending:
                 # A silent marker is invisible in the transcript, so its DONE group

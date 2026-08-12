@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from storage import message_deliveries, messages_service
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
-from storage.models import agent_runs, agent_sessions, messages, scopes
+from storage.models import agent_runs, agent_sessions, messages, scopes, vault_requests
 from storage.pagination import PageRequest
 from storage.settings_service import upsert_scope
 from vibe.message_identity import HARNESS_TYPE
@@ -241,13 +241,23 @@ def _seed_titled_agent_session(conn, scope_id, session_id, *, title, agent_name)
     )
 
 
-def _insert_agent_run(conn, run_id, *, session_id, source_kind, source_actor=None, parent_run_id=None):
+def _insert_agent_run(
+    conn,
+    run_id,
+    *,
+    session_id,
+    source_kind,
+    source_actor=None,
+    parent_run_id=None,
+    delivery_id=None,
+):
     now = messages_service._utc_now_iso()
     conn.execute(
         agent_runs.insert().values(
             id=run_id, run_type="agent_run", status="succeeded", cancel_requested=0,
             source_kind=source_kind, source_actor=source_actor, parent_run_id=parent_run_id,
-            session_id=session_id, created_at=now, updated_at=now, metadata_json="{}",
+            session_id=session_id, delivery_id=delivery_id,
+            created_at=now, updated_at=now, metadata_json="{}",
         )
     )
 
@@ -328,6 +338,49 @@ def test_agent_run_provenance_skips_missing_source_session(isolated_state):
         result = messages_service.list_session_messages(conn, session_id="ses_target")
     by_id = {m["id"]: m for m in result["messages"]}
     assert "source_session_id" not in by_id["msg_ghost"]
+
+
+def test_vault_callback_message_provenance_enrichment(isolated_state):
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        _seed_session(conn, scope_id, "ses_target")
+        _insert_agent_run(
+            conn,
+            "execVault",
+            session_id="ses_target",
+            source_kind="callback",
+            source_actor="vault:vrq_access",
+        )
+        conn.execute(
+            vault_requests.insert().values(
+                id="vrq_access",
+                request_type="access",
+                secret_name="PROD_KEY",
+                requester='{"session_id":"ses_target"}',
+                status="denied",
+                created_at="2026-05-30T10:00:00Z",
+                decided_at="2026-05-30T10:00:01Z",
+            )
+        )
+        _insert_harness_msg(
+            conn,
+            scope_id,
+            "ses_target",
+            author_name="agent_run",
+            native_message_id="agent_run:execVault",
+            msg_id="msg_vault",
+            created_at="2026-05-30T10:00:02Z",
+        )
+
+    with engine.connect() as conn:
+        result = messages_service.list_session_messages(conn, session_id="ses_target")
+
+    message = next(row for row in result["messages"] if row["id"] == "msg_vault")
+    assert message["metadata"]["source_kind"] == "callback"
+    assert message["metadata"]["source_actor"] == "vault:vrq_access"
+    assert message["metadata"]["vault_request_type"] == "access"
+    assert message["metadata"]["vault_request_status"] == "denied"
 
 
 @pytest.mark.parametrize(
@@ -1915,6 +1968,9 @@ def test_draft_upsert_get_and_clear(isolated_state):
         assert message_deliveries.set_draft(conn, "ses_d", "   ") is True
     with engine.connect() as conn:
         assert message_deliveries.get_draft(conn, "ses_d") is None
+        cleared = message_deliveries.get_draft_state(conn, "ses_d")
+    assert cleared["text"] == ""
+    assert cleared["updated_at"] is not None
 
     # clear_draft is idempotent.
     with engine.begin() as conn:
@@ -1923,6 +1979,7 @@ def test_draft_upsert_get_and_clear(isolated_state):
         message_deliveries.set_draft(conn, "ses_d", None)
     with engine.connect() as conn:
         assert message_deliveries.get_draft(conn, "ses_d") is None
+        assert message_deliveries.get_draft_state(conn, "ses_d")["updated_at"] is not None
 
 
 def test_inbox_ignores_draft_and_queued_delivery_activity(isolated_state):
@@ -2117,6 +2174,151 @@ def test_list_session_messages_tail_returns_recent_window(isolated_state):
     assert [m["text"] for m in oldest["messages"]] == ["m0", "m1", "m2"]
     assert [m["text"] for m in recent["messages"]] == ["m2", "m3", "m4"]
     assert recent["next_after_id"] is None
+
+
+def test_list_session_messages_resolves_turn_and_run_anchors(isolated_state):
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        session_id = "ses_anchor_identity"
+        _seed_session(conn, scope_id, session_id)
+        delivery = message_deliveries.insert_delivery(
+            conn,
+            delivery_id="msg_anchor_identity",
+            session_id=session_id,
+            priority="p1",
+            state="reserved",
+            snapshot=message_deliveries.message_snapshot(
+                scope_id=scope_id,
+                session_id=session_id,
+                platform="avibe",
+                author="user",
+                source="user",
+                message_type="user",
+                text="anchor prompt",
+            ),
+            dispatch_text="anchor prompt",
+            now="2026-08-08T00:00:00Z",
+        )
+        claimed = message_deliveries.claim_start_batch(
+            conn,
+            turn_id="trn_anchor_identity",
+            session_id=session_id,
+            backend="claude",
+            deliveries=[delivery],
+            dispatch_text="anchor prompt",
+            attempt_id="atm_anchor_identity",
+        )
+        assert message_deliveries.bind_native_start(
+            conn,
+            "trn_anchor_identity",
+            expected_version=int(claimed["turn"]["version"]),
+            runtime_key="anchor-runtime",
+            runtime_turn_id="anchor-runtime-turn",
+            native_turn_id="anchor-native-turn",
+        ) is not None
+        assert message_deliveries.materialize_start_acceptance(
+            conn,
+            turn_id="trn_anchor_identity",
+            evidence={"kind": "anchor_identity_test"},
+        )
+        _insert_agent_run(
+            conn,
+            "run_anchor_identity",
+            session_id=session_id,
+            source_kind="agent",
+            delivery_id=delivery["id"],
+        )
+    with engine.connect() as conn:
+        by_turn = messages_service.list_session_messages(
+            conn,
+            session_id=session_id,
+            around_turn_id="trn_anchor_identity",
+        )
+        by_run = messages_service.list_session_messages(
+            conn,
+            session_id=session_id,
+            around_run_id="run_anchor_identity",
+        )
+    assert by_turn["anchor_id"] == delivery["id"]
+    assert by_run["anchor_id"] == delivery["id"]
+    assert [row["id"] for row in by_turn["messages"]] == [delivery["id"]]
+    assert [row["id"] for row in by_run["messages"]] == [delivery["id"]]
+
+
+def test_list_session_messages_resolves_legacy_run_anchor(isolated_state):
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        session_id = "ses_legacy_run_anchor"
+        _seed_session(conn, scope_id, session_id)
+        legacy = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id=session_id,
+            platform="avibe",
+            author="agent",
+            message_type="result",
+            source="harness",
+            text="legacy run anchor",
+            native_message_id="agent_run:run_legacy_anchor",
+        )
+        _insert_agent_run(
+            conn,
+            "run_legacy_anchor",
+            session_id=session_id,
+            source_kind="agent",
+        )
+
+    with engine.connect() as conn:
+        anchored = messages_service.list_session_messages(
+            conn,
+            session_id=session_id,
+            around_run_id="run_legacy_anchor",
+        )
+
+    assert anchored["anchor_id"] == legacy["id"]
+    assert [row["id"] for row in anchored["messages"]] == [legacy["id"]]
+
+
+def test_list_session_messages_scopes_native_anchor_by_platform(isolated_state):
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        session_id = "ses_native_platform_anchor"
+        _seed_session(conn, scope_id, session_id)
+        slack = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id=session_id,
+            platform="slack",
+            author="agent",
+            message_type="result",
+            text="slack reply",
+            native_message_id="same-native-id",
+        )
+        discord = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id=session_id,
+            platform="discord",
+            author="agent",
+            message_type="result",
+            text="discord reply",
+            native_message_id="same-native-id",
+        )
+
+    with engine.connect() as conn:
+        anchored = messages_service.list_session_messages(
+            conn,
+            session_id=session_id,
+            around_native_id="same-native-id",
+            around_native_platform="discord",
+        )
+
+    assert anchored["anchor_id"] == discord["id"]
+    assert any(row["id"] == discord["id"] for row in anchored["messages"])
+    assert slack["id"] != discord["id"]
 
 
 def test_list_session_messages_before_id_returns_older_window(isolated_state):

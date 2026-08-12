@@ -13,12 +13,12 @@ from core.audio_asr import (
     detect_audio_mime_from_sample,
     format_audio_transcript_echo,
 )
-from core.message_output import (
-    HARNESS_PROMPT_ECHO_SPEC_KEY,
-    terminal_output_for,
-    terminal_turn_output,
+from core.backend_failure import emit_backend_failure
+from core.message_output import HARNESS_PROMPT_ECHO_SPEC_KEY
+from core.message_context import (
+    SCHEDULED_DISPATCH_METADATA_APPLIED_KEY,
+    resolve_context_thread_id,
 )
-from core.message_context import resolve_context_thread_id
 from core.native_dispatch_phase import (
     DISPATCH_PHASE_PREWRITE,
     set_dispatch_phase,
@@ -467,6 +467,12 @@ class MessageHandler(BaseHandler):
             effective_reasoning_effort = session_target_reasoning or scope_reasoning_override or (
                 vibe_agent.reasoning_effort if vibe_agent else None
             )
+            materialized_agent_identity = bool(
+                vibe_agent
+                and isinstance(session_target, dict)
+                and not session_target.get("agent_id")
+                and not session_target.get("agent_name")
+            )
             # A session may pin a setting to NOTHING on purpose. The cascade above
             # cannot express that: every `or` reads NULL as "inherit", which is the
             # correct reading for the whole existing table and the WRONG one for a
@@ -477,38 +483,48 @@ class MessageHandler(BaseHandler):
             # silently re-route every session that is merely inheriting.
             explicit_overrides: set[str] = set()
             if isinstance(session_target, dict):
-                session_meta = session_target.get("metadata")
-                if isinstance(session_meta, dict):
-                    from storage.session_reclaim import SESSION_SETTINGS_OVERRIDE_KEY
+                from storage.session_reclaim import explicit_override_names
 
-                    marked = session_meta.get(SESSION_SETTINGS_OVERRIDE_KEY)
-                    if isinstance(marked, (list, tuple, set)):
-                        explicit_overrides = {str(name) for name in marked}
+                explicit_overrides = explicit_override_names(session_target.get("metadata"))
             if "model" in explicit_overrides:
                 effective_model = session_target.get("model")
             if "reasoning_effort" in explicit_overrides:
                 effective_reasoning_effort = session_target.get("reasoning_effort")
-            # Materialize the resolved route into EMPTY workbench session
-            # columns NOW, at turn start. A session created on an inherited
-            # default carries NULLs (dispatch resolves the live Agent default);
-            # without pinning, the chat header shows an agent with no model /
-            # effort after the first message. Pinning at turn START — not at
-            # native bind — means any later explicit header pick in this turn
-            # (including an explicit clear to NULL) lands after this write and
-            # is never undone by it. IM (scope/anchor) rows never carry
-            # ``agent_session_target`` and are untouched: their model semantics
-            # stay with channel routing.
-            if isinstance(session_target, dict) and session_target.get("id") and (
-                (effective_model and not session_target.get("model"))
-                or (effective_reasoning_effort and not session_target.get("reasoning_effort"))
+            # Materialize the resolved route into EMPTY Workbench session
+            # columns at turn start. A session created on an inherited default
+            # carries NULLs (dispatch resolves the live Agent default); without
+            # pinning, the chat header shows an Agent with no model / effort
+            # after the first message. Scheduled IM turns can carry the same
+            # target projection, so the platform gate is essential: their model
+            # semantics remain owned by channel routing.
+            if (
+                context.platform == "avibe"
+                and isinstance(session_target, dict)
+                and session_target.get("id")
+                and (
+                    materialized_agent_identity
+                    or (effective_model and not session_target.get("model"))
+                    or (effective_reasoning_effort and not session_target.get("reasoning_effort"))
+                )
             ):
                 materialize = getattr(self.sessions, "materialize_agent_session_route", None)
                 if callable(materialize):
                     try:
                         materialize(
                             str(session_target["id"]),
+                            agent_id=vibe_agent.id if materialized_agent_identity else None,
+                            agent_name=vibe_agent.name if materialized_agent_identity else None,
                             model=effective_model,
                             reasoning_effort=effective_reasoning_effort,
+                            expected_route={
+                                "agent_id": session_target.get("agent_id"),
+                                "agent_name": session_target.get("agent_name"),
+                                "agent_backend": session_target.get("agent_backend"),
+                                "agent_variant": session_target.get("agent_variant"),
+                                "model": session_target.get("model"),
+                                "reasoning_effort": session_target.get("reasoning_effort"),
+                                "explicit_overrides": sorted(explicit_overrides),
+                            },
                         )
                     except Exception:
                         logger.debug("Session route materialization failed; dispatch continues", exc_info=True)
@@ -771,7 +787,13 @@ class MessageHandler(BaseHandler):
                 user_message = append_audio_transcripts_to_message(user_message, audio_transcripts)
                 await self._echo_audio_transcripts_if_enabled(context, audio_transcripts)
 
-            if not (is_human and durable_delivery_owned):
+            scheduled_metadata_applied = bool(
+                source == self.TURN_SOURCE_SCHEDULED
+                and (context.platform_specific or {}).get(
+                    SCHEDULED_DISPATCH_METADATA_APPLIED_KEY
+                )
+            )
+            if not (is_human and durable_delivery_owned) and not scheduled_metadata_applied:
                 message = await self._prepend_message_metadata(
                     context,
                     message,
@@ -810,6 +832,11 @@ class MessageHandler(BaseHandler):
                 processing_indicator=processing_indicator,
                 files=processed_files,
             )
+            request.failure_handler = lambda error: self._emit_agent_dispatch_failure(
+                context,
+                request,
+                error,
+            )
             if processing_indicator is not None:
                 self.controller.processing_indicator.apply_to_request(request, processing_indicator)
             try:
@@ -837,17 +864,12 @@ class MessageHandler(BaseHandler):
                             session_id=str(bound_session_id),
                         )
             except KeyError:
-                await self._handle_missing_agent(context, agent_name)
-                # Synchronous terminal failure (no agent dispatched). Settle the
-                # turn through the OUTBOUND status chokepoint: an empty terminal
-                # error result turns the dot red + releases the SSE waiter (the
-                # missing-agent message was already shown above). No separate latch.
-                await self.controller.emit_agent_message(
+                if request.failure_handled:
+                    raise
+                await self._handle_missing_agent(
                     context,
-                    "result",
-                    "",
-                    is_error=True,
-                    output=terminal_output_for(request),
+                    agent_name,
+                    request=request,
                 )
                 # Clean up reaction on error
                 await self._remove_ack_reaction(context, request)
@@ -870,24 +892,8 @@ class MessageHandler(BaseHandler):
                     )
             except Exception as cleanup_err:
                 logger.debug(f"Failed to clean up reaction on error: {cleanup_err}")
-            error_text = self.formatter.format_error(self._t("error.processMessageFailed", error=str(e)))
-            await self._get_im_client(context).send_message(context, error_text)
-            # Surface the failure into the live web-Chat SSE stream first...
-            await self._stream_terminal_error(context, error_text)
-            # ...then settle the failed turn through the OUTBOUND status chokepoint:
-            # an empty terminal error result turns the dot red + releases the SSE
-            # waiter (the visible error was sent + streamed above). No separate latch.
-            await self.controller.emit_agent_message(
-                context,
-                "result",
-                "",
-                is_error=True,
-                output=(
-                    terminal_output_for(request)
-                    if request is not None
-                    else terminal_turn_output()
-                ),
-            )
+            if not bool(getattr(request, "failure_handled", False)):
+                await self._emit_agent_dispatch_failure(context, request, e)
             return str(e)
         finally:
             release_lifecycle_admission = getattr(
@@ -905,6 +911,26 @@ class MessageHandler(BaseHandler):
                 mark_complete = getattr(self.controller, "mark_turn_complete", None)
                 if callable(mark_complete):
                     mark_complete(context)
+
+    async def _emit_agent_dispatch_failure(
+        self,
+        context: MessageContext,
+        request: AgentRequest | None,
+        error: BaseException,
+    ) -> None:
+        """Report one backend dispatch failure through the shared live boundary."""
+
+        error_text = self.formatter.format_error(
+            self._t("error.processMessageFailed", error=str(error))
+        )
+        await emit_backend_failure(
+            self.controller,
+            context,
+            str(getattr(request, "vibe_agent_backend", None) or "agent"),
+            error_text,
+            display_text=error_text,
+            request=request,
+        )
 
     async def _admit_human_delivery(
         self,
@@ -1318,12 +1344,26 @@ class MessageHandler(BaseHandler):
         metadata_lines: list[str] = []
         if getattr(self.config, "include_time_info", True):
             metadata_lines.append(self._build_current_time_line())
+        source_session_id = self._source_session_id(context)
+        if source_session_id:
+            metadata_lines.append(f"From: #{self._sanitize_identity(source_session_id)}")
         if include_user_info and getattr(self.config, "include_user_info", True):
             metadata_lines.append(await self._build_user_info_line(context))
 
         if not metadata_lines:
             return message
         return "\n".join([*metadata_lines, message])
+
+    @staticmethod
+    def _source_session_id(context: MessageContext) -> str:
+        """Return the Agent Session that authored this Harness input, if known."""
+        payload = context.platform_specific or {}
+        source_session_id = str(payload.get("source_session_id") or "").strip()
+        if source_session_id:
+            return source_session_id
+        if str(payload.get("source_kind") or "").strip() == "agent":
+            return str(payload.get("source_actor") or "").strip()
+        return ""
 
     @staticmethod
     def _build_current_time_line(now: datetime | None = None) -> str:
@@ -1597,14 +1637,30 @@ class MessageHandler(BaseHandler):
             logger.error(f"Error handling inline stop: {e}", exc_info=True)
             return False
 
-    async def _handle_missing_agent(self, context: MessageContext, agent_name: str):
-        """Notify user when a requested agent backend is unavailable."""
+    async def _handle_missing_agent(
+        self,
+        context: MessageContext,
+        agent_name: str,
+        *,
+        request: AgentRequest | None = None,
+    ) -> None:
+        """Notify and, for a dispatched Turn, settle a missing Agent failure."""
         target = agent_name or self.controller.agent_service.default_agent
         backend = self._missing_agent_backend(context, target)
         display_backend = display_name_for_backend(backend) if backend else str(target)
         hint_key = f"error.agentNotConfiguredHint.{backend}" if backend else "error.agentNotConfiguredHint.generic"
         hint = self._t(hint_key)
         msg = f"❌ {self._t('error.agentNotConfigured', agent=target, backend=display_backend, hint=hint)}"
+        if request is not None:
+            await emit_backend_failure(
+                self.controller,
+                context,
+                backend or str(target),
+                msg,
+                display_text=msg,
+                request=request,
+            )
+            return
         await self._get_im_client(context).send_message(context, msg)
         await self._stream_terminal_error(context, msg)
 
@@ -1625,7 +1681,11 @@ class MessageHandler(BaseHandler):
         backend = getattr(agent, "backend", None)
         return str(backend) if is_agent_backend(str(backend)) else None
 
-    async def _stream_terminal_error(self, context: MessageContext, text: str) -> None:
+    async def _stream_terminal_error(
+        self,
+        context: MessageContext,
+        text: str,
+    ) -> None:
         """Surface a synchronous, no-agent-dispatched failure (missing backend,
         a pre-dispatch exception) into the web Chat so the browser shows it
         instead of silently ending the turn with only the user's prompt visible.

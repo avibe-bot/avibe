@@ -90,7 +90,7 @@ def _append_source(payload: dict[str, Any], source: SourceRecord, store: EngineS
             entry["models"] = models
         payload.setdefault("codex-api-key", []).append(entry)
         return
-    if source.protocol in {"openai_chat", "openai_compatible"}:
+    if source.protocol == "openai_chat":
         base_url = source.base_url
         if not base_url and source.vendor == "openai":
             base_url = "https://api.openai.com/v1"

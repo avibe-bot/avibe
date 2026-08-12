@@ -28,6 +28,7 @@ describe('chatRowKind', () => {
     expect(row({ author: 'agent', type: 'result' })).toEqual({ kind: 'agent' });
     expect(row({ author: 'system', type: 'user' })).toEqual({ kind: 'system' });
     expect(row({ author: 'harness', source: 'harness', type: 'harness' })).toEqual({ kind: 'harness' });
+    expect(row({ author: 'harness', source: 'harness', type: 'vault' })).toEqual({ kind: 'harness' });
     expect(row({ author: 'agent', type: 'notify' })).toEqual({ kind: 'notify' });
     expect(row({ author: 'agent', type: 'error' })).toEqual({ kind: 'notify' });
   });

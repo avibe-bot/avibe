@@ -20,7 +20,10 @@ import { isTerminalAgentMessage, isTranscriptMessage } from '../../lib/chatMessa
 import { chatRowKind, drawsEmptyBodyPlaceholder, isAgentAuthored } from '../../lib/chatRowKind';
 import { useIosKeyboardInset } from '../../lib/useIosKeyboardInset';
 import { isProxyMediaUrl } from '../../lib/mediaProxy';
-import { isVaultApprovalRequest, placeVaultProvisionRequests } from '../../lib/vaultRequestPlacement';
+import {
+  isVaultApprovalRequest,
+  placeVaultProvisionRequests,
+} from '../../lib/vaultRequestPlacement';
 import { localPath, type ShowPageLinkInfo } from '../../lib/showPageLinks';
 import { showPageEmbeddedPath } from '../../apps/showPageAvatar';
 import { downloadFile, fileMeta } from '../../lib/filesApi';
@@ -28,6 +31,8 @@ import { isEditableFile, isEditableMeta, previewOverlayKind } from '../../lib/fi
 import { recentPathLabel } from '../../lib/editorRecents';
 import type { LocalFileLinkTarget } from '../../lib/localFileLinks';
 import { formatLocalDateTime, formatRelativeTime } from '../../lib/relativeTime';
+import { canMarkConversationRead, readPageActivity } from '../../lib/pageActivity';
+import { isDesktopViewport, useIsDesktop } from '../../lib/useIsDesktop';
 import { resultFooterParts } from '../../lib/resultFooter';
 import {
   activityItemKind,
@@ -40,7 +45,9 @@ import {
 import {
   chatTriggerLink,
   harnessChipLabelKey,
+  isVaultCallback,
   needsHarnessProvenanceReconcile,
+  vaultCallbackStatusKey,
 } from '../../lib/chatTrigger';
 import { AnnotationMessage } from './AnnotationMessage';
 import { AGENT_BUBBLE, SYSTEM_BUBBLE, USER_BUBBLE } from './chatBubble';
@@ -80,6 +87,11 @@ import {
   transcriptSelectionActions,
   type SessionReadOnlyReason,
 } from './sessionArchived';
+import {
+  createSessionRowRefreshGate,
+  sessionRowWithBootstrapFallback,
+} from './sessionRowRefresh';
+import { chatSessionViewState } from './chatSessionViewState';
 import { InstallHint } from '../InstallHint';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
@@ -190,6 +202,24 @@ export const ChatPage: React.FC = () => {
   const showChatSignal = searchParams.get('view') === 'chat';
   const api = useApi();
   const { unreadBySession, markRead: markInboxRead } = useWorkbenchInbox();
+  const { focusedId: foregroundAppWindowId, focusCanvas } = useWindowManager();
+  const isDesktop = useIsDesktop();
+  const [pageActive, setPageActive] = useState(() => readPageActivity());
+  useEffect(() => {
+    const syncPageActivity = () => setPageActive(readPageActivity());
+    document.addEventListener('visibilitychange', syncPageActivity);
+    window.addEventListener('focus', syncPageActivity);
+    window.addEventListener('blur', syncPageActivity);
+    window.addEventListener('pageshow', syncPageActivity);
+    window.addEventListener('pagehide', syncPageActivity);
+    return () => {
+      document.removeEventListener('visibilitychange', syncPageActivity);
+      window.removeEventListener('focus', syncPageActivity);
+      window.removeEventListener('blur', syncPageActivity);
+      window.removeEventListener('pageshow', syncPageActivity);
+      window.removeEventListener('pagehide', syncPageActivity);
+    };
+  }, []);
   // The mobile chat surface is a fixed full-screen flex column; this keeps the
   // composer glued to the iOS keyboard (settle-then-correct; see the hook).
   const chatSurfaceRef = useRef<HTMLDivElement>(null);
@@ -198,6 +228,7 @@ export const ChatPage: React.FC = () => {
   // Loaded session (null while bootstrapping — ChatPage renders a loader until
   // it's set). Lifted above the composer bridge + show-page logic that gate on it.
   const [session, setSession] = useState<WorkbenchSession | null>(null);
+  const sessionRowRefreshGateRef = useRef(createSessionRowRefreshGate());
   // Archive is terminal: an archived transcript stays fully readable (search's
   // "include archived" opt-in links straight here) but every mutation is refused
   // server-side, so the chat renders read-only — no composer, no rename, no
@@ -229,6 +260,7 @@ export const ChatPage: React.FC = () => {
   // before the composer bridge target, which depends on showPageMode.
   const [showPageMode, setShowPageMode] = useState(false);
   const [showPageBusy, setShowPageBusy] = useState(false);
+  const [showPageViewResolved, setShowPageViewResolved] = useState(false);
   // One authority invalidates an in-flight restore/open when the user explicitly
   // chooses Chat (including a same-session ?view=chat navigation).
   const showPageRequestRef = useRef(0);
@@ -297,6 +329,7 @@ export const ChatPage: React.FC = () => {
     // once the new session row loads, the restore effect below applies its own
     // remembered view through the same open path as a user click.
     showPageRestoreAttemptRef.current = null;
+    setShowPageViewResolved(false);
     selectChatView(sessionId ?? '', false);
     setShowPageUrl(null);
   }, [selectChatView, sessionId]);
@@ -310,6 +343,7 @@ export const ChatPage: React.FC = () => {
     const sid = sessionId ?? '';
     showPageRestoreAttemptRef.current = sid || null;
     selectChatView(sid, true);
+    setShowPageViewResolved(true);
     const next = new URLSearchParams(window.location.search);
     next.delete('view');
     setSearchParams(next, { replace: true });
@@ -396,16 +430,31 @@ export const ChatPage: React.FC = () => {
     () => placeVaultProvisionRequests(messages, vaultRequests),
     [messages, vaultRequests],
   );
-  const transcriptTailVaultRequests = useMemo(
-    () => [...pendingApprovals, ...provisionPlacement.unanchored],
-    [pendingApprovals, provisionPlacement],
-  );
+  // Provision cards belong beside the Agent reply that owns them. Requests whose
+  // owning message is outside the retained window stay unanchored here; they are
+  // intentionally not moved into the transcript footer, so opening a Session
+  // never turns a historical form into a bottom-fixed card or a scroll target.
   // Mirror the latest messages into a ref (updated every render) so effects that
   // must NOT re-run on every message change — chiefly the deep-link jump effect,
   // whose around-fetch would otherwise be cancelled by an SSE/reconcile update —
   // can still read the current transcript without listing ``messages`` as a dep.
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
+  const deepLinkWindowHandledRef = useRef(false);
+  const denyVaultProvisionRequest = useCallback(
+    async (requestId: string) => {
+      try {
+        const result = await api.denyVaultRequest(requestId);
+        if (!result?.ok) return false;
+        showToast(t('vaults.requests.denied'), 'warning');
+        return true;
+      } catch {
+        showToast(t('vaults.approval.errors.failed'), 'warning');
+        return false;
+      }
+    },
+    [api, showToast, t],
+  );
   const [olderCursor, setOlderCursor] = useState<string | null>(null);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const loadingOlderRef = useRef(false);
@@ -679,16 +728,10 @@ export const ChatPage: React.FC = () => {
     });
   }, []);
 
-  // The header's backend lock keys on ``native_session_id``, which the FIRST
-  // turn binds server-side with no dedicated event — so an open page wouldn't
-  // learn it until reload and the picker would keep offering switches the
-  // server now rejects (409). Until the native is known, refresh the row at
-  // the recovery points (turn end / reconnect / tab visible). No-op for the
-  // common already-bound session.
-  const hasNativeRef = useRef(false);
-  useEffect(() => {
-    hasNativeRef.current = Boolean(session?.native_session_id);
-  }, [session]);
+  // The header's route and backend lock both come from the durable Session row.
+  // Every settled turn refreshes it because turn start may materialize inherited
+  // model / effort even on an already-bound legacy session. A missed turn.end is
+  // recovered by syncTurnState, which refreshes the row when it clears stale work.
   // Read the global banner toggle once per mount (cached GET). Absent/failed →
   // default ON, so a transient prefs error never hides live background work.
   useEffect(() => {
@@ -709,28 +752,34 @@ export const ChatPage: React.FC = () => {
   // can't stamp one chat's row onto the chat the user moved to. Best-effort by
   // contract: every caller must already be correct if the request never lands.
   const refreshSessionRow = useCallback(async () => {
-    const id = sessionIdRef.current;
-    if (!id) return;
-    try {
-      // cache:false — an earlier refresh (page open / reconnect) may have
-      // cached a stale row; reusing it inside the read cache's TTL is exactly
-      // what the callers are trying to escape.
-      const row = await api.getSession(id, { cache: false });
-      setSession((prev) => (prev && prev.id === row.id && row.id === sessionIdRef.current ? row : prev));
-    } catch {
-      // Best-effort: the next recovery point retries.
-    }
+    const read = async (allowRetry: boolean): Promise<void> => {
+      const id = sessionIdRef.current;
+      if (!id) return;
+      const isCurrent = await sessionRowRefreshGateRef.current.begin();
+      try {
+        // cache:false — an earlier refresh (page open / reconnect) may have
+        // cached a stale row; reusing it inside the read cache's TTL is exactly
+        // what the callers are trying to escape.
+        const row = await api.getSession(id, { cache: false });
+        setSession((prev) =>
+          isCurrent() && row.id === sessionIdRef.current ? row : prev,
+        );
+      } catch {
+        // If this was still the newest read, one bounded retry prevents a
+        // transient failure from discarding an older route-bearing response
+        // without turning a persistent outage into an unbounded loop.
+        if (allowRetry && isCurrent() && id === sessionIdRef.current) {
+          await read(false);
+        }
+      }
+    };
+    await read(true);
   }, [api]);
-  const refreshSessionRowUntilNativeBound = useCallback(async () => {
-    if (hasNativeRef.current) return;
-    await refreshSessionRow();
-  }, [refreshSessionRow]);
-
   // ── Converging on a terminal archive this tab missed ────────────────────────
   //
   // A backgrounded / offline tab can miss the archive SSE for a session that
-  // already has a native_session_id, and refreshSessionRowUntilNativeBound then
-  // early-returns on every reconnect/focus — so a 409 ``session_archived`` from
+  // already has a native_session_id, and the recovery row read still needs to
+  // run on every reconnect/focus — so a 409 ``session_archived`` from
   // the FIRST write the user attempts is the only point at which this tab learns
   // the truth. Whichever write that is: sending, renaming, re-routing the agent,
   // forking a quote out, or any Show Page mutation. Converging per-verb is what
@@ -751,6 +800,7 @@ export const ChatPage: React.FC = () => {
       showPageRequestRef.current += 1;
       setShowPageBusy(false);
       writeChatViewMode(archivedSessionId, 'chat');
+      sessionRowRefreshGateRef.current.invalidate();
       setSession((prev) => markSessionArchived(prev, archivedSessionId));
       void refreshSessionRow();
     },
@@ -763,7 +813,8 @@ export const ChatPage: React.FC = () => {
   // subscription, including the ones issued by components this page owns rather
   // than by the page itself. ``sendMessage`` is the exception by construction: it
   // uses a raw ``apiFetch`` so it can read ``queued``/``already_answered`` off a
-  // non-2xx-aware response, so it calls the same converger directly.
+  // non-2xx-aware response, so it reports the terminal state back through the
+  // ApiContext converger explicitly.
   useEffect(() => api.onSessionArchived(convergeSessionArchived), [api, convergeSessionArchived]);
 
   useEffect(() => {
@@ -906,6 +957,7 @@ export const ChatPage: React.FC = () => {
       setMessages(tailMessages);
       setOlderCursor(res.next_before_id ?? null);
       setHistoricalWindow(false);
+      deepLinkWindowHandledRef.current = false;
       // Returning to the live tail from a historical window: activity ingestion was
       // suppressed while scrolled away, so resync groups from storage — a turn that
       // finished in history still gets its chip without a full reload.
@@ -916,12 +968,12 @@ export const ChatPage: React.FC = () => {
     }
   }, [api, sessionId, scheduleActivityRefresh]);
 
-  // Persist the composer's unsent text server-side (debounced) so it survives a
-  // reload / device switch. The send path clears it server-side; this only
-  // saves while typing.
+  // Cache every edit synchronously so navigation, a tab close, or a disconnected
+  // network cannot lose it. Cloud persistence remains debounced and serialized.
   const onDraftChange = useCallback(
     (text: string) => {
       if (!sessionId) return;
+      api.cacheSessionDraft(sessionId, text);
       // Tag the pending save with THIS session so the timer (and the
       // session-change flush) save to the right session even if the user has
       // since navigated away.
@@ -982,6 +1034,7 @@ export const ChatPage: React.FC = () => {
       if (turnEpochRef.current !== epochAtRequest) return;
       const sinceSet = Date.now() - workingSetAtRef.current;
       if (sinceSet > WORKING_SETTLE_GRACE_MS) {
+        const recoveredDroppedTurnEnd = workingRef.current;
         workingRef.current = false;
         setWorking(false);
         // Agent Activity: the idle poll recovering a dropped terminal/turn.end is a
@@ -993,6 +1046,7 @@ export const ChatPage: React.FC = () => {
           dispatchLive({ type: 'settle' });
           scheduleActivityRefresh(false);
         }
+        if (recoveredDroppedTurnEnd) void refreshSessionRow();
       } else if (graceResyncRef.current === null) {
         // Idle INSIDE the grace: either the registration gap (don't clear) or a
         // quick turn that already finished and whose turn.end we missed (a
@@ -1006,7 +1060,7 @@ export const ChatPage: React.FC = () => {
     } catch {
       /* controller unreachable — leave the indicator as-is */
     }
-  }, [api, sessionId, markWorking, dispatchLive, scheduleActivityRefresh]);
+  }, [api, sessionId, markWorking, dispatchLive, scheduleActivityRefresh, refreshSessionRow]);
 
   // Keep a ref to the latest syncTurnState so the grace-resync timer can call the
   // current closure without baking it into a dependency cycle.
@@ -1022,10 +1076,23 @@ export const ChatPage: React.FC = () => {
       // Initial chat open needs the same recent tail window, queue, draft,
       // route/config state, and current turn state. Fetch them as one bootstrap
       // payload so remote links don't pay a tunnel round-trip per widget.
+      const bootstrapIsCurrent = await sessionRowRefreshGateRef.current.begin();
       const bootstrap = await api.getSessionBootstrap(sessionId);
       // Dropped if the user switched chats while this load was in flight.
       if (sessionId !== sessionIdRef.current) return;
-      setSession(bootstrap.session);
+      if (bootstrapIsCurrent()) {
+        setSession(bootstrap.session);
+      } else {
+        // A newer turn-end/activity read won the row race. Preserve its row if
+        // it landed, but keep this successful bootstrap as the fallback while a
+        // cold-page recovery is pending or if both bounded attempts fail.
+        setSession((current) => sessionRowWithBootstrapFallback(
+          current,
+          sessionId,
+          bootstrap.session,
+        ));
+        void refreshSessionRow();
+      }
       setAgents(bootstrap.agents);
       setDefaultAgentName(bootstrap.default_agent_name);
       setMessageFontSize(normalizeChatMessageFontSize(bootstrap.config?.ui?.chat_message_font_size));
@@ -1070,13 +1137,17 @@ export const ChatPage: React.FC = () => {
       // its own loading state into a premature not-found / error view (Codex P2).
       if (sessionId === sessionIdRef.current) setLoading(false);
     }
-  }, [api, sessionId, markWorking, scheduleActivityRefresh]);
+  }, [api, sessionId, markWorking, scheduleActivityRefresh, refreshSessionRow]);
 
   // Clear per-session state the instant the session changes (React Router swaps
   // only :sessionId, reusing this instance), before the new session's
   // load/subscribe — so the previous conversation / queue / draft never leak in
   // and the merge in ``refresh`` only ever unions same-session rows.
   useEffect(() => {
+    // The gate is session-scoped. A PATCH for the previous chat may still be
+    // pending after navigation, but it must never hold the new chat's bootstrap
+    // or recovery reads hostage.
+    sessionRowRefreshGateRef.current = createSessionRowRefreshGate();
     // Clear ``session`` too (not just messages/queue/draft): otherwise the header
     // keeps rendering the previous chat's title + agent picker until the new load
     // finishes, and a rename / agent change would patch() the STALE session.id
@@ -1084,6 +1155,7 @@ export const ChatPage: React.FC = () => {
     // loading state until refresh() resolves the new session.
     setSession(null);
     setMessages([]);
+    deepLinkWindowHandledRef.current = false;
     setOlderCursor(null);
     setHistoricalWindow(false);
     oldestLoadedIdRef.current = null;
@@ -1105,7 +1177,7 @@ export const ChatPage: React.FC = () => {
     setWorking(false);
     setRuntimeState(emptyRuntimeState());
     setQueue([]);
-    setInitialDraft(null);
+    setInitialDraft(sessionId ? api.getCachedSessionDraft(sessionId) : null);
     // Clear all Agent Activity state so the previous session's groups / live buffer
     // never leak into the new chat (refresh re-reads the toggle + summary).
     setActivityGroups([]);
@@ -1126,7 +1198,7 @@ export const ChatPage: React.FC = () => {
       window.clearTimeout(graceResyncRef.current);
       graceResyncRef.current = null;
     }
-  }, [sessionId]);
+  }, [api, sessionId]);
 
   // Persistent per-session subscription: append every transcript-visible
   // ``message.new`` for THIS session for as long as the page is open. An agent
@@ -1212,11 +1284,10 @@ export const ChatPage: React.FC = () => {
             dispatchLive({ type: 'settle' });
             scheduleActivityRefresh(false);
           }
-          // The first turn binds the native; pick it up so the header's backend
-          // lock engages without a reload. A failed first turn leaves no native
-          // (the refresh confirms that), keeping the backend switchable so the
-          // user can recover by re-routing.
-          void refreshSessionRowUntilNativeBound();
+          // Turn start can materialize an inherited route even on an already-
+          // bound legacy session. Reload the authoritative row on every settle
+          // so the header picks up both that route and a first native bind.
+          void refreshSessionRow();
           void syncTurnState();
         }
       },
@@ -1241,10 +1312,16 @@ export const ChatPage: React.FC = () => {
         if (data.session_id !== sessionIdRef.current || data.event !== 'updated') return;
         if (!Object.prototype.hasOwnProperty.call(data, 'title')) return;
         const nextTitle = data.title ?? null;
+        sessionRowRefreshGateRef.current.invalidate();
         setSession((prev) => {
           if (!prev || prev.id !== data.session_id || prev.title === nextTitle) return prev;
           return { ...prev, title: nextTitle };
         });
+        // The activity event carries only a partial Session projection. Its
+        // title is newer than an in-flight full-row read, but it cannot replace
+        // that read's native bind or materialized route, so retry after the
+        // invalidation and converge on the complete committed row.
+        void refreshSessionRow();
       },
       onConnected: () => {
         // Every (re)connect recovers any state missed while the socket was down:
@@ -1253,7 +1330,7 @@ export const ChatPage: React.FC = () => {
         void reconcile();
         void refreshQueue();
         void syncTurnState({ quiet: true });
-        void refreshSessionRowUntilNativeBound();
+        void refreshSessionRow();
       },
       onConnectionState: (state) => {
         const connected = state === 'connected';
@@ -1266,7 +1343,7 @@ export const ChatPage: React.FC = () => {
       },
     });
     return disconnect;
-  }, [api, sessionId, appendMessage, reconcile, refreshQueue, syncTurnState, refreshSessionRowUntilNativeBound, markWorking, goBack, ingestActivityRow, scheduleActivityRefresh, dispatchLive]);
+  }, [api, sessionId, appendMessage, reconcile, refreshQueue, syncTurnState, refreshSessionRow, markWorking, goBack, ingestActivityRow, scheduleActivityRefresh, dispatchLive]);
 
   // Mobile tabs (the common case for IM users) get backgrounded mid-turn; the
   // SSE feed can be suspended without a clean reconnect, dropping the reply.
@@ -1281,6 +1358,7 @@ export const ChatPage: React.FC = () => {
       void reconcile();
       void refreshQueue();
       void syncTurnState({ quiet: true });
+      void refreshSessionRow();
     };
     document.addEventListener('visibilitychange', resync);
     window.addEventListener('online', resync);
@@ -1290,7 +1368,7 @@ export const ChatPage: React.FC = () => {
       window.removeEventListener('online', resync);
       window.removeEventListener('focus', resync);
     };
-  }, [sessionId, reconcile, refreshQueue, syncTurnState]);
+  }, [sessionId, reconcile, refreshQueue, syncTurnState, refreshSessionRow]);
 
   useEffect(() => {
     setRuntimeState((current) => ({ ...current, pending_input_count: queue.length }));
@@ -1378,42 +1456,62 @@ export const ChatPage: React.FC = () => {
           body: JSON.stringify(requestBody),
         });
         const body = await response.json().catch(() => null);
+        if (isSessionArchivedConflict(response.status, body)) {
+          // Archive is terminal. Clear the original session's draft even when
+          // this response settles after navigation, and do not return false:
+          // false tells Composer to restore a retryable submission.
+          api.convergeSessionArchived(sessionId);
+          if (sessionId === sessionIdRef.current) {
+            setWorking(false);
+            setError(t('chat.archived.sendBlocked'));
+          }
+          return;
+        }
+        if (!response.ok) {
+          // A reserved ordinary message may already have cleared the server
+          // draft. Start recovery for its original session before any page
+          // staleness decision; the old Composer will then persist its restore
+          // even if navigation unmounted it. Quick replies never advance drafts.
+          if (!metadata?.quick_reply_for && body?.draft_advanced !== false) {
+            void api.recoverSessionDraftAfterRejectedSend(sessionId);
+          }
+          if (sessionId === sessionIdRef.current) {
+            void syncTurnStateRef.current?.();
+            setWorking(false);
+            // Routes answer either the flat ``{"error": "<sentence>"}`` or the shared
+            // CODED shape (``{"error": {code, message}, code, message}``) — the
+            // runtime-owned session's ``403 reserved_session`` is the latter, and
+            // ``String(body.error)`` renders that object as literal "[object Object]".
+            const parsed = body ? selectApiErrorFields(body, `HTTP ${response.status}`) : null;
+            setError(
+              parsed
+                ? parsed.code
+                  ? t(`errors.${parsed.code}`, { defaultValue: parsed.fallback })
+                  : parsed.fallback
+                : body?.detail
+                  ? String(body.detail)
+                  : `HTTP ${response.status}`,
+            );
+          }
+          return false;
+        }
+        // Reserving an accepted message advances the server draft to a blank
+        // revision. Apply that exact causal revision before handling this chat's
+        // UI response, so text typed while the POST was in flight is rebased and
+        // synced even if the user has already navigated to another session.
+        if (
+          response.ok
+          && body?.draft_advanced === true
+          && body?.draft
+          && typeof body.draft === 'object'
+        ) {
+          void api.reconcileSessionDraftAfterSend(sessionId, body.draft);
+        }
         // If the user switched chats while this POST was in flight, the response
         // belongs to the previous session — don't append it / mutate working /
         // error on the chat they moved to (Codex P2). The turn still ran for the
         // original session; its rows live there.
         if (sessionId !== sessionIdRef.current) return;
-        if (isSessionArchivedConflict(response.status, body)) {
-          // Archive is terminal, so this is not a retryable failure — it is state
-          // this tab missed. Raw ``apiFetch`` never reaches ``handleApiError``, so
-          // the shared subscription can't see this one: call the same converger
-          // directly. Only the turn state and the message are send-specific.
-          setWorking(false);
-          setError(t('chat.archived.sendBlocked'));
-          convergeSessionArchived(sessionId);
-          return false;
-        }
-        if (!response.ok) {
-          setWorking(false);
-          // Routes answer either the flat ``{"error": "<sentence>"}`` or the shared
-          // CODED shape (``{"error": {code, message}, code, message}``) — the
-          // runtime-owned session's ``403 reserved_session`` is the latter, and
-          // ``String(body.error)`` renders that object as literal "[object Object]".
-          // This is a raw ``apiFetch``, so ``handleApiError`` never runs; reuse its own
-          // selector instead of re-deriving the precedence, and localize by code the
-          // same way, so a coded refusal reads as a sentence here too. ``detail`` is
-          // only FastAPI's own validation shape.
-          const parsed = body ? selectApiErrorFields(body, `HTTP ${response.status}`) : null;
-          throw new Error(
-            parsed
-              ? parsed.code
-                ? t(`errors.${parsed.code}`, { defaultValue: parsed.fallback })
-                : parsed.fallback
-              : body?.detail
-                ? String(body.detail)
-                : `HTTP ${response.status}`,
-          );
-        }
         if (body?.already_answered) {
           // A duplicate quick-reply the backend already had (stale tab / missed
           // event): no turn started HERE. Reconcile authoritatively rather than
@@ -1447,19 +1545,23 @@ export const ChatPage: React.FC = () => {
           }
         }
       } catch (err) {
+        if (!metadata?.quick_reply_for) {
+          void api.recoverSessionDraftAfterRejectedSend(sessionId);
+        }
         if (sessionId === sessionIdRef.current) {
           // The request may have raced a turn owned by another tab or source.
           // Reconcile rather than clearing that turn's Stop state optimistically.
           void syncTurnStateRef.current?.();
           setWorking(false);
           setError(errorMessage(err) ?? String(err));
-          // Signal the composer the send didn't start so it restores the text +
-          // uploaded chips — the user can retry without re-uploading (Codex r5).
-          return false;
         }
+        // Recovery belongs to the original session, while UI mutation is gated
+        // above. Returning false also lets an unmounted old Composer persist its
+        // submitted text after navigation.
+        return false;
       }
     },
-    [sessionId, appendMessage, refreshQueue, markWorking, reloadLatestMessages, convergeSessionArchived, t],
+    [sessionId, api, appendMessage, refreshQueue, markWorking, reloadLatestMessages, t],
   );
 
   // @ mention source: all enabled Agents, filtered client-side (the set is small
@@ -1581,10 +1683,18 @@ export const ChatPage: React.FC = () => {
     showPageRestoreAttemptRef.current = sid;
     if (readOnly) {
       writeChatViewMode(sid, 'chat');
+      setShowPageViewResolved(true);
       return;
     }
-    if (showChatSignal || deepLinkMessageId || readChatViewMode(sid) !== 'show-page') return;
-    void openShowPage(sid);
+    if (showChatSignal || deepLinkMessageId || readChatViewMode(sid) !== 'show-page') {
+      setShowPageViewResolved(true);
+      return;
+    }
+    void openShowPage(sid).finally(() => {
+      if (sessionIdRef.current === sid && showPageRestoreAttemptRef.current === sid) {
+        setShowPageViewResolved(true);
+      }
+    });
   }, [deepLinkMessageId, openShowPage, readOnly, session?.id, sessionId, showChatSignal]);
 
   // When the share control resolves the page (open) or flips its visibility, the
@@ -1749,7 +1859,6 @@ export const ChatPage: React.FC = () => {
     // the loaded session matches the route) — before that the loaded-vs-around
     // decision and the scroll target wouldn't be meaningful.
     if (loading || session?.id !== sessionId) return;
-
     handledJumpRef.current = targetMsg;
     const requestSessionId = sessionId;
 
@@ -1800,8 +1909,10 @@ export const ChatPage: React.FC = () => {
         // reload the live tail; if not, it already reaches the tail and can keep
         // normal pinned/follow behavior.
         setMessages(window);
+        const reachesHistoricalWindow = Boolean(res.next_after_id);
+        deepLinkWindowHandledRef.current = reachesHistoricalWindow;
         setOlderCursor(res.next_before_id ?? null);
-        setHistoricalWindow(Boolean(res.next_after_id));
+        setHistoricalWindow(reachesHistoricalWindow);
         setJumpTarget(targetMsg);
         startHighlight(targetMsg);
         clearParam();
@@ -1824,7 +1935,7 @@ export const ChatPage: React.FC = () => {
     // window is dropped and ``?msg`` stays unhandled (Codex P2). The closure
     // still reads ``session`` for the ``!session`` / ``session.id !== sessionId``
     // readiness checks; it only needs to re-run when the id changes.
-  }, [deepLinkMessageId, sessionId, loading, session?.id, api, selectChatView, startHighlight, setSearchParams]);
+  }, [api, deepLinkMessageId, loading, selectChatView, session?.id, sessionId, setSearchParams, startHighlight]);
 
   // Re-arm the jump guard once ``?msg=`` is gone. ``clearParam`` (above) nulls
   // the param after handling, so without this re-selecting the SAME search hit
@@ -1847,18 +1958,37 @@ export const ChatPage: React.FC = () => {
     };
   }, []);
 
-  // The user is actively viewing this session, so an agent reply here is seen,
+  // The user is actively viewing this session's live transcript, so an agent reply is seen,
   // not "new". Clear unread whenever it appears — on open, or when a realtime
   // inbox.session.updated lands after a reply — so the Inbox/sidebar never badge
   // the chat you're looking at. Reactive to the unread map, so it's race-free
   // against the cross-process event ordering. Owning this on the mounted route
   // also keeps a canceled blocked navigation from clearing unread state early.
   useEffect(() => {
-    if (historicalWindow) return;
+    if (!canMarkConversationRead({
+      pageActive,
+      sessionReady: !loading && session?.id === sessionId,
+      viewResolved: showPageViewResolved,
+      historicalWindow,
+      showPageActive,
+      foregroundAppWindow: isDesktop && foregroundAppWindowId !== null,
+    })) return;
     if (sessionId && (unreadBySession[sessionId] ?? 0) > 0) {
       void markInboxRead(sessionId);
     }
-  }, [sessionId, unreadBySession, markInboxRead, historicalWindow]);
+  }, [
+    sessionId,
+    unreadBySession,
+    markInboxRead,
+    loading,
+    session?.id,
+    showPageViewResolved,
+    historicalWindow,
+    pageActive,
+    showPageActive,
+    isDesktop,
+    foregroundAppWindowId,
+  ]);
 
   // The Workbench canvas creates the session and hands its first message over
   // as router state. Replay it once through the compose path so the agent turn
@@ -1878,15 +2008,12 @@ export const ChatPage: React.FC = () => {
     async (changes: Partial<WorkbenchSession>) => {
       if (!session) return;
       const patchedId = session.id;
+      const finishPatch = sessionRowRefreshGateRef.current.beginMutation();
       try {
-        const updated = await api.updateSession(session.id, changes as any);
-        // Drop a stale response after a chat switch: if the user navigated to a
-        // different chat (this ChatPage instance is reused) before the PATCH
-        // resolved, installing A's session into B would show A's title/picker on
-        // B and make later edits patch the wrong session.id (Codex P2). Mirrors
-        // the sessionIdRef guards on send/cancel.
-        if (patchedId !== sessionIdRef.current) return;
-        setSession(updated);
+        await api.updateSession(session.id, changes as any);
+        // Do not install the PATCH response: it is only a mutation snapshot and
+        // can be older than another committed write. The authoritative refresh
+        // in finally is guarded by session id and runs after every active write.
       } catch (err) {
         if (patchedId !== sessionIdRef.current) return;
         // The archive itself has already converged through the shared
@@ -1896,9 +2023,12 @@ export const ChatPage: React.FC = () => {
         // ``handleApiError`` resolved is Show-Page-worded, which is wrong for a
         // rename or a re-route.
         setError(isSessionArchivedError(err) ? t('chat.archived.editBlocked') : (errorMessage(err) ?? String(err)));
+      } finally {
+        finishPatch();
+        if (patchedId === sessionIdRef.current) void refreshSessionRow();
       }
     },
-    [api, session, t],
+    [api, session, t, refreshSessionRow],
   );
 
   // Session-level actions share the sidebar/mobile row model. The chat header
@@ -1918,8 +2048,15 @@ export const ChatPage: React.FC = () => {
     onArchived: () => navigate('/inbox'),
     // The provider cache feeds the sidebar, not this page's own session copy. The
     // write resolves after an await, so only patch if we're still on that session.
-    onSessionPatched: (changes, sessionId) =>
-      setSession((prev) => (prev && prev.id === sessionId ? { ...prev, ...changes } : prev)),
+    onSessionPatched: (changes, sessionId) => {
+      if (sessionId !== sessionIdRef.current) return;
+      sessionRowRefreshGateRef.current.invalidate();
+      setSession((prev) => (prev && prev.id === sessionId ? { ...prev, ...changes } : prev));
+      // Pin updates only carry the changed sidebar field. A successful PATCH can
+      // race a turn-end row read, so re-read the complete durable projection to
+      // keep any newly materialized route in the header.
+      void refreshSessionRow();
+    },
     archiveHint: ARCHIVE_SHORTCUT_LABEL,
   });
 
@@ -2046,15 +2183,16 @@ export const ChatPage: React.FC = () => {
     return <ChatMissing onBack={goBack} />;
   }
 
-  // A direct session→session switch re-renders this SAME ChatPage instance with
-  // the new :sessionId while every piece of state still belongs to the PREVIOUS
-  // session — the reset effect only clears it after this render commits.
-  // Rendering the chat body in those mismatch frames leaks the old session under
-  // the new route: the composer remounts (key change) seeded with the OLD
-  // session's draft and its seed-change would be persisted under the NEW
-  // session id. Treat the mismatch as loading so nothing of the old session
-  // ever mounts under the new route.
-  if ((loading && !session) || (session && session.id !== sessionId)) {
+  // A direct session→session switch reuses this ChatPage instance. Until the
+  // current row arrives, the state can still hold the previous row or be empty
+  // while a newer recovery read supersedes bootstrap. Neither means not-found.
+  const viewState = chatSessionViewState({
+    routeSessionId: sessionId,
+    loadedSessionId: session?.id ?? null,
+    loading,
+    error,
+  });
+  if (viewState === 'loading') {
     return (
       <div className="flex h-[60vh] flex-col items-center justify-center gap-2 text-muted">
         <Loader2 className="size-5 animate-spin" />
@@ -2063,7 +2201,7 @@ export const ChatPage: React.FC = () => {
     );
   }
 
-  if (!session) {
+  if (viewState === 'failed' || !session) {
     return (
       <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 py-8">
         <button
@@ -2103,6 +2241,7 @@ export const ChatPage: React.FC = () => {
         key={sessionId ?? 'no-session'}
         requests={vaultRequests}
         onResolved={refreshVaultRequests}
+        onProvisionRequestDenied={denyVaultProvisionRequest}
         disabled={readOnly}
       >
       {/* Mobile: a FIXED full-screen flex column (the AppShell brand header is
@@ -2115,6 +2254,7 @@ export const ChatPage: React.FC = () => {
       <div
         ref={chatSurfaceRef}
         className="fixed inset-0 z-40 flex flex-col bg-background pt-[env(safe-area-inset-top)] md:relative md:inset-auto md:z-auto md:-mx-10 md:-my-8 md:h-[var(--app-vvh)] md:bg-transparent md:pt-0"
+        onPointerDownCapture={focusCanvas}
         {...fileDropHandlers}
       >
         {/* Drag-and-drop overlay: shown while files hover anywhere over the chat
@@ -2229,9 +2369,11 @@ export const ChatPage: React.FC = () => {
             // BEFORE the archive still holds them in state, though — the same
             // stale-tab case that reaches the archived 409 — and their
             // approve/deny buttons would write to a session that can't accept it.
+            // Only access/sign approvals belong in this footer. Provision forms
+            // are rendered next to their owning Agent message above.
             sessionId && !readOnly ? (
               <VaultChatRequests
-                requests={transcriptTailVaultRequests}
+                requests={pendingApprovals}
                 onResolved={refreshVaultRequests}
                 onOffscreenApprovalsChange={setOffscreenApprovals}
               />
@@ -3055,7 +3197,7 @@ const Transcript: React.FC<TranscriptProps> = ({
   const fileViewer = useFileViewer();
   const openLocalFile = useCallback(async (target: LocalFileLinkTarget) => {
     const pathLabel = recentPathLabel(target.path);
-    const desktop = window.matchMedia('(min-width: 768px)').matches;
+    const desktop = isDesktopViewport();
     const openPreview = (name: string, size: number | null, mime: string | null, ext: string | null) => {
       if (desktop) {
         openApp('preview', { title: name, params: { path: target.path, name } });
@@ -3630,9 +3772,11 @@ export const MessageRow = memo(function MessageRow({
   const agentAuthored = isAgentAuthored(message);
   const isHarness = row.kind === 'harness';
   const isUser = row.kind === 'user';
+  const isVaultNotification = isNotify && isVaultCallback(message);
   // Trigger-message provenance click-through (contract A9a/A9b): agent-callback
   // rows link to the source session's chat; task/watch rows to the Harness view.
   const triggerLink = isHarness ? chatTriggerLink(message, t('chat.source.agentFallback')) : null;
+  const vaultStatusKey = isVaultCallback(message) ? vaultCallbackStatusKey(message) : null;
   const messageFontStyle = { fontSize: `${normalizeChatMessageFontSize(messageFontSize)}px` };
   const resultPresentation = resultFooterParts(message);
 
@@ -3768,7 +3912,10 @@ export const MessageRow = memo(function MessageRow({
           <div className="inline-flex w-fit max-w-full items-start gap-1.5 rounded-2xl rounded-tl-md border border-gold/30 bg-gold/[0.08] px-3 py-1.5 text-[12px] text-gold">
             <Bell className="mt-px size-3 shrink-0" />
             <span className="min-w-0 break-words">
-              <span className="font-semibold">{t('chat.notifyLabel')}</span>
+              <span className="font-semibold">{t(isVaultNotification ? 'chat.source.vault' : 'chat.notifyLabel')}</span>
+              {vaultStatusKey && (
+                <span className="font-normal text-gold/80"> · {t(vaultStatusKey)}</span>
+              )}
               {resultPresentation.body && (
                 <span className="font-normal text-gold/80"> · {resultPresentation.body}</span>
               )}
@@ -3819,6 +3966,12 @@ export const MessageRow = memo(function MessageRow({
                 <span className="shrink-0 text-[11px] font-medium text-cyan">
                   {t(harnessChipLabelKey(message))}
                 </span>
+              )}
+              {vaultStatusKey && (
+                <>
+                  <span className="shrink-0 text-[11px] text-muted">·</span>
+                  <span className="shrink-0 text-[11px] text-muted">{t(vaultStatusKey)}</span>
+                </>
               )}
               {triggerLink?.kind === 'source' && (
                 // A9a: agent-callback shows the SOURCE session + links to its chat.

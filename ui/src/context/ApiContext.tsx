@@ -15,6 +15,12 @@ import type { DockDoc } from './dockDoc';
 import { archivedConflictSessionId, selectApiErrorFields } from './apiErrorParse';
 import { parseMemoryFactoryResetResult } from '../lib/memoryFactoryReset';
 import type { MemoryFactoryResetResult } from '../lib/memoryFactoryReset';
+import {
+  SessionDraftPersistence,
+  type SessionDraftSaveResult,
+  type SessionDraftServerState,
+  type SessionDraftWrite,
+} from '../lib/sessionDraftPersistence';
 
 // The workbench Dock API response shape ({ ok, dock }); the Dock document type
 // itself lives with the DockProvider that owns reconciliation.
@@ -682,6 +688,9 @@ export type ApiContextType = {
   getSessionBootstrap: (sessionId: string) => Promise<WorkbenchSessionBootstrap>;
   updateSession: (sessionId: string, payload: Partial<WorkbenchSessionUpdate>) => Promise<WorkbenchSession>;
   archiveSession: (sessionId: string) => Promise<WorkbenchSession>;
+  /** Apply the terminal archived state for raw request paths that intentionally
+   *  bypass the shared JSON error handler. */
+  convergeSessionArchived: (sessionId: string) => void;
   /** Subscribe to "the server just refused a write because that session is
    *  archived". Fires for EVERY request whose error body carries
    *  ``session_archived``, whatever the verb — the messages POST, the sessions
@@ -693,7 +702,7 @@ export type ApiContextType = {
   /** Counts of resources permanently reclaimed when archiving this session
    *  (bound tasks/watches + active runs) — drives the irreversible-confirm dialog. */
   getArchivePreview: (sessionId: string) => Promise<{ tasks: number; watches: number; runs: number; queued: number }>;
-  listSessionMessages: (sessionId: string, params?: { afterId?: string; beforeId?: string; aroundId?: string; limit?: number; tail?: boolean; cache?: boolean }) => Promise<{ messages: WorkbenchMessage[]; next_after_id: string | null; next_before_id?: string | null }>;
+  listSessionMessages: (sessionId: string, params?: { afterId?: string; beforeId?: string; aroundId?: string; aroundNativeId?: string; aroundNativePlatform?: string; aroundTurnId?: string; aroundRunId?: string; limit?: number; tail?: boolean; cache?: boolean }) => Promise<{ messages: WorkbenchMessage[]; next_after_id: string | null; next_before_id?: string | null; anchor_id?: string | null }>;
   // Chat Activity panel (GET /api/sessions/<id>/activity): summary of turn groups
   // for chips, and one group's rows for lazy expand. Only used when the
   // ``ui.show_agent_activity`` toggle is on (see lib/agentActivity).
@@ -725,8 +734,15 @@ export type ApiContextType = {
   removeQueuedMessage: (sessionId: string, messageId: string) => Promise<{ removed: boolean }>;
   sendQueuedNow: (sessionId: string, messageId: string) => Promise<{ ok: boolean; status?: string; code?: string; detail?: string }>;
   getTurnState: (sessionId: string, options?: { handleError?: boolean }) => Promise<SessionRuntimeState>;
+  getCachedSessionDraft: (sessionId: string) => string | null;
+  cacheSessionDraft: (sessionId: string, text: string) => void;
   getSessionDraft: (sessionId: string) => Promise<{ text: string }>;
   setSessionDraft: (sessionId: string, text: string) => Promise<{ ok: boolean }>;
+  reconcileSessionDraftAfterSend: (
+    sessionId: string,
+    draft: { text: string; updated_at: string | null },
+  ) => Promise<void>;
+  recoverSessionDraftAfterRejectedSend: (sessionId: string) => Promise<void>;
   listInbox: (params?: { platform?: string; unreadOnly?: boolean; limit?: number; before?: string; onlySession?: string; cache?: boolean; handleError?: boolean }) => Promise<InboxFeedResult>;
   connectWorkbenchEvents: (handlers: WorkbenchEventHandlers) => () => void;
   listVibeAgents: (params?: {
@@ -1257,9 +1273,22 @@ export type WorkbenchSessionBootstrap = {
   next_after_id: string | null;
   next_before_id?: string | null;
   queued: WorkbenchMessage[];
-  draft: { text: string };
+  draft: { text: string; updated_at: string | null };
   turn_state: SessionRuntimeState;
 };
+
+function sessionDraftServerState(payload: unknown): SessionDraftServerState {
+  const draft = payload && typeof payload === 'object'
+    ? payload as { text?: unknown; updated_at?: unknown }
+    : {};
+  return {
+    text: typeof draft.text === 'string' ? draft.text : '',
+    updatedAt: typeof draft.updated_at === 'string' ? draft.updated_at : null,
+  };
+}
+
+const SESSION_DRAFT_WRITE_TIMEOUT_MS = 12_000;
+const SESSION_DRAFT_RECONCILE_TIMEOUT_MS = 5_000;
 
 // One row of the per-session ("Slack-like") inbox feed from ``GET /api/inbox``.
 // Aggregated per session at query time: ``preview_text`` is the session's latest
@@ -1350,6 +1379,11 @@ export type HarnessDefinitionState = {
   // the window at all. Both age out on their own; neither is acknowledgment state.
   consecutive_failures: number;
   recent_failures: number;
+  // Watches separate waiter health above from the Agent Runs created by events.
+  // Tasks omit these because their execution is already the definition health.
+  processing_health?: HarnessDefinitionHealth | null;
+  processing_consecutive_failures?: number;
+  processing_recent_failures?: number;
 };
 
 export type HarnessTask = HarnessSessionSummary & HarnessDefinitionState & {
@@ -1374,6 +1408,10 @@ export type HarnessTask = HarnessSessionSummary & HarnessDefinitionState & {
   last_run_at: string | null;
   last_run_id: string | null;
   last_error: string | null;
+  resume_blocked?: {
+    code: string;
+    owner_session_id: string;
+  } | null;
   // Command tasks: a scheduled definition that runs a subprocess instead of
   // prompting an Agent. Non-null ``shell_command`` OR a non-empty ``command``
   // argv is what makes a row one (see ``taskIsCommand``); its ``prompt`` is
@@ -2396,8 +2434,21 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const eventConnectionStateRef = useRef<WorkbenchEventConnectionState>('reconnecting');
   const eventReconnectLoopRef = useRef<WorkbenchEventReconnectLoop | null>(null);
   const wakeWorkbenchEventsRef = useRef<() => void>(() => {});
+  const syncSessionDraftsRef = useRef<() => void>(() => {});
   const stopWorkbenchEventsRef = useRef<() => void>(() => {});
   const sessionArchivedHandlersRef = useRef(new Set<(sessionId: string) => void>());
+  const sessionDraftPersistence = useMemo(() => new SessionDraftPersistence(), []);
+
+  const convergeSessionArchived = (sessionId: string) => {
+    sessionDraftPersistence.clearSession(sessionId);
+    for (const handler of Array.from(sessionArchivedHandlersRef.current)) {
+      try {
+        handler(sessionId);
+      } catch (err) {
+        console.error('[API] session-archived subscriber failed', err);
+      }
+    }
+  };
 
   const handleApiError = async (res: Response, path: string) => {
     let errorMessage = `Request failed: ${path} (${res.status})`;
@@ -2437,13 +2488,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // must never change whether/what this handler throws.
     const archivedSessionId = archivedConflictSessionId(errorCode, path);
     if (archivedSessionId) {
-      for (const handler of Array.from(sessionArchivedHandlersRef.current)) {
-        try {
-          handler(archivedSessionId);
-        } catch (err) {
-          console.error('[API] session-archived subscriber failed', err);
-        }
-      }
+      convergeSessionArchived(archivedSessionId);
     }
 
     throw new ApiError(errorMessage, res.status, errorCode);
@@ -2629,6 +2674,9 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (!envelope) return;
       if (envelope.data.session_id) {
         clearSessionReadCache(envelope.data.session_id);
+        if (envelope.data.event === 'archived') {
+          sessionDraftPersistence.clearSession(envelope.data.session_id);
+        }
       } else {
         clearReadCacheMatching((path) => path.startsWith('/api/inbox') || path.startsWith('/api/sessions'));
       }
@@ -2779,11 +2827,14 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   useEffect(() => {
     const wakeIfVisible = () => {
-      if (document.visibilityState === 'visible') wakeWorkbenchEventsRef.current();
+      if (document.visibilityState !== 'visible') return;
+      wakeWorkbenchEventsRef.current();
+      syncSessionDraftsRef.current();
     };
     document.addEventListener('visibilitychange', wakeIfVisible);
     window.addEventListener('online', wakeIfVisible);
     window.addEventListener('focus', wakeIfVisible);
+    if (document.visibilityState === 'visible') syncSessionDraftsRef.current();
     return () => {
       document.removeEventListener('visibilitychange', wakeIfVisible);
       window.removeEventListener('online', wakeIfVisible);
@@ -2807,6 +2858,95 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       clearReadCache();
     }
     return { res, payloadJson };
+  };
+
+  const readSessionDraftServer = async (
+    sessionId: string,
+    timeoutMs = SESSION_DRAFT_RECONCILE_TIMEOUT_MS,
+  ): Promise<SessionDraftServerState | null> => {
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await apiFetch(
+        `/api/sessions/${encodeURIComponent(sessionId)}/draft`,
+        { signal: controller.signal },
+      );
+      if (!res.ok) return null;
+      return sessionDraftServerState(await res.json().catch(() => null));
+    } catch {
+      return null;
+    } finally {
+      window.clearTimeout(timeout);
+    }
+  };
+
+  const writeSessionDraft = async (
+    sessionId: string,
+    draft: SessionDraftWrite,
+  ): Promise<SessionDraftSaveResult> => {
+    const controller = new AbortController();
+    let timedOut = false;
+    const timeout = window.setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, SESSION_DRAFT_WRITE_TIMEOUT_MS);
+    try {
+      const { res, payloadJson } = await requestJson(
+        `/api/sessions/${encodeURIComponent(sessionId)}/draft`,
+        {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            text: draft.text,
+            expected_updated_at: draft.expectedUpdatedAt,
+          }),
+          signal: controller.signal,
+        },
+        `/api/sessions/${sessionId}/draft`,
+        { handleError: false },
+      );
+      const hasServerDraft = payloadJson?.draft && typeof payloadJson.draft === 'object';
+      const server = sessionDraftServerState(payloadJson?.draft);
+      if (res.status === 409 && payloadJson?.code === 'draft_conflict') {
+        return { ok: false, conflict: true, server };
+      }
+      return res.ok
+        ? { ok: true, ...(hasServerDraft ? { server } : {}) }
+        : { ok: false };
+    } catch (error) {
+      if (!timedOut) throw error;
+      // The request may have committed before its response stalled. Reconcile
+      // once before releasing queued successors so they inherit the actual
+      // cloud revision instead of manufacturing a conflict from uncertainty.
+      const server = await readSessionDraftServer(sessionId);
+      if (!server) return { ok: false };
+      if (server.text === draft.text) return { ok: true, server };
+      return server.updatedAt !== draft.expectedUpdatedAt
+        ? { ok: false, conflict: true, server }
+        : {
+            ok: false,
+            server,
+            // The abort only stops waiting for the response; the synchronous
+            // server transaction may still commit. If the queued successor
+            // conflicts specifically with this text, rebase and retry once.
+            retryConflictIfServerText: draft.text,
+          };
+    } finally {
+      window.clearTimeout(timeout);
+    }
+  };
+  const rebaseAndRetrySessionDraft = async (
+    sessionId: string,
+    server: SessionDraftServerState,
+  ): Promise<void> => {
+    sessionDraftPersistence.rebase(sessionId, server);
+    await sessionDraftPersistence.retry(
+      sessionId,
+      (draft) => writeSessionDraft(sessionId, draft),
+    );
+  };
+  syncSessionDraftsRef.current = () => {
+    void sessionDraftPersistence.retryAll(writeSessionDraft);
   };
 
   const postJson = async (path: string, payload: any, opts?: { handleError?: boolean }) => {
@@ -3221,8 +3361,28 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         session: res.ok && payload && typeof payload.id === 'string' ? payload : null,
       };
     },
-    getSessionBootstrap: (sessionId) =>
-      getJson(`/api/sessions/${encodeURIComponent(sessionId)}/bootstrap`),
+    getSessionBootstrap: async (sessionId) => {
+      const read = sessionDraftPersistence.beginRead(sessionId);
+      try {
+        const payload = await getJson(`/api/sessions/${encodeURIComponent(sessionId)}/bootstrap`);
+        if (payload?.session?.status === 'archived') {
+          sessionDraftPersistence.clearSession(sessionId);
+          return payload;
+        }
+        const server = sessionDraftServerState(payload?.draft);
+        const text = sessionDraftPersistence.reconcileRead(sessionId, read, server);
+        void sessionDraftPersistence.retry(
+          sessionId,
+          (draft) => writeSessionDraft(sessionId, draft),
+        );
+        return text === server.text
+          ? payload
+          : { ...payload, draft: { ...(payload.draft ?? {}), text } };
+      } catch (error) {
+        sessionDraftPersistence.releaseRead(sessionId, read);
+        throw error;
+      }
+    },
     updateSession: async (sessionId, payload) => {
       const { payloadJson } = await requestJson(`/api/sessions/${encodeURIComponent(sessionId)}`, {
         method: 'PATCH',
@@ -3231,7 +3391,12 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }, `PATCH /api/sessions/${sessionId}`);
       return payloadJson;
     },
-    archiveSession: (sessionId) => deleteJson(`/api/sessions/${encodeURIComponent(sessionId)}`),
+    archiveSession: async (sessionId) => {
+      const payload = await deleteJson(`/api/sessions/${encodeURIComponent(sessionId)}`);
+      sessionDraftPersistence.clearSession(sessionId);
+      return payload;
+    },
+    convergeSessionArchived,
     onSessionArchived,
     getArchivePreview: (sessionId) =>
       getJson(`/api/sessions/${encodeURIComponent(sessionId)}/archive-preview`),
@@ -3240,6 +3405,10 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (params?.afterId) search.set('after_id', params.afterId);
       if (params?.beforeId) search.set('before_id', params.beforeId);
       if (params?.aroundId) search.set('around_id', params.aroundId);
+      if (params?.aroundNativeId) search.set('around_native_id', params.aroundNativeId);
+      if (params?.aroundNativePlatform) search.set('around_native_platform', params.aroundNativePlatform);
+      if (params?.aroundTurnId) search.set('around_turn_id', params.aroundTurnId);
+      if (params?.aroundRunId) search.set('around_run_id', params.aroundRunId);
       if (params?.limit) search.set('limit', String(params.limit));
       if (params?.tail) search.set('tail', '1');
       const qs = search.toString();
@@ -3316,14 +3485,40 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
       return res.json();
     },
-    getSessionDraft: (sessionId) => getCachedJson(`/api/sessions/${encodeURIComponent(sessionId)}/draft`),
-    setSessionDraft: async (sessionId, text) => {
-      const { res, payloadJson } = await requestJson(`/api/sessions/${encodeURIComponent(sessionId)}/draft`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text }),
-      }, `/api/sessions/${sessionId}/draft`, { handleError: false });
-      return res.ok ? payloadJson : { ok: false };
+    getCachedSessionDraft: (sessionId) => sessionDraftPersistence.peek(sessionId),
+    cacheSessionDraft: (sessionId, text) => sessionDraftPersistence.cache(sessionId, text),
+    getSessionDraft: async (sessionId) => {
+      const read = sessionDraftPersistence.beginRead(sessionId);
+      try {
+        const payload = await getJson(`/api/sessions/${encodeURIComponent(sessionId)}/draft`);
+        const server = sessionDraftServerState(payload);
+        const text = sessionDraftPersistence.reconcileRead(sessionId, read, server);
+        void sessionDraftPersistence.retry(
+          sessionId,
+          (draft) => writeSessionDraft(sessionId, draft),
+        );
+        return { text };
+      } catch (error) {
+        sessionDraftPersistence.releaseRead(sessionId, read);
+        throw error;
+      }
+    },
+    setSessionDraft: (sessionId, text) => sessionDraftPersistence.save(
+      sessionId,
+      text,
+      (draft) => writeSessionDraft(sessionId, draft),
+    ),
+    reconcileSessionDraftAfterSend: (sessionId, draft) => (
+      rebaseAndRetrySessionDraft(sessionId, sessionDraftServerState(draft))
+    ),
+    recoverSessionDraftAfterRejectedSend: async (sessionId) => {
+      // The message reservation clears the cloud draft before dispatch. A
+      // rejected/unknown dispatch therefore needs an authoritative revision
+      // before the composer's optimistic text restoration is replayed.
+      sessionDraftPersistence.markRejectedSend(sessionId);
+      const server = await readSessionDraftServer(sessionId);
+      if (!server) return;
+      await rebaseAndRetrySessionDraft(sessionId, server);
     },
     listInbox: (params) => {
       const search = new URLSearchParams();
@@ -3616,7 +3811,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     getAuthSession: () => getJson('/api/session'),
     signOut: () => postJson('/auth/logout', {}),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [showToast, t]);
+  }), [sessionDraftPersistence, showToast, t]);
 
   return <ApiContext.Provider value={value}>{children}</ApiContext.Provider>;
 };

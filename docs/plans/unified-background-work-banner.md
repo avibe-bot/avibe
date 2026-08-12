@@ -18,15 +18,22 @@ The banner's source of truth is a **union assembled at runtime-state build time*
 2. **Harness items** — derived LIVE from the durable store at assembly time, never duplicated
    into the registry (a watch survives restarts; the registry does not — deriving from the DB
    keeps the banner correct-by-construction after a restart):
-   - enabled watches whose callback session is this session;
-   - pending/scheduled tasks targeting this session;
-   - running/queued delegated agent runs whose callback returns to this session (work this
-     session dispatched and is waiting on).
+   - enabled watches whose callback targets this session;
+   - pending/scheduled tasks managed by this session; the task definition's
+     creation provenance (`metadata_json.created_by.caller.session_id`) is
+     authoritative, with its bound execution `session_id` used only as a
+     fallback for legacy tasks without provenance;
+   - active delegated agent runs whose callback returns to this session (work this session
+     dispatched and is waiting on). A linked Delivery still in the FIFO `queued` state is
+     presented as queued even when its executor Run has already moved to `running`. Accepted
+     Deliveries that share one target Turn project as one running item, represented by the
+     Delivery with the greatest `turn_position`; queued Deliveries remain separate items.
 
 Each unified item carries: `kind` (`backend_activity` | `watch` | `task` | `agent_run`),
 `label` (watch name / task summary / target agent + short message head / activity description),
 `since` timestamp, and a stable id. Task items also carry the durable `schedule_type` (`at` |
-`cron`) used for display classification. The banner count = union size. No controls
+`cron`) used for display classification. The banner count = projected union size after the
+accepted-Turn collapse. No controls
 (pause/cancel) in this phase — the expanded list links to the Harness page (watches/tasks) or
 run detail.
 
@@ -46,8 +53,9 @@ run detail.
   state payload (search `background_activities` producers in core/vibe; ChatPage consumes
   `runtimeState.background_activities` at ui/src/components/workbench/ChatPage.tsx ~1632).
 - Registry: `core/session_activities.py` (`SessionActivity`, `SessionActivityRegistry`).
-- Harness state: `run_definitions` (watches), scheduled tasks store, `agent_runs`
-  (status running/queued, callback lineage) — read-only queries.
+- Harness state: `run_definitions` (watches), scheduled tasks store, `agent_runs` (executor
+  status and callback lineage), and linked `message_deliveries` (FIFO queue status) — read-only
+  queries.
 - Banner UI: ChatPage banner block (~1626-1670) + `chat.activities.*` i18n keys.
 
 ## Owner design review (2026-07-16 21:15) — five requirements folded in
@@ -61,12 +69,15 @@ run detail.
 3. **Length discipline.** The pill has a max width (~420px); the first-item summary truncates
    with ellipsis; the count badge is always visible. The expanded list has a max height
    (~340px ≈ 5 rows); more items scroll inside the popover.
-4. **Row navigation = Harness with an automatic SESSION filter.** Clicking a Watch/task row
-   opens the Harness page's matching tab with a session filter applied (route param, e.g.
-   `?session=<id>`), shown as a removable chip ("仅看:本会话") — WITHOUT the filter the page
-   would show everything, which is wrong coming from a session context. A delegated-run row
-   opens the runs view similarly filtered/anchored to that run. **This adds Harness-page scope:
-   the route param + filter chip + filtered queries are part of this PR** (declare the files).
+4. **Row navigation = Harness with an automatic OWNER filter.** Clicking a Watch/task row
+   opens the Harness page's matching tab with the originating Session's filter applied (route
+   param, e.g. `?session=<id>`), shown as a removable chip ("仅看:本会话") — WITHOUT the
+   filter the page would show everything, which is wrong coming from a session context. The
+   filtered Task query uses the same owner-first rule as the banner, so per-run and pure
+   command definitions remain discoverable even without a bound execution Session; Watch
+   filtering continues to use its callback target. A delegated-run row opens the runs view
+   similarly filtered/anchored to that run. **This adds Harness-page scope: the route param +
+   filter chip + filtered queries are part of this PR** (declare the files).
 5. Ordering inside the popover: active/running first, then by start time descending.
 
 ## Non-goals (this phase)

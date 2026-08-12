@@ -82,6 +82,9 @@ class ModelHubRemoteService:
     def list_sources(self) -> list[dict]:
         return _rpc_sync("list_sources")
 
+    async def observe_source(self, payload: dict) -> dict:
+        return await _rpc("observe_source", {"observation": payload})
+
     async def create_source(self, payload: dict) -> dict:
         return await _rpc("create_source", {"source": payload})
 
@@ -100,12 +103,11 @@ class ModelHubRemoteService:
             {"source_id": source_id, "reauth": payload},
         )
 
-    async def delete_source(self, source_id: str, *, force: bool = False) -> None:
-        await _rpc("delete_source", {"source_id": source_id, "force": force})
+    async def delete_source(self, source_id: str, *, force: bool = False) -> dict:
+        return await _rpc("delete_source", {"source_id": source_id, "force": force})
 
-    async def refresh_source(self, source_id: str) -> tuple[dict, int]:
-        result = await _rpc("refresh_source", {"source_id": source_id})
-        return result["source"], result["discovered"]
+    async def refresh_source(self, source_id: str, *, force: bool = False) -> dict:
+        return await _rpc("refresh_source", {"source_id": source_id, "force": force})
 
     def list_agents(self) -> list[dict]:
         return _rpc_sync("list_agents")
@@ -122,19 +124,42 @@ class ModelHubRemoteService:
     async def set_agent_mode(self, backend: str, mode: object) -> dict:
         return await _rpc("set_agent_mode", {"backend": backend, "mode": mode})
 
-    async def set_mappings(self, backend: str, mappings: object) -> dict:
-        return await _rpc("set_mappings", {"backend": backend, "mappings": mappings})
+    async def set_agent_chain(self, backend: str, model_id: str, chain: object) -> dict:
+        return await _rpc(
+            "set_agent_chain",
+            {"backend": backend, "model_id": model_id, "chain": chain},
+        )
 
     async def set_opencode_menu(self, menu: object) -> dict:
         return await _rpc("set_opencode_menu", {"menu": menu})
 
-    async def add_custom_model(self, payload: dict) -> dict:
-        return await _rpc("add_custom_model", {"model": payload})
+    async def add_custom_model(self, source_id: object, payload: dict) -> dict:
+        return await _rpc(
+            "add_custom_model",
+            {"source_id": source_id, "model": payload},
+        )
 
-    async def delete_custom_model(self, source_id: object, model_id: object) -> dict:
+    async def update_model_reasoning_efforts(
+        self,
+        source_id: object,
+        model_id: object,
+        payload: dict,
+    ) -> dict:
+        return await _rpc(
+            "update_model_reasoning_efforts",
+            {"source_id": source_id, "model_id": model_id, "model": payload},
+        )
+
+    async def delete_custom_model(
+        self,
+        source_id: object,
+        model_id: object,
+        *,
+        force: bool = False,
+    ) -> dict:
         return await _rpc(
             "delete_custom_model",
-            {"source_id": source_id, "model_id": model_id},
+            {"source_id": source_id, "model_id": model_id, "force": force},
         )
 
     def list_events(self, *, limit: int = 20, before: Optional[str] = None) -> list[dict]:

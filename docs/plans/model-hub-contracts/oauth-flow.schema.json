@@ -5,17 +5,22 @@
   "description": "Subscription-connect flow state. RUNTIME-DECLARED presentation (S1 gap ③): the server declares what to show and what it expects back; the UI renders declaratively and never keys off a vendor→form table. UI shell semantics mirror the existing BackendOAuthPanel (2s poll, 15-min timeout, cancel). Forms A/B/C from spec §5 frame 09 are presentation patterns the declaration composes: A = auth_url + expects paste_code; B = auth_url + device_code + expects none; C = auth_url + expects paste_callback_url. Under Option 1, native_cli subscription connect drives the CLI's own login through this same shape.",
   "$comment": "Owner-approved channel class audit: this is the user-facing presentation wire, not the service-side OAuthFlowState seam. `credential_ref`, `retained_material_disposition`, and `retained_credential_ref` are deliberately excluded because only the service repair consumer acts on them; no UI or wire consumer does. Both channel branches still expose `channel`, and source-bound create/reauth flows carry `source_id`. Evidence at master 05f72ae5: core/handlers/model_hub/native_oauth.py:252-289 produces native success with no engine credential ref, while the HTTP projection publishes presentation fields rather than adapter refs.",
   "type": "object",
-  "required": ["flow_id", "vendor", "channel", "state", "presentation"],
+  "required": ["flow_id", "intent", "source_id", "vendor", "channel", "state", "presentation", "error_key", "expires_at"],
   "additionalProperties": false,
   "properties": {
     "flow_id": { "type": "string" },
+    "client_nonce": {
+      "type": "string",
+      "pattern": "^ofn_[a-z0-9]{16,64}$",
+      "description": "Optional client-generated OAuth-start correlation echoed from the start request. Before provider work the server atomically claims the exact (client_nonce, vendor, channel) tuple; concurrent retries coalesce to its one pending start and terminal result. Provider failure or task cancellation before a flow exists releases the claim after cleanup, while success atomically converts it to the one OAuthFlow returned by every retry until its existing expires_at. Explicit cancellation retains that committed flow with state cancelled until expiry and starts no provider on a same-tuple retry."
+    },
     "intent": {
       "enum": ["create", "reauth"],
-      "description": "v2 (07-29, review round 6), extended by the channel class pass: what this flow is FOR, and therefore what its terminal success response carries — `create` → `{flow, source, adopted_by, skipped_by}`, `reauth` → `{flow, source, recovered, interrupted_pairs}` (api.md → OAuth completion responses). Round 5 defined neither, which left the two creation paths inconsistent: `POST /sources` closed the 「so what now?」 loop with an adoption result while the OAuth door — the default way a subscription is added — returned only flow state. Declared as a field rather than inferred, for two reasons. `source_id` cannot discriminate: both channel branches and both intents bind a pending or existing source. And the alternative — the client remembering which button it pressed — makes the response shape a function of client state instead of of the payload, which is exactly how a poll that arrives after a page reload ends up parsed as the wrong shape. OPTIONAL here, REQUIRED at the API boundary from v2 on (README → required-vs-optional): the shipped flow payloads are validated against this file by tests/test_model_hub_api.py and predate the field, so a `required` would fail the contract gate instead of tightening it."
+      "description": "The flow intent determines its successful terminal response: create returns `{flow, source, added_to, adopted_by}`; reauth returns `{flow, source, recovered, interrupted_pairs}`. A local terminal materialization error instead uses the standard error envelope; only a nonempty acquisition-stage interruption report adds `interrupted_pairs`. Intent is explicit because source_id cannot distinguish create from reauth and clients must not infer response shape from remembered UI state."
     },
-    "source_id": { "type": ["string", "null"], "description": "v1.1: pending Source this flow binds to (deterministic association). Both hub and native_cli Model Hub create/reauth flows set it; null remains legal only for legacy presentation payloads." },
+    "source_id": { "type": ["string", "null"], "description": "Pending or existing Source this flow binds to. Both hub and native_cli create/reauth flows set it; null is reserved for presentation-only flows outside Model Hub." },
     "vendor": { "type": "string" },
-    "channel": { "enum": ["native_cli", "hub"], "description": "where the resulting credential will live; hub-held subscriptions only behind the consent-gated experimental flag (S2)" },
+    "channel": { "enum": ["native_cli", "hub"], "description": "Where the resulting credential lives. Claude recommends native_cli; ChatGPT recommends hub; both explicit alternatives remain legal. Hub-held subscriptions require no feature flag or consent record." },
     "state": { "enum": ["starting", "awaiting_action", "verifying", "success", "failed", "cancelled"] },
     "presentation": {
       "type": "object",
@@ -29,11 +34,24 @@
       }
     },
     "error_key": { "type": ["string", "null"], "description": "i18n key; raw upstream errors never surface" },
-    "expires_at": { "type": ["string", "null"], "format": "date-time" }
+    "expires_at": { "type": ["string", "null"], "format": "date-time", "description": "Flow expiry. A flow without client_nonce may use null for ordinary or presentation-only lifetime handling; a nonce-bearing flow always carries a non-null date-time that bounds reconciliation and retained cancellation." }
   },
+  "allOf": [
+    {
+      "if": { "required": ["client_nonce"] },
+      "then": {
+        "properties": {
+          "expires_at": { "type": "string", "format": "date-time" }
+        }
+      }
+    }
+  ],
   "examples": [
     {
       "flow_id": "oaf_claude01",
+      "client_nonce": "ofn_01j5w8z7p4n6q2rt",
+      "intent": "create",
+      "source_id": "src_claudepro1",
       "vendor": "anthropic",
       "channel": "native_cli",
       "state": "awaiting_action",

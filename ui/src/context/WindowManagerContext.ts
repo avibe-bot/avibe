@@ -35,11 +35,13 @@ export interface OpenAppOptions {
 
 export interface WindowManagerValue {
   windows: WindowInstance[];
-  /** The current top window id (highest z, not minimized), or null. */
+  /** The app window that owns foreground focus, or null while the canvas owns it. */
   focusedId: string | null;
   openApp: (appId: AppId, opts?: OpenAppOptions) => string;
   close: (id: string) => void;
   focus: (id: string) => void;
+  /** Return foreground focus to the workbench canvas without hiding windows. */
+  focusCanvas: () => void;
   minimize: (id: string) => void;
   /** Un-minimize and bring to front. */
   restore: (id: string) => void;

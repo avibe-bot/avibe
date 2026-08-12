@@ -1619,6 +1619,12 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Watches created from an Avibe Agent shell follow up in this conversation by default", prompt)
         self.assertIn("`vibe watch add` creates a managed monitor", prompt)
         self.assertIn("product signals, business events, files, logs, CI/reviews/deploys", prompt)
+        self.assertIn("exit `0` only for one NEW reportable event", prompt)
+        self.assertIn("default `75`) keeps either a once or forever Watch waiting", prompt)
+        self.assertIn("it retires a once Watch and re-arms a forever Watch", prompt)
+        self.assertIn("must therefore return an allowed retry code, not `64`", prompt)
+        self.assertIn("waits five seconds after a follow-up settles before re-arming", prompt)
+        self.assertIn("six successful events within 60 seconds", prompt)
         delegate_guidance = (
             "Use `vibe agent run --agent <agent-name> --message ...` when one Agent delegates work to another Agent. "
             "By default this creates a background Session in the caller's scope and returns immediately; when the run "
@@ -1642,7 +1648,7 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             prompt,
         )
         self.assertIn(
-            "Both forms work for Workbench and IM Sessions",
+            "Both commands work for Workbench and IM Sessions",
             prompt,
         )
         self.assertIn(
@@ -1666,19 +1672,19 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             prompt,
         )
         self.assertIn(
-            "persist the new Run at P3 and then promote the exact FIFO head through P1",
+            "explicitly selects that same content-bearing P1 behavior",
             prompt,
         )
         self.assertIn(
-            "the new message never leapfrogs it",
+            "it does not promote an older queued message",
             prompt,
         )
         self.assertIn(
-            "the same exact-head P1 promotion without adding a Message",
+            "this content-free P1 promotes the exact existing FIFO head",
             prompt,
         )
         self.assertIn(
-            "the promoted head steers that same logical/native Turn",
+            "that head steers the same logical/native Turn",
             prompt,
         )
         self.assertIn(

@@ -18,6 +18,7 @@ import type {
 import {
   DetailSession,
   HealthBadge,
+  ProcessingHealthBadge,
   RunDetail,
   RunTriggerChip,
   TaskDetail,
@@ -435,6 +436,34 @@ describe('HealthBadge', () => {
   });
 });
 
+describe('ProcessingHealthBadge', () => {
+  it('names a failed Watch follow-up without reporting the waiter as failed', () => {
+    const row = watch({
+      health: 'healthy',
+      consecutive_failures: 0,
+      recent_failures: 0,
+      processing_health: 'failing',
+      processing_consecutive_failures: 2,
+      processing_recent_failures: 2,
+    });
+
+    expect(render(<HealthBadge row={row} />)).toBe('');
+    const html = render(<ProcessingHealthBadge row={row} />);
+    expect(html).toContain(`>${i18n.t('harness.processingHealth.failing')} 2<`);
+    expect(html).toContain('text-pink');
+  });
+
+  it('stays quiet when event processing is healthy', () => {
+    expect(render(<ProcessingHealthBadge row={watch({ processing_health: 'healthy' })} />)).toBe('');
+  });
+
+  it('surfaces an unreadable downstream verdict without inventing a count', () => {
+    const html = render(<ProcessingHealthBadge row={watch({ processing_health: 'unknown' })} />);
+    expect(html).toContain(`>${i18n.t('harness.processingHealth.unknown')}<`);
+    expect(html).toContain('text-muted');
+  });
+});
+
 describe('TaskKindBadge', () => {
   it('marks a command task, so the list distinguishes it from a message task', () => {
     const label = i18n.t('harness.taskKind.command');
@@ -510,6 +539,23 @@ describe('TaskDetail command task', () => {
 
     expect(html).toContain(i18n.t('harness.detail.sessionNone'));
     expect(html).not.toContain('/chat/');
+  });
+
+  it('localizes an orphan-owner pause reason stored as a machine code', () => {
+    const html = detail(
+      task({
+        enabled: false,
+        lifecycle_state: 'paused',
+        resume_blocked: {
+          code: 'task_owner_session_unavailable',
+          owner_session_id: 'ses-removed',
+        },
+      }),
+    );
+
+    expect(html).toContain(`>${i18n.t('harness.detail.pauseReason')}<`);
+    expect(html).toContain(i18n.t('harness.taskPauseReason.ownerSessionUnavailable'));
+    expect(html).not.toContain('task_owner_session_unavailable');
   });
 
   it('drops the Agent routing a pure command task deliberately has none of', () => {
@@ -778,6 +824,19 @@ describe('WatchDetail runtime', () => {
     if (expected.line) expect(html).toContain(expected.line);
     else expect(html).not.toContain('process exited');
     if (expected.pid) expect(html).toContain(expected.pid);
+  });
+
+  it('keeps unknown event-processing health visible in the detail pane', () => {
+    const html = render(
+      <WatchDetail
+        watch={watch({ processing_health: 'unknown' })}
+        onToggleEnabled={() => undefined}
+        pending={false}
+      />,
+    );
+
+    expect(html).toContain(`>${i18n.t('harness.detail.eventProcessing')}<`);
+    expect(html).toContain(`>${i18n.t('harness.processingHealth.unknown')}<`);
   });
 });
 

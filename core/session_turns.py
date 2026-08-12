@@ -15,6 +15,7 @@ owners for live tasks and streaming only.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import uuid
@@ -28,7 +29,10 @@ from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import IntegrityError
 
 from core.web_push_notifications import WEB_PUSH_USER_KEY_METADATA, WEB_PUSH_USER_KEYS_METADATA
-from core.message_context import resolve_turn_sink_key
+from core.message_context import (
+    SCHEDULED_DISPATCH_METADATA_APPLIED_KEY,
+    resolve_turn_sink_key,
+)
 from core.native_dispatch_phase import backend_dispatch_attempted
 from core.run_settlement import (
     NON_COMPLETING_TURN_SETTLEMENTS,
@@ -40,11 +44,13 @@ from core.run_settlement import (
     SETTLED_BY_STOPPED,
     SETTLED_BY_TERMINAL_RESULT,
 )
+from core.processing_indicator import INTERRUPTED_REACTION_EMOJI
 from core.services.dispatch import SOURCE_HUMAN, SOURCE_SCHEDULED, dispatch_turn_with_outcome
 from core.services.agent_steering import (
     SteerOutcome,
     SteerReconcileRequest,
     SteerRequest,
+    SteerResult,
     active_steer_identity,
     reconcile_steer_attempt,
     result as steer_result,
@@ -54,7 +60,12 @@ from storage import messages_service
 from storage import message_deliveries as delivery_store
 from storage.agent_session_rows import reserve_write_lock
 from storage.db import get_cached_sqlite_engine
-from storage.background import normalize_run_status
+from storage.background import (
+    OWED_FAILURE_NOTICE_KEY,
+    apply_live_agent_run_cancellation_in_connection,
+    normalize_run_status,
+    run_update_event_transaction,
+)
 from storage.session_reclaim import reconcile_explicit_overrides
 from storage.models import (
     agent_runs,
@@ -102,6 +113,29 @@ class SessionTurnLifecycleBusyError(RuntimeError):
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _accepted_steer_receipt(delivery: dict[str, Any]) -> SteerResult:
+    """Rebuild a typed accepted receipt from durable evidence."""
+
+    try:
+        payload = json.loads(str(delivery.get("current_receipt_json") or "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    details = payload.get("details")
+    if not isinstance(details, dict):
+        details = {}
+    return steer_result(
+        SteerOutcome.ACCEPTED,
+        reason=(
+            str(payload.get("reason"))
+            if payload.get("reason") is not None
+            else None
+        ),
+        **details,
+    )
 
 
 def _turn_event_payload(session_id: str, turn_id: str | None = None) -> dict[str, str]:
@@ -320,10 +354,14 @@ def _scheduled_merge_key(row: dict[str, Any]) -> Optional[tuple[str, ...]]:
             or spec.get(SCHEDULED_TARGET_AGENT_KEY)
             or ""
         )
+    source_session_id = str(spec.get("source_session_id") or "").strip()
+    if not source_session_id and str(spec.get("source_kind") or "").strip() == "agent":
+        source_session_id = str(spec.get("source_actor") or "").strip()
     return (
         trigger_kind,
         definition_id,
         stable_agent_key,
+        source_session_id,
         str(spec.get("delivery_key_external") or ""),
         str(spec.get("delivery_scope_session_key") or ""),
         str(delivery_override.get("platform") or ""),
@@ -485,6 +523,9 @@ class DeliveryRequest:
     delivery_id: str | None = None
     expected_delivery_id: str | None = None
     expected_turn_id: str | None = None
+    # Run-level cancellation may interrupt a backend only when this exact Run is
+    # still the Turn's sole initial input.  Checked under the P0 writer lock.
+    expected_exclusive_agent_run_id: str | None = None
     scope_id: str | None = None
     platform: str = "avibe"
     source: str = "user"
@@ -558,6 +599,12 @@ class SessionTurnManager:
     lives in ``internal_server``).
     """
 
+    # Backoff for re-sending an interruption notice the transport claimed to be
+    # ready for and then failed to deliver. Short enough to catch a blip, long
+    # enough that a hard outage does not spin; a class attribute so tests can
+    # shrink it instead of sleeping.
+    LOST_TURN_RETRY_DELAYS: tuple[float, ...] = (5.0, 30.0, 120.0)
+
     def __init__(
         self,
         controller: Any = None,
@@ -572,6 +619,11 @@ class SessionTurnManager:
         self._deferred_restart_sessions: dict[str, set[str]] = {}
         self._queue_recovery_locks: dict[str, asyncio.Lock] = {}
         self._session_lifecycle_locks: dict[str, asyncio.Lock] = {}
+        # Interruption reports owed to turns whose platform was not connected yet
+        # when recovery ran, keyed by platform. See ``_report_lost_im_turn``.
+        self._pending_lost_turn_reports: dict[str, list[tuple[str, str]]] = {}
+        # One in-flight retry task per platform for the reports above.
+        self._lost_turn_retry_tasks: dict[str, asyncio.Task[None]] = {}
         # The live turn sink per TURN SINK KEY. Each is
         # ``{on_chunk, done_event, turn_token}`` — the turn's stream callback +
         # completion event + correlation token. Every dispatched turn registers one,
@@ -695,7 +747,15 @@ class SessionTurnManager:
         run_ids: set[str] | list[str],
         turn: dict[str, Any],
     ) -> None:
-        normalized = sorted({str(run_id) for run_id in run_ids if str(run_id).strip()})
+        turn_id = str(turn.get("id") or "").strip()
+        durable_ids = self.accepted_agent_run_ids_for_turn(turn_id) if turn_id else []
+        normalized = sorted(
+            {
+                str(run_id)
+                for run_id in [*run_ids, *durable_ids]
+                if str(run_id).strip()
+            }
+        )
         if not normalized:
             return
         service = (
@@ -1040,6 +1100,52 @@ class SessionTurnManager:
         if self._build_context is None:
             raise RuntimeError("Session delivery context builder is not bound")
         return self._build_context(session_id)
+
+    async def prepare_scheduled_dispatch(
+        self,
+        context: "MessageContext",
+        text: str,
+        *,
+        delivery: Optional[dict[str, Any]] = None,
+        decorate: bool = True,
+    ) -> str:
+        """Restore scheduled provenance and optionally decorate backend text."""
+        if delivery is not None:
+            self._restore_scheduled_dispatch_context(context, delivery)
+        if not decorate:
+            return text
+        spec = dict(getattr(context, "platform_specific", None) or {})
+        if spec.get(SCHEDULED_DISPATCH_METADATA_APPLIED_KEY):
+            return text
+        handler = getattr(self.controller, "message_handler", None)
+        decorator = getattr(handler, "_prepend_message_metadata", None)
+        if not callable(decorator) or not inspect.iscoroutinefunction(decorator):
+            return text
+        return await decorator(context, text, include_user_info=False)
+
+    @staticmethod
+    def _restore_scheduled_dispatch_context(
+        context: "MessageContext",
+        delivery: dict[str, Any],
+    ) -> None:
+        payload = delivery_store.delivery_payload(delivery)
+        provenance = (payload.get("metadata") or {}).get(SCHEDULED_PROVENANCE_KEY)
+        preserved = (
+            provenance.get("platform_specific")
+            if isinstance(provenance, dict)
+            else None
+        )
+        if not isinstance(preserved, dict):
+            return
+        spec = dict(getattr(context, "platform_specific", None) or {})
+        spec.update(
+            {
+                key: value
+                for key, value in preserved.items()
+                if key not in _EXECUTION_ROUTING_KEYS
+            }
+        )
+        context.platform_specific = spec
 
     @staticmethod
     def _apply_delivery_binding_provenance(
@@ -1825,6 +1931,71 @@ class SessionTurnManager:
         return delivery
 
     @classmethod
+    def _terminalize_detached_run_replacement(
+        cls,
+        conn: Connection,
+        *,
+        run_id: str,
+        session_id: str,
+        current: dict[str, Any],
+    ) -> bool:
+        """Give the Turn owner sole authority to terminalize a canceled successor."""
+
+        if current.get("control_mode") != "replace" or current.get(
+            "control_state"
+        ) not in {
+            "pending",
+            "interrupting",
+            "waiting_terminal",
+            "reconciling",
+        }:
+            return False
+        run = conn.execute(
+            select(agent_runs.c.status, agent_runs.c.delivery_id)
+            .where(agent_runs.c.id == run_id)
+            .where(agent_runs.c.session_id == session_id)
+            .limit(1)
+        ).mappings().first()
+        successor_delivery_id = str(
+            current.get("control_successor_delivery_id") or ""
+        )
+        successor_turn_id = str(current.get("control_successor_turn_id") or "")
+        if (
+            run is None
+            or normalize_run_status(run["status"]) not in {"queued", "running"}
+            or str(run["delivery_id"] or "") != successor_delivery_id
+            or not successor_turn_id
+        ):
+            return False
+        successor = delivery_store.get_turn(conn, successor_turn_id)
+        successor_delivery = delivery_store.get_delivery(
+            conn,
+            successor_delivery_id,
+        )
+        if (
+            successor is None
+            or successor["session_id"] != session_id
+            or successor["state"] != "waiting"
+            or successor["initial_delivery_id"] != successor_delivery_id
+            or successor_delivery is None
+            or successor_delivery["session_id"] != session_id
+            or successor_delivery["state"] != "interrupt_waiting"
+            or successor_delivery["turn_id"] != successor_turn_id
+            or successor_delivery["turn_role"] != "initial"
+        ):
+            return False
+        terminalized = cls._write_terminal_snapshot(
+            conn,
+            successor_turn_id,
+            outcome="not_written",
+            settled_by="agent_run_canceled",
+            evidence_kind="replacement_run_canceled",
+        )
+        if not terminalized.get("changed"):
+            raise RuntimeError("replacement Run cancellation lost Turn authority")
+        return True
+
+    @classmethod
     def _retire_delivery_not_written(
         cls,
         conn: Connection,
@@ -2604,13 +2775,22 @@ class SessionTurnManager:
                 attempted_turn_id=turn_id,
             )
         elif delivery["state"] == "steering" and turn_id and attempt_id and native_id:
+            raw_steer_text = str(delivery.get("dispatch_text") or "")
+            if request.source == "harness" or _scheduled_provenance(delivery) is not None:
+                steer_text = await self.prepare_scheduled_dispatch(
+                    context,
+                    raw_steer_text,
+                    delivery=delivery,
+                )
+            else:
+                steer_text = raw_steer_text
             receipt = await self._attempt_steer(
                 steer_backend,
                 SteerRequest(
                     target_session_id=request.session_id,
                     expected_logical_turn_id=turn_id,
                     expected_native_turn_id=native_id,
-                    text=str(delivery.get("dispatch_text") or ""),
+                    text=steer_text,
                     attempt_id=attempt_id,
                 ),
             )
@@ -2776,13 +2956,18 @@ class SessionTurnManager:
                 attempted_turn_id=turn_id,
             )
         elif leader["state"] == "steering" and turn_id and attempt_id and native_id:
+            steer_text = await self.prepare_scheduled_dispatch(
+                context,
+                dispatch_text,
+                delivery=leader,
+            ) if _scheduled_provenance(leader) is not None else dispatch_text
             receipt = await self._attempt_steer(
                 steer_backend,
                 SteerRequest(
                     target_session_id=session_id,
                     expected_logical_turn_id=turn_id,
                     expected_native_turn_id=native_id,
-                    text=dispatch_text,
+                    text=steer_text,
                     attempt_id=attempt_id,
                 ),
             )
@@ -2860,17 +3045,12 @@ class SessionTurnManager:
                     ):
                         terminal_target = target_turn
                 if outcome_value == SteerOutcome.UNKNOWN.value:
-                    unknown_rows = [
-                        row
-                        if row["state"] == "reconciling_steer"
-                        else delivery_store.mark_attempt_unknown(
-                            conn,
-                            str(row["id"]),
-                            expected_version=int(row["version"]),
-                            receipt=body,
-                        )
-                        for row in attempt_rows
-                    ]
+                    unknown_rows = delivery_store.mark_attempt_receipt_batch(
+                        conn,
+                        leader_delivery_id=delivery_id,
+                        outcome="unknown",
+                        receipt=body,
+                    )
                     saved = unknown_rows[0] if unknown_rows else None
                     return DeliveryResult(
                         delivery_id,
@@ -2914,19 +3094,26 @@ class SessionTurnManager:
             try:
                 with self._sqlite_engine().begin() as conn:
                     reserve_write_lock(conn)
-                    leader = delivery_store.get_delivery(conn, delivery_id)
-                    lost_attempt_id = str((leader or {}).get("current_attempt_id") or "")
-                    for row in delivery_store.attempt_deliveries(conn, lost_attempt_id):
-                        if row["state"] == "steering":
-                            delivery_store.mark_attempt_unknown(
-                                conn,
-                                str(row["id"]),
-                                expected_version=int(row["version"]),
-                                receipt={"reason": "receipt_persistence_lost"},
-                            )
+                    persisted_outcome = (
+                        "accepted"
+                        if outcome_value == SteerOutcome.ACCEPTED.value
+                        else "unknown"
+                    )
+                    persisted_rows = delivery_store.mark_attempt_receipt_batch(
+                        conn,
+                        leader_delivery_id=delivery_id,
+                        outcome=persisted_outcome,
+                        receipt=(
+                            body
+                            if persisted_outcome == "accepted"
+                            else {"reason": "receipt_persistence_lost"}
+                        ),
+                    )
+                    if not persisted_rows:
+                        raise RuntimeError("steer receipt batch is no longer recoverable")
             except Exception:
                 logger.exception(
-                    "failed to persist unknown steer fence for delivery=%s",
+                    "failed to persist steer receipt recovery fence for delivery=%s",
                     delivery_id,
                 )
             return DeliveryResult(
@@ -2979,7 +3166,10 @@ class SessionTurnManager:
         interrupt_target_id: str | None = None
         should_interrupt = False
         joined = False
-        with self._runtime_start_owner(request.session_id, backend) as start_owner, self._sqlite_engine().begin() as conn:
+        with self._runtime_start_owner(
+            request.session_id,
+            backend,
+        ) as start_owner, run_update_event_transaction(self._sqlite_engine()) as conn:
             reserve_write_lock(conn)
             session_status = conn.execute(
                 select(agent_sessions.c.status).where(
@@ -2987,6 +3177,9 @@ class SessionTurnManager:
                 )
             ).scalar_one_or_none()
             current = delivery_store.active_turn(conn, request.session_id)
+            expected_exclusive_run_id = str(
+                request.expected_exclusive_agent_run_id or ""
+            ).strip()
             if request.content is not None and session_status != "active":
                 existing = (
                     delivery_store.get_delivery(conn, request.delivery_id)
@@ -3005,6 +3198,23 @@ class SessionTurnManager:
             current_id = str((current or {}).get("id") or "") or None
             if current is None:
                 if request.content is None:
+                    if expected_exclusive_run_id:
+                        cancellation = apply_live_agent_run_cancellation_in_connection(
+                            conn,
+                            expected_exclusive_run_id,
+                            session_id=request.session_id,
+                            detach=True,
+                        )
+                        return DeliveryResult(
+                            None,
+                            None,
+                            (
+                                "run_detached"
+                                if cancellation == "run_detached"
+                                else "settled"
+                            ),
+                            reason=cancellation,
+                        )
                     return DeliveryResult(None, None, "settled", reason="not_active")
                 delivery = self._insert_delivery(
                     conn,
@@ -3033,6 +3243,7 @@ class SessionTurnManager:
                     request.content is None
                     and expected_turn_id
                     and current_id != expected_turn_id
+                    and not expected_exclusive_run_id
                 ):
                     return DeliveryResult(
                         None,
@@ -3041,6 +3252,52 @@ class SessionTurnManager:
                         current_id,
                         "target_turn_changed",
                     )
+                if request.content is None and expected_exclusive_run_id:
+                    exclusive, reason = delivery_store.agent_run_exclusively_owns_turn(
+                        conn,
+                        run_id=expected_exclusive_run_id,
+                        turn_id=str(current_id or ""),
+                    )
+                    replacement_terminalized = False
+                    if not exclusive:
+                        replacement_terminalized = (
+                            self._terminalize_detached_run_replacement(
+                                conn,
+                                run_id=expected_exclusive_run_id,
+                                session_id=request.session_id,
+                                current=current,
+                            )
+                        )
+                    cancellation = apply_live_agent_run_cancellation_in_connection(
+                        conn,
+                        expected_exclusive_run_id,
+                        session_id=request.session_id,
+                        detach=not exclusive,
+                    )
+                    if replacement_terminalized and cancellation != "run_detached":
+                        raise RuntimeError(
+                            "replacement Run terminalized without cancellation ownership"
+                        )
+                    if not exclusive:
+                        return DeliveryResult(
+                            None,
+                            None,
+                            (
+                                "run_detached"
+                                if cancellation == "run_detached"
+                                else "settled"
+                            ),
+                            current_id,
+                            reason if cancellation == "run_detached" else cancellation,
+                        )
+                    if cancellation != "cancel_requested":
+                        return DeliveryResult(
+                            None,
+                            None,
+                            "settled",
+                            current_id,
+                            cancellation,
+                        )
                 control_in_progress = current.get("control_state") in {
                     "pending",
                     "interrupting",
@@ -3439,6 +3696,15 @@ class SessionTurnManager:
                     "control_receipt_json": json.dumps(
                         {"reason": reason or "stop_error"}, sort_keys=True
                     ),
+                    **(
+                        {
+                            "control_mode": None,
+                            "control_successor_delivery_id": None,
+                            "control_successor_turn_id": None,
+                        }
+                        if definitive and not terminal_proven
+                        else {}
+                    ),
                 },
             )
             receipt_result = {
@@ -3693,6 +3959,17 @@ class SessionTurnManager:
                     else str(delivery["id"])
                 )
             text = str(turn.get("dispatch_text") or "")
+            if source == SOURCE_SCHEDULED:
+                # Keep the raw prompt until MessageHandler parses an explicit
+                # ``subagent: prompt`` prefix. The handler adds metadata to the
+                # final backend request after routing; decorating here would make
+                # the metadata line hide that prefix from the parser.
+                await self.prepare_scheduled_dispatch(
+                    resolved,
+                    text,
+                    delivery=delivery,
+                    decorate=False,
+                )
         except Exception:
             logger.exception(
                 "durable native start failed during pre-dispatch preparation for Turn=%s",
@@ -3866,6 +4143,7 @@ class SessionTurnManager:
         result: dict[str, Any]
         materialized_id: str | None = None
         terminal_run_ids: list[str] = []
+        terminal_turn_snapshot: dict[str, Any] | None = None
         projected_status: str | None = None
         status_changed = False
         replayed_unknown_start = False
@@ -4282,6 +4560,7 @@ class SessionTurnManager:
                             turn_id,
                         )
                     )
+                    terminal_turn_snapshot = delivery_store.get_turn(conn, turn_id)
                     projected_status = (
                         "running"
                         if claimed_successor
@@ -4302,7 +4581,20 @@ class SessionTurnManager:
                 if result.get("unknown_start_exhausted")
                 else settled_by
             )
-            self._settle_agent_run_ids(terminal_run_ids, run_settled_by)
+            if (
+                terminal_turn_snapshot is not None
+                and run_settled_by in SETTLEMENTS_WITHOUT_RESULT
+            ):
+                terminal_turn_snapshot = {
+                    **terminal_turn_snapshot,
+                    "settled_by": run_settled_by,
+                }
+                self._settle_agent_run_ids_from_terminal_turn(
+                    terminal_run_ids,
+                    terminal_turn_snapshot,
+                )
+            else:
+                self._settle_agent_run_ids(terminal_run_ids, run_settled_by)
         if materialized_id:
             self._publish_materialized_delivery(materialized_id)
         if result.get("changed"):
@@ -4666,6 +4958,11 @@ class SessionTurnManager:
                 )
                 backend = str(turn["backend"])
                 delivery_id = str(claimed_batch[0]["id"])
+            steer_text = await self.prepare_scheduled_dispatch(
+                context,
+                steer_text,
+                delivery=claimed_batch[0],
+            ) if _scheduled_provenance(claimed_batch[0]) is not None else steer_text
             receipt = await self._attempt_steer(
                 backend,
                 SteerRequest(
@@ -5438,6 +5735,16 @@ class SessionTurnManager:
             )
             return True
         if delivery["state"] in {"steering", "reconciling_steer"}:
+            if (
+                delivery["state"] == "reconciling_steer"
+                and delivery.get("current_receipt_outcome") == "accepted"
+            ):
+                result = await self._finish_steer(
+                    str(delivery["id"]),
+                    _accepted_steer_receipt(delivery),
+                    context=None,
+                )
+                return result.state != "reconciling_steer"
             attempt_id = str(delivery.get("current_attempt_id") or "")
             expected_native = str(
                 delivery.get("current_expected_native_turn_id") or ""
@@ -5471,6 +5778,282 @@ class SessionTurnManager:
             )
             return result.state != "reconciling_steer"
         return False
+
+    def _turn_origin_native_message_id(self, turn_id: str) -> str:
+        """The message a terminal receipt for one Turn belongs on, or ``""``.
+
+        Read durably rather than from the live indicator because the caller runs
+        AFTER a restart, where no in-memory handle survived. The Delivery's own
+        snapshot is NOT the source: admission materializes it into ``messages``
+        and clears ``snapshot_json``, so by the time a Turn is active its
+        Delivery no longer carries the native id — only the ledger row it points
+        at does. The snapshot is still consulted first for a Delivery caught
+        before materialization.
+
+        The target is not always the sender's message: a quick-reply callback is
+        admitted with no ``native_message_id`` on purpose and wears its indicator
+        on the bot echo instead, so ``_delivery_ack_target`` — which recovers
+        that echo id from the durable admission context — decides first. Reading
+        only the native id would return ``""`` for those turns and silently skip
+        the ⚠️, leaving the echo claiming the turn is still running.
+        """
+
+        if not turn_id or not self._durable_schema_available():
+            return ""
+        try:
+            with self._sqlite_engine().connect() as conn:
+                turn = delivery_store.get_turn(conn, turn_id)
+                if turn is None:
+                    return ""
+                delivery = delivery_store.get_delivery(
+                    conn,
+                    str(turn["initial_delivery_id"]),
+                )
+                if delivery is None:
+                    return ""
+                ack_target = self._delivery_ack_target(delivery)
+                if ack_target:
+                    return str(ack_target).strip()
+                message_id = str(delivery.get("message_id") or "").strip()
+                if not message_id:
+                    return ""
+                message = messages_service.get_message(conn, message_id)
+                if message is None:
+                    return ""
+                return str(message.get("native_message_id") or "").strip()
+        except Exception:
+            logger.debug(
+                "turn origin lookup failed for turn=%s", turn_id, exc_info=True
+            )
+            return ""
+
+    def _controller_language(self) -> str:
+        language_getter = getattr(self.controller, "_get_lang", None)
+        if callable(language_getter):
+            return language_getter()
+        return getattr(getattr(self.controller, "config", None), "language", "en")
+
+    async def _report_lost_im_turn(
+        self,
+        session_id: str,
+        origin_native_message_id: str,
+    ) -> None:
+        """Tell an IM turn's author that its runtime died with the service.
+
+        An IM turn owns no ``agent_runs`` row, so the Harness interruption lane is
+        structurally unreachable for it: notices are stamped on runs, and
+        ``_settle_agent_run_ids`` returns early for a Turn that has none. Without
+        this report the turn's only trace is a durable row the user cannot read —
+        the thread simply stops, which is indistinguishable from an agent that
+        chose to stay quiet. The reported field case had a user wait five hours
+        before asking what had happened to their request.
+
+        This is deliberately NOT the shape of a Stop, which stays silent because
+        the user caused it and already knows. Nobody asked for this ending, so it
+        has to announce itself.
+
+        Recovery runs from ``_on_runtime_ready``, which fires BEFORE an external
+        transport has necessarily connected. A turn is terminal once reported, so
+        a lost report is lost for good — hence the report is held until
+        ``notify_transport_ready`` says that platform can actually deliver, and a
+        send that still fails goes back on the queue rather than being dropped.
+        ``avibe`` is ready as soon as the runtime is, so Workbench sessions
+        report inline.
+        """
+
+        if self.controller is None:
+            return
+        try:
+            context = self._delivery_context(session_id)
+        except Exception:
+            logger.debug(
+                "lost turn report: no delivery context for session=%s",
+                session_id,
+                exc_info=True,
+            )
+            return
+        platform = str(getattr(context, "platform", "") or "")
+        if self._transport_can_deliver(platform) and await self._emit_lost_turn_report(
+            context, session_id, origin_native_message_id
+        ):
+            return
+        self._pending_lost_turn_reports.setdefault(platform, []).append(
+            (session_id, str(origin_native_message_id or ""))
+        )
+        logger.info(
+            "lost turn report held until %s transport can deliver (session=%s)",
+            platform,
+            session_id,
+        )
+        if self._transport_can_deliver(platform):
+            # Held despite a ready transport means the send itself failed, so no
+            # ready callback is coming to flush it — retry on our own clock.
+            self._schedule_lost_turn_retry(platform)
+
+    def _transport_can_deliver(self, platform: str) -> bool:
+        """Whether ``platform`` can deliver right now.
+
+        Unknown readiness is treated as ready: a controller that does not expose
+        the probe (tests, embedded runners) must not silently swallow reports.
+        """
+
+        probe = getattr(self.controller, "is_im_transport_ready", None)
+        if not callable(probe) or not platform:
+            return True
+        try:
+            return bool(probe(platform))
+        except Exception:
+            logger.debug(
+                "transport readiness probe failed for %s", platform, exc_info=True
+            )
+            return True
+
+    async def notify_transport_ready(self, platform: str) -> int:
+        """Flush the interruption reports held for one platform.
+
+        Held in memory only: the turn is already terminal, so a report that never
+        drains (transport disabled before it connects) is dropped rather than
+        replayed on the next start, where it would be stale news. A send that
+        fails against a connected transport is retained AND retried on a bounded
+        backoff — see ``_schedule_lost_turn_retry`` for why nothing else would.
+        """
+
+        pending = self._pending_lost_turn_reports.pop(platform, [])
+        if not pending or self.controller is None:
+            return 0
+        reported = 0
+        unsent: list[tuple[str, str]] = []
+        for session_id, origin_native_message_id in pending:
+            try:
+                context = self._delivery_context(session_id)
+            except Exception:
+                logger.debug(
+                    "deferred lost turn report: no delivery context for session=%s",
+                    session_id,
+                    exc_info=True,
+                )
+                continue
+            if await self._emit_lost_turn_report(
+                context, session_id, origin_native_message_id
+            ):
+                reported += 1
+            else:
+                # "Ready" is the transport's claim, not a delivered message: a
+                # transient API error still loses the notice. Popping happened
+                # first, so an unsent report has to be put BACK or the only
+                # record of the interruption is gone for the process's lifetime.
+                unsent.append((session_id, str(origin_native_message_id or "")))
+        if unsent:
+            self._pending_lost_turn_reports.setdefault(platform, []).extend(unsent)
+            logger.info(
+                "%d lost turn report(s) on %s still undelivered; retrying",
+                len(unsent),
+                platform,
+            )
+            self._schedule_lost_turn_retry(platform)
+        return reported
+
+    def _schedule_lost_turn_retry(self, platform: str) -> None:
+        """Start the bounded retry for reports this platform failed to deliver.
+
+        ``notify_transport_ready`` has exactly one caller — ``_on_im_ready`` —
+        and ``MultiIMClient`` suppresses further ready callbacks until the
+        platform goes unready again. So a connection that merely hit one API
+        error would hold the notice forever with nothing to nudge it: the retry
+        has to come from here. One task per platform, a few attempts, then give
+        up loudly — the next genuine reconnect flushes whatever is left.
+        """
+
+        existing = self._lost_turn_retry_tasks.get(platform)
+        if existing is not None and not existing.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.debug("no running loop for lost turn retry on %s", platform)
+            return
+        self._lost_turn_retry_tasks[platform] = loop.create_task(
+            self._retry_lost_turn_reports(platform),
+            name=f"lost-turn-report-retry:{platform}",
+        )
+
+    async def _retry_lost_turn_reports(self, platform: str) -> None:
+        try:
+            for delay in self.LOST_TURN_RETRY_DELAYS:
+                await asyncio.sleep(delay)
+                if not self._pending_lost_turn_reports.get(platform):
+                    return
+                if not self._transport_can_deliver(platform):
+                    # Went unready again; the reconnect's ready callback flushes.
+                    return
+                await self.notify_transport_ready(platform)
+            remaining = len(self._pending_lost_turn_reports.get(platform) or [])
+            if remaining:
+                logger.warning(
+                    "%d lost turn report(s) on %s undelivered after %d retries; "
+                    "held until the transport reconnects",
+                    remaining,
+                    platform,
+                    len(self.LOST_TURN_RETRY_DELAYS),
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.debug("lost turn report retry failed for %s", platform, exc_info=True)
+        finally:
+            if self._lost_turn_retry_tasks.get(platform) is asyncio.current_task():
+                self._lost_turn_retry_tasks.pop(platform, None)
+
+    async def _emit_lost_turn_report(
+        self,
+        context: "MessageContext",
+        session_id: str,
+        origin_native_message_id: str,
+    ) -> bool:
+        """Emit one interruption notice. ``False`` means it did NOT reach the user.
+
+        The dispatcher returns the delivered message id, and ``None`` when every
+        send failed — so a falsy return is real evidence of loss, not merely an
+        absent receipt. Treating it as success would stamp a ⚠️ next to a notice
+        nobody got, on a turn that is already terminal and will never be retried
+        by anything else.
+        """
+
+        try:
+            delivered = await self.controller.emit_agent_message(
+                context,
+                "notify",
+                i18n_t("turn.interrupted.serviceRestart", self._controller_language()),
+            )
+        except Exception:
+            logger.warning(
+                "lost turn report: failed to notify session=%s",
+                session_id,
+                exc_info=True,
+            )
+            return False
+        if not delivered:
+            logger.warning(
+                "lost turn report: notify produced no delivery for session=%s",
+                session_id,
+            )
+            return False
+        # The dead process could not clear its own 👀. Retire it here so the
+        # triggering message stops claiming the turn is still running.
+        native_message_id = str(origin_native_message_id or "")
+        service = getattr(self.controller, "processing_indicator", None)
+        stamp = getattr(service, "stamp_orphaned_terminal_reaction", None)
+        if not native_message_id or not callable(stamp):
+            return True
+        try:
+            await stamp(context, native_message_id, INTERRUPTED_REACTION_EMOJI)
+        except Exception:
+            logger.debug(
+                "lost turn report: terminal reaction failed for session=%s",
+                session_id,
+                exc_info=True,
+            )
+        return True
 
     async def recover_durable_delivery_state(
         self,
@@ -5640,6 +6223,11 @@ class SessionTurnManager:
                     )
 
         for target_session, turn_id, attempt_id, backend in lost_active_turns:
+            # Read Run attribution BEFORE terminalizing: the notice below is owed
+            # only to a turn that has none, and terminalization retires the
+            # deliveries the attribution is derived from.
+            owning_run_ids = self.accepted_agent_run_ids_for_turn(turn_id)
+            origin_message_id = self._turn_origin_native_message_id(turn_id)
             terminal = self._terminalize_durable_turn(
                 turn_id,
                 "failed",
@@ -5654,6 +6242,8 @@ class SessionTurnManager:
             if not terminal.get("changed"):
                 continue
             recovered.append(target_session)
+            if not owning_run_ids:
+                await self._report_lost_im_turn(target_session, origin_message_id)
             successor_turn_id = str(terminal.get("successor_turn_id") or "")
             if successor_turn_id:
                 await self._start_persisted_turn(successor_turn_id)
@@ -5680,6 +6270,7 @@ class SessionTurnManager:
 
         with self._sqlite_engine().connect() as conn:
             unresolved = delivery_store.unresolved_deliveries(conn, session_id)
+            accepted_steer_attempts: list[dict[str, Any]] = []
             steer_attempts: list[tuple[dict[str, Any], str]] = []
             seen_attempt_ids: set[str] = set()
             for attempt in unresolved:
@@ -5694,14 +6285,30 @@ class SessionTurnManager:
                     not attempt_id
                     or attempt_id in seen_attempt_ids
                     or not target_turn_id
-                    or not expected_native_id
                 ):
                     continue
                 target_turn = delivery_store.get_turn(conn, target_turn_id)
                 if target_turn is None:
                     continue
                 seen_attempt_ids.add(attempt_id)
+                if (
+                    attempt["state"] == "reconciling_steer"
+                    and attempt.get("current_receipt_outcome") == "accepted"
+                ):
+                    accepted_steer_attempts.append(attempt)
+                    continue
+                if not expected_native_id:
+                    continue
                 steer_attempts.append((attempt, str(target_turn["backend"])))
+
+        for attempt in accepted_steer_attempts:
+            result = await self._finish_steer(
+                str(attempt["id"]),
+                _accepted_steer_receipt(attempt),
+                context=None,
+            )
+            if result.state != "reconciling_steer":
+                recovered.append(str(attempt["session_id"]))
 
         for attempt, backend in steer_attempts:
             attempt_id = str(attempt["current_attempt_id"])
@@ -5811,24 +6418,61 @@ class SessionTurnManager:
                 for _terminal_turn, run_ids in terminal_run_owners
                 for run_id in run_ids
             }
-            statuses = {
-                str(row["id"]): normalize_run_status(row["status"])
+            run_rows = {
+                str(row["id"]): row
                 for row in conn.execute(
-                    select(agent_runs.c.id, agent_runs.c.status).where(
+                    select(
+                        agent_runs.c.id,
+                        agent_runs.c.status,
+                        agent_runs.c.metadata_json,
+                    ).where(
                         agent_runs.c.id.in_(all_run_ids)
                     )
                 ).mappings()
             }
-            unsettled_owners: list[tuple[dict[str, Any], list[str]]] = []
+            recoverable_owners: list[tuple[dict[str, Any], list[str]]] = []
             for terminal_turn, run_ids in terminal_run_owners:
                 unsettled = [
                     run_id
                     for run_id in run_ids
-                    if statuses.get(run_id) in {"queued", "running"}
+                    if run_id in run_rows
+                    and normalize_run_status(run_rows[run_id]["status"])
+                    in {"queued", "running"}
                 ]
-                if unsettled:
-                    unsettled_owners.append((terminal_turn, unsettled))
-        for terminal_turn, run_ids in unsettled_owners:
+                settled_by = str(terminal_turn.get("settled_by") or "")
+                legacy_pending_notice = False
+                if settled_by in SETTLEMENTS_WITHOUT_RESULT:
+                    for run_id in run_ids:
+                        row = run_rows.get(run_id)
+                        if row is None:
+                            continue
+                        try:
+                            metadata = json.loads(str(row["metadata_json"] or "{}"))
+                        except (TypeError, ValueError, json.JSONDecodeError):
+                            continue
+                        notice = (
+                            metadata.get(OWED_FAILURE_NOTICE_KEY)
+                            if isinstance(metadata, dict)
+                            else None
+                        )
+                        if (
+                            isinstance(notice, dict)
+                            and notice.get("state") == "pending"
+                            and not str(notice.get("turn_id") or "").strip()
+                            and str(
+                                notice.get("interrupt_reason")
+                                or metadata.get("interrupt_reason")
+                                or ""
+                            ).strip()
+                            == settled_by
+                        ):
+                            legacy_pending_notice = True
+                            break
+                if unsettled or legacy_pending_notice:
+                    # Older releases stamped one notice per Run even though the
+                    # accepted Delivery relation retained this exact Turn owner.
+                    recoverable_owners.append((terminal_turn, run_ids))
+        for terminal_turn, run_ids in recoverable_owners:
             self._settle_agent_run_ids_from_terminal_turn(run_ids, terminal_turn)
         with self._sqlite_engine().begin() as conn:
             reserve_write_lock(conn)
@@ -6141,6 +6785,16 @@ class SessionTurnManager:
             )
 
         spec = dict(getattr(context, "platform_specific", None) or {})
+        dispatch_text = text
+        scheduled_metadata = (
+            dict(spec.get("message_metadata") or {})
+            if isinstance(spec.get("message_metadata"), dict)
+            else {}
+        )
+        if source == SOURCE_SCHEDULED:
+            scheduled_metadata[SCHEDULED_PROVENANCE_KEY] = capture_scheduled_provenance(
+                context
+            )
         with self._sqlite_engine().connect() as conn:
             busy = delivery_store.active_turn(conn, session_id) is not None
         source_value = "harness" if source == SOURCE_SCHEDULED else "user"
@@ -6155,7 +6809,7 @@ class SessionTurnManager:
         request = DeliveryRequest(
             session_id=session_id,
             priority=priority,
-            content=text,
+            content=dispatch_text,
             has_content=delivery_store.has_substantive_input(
                 text,
                 has_attachments=bool(getattr(context, "files", None)),
@@ -6168,7 +6822,7 @@ class SessionTurnManager:
             message_type="harness" if source == SOURCE_SCHEDULED else "user",
             display_text=str(spec.get("display_text") or text),
             content_json=spec.get("message_content") if isinstance(spec.get("message_content"), dict) else None,
-            metadata=spec.get("message_metadata") if isinstance(spec.get("message_metadata"), dict) else {},
+            metadata=scheduled_metadata,
             author_id=str(
                 spec.get("author_id")
                 or (spec.get("task_definition_id") if source == SOURCE_SCHEDULED else "")
@@ -6981,14 +7635,36 @@ class SessionTurnManager:
             )
         return bool(terminal.get("changed"))
 
-    async def cancel(self, session_id: str) -> dict:
-        """Persist one empty-P0 control request against the exact active Turn."""
+    async def cancel(
+        self,
+        session_id: str,
+        *,
+        agent_run_id: str | None = None,
+    ) -> dict:
+        """Cancel a Session Turn or detach one exact Run from a shared Turn."""
+        normalized_agent_run_id = (
+            str(agent_run_id).strip() if agent_run_id is not None else None
+        )
+        if agent_run_id is not None and not normalized_agent_run_id:
+            return {
+                "ok": False,
+                "code": "invalid_run_id",
+                "session_id": session_id,
+                "reason": "run_id_required",
+            }
         turn = self.in_flight.get(session_id)
         if not self._durable_schema_available():
+            if normalized_agent_run_id:
+                return {
+                    "ok": False,
+                    "code": "atomic_run_cancel_unavailable",
+                    "session_id": session_id,
+                    "reason": "durable_turn_ownership_unavailable",
+                }
             return await self._cancel_legacy_turn(session_id, turn)
         with self._sqlite_engine().connect() as conn:
             owner = delivery_store.active_turn(conn, session_id)
-        if owner is None:
+        if owner is None and not agent_run_id:
             return {
                 "ok": False,
                 "code": "not_in_flight",
@@ -7002,13 +7678,30 @@ class SessionTurnManager:
                 session_id=session_id,
                 priority="p0",
                 content=None,
-                expected_turn_id=str(owner["id"]),
+                expected_turn_id=(str(owner["id"]) if owner is not None else None),
+                expected_exclusive_agent_run_id=(
+                    normalized_agent_run_id
+                ),
             ),
             context=turn.context if turn is not None else None,
         )
+        if result.state == "run_detached":
+            return {
+                "ok": True,
+                "session_id": session_id,
+                "status": "run_detached",
+                "reason": result.reason or "shared_turn",
+            }
         if result.state in {"waiting_terminal", "interrupt_waiting"}:
             return {"ok": True, "session_id": session_id, "status": "cancel_requested"}
         if result.state == "settled":
+            if normalized_agent_run_id:
+                return {
+                    "ok": True,
+                    "session_id": session_id,
+                    "status": "run_settled",
+                    "reason": result.reason or "already_terminal",
+                }
             return {
                 "ok": True,
                 "session_id": session_id,
@@ -7427,16 +8120,7 @@ class SessionTurnManager:
                     if session_row["status"] != "active":
                         return False
                     delivery_id = delivery_store.new_delivery_id()
-                    language_getter = getattr(self.controller, "_get_lang", None)
-                    language = (
-                        language_getter()
-                        if callable(language_getter)
-                        else getattr(
-                            getattr(self.controller, "config", None),
-                            "language",
-                            "en",
-                        )
-                    )
+                    language = self._controller_language()
                     trigger_text = str(
                         payload.get("agent_initiated_trigger_text")
                         or i18n_t("harness.agentInitiatedContinuation", language)
@@ -7453,7 +8137,10 @@ class SessionTurnManager:
                             platform="avibe",
                             author="harness",
                             source="harness",
-                            message_type="harness",
+                            # This durable row owns the backend-started Turn for
+                            # Stop/FSM/history, but it is not a user instruction
+                            # and must not render as a chat bubble.
+                            message_type="agent_initiated",
                             text=trigger_text,
                             metadata={
                                 "source": "agent_initiated",

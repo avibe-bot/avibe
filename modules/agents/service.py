@@ -411,28 +411,46 @@ class AgentService:
             if not scheduled:
                 self.release_runtime_turn(request.context)
             raise
-        except Exception:
-            # The message handler converts backend exceptions into a terminal
-            # error result using the same context. Try that shared terminal path
-            # here too; if delivery itself is broken, the finally below still
-            # releases this turn's token so later prompts cannot hang forever.
+        except Exception as error:
+            # The caller owns the user-facing failure copy. Invoke that shared
+            # reporter while this runtime Turn is still current, so its notify
+            # receipt is part of the terminal failure contract before the gate is
+            # released. Direct AgentService callers without a reporter retain the
+            # silent terminal fallback below.
             try:
-                emit = getattr(self.controller, "emit_agent_message", None)
-                if callable(emit):
+                failure_handler = getattr(request, "failure_handler", None)
+                if callable(failure_handler):
+                    request.failure_handled = True
                     try:
-                        await emit(
-                            request.context,
-                            "result",
-                            "",
-                            is_error=True,
-                            level="silent",
-                            output=terminal_output_for(request),
-                        )
+                        handled = failure_handler(error)
+                        if inspect.isawaitable(handled):
+                            await handled
                     except Exception:
-                        logger.debug("Failed to emit terminal result for backend exception", exc_info=True)
+                        logger.exception("Failed to report backend exception before Turn release")
+                        await self._emit_exception_terminal_fallback(request)
+                else:
+                    await self._emit_exception_terminal_fallback(request)
             finally:
                 self.release_runtime_turn(request.context)
             raise
+
+    async def _emit_exception_terminal_fallback(self, request: AgentRequest) -> None:
+        """Best-effort settlement for callers without a visible failure owner."""
+
+        emit = getattr(self.controller, "emit_agent_message", None)
+        if not callable(emit):
+            return
+        try:
+            await emit(
+                request.context,
+                "result",
+                "",
+                is_error=True,
+                level="silent",
+                output=terminal_output_for(request),
+            )
+        except Exception:
+            logger.debug("Failed to emit terminal result for backend exception", exc_info=True)
 
     async def clear_sessions(self, session_key: str) -> Dict[str, int]:
         cleared: Dict[str, int] = {}

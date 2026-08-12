@@ -4,7 +4,9 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock, call
 
-from core.backend_failure import emit_backend_failure
+from core.backend_failure import emit_backend_failure, terminal_backend_failure_output
+from core.delivery_evidence import DeliveryEvidence
+from core.message_output import MessageOutput
 from modules.agents.base import AgentRequest
 from modules.im import MessageContext
 
@@ -28,6 +30,303 @@ def _request() -> AgentRequest:
 
 
 class BackendFailureTests(unittest.IsolatedAsyncioTestCase):
+    async def test_terminal_contract_never_downgrades_existing_delivery_evidence(
+        self,
+    ) -> None:
+        request = _request()
+        output = MessageOutput(
+            completes_turn=True,
+            completes_run=True,
+            metadata={
+                "turn_failure_notification": {
+                    "failure_id": "turn:turn-1",
+                    "ack_evidence": "receipt",
+                    "delivered": True,
+                    "fallback_run_id": "run-owner",
+                }
+            },
+        )
+
+        merged = terminal_backend_failure_output(
+            request.context,
+            request=request,
+            output=output,
+            delivery=DeliveryEvidence(),
+        )
+
+        self.assertEqual(
+            merged.metadata["turn_failure_notification"],
+            {
+                "failure_id": "turn:turn-1",
+                "ack_evidence": "receipt",
+                "delivered": True,
+                "fallback_run_id": "run-owner",
+            },
+        )
+
+    async def test_turn_without_current_runs_preserves_primary_delivery_for_late_runs(
+        self,
+    ) -> None:
+        request = _request()
+        emissions = []
+
+        async def emit(context, message_type, text, **kwargs):
+            emissions.append((message_type, text, kwargs))
+            evidence = kwargs.get("delivery")
+            if message_type == "notify" and evidence is not None:
+                evidence.persisted_row = {"id": "msg-primary"}
+                return "msg-primary"
+            return None
+
+        controller = SimpleNamespace(
+            agent_auth_service=SimpleNamespace(),
+            emit_agent_message=emit,
+        )
+
+        await emit_backend_failure(
+            controller,
+            request.context,
+            "codex",
+            "provider unavailable",
+            request=request,
+        )
+
+        terminal_output = emissions[1][2]["output"]
+        self.assertEqual(
+            terminal_output.metadata["turn_failure_notification"],
+            {
+                "failure_id": "turn-1",
+                "ack_evidence": "receipt",
+                "delivered": True,
+            },
+        )
+
+    async def test_harness_turn_notifies_live_and_carries_delivery_evidence_to_settlement(
+        self,
+    ) -> None:
+        request = _request()
+        request.context.platform_specific.update(
+            {
+                "task_execution_id": "run-watch-1",
+                "task_trigger_kind": "watch",
+            }
+        )
+        emissions = []
+
+        async def emit(context, message_type, text, **kwargs):
+            emissions.append((message_type, text, kwargs))
+            evidence = kwargs.get("delivery")
+            if message_type == "notify" and evidence is not None:
+                evidence.delivered_id = "msg-1"
+                evidence.persisted_row = {"id": "msg-1"}
+                evidence.send_returned = True
+                return "msg-1"
+            return None
+
+        auth = AsyncMock(return_value=False)
+        controller = SimpleNamespace(
+            agent_auth_service=SimpleNamespace(maybe_emit_auth_recovery_message=auth),
+            emit_agent_message=emit,
+        )
+
+        handled_auth = await emit_backend_failure(
+            controller,
+            request.context,
+            "codex",
+            "provider unavailable",
+            request=request,
+        )
+
+        self.assertFalse(handled_auth)
+        auth.assert_not_awaited()
+        self.assertEqual([message_type for message_type, _text, _kwargs in emissions], ["notify", "result"])
+        notify_output = emissions[0][2]["output"]
+        self.assertEqual(notify_output.idempotency_key, "backend-failure:turn:turn-1")
+        terminal_output = emissions[1][2]["output"]
+        self.assertEqual(
+            terminal_output.metadata["turn_failure_notification"],
+            {
+                "failure_id": "turn:turn-1",
+                "ack_evidence": "receipt",
+                "delivered": True,
+            },
+        )
+
+    async def test_run_attached_to_an_existing_turn_keeps_harness_failure_ownership(
+        self,
+    ) -> None:
+        request = _request()
+        request.context.platform_specific["accepted_agent_run_ids"] = [
+            "run-attached-1"
+        ]
+        emissions = []
+
+        async def emit(context, message_type, text, **kwargs):
+            emissions.append((message_type, kwargs))
+            evidence = kwargs.get("delivery")
+            if message_type == "notify" and evidence is not None:
+                evidence.persisted_row = {"id": "msg-attached"}
+                return "msg-attached"
+            return None
+
+        auth = AsyncMock(return_value=False)
+        controller = SimpleNamespace(
+            agent_auth_service=SimpleNamespace(maybe_emit_auth_recovery_message=auth),
+            emit_agent_message=emit,
+        )
+
+        await emit_backend_failure(
+            controller,
+            request.context,
+            "codex",
+            "stream disconnected",
+            request=request,
+        )
+
+        auth.assert_not_awaited()
+        self.assertEqual([message_type for message_type, _kwargs in emissions], ["notify", "result"])
+        self.assertEqual(
+            emissions[1][1]["output"].metadata["turn_failure_notification"],
+            {
+                "failure_id": "turn:turn-1",
+                "ack_evidence": "receipt",
+                "delivered": True,
+            },
+        )
+
+    async def test_suppressed_harness_notification_does_not_ack_local_message_id(
+        self,
+    ) -> None:
+        request = _request()
+        request.context.platform = "slack"
+        request.context.platform_specific.update(
+            {
+                "task_execution_id": "run-background-1",
+                "task_trigger_kind": "watch",
+                "suppress_delivery": True,
+            }
+        )
+        emissions = []
+
+        async def emit(_context, message_type, _text, **kwargs):
+            emissions.append((message_type, kwargs))
+            if message_type == "notify":
+                return "suppressed:run-background-1"
+            return None
+
+        controller = SimpleNamespace(
+            agent_auth_service=SimpleNamespace(
+                maybe_emit_auth_recovery_message=AsyncMock(return_value=False)
+            ),
+            emit_agent_message=emit,
+        )
+
+        await emit_backend_failure(
+            controller,
+            request.context,
+            "codex",
+            "stream disconnected",
+            request=request,
+        )
+
+        terminal_output = emissions[1][1]["output"]
+        self.assertEqual(
+            terminal_output.metadata["turn_failure_notification"],
+            {
+                "failure_id": "turn:turn-1",
+                "ack_evidence": None,
+                "delivered": False,
+            },
+        )
+
+    async def test_hfr_454_delivery_only_ack_uses_the_routed_target_platform(
+        self,
+    ) -> None:
+        """Transport-only ids are evidence according to where the notify was sent."""
+
+        for source, target, expected in (
+            ("avibe", "slack", True),
+            ("slack", "avibe", False),
+        ):
+            with self.subTest(source=source, target=target):
+                request = _request()
+                request.context.platform = source
+                request.context.platform_specific.update(
+                    {
+                        "task_execution_id": f"run-{source}-to-{target}",
+                        "delivery_override": {
+                            "platform": target,
+                            "channel_id": f"channel-{target}",
+                        },
+                    }
+                )
+                emissions = []
+
+                async def emit(_context, message_type, _text, **kwargs):
+                    emissions.append((message_type, kwargs))
+                    evidence = kwargs.get("delivery")
+                    if message_type == "notify" and evidence is not None:
+                        evidence.delivered_id = f"native-{target}-id"
+                        evidence.send_returned = True
+                    return None
+
+                controller = SimpleNamespace(
+                    agent_auth_service=SimpleNamespace(
+                        maybe_emit_auth_recovery_message=AsyncMock(return_value=False)
+                    ),
+                    emit_agent_message=emit,
+                )
+
+                await emit_backend_failure(
+                    controller,
+                    request.context,
+                    "codex",
+                    "stream disconnected",
+                    request=request,
+                )
+
+                notification = emissions[1][1]["output"].metadata[
+                    "turn_failure_notification"
+                ]
+                self.assertEqual(notification["ack_evidence"], "delivery_only")
+                self.assertIs(notification["delivered"], expected)
+
+    async def test_delivery_only_ack_fails_closed_without_target_platform(
+        self,
+    ) -> None:
+        request = _request()
+        request.context.platform = None
+        emissions = []
+
+        async def emit(_context, message_type, _text, **kwargs):
+            emissions.append((message_type, kwargs))
+            evidence = kwargs.get("delivery")
+            if message_type == "notify" and evidence is not None:
+                evidence.delivered_id = "synthetic-id"
+                evidence.send_returned = True
+            return None
+
+        controller = SimpleNamespace(
+            agent_auth_service=SimpleNamespace(
+                maybe_emit_auth_recovery_message=AsyncMock(return_value=False)
+            ),
+            emit_agent_message=emit,
+        )
+
+        await emit_backend_failure(
+            controller,
+            request.context,
+            "codex",
+            "stream disconnected",
+            request=request,
+        )
+
+        notification = emissions[1][1]["output"].metadata[
+            "turn_failure_notification"
+        ]
+        self.assertEqual(notification["ack_evidence"], "delivery_only")
+        self.assertFalse(notification["delivered"])
+
     async def test_auth_recovery_owns_the_only_terminal_settlement(self) -> None:
         request = _request()
         controller = SimpleNamespace(
@@ -68,14 +367,18 @@ class BackendFailureTests(unittest.IsolatedAsyncioTestCase):
                 request=request,
             )
 
-        controller.emit_agent_message.assert_awaited_once_with(
-            request.context,
-            "result",
-            "",
-            is_error=True,
-            level="silent",
-            output=request.output,
-            terminal_error="401 Unauthorized",
+        terminal_call = controller.emit_agent_message.await_args
+        self.assertEqual(terminal_call.args, (request.context, "result", ""))
+        self.assertTrue(terminal_call.kwargs["is_error"])
+        self.assertEqual(terminal_call.kwargs["level"], "silent")
+        self.assertEqual(terminal_call.kwargs["terminal_error"], "401 Unauthorized")
+        self.assertEqual(
+            terminal_call.kwargs["output"].metadata["turn_failure_notification"],
+            {
+                "failure_id": "turn-1",
+                "ack_evidence": None,
+                "delivered": False,
+            },
         )
 
     async def test_separates_notify_from_terminal_settlement(self) -> None:
@@ -103,7 +406,6 @@ class BackendFailureTests(unittest.IsolatedAsyncioTestCase):
             (request.context, "codex", "Codex failed: provider unavailable"),
         )
         self.assertEqual(auth_call.kwargs["terminal_error"], "provider unavailable")
-        terminal_output = auth_call.kwargs["output"]
         notify_call, terminal_call = controller.emit_agent_message.await_args_list
         self.assertEqual(
             notify_call,
@@ -112,6 +414,7 @@ class BackendFailureTests(unittest.IsolatedAsyncioTestCase):
                 "notify",
                 "Codex failed: provider unavailable",
                 output=ANY,
+                delivery=ANY,
             ),
         )
         self.assertFalse(notify_call.kwargs["output"].settles_run)
@@ -135,9 +438,17 @@ class BackendFailureTests(unittest.IsolatedAsyncioTestCase):
                 "",
                 is_error=True,
                 level="silent",
-                output=terminal_output,
+                output=ANY,
                 terminal_error="provider unavailable",
             ),
+        )
+        self.assertEqual(
+            terminal_call.kwargs["output"].metadata["turn_failure_notification"],
+            {
+                "failure_id": "turn-1",
+                "ack_evidence": "delivery_only",
+                "delivered": False,
+            },
         )
 
     async def test_identity_is_stable_for_duplicate_terminal_events(self) -> None:
@@ -187,14 +498,15 @@ class BackendFailureTests(unittest.IsolatedAsyncioTestCase):
                 request=request,
             )
 
+        self.assertEqual(len(terminal_calls), 1)
+        self.assertTrue(terminal_calls[0]["is_error"])
+        self.assertEqual(terminal_calls[0]["level"], "silent")
+        self.assertEqual(terminal_calls[0]["terminal_error"], "transport failed")
         self.assertEqual(
-            terminal_calls,
-            [
-                {
-                    "is_error": True,
-                    "level": "silent",
-                    "output": request.output,
-                    "terminal_error": "transport failed",
-                }
-            ],
+            terminal_calls[0]["output"].metadata["turn_failure_notification"],
+            {
+                "failure_id": "turn-1",
+                "ack_evidence": None,
+                "delivered": False,
+            },
         )

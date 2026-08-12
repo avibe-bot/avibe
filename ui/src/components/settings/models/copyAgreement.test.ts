@@ -6,27 +6,22 @@
 // translated from reads correctly and the English silently did not.
 //
 // The reported string was not the class. The same page also wrote 「{{count}} agents
-// have no supply」, which breaks at the MOST common count — one. So the rule below is
-// TOTAL rather than a list of known-bad keys; that is the only way it catches copy
-// that does not exist yet. Two shapes, two scopes:
+// have no supply」, which breaks at the MOST common count — one. The final UI copy
+// register resolves that class with i18next plural families. The rule below is TOTAL
+// rather than a list of known-bad keys; that is the only way it catches copy that does
+// not exist yet. Two shapes, two scopes:
 //
 //   1. a list placeholder in front of a singular verb — checked over the WHOLE
 //      bundle, because no string anywhere passes a joined list to a singular verb.
-//   2. `{{count}}` in front of a plural noun — checked over `settings.models`, this
-//      page's own copy, with no allowances. The wider bundle has a long-standing
-//      「{{count}} items」 habit across File Browser, Vaults, Skills and Chat;
-//      rewriting forty strings on other surfaces is not this lane's change to make,
-//      so the rule stops at the page boundary rather than carrying an exception list.
-//
-// Neither shape is fixed with a plural key. This bundle has no `_one`/`_other` keys
-// at all, and adding them would mean dead `_one` entries in zh (whose plural rule has
-// only `other`) — a trap for the next translator, and a break of the zh/en key
-// correspondence that `supplyCopyRedline.test.ts` guards. `attribution.unassigned`
-// and `order.groupDisabled` already show the cheaper answer that this file enforces:
-// word it so the subject's number stops mattering.
+//   2. every `{{count}}` key under `settings.models` belongs to a complete
+//      `_one`/`_other` family. Both locale files carry both leaves; zh deliberately
+//      repeats the value so locale parity remains a plain set equality.
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 import en from '../../../i18n/en.json';
+import zh from '../../../i18n/zh.json';
+import { BACKEND_ADOPTION_VENDOR_KEY } from './vendorMeta';
 
 /** Placeholders a join can fill with more than one item. */
 const LIST_PLACEHOLDER = /\{\{(?:names|models|agents|sources|backends|list|skipped)\}\}/;
@@ -39,14 +34,9 @@ const LIST_PLACEHOLDER = /\{\{(?:names|models|agents|sources|backends|list|skipp
 const SINGULAR_VERB =
   /\{\{(?:names|models|agents|sources|backends|list|skipped)\}\}\s+(?:has|is|was|does|hasn't|isn't|wasn't|doesn't)\b/i;
 
-/**
- * `{{count}}` followed by a noun that has already committed to plural.
- *
- * `{{count}} model(s)` passes on purpose: it is correct at every count, and it is
- * what the rest of this subtree already writes (`migration.applied`,
- * `sourceActions.refreshed`, `migrationBanner.body`).
- */
-const PLURAL_NOUN = /\{\{count\}\}\s+(?:more\s+)?[a-z]+s\b/i;
+const COUNT = /\{\{count\}\}/;
+const PARENTHESIZED_PLURAL = /\b[a-z]+\(s\)/i;
+const PLURAL_SUFFIX = /_(one|other)$/;
 
 type Leaf = { key: string; text: string };
 
@@ -64,9 +54,9 @@ describe('English copy agrees with the number of things it interpolates', () => 
   it('walks a non-trivial bundle, so the rules have something to check', () => {
     // Guards the walks themselves: a renamed namespace would otherwise make every
     // assertion below pass over an empty list.
-    expect(all.filter((l) => LIST_PLACEHOLDER.test(l.text)).length).toBeGreaterThan(0);
-    expect(models.length).toBeGreaterThan(100);
-    expect(models.map((l) => l.key)).toContain('statusPill.interrupted');
+    expect(all.some((leaf) => LIST_PLACEHOLDER.test(leaf.text))).toBe(true);
+    expect(models.some((leaf) => COUNT.test(leaf.text))).toBe(true);
+    expect(models.some((leaf) => PLURAL_SUFFIX.test(leaf.key))).toBe(true);
   });
 
   it('never gives a joined list a singular verb, anywhere in the bundle', () => {
@@ -74,8 +64,34 @@ describe('English copy agrees with the number of things it interpolates', () => 
     expect(broken.map((l) => `${l.key}: ${l.text}`)).toEqual([]);
   });
 
-  it('never gives a count a plural noun on the Models page', () => {
-    const broken = models.filter((l) => PLURAL_NOUN.test(l.text));
-    expect(broken.map((l) => `${l.key}: ${l.text}`)).toEqual([]);
+  it.each([['en', en], ['zh', zh]] as const)('gives every Models count a complete plural family in %s', (_lng, bundle) => {
+    const localized = leaves(bundle.settings.models);
+    const byKey = new Map(localized.map((leaf) => [leaf.key, leaf.text]));
+    const bareCounts = localized.filter((leaf) => COUNT.test(leaf.text) && !PLURAL_SUFFIX.test(leaf.key));
+    const orphaned = localized.filter((leaf) => {
+      const match = leaf.key.match(PLURAL_SUFFIX);
+      if (!match) return false;
+      const base = leaf.key.replace(PLURAL_SUFFIX, '');
+      return !byKey.has(`${base}_one`) || !byKey.has(`${base}_other`);
+    });
+    expect(bareCounts.map((leaf) => leaf.key)).toEqual([]);
+    expect(orphaned.map((leaf) => leaf.key)).toEqual([]);
+  });
+
+  it('uses real plural families instead of parenthesized English plurals', () => {
+    const broken = models.filter((leaf) => PARENTHESIZED_PLURAL.test(leaf.text));
+    expect(broken.map((leaf) => `${leaf.key}: ${leaf.text}`)).toEqual([]);
+  });
+
+  it('resolves gateway-adoption vendor interpolation through locale keys', () => {
+    const component = readFileSync(new URL('./EnableGatewayDialog.tsx', import.meta.url), 'utf8');
+    const vendorKeys = new Set(Object.values(BACKEND_ADOPTION_VENDOR_KEY));
+    expect(component).toContain('BACKEND_ADOPTION_VENDOR_KEY[agent.backend]');
+    expect(new Set(Object.keys(en.settings.models.adopt.vendor))).toEqual(vendorKeys);
+    expect(new Set(Object.keys(zh.settings.models.adopt.vendor))).toEqual(vendorKeys);
+    for (const key of vendorKeys) {
+      expect(en.settings.models.adopt.vendor[key]).toBeTruthy();
+      expect(zh.settings.models.adopt.vendor[key]).toBeTruthy();
+    }
   });
 });

@@ -349,6 +349,7 @@ export type VoiceRecordingPipelineOptions = {
   stream: MediaStream;
   segmentMs: number;
   onSegment: (blob: Blob, metadata: VoiceRecordingSegmentMetadata) => void;
+  onPcm?: (samples: Int16Array<ArrayBuffer>) => void;
   onStopRequested?: (
     reason: VoiceRecordingStopReason,
     metadata: VoiceRecordingStopMetadata,
@@ -525,6 +526,7 @@ export class VoiceRecordingPipeline {
 
   private handleSamples(samples: Int16Array<ArrayBuffer>): void {
     if (this.stopped || this.stopping === 'abort') return;
+    this.options.onPcm?.(samples);
     let offset = 0;
     while (offset < samples.length) {
       const available = this.segmentSamples - this.segmentSampleCount;

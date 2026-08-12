@@ -37,7 +37,6 @@ from config.v2_config import V2Config
 from core.scheduled_tasks import (
     AGENT_RUN_DELIVERY_QUEUE,
     AGENT_RUN_DELIVERY_STEER,
-    AGENT_RUN_DELIVERY_SEND_NOW,
     BINDING_FOLLOWS_SESSION_METADATA_KEY,
     ScheduledTaskStore,
     TaskExecutionStore,
@@ -76,6 +75,7 @@ from storage.db import create_sqlite_engine
 from storage.background import (
     DefinitionWriteConflict,
     SQLiteBackgroundTaskStore,
+    TaskResumeBlocked,
     compute_next_run_at,
     normalize_run_status,
 )
@@ -1427,14 +1427,17 @@ def _watch_add_examples_text() -> str:
           Use --create-session with --same-scope only from an Avibe Agent shell, where the caller Session scope is available.
           Prefer --message or --message-file for follow-up instructions; --prefix is legacy-compatible.
           Terminal failures also send a follow-up and disable the watch.
-          In forever mode, failures are retried only when the waiter exits with an allowed `--retry-exit-code`.
-          Waiter exit codes: 0 detected an event and sends the follow-up; 124 timed out and sends a timeout follow-up;
+          In either mode, an allowed `--retry-exit-code` keeps waiting. A once Watch stops after its first event.
+          A forever Watch waits for each event's Agent Run to finish before re-arming, then applies a five-second safety delay.
+          Exit 0 must mean one new reportable event, not a condition that merely remains true. Repeated rapid successes automatically pause the Watch and send the Agent a repair message.
+          Waiter exit codes: 0 detected an event and sends the follow-up; 124 timed out and is terminal unless explicitly allowed for retry;
           64 PLUS the line 'avibe-watch: no-event' on stderr means the cycle ran and found nothing worth reporting,
-          so the watch ends or re-arms WITHOUT an Agent turn; any other non-zero is a failure.
+          so a once Watch ends and a forever Watch re-arms WITHOUT an Agent turn. A once waiter that is still waiting must use a retry exit code.
+          Any other non-zero is a failure.
           The marker is required: 64 alone is also sysexits EX_USAGE, so a bare 64 stays a failure and stops the watch.
           Use it in waiters whose normal outcome is uninteresting, such as green CI.
           Pass either --shell '<command>' or a command after '--'.
-          --timeout applies to each cycle. --lifetime-timeout applies only to the whole forever watch lifetime.
+          --timeout applies to each cycle. --lifetime-timeout applies to the whole Watch lifetime across retries and re-arms.
 
         Examples:
           vibe watch add --session-id sesk8m4q2p7x --message 'The export finished. Inspect it and continue.' --shell 'python3 scripts/wait_for_export.py'
@@ -1451,7 +1454,7 @@ def _agent_run_examples_text() -> str:
           Use --session-id to continue an existing Agent Session.
           The default is P1: steer an active native Turn, start when idle, or fall back to the durable P3 queue.
           Add --queue to persist this Run as P3 behind the active Turn.
-          Add --send-now to persist the new Run and steer the exact FIFO head into the active Turn.
+          --send-now explicitly selects the same P1 content delivery for an existing Session.
           To promote the exact existing P3 queue head without a new message, use: vibe session send-now <session-id>
           Inspect queued work with: vibe session queue list <session-id>
           Remove one exact queued row with: vibe session queue remove <session-id> <message-id>
@@ -1823,7 +1826,6 @@ def _validate_watch_timing(
     timeout_seconds: float,
     retry_delay_seconds: float,
     lifetime_timeout_seconds: float,
-    mode: str,
     help_command: str,
 ) -> None:
     if timeout_seconds < 0:
@@ -1850,13 +1852,6 @@ def _validate_watch_timing(
             help_command=help_command,
             details={"lifetime_timeout": lifetime_timeout_seconds},
         )
-    if lifetime_timeout_seconds and mode != "forever":
-        raise TaskCliError(
-            "--lifetime-timeout requires --forever",
-            code="invalid_watch_lifetime_timeout",
-            hint="Use --lifetime-timeout only on forever watches.",
-            help_command=help_command,
-    )
 
 
 def _task_message_preview(message: str, *, max_chars: int = 72) -> str:
@@ -2046,8 +2041,14 @@ _DEFINITION_FAILURE_FIELDS = (
     "health",
     "consecutive_failures",
     "recent_failures",
+    # Watches keep waiter health above and expose their downstream Agent Run
+    # history independently. Tasks omit these keys.
+    "processing_health",
+    "processing_consecutive_failures",
+    "processing_recent_failures",
     # The one field that says WHY, dropped from the brief list payload before.
     "last_error",
+    "resume_blocked",
 )
 
 
@@ -3752,6 +3753,21 @@ def cmd_task_set_enabled(task_id: str, enabled: bool):
         return 1
     try:
         updated = store.set_enabled(task_id, enabled)
+    except TaskResumeBlocked as exc:
+        lang = _memory_cli_language()
+        _print_task_error(
+            TaskCliError(
+                i18n_t("error.taskOwnerUnavailable.message", lang),
+                code=exc.code,
+                hint=i18n_t("error.taskOwnerUnavailable.hint", lang, id=task_id),
+                help_command=f"vibe task remove {task_id}",
+                details={
+                    "task_id": task_id,
+                    "owner_session_id": exc.owner_session_id,
+                },
+            )
+        )
+        return 1
     except DefinitionWriteConflict as exc:
         # Pause/resume is also a full-row write, so it is refused when a teardown
         # changed the definition first. Reporting the switch as flipped would be a lie
@@ -5854,13 +5870,11 @@ def cmd_agent_run(args):
         )
         session_policy = _validate_run_session_policy(args, help_command="vibe agent run --help")
         delivery_intent = (
-            AGENT_RUN_DELIVERY_SEND_NOW
-            if bool(getattr(args, "send_now", False))
-            else AGENT_RUN_DELIVERY_QUEUE
+            AGENT_RUN_DELIVERY_QUEUE
             if bool(getattr(args, "queue", False))
             else AGENT_RUN_DELIVERY_STEER
         )
-        if delivery_intent == AGENT_RUN_DELIVERY_SEND_NOW and session_policy != "existing":
+        if bool(getattr(args, "send_now", False)) and session_policy != "existing":
             raise TaskCliError(
                 "--send-now requires an existing Agent Session",
                 code="send_now_requires_existing_session",
@@ -6069,7 +6083,7 @@ def cmd_agent_run(args):
                 "parent_run_id": parent_run_id,
             },
         }
-        if delivery_intent != AGENT_RUN_DELIVERY_STEER:
+        if bool(getattr(args, "send_now", False)) or delivery_intent != AGENT_RUN_DELIVERY_STEER:
             payload["delivery_intent"] = delivery_intent
             payload["run"]["delivery_intent"] = delivery_intent
         if fork_result:
@@ -6249,6 +6263,17 @@ def _recorded_only_cancel_result(*, reason_code: str, detail: object | None = No
     return result
 
 
+def _record_live_cancel_fallback(
+    store: TaskExecutionStore,
+    run_id: str,
+    *,
+    reason_code: str,
+    detail: object | None = None,
+) -> dict:
+    store.cancel_run(run_id)
+    return _recorded_only_cancel_result(reason_code=reason_code, detail=detail)
+
+
 def _initial_cancel_result(run: dict | None) -> dict:
     if not isinstance(run, dict):
         return _recorded_only_cancel_result(reason_code="run_not_found")
@@ -6301,22 +6326,33 @@ def _live_cancel_was_confirmed(status_code: int | None, body: object) -> bool:
     return str(body.get("status") or "").strip() in {"cancel_requested", "stale_released"}
 
 
-async def _request_live_run_cancel(session_id: str) -> dict:
+async def _request_live_run_cancel(session_id: str, run_id: str) -> dict:
     from vibe import internal_client
 
-    return await internal_client.cancel_dispatch(session_id)
+    return await internal_client.cancel_dispatch(session_id, run_id=run_id)
 
 
 def _cancel_live_agent_run(store: TaskExecutionStore, run: dict) -> dict:
     session_id = _run_session_id(run)
+    run_id = str(run.get("id") or "").strip()
     from vibe import internal_client
 
     try:
-        controller_result = asyncio.run(_request_live_run_cancel(session_id))
+        controller_result = asyncio.run(_request_live_run_cancel(session_id, run_id))
     except internal_client.InternalServerUnavailable as exc:
-        return _recorded_only_cancel_result(reason_code="internal_unavailable", detail=str(exc))
+        return _record_live_cancel_fallback(
+            store,
+            run_id,
+            reason_code="internal_unavailable",
+            detail=str(exc),
+        )
     except Exception as exc:  # noqa: BLE001
-        return _recorded_only_cancel_result(reason_code="live_cancel_failed", detail=str(exc))
+        return _record_live_cancel_fallback(
+            store,
+            run_id,
+            reason_code="live_cancel_failed",
+            detail=str(exc),
+        )
 
     status_code = controller_result.get("status_code")
     try:
@@ -6324,8 +6360,43 @@ def _cancel_live_agent_run(store: TaskExecutionStore, run: dict) -> dict:
     except (TypeError, ValueError):
         normalized_status_code = None
     body = controller_result.get("body") or {}
+    if (
+        normalized_status_code is not None
+        and 200 <= normalized_status_code < 300
+        and isinstance(body, dict)
+        and str(body.get("status") or "").strip() == "run_detached"
+    ):
+        saved = store.get_run(run_id)
+        return {
+            "code": "run_canceled_without_live_stop",
+            "live_cancel_attempted": False,
+            "live_cancel_confirmed": False,
+            "run_terminalized": bool(
+                saved and normalize_run_status(saved.get("status")) == "canceled"
+            ),
+            "controller_status_code": normalized_status_code,
+            "controller_response": body,
+            "message": "Run was canceled without stopping the shared Session turn.",
+        }
+    if (
+        normalized_status_code is not None
+        and 200 <= normalized_status_code < 300
+        and isinstance(body, dict)
+        and str(body.get("status") or "").strip() == "run_settled"
+    ):
+        return {
+            "code": "run_already_settled",
+            "live_cancel_attempted": False,
+            "live_cancel_confirmed": False,
+            "run_terminalized": False,
+            "controller_status_code": normalized_status_code,
+            "controller_response": body,
+            "message": "Run had already settled before cancellation acquired ownership.",
+        }
     if not _live_cancel_was_confirmed(normalized_status_code, body):
-        return _recorded_only_cancel_result(
+        return _record_live_cancel_fallback(
+            store,
+            run_id,
             reason_code=_live_cancel_failure_code(normalized_status_code, body),
             detail={
                 "controller_status_code": normalized_status_code,
@@ -6333,7 +6404,7 @@ def _cancel_live_agent_run(store: TaskExecutionStore, run: dict) -> dict:
             },
         )
 
-    run_terminalized = store.mark_run_canceled(str(run.get("id") or ""))
+    run_terminalized = store.mark_run_canceled(run_id)
     return {
         "code": "live_cancel_confirmed",
         "live_cancel_attempted": True,
@@ -6351,13 +6422,14 @@ def cmd_runs_cancel(args):
     if existing is None:
         _print_task_error(TaskCliError(f"run '{args.run_id}' not found", code="run_not_found", details={"run_id": args.run_id}))
         return 1
-    canceled = store.cancel_run(args.run_id)
-    if not canceled:
-        _print_task_error(TaskCliError(f"run '{args.run_id}' not found", code="run_not_found", details={"run_id": args.run_id}))
-        return 1
-    cancel_result = _initial_cancel_result(existing)
     if _should_attempt_live_run_cancel(existing):
         cancel_result = _cancel_live_agent_run(store, existing)
+    else:
+        canceled = store.cancel_run(args.run_id)
+        if not canceled:
+            _print_task_error(TaskCliError(f"run '{args.run_id}' not found", code="run_not_found", details={"run_id": args.run_id}))
+            return 1
+        cancel_result = _initial_cancel_result(existing)
     run = store.get_run(args.run_id)
     _print_cli_payload(
         "agent_run",
@@ -9676,7 +9748,6 @@ def cmd_watch_add(args):
             timeout_seconds=float(args.timeout),
             retry_delay_seconds=float(args.retry_delay),
             lifetime_timeout_seconds=float(args.lifetime_timeout),
-            mode=mode,
             help_command="vibe watch add --help",
         )
         prefix = _normalize_task_name(getattr(args, "prefix", None))
@@ -9992,7 +10063,6 @@ def cmd_watch_update(args):
             timeout_seconds=timeout_seconds,
             retry_delay_seconds=retry_delay_seconds,
             lifetime_timeout_seconds=lifetime_timeout_seconds,
-            mode=mode,
             help_command="vibe watch update --help",
         )
         session_policy = _definition_session_policy_for_update(
@@ -10708,13 +10778,26 @@ def _doctor(*, deep: bool = False):
     config = None
     try:
         config = V2Config.load(config_path)
-        config_items.append(
-            {
-                "status": "pass",
-                "message": "Configuration loaded successfully",
-            }
-        )
-        summary["pass"] += 1
+        if config.load_warnings:
+            recovery_notice = api.config_recovery_notice(config)
+            if recovery_notice:
+                recovery_language = getattr(config, "language", "en") or "en"
+                _add_doctor_item(
+                    config_items,
+                    "warn",
+                    recovery_notice,
+                    i18n_t("error.configRecovery.action", recovery_language),
+                    code="config.recovery",
+                )
+                summary["warn"] += 1
+        else:
+            config_items.append(
+                {
+                    "status": "pass",
+                    "message": "Configuration loaded successfully",
+                }
+            )
+            summary["pass"] += 1
     except Exception as exc:
         config_items.append(
             {
@@ -14280,7 +14363,7 @@ def build_parser():
     agent_run_delivery_group.add_argument(
         "--send-now",
         action="store_true",
-        help="Persist this Run, then steer the exact FIFO head without stopping the active Turn",
+        help="Explicitly deliver this Run as P1 to an existing Session (the default behavior)",
     )
     agent_run_delivery_group.add_argument(
         "--queue",
@@ -15338,7 +15421,7 @@ def build_parser():
         epilog=_watch_add_examples_text(),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe watch add --help",
-        error_hint="Use --session-id and either --shell or a command after '--'. Add --forever only when the waiter should re-arm after successful cycles and only retry failures for explicit retry exit codes.",
+        error_hint="Use --session-id and either --shell or a command after '--'. Retry exit codes keep either mode waiting; add --forever only when distinct successful events should re-arm the Watch.",
     )
     watch_add_parser.add_argument("--name", help="Optional human-friendly watch name")
     watch_add_parser.add_argument(
@@ -15383,13 +15466,13 @@ def build_parser():
     watch_add_parser.add_argument(
         "--forever",
         action="store_true",
-        help="Keep re-arming the watch after each successful cycle instead of stopping after the first event. Terminal failures still stop the watch unless a retry exit code is allowed.",
+        help="Monitor distinct events continuously. After each event's Agent Run settles, the Watch re-arms; terminal failures still stop it unless their exit code is retryable.",
     )
     watch_add_parser.add_argument(
         "--lifetime-timeout",
         type=float,
         default=0,
-        help="Overall forever-watch lifetime timeout in seconds. Use 0 for no lifetime limit. Requires --forever.",
+        help="Overall Watch lifetime timeout in seconds across retries and re-arms. Use 0 for no lifetime limit.",
     )
     watch_add_parser.add_argument(
         "--retry-exit-code",
@@ -15397,13 +15480,13 @@ def build_parser():
         action="append",
         type=int,
         default=None,
-        help=f"Cycle exit code that should be retried in forever mode. Repeat to add more. Default: {DEFAULT_RETRY_EXIT_CODE}",
+        help=f"Cycle exit code that should keep waiting. Repeat to add more. Default: {DEFAULT_RETRY_EXIT_CODE}",
     )
     watch_add_parser.add_argument(
         "--retry-delay",
         type=float,
         default=30,
-        help="Delay in seconds before retrying an allowed forever cycle failure. Default: 30",
+        help="Delay in seconds before retrying an allowed cycle result. Default: 30",
     )
     watch_add_parser.add_argument(
         "--shell",
@@ -15476,7 +15559,7 @@ def build_parser():
     watch_update_parser.add_argument(
         "--lifetime-timeout",
         type=float,
-        help="Set overall forever-watch lifetime timeout in seconds. Use 0 for no lifetime limit.",
+        help="Set the overall Watch lifetime timeout across retries and re-arms. Use 0 for no lifetime limit.",
     )
     watch_update_parser.add_argument(
         "--retry-exit-code",
@@ -15484,7 +15567,7 @@ def build_parser():
         action="append",
         type=int,
         default=None,
-        help="Replace retryable forever-mode exit codes. Repeat to add more.",
+        help="Replace exit codes that keep this Watch waiting. Repeat to add more.",
     )
     watch_update_parser.add_argument("--retry-delay", type=float, help="Set retry delay in seconds")
     watch_update_parser.add_argument("--shell", help="Replace waiter with a shell command")

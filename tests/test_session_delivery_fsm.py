@@ -25,6 +25,7 @@ from core.run_settlement import (
     SETTLED_BY_STOPPED,
     SETTLED_BY_TERMINAL_RESULT,
 )
+from core.processing_indicator import INTERRUPTED_REACTION_EMOJI
 from core.runtime_activation import (
     RuntimeActivationRegistry,
     RuntimeActivationResolution,
@@ -36,7 +37,9 @@ from core.session_turns import (
     DeliveryRequest,
     SessionTurnManager,
     Turn,
+    _scheduled_merge_key,
 )
+from core.message_context import SCHEDULED_DISPATCH_METADATA_APPLIED_KEY
 from core.handlers.message_handler import MessageHandler
 from modules.im import MessageContext
 from modules.im.base import FileAttachment
@@ -641,6 +644,112 @@ def test_fifo_segment_does_not_merge_different_message_authors(managers) -> None
     assert bob["state"] == "queued"
 
 
+def test_scheduled_segment_key_keeps_source_sessions_separate() -> None:
+    def row(source_session_id: str) -> dict:
+        return {
+            "metadata": {
+                SCHEDULED_PROVENANCE_KEY: {
+                    "platform_specific": {
+                        "task_trigger_kind": "agent_run",
+                        "source_session_id": source_session_id,
+                    }
+                }
+            }
+        }
+
+    assert _scheduled_merge_key(row("source-a")) != _scheduled_merge_key(row("source-b"))
+    assert _scheduled_merge_key(row("source-a")) == _scheduled_merge_key(row("source-a"))
+
+    agent_row = row("")
+    agent_row["metadata"][SCHEDULED_PROVENANCE_KEY]["platform_specific"].update(
+        {"source_kind": "agent", "source_actor": "source-agent-a"}
+    )
+    other_agent_row = row("")
+    other_agent_row["metadata"][SCHEDULED_PROVENANCE_KEY]["platform_specific"].update(
+        {"source_kind": "agent", "source_actor": "source-agent-b"}
+    )
+    assert _scheduled_merge_key(agent_row) != _scheduled_merge_key(other_agent_row)
+
+
+def test_fifo_scheduled_segment_does_not_merge_different_source_sessions(managers) -> None:
+    manager, _other, engine, _engine_b, starts = managers
+    active_turn_id, _ = asyncio.run(_activate(manager, text="active"))
+
+    def scheduled_request(text: str, source_session_id: str) -> DeliveryRequest:
+        return DeliveryRequest(
+            session_id="ses_fsm",
+            priority="p3",
+            content=text,
+            source="harness",
+            author="harness",
+            message_type="harness",
+            metadata={
+                SCHEDULED_PROVENANCE_KEY: {
+                    "platform_specific": {
+                        "task_trigger_kind": "agent_run",
+                        "source_session_id": source_session_id,
+                    }
+                }
+            },
+        )
+
+    queued = [
+        asyncio.run(manager.deliver(scheduled_request(text, source), context=_context()))
+        for text, source in (("callback A", "source-a"), ("callback B", "source-b"))
+    ]
+
+    assert asyncio.run(manager.terminalize_turn(active_turn_id))
+    queued_starts = [(turn_id, text) for turn_id, text in starts if turn_id != active_turn_id]
+    assert len(queued_starts) == 1
+    first_turn_id, dispatch_text = queued_starts[0]
+    assert dispatch_text == "callback A"
+    assert _row(engine, str(queued[0].delivery_id))["turn_id"] == first_turn_id
+    assert _row(engine, str(queued[1].delivery_id))["turn_id"] is None
+
+
+@pytest.mark.anyio
+async def test_scheduled_submit_decorates_before_native_steering(managers) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+    decorator = AsyncMock(side_effect=lambda _context, text, **_kwargs: f"decorated: {text}")
+    manager.controller.message_handler = SimpleNamespace(
+        _prepend_message_metadata=decorator,
+    )
+    await _activate(manager, text="active")
+    manager._steer = AsyncMock(return_value=steer_result(SteerOutcome.ACCEPTED))
+
+    context = _context()
+    context.platform_specific.update(
+        {
+            "task_trigger_kind": "agent_run",
+            "source_session_id": "source-session",
+        }
+    )
+    result = await manager.deliver(
+        DeliveryRequest(
+            session_id="ses_fsm",
+            priority="p1",
+            content="callback result",
+            source="harness",
+            author="harness",
+            message_type="harness",
+            metadata={
+                SCHEDULED_PROVENANCE_KEY: {
+                    "platform_specific": {
+                        "task_trigger_kind": "agent_run",
+                        "source_session_id": "source-session",
+                    }
+                }
+            },
+        ),
+        context=context,
+    )
+
+    assert result.state == "accepted"
+    decorator.assert_awaited_once_with(context, "callback result", include_user_info=False)
+    manager._steer.assert_awaited_once()
+    assert manager._steer.await_args.args[1].text == "decorated: callback result"
+
+
 def test_persisted_start_attempt_reaches_dispatch_context(managers) -> None:
     manager, _other, engine, _engine_b, _starts = managers
     captured: dict[str, object] = {}
@@ -661,6 +770,54 @@ def test_persisted_start_attempt_reaches_dispatch_context(managers) -> None:
         turn = delivery_store.get_turn(conn, admitted.turn_id)
     assert turn is not None
     assert captured["delivery_start_attempt_id"] == turn["start_attempt_id"]
+
+
+@pytest.mark.anyio
+async def test_persisted_scheduled_start_preserves_raw_text_for_handler_routing(managers) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+    captured: dict[str, object] = {}
+
+    async def capture_run(_session_id, context, text, **_kwargs):
+        captured["context"] = context
+        captured["text"] = text
+
+    manager._run = capture_run
+    context = _context()
+    context.platform_specific.update(
+        {
+            "task_trigger_kind": "agent_run",
+            "source_kind": "agent",
+            "source_actor": "source-session",
+        }
+    )
+
+    admitted = await manager.deliver(
+        DeliveryRequest(
+            session_id="ses_fsm",
+            priority="p3",
+            content="callback result",
+            source="harness",
+            author="harness",
+            message_type="harness",
+            metadata={
+                SCHEDULED_PROVENANCE_KEY: {
+                    "platform_specific": {
+                        "task_trigger_kind": "agent_run",
+                        "source_kind": "agent",
+                        "source_actor": "source-session",
+                    }
+                }
+            },
+        ),
+        context=context,
+    )
+
+    assert admitted.state == "claimed"
+    assert captured["text"] == "callback result"
+    assert captured["context"].platform_specific["source_actor"] == "source-session"
+    assert not captured["context"].platform_specific.get(
+        SCHEDULED_DISPATCH_METADATA_APPLIED_KEY
+    )
 
 
 def test_first_delivery_binds_agentless_session_before_runtime_start(managers) -> None:
@@ -1168,6 +1325,55 @@ def test_late_steer_acceptance_upgrades_the_queued_admission_receipt(managers) -
     asyncio.run(run())
 
     assert acks == [("slack", "slack-msg-99", "accepted", "steered")]
+
+
+@pytest.mark.anyio
+async def test_pending_scheduled_batches_each_get_dispatch_metadata(managers) -> None:
+    manager, _other, _engine, _engine_b, _starts = managers
+    decorator = AsyncMock(side_effect=lambda _context, text, **_kwargs: f"decorated: {text}")
+    manager.controller.message_handler = SimpleNamespace(
+        _prepend_message_metadata=decorator,
+    )
+    context = _context()
+    deliveries = []
+    for index, text in enumerate(("first callback", "second callback")):
+        deliveries.append(
+            {
+                "id": f"delivery-{index}",
+                "dispatch_text": text,
+                "snapshot_json": json.dumps(
+                    delivery_store.message_snapshot(
+                        scope_id=None,
+                        session_id="ses_fsm",
+                        platform="avibe",
+                        author="harness",
+                        source="harness",
+                        message_type="harness",
+                        text=text,
+                        metadata={
+                            SCHEDULED_PROVENANCE_KEY: {
+                                "platform_specific": {
+                                    "task_trigger_kind": "agent_run",
+                                    "source_session_id": f"source-{index}",
+                                }
+                            }
+                        },
+                    )
+                ),
+            }
+        )
+
+    assert await manager.prepare_scheduled_dispatch(
+        context, "first callback", delivery=deliveries[0]
+    ) == "decorated: first callback"
+    assert await manager.prepare_scheduled_dispatch(
+        context, "second callback", delivery=deliveries[1]
+    ) == "decorated: second callback"
+    assert decorator.await_count == 2
+    assert [call.args[1] for call in decorator.await_args_list] == [
+        "first callback",
+        "second callback",
+    ]
 
 
 def test_workbench_delivery_reports_no_reaction_receipt(managers) -> None:
@@ -2572,7 +2778,7 @@ def test_lost_accepted_receipt_materializes_from_exact_restart_evidence(
     managers,
     monkeypatch,
 ) -> None:
-    """MESSAGE-DELIVERY-011: adapter acceptance is may-have-written after DB loss."""
+    """MESSAGE-DELIVERY-011: accepted evidence recovers without adapter reconciliation."""
 
     first, restarted, engine, _engine_b, _starts = managers
     turn_id, _ = asyncio.run(_activate(first))
@@ -2598,22 +2804,18 @@ def test_lost_accepted_receipt_materializes_from_exact_restart_evidence(
         )
     )
     monkeypatch.setattr(delivery_store, "materialize_steer_acceptance", original)
+    persisted = _row(engine, str(outcome.delivery_id))
+    assert persisted["state"] == "reconciling_steer"
+    assert persisted["current_receipt_outcome"] == "accepted"
     restarted._active_identity = lambda _b, _s, logical: (logical, f"native-{logical}")
-
-    async def reconcile(_backend, request):
-        assert request.attempt_id
-        assert request.expected_logical_turn_id == turn_id
-        return steer_result(
-            SteerOutcome.ACCEPTED,
-            reason="native_attempt_found",
-            native_message_id=request.attempt_id,
-        )
-
-    restarted._reconcile_steer_attempt = reconcile
+    restarted._reconcile_steer_attempt = AsyncMock(
+        side_effect=AssertionError("accepted evidence must not reconcile")
+    )
     asyncio.run(restarted.recover_durable_delivery_state())
 
     row = _row(engine, str(outcome.delivery_id))
     assert calls == 1
+    restarted._reconcile_steer_attempt.assert_not_awaited()
     assert row["state"] == "accepted"
     assert row["turn_id"] == turn_id
     assert row["current_attempt_id"] is None
@@ -2624,9 +2826,146 @@ def test_lost_accepted_receipt_materializes_from_exact_restart_evidence(
     assert message["content_text"] == "accepted once"
 
 
-def test_missing_restart_evidence_keeps_unknown_without_resteer(
+def test_observation_recovery_materializes_persisted_accepted_receipt_without_reconcile(
     managers,
     monkeypatch,
+) -> None:
+    """MESSAGE-DELIVERY-311: observation recovery consumes accepted evidence directly."""
+
+    first, restarted, engine, _engine_b, _starts = managers
+    turn_id, _ = asyncio.run(_activate(first))
+    first._active_identity = lambda _b, _s, logical: (logical, f"native-{logical}")
+    first._steer = AsyncMock(return_value=steer_result(SteerOutcome.ACCEPTED))
+    original = delivery_store.materialize_steer_acceptance
+
+    def lose_receipt(*_args, **_kwargs):
+        raise OSError("simulated receipt fsync loss")
+
+    monkeypatch.setattr(
+        delivery_store,
+        "materialize_steer_acceptance",
+        lose_receipt,
+    )
+    outcome = asyncio.run(
+        first.deliver(
+            DeliveryRequest(session_id="ses_fsm", priority="p1", content="observed"),
+            context=_context(),
+        )
+    )
+    monkeypatch.setattr(delivery_store, "materialize_steer_acceptance", original)
+    observations, _ = restarted.scan_runtime_delivery_recovery(
+        limit=10,
+        occupied=frozenset(),
+    )
+    observation = next(
+        item for item in observations if item.delivery_id == str(outcome.delivery_id)
+    )
+    restarted._reconcile_steer_attempt = AsyncMock(
+        side_effect=AssertionError("accepted evidence must not reconcile")
+    )
+
+    assert asyncio.run(restarted.recover_runtime_delivery_observation(observation))
+    restarted._reconcile_steer_attempt.assert_not_awaited()
+    row = _row(engine, str(outcome.delivery_id))
+    assert row["state"] == "accepted"
+    assert row["turn_id"] == turn_id
+
+
+def test_accepted_receipt_recovery_preserves_attempt_batch_and_run_attachment(
+    managers,
+    monkeypatch,
+) -> None:
+    """MESSAGE-DELIVERY-313: accepted batch recovery retains Turn participants."""
+
+    first, restarted, engine, _engine_b, _starts = managers
+    original = delivery_store.materialize_steer_acceptance
+    run_id = "run-accepted-receipt-batch"
+
+    async def run() -> tuple[str, list[str], MessageContext]:
+        turn_id, active_context = await _activate(first)
+        queued = [
+            await first.deliver(
+                DeliveryRequest(
+                    session_id="ses_fsm",
+                    priority="p3",
+                    content=text,
+                    source="harness",
+                    author="harness",
+                    message_type="harness",
+                ),
+                context=_context(),
+            )
+            for text in ("batch one", "batch two")
+        ]
+        now = "2026-08-11T00:00:00Z"
+        with engine.begin() as conn:
+            conn.execute(
+                agent_runs.insert().values(
+                    id=run_id,
+                    definition_id=None,
+                    run_type="agent_run",
+                    status="running",
+                    cancel_requested=0,
+                    session_id="ses_fsm",
+                    delivery_id=queued[1].delivery_id,
+                    created_at=now,
+                    updated_at=now,
+                    metadata_json="{}",
+                )
+            )
+        first._steer = AsyncMock(return_value=steer_result(SteerOutcome.ACCEPTED))
+
+        def lose_receipt(*_args, **_kwargs):
+            raise OSError("simulated receipt fsync loss")
+
+        monkeypatch.setattr(
+            delivery_store,
+            "materialize_steer_acceptance",
+            lose_receipt,
+        )
+        await first.deliver(
+            DeliveryRequest(session_id="ses_fsm", priority="p1", content=None),
+            context=_context(),
+        )
+        monkeypatch.setattr(
+            delivery_store,
+            "materialize_steer_acceptance",
+            original,
+        )
+        delivery_ids = [str(item.delivery_id) for item in queued]
+        persisted = [_row(engine, delivery_id) for delivery_id in delivery_ids]
+        assert {row["state"] for row in persisted} == {"reconciling_steer"}
+        assert {row["current_receipt_outcome"] for row in persisted} == {
+            "accepted"
+        }
+        assert len({row["current_attempt_id"] for row in persisted}) == 1
+
+        holder = asyncio.create_task(asyncio.Event().wait())
+        restarted.in_flight["ses_fsm"] = Turn(
+            task=holder,
+            context=active_context,
+            logical_turn_id=turn_id,
+        )
+        restarted._reconcile_steer_attempt = AsyncMock(
+            side_effect=AssertionError("accepted evidence must not reconcile")
+        )
+        await restarted.recover_durable_delivery_state()
+        holder.cancel()
+        await asyncio.gather(holder, return_exceptions=True)
+        return turn_id, delivery_ids, active_context
+
+    turn_id, delivery_ids, active_context = asyncio.run(run())
+    restarted._reconcile_steer_attempt.assert_not_awaited()
+    accepted = [_row(engine, delivery_id) for delivery_id in delivery_ids]
+    assert {row["state"] for row in accepted} == {"accepted"}
+    assert {row["turn_id"] for row in accepted} == {turn_id}
+    assert len({row["message_id"] for row in accepted}) == 1
+    assert [row["turn_position"] for row in accepted] == [1, 2]
+    assert active_context.platform_specific["accepted_agent_run_ids"] == [run_id]
+
+
+def test_missing_restart_evidence_keeps_unknown_without_resteer(
+    managers,
 ) -> None:
     first, restarted, engine, _engine_b, _starts = managers
     turn_id, _ = asyncio.run(_activate(first))
@@ -2634,25 +2973,18 @@ def test_missing_restart_evidence_keeps_unknown_without_resteer(
     steer_calls = 0
     reconciliation_calls = 0
 
-    async def accepted(_backend, _request):
+    async def unknown(_backend, _request):
         nonlocal steer_calls
         steer_calls += 1
-        return steer_result(SteerOutcome.ACCEPTED)
+        return steer_result(SteerOutcome.UNKNOWN, reason="evidence_unavailable")
 
-    first._steer = accepted
-    original = delivery_store.materialize_steer_acceptance
-
-    def lose_receipt(*args, **kwargs):
-        raise OSError("simulated receipt fsync loss")
-
-    monkeypatch.setattr(delivery_store, "materialize_steer_acceptance", lose_receipt)
+    first._steer = unknown
     outcome = asyncio.run(
         first.deliver(
             DeliveryRequest(session_id="ses_fsm", priority="p1", content="still unknown"),
             context=_context(),
         )
     )
-    monkeypatch.setattr(delivery_store, "materialize_steer_acceptance", original)
     restarted._active_identity = lambda _b, _s, logical: (logical, f"native-{logical}")
 
     async def reconcile(_backend, request):
@@ -2823,6 +3155,50 @@ def test_definitive_p0_refusal_leaves_backlog_behind_the_active_turn(managers) -
         active = delivery_store.active_turn(conn, "ses_fsm")
     assert active is not None and active["id"] == turn_id
     assert _row(engine, queued_id)["state"] == "queued"
+
+
+def test_refused_replacement_releases_its_control_ownership(managers) -> None:
+    manager, _other, engine, _engine_b, _starts = managers
+
+    async def run() -> tuple[str, str]:
+        turn_id, context = await _activate(manager)
+        holder = asyncio.create_task(asyncio.Event().wait())
+        manager.in_flight["ses_fsm"] = Turn(
+            task=holder,
+            context=context,
+            logical_turn_id=turn_id,
+        )
+
+        async def refused(stop_context):
+            stop_context.platform_specific["stop_failure_reason"] = "refused"
+            return False
+
+        manager.controller.command_handler.handle_stop = AsyncMock(side_effect=refused)
+        try:
+            result = await manager.deliver(
+                DeliveryRequest(
+                    session_id="ses_fsm",
+                    priority="p0",
+                    content="replacement",
+                ),
+                context=_context(),
+            )
+        finally:
+            holder.cancel()
+            await asyncio.gather(holder, return_exceptions=True)
+        assert result.state == "queued"
+        return turn_id, str(result.delivery_id)
+
+    turn_id, replacement_delivery_id = asyncio.run(run())
+    with engine.connect() as conn:
+        active = delivery_store.get_turn(conn, turn_id)
+    assert active is not None
+    assert active["state"] == "active"
+    assert active["control_state"] == "refused"
+    assert active["control_mode"] is None
+    assert active["control_successor_turn_id"] is None
+    assert active["control_successor_delivery_id"] is None
+    assert _row(engine, replacement_delivery_id)["state"] == "queued"
 
 
 def test_empty_p0_uses_the_control_slot_without_creating_a_message_delivery(managers) -> None:
@@ -3531,6 +3907,318 @@ def test_accepted_codex_turn_without_runtime_settles_and_releases_queue(managers
     assert accepted is not None and accepted["state"] == "accepted"
     assert _row(engine, str(queued.delivery_id))["state"] == "claimed"
     assert [text for _started_turn, text in starts] == ["continue after restart"]
+
+
+def _capture_lost_turn_report(manager: SessionTurnManager) -> tuple[list, list]:
+    """Record what a lost turn reports outward, without a real IM client."""
+
+    emitted: list[tuple[str, str]] = []
+    stamped: list[tuple[str, str]] = []
+
+    async def _emit(_context, kind, text, **_kwargs):
+        emitted.append((kind, text))
+        # The dispatcher answers with the delivered message id; a falsy answer
+        # means the send failed, which the report path must not read as success.
+        return f"msg-{len(emitted)}"
+
+    async def _stamp(_context, message_id, emoji):
+        stamped.append((message_id, emoji))
+        return True
+
+    manager.controller.emit_agent_message = _emit
+    manager.controller.processing_indicator = SimpleNamespace(
+        stamp_orphaned_terminal_reaction=_stamp
+    )
+    return emitted, stamped
+
+
+def test_lost_im_turn_without_run_reports_interruption(managers) -> None:
+    # An IM turn owns no agent_runs row, so the Harness interruption lane cannot
+    # reach it: without this report the thread just stops, which is
+    # indistinguishable from an agent choosing to stay quiet.
+    first, restarted, engine, _engine_b, _starts = managers
+    context = _context()
+    admitted = asyncio.run(
+        first.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="im turn killed by restart",
+                native_message_id="m-origin",
+            ),
+            context=context,
+        )
+    )
+    turn_id = str(admitted.turn_id)
+    context.platform_specific["turn_token"] = turn_id
+    context.platform_specific["agent_runtime_turn_token"] = f"runtime-{turn_id}"
+    first._active_identity = lambda _backend, _session_id, logical_id: (
+        logical_id,
+        f"native-{logical_id}",
+    )
+    first.on_native_start(
+        context,
+        backend="codex",
+        runtime_key=f"runtime-key-{turn_id}",
+        runtime_turn_id=f"runtime-{turn_id}",
+    )
+    emitted, stamped = _capture_lost_turn_report(restarted)
+    restarted._active_identity = lambda *_args: None
+
+    asyncio.run(restarted.recover_durable_delivery_state("ses_fsm", service_restart=True))
+
+    with engine.connect() as conn:
+        settled = delivery_store.get_turn(conn, turn_id)
+    assert settled is not None and settled["terminal_evidence_kind"] == "restart_runtime_missing"
+    assert [kind for kind, _text in emitted] == ["notify"]
+    assert "interrupted" in emitted[0][1].lower()
+    # The dead process could not clear its own 👀; recovery retires it in place.
+    assert stamped == [("m-origin", INTERRUPTED_REACTION_EMOJI)]
+
+
+def test_lost_quick_reply_turn_stamps_the_echo_it_reacted_on(managers) -> None:
+    """A quick-reply turn wears its 👀 on the bot echo, not on a user message.
+
+    The callback is admitted with ``native_message_id=None`` on purpose (it would
+    collide with platform event dedup) and the echo id survives only in the
+    durable admission context. Reading the native id alone yields ``""`` here, so
+    the ⚠️ is skipped and the echo keeps claiming the turn is still running —
+    exactly the stuck indicator the report exists to retire.
+    """
+
+    first, restarted, _engine, _engine_b, _starts = managers
+    context = _context()
+    admitted = asyncio.run(
+        first.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="quick reply killed by restart",
+                admission_context={"processing_indicator_message_id": "echo-9"},
+            ),
+            context=context,
+        )
+    )
+    turn_id = str(admitted.turn_id)
+    context.platform_specific["turn_token"] = turn_id
+    context.platform_specific["agent_runtime_turn_token"] = f"runtime-{turn_id}"
+    first._active_identity = lambda _backend, _session_id, logical_id: (
+        logical_id,
+        f"native-{logical_id}",
+    )
+    first.on_native_start(
+        context,
+        backend="codex",
+        runtime_key=f"runtime-key-{turn_id}",
+        runtime_turn_id=f"runtime-{turn_id}",
+    )
+    emitted, stamped = _capture_lost_turn_report(restarted)
+    restarted._active_identity = lambda *_args: None
+
+    asyncio.run(restarted.recover_durable_delivery_state("ses_fsm", service_restart=True))
+
+    assert [kind for kind, _text in emitted] == ["notify"]
+    assert stamped == [("echo-9", INTERRUPTED_REACTION_EMOJI)]
+
+
+def test_lost_im_turn_report_waits_for_its_transport(managers) -> None:
+    # Recovery runs at startup, BEFORE the IM transports finish connecting.
+    # Emitting then would drop the notice into a client that cannot send, so the
+    # report is held and flushed from the transport-ready hook instead.
+    first, restarted, _engine, _engine_b, _starts = managers
+    context = _context()
+    admitted = asyncio.run(
+        first.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="im turn killed before the transport came up",
+                native_message_id="m-origin",
+            ),
+            context=context,
+        )
+    )
+    turn_id = str(admitted.turn_id)
+    context.platform_specific["turn_token"] = turn_id
+    context.platform_specific["agent_runtime_turn_token"] = f"runtime-{turn_id}"
+    first._active_identity = lambda _backend, _session_id, logical_id: (
+        logical_id,
+        f"native-{logical_id}",
+    )
+    first.on_native_start(
+        context,
+        backend="codex",
+        runtime_key=f"runtime-key-{turn_id}",
+        runtime_turn_id=f"runtime-{turn_id}",
+    )
+    emitted, stamped = _capture_lost_turn_report(restarted)
+    restarted._active_identity = lambda *_args: None
+    ready: set[str] = set()
+    restarted._transport_can_deliver = lambda platform: platform in ready
+
+    asyncio.run(restarted.recover_durable_delivery_state("ses_fsm", service_restart=True))
+
+    assert emitted == [] and stamped == []
+
+    ready.add("avibe")
+    reported = asyncio.run(restarted.notify_transport_ready("avibe"))
+
+    assert reported == 1
+    assert [kind for kind, _text in emitted] == ["notify"]
+    assert stamped == [("m-origin", INTERRUPTED_REACTION_EMOJI)]
+    # The queue is drained, not replayed: a second hook fires nothing.
+    assert asyncio.run(restarted.notify_transport_ready("avibe")) == 0
+    assert len(emitted) == 1
+
+
+def test_lost_im_turn_report_survives_a_failed_send(managers) -> None:
+    # "Transport ready" is the transport's claim, not a delivered message. The
+    # dispatcher swallows a send failure and answers None, and the turn is
+    # already terminal, so treating that as done would discard the only account
+    # of the interruption the user will ever get.
+    first, restarted, _engine, _engine_b, _starts = managers
+    context = _context()
+    admitted = asyncio.run(
+        first.deliver(
+            DeliveryRequest(
+                session_id="ses_fsm",
+                priority="p3",
+                content="im turn killed by restart",
+                native_message_id="m-origin",
+            ),
+            context=context,
+        )
+    )
+    turn_id = str(admitted.turn_id)
+    context.platform_specific["turn_token"] = turn_id
+    context.platform_specific["agent_runtime_turn_token"] = f"runtime-{turn_id}"
+    first._active_identity = lambda _backend, _session_id, logical_id: (
+        logical_id,
+        f"native-{logical_id}",
+    )
+    first.on_native_start(
+        context,
+        backend="codex",
+        runtime_key=f"runtime-key-{turn_id}",
+        runtime_turn_id=f"runtime-{turn_id}",
+    )
+    emitted, stamped = _capture_lost_turn_report(restarted)
+    restarted._active_identity = lambda *_args: None
+    delivers = False
+
+    async def _emit(_context, kind, text, **_kwargs):
+        emitted.append((kind, text))
+        return "msg-1" if delivers else None
+
+    restarted.controller.emit_agent_message = _emit
+
+    asyncio.run(restarted.recover_durable_delivery_state("ses_fsm", service_restart=True))
+
+    # It was attempted and it failed: no ⚠️ next to a notice nobody received.
+    assert [kind for kind, _text in emitted] == ["notify"]
+    assert stamped == []
+
+    delivers = True
+    assert asyncio.run(restarted.notify_transport_ready("avibe")) == 1
+    assert len(emitted) == 2
+    assert stamped == [("m-origin", INTERRUPTED_REACTION_EMOJI)]
+
+
+def test_retained_lost_turn_report_is_retried_on_its_own_clock(managers) -> None:
+    # notify_transport_ready has exactly one caller (_on_im_ready) and the IM
+    # client suppresses repeat ready callbacks until the platform goes unready,
+    # so a connected transport that merely hit one API error would hold the
+    # notice forever. The retry has to come from the manager itself.
+    _first, restarted, _engine, _engine_b, _starts = managers
+    emitted, _stamped = _capture_lost_turn_report(restarted)
+    restarted.LOST_TURN_RETRY_DELAYS = (0.0, 0.0)
+    restarted._pending_lost_turn_reports["slack"] = [("ses_fsm", "m-origin")]
+    failures = 1
+
+    async def _emit(_context, kind, text, **_kwargs):
+        nonlocal failures
+        emitted.append((kind, text))
+        if failures:
+            failures -= 1
+            return None
+        return "msg-late"
+
+    restarted.controller.emit_agent_message = _emit
+    restarted._delivery_context = lambda _session_id: _context()
+
+    async def _flush_then_settle():
+        assert await restarted.notify_transport_ready("slack") == 0
+        assert restarted._pending_lost_turn_reports["slack"]
+        # Nothing else will call in; the scheduled retry is the only hope.
+        task = restarted._lost_turn_retry_tasks["slack"]
+        await asyncio.wait_for(task, timeout=5)
+
+    asyncio.run(_flush_then_settle())
+
+    assert len(emitted) == 2
+    assert not restarted._pending_lost_turn_reports.get("slack")
+    assert not restarted._lost_turn_retry_tasks
+
+
+def test_lost_turn_retry_gives_up_instead_of_spinning(managers) -> None:
+    # A hard outage must not turn into an unbounded resend loop; the next real
+    # reconnect flushes whatever is still owed.
+    _first, restarted, _engine, _engine_b, _starts = managers
+    emitted, _stamped = _capture_lost_turn_report(restarted)
+    restarted.LOST_TURN_RETRY_DELAYS = (0.0, 0.0)
+    restarted._pending_lost_turn_reports["slack"] = [("ses_fsm", "m-origin")]
+
+    async def _emit(_context, kind, text, **_kwargs):
+        emitted.append((kind, text))
+        return None
+
+    restarted.controller.emit_agent_message = _emit
+    restarted._delivery_context = lambda _session_id: _context()
+
+    async def _flush_and_exhaust():
+        await restarted.notify_transport_ready("slack")
+        await asyncio.wait_for(restarted._lost_turn_retry_tasks["slack"], timeout=5)
+
+    asyncio.run(_flush_and_exhaust())
+
+    # One initial attempt plus one per configured delay, then it stops.
+    assert len(emitted) == 3
+    assert restarted._pending_lost_turn_reports["slack"] == [("ses_fsm", "m-origin")]
+
+
+def test_lost_turn_owning_a_run_leaves_the_notice_to_the_harness_lane(managers) -> None:
+    # A Harness turn already gets harness.run.interrupted.* stamped on its Run.
+    # Reporting again here would double-notify the same interruption.
+    first, restarted, engine, _engine_b, _starts = managers
+    turn_id, _context_value = asyncio.run(_activate(first, text="harness turn"))
+    with engine.begin() as conn:
+        accepted = delivery_store.delivery_for_turn(conn, turn_id)
+        assert accepted is not None
+        conn.execute(
+            agent_runs.insert().values(
+                id="run-lost-turn",
+                definition_id=None,
+                run_type="scheduled",
+                status="running",
+                cancel_requested=0,
+                session_id="ses_fsm",
+                delivery_id=str(accepted["id"]),
+                created_at="2026-08-01T00:00:00Z",
+                updated_at="2026-08-01T00:00:00Z",
+                metadata_json="{}",
+            )
+        )
+    assert first.accepted_agent_run_ids_for_turn(turn_id) == ["run-lost-turn"]
+    emitted, stamped = _capture_lost_turn_report(restarted)
+    restarted._active_identity = lambda *_args: None
+
+    asyncio.run(restarted.recover_durable_delivery_state("ses_fsm", service_restart=True))
+
+    with engine.connect() as conn:
+        settled = delivery_store.get_turn(conn, turn_id)
+    assert settled is not None and settled["terminal_evidence_kind"] == "restart_runtime_missing"
+    assert emitted == []
+    assert stamped == []
 
 
 def test_accepted_opencode_turn_without_restored_identity_stays_live(managers) -> None:
@@ -5800,6 +6488,148 @@ def test_owned_run_sweep_retries_terminal_turn_settlement_before_orphaning(
         ).scalar_one() == "succeeded"
 
 
+@pytest.mark.parametrize("sent_before_recovery", [False, True])
+def test_hfr_474_startup_collapses_legacy_restart_notices_by_durable_turn(
+    managers,
+    tmp_path: Path,
+    sent_before_recovery: bool,
+) -> None:
+    """Upgrade recovery uses exact Delivery ownership before notices can drain."""
+
+    from core import failure_notices
+    from core.scheduled_tasks import ScheduledTaskService, TaskExecutionStore
+    from storage.background import SQLiteBackgroundTaskStore
+
+    manager, _restarted, engine, _engine_b, _starts = managers
+    turn_id, _context_value = asyncio.run(_activate(manager))
+    run_ids = [f"run-legacy-restart-{index}" for index in range(3)]
+    now = "2026-08-01T00:00:00Z"
+    with engine.begin() as conn:
+        initial = delivery_store.initial_deliveries_for_turn(conn, turn_id)[0]
+        assert initial["state"] == "accepted"
+        initial_row = delivery_store.get_delivery(conn, str(initial["id"]))
+        assert initial_row is not None
+        delivery_ids = [str(initial["id"])]
+        for index in range(1, len(run_ids)):
+            delivery_id = delivery_store.new_delivery_id()
+            values = dict(initial_row)
+            values.update(
+                id=delivery_id,
+                priority="p1",
+                dedupe_key=None,
+                turn_role="steer",
+                turn_position=index,
+                submitted_at=now,
+                updated_at=now,
+                version=1,
+            )
+            conn.execute(message_deliveries.insert().values(**values))
+            delivery_ids.append(delivery_id)
+        for run_id, delivery_id in zip(run_ids, delivery_ids, strict=True):
+            conn.execute(
+                agent_runs.insert().values(
+                    id=run_id,
+                    definition_id=None,
+                    run_type="agent_run",
+                    status="running",
+                    cancel_requested=0,
+                    session_id="ses_fsm",
+                    callback_status="pending",
+                    delivery_id=delivery_id,
+                    created_at=now,
+                    started_at=now,
+                    updated_at=now,
+                    metadata_json="{}",
+                )
+            )
+
+    db_path = Path(str(engine.url.database))
+    run_store = SQLiteBackgroundTaskStore(db_path)
+    request_store = TaskExecutionStore(root=tmp_path / "legacy-restart-requests")
+    request_store._sqlite = run_store
+    scheduled = ScheduledTaskService.__new__(ScheduledTaskService)
+    scheduled.controller = manager.controller
+    scheduled.request_store = request_store
+    scheduled._drain_dirty = False
+    manager.controller.scheduled_task_service = scheduled
+    try:
+        # Reproduce the old release: each failed Run independently receives a
+        # restart notice although all rows retain the same exact durable Turn.
+        for run_id in run_ids:
+            assert run_store.settle_run_terminal(
+                run_id,
+                terminal_status="failed",
+                error="service restarted",
+                metadata={"interrupt_reason": SETTLED_BY_RESTARTED},
+                updated_at=now,
+            ) == "failed"
+        sent_id = run_ids[0]
+        if sent_before_recovery:
+            run_store.update_owed_failure_notice(
+                sent_id,
+                state="sent",
+                ack_evidence="receipt",
+            )
+
+        # Match an upgrade: the old process wrote the terminal Turn and per-Run
+        # notices; the new process owns startup reconciliation.
+        with engine.begin() as conn:
+            terminal = manager._write_terminal_snapshot(
+                conn,
+                turn_id,
+                outcome="failed",
+                settled_by=SETTLED_BY_RESTARTED,
+                evidence_kind="service_shutdown",
+                evidence={"reason": "scheduled_service_shutdown"},
+            )
+        assert terminal["changed"] is True
+
+        asyncio.run(manager.recover_durable_delivery_state(service_restart=True))
+
+        notices = {
+            run_id: run_store.owed_failure_notice(run_id) for run_id in run_ids
+        }
+        assert all(notice is not None for notice in notices.values())
+        assert {
+            notice["turn_id"] for notice in notices.values() if notice is not None
+        } == {turn_id}
+        assert {
+            notice["turn_fallback_run_id"]
+            for notice in notices.values()
+            if notice is not None
+        } == {sent_id}
+        assert {
+            tuple(notice["turn_participant_run_ids"])
+            for notice in notices.values()
+            if notice is not None
+        } == {tuple(run_ids)}
+
+        deliverable = [
+            run_id
+            for run_id, notice in notices.items()
+            if notice is not None
+            and notice["state"] == "pending"
+            and failure_notices.decide(
+                run_id=run_id,
+                definition_id=None,
+                notice=notice,
+                streak_facts=None,
+                earlier_unsettled=None,
+            ).action
+            == failure_notices.ACTION_DELIVER
+        ]
+        assert deliverable == ([] if sent_before_recovery else [sent_id])
+        if sent_before_recovery:
+            assert notices[sent_id]["state"] == "sent"
+            assert all(
+                notice["turn_notification_delivered"] is True
+                for notice in notices.values()
+                if notice is not None
+            )
+    finally:
+        run_store.close()
+
+
 def test_restored_opencode_generation_rebinds_turn_control_and_steer(
     managers,
 ) -> None:
@@ -6287,9 +7117,11 @@ async def test_terminal_commit_publishes_replyless_inbox_settlement(
 
 
 @pytest.mark.anyio
-async def test_agent_initiated_continuation_materializes_in_configured_language(
+async def test_agent_initiated_continuation_materializes_as_hidden_turn_input(
     managers,
 ) -> None:
+    """HFR-461: backend continuation keeps a hidden lifecycle input."""
+
     manager, _other, engine, _engine_b, _starts = managers
     manager.controller.config.language = "zh"
     context = _context()
@@ -6297,8 +7129,15 @@ async def test_agent_initiated_continuation_materializes_in_configured_language(
     assert manager.register_agent_initiated_turn(context) is True
     with engine.connect() as conn:
         row = messages_service.get_message(conn, str(context.message_id))
+        transcript = messages_service.list_session_messages(
+            conn,
+            session_id="ses_fsm",
+            types=messages_service.TRANSCRIPT_TYPES,
+        )
     assert row is not None
+    assert row["type"] == "agent_initiated"
     assert row["text"] == "Agent 主动发起的续接"
+    assert transcript["messages"] == []
 
     sink = manager.get_turn_sink(manager.controller._get_session_key(context))
     assert sink is not None

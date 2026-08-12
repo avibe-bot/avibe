@@ -67,13 +67,6 @@ describe('oauthFailureKey', () => {
   // POST /sources errors drift apart, which a shared constant cannot do.
   const MATERIALIZE = ['discovery_failed', 'migration_item_conflict'] as const;
 
-  it('keeps the consent remedy for both journeys', () => {
-    // consent_required is answered by a control the user can still reach, so its
-    // copy is the same instruction whichever journey asked.
-    expect(oauthFailureKey('consent_required', 'connect')).toBe('settings.models.oauth.error.consent');
-    expect(oauthFailureKey('consent_required', 'reauth')).toBe('settings.models.oauth.error.consent');
-  });
-
   it.each(MATERIALIZE)('names the right object for %s', (code) => {
     // The whole reason the journey is a required argument: a connect has no
     // Source yet, a reauth has one the server just cleared and marked unavailable.
@@ -105,7 +98,6 @@ describe('oauthFailureKey', () => {
 
   it.each(['zh', 'en'] as const)('resolves every key it can return in %s', (lng) => {
     const keys = [
-      oauthFailureKey('consent_required', 'connect'),
       oauthFailureKey('discovery_failed', 'connect'),
       oauthFailureKey('discovery_failed', 'reauth'),
       oauthFailureKey(undefined, 'connect'),

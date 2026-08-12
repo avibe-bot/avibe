@@ -6,10 +6,12 @@ from types import SimpleNamespace
 
 import pytest
 
+from fastapi import Request as FastAPIRequest
 from storage.importer import ensure_sqlite_state
 from vibe.ui_compat import (
     TEST_REMOTE_ADDR_HEADER,
     CompatApp,
+    _read_json_payload,
     normalize_response,
     route_path_to_fastapi,
     run_maybe_async,
@@ -1401,6 +1403,65 @@ def test_harness_routes_page_filter_and_return_counts(monkeypatch, tmp_path):
     assert counts["runs"]["all"] == 4
 
 
+def test_harness_task_resume_rejects_orphaned_owner_without_target(
+    monkeypatch, tmp_path
+):
+    from storage.background import SQLiteBackgroundTaskStore
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    store = SQLiteBackgroundTaskStore()
+    try:
+        store.upsert_scheduled_task(
+            {
+                "id": "orphaned-task",
+                "name": "Orphaned task",
+                "prompt": "run it",
+                "schedule_type": "cron",
+                "cron": "0 * * * *",
+                "enabled": False,
+                "created_at": "2026-08-11T00:00:00+00:00",
+                "updated_at": "2026-08-11T00:00:00+00:00",
+                "metadata": {
+                    "orphaned_task_owner": {
+                        "reason_code": "task_owner_session_unavailable",
+                        "owner_session_id": "ses-removed",
+                    }
+                },
+            }
+        )
+    finally:
+        store.close()
+
+    client = app.test_client()
+    response = client.patch(
+        "/api/harness/tasks/orphaned-task",
+        json={"enabled": True},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 409
+    body = response.get_json()
+    assert body["code"] == "task_owner_session_unavailable"
+    assert body["error"]["code"] == "task_owner_session_unavailable"
+    assert "Create a replacement Task" in body["hint"]
+    assert body["details"] == {
+        "task_id": "orphaned-task",
+        "owner_session_id": "ses-removed",
+    }
+    store = SQLiteBackgroundTaskStore()
+    try:
+        saved = store.get_scheduled_task("orphaned-task")
+    finally:
+        store.close()
+    assert saved is not None
+    assert saved["enabled"] is False
+    assert saved["resume_blocked"] == {
+        "code": "task_owner_session_unavailable",
+        "owner_session_id": "ses-removed",
+    }
+
+
 def test_harness_bootstrap_returns_counts_and_selected_page(monkeypatch, tmp_path):
     from storage.background import SQLiteBackgroundTaskStore
 
@@ -2464,6 +2525,52 @@ def test_run_maybe_async_offloads_sync_handlers_without_losing_context():
 
     assert result == "/threadpool-check"
     assert tick == "tick"
+
+
+def test_json_payload_parsing_runs_off_the_asgi_loop(monkeypatch):
+    parse_threads: list[int] = []
+    original_loads = json.loads
+
+    def tracked_loads(payload):
+        parse_threads.append(threading.get_ident())
+        return original_loads(payload)
+
+    monkeypatch.setattr("vibe.ui_compat.json.loads", tracked_loads)
+
+    async def receive():
+        return {
+            "type": "http.request",
+            "body": b'{"attachment":"legacy"}',
+            "more_body": False,
+        }
+
+    starlette_request = FastAPIRequest(
+        {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": "/legacy-upload",
+            "raw_path": b"/legacy-upload",
+            "query_string": b"",
+            "headers": [(b"content-type", b"application/json")],
+            "client": ("127.0.0.1", 12345),
+            "server": ("testserver", 80),
+        },
+        receive,
+    )
+
+    async def exercise():
+        loop_thread = threading.get_ident()
+        payload = await _read_json_payload(starlette_request)
+        return loop_thread, payload
+
+    loop_thread, payload = asyncio.run(exercise())
+
+    assert payload == {"attachment": "legacy"}
+    assert parse_threads
+    assert parse_threads[0] != loop_thread
 
 
 def test_wechat_qr_poll_marks_bind_hint_and_schedules_managed_restart(monkeypatch):

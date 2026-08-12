@@ -36,6 +36,15 @@ QUEUED_REACTION_EMOJI = "👌"
 STEERED_REACTION_EMOJI = "✍️"
 UNCONFIRMED_REACTION_EMOJI = "🤔"
 NOT_DELIVERED_REACTION_EMOJI = "🤷"
+# Terminal receipts that REPLACE the running 👀 instead of clearing it. Plain
+# removal is the right ending for a turn that produced its own result — the
+# result IS the receipt — but it is ambiguous for a turn that ended without one:
+# a stopped turn and a turn whose runtime died both leave a message that simply
+# stopped having a reaction, which is also what a healthy silent completion
+# looks like. These two say which happened, and they persist on the triggering
+# message rather than costing a line in the thread.
+STOPPED_REACTION_EMOJI = "⏹️"
+INTERRUPTED_REACTION_EMOJI = "⚠️"
 # Delivery state -> admission receipt. States that own a turn (``claimed``,
 # ``steering``, ``interrupt_waiting``) are absent on purpose: their feedback is
 # the turn's own processing indicator, and an ``accepted`` Delivery is only
@@ -47,16 +56,10 @@ _ADMISSION_ACK_REACTIONS: dict[str, str] = {
     "reconciling_steer": UNCONFIRMED_REACTION_EMOJI,
     "retired": NOT_DELIVERED_REACTION_EMOJI,
 }
-# Receipts that can still be replaced or cleared later, and are therefore worth
-# remembering. The rest are final: the Delivery they describe never starts a turn
-# of its own, so nothing would ever read the entry back and keeping it would grow
-# the registry by one key per mid-turn message for the life of the process.
-_REPLACEABLE_ADMISSION_STATES = frozenset(
-    {"queued", "pending_steer", "reconciling_steer"}
-)
-# Backstop for receipts whose Delivery never reaches a turn (a queue drained by a
-# Stop, a session archived mid-wait). Bounded FIFO eviction: dropping the oldest
-# key only forfeits a later replace/clear, never the reaction itself.
+# Backstop for receipts nothing ever reads back (a queue drained by a Stop, a
+# session archived mid-wait, a terminal ✍️/🤷 on a message no other Delivery
+# touches). Bounded FIFO eviction: dropping the oldest key only forfeits a later
+# replace/clear, never the reaction itself.
 _ADMISSION_ACK_REGISTRY_LIMIT = 1024
 # Registry marker for a message whose own turn has started. Kept so a receipt
 # still in flight when the turn began cannot decorate it afterwards.
@@ -72,6 +75,9 @@ class ProcessingIndicatorHandle:
     ack_message_channel_id: Optional[str] = None
     ack_reaction_message_id: Optional[str] = None
     ack_reaction_emoji: Optional[str] = None
+    # Captured only by start(), which runs for human turns. Backend-initiated
+    # turns may reuse a context with an old message_id and must not stamp it.
+    terminal_reaction_message_id: Optional[str] = None
     typing_indicator_active: bool = False
     typing_indicator_task: Optional[asyncio.Task] = None
     # True when the reaction indicator is the selected mode for this turn. The
@@ -97,6 +103,7 @@ class ProcessingIndicatorHandle:
             "ack_message_channel_id": self.ack_message_channel_id,
             "ack_reaction_message_id": self.ack_reaction_message_id,
             "ack_reaction_emoji": self.ack_reaction_emoji,
+            "terminal_reaction_message_id": self.terminal_reaction_message_id,
             "typing_indicator_active": self.typing_indicator_active,
         }
 
@@ -125,6 +132,12 @@ class ProcessingIndicatorHandle:
             ack_message_channel_id=data.get("ack_message_channel_id") or data.get("channel_id") or None,
             ack_reaction_message_id=data.get("ack_reaction_message_id") or None,
             ack_reaction_emoji=data.get("ack_reaction_emoji") or None,
+            terminal_reaction_message_id=(
+                data.get("terminal_reaction_message_id")
+                or data.get("ack_reaction_message_id")
+                or data.get("message_id")
+                or None
+            ),
             typing_indicator_active=bool(data.get("typing_indicator_active", False)),
         )
 
@@ -365,12 +378,14 @@ class ProcessingIndicatorService:
             if not applied:
                 registry.pop(key, None)
                 return None
-            if str(state or "").strip() in _REPLACEABLE_ADMISSION_STATES:
-                self._remember_admission_ack(key, emoji)
-            else:
-                # Final receipt: the Delivery behind it never starts a turn, so
-                # nothing will ever replace or clear this reaction.
-                registry.pop(key, None)
+            # Every receipt is remembered, terminal ones included. A reaction
+            # target can be shared — a quick-reply callback reacts on its bot
+            # echo, so two Deliveries settle on one message — and a platform
+            # shows one reaction per (message, emoji, bot). The receipt therefore
+            # describes the message rather than any one Delivery: last writer
+            # wins, and the previous receipt is removed instead of stacked. The
+            # FIFO cap bounds what a terminal receipt leaves behind.
+            self._remember_admission_ack(key, emoji)
             return emoji
 
     async def clear_admission_ack(self, context: MessageContext) -> None:
@@ -422,7 +437,10 @@ class ProcessingIndicatorService:
             await self.clear_admission_ack(merged)
 
     async def start(self, context: MessageContext, agent_name: str, *, enabled: bool = True) -> ProcessingIndicatorHandle:
-        handle = ProcessingIndicatorHandle(context=context)
+        handle = ProcessingIndicatorHandle(
+            context=context,
+            terminal_reaction_message_id=self._reaction_target_message_id(context),
+        )
         # A queued input carries an admission receipt (👌) that this turn's own
         # indicator now replaces. Platforms that stack reactions would otherwise
         # show both, and the receipt would outlive the wait it described.
@@ -525,6 +543,63 @@ class ProcessingIndicatorService:
         handle.ack_reaction_emoji = emoji
         return True
 
+    async def stamp_orphaned_terminal_reaction(
+        self,
+        context: MessageContext,
+        message_id: str,
+        terminal_emoji: str,
+    ) -> bool:
+        """Retire a running 👀 left behind by a runtime that died mid-turn.
+
+        The in-memory handle does NOT survive a service restart — only the
+        OpenCode poll loop snapshots one, and it restores after the promotion to
+        👀 — so a turn whose process disappeared leaves its running reaction on
+        the user's message with nothing left to clear it. Recovery recovers the
+        originating message id from the durable ledger, so it can finish the
+        lifecycle the dead process could not: drop the stale 👀 and leave the
+        terminal receipt in its place.
+
+        Both halves are best-effort and independent. A platform that already lost
+        the reaction (message deleted, history trimmed) must still get the
+        terminal receipt attempted, so the removal failing does not skip it.
+        """
+
+        if not message_id or not terminal_emoji:
+            return False
+        im_client = self._get_im_client(context)
+        try:
+            await im_client.remove_reaction(context, message_id, ACK_REACTION_EMOJI)
+        except Exception as err:
+            logger.debug("Failed to remove orphaned ack reaction: %s", err)
+        try:
+            return bool(await im_client.add_reaction(context, message_id, terminal_emoji))
+        except Exception as err:
+            logger.debug("Failed to stamp orphaned terminal reaction: %s", err)
+            return False
+
+    async def _stamp_terminal_reaction_without_indicator(
+        self,
+        handle: ProcessingIndicatorHandle,
+        terminal_emoji: str,
+    ) -> bool:
+        """Leave the terminal receipt when the turn's indicator was not a reaction.
+
+        There is no 👀 to replace here, so nothing is removed — the receipt is
+        added to the message that started the turn. Capability-gated and
+        best-effort: a platform without reactions (WeChat) or without a target
+        message id simply ends with no receipt, same as before.
+        """
+
+        context = handle.context
+        message_id = handle.terminal_reaction_message_id
+        if not message_id or not self._capabilities(context).supports_reaction_indicator:
+            return False
+        try:
+            return bool(await self._get_im_client(context).add_reaction(context, message_id, terminal_emoji))
+        except Exception as err:
+            logger.debug("Failed to add terminal reaction without an indicator: %s", err)
+            return False
+
     def _resolve_handle(self, request_or_handle: Any) -> tuple[ProcessingIndicatorHandle, Optional[Any]]:
         if isinstance(request_or_handle, ProcessingIndicatorHandle):
             return request_or_handle, None
@@ -604,8 +679,34 @@ class ProcessingIndicatorService:
             if self._mode_supported(capabilities, "typing", handle.context):
                 fell_back = await self._start_typing_indicator(handle)
             if not fell_back and self._mode_supported(capabilities, "message", handle.context):
-                await self._start_message_indicator(handle, agent_name or "")
+                fell_back = await self._start_message_indicator(handle, agent_name or "")
+            if fell_back:
+                self._warn_ack_mode_downgraded(
+                    handle.context,
+                    "typing" if handle.typing_indicator_active else "message",
+                )
         self._sync_reaction_to_request(handle, request)
+
+    def _warn_ack_mode_downgraded(self, context: MessageContext, applied_mode: str) -> None:
+        """Report that the configured ack mode failed and a lower one was used.
+
+        The fallback ladder is deliberately silent about *which* mode won, so a
+        user who picked ``reaction`` and keeps seeing an ack message has nothing
+        to go on. Warn once per downgraded turn, naming the channel — a DM whose
+        channel_id is a user id is the usual cause.
+        """
+
+        configured = str(getattr(self.config, "ack_mode", "typing") or "typing")
+        if configured != "reaction":
+            return
+        logger.warning(
+            "Ack mode 'reaction' failed for %s channel=%s; downgraded to '%s'. "
+            "Check that the bot can react in this conversation (reactions:write, membership, "
+            "and a real channel id — a DM context must not carry the user id).",
+            context.platform or "unknown",
+            context.channel_id,
+            applied_mode,
+        )
 
     @staticmethod
     def _turn_tokens(context: MessageContext) -> set[str]:
@@ -681,6 +782,7 @@ class ProcessingIndicatorService:
         request.ack_message_id = handle.ack_message_id
         request.ack_reaction_message_id = handle.ack_reaction_message_id
         request.ack_reaction_emoji = handle.ack_reaction_emoji
+        request.terminal_reaction_message_id = handle.terminal_reaction_message_id
         request.typing_indicator_active = handle.typing_indicator_active
         request.typing_indicator_task = handle.typing_indicator_task
 
@@ -694,6 +796,11 @@ class ProcessingIndicatorService:
                 None,
             )
             handle.ack_reaction_emoji = handle.ack_reaction_emoji or getattr(request, "ack_reaction_emoji", None)
+            handle.terminal_reaction_message_id = handle.terminal_reaction_message_id or getattr(
+                request,
+                "terminal_reaction_message_id",
+                None,
+            )
             handle.typing_indicator_active = handle.typing_indicator_active or bool(
                 getattr(request, "typing_indicator_active", False)
             )
@@ -705,6 +812,7 @@ class ProcessingIndicatorService:
             ack_message_channel_id=getattr(request.context, "channel_id", None),
             ack_reaction_message_id=getattr(request, "ack_reaction_message_id", None),
             ack_reaction_emoji=getattr(request, "ack_reaction_emoji", None),
+            terminal_reaction_message_id=getattr(request, "terminal_reaction_message_id", None),
             typing_indicator_active=bool(getattr(request, "typing_indicator_active", False)),
             typing_indicator_task=getattr(request, "typing_indicator_task", None),
         )
@@ -721,7 +829,23 @@ class ProcessingIndicatorService:
         if getattr(request, "processing_indicator", None) is None:
             request.processing_indicator = handle
 
-    async def finish(self, request_or_handle: Any) -> None:
+    async def finish(
+        self,
+        request_or_handle: Any,
+        *,
+        terminal_emoji: Optional[str] = None,
+    ) -> None:
+        """Clear the turn's indicator, optionally leaving a terminal receipt.
+
+        ``terminal_emoji`` replaces the running 👀 rather than clearing it, for
+        the endings that produce no result of their own (see
+        ``STOPPED_REACTION_EMOJI`` / ``INTERRUPTED_REACTION_EMOJI``). Omitting it
+        keeps the historical behavior — a turn that emitted a result needs no
+        second receipt. Adding the replacement is best-effort: the removal is
+        what the handle's bookkeeping is keyed on, so a platform that rejects the
+        new emoji still ends with a cleanly cleared indicator.
+        """
+
         if isinstance(request_or_handle, ProcessingIndicatorHandle):
             handle = request_or_handle
             request = None
@@ -756,15 +880,44 @@ class ProcessingIndicatorService:
             if request is not None:
                 request.typing_indicator_active = False
 
+        if terminal_emoji and not handle.ack_reaction_emoji:
+            # The receipt is not a *reaction* feature, it is the only trace a
+            # silent ending leaves. ack_mode defaults to 'typing' on every
+            # platform that has it, so gating the stamp on "the indicator
+            # happened to be a reaction" would make ⏹️/⚠️ invisible for the
+            # default configuration — exactly the turns that emit no result.
+            # Stamp on the originating message instead, wherever reactions work.
+            await self._stamp_terminal_reaction_without_indicator(handle, terminal_emoji)
+
         if handle.ack_reaction_message_id and handle.ack_reaction_emoji:
+            reaction_message_id = handle.ack_reaction_message_id
+            removed = False
             try:
-                await self._get_im_client(handle.context).remove_reaction(
-                    handle.context,
-                    handle.ack_reaction_message_id,
-                    handle.ack_reaction_emoji,
+                removed = bool(
+                    await self._get_im_client(handle.context).remove_reaction(
+                        handle.context,
+                        handle.ack_reaction_message_id,
+                        handle.ack_reaction_emoji,
+                    )
                 )
             except Exception as err:
                 logger.debug("Failed to remove reaction ack: %s", err)
+            else:
+                # Adapters report a failed removal by RETURNING False (Slack,
+                # Discord, Telegram, Feishu) as often as by raising, and
+                # ``promote_reaction_to_running`` already treats that value as
+                # authoritative. Stamping on an unremoved 👀 would leave the
+                # message showing running AND stopped at once, so the receipt is
+                # owed only to a removal that actually happened.
+                if terminal_emoji and removed:
+                    try:
+                        await self._get_im_client(handle.context).add_reaction(
+                            handle.context,
+                            reaction_message_id,
+                            terminal_emoji,
+                        )
+                    except Exception as err:
+                        logger.debug("Failed to add terminal reaction: %s", err)
             finally:
                 handle.ack_reaction_message_id = None
                 handle.ack_reaction_emoji = None

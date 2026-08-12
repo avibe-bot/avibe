@@ -43,7 +43,15 @@ from storage.migrations import (
     guard_source_checkout_default_state_migration,
     initialize_background_tables,
 )
-from storage.models import agents, agent_runs, agent_sessions, messages, run_definitions, scopes
+from storage.models import (
+    agents,
+    agent_runs,
+    agent_sessions,
+    message_deliveries,
+    messages,
+    run_definitions,
+    scopes,
+)
 from storage.pagination import PageRequest, PageResult, page_result_from_limit_plus_one
 from storage.sqlite_semantics import sqlite_cast_integer
 from storage.session_reclaim import (
@@ -52,6 +60,8 @@ from storage.session_reclaim import (
 )
 
 logger = logging.getLogger(__name__)
+
+CALLBACK_TERMINAL_TURN_ID_METADATA_KEY = "callback_terminal_turn_id"
 
 
 def _json_dumps(value: Any) -> str:
@@ -324,6 +334,127 @@ _BLANK_DEFINITION_SUMMARY: dict[str, Any] = {
 # Where a definition's session binding hides when it has no ``session_id``: a
 # legacy IM binding, then a ``create_per_run`` delivery target. Precedence order.
 _DEFINITION_SESSION_KEY_FIELDS = ("session_key", "deliver_key")
+ORPHANED_TASK_OWNER_METADATA_KEY = "orphaned_task_owner"
+TASK_OWNER_UNAVAILABLE_REASON_CODE = "task_owner_session_unavailable"
+_SQLITE_TRIM_WHITESPACE = " \t\n\r\f\v"
+
+
+def definition_owner_session_id(metadata: Any) -> Optional[str]:
+    """Return a valid creation-owner Session ID from definition metadata."""
+
+    if not isinstance(metadata, dict):
+        return None
+    created_by = metadata.get("created_by")
+    if not isinstance(created_by, dict):
+        return None
+    caller = created_by.get("caller")
+    if not isinstance(caller, dict):
+        return None
+    raw_owner = caller.get("session_id")
+    if not isinstance(raw_owner, str):
+        return None
+    return raw_owner.strip() or None
+
+
+def task_resume_block(metadata: Any, session_id: Any) -> Optional[dict[str, str]]:
+    """Return the durable reason an orphaned Task cannot be resumed yet."""
+
+    if str(session_id or "").strip() or not isinstance(metadata, dict):
+        return None
+    marker = metadata.get(ORPHANED_TASK_OWNER_METADATA_KEY)
+    if not isinstance(marker, dict):
+        return None
+    if marker.get("reason_code") != TASK_OWNER_UNAVAILABLE_REASON_CODE:
+        return None
+    owner_session_id = str(marker.get("owner_session_id") or "").strip()
+    if not owner_session_id:
+        return None
+    return {
+        "code": TASK_OWNER_UNAVAILABLE_REASON_CODE,
+        "owner_session_id": owner_session_id,
+    }
+
+
+def definition_owner_session_id_expression() -> Any:
+    """Return the durable Session that manages a scheduled definition, when known.
+
+    Definitions created from an Avibe Agent shell preserve their creation
+    provenance under ``metadata_json.created_by.caller.session_id``. That is
+    the owner used by user-facing Session projections: the execution target may
+    be a newly-created Session, or absent for a pure command / per-run task.
+    Invalid and legacy metadata deliberately resolve to ``NULL`` so callers can
+    fall back to the historical bound ``run_definitions.session_id``. A recorded
+    owner that has since been archived or removed is treated the same way for
+    projections, preserving visibility for pre-upgrade orphaned definitions.
+    """
+
+    metadata_json = run_definitions.c.metadata_json
+    raw_owner = func.json_extract(
+        metadata_json,
+        "$.created_by.caller.session_id",
+    )
+    return case(
+        (
+            func.json_valid(metadata_json) == 1,
+            case(
+                (
+                    func.json_type(metadata_json, "$.created_by.caller.session_id")
+                    == "text",
+                    func.nullif(func.trim(raw_owner, _SQLITE_TRIM_WHITESPACE), ""),
+                ),
+                else_=None,
+            ),
+        ),
+        else_=None,
+    )
+
+
+def scheduled_definition_owned_by_session_expression(session_id: str) -> Any:
+    """Return the owner-first Session predicate for scheduled Task projections.
+
+    Creation ownership wins while that owner Session still exists and is not
+    archived. Once the owner is gone, the execution target resumes the legacy
+    fallback so persisted Tasks remain visible instead of becoming orphaned.
+    """
+
+    owner_session_id = definition_owner_session_id_expression()
+    owner_session_is_live = exists(
+        select(literal(1))
+        .select_from(agent_sessions)
+        .where(
+            agent_sessions.c.id == owner_session_id,
+            agent_sessions.c.status != "archived",
+        )
+    )
+    return or_(
+        and_(owner_session_id == session_id, owner_session_is_live),
+        and_(
+            or_(owner_session_id.is_(None), ~owner_session_is_live),
+            run_definitions.c.session_id == session_id,
+        ),
+    )
+
+
+def scheduled_definition_reclaimable_by_session_expression(session_id: str) -> Any:
+    """Return the teardown predicate for scheduled Tasks touching a Session.
+
+    Teardown is broader than banner projection: removing an execution target must
+    also stop a Task created by a different Session from firing into that dead
+    target. Owner-first remains the projection rule; this expression is only for
+    reclaim and archive accounting.
+    """
+
+    # Teardown must retain the raw provenance match even after the owner row is
+    # archived; that is the event that caused this cleanup. Projection uses the
+    # liveness-aware owner-first expression above, while teardown covers both
+    # owner identity and execution target identity.
+    owner_session_id = definition_owner_session_id_expression()
+    return or_(
+        owner_session_id == session_id,
+        run_definitions.c.session_id == session_id,
+    )
+
+
 # The exit code a waiter that ran out of lifetime carries. Written by
 # ``core/watches.py`` (the ``timeout`` convention), read here to tell an ending
 # that ran out of time from one that failed.
@@ -407,6 +538,84 @@ class DefinitionWriteConflict(RuntimeError):
         )
         self.definition_id = str(definition_id)
         self.definition_type = str(definition_type)
+
+
+class TaskResumeBlocked(RuntimeError):
+    """A paused Task has neither a surviving owner nor an execution target."""
+
+    code = TASK_OWNER_UNAVAILABLE_REASON_CODE
+
+    def __init__(self, definition_id: str, owner_session_id: str) -> None:
+        super().__init__(
+            f"task {definition_id} cannot be resumed because its owner Session "
+            f"{owner_session_id} is unavailable and it has no execution target"
+        )
+        self.definition_id = str(definition_id)
+        self.owner_session_id = str(owner_session_id)
+
+
+def require_task_resumable(
+    definition_id: str,
+    *,
+    metadata: Any,
+    session_id: Any,
+) -> None:
+    blocked = task_resume_block(metadata, session_id)
+    if blocked is not None:
+        raise TaskResumeBlocked(definition_id, blocked["owner_session_id"])
+
+
+def clear_task_resume_blocks_for_available_owner(
+    conn: Any,
+    owner_session_id: str,
+) -> int:
+    """Clear stale orphan markers when a refused teardown leaves the owner live."""
+
+    sid = str(owner_session_id or "").strip()
+    if not sid:
+        return 0
+    owner_is_live = conn.execute(
+        select(literal(1))
+        .select_from(agent_sessions)
+        .where(agent_sessions.c.id == sid, agent_sessions.c.status != "archived")
+        .limit(1)
+    ).first()
+    if owner_is_live is None:
+        return 0
+
+    rows = (
+        conn.execute(
+            select(
+                run_definitions.c.id,
+                run_definitions.c.session_id,
+                run_definitions.c.metadata_json,
+            )
+            .where(run_definitions.c.definition_type == "scheduled")
+            .where(run_definitions.c.deleted_at.is_(None))
+        )
+        .mappings()
+        .all()
+    )
+    cleared = 0
+    now = _utc_now_iso()
+    for row in rows:
+        metadata = _json_loads(row["metadata_json"], {})
+        if definition_owner_session_id(metadata) != sid:
+            continue
+        blocked = task_resume_block(metadata, row["session_id"])
+        if blocked is None or blocked["owner_session_id"] != sid:
+            continue
+        metadata = dict(metadata)
+        metadata.pop(ORPHANED_TASK_OWNER_METADATA_KEY, None)
+        result = conn.execute(
+            update(run_definitions)
+            .where(run_definitions.c.id == row["id"])
+            .where(run_definitions.c.deleted_at.is_(None))
+            .where(run_definitions.c.metadata_json == row["metadata_json"])
+            .values(metadata_json=_json_dumps(metadata), updated_at=now)
+        )
+        cleared += int(result.rowcount or 0)
+    return cleared
 
 
 @dataclass(frozen=True)
@@ -873,6 +1082,7 @@ _RUN_PROJECTIONS: tuple[_RunProjection, ...] = (
     ),
 )
 _DEFERRED_RUN_EVENT_ROWS_KEY = "avibe.deferred_run_event_rows"
+_DEFERRED_QUEUE_UPDATED_SESSION_IDS_KEY = "avibe.deferred_queue_updated_session_ids"
 _TERMINAL_STATUS_PRIORITY = {
     "succeeded": 0,
     "canceled": 1,
@@ -881,6 +1091,8 @@ _TERMINAL_STATUS_PRIORITY = {
 # The closed set of terminal run statuses. Shared so guarded writers and reconcile
 # paths cannot drift apart (this file previously spelled the set inline).
 TERMINAL_RUN_STATUSES = frozenset(_TERMINAL_STATUS_PRIORITY)
+DEFERRED_TERMINAL_METADATA_KEY = "deferred_terminal_metadata"
+TURN_PARTICIPANT_RUN_IDS_METADATA_KEY = "turn_participant_run_ids"
 
 
 def _parse_iso_instant(value: Any) -> Optional[datetime]:
@@ -1462,6 +1674,41 @@ HEALTH_HEALTHY = "healthy"
 #: health signal that cannot be computed must not read as a clean bill.
 HEALTH_UNKNOWN = "unknown"
 
+#: Durable provenance for the Agent Run queued by one Watch cycle. The Watch
+#: definition owns waiter state while this value says which kind of follow-up the
+#: Run is processing, so a failed reporting Turn cannot rewrite a waiter failure as
+#: a detected event.
+WATCH_HOOK_OUTCOME_METADATA_KEY = "watch_hook_outcome"
+WATCH_HOOK_OUTCOME_EVENT = "event"
+WATCH_HOOK_OUTCOME_WAITER_FAILURE = "waiter_failure"
+WATCH_HOOK_OUTCOME_CIRCUIT_REPAIR = "circuit_repair"
+# Durable Watch admission state. These values move with the Agent Run outbox row,
+# so the definition owns them instead of the in-memory supervisor.
+WATCH_FOLLOW_UP_RUN_ID_METADATA_KEY = "watch_follow_up_run_id"
+WATCH_RECENT_EVENT_TIMESTAMPS_METADATA_KEY = "watch_recent_event_timestamps"
+WATCH_CIRCUIT_BREAKER_METADATA_KEY = "watch_circuit_breaker"
+WATCH_LIFETIME_STARTED_AT_METADATA_KEY = "watch_lifetime_started_at"
+
+
+def watch_metadata_after_resume(
+    metadata: dict[str, Any],
+    *,
+    resumed_at: str,
+) -> dict[str, Any]:
+    """Start a new armed episode while retaining the repair Run admission fence."""
+
+    updated = dict(metadata)
+    updated.pop(WATCH_RECENT_EVENT_TIMESTAMPS_METADATA_KEY, None)
+    updated[WATCH_LIFETIME_STARTED_AT_METADATA_KEY] = resumed_at
+    incident = updated.get(WATCH_CIRCUIT_BREAKER_METADATA_KEY)
+    if isinstance(incident, dict) and incident.get("status") == "tripped":
+        updated[WATCH_CIRCUIT_BREAKER_METADATA_KEY] = {
+            **incident,
+            "status": "resumed",
+            "resumed_at": resumed_at,
+        }
+    return updated
+
 #: The health window: the last N verdicts OR the last T hours, whichever is
 #: shorter. Both bounds live in the ``WHERE``/``LIMIT`` of one query rather than
 #: one of them in prose — bounded only by count, a definition that failed once and
@@ -1522,6 +1769,40 @@ def _owed_failure_notice_for_transition(
         # The escalation turn IS the user-visible report for this failure.
         return None
     reason = str(metadata.get("interrupt_reason") or "").strip() or None
+    turn_notification = metadata.get("turn_failure_notification")
+    turn_notification = (
+        dict(turn_notification) if isinstance(turn_notification, dict) else {}
+    )
+    turn_failure_id = str(turn_notification.get("failure_id") or "").strip()
+    has_turn_notification = bool(turn_failure_id)
+    # ``turn_id`` is broad execution provenance. It becomes notification ownership
+    # only when the terminal output also carries the explicit Turn-failure contract.
+    # A direct error result (for example the disabled OpenCode question tool) has a
+    # Turn id but no separate notification; admitting it here would stamp every linked
+    # Run as an ownerless Turn fallback and bypass ordinary definition suppression.
+    turn_id = (
+        str(metadata.get("turn_id") or "").strip() or None
+        if has_turn_notification
+        else None
+    )
+    fallback_run_id = (
+        str(turn_notification.get("fallback_run_id") or "").strip()
+        if has_turn_notification
+        else ""
+    )
+    participant_run_ids = list(
+        dict.fromkeys(
+            run_id
+            for value in (
+                metadata.get(TURN_PARTICIPANT_RUN_IDS_METADATA_KEY)
+                if isinstance(
+                    metadata.get(TURN_PARTICIPANT_RUN_IDS_METADATA_KEY), list
+                )
+                else []
+            )
+            if (run_id := str(value or "").strip())
+        )
+    )
     return {
         "state": NOTICE_PENDING,
         "attempts": 0,
@@ -1565,8 +1846,16 @@ def _owed_failure_notice_for_transition(
         "failure_id": (
             f"interrupt:{run_id}:{reason}"
             if reason in RUN_INTERRUPTION_REASONS
-            else run_id
+            else (turn_failure_id or run_id)
         ),
+        # A Turn is the user-visible failure owner. Every accepted Run keeps its
+        # own terminal audit row, while this shared identity and elected fallback
+        # owner prevent those rows from becoming duplicate messages.
+        "turn_id": turn_id,
+        "turn_notification_delivered": bool(turn_notification.get("delivered")),
+        "turn_notification_ack_evidence": turn_notification.get("ack_evidence"),
+        "turn_fallback_run_id": fallback_run_id or None,
+        TURN_PARTICIPANT_RUN_IDS_METADATA_KEY: participant_run_ids if turn_id else [],
         # Optional, and only ever a copy selector. The lane a notice belongs to is
         # decided from this value's membership in ``RUN_INTERRUPTION_REASONS``, not
         # from its presence.
@@ -1696,6 +1985,45 @@ def _callback_parent_owns_failure_notice(
     return isinstance(notice, dict) and bool(str(notice.get("state") or "").strip())
 
 
+def _decoded_failure_notice_metadata(raw: Any) -> Optional[dict[str, Any]]:
+    """Return the writable metadata object used by every notice owner decision."""
+
+    if isinstance(raw, (bytes, bytearray)):
+        raw = bytes(raw).decode("utf-8", "replace")
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return {}
+    decoded = _json_loads(raw if isinstance(raw, str) else None, None)
+    return decoded if isinstance(decoded, dict) else None
+
+
+def _run_can_own_failure_notice(
+    conn: Any,
+    row: Any,
+    *,
+    turn_id: str,
+    will_settle_failed: bool,
+) -> bool:
+    """Whether this transaction leaves the Run owning this Turn's notice."""
+
+    metadata = _decoded_failure_notice_metadata(row["metadata_json"])
+    if metadata is None:
+        return False
+    existing = metadata.get(OWED_FAILURE_NOTICE_KEY)
+    if isinstance(existing, dict) and str(existing.get("state") or "").strip():
+        return bool(turn_id) and (
+            str(existing.get("turn_id") or "").strip() == turn_id
+        )
+    if not will_settle_failed:
+        return False
+    if str(metadata.get("escalation_run_id") or "").strip():
+        return False
+    return not _callback_parent_owns_failure_notice(
+        conn,
+        source_kind=row["source_kind"],
+        parent_run_id=row["parent_run_id"],
+    )
+
+
 def _merge_owed_failure_notice(
     values: dict[str, Any],
     *,
@@ -1737,22 +2065,14 @@ def _merge_owed_failure_notice(
     unreachable — and it is the direction every other reader on this path chose.
     """
 
-    if isinstance(row_metadata_json, (bytes, bytearray)):
-        row_metadata_json = bytes(row_metadata_json).decode("utf-8", "replace")
-    if row_metadata_json is None or (
-        isinstance(row_metadata_json, str) and not row_metadata_json.strip()
-    ):
-        merged: dict[str, Any] = {}
-    else:
-        decoded = _json_loads(row_metadata_json if isinstance(row_metadata_json, str) else None, None)
-        if not isinstance(decoded, dict):
-            logger.warning(
-                "run %s has unreadable metadata_json; settling it without touching the "
-                "column, so it records no owed failure notice",
-                run_id,
-            )
-            return
-        merged = decoded
+    merged = _decoded_failure_notice_metadata(row_metadata_json)
+    if merged is None:
+        logger.warning(
+            "run %s has unreadable metadata_json; settling it without touching the "
+            "column, so it records no owed failure notice",
+            run_id,
+        )
+        return
     if extra_metadata:
         merged.update(extra_metadata)
     notice = None
@@ -1767,11 +2087,99 @@ def _merge_owed_failure_notice(
             metadata=merged,
             now=now,
         )
+    # Participant membership belongs to the notice snapshot, not as a second
+    # top-level metadata contract. Deferred settlement reads its local copy before
+    # reaching this writer.
+    merged.pop(TURN_PARTICIPANT_RUN_IDS_METADATA_KEY, None)
     if notice is None and not extra_metadata:
         return
     if notice is not None:
         merged[OWED_FAILURE_NOTICE_KEY] = notice
     values["metadata_json"] = _json_dumps(merged)
+
+
+_ACK_EVIDENCE_PRIORITY = {"": 0, "delivery_only": 1, "receipt": 2}
+
+
+def _merge_replayed_turn_delivery_evidence(
+    conn: Any,
+    *,
+    run_id: str,
+    row: Any,
+    incoming_status: Any,
+    provenance: Optional[dict[str, Any]],
+    now: str,
+) -> bool:
+    """Promote same-Turn delivery evidence without resetting a terminal notice."""
+
+    notification = (
+        provenance.get("turn_failure_notification")
+        if isinstance(provenance, dict)
+        else None
+    )
+    turn_id = str((provenance or {}).get("turn_id") or "").strip()
+    if (
+        not turn_id
+        or not isinstance(notification, dict)
+        or not bool(notification.get("delivered"))
+    ):
+        return False
+    normalized_incoming_status = normalize_run_status(incoming_status)
+    current = row
+    for final_attempt in (False, True):
+        if normalize_run_status(current["status"]) != normalized_incoming_status:
+            return False
+        raw_metadata = current["metadata_json"]
+        metadata = _decoded_failure_notice_metadata(raw_metadata)
+        if metadata is None:
+            return False
+        notice = metadata.get(OWED_FAILURE_NOTICE_KEY)
+        if not isinstance(notice, dict) or str(notice.get("turn_id") or "").strip() != turn_id:
+            return False
+        incoming_ack = str(notification.get("ack_evidence") or "").strip()
+        current_ack = str(notice.get("turn_notification_ack_evidence") or "").strip()
+        merged_ack = current_ack
+        if _ACK_EVIDENCE_PRIORITY.get(incoming_ack, 1 if incoming_ack else 0) > (
+            _ACK_EVIDENCE_PRIORITY.get(current_ack, 1 if current_ack else 0)
+        ):
+            merged_ack = incoming_ack
+        if bool(notice.get("turn_notification_delivered")) and merged_ack == current_ack:
+            return False
+        merged_notice = dict(notice)
+        merged_notice["turn_notification_delivered"] = True
+        if merged_ack:
+            merged_notice["turn_notification_ack_evidence"] = merged_ack
+        metadata[OWED_FAILURE_NOTICE_KEY] = merged_notice
+        updated = conn.execute(
+            update(agent_runs)
+            .where(agent_runs.c.id == run_id)
+            .where(agent_runs.c.metadata_json == raw_metadata)
+            .where(
+                agent_runs.c.status.in_(
+                    _status_query_values(normalized_incoming_status)
+                )
+            )
+            .values(metadata_json=_json_dumps(metadata), updated_at=now)
+        )
+        if updated.rowcount:
+            return True
+        if final_attempt:
+            return False
+        current = (
+            conn.execute(
+                select(
+                    agent_runs.c.status,
+                    agent_runs.c.metadata_json,
+                )
+                .where(agent_runs.c.id == run_id)
+                .limit(1)
+            )
+            .mappings()
+            .first()
+        )
+        if current is None:
+            return False
+    return False
 
 
 def normalize_run_status(status: Any) -> str:
@@ -1886,6 +2294,21 @@ def _publish_queue_updated(session_id: str) -> None:
         )
 
 
+def _defer_queue_updated_from_connection(conn: Any, session_id: str) -> None:
+    normalized_session_id = str(session_id or "").strip()
+    if not normalized_session_id:
+        return
+    pending = conn.info.setdefault(_DEFERRED_QUEUE_UPDATED_SESSION_IDS_KEY, set())
+    pending.add(normalized_session_id)
+
+
+def _pop_deferred_queue_updated_session_ids_from_connection(conn: Any) -> list[str]:
+    pending = conn.info.pop(_DEFERRED_QUEUE_UPDATED_SESSION_IDS_KEY, set())
+    if not isinstance(pending, set):
+        return []
+    return sorted(str(session_id) for session_id in pending if session_id)
+
+
 def _defer_run_rows_updated_from_connection(conn: Any, rows: list[Any]) -> None:
     if not rows:
         return
@@ -1911,14 +2334,21 @@ def run_update_event_transaction(engine: Any):
     """Commit DB writes before publishing deferred ``runs.updated`` snapshots."""
 
     pending_rows: list[dict[str, Any]] = []
+    pending_queue_session_ids: list[str] = []
     with engine.begin() as conn:
         try:
             yield conn
             pending_rows = pop_deferred_run_event_rows_from_connection(conn)
+            pending_queue_session_ids = (
+                _pop_deferred_queue_updated_session_ids_from_connection(conn)
+            )
         except Exception:
             conn.info.pop(_DEFERRED_RUN_EVENT_ROWS_KEY, None)
+            conn.info.pop(_DEFERRED_QUEUE_UPDATED_SESSION_IDS_KEY, None)
             raise
     _publish_run_rows_updated(pending_rows)
+    for session_id in pending_queue_session_ids:
+        _publish_queue_updated(session_id)
 
 
 def _run_rows_for_ids(conn: Any, run_ids: list[str]) -> list[Any]:
@@ -2226,6 +2656,85 @@ def attach_agent_run_delivery_in_connection(
         return False
     _defer_run_ids_updated_from_connection(conn, [normalized_run_id])
     return True
+
+
+def apply_live_agent_run_cancellation_in_connection(
+    conn: Any,
+    run_id: str,
+    *,
+    session_id: str,
+    detach: bool,
+    updated_at: Optional[str] = None,
+) -> str:
+    """Record one live Run cancellation inside the Turn owner's transaction.
+
+    ``detach`` is the outcome of the shared-Turn ownership check made under the
+    same SQLite writer reservation. A detached participant becomes terminal,
+    retires its exact input when the Delivery state proves no native side effect,
+    and suppresses its callback before any terminal writer or callback drain can
+    run; an exclusive owner only records the cancellation request before P0 Stop.
+    """
+
+    normalized_run_id = str(run_id or "").strip()
+    normalized_session_id = str(session_id or "").strip()
+    if not normalized_run_id or not normalized_session_id:
+        return "missing_run_identity"
+    row = conn.execute(
+        select(agent_runs)
+        .where(agent_runs.c.id == normalized_run_id)
+        .limit(1)
+    ).mappings().first()
+    if row is None:
+        return "run_not_found"
+    if str(row["session_id"] or "").strip() != normalized_session_id:
+        return "run_session_mismatch"
+    status = normalize_run_status(row["status"])
+    if status in TERMINAL_RUN_STATUSES:
+        return "run_already_terminal"
+    if status not in {"queued", "running"}:
+        return "run_not_cancelable"
+
+    now = updated_at or _utc_now_iso()
+    values: dict[str, Any] = {
+        "cancel_requested": 1,
+        "cancel_requested_at": row["cancel_requested_at"] or now,
+        "updated_at": now,
+    }
+    if detach:
+        delivery_id = str(row["delivery_id"] or "").strip()
+        if delivery_id:
+            from storage import message_deliveries as delivery_store
+
+            if delivery_store.retire_for_run_cancellation(
+                conn,
+                normalized_session_id,
+                delivery_id,
+            ):
+                _defer_queue_updated_from_connection(conn, normalized_session_id)
+        values.update(status="canceled", completed_at=now)
+        callback_session_id = str(row["callback_session_id"] or "").strip()
+        callback_status = str(row["callback_status"] or "").strip()
+        if callback_session_id and callback_status not in {"sent", "skipped"}:
+            values.update(
+                callback_status="skipped",
+                callback_error=None,
+                callback_completed_at=now,
+            )
+    result = conn.execute(
+        update(agent_runs)
+        .where(agent_runs.c.id == normalized_run_id)
+        .where(agent_runs.c.session_id == normalized_session_id)
+        .where(
+            agent_runs.c.status.in_(
+                _status_query_values("queued") + _status_query_values("running")
+            )
+        )
+        .values(**values)
+    )
+    if not result.rowcount:
+        return "run_transition_lost"
+    _defer_run_ids_updated_from_connection(conn, [normalized_run_id])
+    return "run_detached" if detach else "cancel_requested"
 
 
 def agent_run_cancellation_won_in_connection(conn: Any, run_id: str) -> bool:
@@ -2687,6 +3196,11 @@ class SQLiteBackgroundTaskStore:
         definition_type: Optional[str] = None,
     ) -> bool:
         with self.engine.begin() as conn:
+            if enabled:
+                # The resumability decision and enabling UPDATE are one atomic
+                # transition. Without the writer reservation, /new can stamp an
+                # orphan-owner block after the SELECT and before this UPDATE.
+                reserve_write_lock(conn)
             values: dict[str, Any] = {"enabled": 1 if enabled else 0, "updated_at": _utc_now_iso()}
             if enabled:
                 # Resuming may start a new lifecycle, and the old one must stop
@@ -2701,6 +3215,8 @@ class SQLiteBackgroundTaskStore:
                             run_definitions.c.definition_type,
                             run_definitions.c.mode,
                             run_definitions.c.enabled,
+                            run_definitions.c.session_id,
+                            run_definitions.c.metadata_json,
                         )
                         .where(run_definitions.c.id == definition_id)
                         .where(run_definitions.c.deleted_at.is_(None))
@@ -2709,10 +3225,24 @@ class SQLiteBackgroundTaskStore:
                     .first()
                 )
                 if current is not None and not current["enabled"]:
+                    if current["definition_type"] == "scheduled":
+                        require_task_resumable(
+                            definition_id,
+                            metadata=_json_loads(current["metadata_json"], {}),
+                            session_id=current["session_id"],
+                        )
                     clear_columns = definition_resume_clear_columns(
                         current["definition_type"], current["mode"]
                     )
                     values.update(dict.fromkeys(clear_columns, None))
+                    if current["definition_type"] == "watch":
+                        metadata = _json_loads(current["metadata_json"], {})
+                        values["metadata_json"] = _json_dumps(
+                            watch_metadata_after_resume(
+                                metadata if isinstance(metadata, dict) else {},
+                                resumed_at=values["updated_at"],
+                            )
+                        )
             stmt = (
                 update(run_definitions)
                 .where(run_definitions.c.id == definition_id)
@@ -2876,6 +3406,20 @@ class SQLiteBackgroundTaskStore:
         run_values = self._run_values(run_payload)
         with run_update_event_transaction(self.engine) as conn:
             reserve_write_lock(conn)
+            unsettled = conn.execute(
+                select(agent_runs.c.id)
+                .where(agent_runs.c.definition_id == values["id"])
+                .where(agent_runs.c.run_type == "watch")
+                .where(
+                    agent_runs.c.status.in_(
+                        _status_query_values("queued")
+                        + _status_query_values("running")
+                    )
+                )
+                .limit(1)
+            ).first()
+            if unsettled is not None:
+                return False
             if not upsert_definition_in_connection(
                 conn, values, expect=expect, definition_type="watch"
             ):
@@ -2979,6 +3523,74 @@ class SQLiteBackgroundTaskStore:
                 values["agent_name"] = identity["name"]
                 values["agent_backend"] = identity["backend"]
             enqueue_run_in_connection(conn, values)
+
+    def enqueue_callback_run(
+        self,
+        payload: dict[str, Any],
+        *,
+        parent_run_id: str,
+        source_actor: str,
+    ) -> Optional[str]:
+        """Find-or-enqueue a callback child and arm its live parent atomically."""
+
+        values = self._run_values(payload)
+        now = str(values.get("updated_at") or _utc_now_iso())
+        with run_update_event_transaction(self.engine) as conn:
+            reserve_write_lock(conn)
+            parent = conn.execute(
+                select(agent_runs.c.status, agent_runs.c.cancel_requested)
+                .where(agent_runs.c.id == parent_run_id)
+                .limit(1)
+            ).mappings().first()
+            if parent is None:
+                raise ValueError(f"callback parent Run not found: {parent_run_id}")
+            terminal_turn_id = str(values.get("callback_terminal_turn_id") or "").strip()
+            callback_session_id = str(values.get("session_id") or "").strip()
+            callback_run_id = None
+            if terminal_turn_id and callback_session_id:
+                callback_run_id = conn.execute(
+                    select(agent_runs.c.id)
+                    .where(agent_runs.c.run_type == "agent_run")
+                    .where(agent_runs.c.source_kind == "callback")
+                    .where(agent_runs.c.callback_terminal_turn_id == terminal_turn_id)
+                    .where(agent_runs.c.session_id == callback_session_id)
+                    .order_by(agent_runs.c.created_at, agent_runs.c.id)
+                    .limit(1)
+                ).scalar_one_or_none()
+            if callback_run_id is None:
+                callback_run_id = conn.execute(
+                    select(agent_runs.c.id)
+                    .where(agent_runs.c.run_type == "agent_run")
+                    .where(agent_runs.c.source_kind == "callback")
+                    .where(agent_runs.c.parent_run_id == parent_run_id)
+                    .where(agent_runs.c.source_actor == source_actor)
+                    .order_by(agent_runs.c.created_at, agent_runs.c.id)
+                    .limit(1)
+                ).scalar_one_or_none()
+            parent_status = normalize_run_status(parent["status"])
+            parent_refuses_new_child = bool(parent["cancel_requested"]) and (
+                parent_status != "canceled"
+            )
+            if callback_run_id is None and parent_refuses_new_child:
+                return None
+            if callback_run_id is None:
+                enqueue_run_in_connection(conn, values)
+                callback_run_id = str(values["id"])
+            parent_update = conn.execute(
+                update(agent_runs)
+                .where(agent_runs.c.id == parent_run_id)
+                .values(
+                    callback_status="sent",
+                    callback_error=None,
+                    callback_run_id=callback_run_id,
+                    callback_completed_at=now,
+                    updated_at=now,
+                )
+            )
+            if not parent_update.rowcount:
+                raise ValueError(f"callback parent Run not found: {parent_run_id}")
+            _defer_run_ids_updated_from_connection(conn, [parent_run_id])
+        return str(callback_run_id)
 
     def enqueue_definition_run(
         self,
@@ -3451,10 +4063,20 @@ class SQLiteBackgroundTaskStore:
             stmt.where(run_definitions.c.definition_type == definition_type)
             .where(run_definitions.c.deleted_at.is_(None))
         )
-        # Precise bound-session filter (ix_run_definitions_session) — powers the
-        # Harness "只看本会话" chip that background-work banner rows navigate into.
+        # This Session filter powers the Harness "只看本会话" chip that the
+        # background-work banner navigates into. Scheduled Tasks use creation
+        # provenance as the authoritative owner: a create-per-run or pure command
+        # definition may have no bound execution Session at all. Legacy Task rows
+        # without provenance retain the historical bound-session behavior.
         if session_id:
-            stmt = stmt.where(run_definitions.c.session_id == session_id)
+            if definition_type == "scheduled":
+                stmt = stmt.where(
+                    scheduled_definition_owned_by_session_expression(session_id)
+                )
+            else:
+                # A Watch is an event callback surface: its callback target, not
+                # the Session that created the definition, owns its banner row.
+                stmt = stmt.where(run_definitions.c.session_id == session_id)
         if status and status != "all":
             states = DEFINITION_STATUS_FILTERS.get(status)
             if not states:
@@ -3533,6 +4155,25 @@ class SQLiteBackgroundTaskStore:
             if row is None:
                 return None
             return self._enrich_runs([self._run_from_row(row)], conn)[0]
+
+    def get_unsettled_watch_run(self, definition_id: str) -> Optional[dict[str, Any]]:
+        """Return the oldest queued/running Agent follow-up owned by one Watch."""
+
+        with self.engine.connect() as conn:
+            row = conn.execute(
+                select(agent_runs)
+                .where(agent_runs.c.definition_id == definition_id)
+                .where(agent_runs.c.run_type == "watch")
+                .where(
+                    agent_runs.c.status.in_(
+                        _status_query_values("queued")
+                        + _status_query_values("running")
+                    )
+                )
+                .order_by(agent_runs.c.created_at, agent_runs.c.id)
+                .limit(1)
+            ).mappings().first()
+            return self._run_from_row(row) if row is not None else None
 
     def list_deferred_runs(self) -> list[dict[str, Any]]:
         """Return non-terminal Runs carrying a durable terminal intent."""
@@ -3991,6 +4632,187 @@ class SQLiteBackgroundTaskStore:
             row = conn.execute(statement).first()
         return None if row is None else str(row[0])
 
+    def _callback_state_rows(
+        self,
+        *,
+        run_id: Optional[str] = None,
+        turn_id: Optional[str] = None,
+        participant_run_ids: Sequence[str] = (),
+    ) -> list[Any]:
+        """Read callback delivery facts from bounded Run ownership."""
+
+        parent = agent_runs.alias("callback_parent")
+        child = agent_runs.alias("callback_child")
+        callback_session = agent_sessions.alias("callback_session")
+        callback_output = (
+            func.json_each(child.c.result_payload_json, "$.outputs")
+            .table_valued("value")
+            .alias("callback_output")
+        )
+        linked_output_receipt = (
+            select(literal(1))
+            .select_from(callback_output)
+            .where(func.json_valid(child.c.result_payload_json) == 1)
+            .where(
+                cast(func.json_extract(callback_output.c.value, "$.id"), Text)
+                == cast(
+                    func.json_extract(messages.c.metadata_json, "$.output_id"),
+                    Text,
+                )
+            )
+            .where(
+                cast(
+                    func.json_extract(
+                        callback_output.c.value,
+                        "$.provenance.turn_id",
+                    ),
+                    Text,
+                )
+                == cast(
+                    func.json_extract(messages.c.metadata_json, "$.turn_id"),
+                    Text,
+                )
+            )
+            .where(
+                func.coalesce(
+                    cast(
+                        func.json_extract(
+                            callback_output.c.value,
+                            "$.provenance.turn_id",
+                        ),
+                        Text,
+                    ),
+                    "",
+                )
+                != ""
+            )
+            .correlate(child, messages)
+            .exists()
+        )
+        persisted_receipt = (
+            select(literal(1))
+            .select_from(messages)
+            .where(messages.c.session_id == child.c.session_id)
+            .where(messages.c.type == "result")
+            .where(func.json_valid(messages.c.metadata_json) == 1)
+            .where(
+                or_(
+                    cast(
+                        func.json_extract(messages.c.metadata_json, "$.run_id"),
+                        Text,
+                    )
+                    == child.c.id,
+                    linked_output_receipt,
+                )
+            )
+            .where(
+                func.coalesce(
+                    cast(
+                        func.json_extract(
+                            messages.c.metadata_json,
+                            "$.delivery_suppressed",
+                        ),
+                        Integer,
+                    ),
+                    0,
+                )
+                == 0
+            )
+            .correlate(child)
+            .exists()
+        )
+        statement = select(
+            parent.c.callback_session_id,
+            parent.c.callback_status,
+            parent.c.callback_run_id,
+            child.c.status,
+            persisted_receipt,
+            callback_session.c.status,
+            callback_session.c.visibility,
+            child.c.legacy_session_key,
+            child.c.message_ids_json,
+        ).select_from(
+            parent.outerjoin(child, child.c.id == parent.c.callback_run_id).outerjoin(
+                callback_session,
+                callback_session.c.id == child.c.session_id,
+            )
+        )
+        live_parent = and_(
+            func.coalesce(parent.c.cancel_requested, 0) == 0,
+            ~parent.c.status.in_(_status_query_values("canceled")),
+        )
+        armed_callback = and_(
+            parent.c.callback_status == "sent",
+            parent.c.callback_run_id.is_not(None),
+            parent.c.callback_run_id != "",
+        )
+        statement = statement.where(or_(live_parent, armed_callback))
+        normalized_turn_id = str(turn_id or "").strip()
+        if normalized_turn_id:
+            normalized_participant_ids = list(
+                dict.fromkeys(
+                    participant_id
+                    for value in participant_run_ids
+                    if (participant_id := str(value or "").strip())
+                )
+            )
+            durable_participant_ids = (
+                select(agent_runs.c.id)
+                .select_from(
+                    agent_runs.join(
+                        message_deliveries,
+                        message_deliveries.c.id == agent_runs.c.delivery_id,
+                    )
+                )
+                .where(message_deliveries.c.turn_id == normalized_turn_id)
+                .where(message_deliveries.c.state == "accepted")
+            )
+            membership = [parent.c.id.in_(durable_participant_ids)]
+            if normalized_participant_ids:
+                membership.append(parent.c.id.in_(normalized_participant_ids))
+            statement = statement.where(or_(*membership))
+        else:
+            statement = statement.where(parent.c.id == str(run_id or ""))
+        with self.engine.connect() as conn:
+            return list(conn.execute(statement))
+
+    @staticmethod
+    def _callback_state_from_row(row: Any) -> Optional[str]:
+        if row is None or not str(row[0] or "").strip():
+            return None
+        callback_status = str(row[1] or "").strip() or None
+        callback_run_id = str(row[2] or "").strip()
+        if callback_status != "sent" or not callback_run_id:
+            return callback_status
+        child_status = normalize_run_status(row[3]) if row[3] is not None else ""
+        if child_status in {"queued", "running"}:
+            return "pending"
+        target_key_parts = SQLiteBackgroundTaskStore._parse_session_key(row[7])
+        message_ids = _json_loads(row[8], [])
+        descriptor = (
+            PLATFORM_REGISTRY.get(target_key_parts[0])
+            if target_key_parts is not None
+            else None
+        )
+        has_native_im_receipt = (
+            descriptor is not None
+            and descriptor.kind == "im"
+            and target_key_parts is not None
+            and target_key_parts[1] in {"channel", "user"}
+            and isinstance(message_ids, list)
+            and any(str(message_id or "").strip() for message_id in message_ids)
+        )
+        target_is_visible = (
+            str(row[5] or "").strip() != "archived"
+            and str(row[6] or "").strip() in INBOX_SESSION_VISIBILITIES
+        )
+        has_visible_persisted_receipt = bool(row[4]) and target_is_visible
+        if child_status == "succeeded" and (
+            has_native_im_receipt or has_visible_persisted_receipt
+        ):
+            return "sent"
+        return "failed"
+
     def run_callback_state(self, run_id: str) -> Optional[str]:
         """This run's effective callback delivery state, or ``None`` without one.
 
@@ -4019,78 +4841,37 @@ class SQLiteBackgroundTaskStore:
         no-shield.
         """
 
-        parent = agent_runs.alias("callback_parent")
-        child = agent_runs.alias("callback_child")
-        callback_session = agent_sessions.alias("callback_session")
-        persisted_receipt = (
-            select(literal(1))
-            .select_from(messages)
-            .where(messages.c.session_id == child.c.session_id)
-            .where(messages.c.type == "result")
-            .where(func.json_valid(messages.c.metadata_json) == 1)
-            .where(
-                cast(func.json_extract(messages.c.metadata_json, "$.run_id"), Text)
-                == child.c.id
+        rows = self._callback_state_rows(run_id=run_id)
+        return self._callback_state_from_row(rows[0] if rows else None)
+
+    def turn_callback_state(
+        self,
+        turn_id: str,
+        *,
+        participant_run_ids: Sequence[str] = (),
+    ) -> Optional[str]:
+        """Aggregate callback delivery across every failed Run in one Turn.
+
+        A callback reports the Turn's terminal result, not only its parent Run. One
+        delivered callback therefore suppresses every sibling fallback; while any
+        callback is still pending, the fallback waits rather than racing it. The
+        aggregation is read in one SQLite snapshot so two sibling decisions cannot
+        observe a half-updated callback set.
+        """
+
+        states = [
+            state
+            for row in self._callback_state_rows(
+                turn_id=turn_id,
+                participant_run_ids=participant_run_ids,
             )
-            .correlate(child)
-            .exists()
-        )
-        with self.engine.connect() as conn:
-            row = conn.execute(
-                select(
-                    parent.c.callback_session_id,
-                    parent.c.callback_status,
-                    parent.c.callback_run_id,
-                    child.c.status,
-                    persisted_receipt,
-                    callback_session.c.status,
-                    callback_session.c.visibility,
-                    child.c.legacy_session_key,
-                    child.c.message_ids_json,
-                )
-                .select_from(
-                    parent.outerjoin(child, child.c.id == parent.c.callback_run_id).outerjoin(
-                        callback_session,
-                        callback_session.c.id == child.c.session_id,
-                    )
-                )
-                .where(parent.c.id == str(run_id))
-                .limit(1)
-            ).first()
-        if row is None or not str(row[0] or "").strip():
-            return None
-        callback_status = str(row[1] or "").strip() or None
-        callback_run_id = str(row[2] or "").strip()
-        if callback_status != "sent" or not callback_run_id:
-            return callback_status
-        child_status = normalize_run_status(row[3]) if row[3] is not None else ""
-        if child_status in {"queued", "running"}:
-            return "pending"
-        target_key_parts = self._parse_session_key(row[7])
-        message_ids = _json_loads(row[8], [])
-        descriptor = (
-            PLATFORM_REGISTRY.get(target_key_parts[0])
-            if target_key_parts is not None
-            else None
-        )
-        has_native_im_receipt = (
-            descriptor is not None
-            and descriptor.kind == "im"
-            and target_key_parts is not None
-            and target_key_parts[1] in {"channel", "user"}
-            and isinstance(message_ids, list)
-            and any(str(message_id or "").strip() for message_id in message_ids)
-        )
-        target_is_visible = (
-            str(row[5] or "").strip() != "archived"
-            and str(row[6] or "").strip() in INBOX_SESSION_VISIBILITIES
-        )
-        has_visible_persisted_receipt = bool(row[4]) and target_is_visible
-        if child_status == "succeeded" and (
-            has_native_im_receipt or has_visible_persisted_receipt
-        ):
+            if (state := self._callback_state_from_row(row)) is not None
+        ]
+        if "sent" in states:
             return "sent"
-        return "failed"
+        if "pending" in states:
+            return "pending"
+        return "failed" if states else None
 
     def update_callback_status(
         self,
@@ -4315,6 +5096,7 @@ class SQLiteBackgroundTaskStore:
         terminal_status: Optional[str] = None,
         error: Optional[str] = None,
         updated_at: Optional[str] = None,
+        _conn: Any = None,
     ) -> dict[str, Any]:
         """Append one idempotent Run output and optionally settle the Run once."""
 
@@ -4325,9 +5107,11 @@ class SQLiteBackgroundTaskStore:
         recorded = False
         terminal_transition = False
         text_backfilled = False
+        delivery_evidence_merged = False
         run_payload: Optional[dict[str, Any]] = None
         row_to_publish = None
-        with self.engine.begin() as conn:
+        transaction = nullcontext(_conn) if _conn is not None else self.engine.begin()
+        with transaction as conn:
             row = conn.execute(
                 select(agent_runs).where(agent_runs.c.id == run_id).limit(1)
             ).mappings().first()
@@ -4430,6 +5214,17 @@ class SQLiteBackgroundTaskStore:
                         source_kind=terminal_row["source_kind"],
                         parent_run_id=terminal_row["parent_run_id"],
                         row_metadata_json=terminal_row["metadata_json"],
+                        extra_metadata={
+                            key: value
+                            for key in (
+                                "turn_id",
+                                "turn_failure_notification",
+                                TURN_PARTICIPANT_RUN_IDS_METADATA_KEY,
+                                "interrupt_reason",
+                            )
+                            if provenance and (value := provenance.get(key)) is not None
+                        }
+                        or None,
                         now=now,
                     )
                     transition = conn.execute(
@@ -4484,6 +5279,16 @@ class SQLiteBackgroundTaskStore:
                     # the real terminal result is PR7's job -- PR1 must not paper
                     # over it by writing text that contradicts the status.
                     if stored_status == incoming_status:
+                        delivery_evidence_merged = (
+                            _merge_replayed_turn_delivery_evidence(
+                                conn,
+                                run_id=run_id,
+                                row=terminal_row,
+                                incoming_status=incoming_status,
+                                provenance=provenance,
+                                now=now,
+                            )
+                        )
                         if terminal_result_text.strip():
                             filled = conn.execute(
                                 update(agent_runs)
@@ -4501,7 +5306,12 @@ class SQLiteBackgroundTaskStore:
                             )
                             text_backfilled = text_backfilled or bool(filled_error.rowcount)
 
-            if payload_changed or terminal_transition or text_backfilled:
+            if (
+                payload_changed
+                or terminal_transition
+                or text_backfilled
+                or delivery_evidence_merged
+            ):
                 row_to_publish = dict(
                     conn.execute(
                         select(agent_runs).where(agent_runs.c.id == run_id).limit(1)
@@ -4510,7 +5320,10 @@ class SQLiteBackgroundTaskStore:
                 run_payload = self._run_from_row(row_to_publish)
             else:
                 run_payload = self._run_from_row(row)
-        _publish_run_rows_updated([row_to_publish])
+        if _conn is not None:
+            _defer_run_rows_updated_from_connection(_conn, [row_to_publish])
+        else:
+            _publish_run_rows_updated([row_to_publish])
         return {
             "recorded": recorded,
             "terminal_transition": terminal_transition,
@@ -4518,8 +5331,356 @@ class SQLiteBackgroundTaskStore:
             # text/error. Distinct from ``terminal_transition`` on purpose: no
             # status changed, so callers must not read it as a settlement.
             "text_backfilled": text_backfilled,
+            "delivery_evidence_merged": delivery_evidence_merged,
             "run": run_payload,
         }
+
+    def record_turn_run_outputs(
+        self,
+        run_ids: Sequence[str],
+        *,
+        output_id: str,
+        text: str,
+        message_id: str | None = None,
+        sequence: int | None = None,
+        provenance: Optional[dict[str, Any]] = None,
+        terminal_status: Optional[str] = None,
+        error: Optional[str] = None,
+        deferred_run_ids: Sequence[str] = (),
+        updated_at: Optional[str] = None,
+    ) -> dict[str, dict[str, Any]]:
+        """Record one Turn output across all participant Runs atomically.
+
+        The fallback owner is a property of the whole failed Turn, not of any one
+        Run write. Reserve SQLite's writer slot before reading participant state so
+        cancellation cannot land after owner election but before a later participant
+        is written with that owner's id.
+        """
+
+        from core import failure_notices
+
+        normalized_run_ids = list(
+            dict.fromkeys(
+                run_id
+                for value in run_ids
+                if (run_id := str(value or "").strip())
+            )
+        )
+        if not normalized_run_ids:
+            return {}
+        deferred_ids = {
+            run_id
+            for value in deferred_run_ids
+            if (run_id := str(value or "").strip())
+        }
+        now = updated_at or _utc_now_iso()
+        results: dict[str, dict[str, Any]] = {}
+        with run_update_event_transaction(self.engine) as conn:
+            reserve_write_lock(conn)
+            terminal_provenance = dict(provenance or {})
+            notification = terminal_provenance.get("turn_failure_notification")
+            current_owner = (
+                str(notification.get("fallback_run_id") or "").strip()
+                if isinstance(notification, dict)
+                else ""
+            )
+            candidate_ids = [*normalized_run_ids]
+            if current_owner and current_owner not in candidate_ids:
+                candidate_ids.append(current_owner)
+            rows: dict[str, Any] = {}
+            for batch in _id_batches(candidate_ids):
+                rows.update(
+                    {
+                        str(row["id"]): row
+                        for row in conn.execute(
+                            select(agent_runs).where(agent_runs.c.id.in_(batch))
+                        ).mappings()
+                    }
+                )
+            loaded_run_ids = [
+                run_id for run_id in normalized_run_ids if run_id in rows
+            ]
+            runs = {
+                run_id: self._run_from_row(row)
+                for run_id, row in rows.items()
+            }
+            turn_id = str(terminal_provenance.get("turn_id") or "").strip()
+            settles_failed_now = normalize_run_status(terminal_status) == "failed"
+            # Project notice ownership in the same order as the terminal writes below.
+            # A callback child whose earlier parent will acquire a notice is removed
+            # before the remaining candidates use their stable lexical tie-breaker.
+            same_batch_notice_owners: set[str] = set()
+            eligible_run_ids: list[str] = []
+            for run_id in loaded_run_ids:
+                row = rows[run_id]
+                parent_id = (
+                    str(row["parent_run_id"] or "").strip()
+                    if str(row["source_kind"] or "").strip() == "callback"
+                    else ""
+                )
+                can_own = (
+                    failure_notices.turn_fallback_owner_eligible(runs.get(run_id))
+                    and _run_can_own_failure_notice(
+                        conn,
+                        row,
+                        turn_id=turn_id,
+                        will_settle_failed=(
+                            settles_failed_now
+                            and run_id not in deferred_ids
+                            and normalize_run_status(runs[run_id].get("status"))
+                            not in TERMINAL_RUN_STATUSES
+                        ),
+                    )
+                    and parent_id not in same_batch_notice_owners
+                )
+                if can_own:
+                    eligible_run_ids.append(run_id)
+                    same_batch_notice_owners.add(run_id)
+            eligible_run_ids.sort()
+            immediate_owner_ids = [
+                run_id for run_id in eligible_run_ids if run_id not in deferred_ids
+            ]
+            if isinstance(notification, dict):
+                notification = dict(notification)
+                if immediate_owner_ids:
+                    if current_owner not in immediate_owner_ids:
+                        notification["fallback_run_id"] = immediate_owner_ids[0]
+                else:
+                    # A deferred Run is still mutable: Stop can cancel it before its
+                    # Activity releases terminal settlement. Electing it now makes
+                    # already-terminal siblings permanently stand down for an owner
+                    # that may never owe a notice. When every participant is deferred,
+                    # the first Run that actually settles elects and propagates the
+                    # owner under the settlement writer lock instead.
+                    notification.pop("fallback_run_id", None)
+                terminal_provenance["turn_failure_notification"] = notification
+
+            if isinstance(notification, dict) and str(
+                notification.get("failure_id") or ""
+            ).strip():
+                terminal_provenance[TURN_PARTICIPANT_RUN_IDS_METADATA_KEY] = list(
+                    loaded_run_ids
+                )
+
+            deferred_metadata = {
+                key: value
+                for key in (
+                    "turn_id",
+                    "turn_failure_notification",
+                    TURN_PARTICIPANT_RUN_IDS_METADATA_KEY,
+                    "interrupt_reason",
+                )
+                if (value := terminal_provenance.get(key)) is not None
+            }
+            for run_id in loaded_run_ids:
+                run = runs.get(run_id)
+                if run is None or normalize_run_status(run.get("status")) == "canceled":
+                    continue
+                run_terminal_status = terminal_status
+                if run_terminal_status and run_id in deferred_ids:
+                    defer_kwargs: dict[str, Any] = {
+                        "terminal_status": run_terminal_status,
+                        "result_text": text,
+                        "updated_at": now,
+                        "_conn": conn,
+                    }
+                    if error is not None:
+                        defer_kwargs["error"] = error
+                    if deferred_metadata:
+                        defer_kwargs["metadata"] = deferred_metadata
+                    self.defer_run_terminal(run_id, **defer_kwargs)
+                    run_terminal_status = None
+                results[run_id] = self.record_run_output(
+                    run_id,
+                    output_id=output_id,
+                    text=text,
+                    message_id=message_id,
+                    sequence=sequence,
+                    provenance=terminal_provenance,
+                    terminal_status=run_terminal_status,
+                    error=error,
+                    updated_at=now,
+                    _conn=conn,
+                )
+        return results
+
+    def reconcile_resultless_turn_failure_notices(
+        self,
+        run_ids: Sequence[str],
+        *,
+        turn_id: str,
+        settled_by: str,
+        updated_at: Optional[str] = None,
+    ) -> list[str]:
+        """Attach one exact Turn owner to legacy per-Run interruption notices.
+
+        Releases before HFR-474 lost the notification contract from Run metadata,
+        but accepted Delivery ownership still retained the exact Turn. Startup calls
+        this before the notice lane activates. A sent notice is authoritative;
+        otherwise one pending participant is elected deterministically. Notice state,
+        attempts, errors, and retry timing remain unchanged.
+        """
+
+        from core import failure_notices
+
+        normalized_turn_id = str(turn_id or "").strip()
+        normalized_reason = str(settled_by or "").strip()
+        normalized_run_ids = list(
+            dict.fromkeys(
+                run_id
+                for value in run_ids
+                if (run_id := str(value or "").strip())
+            )
+        )
+        if not normalized_turn_id or not normalized_reason or not normalized_run_ids:
+            return []
+
+        now = updated_at or _utc_now_iso()
+        changed_ids: list[str] = []
+        with run_update_event_transaction(self.engine) as conn:
+            reserve_write_lock(conn)
+            rows: dict[str, Any] = {}
+            for batch in _id_batches(normalized_run_ids):
+                rows.update(
+                    {
+                        str(row["id"]): row
+                        for row in conn.execute(
+                            select(agent_runs).where(agent_runs.c.id.in_(batch))
+                        ).mappings()
+                    }
+                )
+            participant_ids = [
+                run_id for run_id in normalized_run_ids if run_id in rows
+            ]
+            notice_rows: dict[str, tuple[Any, dict[str, Any], dict[str, Any]]] = {}
+            for run_id in participant_ids:
+                row = rows[run_id]
+                if normalize_run_status(row["status"]) != "failed":
+                    continue
+                metadata = _decoded_failure_notice_metadata(row["metadata_json"])
+                if metadata is None:
+                    continue
+                notice = metadata.get(OWED_FAILURE_NOTICE_KEY)
+                if not isinstance(notice, dict) or notice.get("state") not in {
+                    NOTICE_PENDING,
+                    NOTICE_SENT,
+                }:
+                    continue
+                notice_turn_id = failure_notices.notice_turn_id(notice)
+                if notice_turn_id and notice_turn_id != normalized_turn_id:
+                    continue
+                reason = str(
+                    notice.get("interrupt_reason")
+                    or metadata.get("interrupt_reason")
+                    or ""
+                ).strip()
+                if reason != normalized_reason:
+                    continue
+                notice_rows[run_id] = (row, metadata, dict(notice))
+            if not notice_rows:
+                return []
+
+            ordered_ids = sorted(
+                notice_rows,
+                key=lambda run_id: (
+                    str(notice_rows[run_id][0]["created_at"] or ""),
+                    run_id,
+                ),
+            )
+            sent_ids = [
+                run_id
+                for run_id in ordered_ids
+                if notice_rows[run_id][2].get("state") == NOTICE_SENT
+            ]
+            pending_ids = [
+                run_id
+                for run_id in ordered_ids
+                if notice_rows[run_id][2].get("state") == NOTICE_PENDING
+            ]
+            existing_owner = ""
+            for run_id in ordered_ids:
+                _row, metadata, notice = notice_rows[run_id]
+                notification = metadata.get("turn_failure_notification")
+                notification = notification if isinstance(notification, dict) else {}
+                candidate = str(
+                    notification.get("fallback_run_id")
+                    or notice.get("turn_fallback_run_id")
+                    or ""
+                ).strip()
+                if candidate in notice_rows:
+                    existing_owner = candidate
+                    break
+
+            if sent_ids:
+                owner_id = sent_ids[0]
+            elif existing_owner in pending_ids:
+                owner_id = existing_owner
+            else:
+                owner_id = next(
+                    (
+                        run_id
+                        for run_id in pending_ids
+                        if not _callback_parent_owns_failure_notice(
+                            conn,
+                            source_kind=notice_rows[run_id][0]["source_kind"],
+                            parent_run_id=notice_rows[run_id][0]["parent_run_id"],
+                        )
+                    ),
+                    pending_ids[0] if pending_ids else "",
+                )
+            if not owner_id:
+                return []
+
+            delivered = bool(sent_ids)
+            ack_evidence = None
+            if sent_ids:
+                evidence_values = [
+                    str(notice_rows[run_id][2].get("ack_evidence") or "")
+                    for run_id in sent_ids
+                ]
+                ack_evidence = max(
+                    evidence_values,
+                    key=lambda value: _ACK_EVIDENCE_PRIORITY.get(value, 0),
+                ) or None
+            failure_id = f"turn:{normalized_turn_id}"
+            notification: dict[str, Any] = {
+                "failure_id": failure_id,
+                "delivered": delivered,
+                "fallback_run_id": owner_id,
+            }
+            if ack_evidence:
+                notification["ack_evidence"] = ack_evidence
+
+            for run_id in ordered_ids:
+                _row, metadata, notice = notice_rows[run_id]
+                updated_metadata = dict(metadata)
+                updated_notice = dict(notice)
+                updated_metadata["turn_id"] = normalized_turn_id
+                updated_metadata["turn_failure_notification"] = dict(notification)
+                updated_notice.update(
+                    {
+                        "failure_id": failure_id,
+                        "turn_id": normalized_turn_id,
+                        "turn_notification_delivered": delivered,
+                        "turn_notification_ack_evidence": ack_evidence,
+                        "turn_fallback_run_id": owner_id,
+                        TURN_PARTICIPANT_RUN_IDS_METADATA_KEY: participant_ids,
+                    }
+                )
+                updated_metadata[OWED_FAILURE_NOTICE_KEY] = updated_notice
+                if updated_metadata == metadata:
+                    continue
+                conn.execute(
+                    update(agent_runs)
+                    .where(agent_runs.c.id == run_id)
+                    .values(
+                        metadata_json=_json_dumps(updated_metadata),
+                        updated_at=now,
+                    )
+                )
+                changed_ids.append(run_id)
+            _defer_run_ids_updated_from_connection(conn, changed_ids)
+        return changed_ids
 
     def settle_run_terminal(
         self,
@@ -4664,13 +5825,16 @@ class SQLiteBackgroundTaskStore:
         terminal_status: str,
         error: Optional[str] = None,
         result_text: Optional[str] = None,
+        metadata: Optional[dict[str, Any]] = None,
         updated_at: Optional[str] = None,
+        _conn: Any = None,
     ) -> bool:
-        """Remember a terminal intent and result while an Activity blocks it."""
+        """Remember a terminal intent and its evidence while an Activity blocks it."""
 
         now = updated_at or _utc_now_iso()
         row_to_publish = None
-        with self.engine.begin() as conn:
+        transaction = nullcontext(_conn) if _conn is not None else self.engine.begin()
+        with transaction as conn:
             row = conn.execute(
                 select(agent_runs).where(agent_runs.c.id == run_id).limit(1)
             ).mappings().first()
@@ -4694,13 +5858,25 @@ class SQLiteBackgroundTaskStore:
                 deferred_result_text is not None
                 and result_payload.get("deferred_terminal_result_text") != deferred_result_text
             )
-            if not status_changed and not error_changed and not result_text_changed:
+            deferred_metadata = dict(metadata) if isinstance(metadata, dict) else None
+            metadata_changed = bool(
+                deferred_metadata is not None
+                and result_payload.get(DEFERRED_TERMINAL_METADATA_KEY) != deferred_metadata
+            )
+            if (
+                not status_changed
+                and not error_changed
+                and not result_text_changed
+                and not metadata_changed
+            ):
                 return False
             result_payload["deferred_terminal_status"] = normalized
             if error_changed:
                 result_payload["deferred_terminal_error"] = error_text
             if result_text_changed:
                 result_payload["deferred_terminal_result_text"] = deferred_result_text
+            if metadata_changed:
+                result_payload[DEFERRED_TERMINAL_METADATA_KEY] = deferred_metadata
             conn.execute(
                 update(agent_runs)
                 .where(agent_runs.c.id == run_id)
@@ -4714,7 +5890,10 @@ class SQLiteBackgroundTaskStore:
                     select(agent_runs).where(agent_runs.c.id == run_id).limit(1)
                 ).mappings().one()
             )
-        _publish_run_rows_updated([row_to_publish])
+        if _conn is not None:
+            _defer_run_rows_updated_from_connection(_conn, [row_to_publish])
+        else:
+            _publish_run_rows_updated([row_to_publish])
         return True
 
     def settle_deferred_run(
@@ -4729,8 +5908,14 @@ class SQLiteBackgroundTaskStore:
 
         now = updated_at or _utc_now_iso()
         row_to_publish = None
+        participant_rows_to_publish: list[dict[str, Any]] = []
         transitioned = False
         with self.engine.begin() as conn:
+            # Deferred Runs from one Turn can be released by independent Activity
+            # completions. Own SQLite's writer slot before reading either the Run
+            # or its current fallback owner so election, settlement, and sibling
+            # propagation observe one serialized snapshot.
+            reserve_write_lock(conn)
             row = conn.execute(
                 select(agent_runs).where(agent_runs.c.id == run_id).limit(1)
             ).mappings().first()
@@ -4755,12 +5940,85 @@ class SQLiteBackgroundTaskStore:
                 deferred_result_text = result_payload.pop(
                     "deferred_terminal_result_text", None
                 )
+                deferred_metadata = result_payload.pop(
+                    DEFERRED_TERMINAL_METADATA_KEY, None
+                )
                 requested_status = (
                     _stronger_terminal_status(deferred_status, terminal_status)
                     if terminal_status
                     else normalize_run_status(deferred_status)
                 )
                 status, guards = _cancel_aware_terminal_status(row, requested_status)
+                participant_ids: list[str] = []
+                fallback_owner = ""
+                notice_metadata = (
+                    dict(deferred_metadata)
+                    if isinstance(deferred_metadata, dict)
+                    else None
+                )
+                if notice_metadata is not None:
+                    raw_participant_ids = notice_metadata.get(
+                        TURN_PARTICIPANT_RUN_IDS_METADATA_KEY, []
+                    )
+                    participant_ids = list(
+                        dict.fromkeys(
+                            participant_id
+                            for value in (
+                                raw_participant_ids
+                                if isinstance(raw_participant_ids, list)
+                                else []
+                            )
+                            if (participant_id := str(value or "").strip())
+                        )
+                    )
+                if status == "failed" and notice_metadata is not None:
+                    turn_id = str(notice_metadata.get("turn_id") or "").strip()
+                    notification = notice_metadata.get("turn_failure_notification")
+                    if turn_id and isinstance(notification, dict):
+                        notification = dict(notification)
+                        fallback_owner = str(
+                            notification.get("fallback_run_id") or ""
+                        ).strip()
+                        current_can_own = _run_can_own_failure_notice(
+                            conn,
+                            row,
+                            turn_id=turn_id,
+                            will_settle_failed=True,
+                        )
+                        owner_has_notice = (
+                            fallback_owner == run_id and current_can_own
+                        )
+                        if fallback_owner and fallback_owner != run_id:
+                            owner_row = conn.execute(
+                                select(agent_runs)
+                                .where(agent_runs.c.id == fallback_owner)
+                                .limit(1)
+                            ).mappings().first()
+                            owner_metadata = (
+                                _json_loads(owner_row["metadata_json"], {})
+                                if owner_row is not None
+                                else {}
+                            )
+                            owner_notice = (
+                                owner_metadata.get(OWED_FAILURE_NOTICE_KEY)
+                                if isinstance(owner_metadata, dict)
+                                else None
+                            )
+                            owner_has_notice = bool(
+                                owner_row is not None
+                                and normalize_run_status(owner_row["status"]) == "failed"
+                                and isinstance(owner_notice, dict)
+                                and str(owner_notice.get("turn_id") or "").strip()
+                                == turn_id
+                            )
+                        if not owner_has_notice:
+                            if current_can_own:
+                                fallback_owner = run_id
+                                notification["fallback_run_id"] = fallback_owner
+                            else:
+                                fallback_owner = ""
+                                notification.pop("fallback_run_id", None)
+                        notice_metadata["turn_failure_notification"] = notification
                 values: dict[str, Any] = {
                     "status": status,
                     "completed_at": now,
@@ -4780,6 +6038,9 @@ class SQLiteBackgroundTaskStore:
                     source_kind=row["source_kind"],
                     parent_run_id=row["parent_run_id"],
                     row_metadata_json=row["metadata_json"],
+                    extra_metadata=(
+                        notice_metadata
+                    ),
                     now=now,
                 )
                 transition = conn.execute(
@@ -4790,6 +6051,73 @@ class SQLiteBackgroundTaskStore:
                 )
                 if transition.rowcount:
                     transitioned = True
+                    if fallback_owner and participant_ids:
+                        turn_id = str((notice_metadata or {}).get("turn_id") or "").strip()
+                        for participant_id in participant_ids:
+                            if participant_id == run_id:
+                                continue
+                            participant_row = conn.execute(
+                                select(agent_runs)
+                                .where(agent_runs.c.id == participant_id)
+                                .limit(1)
+                            ).mappings().first()
+                            if (
+                                participant_row is None
+                                or normalize_run_status(participant_row["status"])
+                                in TERMINAL_RUN_STATUSES
+                            ):
+                                continue
+                            participant_payload = _json_loads(
+                                participant_row["result_payload_json"], {}
+                            )
+                            if not isinstance(participant_payload, dict):
+                                continue
+                            participant_metadata = participant_payload.get(
+                                DEFERRED_TERMINAL_METADATA_KEY
+                            )
+                            if not isinstance(participant_metadata, dict) or str(
+                                participant_metadata.get("turn_id") or ""
+                            ).strip() != turn_id:
+                                continue
+                            participant_notification = participant_metadata.get(
+                                "turn_failure_notification"
+                            )
+                            if not isinstance(participant_notification, dict):
+                                continue
+                            participant_notification = dict(participant_notification)
+                            if (
+                                str(
+                                    participant_notification.get("fallback_run_id")
+                                    or ""
+                                ).strip()
+                                == fallback_owner
+                            ):
+                                continue
+                            participant_notification["fallback_run_id"] = fallback_owner
+                            participant_metadata = dict(participant_metadata)
+                            participant_metadata["turn_failure_notification"] = (
+                                participant_notification
+                            )
+                            participant_payload[DEFERRED_TERMINAL_METADATA_KEY] = (
+                                participant_metadata
+                            )
+                            conn.execute(
+                                update(agent_runs)
+                                .where(agent_runs.c.id == participant_id)
+                                .values(
+                                    result_payload_json=_json_dumps(participant_payload),
+                                    updated_at=now,
+                                )
+                            )
+                            participant_rows_to_publish.append(
+                                dict(
+                                    conn.execute(
+                                        select(agent_runs)
+                                        .where(agent_runs.c.id == participant_id)
+                                        .limit(1)
+                                    ).mappings().one()
+                                )
+                            )
                     row_to_publish = dict(
                         conn.execute(
                             select(agent_runs).where(agent_runs.c.id == run_id).limit(1)
@@ -4805,7 +6133,7 @@ class SQLiteBackgroundTaskStore:
                 )
                 if row is None:
                     break
-        _publish_run_rows_updated([row_to_publish])
+        _publish_run_rows_updated([row_to_publish, *participant_rows_to_publish])
         return transitioned
 
     def find_escalation_run(self, *, parent_run_id: str) -> Optional[dict[str, Any]]:
@@ -4832,10 +6160,41 @@ class SQLiteBackgroundTaskStore:
         *,
         parent_run_id: str,
         source_actor: str,
+        terminal_turn_id: Optional[str] = None,
+        callback_session_id: Optional[str] = None,
     ) -> Optional[dict[str, Any]]:
-        """Return the callback Run for one parent callback identity."""
+        """Return the callback Run referenced by one parent callback ledger."""
 
         with self.engine.connect() as conn:
+            callback_run_id = conn.execute(
+                select(agent_runs.c.callback_run_id)
+                .where(agent_runs.c.id == parent_run_id)
+                .limit(1)
+            ).scalar_one_or_none()
+            if callback_run_id:
+                row = conn.execute(
+                    select(agent_runs)
+                    .where(agent_runs.c.id == callback_run_id)
+                    .where(agent_runs.c.run_type == "agent_run")
+                    .where(agent_runs.c.source_kind == "callback")
+                    .limit(1)
+                ).mappings().first()
+                if row is not None:
+                    return self._run_from_row(row)
+            normalized_turn_id = str(terminal_turn_id or "").strip()
+            normalized_session_id = str(callback_session_id or "").strip()
+            if normalized_turn_id and normalized_session_id:
+                row = conn.execute(
+                    select(agent_runs)
+                    .where(agent_runs.c.run_type == "agent_run")
+                    .where(agent_runs.c.source_kind == "callback")
+                    .where(agent_runs.c.callback_terminal_turn_id == normalized_turn_id)
+                    .where(agent_runs.c.session_id == normalized_session_id)
+                    .order_by(agent_runs.c.created_at, agent_runs.c.id)
+                    .limit(1)
+                ).mappings().first()
+                if row is not None:
+                    return self._run_from_row(row)
             row = conn.execute(
                 select(agent_runs)
                 .where(agent_runs.c.run_type == "agent_run")
@@ -6596,6 +7955,8 @@ class SQLiteBackgroundTaskStore:
     def _run_values(self, payload: dict[str, Any]) -> dict[str, Any]:
         created_at = payload.get("created_at") or payload.get("updated_at")
         message = payload.get("message") or payload.get("prompt")
+        raw_metadata = payload.get("metadata")
+        metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
         return {
             "id": payload["id"],
             "definition_id": payload.get("definition_id") or payload.get("task_id"),
@@ -6626,6 +7987,10 @@ class SQLiteBackgroundTaskStore:
             "callback_error": payload.get("callback_error"),
             "callback_run_id": payload.get("callback_run_id"),
             "callback_completed_at": payload.get("callback_completed_at"),
+            "callback_terminal_turn_id": str(
+                metadata.get(CALLBACK_TERMINAL_TURN_ID_METADATA_KEY) or ""
+            ).strip()
+            or None,
             "cancel_requested": 1 if payload.get("cancel_requested") else 0,
             "cancel_requested_at": payload.get("cancel_requested_at"),
             "pid": payload.get("pid"),
@@ -6637,11 +8002,12 @@ class SQLiteBackgroundTaskStore:
             "started_at": payload.get("started_at"),
             "completed_at": payload.get("completed_at"),
             "updated_at": payload.get("updated_at") or created_at,
-            "metadata_json": _json_dumps(payload.get("metadata") or {}),
+            "metadata_json": _json_dumps(raw_metadata or {}),
         }
 
     @staticmethod
     def _scheduled_task_from_row(row: Any) -> dict[str, Any]:
+        metadata = _json_loads(row["metadata_json"], {})
         return {
             "id": row["id"],
             "name": row["name"],
@@ -6669,7 +8035,8 @@ class SQLiteBackgroundTaskStore:
             "last_run_at": row["last_run_at"],
             "last_run_id": row["last_run_id"],
             "last_error": row["last_error"],
-            "metadata": _json_loads(row["metadata_json"], {}),
+            "metadata": metadata,
+            "resume_blocked": task_resume_block(metadata, row["session_id"]),
             "lifecycle_state": _row_lifecycle_state(row),
         }
 
@@ -6751,6 +8118,7 @@ class SQLiteBackgroundTaskStore:
             "callback_error": row["callback_error"],
             "callback_run_id": row["callback_run_id"],
             "callback_completed_at": row["callback_completed_at"],
+            "callback_terminal_turn_id": row["callback_terminal_turn_id"],
             "cancel_requested": bool(row["cancel_requested"]),
             "cancel_requested_at": row["cancel_requested_at"],
             "pid": row["pid"],
@@ -6834,11 +8202,11 @@ class SQLiteBackgroundTaskStore:
                 "watch runtimes",
                 lambda: self._watch_runtimes(conn, [row.get("id") for row in rows]),
             )
-        # Derived health for the whole page in one query. It goes here rather than in
-        # a per-surface payload builder because this is the only chokepoint the CLI,
-        # the list endpoint and the detail pane all pass through — and the Harness
-        # detail pane has no fetch of its own, it re-renders the row the list
-        # returned, so a field that is not on the row cannot reach it.
+        # Derived downstream execution health for the whole page in one query. It
+        # goes here rather than in a per-surface payload builder because this is the
+        # only chokepoint the CLI, list endpoint and detail pane all pass through.
+        # The detail pane has no fetch of its own, so a field absent here cannot
+        # reach it.
         health = _lookup(
             "definition health",
             lambda: self.definition_health_batch(
@@ -6873,9 +8241,49 @@ class SQLiteBackgroundTaskStore:
                 "consecutive_failures": 0,
                 "recent_failures": 0,
             }
-            row["health"] = row_health["health"]
-            row["consecutive_failures"] = row_health["consecutive_failures"]
-            row["recent_failures"] = row_health["recent_failures"]
+            if definition_type == "watch":
+                # A Watch owns observation, not the Agent Turn created from an
+                # observed event. Keep the waiter signal on the existing health
+                # fields and expose downstream Run verdicts on a separate axis.
+                row["processing_health"] = row_health["health"]
+                row["processing_consecutive_failures"] = row_health[
+                    "consecutive_failures"
+                ]
+                row["processing_recent_failures"] = row_health["recent_failures"]
+                retry_codes = row.get("retry_exit_codes")
+                retry_codes = retry_codes if isinstance(retry_codes, list) else []
+                exit_code = row.get("last_exit_code")
+                # A start timestamp is lifecycle evidence, not a waiter verdict.
+                waiter_observed = bool(
+                    row.get("last_finished_at")
+                    or exit_code is not None
+                    or str(row.get("last_error") or "").strip()
+                )
+                retry_is_healthy = bool(row.get("enabled")) and exit_code in retry_codes
+                successful_exit_codes = {0, NO_EVENT_EXIT_CODE}
+                waiter_failed = bool(
+                    (
+                        exit_code is not None
+                        and exit_code not in successful_exit_codes
+                        and not retry_is_healthy
+                    )
+                    or (
+                        str(row.get("last_error") or "").strip()
+                        and not retry_is_healthy
+                        and exit_code != NO_EVENT_EXIT_CODE
+                    )
+                )
+                row["health"] = (
+                    HEALTH_UNKNOWN
+                    if not waiter_observed
+                    else (HEALTH_FAILING if waiter_failed else HEALTH_HEALTHY)
+                )
+                row["consecutive_failures"] = 1 if waiter_failed else 0
+                row["recent_failures"] = 1 if waiter_failed else 0
+            else:
+                row["health"] = row_health["health"]
+                row["consecutive_failures"] = row_health["consecutive_failures"]
+                row["recent_failures"] = row_health["recent_failures"]
             state = row.get("lifecycle_state")
             row["lifecycle_detail"] = definition_lifecycle_detail(
                 lifecycle_state=state,

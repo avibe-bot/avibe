@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from modules.im import MessageContext
+from modules.sessions_facade import SessionsFacade
 from core.processing_indicator import ProcessingIndicatorService
 
 
@@ -203,9 +204,20 @@ class _StubController:
         is_error=False,
         level="normal",
         output=None,
+        terminal_error=None,
+        delivery=None,
     ):
         # Terminal error results settle the dot + release the SSE waiter via the
         # outbound chokepoint; a no-op here (these are IM turns, no workbench dot).
+        if message_type == "notify":
+            delivered_id = await self.get_im_client_for_context(context).send_message(
+                context,
+                text,
+            )
+            if delivery is not None:
+                delivery.send_returned = True
+                delivery.delivered_id = delivered_id
+            return delivered_id
         return None
 
     def get_im_client_for_context(self, context):
@@ -490,8 +502,12 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(error, "context preparation failed")
-        controller.emit_agent_message.assert_awaited_once()
-        call = controller.emit_agent_message.await_args
+        self.assertEqual(controller.emit_agent_message.await_count, 2)
+        notify_call, call = controller.emit_agent_message.await_args_list
+        self.assertEqual(
+            notify_call.args[:3],
+            (context, "notify", "Error: context preparation failed"),
+        )
         self.assertEqual(call.args[:3], (context, "result", ""))
         output = call.kwargs["output"]
         self.assertTrue(output.completes_turn)
@@ -1082,11 +1098,15 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(request.vibe_agent_reasoning_effort)
 
     async def test_workbench_inherited_route_materializes_at_turn_start(self):
-        """A workbench session created on an inherited default (empty model /
+        """HFR-462: a workbench session created on an inherited default (empty model /
         effort) gets the resolved Agent defaults pinned onto its row when the
         turn STARTS, so the chat-header picker keeps showing the full route."""
         controller = _StubController(platform="avibe", ack_mode="reaction", typing_result=True)
-        controller.settings_manager.sessions.materialize_agent_session_route = Mock(return_value=True)
+        sessions_store = Mock()
+        sessions_store.is_message_in_processed_set.return_value = False
+        sessions_store.try_add_to_processed_set.return_value = True
+        sessions_store.materialize_agent_session_route = Mock(return_value=True)
+        controller.settings_manager.sessions = SessionsFacade(sessions_store)
         handler = MessageHandler(controller)
         handler.set_session_handler(_StubSessionHandler())
         context = MessageContext(
@@ -1097,8 +1117,10 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
             platform_specific={
                 "agent_session_target": {
                     "id": "ses_wb",
+                    "agent_id": None,
                     "agent_name": None,
                     "agent_backend": None,
+                    "agent_variant": None,
                     "model": None,
                     "reasoning_effort": None,
                 }
@@ -1107,8 +1129,21 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
 
         await handler.handle_user_message(context, "hello")
 
-        controller.settings_manager.sessions.materialize_agent_session_route.assert_called_once_with(
-            "ses_wb", model="gpt-5.4", reasoning_effort="high"
+        sessions_store.materialize_agent_session_route.assert_called_once_with(
+            "ses_wb",
+            agent_id="agent-default",
+            agent_name="default",
+            model="gpt-5.4",
+            reasoning_effort="high",
+            expected_route={
+                "agent_id": None,
+                "agent_name": None,
+                "agent_backend": None,
+                "agent_variant": None,
+                "model": None,
+                "reasoning_effort": None,
+                "explicit_overrides": [],
+            },
         )
 
     async def test_workbench_explicit_route_skips_materialization(self):
@@ -1138,14 +1173,78 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
 
         controller.settings_manager.sessions.materialize_agent_session_route.assert_not_called()
 
+    async def test_workbench_scalar_explicit_route_marker_uses_shared_parser(self):
+        """A tolerated legacy scalar marker must mean the same thing to the
+        dispatch snapshot and the storage CAS: model stays explicitly null while
+        the unpinned effort can still materialize."""
+        controller = _StubController(platform="avibe", ack_mode="reaction", typing_result=True)
+        sessions_store = Mock()
+        sessions_store.is_message_in_processed_set.return_value = False
+        sessions_store.try_add_to_processed_set.return_value = True
+        sessions_store.materialize_agent_session_route = Mock(return_value=True)
+        controller.settings_manager.sessions = SessionsFacade(sessions_store)
+        handler = MessageHandler(controller)
+        handler.set_session_handler(_StubSessionHandler())
+        context = MessageContext(
+            user_id="U1",
+            channel_id="ses_wb",
+            message_id="m1",
+            platform="avibe",
+            platform_specific={
+                "agent_session_target": {
+                    "id": "ses_wb",
+                    "agent_id": None,
+                    "agent_name": None,
+                    "agent_backend": None,
+                    "agent_variant": None,
+                    "model": None,
+                    "reasoning_effort": None,
+                    "metadata": {"explicit_setting_overrides": "model"},
+                }
+            },
+        )
+
+        await handler.handle_user_message(context, "hello")
+
+        sessions_store.materialize_agent_session_route.assert_called_once_with(
+            "ses_wb",
+            agent_id="agent-default",
+            agent_name="default",
+            model=None,
+            reasoning_effort="high",
+            expected_route={
+                "agent_id": None,
+                "agent_name": None,
+                "agent_backend": None,
+                "agent_variant": None,
+                "model": None,
+                "reasoning_effort": None,
+                "explicit_overrides": ["model"],
+            },
+        )
+
     async def test_im_turn_never_materializes_session_route(self):
-        """IM turns carry no ``agent_session_target``; their model semantics
-        belong to channel routing and must never be pinned onto session rows."""
+        """Scheduled IM turns can carry ``agent_session_target``; their model
+        semantics still belong to channel routing and must not be pinned."""
         controller = _StubController(platform="slack", ack_mode="reaction", typing_result=True)
         controller.settings_manager.sessions.materialize_agent_session_route = Mock(return_value=True)
         handler = MessageHandler(controller)
         handler.set_session_handler(_StubSessionHandler())
-        context = MessageContext(user_id="U1", channel_id="C1", message_id="m1", platform="slack")
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            message_id="m1",
+            platform="slack",
+            platform_specific={
+                "agent_session_target": {
+                    "id": "ses_im",
+                    "agent_name": "codex",
+                    "agent_backend": "codex",
+                    "model": None,
+                    "reasoning_effort": None,
+                }
+            },
+        )
 
         await handler.handle_user_message(context, "hello")
 
@@ -1428,6 +1527,17 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
     async def test_scheduled_turn_returns_error_string_after_notifying_im(self):
         controller = _StubController(platform="slack", ack_mode="reaction", typing_result=True)
         controller.agent_service.error = RuntimeError("boom")
+
+        async def emit(context, message_type, text, **kwargs):
+            if message_type == "notify":
+                delivered_id = await controller.im_client.send_message(context, text)
+                delivery = kwargs["delivery"]
+                delivery.send_returned = True
+                delivery.delivered_id = delivered_id
+                return delivered_id
+            return None
+
+        controller.emit_agent_message = AsyncMock(side_effect=emit)
         handler = MessageHandler(controller)
         handler.set_session_handler(_StubSessionHandler())
         context = MessageContext(
@@ -1435,12 +1545,69 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
             channel_id="C1",
             message_id="scheduled:task-1:abc",
             platform="slack",
+            platform_specific={
+                "turn_token": "turn-scheduled-error",
+                "task_execution_id": "run-scheduled-error",
+            },
         )
 
         result = await handler.handle_scheduled_message(context, "hello")
 
         self.assertEqual(result, "boom")
         self.assertEqual(controller.im_client.sent_messages, [("C1", "Error: boom")])
+        self.assertEqual(controller.emit_agent_message.await_count, 2)
+        notify_call, _terminal_call = controller.emit_agent_message.await_args_list
+        self.assertEqual(notify_call.args[:3], (context, "notify", "Error: boom"))
+        terminal_output = controller.emit_agent_message.await_args.kwargs["output"]
+        self.assertEqual(
+            terminal_output.metadata["turn_failure_notification"],
+            {
+                "failure_id": "turn:turn-scheduled-error",
+                "ack_evidence": "delivery_only",
+                "delivered": True,
+            },
+        )
+
+    async def test_handled_backend_key_error_is_not_reclassified_as_missing_agent(self):
+        controller = _StubController(platform="slack", ack_mode="reaction", typing_result=True)
+
+        async def fail_after_dispatch(_agent_name, request):
+            error = KeyError("backend config")
+            request.failure_handled = True
+            await request.failure_handler(error)
+            raise error
+
+        controller.agent_service.handle_message = fail_after_dispatch
+
+        async def emit(context, message_type, text, **kwargs):
+            if message_type == "notify":
+                delivered_id = await controller.im_client.send_message(context, text)
+                delivery = kwargs["delivery"]
+                delivery.send_returned = True
+                delivery.delivered_id = delivered_id
+                return delivered_id
+            return None
+
+        controller.emit_agent_message = AsyncMock(side_effect=emit)
+        handler = MessageHandler(controller)
+        handler.set_session_handler(_StubSessionHandler())
+        context = MessageContext(
+            user_id="scheduled",
+            channel_id="C1",
+            message_id="scheduled:task-1:key-error",
+            platform="slack",
+            platform_specific={
+                "turn_token": "turn-scheduled-key-error",
+                "task_execution_id": "run-scheduled-key-error",
+            },
+        )
+
+        result = await handler.handle_scheduled_message(context, "hello")
+
+        self.assertEqual(result, "'backend config'")
+        self.assertEqual(controller.im_client.sent_messages, [("C1", "Error: 'backend config'")])
+        self.assertEqual(controller.emit_agent_message.await_count, 2)
+        self.assertNotIn("not available", controller.im_client.sent_messages[0][1])
 
     async def test_durable_scheduled_turn_does_not_mirror_before_acceptance(self):
         controller = _StubController(platform="slack", ack_mode="reaction", typing_result=True)

@@ -18,9 +18,10 @@ import { cn } from '@/lib/utils';
 
 /** Never exported: a label that does not name a control is the defect above, so
  *  `htmlFor` is required and `Field` is the only thing that can supply it. */
-const FieldLabel: React.FC<{ htmlFor: string; mono?: boolean; children: React.ReactNode }> = ({
+const FieldLabel: React.FC<{ htmlFor: string; mono?: boolean; className?: string; children: React.ReactNode }> = ({
   htmlFor,
   mono,
+  className,
   children,
 }) => (
   <label
@@ -28,8 +29,9 @@ const FieldLabel: React.FC<{ htmlFor: string; mono?: boolean; children: React.Re
     className={cn(
       'text-muted',
       mono
-        ? 'font-mono text-[11px] font-medium uppercase tracking-wide'
+        ? 'font-mono text-[11px] font-medium uppercase tracking-normal'
         : 'text-[12px] font-semibold text-foreground',
+      className,
     )}
   >
     {children}
@@ -62,15 +64,18 @@ export const Field: React.FC<{
   mono?: boolean;
   icon?: React.ComponentType<{ className?: string }>;
   hint?: React.ReactNode;
-}> = ({ label, children, mono, icon, hint }) => {
+  className?: string;
+  labelClassName?: string;
+  hintClassName?: string;
+}> = ({ label, children, mono, icon, hint, className, labelClassName, hintClassName }) => {
   const id = React.useId();
   return (
-    <div className="flex flex-col gap-2">
-      <FieldLabel htmlFor={id} mono={mono}>
+    <div className={cn('flex flex-col gap-2', className)}>
+      <FieldLabel htmlFor={id} mono={mono} className={labelClassName}>
         {label}
       </FieldLabel>
       {icon ? <IconField icon={icon}>{children(id)}</IconField> : children(id)}
-      {hint ? <p className="text-[12px] leading-relaxed text-muted">{hint}</p> : null}
+      {hint ? <p className={cn('text-[12px] leading-relaxed text-muted', hintClassName)}>{hint}</p> : null}
     </div>
   );
 };

@@ -1407,6 +1407,18 @@ class Controller:
         # Poll registration is durable-owner evidence needed by startup recovery.
         # All work admission and user-visible delivery remain behind the barrier.
         await self._await_runtime_owner_recovery()
+        # Interruption reports for turns on this platform were held back during
+        # recovery precisely because it could not deliver them yet.
+        notify_turns = getattr(self.session_turns, "notify_transport_ready", None)
+        if callable(notify_turns):
+            try:
+                reported = await notify_turns(platform)
+                if reported:
+                    logger.info(
+                        "Reported %d interrupted turn(s) on %s", reported, platform
+                    )
+            except Exception:
+                logger.exception("Failed to report interrupted turns for %s", platform)
         self.scheduled_task_service.notify_transport_ready(platform)
         notify_update_checker = getattr(self.update_checker, "notify_transport_ready", None)
         if callable(notify_update_checker):

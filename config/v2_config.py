@@ -1,8 +1,10 @@
+import copy
 import ipaddress
 import json
 import logging
 import os
 import re
+import shutil
 import tempfile
 import threading
 from contextlib import contextmanager
@@ -10,8 +12,8 @@ from copy import deepcopy
 from dataclasses import dataclass, field, fields
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Iterator, List, Literal, Mapping, Optional, Union
-from urllib.parse import urlsplit, urlunsplit
+from typing import Callable, ClassVar, Iterator, List, Literal, Mapping, Optional, Union
+from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
 from config import paths
 from config.platform_registry import (
@@ -159,6 +161,20 @@ def _memory_config_transaction(config_path: Path) -> Iterator[None]:
             os.close(descriptor)
 
 
+_MODEL_HUB_CREDENTIAL_PATTERNS = (
+    re.compile(r"(?i)\b(?:sk|rk|pk|sess|token)[-_][a-z0-9_-]{8,}\b"),
+    re.compile(
+        r"(?i)\b(?:authorization|api[_ -]?key|access[_ -]?token)\s*[:=]\s*"
+        r"(?:sk[-_][a-z0-9_-]{8,}|[a-z0-9._~+/=-]{16,})"
+    ),
+    re.compile(r"(?i)\bbearer\s+[a-z0-9._~+/=-]{8,}"),
+)
+
+
+def _contains_model_hub_credential_material(value: object) -> bool:
+    rendered = json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return any(pattern.search(rendered) for pattern in _MODEL_HUB_CREDENTIAL_PATTERNS)
+
 DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS = 600
 
 # Harness run staleness sweep (``docs/plans/agent-run-zombie-settlement.md`` §4.4).
@@ -232,6 +248,903 @@ DEFAULT_AGENT_PROGRESS_STYLE = "off"
 MODEL_HUB_ENABLED_ENV = "VIBE_MODEL_HUB_ENABLED"
 MODEL_HUB_BACKENDS = ("claude", "codex", "opencode")
 MODEL_HUB_LEGACY_CREATED_AT = "1970-01-01T00:00:00Z"
+_LEGACY_CLAUDE_FAMILY_ALIASES = {
+    "opus": "opus",
+    "opus[1m]": "opus",
+    "sonnet": "sonnet",
+    "sonnet[1m]": "sonnet",
+    "haiku": "haiku",
+}
+_LEGACY_CLAUDE_MODEL_ID = re.compile(
+    r"^claude-(?P<family>opus|sonnet|haiku|fable)-(?P<version>\d+(?:-\d+)*?)(?:-(?P<date>\d{8}))?$"
+)
+
+
+def normalize_model_hub_vendor_id(value: object) -> str:
+    """Return the canonical persisted vendor id used by matching-v1."""
+
+    if not isinstance(value, str):
+        raise ValueError("Config 'model_hub.sources.vendor' must be a non-empty string")
+    vendor = value.strip().lower()
+    if (
+        not vendor
+        or re.fullmatch(r"[a-z0-9]+(?:[._-][a-z0-9]+)*", vendor) is None
+        or _contains_model_hub_credential_material(vendor)
+    ):
+        raise ValueError("Config 'model_hub.sources.vendor' is invalid")
+    return vendor
+
+
+def canonical_opencode_menu_identity(identifier: object) -> tuple[str, str]:
+    """Validate and split one persisted OpenCode ``provider/model`` identity."""
+
+    from core.handlers.model_hub.identifiers import (
+        STANDARD_OPENCODE_VENDOR_IDS,
+        parse_opencode_model_id,
+    )
+
+    if not isinstance(identifier, str) or identifier != identifier.strip():
+        raise ValueError("Invalid OpenCode model identifier")
+    provider_id, model_id = parse_opencode_model_id(identifier)
+    if (
+        provider_id not in STANDARD_OPENCODE_VENDOR_IDS
+        and provider_id != "custom"
+    ) or provider_id != provider_id.strip() or model_id != model_id.strip():
+        raise ValueError("Invalid OpenCode model identifier")
+    if _contains_model_hub_credential_material(identifier):
+        raise ValueError("OpenCode model identifier contains credential material")
+    return provider_id, model_id
+
+
+def model_hub_fixed_menu_ids(backend: str) -> tuple[str, ...]:
+    """Return the bundled fixed-menu ids used by persisted Hub routes."""
+
+    if backend not in {"claude", "codex"}:
+        return ()
+    from vibe.backend_model_catalog import backend_model_entries, load_bundled_catalog
+
+    return tuple(
+        entry["id"]
+        for entry in backend_model_entries(backend, load_bundled_catalog())
+    )
+
+
+def _migrate_fixed_menu_routes_on_load(payload: dict) -> dict:
+    """Adapt fixed-menu route keys to the current bundled catalog on reload.
+
+    A changed catalog is a one-time structural migration: newly introduced
+    menu ids receive empty routes and removed ids are discarded. Existing hop
+    payloads are copied verbatim; matching and placement never run here.
+    """
+
+    model_hub = payload.get("model_hub")
+    if not isinstance(model_hub, dict):
+        return payload
+    agents = model_hub.get("agents")
+    if not isinstance(agents, dict):
+        return payload
+
+    migrated_agents = dict(agents)
+    changed = False
+    for backend in ("claude", "codex"):
+        raw_agent = agents.get(backend)
+        if not isinstance(raw_agent, dict):
+            continue
+        routes = raw_agent.get("routes")
+        expected_menu_ids = model_hub_fixed_menu_ids(backend)
+        if not isinstance(routes, dict) or not expected_menu_ids:
+            continue
+        migrated_routes = {
+            model_id: routes.get(model_id, {"hops": []})
+            for model_id in expected_menu_ids
+        }
+        if migrated_routes == routes:
+            continue
+        migrated_agent = dict(raw_agent)
+        migrated_agent["routes"] = migrated_routes
+        migrated_agents[backend] = migrated_agent
+        changed = True
+
+    if not changed:
+        return payload
+    migrated_model_hub = dict(model_hub)
+    migrated_model_hub["agents"] = migrated_agents
+    migrated_payload = dict(payload)
+    migrated_payload["model_hub"] = migrated_model_hub
+    return migrated_payload
+
+
+def _legacy_source_eligible_for_backend(source: object, backend: str) -> bool:
+    if not isinstance(source, dict):
+        return False
+    if source.get("kind") == "api_key":
+        return source.get("supply_channel") == "hub"
+    expected_backend = {"anthropic": "claude", "openai": "codex"}.get(source.get("vendor"))
+    return expected_backend == backend
+
+
+def _legacy_recommended_source_order(
+    sources: dict[str, dict],
+    backend: str,
+) -> list[str]:
+    def sort_key(source: dict) -> tuple[object, ...]:
+        if source.get("kind") == "subscription":
+            return (
+                0,
+                0 if source.get("supply_channel") == "native_cli" else 1,
+                str(source.get("id") or ""),
+            )
+        created_at = str(source.get("created_at") or MODEL_HUB_LEGACY_CREATED_AT)
+        try:
+            created_timestamp = datetime.fromisoformat(created_at.replace("Z", "+00:00")).timestamp()
+        except (TypeError, ValueError, OverflowError):
+            created_timestamp = 0
+        return (1, created_timestamp, str(source.get("id") or ""))
+
+    return [
+        str(source.get("id"))
+        for source in sorted(sources.values(), key=sort_key)
+        if _legacy_source_eligible_for_backend(source, backend)
+    ]
+
+
+def _legacy_source_order(
+    model_hub: dict,
+    sources: dict[str, dict],
+    agent: dict,
+    backend: str,
+) -> list[str]:
+    source_settings = agent.get("sources")
+    if isinstance(source_settings, dict):
+        policy = source_settings.get("policy")
+        order = source_settings.get("order")
+        if policy is None and isinstance(order, list):
+            return [
+                source_id
+                for source_id in order
+                if isinstance(source_id, str)
+                and source_id in sources
+                and _legacy_source_eligible_for_backend(sources[source_id], backend)
+            ]
+        if policy == "custom" and isinstance(order, list):
+            return [
+                source_id
+                for source_id in order
+                if isinstance(source_id, str)
+                and source_id in sources
+                and _legacy_source_eligible_for_backend(sources[source_id], backend)
+            ]
+        if policy == "follow":
+            return _legacy_recommended_source_order(sources, backend)
+
+    priority_order = model_hub.get("priority_order")
+    if isinstance(priority_order, list):
+        ordered = [
+            source_id
+            for source_id in priority_order
+            if isinstance(source_id, str)
+            and source_id in sources
+            and _legacy_source_eligible_for_backend(sources[source_id], backend)
+        ]
+        if ordered:
+            return ordered
+    return _legacy_recommended_source_order(sources, backend)
+
+
+def _legacy_source_order_setting_is_valid(value: object, *, required: bool = False) -> bool:
+    """Validate the pre-v5 source-order shape before migration can infer hops."""
+
+    if not isinstance(value, dict):
+        return False
+    if set(value) - {"policy", "order"}:
+        return False
+    policy = value.get("policy")
+    if policy is not None and not isinstance(policy, str):
+        return False
+    if policy not in {None, "custom", "follow"}:
+        return False
+    if required and not isinstance(value.get("order"), list):
+        return False
+    order = value.get("order")
+    if order is None:
+        return not required
+    return (
+        isinstance(order, list)
+        and all(isinstance(source_id, str) for source_id in order)
+        and len(order) == len(set(order))
+    )
+
+
+def _legacy_mapping_is_valid(value: object) -> bool:
+    """Match the pre-v5 mapping parser's required fields and types."""
+
+    if (
+        not isinstance(value, dict)
+        or set(value) - {"builtin_id", "target_model_id", "enabled"}
+        or not isinstance(value.get("builtin_id"), str)
+        or not value["builtin_id"]
+        or not isinstance(value.get("enabled"), bool)
+    ):
+        return False
+    target_model_id = value.get("target_model_id")
+    if value["enabled"]:
+        return isinstance(target_model_id, str) and bool(target_model_id)
+    return target_model_id is None or isinstance(target_model_id, str)
+
+
+def _legacy_claude_matching_model_id(source: dict, requested_model: str) -> str | None:
+    """Resolve the pre-v5 Claude aliases against discovered native models.
+
+    Claude's old native CLI resolver treated ``opus``/``sonnet``/``haiku`` as
+    family selectors and persisted the newest concrete model it observed. Keep
+    that behavior at the disk migration boundary; the current runtime resolver
+    intentionally only follows persisted exact hops.
+    """
+
+    if source.get("vendor") != "anthropic":
+        return None
+    observed_models = [
+        model
+        for model in source.get("models") or []
+        if isinstance(model, dict)
+        and model.get("origin", model.get("provenance")) == "discovered"
+    ]
+    family = _LEGACY_CLAUDE_FAMILY_ALIASES.get(requested_model)
+    requested_version: tuple[int, ...] | None = None
+    match = _LEGACY_CLAUDE_MODEL_ID.fullmatch(requested_model)
+    requested_date: int | None = None
+    if family is None and match is not None:
+        family = match.group("family")
+        requested_version = tuple(int(part) for part in match.group("version").split("-"))
+        requested_date = int(match.group("date")) if match.group("date") else None
+    if family is None:
+        return None
+    if requested_date is not None:
+        return next(
+            (
+                model.get("id")
+                for model in observed_models
+                if model.get("id") == requested_model
+            ),
+            None,
+        )
+
+    matches: list[tuple[tuple[int, ...], int, str]] = []
+    for model in observed_models:
+        model_id = model.get("id")
+        if not isinstance(model_id, str):
+            continue
+        parsed = _LEGACY_CLAUDE_MODEL_ID.fullmatch(model_id)
+        if parsed is None or parsed.group("family") != family:
+            continue
+        version = tuple(int(part) for part in parsed.group("version").split("-"))
+        if requested_version is not None and version != requested_version:
+            continue
+        date = int(parsed.group("date")) if parsed.group("date") else 0
+        matches.append((version, date, model_id))
+    return max(matches)[2] if matches else None
+
+
+def _legacy_route_hops(
+    sources: dict[str, dict],
+    source_order: list[str],
+    backend: str,
+    target_model_id: str,
+) -> list[dict[str, str]]:
+    provider: Optional[str] = None
+    bare_target = backend == "opencode" and "/" not in target_model_id
+    if backend == "opencode":
+        if not bare_target:
+            try:
+                provider, target_model_id = canonical_opencode_menu_identity(target_model_id)
+            except ValueError:
+                return []
+    hops: list[dict[str, str]] = []
+    bare_matches: list[dict[str, str]] = []
+    for source_id in source_order:
+        source = sources[source_id]
+        legacy_claude_model_id = (
+            _legacy_claude_matching_model_id(source, target_model_id)
+            if backend == "claude"
+            else None
+        )
+        if legacy_claude_model_id is not None:
+            hops.append({"source_id": source_id, "model_id": legacy_claude_model_id})
+            continue
+        for model in source.get("models") or []:
+            if not isinstance(model, dict) or not isinstance(model.get("id"), str):
+                continue
+            model_id = model["id"]
+            if provider is not None:
+                try:
+                    source_provider, source_model_id = canonical_opencode_menu_identity(
+                        f"{source.get('vendor') or ''}/{model_id}"
+                    )
+                except ValueError:
+                    try:
+                        source_provider, source_model_id = canonical_opencode_menu_identity(
+                            f"custom/{model_id}"
+                        )
+                    except ValueError:
+                        continue
+                if (source_provider, source_model_id) != (provider, target_model_id):
+                    continue
+                hops.append({"source_id": source_id, "model_id": model_id})
+                continue
+            if bare_target:
+                try:
+                    _, source_model_id = canonical_opencode_menu_identity(
+                        f"{source.get('vendor') or ''}/{model_id}"
+                    )
+                except ValueError:
+                    try:
+                        _, source_model_id = canonical_opencode_menu_identity(
+                            f"custom/{model_id}"
+                        )
+                    except ValueError:
+                        continue
+                if source_model_id == target_model_id or source_model_id.endswith(
+                    f"/{target_model_id}"
+                ):
+                    bare_matches.append({"source_id": source_id, "model_id": model_id})
+                continue
+            if model_id == target_model_id:
+                hops.append({"source_id": source_id, "model_id": model_id})
+    if bare_target and len(bare_matches) == 1:
+        return bare_matches
+    return hops
+
+
+def _migrate_legacy_model_hub_payload(payload: dict) -> tuple[dict, bool, tuple[str, ...]]:
+    """Convert the pre-v5 Model Hub shape before the strict parser runs.
+
+    The final parser intentionally rejects retired fields. Disk loading is the
+    compatibility boundary, so old ``mappings`` are converted into exact route
+    hops when the old model inventory identifies their source unambiguously.
+    Unrepresentable mappings remain in the untouched backup and produce a load
+    warning instead of silently selecting a different source.
+    """
+
+    model_hub = payload.get("model_hub")
+    if not isinstance(model_hub, dict):
+        return payload, False, ()
+    agents = model_hub.get("agents")
+    if not isinstance(agents, dict):
+        return payload, False, ()
+    if set(agents) - set(MODEL_HUB_BACKENDS):
+        return payload, False, ()
+    raw_sources = model_hub.get("sources")
+    if raw_sources is not None and not isinstance(raw_sources, list):
+        return payload, False, ()
+    if "priority_order" in model_hub and not _legacy_source_order_setting_is_valid(
+        {"order": model_hub["priority_order"]}
+    ):
+        return payload, False, ()
+    if (
+        "subscription_hub_experimental" in model_hub
+        and not isinstance(model_hub["subscription_hub_experimental"], bool)
+    ):
+        return payload, False, ()
+    legacy_sources_by_id = {
+        source.get("id"): source
+        for source in raw_sources or []
+        if isinstance(source, dict) and isinstance(source.get("id"), str)
+    }
+    if "priority_order" in model_hub and any(
+        source_id not in legacy_sources_by_id
+        for source_id in model_hub["priority_order"]
+    ):
+        return payload, False, ()
+    for source in raw_sources or []:
+        if not isinstance(source, dict):
+            return payload, False, ()
+        models = source.get("models")
+        if "models" in source and not isinstance(models, list):
+            return payload, False, ()
+        if isinstance(models, list) and any(not isinstance(model, dict) for model in models):
+            return payload, False, ()
+        for model in models or []:
+            if "provenance" not in model:
+                continue
+            provenance = model["provenance"]
+            if not isinstance(provenance, str) or provenance not in {"discovered", "manual"}:
+                return payload, False, ()
+            if "origin" in model and model["origin"] != provenance:
+                return payload, False, ()
+        if "experimental_consent_at" in source:
+            try:
+                _validate_optional_datetime(
+                    source["experimental_consent_at"],
+                    "model_hub.sources.experimental_consent_at",
+                )
+            except (TypeError, ValueError):
+                return payload, False, ()
+    for backend, agent in agents.items():
+        if not isinstance(agent, dict):
+            return payload, False, ()
+        if set(agent) - {
+            "backend",
+            "mode",
+            "menu_kind",
+            "sources",
+            "mappings",
+            "routes",
+            "menu",
+        }:
+            return payload, False, ()
+        expected_menu_kind = "open" if backend == "opencode" else "fixed"
+        if agent.get("backend") != backend or agent.get("menu_kind") != expected_menu_kind:
+            return payload, False, ()
+        if "mode" in agent:
+            mode = agent["mode"]
+            if not isinstance(mode, str) or mode not in {"hub", "direct"}:
+                return payload, False, ()
+        mappings = agent.get("mappings")
+        if "mappings" in agent and not isinstance(mappings, list):
+            return payload, False, ()
+        if isinstance(mappings, list) and any(
+            not _legacy_mapping_is_valid(mapping) for mapping in mappings
+        ):
+            return payload, False, ()
+        if backend in {"claude", "codex"}:
+            fixed_menu_ids = set(model_hub_fixed_menu_ids(backend))
+            if any(
+                mapping["enabled"] and mapping["builtin_id"] not in fixed_menu_ids
+                for mapping in mappings or []
+            ):
+                return payload, False, ()
+        if "routes" in agent and not isinstance(agent["routes"], dict):
+            return payload, False, ()
+        menu = agent.get("menu")
+        if isinstance(menu, dict) and "checked" in menu and not isinstance(menu["checked"], list):
+            return payload, False, ()
+        if "sources" in agent:
+            source_settings = agent["sources"]
+            if not _legacy_source_order_setting_is_valid(
+                source_settings,
+                required=isinstance(source_settings, dict)
+                and source_settings.get("policy") == "custom",
+            ):
+                return payload, False, ()
+            if (
+                isinstance(source_settings, dict)
+                and source_settings.get("policy") in {None, "custom"}
+                and isinstance(source_settings.get("order"), list)
+                and any(
+                    source_id not in legacy_sources_by_id
+                    or not _legacy_source_eligible_for_backend(
+                        legacy_sources_by_id[source_id],
+                        backend,
+                    )
+                    for source_id in source_settings["order"]
+                )
+            ):
+                return payload, False, ()
+    has_legacy_shape = bool(
+        {"priority_order", "subscription_hub_experimental"} & set(model_hub)
+        or any(isinstance(agent, dict) and "mappings" in agent for agent in agents.values())
+        or any(
+            isinstance(source, dict)
+            and "experimental_consent_at" in source
+            for source in raw_sources or []
+        )
+        or any(
+            isinstance(source, dict)
+            and any(
+                isinstance(model, dict)
+                and ("provenance" in model or "reasoning_efforts" not in model)
+                for model in source.get("models") or []
+            )
+            for source in raw_sources or []
+        )
+    )
+    if not has_legacy_shape:
+        return payload, False, ()
+
+    migrated_payload = copy.deepcopy(payload)
+    migrated_model_hub = migrated_payload["model_hub"]
+    migrated_model_hub.pop("priority_order", None)
+    migrated_model_hub.pop("subscription_hub_experimental", None)
+
+    raw_sources = migrated_model_hub.get("sources") or []
+    sources_by_id: dict[str, dict] = {}
+    for source in raw_sources:
+        if not isinstance(source, dict):
+            continue
+        source.pop("experimental_consent_at", None)
+        for model in source.get("models") or []:
+            if not isinstance(model, dict):
+                continue
+            if "provenance" in model:
+                if "origin" not in model:
+                    model["origin"] = model["provenance"]
+                model.pop("provenance", None)
+            if "reasoning_efforts" not in model:
+                model["reasoning_efforts"] = []
+        source_id = source.get("id")
+        if isinstance(source_id, str):
+            sources_by_id[source_id] = source
+
+    warnings: list[str] = []
+    migrated_agents: dict[str, object] = {}
+    for backend in MODEL_HUB_BACKENDS:
+        raw_agent = agents.get(backend)
+        if not isinstance(raw_agent, dict):
+            continue
+
+        agent = copy.deepcopy(raw_agent)
+        source_order = _legacy_source_order(migrated_model_hub, sources_by_id, agent, backend)
+        source_settings = {"order": source_order}
+        route_ids: list[str]
+        if backend in {"claude", "codex"}:
+            route_ids = list(model_hub_fixed_menu_ids(backend))
+        else:
+            menu = agent.get("menu")
+            checked = menu.get("checked") if isinstance(menu, dict) else []
+            route_ids = [item for item in checked if isinstance(item, str)]
+
+        if isinstance(agent.get("routes"), dict):
+            routes = copy.deepcopy(agent["routes"])
+        else:
+            old_mappings = agent.get("mappings")
+            mappings = old_mappings if isinstance(old_mappings, list) else []
+            # The legacy resolver selected the first enabled mapping in list
+            # order. Disabled duplicates must not shadow an earlier active one.
+            mapping_by_menu: dict[str, dict] = {}
+            for item in mappings:
+                if not isinstance(item, dict) or item.get("enabled") is not True:
+                    continue
+                builtin_id = item.get("builtin_id")
+                if isinstance(builtin_id, str) and builtin_id not in mapping_by_menu:
+                    mapping_by_menu[builtin_id] = item
+            if backend == "opencode":
+                route_ids.extend(
+                    builtin_id
+                    for builtin_id, mapping in mapping_by_menu.items()
+                    if builtin_id not in route_ids and mapping.get("enabled") is True
+                )
+            routes = {}
+            for model_id in route_ids:
+                mapping = mapping_by_menu.get(model_id)
+                target_model_id = model_id
+                if isinstance(mapping, dict) and mapping.get("enabled") is True:
+                    target = mapping.get("target_model_id")
+                    if isinstance(target, str) and target:
+                        target_model_id = target
+                hops = _legacy_route_hops(
+                    sources_by_id,
+                    source_order,
+                    backend,
+                    target_model_id,
+                )
+                if isinstance(mapping, dict) and mapping.get("enabled") is True and not hops:
+                    warnings.append(
+                        f"Model Hub route {backend}/{model_id} could not be mapped to a persisted source model"
+                    )
+                routes[model_id] = {"hops": hops}
+
+        allowed_agent = {
+            key: value
+            for key, value in agent.items()
+            if key in {"backend", "mode", "menu_kind", "menu"}
+        }
+        allowed_agent["backend"] = backend
+        agent_mode = agent.get("mode")
+        allowed_agent["mode"] = agent_mode if isinstance(agent_mode, str) and agent_mode in {"hub", "direct"} else "direct"
+        allowed_agent["menu_kind"] = "open" if backend == "opencode" else "fixed"
+        allowed_agent["sources"] = source_settings
+        allowed_agent["routes"] = routes
+        migrated_agents[backend] = allowed_agent
+
+    migrated_model_hub["agents"] = migrated_agents
+    migrated_payload["model_hub"] = migrated_model_hub
+    return migrated_payload, True, tuple(warnings)
+
+
+def _migrate_config_payload_on_load(payload: dict) -> tuple[dict, bool, tuple[str, ...]]:
+    migrated, changed, warnings = _migrate_legacy_model_hub_payload(payload)
+    migrated = _migrate_fixed_menu_routes_on_load(migrated)
+    return migrated, changed, warnings
+
+
+def _recovery_section_for_error(error: BaseException) -> Optional[str]:
+    message = str(error)
+    match = re.search(r"Config '([^']+)'", message)
+    if match:
+        path = match.group(1)
+        if path == "platform":
+            return "platforms"
+        if path.startswith("agents."):
+            backend = path.split(".", 2)[1]
+            if backend in MODEL_HUB_BACKENDS or backend == "avault":
+                return f"agents.{backend}"
+        return path.split(".", 1)[0]
+
+    lowered = message.lower()
+    if "unsupported enabled platform" in lowered:
+        return "platforms"
+    for platform_id in supported_platform_ids():
+        if f"invalid {platform_id.lower()}" in lowered:
+            return platform_id
+    if any(
+        marker in lowered
+        for marker in (
+            "source state",
+            "hub sources",
+            "engine credential ref",
+            "native source",
+            "api-key source",
+            "manual model",
+            "subscription source",
+            "opencode model identifier",
+        )
+    ):
+        return "model_hub"
+    for section in (
+        "model_hub",
+        "memory",
+        "remote_access",
+        "audio_asr",
+        "runtime",
+        "agents",
+        "platforms",
+        "update",
+        "ui",
+    ):
+        if section in lowered:
+            return section
+    return None
+
+
+def _reset_recoverable_config_section(payload: dict, section: str) -> bool:
+    """Replace one independently recoverable section with its safe default.
+
+    This is deliberately outside ``V2Config.from_payload``. Direct callers and
+    API writes still get strict validation; only disk loading may enter this
+    loss-avoiding recovery path, and the original file is backed up first.
+    """
+
+    if section == "runtime":
+        # Keep this in sync with ``V2Config.default``.  RuntimeConfig has a
+        # required cwd, so an empty object would make the recovery loop fail a
+        # second time and discard otherwise valid settings.
+        payload[section] = {"default_cwd": str(Path.home() / "work")}
+        return True
+    if section in {
+        "model_hub",
+        "memory",
+        "ui",
+        "remote_access",
+        "audio_asr",
+        "update",
+    }:
+        payload[section] = {}
+        return True
+    if section == "agents":
+        defaults = V2Config.default().agents
+        payload[section] = {
+            "opencode": dict(defaults.opencode.__dict__),
+            "claude": dict(defaults.claude.__dict__),
+            "codex": dict(defaults.codex.__dict__),
+            "avault": dict(defaults.avault.__dict__),
+        }
+        return True
+    if section == "gateway":
+        payload[section] = None
+        return True
+    if section == "mode":
+        payload[section] = "self_host"
+        return True
+    if section == "platforms":
+        payload["platforms"] = {"enabled": [], "primary": WORKBENCH_PLATFORM_ID}
+        payload["platform"] = WORKBENCH_PLATFORM_ID
+        return True
+    if section in {"ack_mode", "language", "agent_progress_style"}:
+        payload[section] = {
+            "ack_mode": "typing",
+            "language": "en",
+            "agent_progress_style": DEFAULT_AGENT_PROGRESS_STYLE,
+        }[section]
+        return True
+    if section in {
+        "show_duration",
+        "include_time_info",
+        "include_user_info",
+        "reply_enhancements",
+        "show_pages_prompt",
+        "setup_completed",
+    }:
+        payload[section] = {
+            "show_duration": False,
+            "include_time_info": True,
+            "include_user_info": True,
+            "reply_enhancements": True,
+            "show_pages_prompt": True,
+            "setup_completed": False,
+        }[section]
+        return True
+    if section in {"agent_status_heartbeat_ms", "agent_status_no_output_ms"}:
+        payload.pop(section, None)
+        return True
+    if section.startswith("agents."):
+        agent_name = section.split(".", 1)[1]
+        agents_payload = payload.get("agents")
+        if not isinstance(agents_payload, dict):
+            return False
+        if agent_name == "codex":
+            # Codex is opt-in in the canonical first-run/recovery config.
+            agents_payload[agent_name] = dict(V2Config.default().agents.codex.__dict__)
+        else:
+            agents_payload[agent_name] = {}
+        return True
+    if section in set(supported_platform_ids()) | {WORKBENCH_PLATFORM_ID}:
+        payload[section] = {}
+        platforms_payload = payload.get("platforms")
+        if not isinstance(platforms_payload, dict):
+            platforms_payload = {"enabled": [], "primary": WORKBENCH_PLATFORM_ID}
+        enabled = platforms_payload.get("enabled")
+        if not isinstance(enabled, list):
+            enabled = []
+        enabled = [item for item in enabled if item != section]
+        primary = platforms_payload.get("primary")
+        if primary == section or primary not in enabled:
+            primary = enabled[0] if enabled else WORKBENCH_PLATFORM_ID
+        payload["platforms"] = {"enabled": enabled, "primary": primary}
+        if payload.get("platform") == section:
+            payload["platform"] = primary
+        return True
+    return False
+
+
+def _backup_config_file(
+    path: Path,
+    label: str,
+    *,
+    content: bytes | None = None,
+) -> Optional[Path]:
+    if content is None and not path.exists():
+        return None
+    try:
+        if content is None:
+            content = path.read_bytes()
+        existing = sorted(
+            path.parent.glob(f"{path.name}.bak-{label}-*"),
+            key=lambda candidate: candidate.stat().st_mtime,
+            reverse=True,
+        )
+        for candidate in existing:
+            try:
+                if candidate.read_bytes() == content:
+                    candidate.chmod(0o600)
+                    return candidate
+            except OSError:
+                continue
+    except OSError:
+        pass
+
+    stamp = datetime.now().strftime("%Y%m%d%H%M%S%f")
+    backup = path.with_name(f"{path.name}.bak-{label}-{stamp}")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    try:
+        file_descriptor = os.open(backup, flags, 0o600)
+        with os.fdopen(file_descriptor, "wb") as destination:
+            if content is None:
+                with path.open("rb") as source:
+                    shutil.copyfileobj(source, destination)
+            else:
+                destination.write(content)
+            destination.flush()
+            os.fsync(destination.fileno())
+    except OSError as exc:
+        logger.warning("Could not back up config before recovery (%s): %s", path, exc)
+        try:
+            backup.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return None
+    return backup
+
+
+def _config_file_lock(path: Path):
+    """Return the shared cross-process lock for one config path."""
+
+    # Import lazily because storage's package initializer imports V2Config.
+    from storage.lock import MigrationFileLock
+
+    return MigrationFileLock(path.with_name(f".{path.name}.lock"))
+
+
+def _write_config_payload(path: Path, payload: dict) -> None:
+    content = json.dumps(payload, indent=2)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with CONFIG_LOCK:
+        with _config_file_lock(path):
+            _atomic_write_text(path, content)
+
+
+def _write_config_payload_if_unchanged(
+    path: Path,
+    payload: dict,
+    expected_raw: str,
+) -> bool:
+    """Replace a config only if the final pre-replace snapshot still matches."""
+
+    content = json.dumps(payload, indent=2)
+    temp_name: str | None = None
+    with CONFIG_LOCK:
+        try:
+            with tempfile.NamedTemporaryFile(
+                "w",
+                encoding="utf-8",
+                dir=path.parent,
+                delete=False,
+            ) as tmp:
+                tmp.write(content)
+                tmp.flush()
+                os.fsync(tmp.fileno())
+                temp_name = tmp.name
+            current_raw = path.read_text(encoding="utf-8")
+            if current_raw != expected_raw:
+                return False
+            os.replace(temp_name, path)
+            temp_name = None
+            return True
+        except (OSError, UnicodeDecodeError):
+            return False
+        finally:
+            if temp_name is not None:
+                try:
+                    Path(temp_name).unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+
+def _persist_migrated_config_payload(
+    path: Path,
+    expected_raw: str,
+    payload: dict,
+) -> tuple[Optional[Path], Optional[str]]:
+    """Persist a migration only when the snapshot read at load is unchanged."""
+
+    try:
+        with CONFIG_LOCK:
+            with _config_file_lock(path):
+                try:
+                    current_raw = path.read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError) as exc:
+                    return None, f"Could not verify config before migration persistence: {exc}"
+                if current_raw != expected_raw:
+                    return None, "Skipped config migration because the file changed during load"
+                backup = _backup_config_file(
+                    path,
+                    "model-hub-migration",
+                    content=expected_raw.encode("utf-8"),
+                )
+                if backup is None:
+                    return None, "Skipped config migration because the original file could not be backed up"
+                if not _write_config_payload_if_unchanged(path, payload, expected_raw):
+                    return backup, "Skipped config migration because the file changed before replacement"
+                return backup, None
+    except TimeoutError as exc:
+        return None, f"Could not acquire config migration lock: {exc}"
+
+
+_MODEL_HUB_CREDENTIAL_QUERY_KEYS = {
+    "access_token",
+    "api_key",
+    "apikey",
+    "auth",
+    "authorization",
+    "bearer",
+    "credential",
+    "key",
+    "password",
+    "passwd",
+    "secret",
+    "sig",
+    "signature",
+    "token",
+}
 
 
 def is_model_hub_enabled(environ: Optional[Mapping[str, str]] = None) -> bool:
@@ -253,6 +1166,64 @@ def _validate_optional_datetime(value: object, field_path: str) -> Optional[str]
     if parsed.tzinfo is None:
         raise ValueError(f"Config '{field_path}' must include a timezone")
     return value
+
+
+def normalize_model_hub_base_url(
+    value: object,
+    *,
+    append_path: str | None = None,
+) -> Optional[str]:
+    """Validate a Source URL and optionally append an upstream API path."""
+
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("Config 'model_hub.sources.base_url' is invalid")
+    try:
+        parsed = urlsplit(value.strip())
+        hostname = parsed.hostname
+    except ValueError as exc:
+        raise ValueError("Config 'model_hub.sources.base_url' is invalid") from exc
+    if (
+        parsed.scheme.lower() not in {"http", "https"}
+        or not hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.fragment
+    ):
+        raise ValueError("Config 'model_hub.sources.base_url' is invalid")
+    for key, _ in parse_qsl(
+        parsed.query,
+        keep_blank_values=True,
+    ):
+        normalized = key.strip().lower().replace("-", "_").replace(".", "_")
+        if normalized in _MODEL_HUB_CREDENTIAL_QUERY_KEYS or any(
+            marker in normalized
+            for marker in (
+                "api_key",
+                "access_token",
+                "auth_token",
+                "token",
+                "authorization",
+                "signature",
+                "secret",
+                "password",
+                "credential",
+            )
+        ):
+            raise ValueError("Config 'model_hub.sources.base_url' is invalid")
+    if _contains_model_hub_credential_material(value):
+        raise ValueError("Config 'model_hub.sources.base_url' is invalid")
+    path = parsed.path.rstrip("/")
+    if append_path is not None:
+        if not append_path.startswith("/") or append_path.startswith("//"):
+            raise ValueError("Model Hub URL path must be relative to the API root")
+        path = f"{path}{append_path}"
+    return urlunsplit((parsed.scheme.lower(), parsed.netloc, path, parsed.query, ""))
+
+
+def _validate_model_hub_base_url(value: object) -> Optional[str]:
+    return normalize_model_hub_base_url(value)
 
 
 def _filter_dataclass_fields(dc_class, payload: dict) -> dict:
@@ -753,6 +1724,7 @@ class AgentsConfig:
 class ModelHubModelConfig:
     id: str
     provenance: Literal["discovered", "manual"]
+    reasoning_efforts: list[str] = field(default_factory=list)
     display_name: Optional[str] = None
     discovered_at: Optional[str] = None
 
@@ -760,19 +1732,45 @@ class ModelHubModelConfig:
     def from_payload(cls, payload: dict) -> "ModelHubModelConfig":
         if not isinstance(payload, dict):
             raise ValueError("Config 'model_hub.sources.models' entries must be objects")
+        if set(payload) - {
+            "id",
+            "display_name",
+            "origin",
+            "reasoning_efforts",
+            "discovered_at",
+        }:
+            raise ValueError("Config 'model_hub.sources.models' contains unknown fields")
         model_id = payload.get("id")
-        provenance = payload.get("provenance")
+        origin = payload.get("origin")
+        if "reasoning_efforts" not in payload:
+            raise ValueError("Config 'model_hub.sources.models.reasoning_efforts' is required")
+        reasoning_efforts = payload["reasoning_efforts"]
         display_name = payload.get("display_name")
         discovered_at = payload.get("discovered_at")
-        if not isinstance(model_id, str) or not model_id:
+        if not isinstance(model_id, str) or not model_id or _contains_model_hub_credential_material(model_id):
             raise ValueError("Config 'model_hub.sources.models.id' must be a non-empty string")
-        if provenance not in {"discovered", "manual"}:
-            raise ValueError("Config 'model_hub.sources.models.provenance' is invalid")
-        if display_name is not None and not isinstance(display_name, str):
+        if not isinstance(origin, str) or origin not in {"discovered", "manual"}:
+            raise ValueError("Config 'model_hub.sources.models.origin' is invalid")
+        if (
+            not isinstance(reasoning_efforts, list)
+            or any(not isinstance(effort, str) or not effort for effort in reasoning_efforts)
+            or len(set(reasoning_efforts)) != len(reasoning_efforts)
+            or any(_contains_model_hub_credential_material(effort) for effort in reasoning_efforts)
+        ):
+            raise ValueError(
+                "Config 'model_hub.sources.models.reasoning_efforts' must be a unique credential-free array of strings"
+            )
+        if display_name is not None and (
+            not isinstance(display_name, str)
+            or _contains_model_hub_credential_material(display_name)
+        ):
             raise ValueError("Config 'model_hub.sources.models.display_name' must be a string or null")
+        if origin == "manual" and discovered_at is not None:
+            raise ValueError("Config manual model entries cannot carry discovered_at")
         return cls(
             id=model_id,
-            provenance=provenance,
+            provenance=origin,
+            reasoning_efforts=list(reasoning_efforts),
             display_name=display_name,
             discovered_at=_validate_optional_datetime(
                 discovered_at,
@@ -784,7 +1782,8 @@ class ModelHubModelConfig:
         return {
             "id": self.id,
             "display_name": self.display_name,
-            "provenance": self.provenance,
+            "origin": self.provenance,
+            "reasoning_efforts": list(self.reasoning_efforts),
             "discovered_at": self.discovered_at,
         }
 
@@ -799,10 +1798,18 @@ class ModelHubSourceStateConfig:
     def from_payload(cls, payload: dict) -> "ModelHubSourceStateConfig":
         if not isinstance(payload, dict):
             raise ValueError("Config 'model_hub.sources.state' must be an object")
+        if set(payload) - {"status", "retry_at", "detail_key"}:
+            raise ValueError("Config 'model_hub.sources.state' contains unknown fields")
         status = payload.get("status")
         retry_at = payload.get("retry_at")
         detail_key = payload.get("detail_key")
-        if status not in {"active", "standby", "cooldown", "needs_action", "error"}:
+        if not isinstance(status, str) or status not in {
+            "active",
+            "standby",
+            "cooldown",
+            "needs_action",
+            "error",
+        }:
             raise ValueError("Config 'model_hub.sources.state.status' is invalid")
         if detail_key is not None and not isinstance(detail_key, str):
             raise ValueError("Config 'model_hub.sources.state.detail_key' must be a string or null")
@@ -849,6 +1856,13 @@ class ModelHubSourceUsageConfig:
     def from_payload(cls, payload: dict) -> "ModelHubSourceUsageConfig":
         if not isinstance(payload, dict):
             raise ValueError("Config 'model_hub.sources.usage' must be an object")
+        if set(payload) - {
+            "cycle_used_pct",
+            "month_spend_cents",
+            "currency",
+            "projected_exhaust_at",
+        }:
+            raise ValueError("Config 'model_hub.sources.usage' contains unknown fields")
         cycle_used_pct = payload.get("cycle_used_pct")
         if cycle_used_pct is not None and (
             isinstance(cycle_used_pct, bool)
@@ -890,7 +1904,7 @@ class ModelHubSourceConfig:
     kind: Literal["subscription", "api_key"]
     vendor: str
     display_name: str
-    protocol: Literal["anthropic", "openai_responses", "openai_chat", "openai_compatible"]
+    protocol: Literal["anthropic", "openai_responses", "openai_chat"]
     supply_channel: Literal["native_cli", "hub"]
     billing: Literal["monthly", "metered"]
     state: ModelHubSourceStateConfig
@@ -898,7 +1912,6 @@ class ModelHubSourceConfig:
     created_at: str = MODEL_HUB_LEGACY_CREATED_AT
     last_discovered_at: Optional[str] = None
     base_url: Optional[str] = None
-    experimental_consent_at: Optional[str] = None
     usage: Optional[ModelHubSourceUsageConfig] = None
     credential_ref: Optional[str] = None
     account_label: Optional[str] = None
@@ -908,6 +1921,26 @@ class ModelHubSourceConfig:
     def from_payload(cls, payload: dict) -> "ModelHubSourceConfig":
         if not isinstance(payload, dict):
             raise ValueError("Config 'model_hub.sources' entries must be objects")
+        allowed_fields = {
+            "id",
+            "created_at",
+            "last_discovered_at",
+            "kind",
+            "vendor",
+            "display_name",
+            "protocol",
+            "base_url",
+            "supply_channel",
+            "billing",
+            "state",
+            "usage",
+            "models",
+            "credential_ref",
+            "account_label",
+            "masked_credential",
+        }
+        if set(payload) - allowed_fields:
+            raise ValueError("Config 'model_hub.sources' contains unknown fields")
         source_id = payload.get("id")
         kind = payload.get("kind")
         vendor = payload.get("vendor")
@@ -917,37 +1950,57 @@ class ModelHubSourceConfig:
         billing = payload.get("billing")
         if not isinstance(source_id, str) or re.fullmatch(r"src_[a-z0-9]{8,}", source_id) is None:
             raise ValueError("Config 'model_hub.sources.id' is invalid")
-        if kind not in {"subscription", "api_key"}:
+        if not isinstance(kind, str) or kind not in {"subscription", "api_key"}:
             raise ValueError("Config 'model_hub.sources.kind' is invalid")
-        if not isinstance(vendor, str) or not vendor:
-            raise ValueError("Config 'model_hub.sources.vendor' must be a non-empty string")
+        vendor = normalize_model_hub_vendor_id(vendor)
         if not isinstance(display_name, str) or not display_name or len(display_name) > 64:
             raise ValueError("Config 'model_hub.sources.display_name' is invalid")
-        if protocol not in {"anthropic", "openai_responses", "openai_chat", "openai_compatible"}:
+        if not isinstance(protocol, str) or protocol not in {
+            "anthropic",
+            "openai_responses",
+            "openai_chat",
+        }:
             raise ValueError("Config 'model_hub.sources.protocol' is invalid")
-        if supply_channel not in {"native_cli", "hub"}:
+        if not isinstance(supply_channel, str) or supply_channel not in {"native_cli", "hub"}:
             raise ValueError("Config 'model_hub.sources.supply_channel' is invalid")
-        if billing not in {"monthly", "metered"}:
+        if not isinstance(billing, str) or billing not in {"monthly", "metered"}:
             raise ValueError("Config 'model_hub.sources.billing' is invalid")
         models_payload = payload.get("models")
         if not isinstance(models_payload, list):
             raise ValueError("Config 'model_hub.sources.models' must be an array")
+        model_ids = [model.get("id") for model in models_payload if isinstance(model, dict)]
+        if len(model_ids) != len(models_payload):
+            raise ValueError("Config 'model_hub.sources.models' entries must be objects")
+        if any(not isinstance(model_id, str) for model_id in model_ids):
+            raise ValueError("Config 'model_hub.sources.models.id' must be a non-empty string")
+        if len(set(model_ids)) != len(model_ids):
+            raise ValueError("Config 'model_hub.sources.models' contains duplicate ids")
         usage_payload = payload.get("usage")
         base_url = payload.get("base_url")
-        consent_at = payload.get("experimental_consent_at")
         credential_ref = payload.get("credential_ref")
         account_label = payload.get("account_label")
         masked_credential = payload.get("masked_credential")
         created_at = payload.get("created_at")
         last_discovered_at = payload.get("last_discovered_at")
-        if base_url is not None and not isinstance(base_url, str):
-            raise ValueError("Config 'model_hub.sources.base_url' is invalid")
+        base_url = _validate_model_hub_base_url(base_url)
         if credential_ref is not None and not isinstance(credential_ref, str):
             raise ValueError("Config 'model_hub.sources.credential_ref' is invalid")
         if account_label is not None and not isinstance(account_label, str):
             raise ValueError("Config 'model_hub.sources.account_label' is invalid")
         if masked_credential is not None and not isinstance(masked_credential, str):
             raise ValueError("Config 'model_hub.sources.masked_credential' is invalid")
+        if kind == "subscription" and (base_url is not None or masked_credential is not None):
+            raise ValueError("Config subscription Sources cannot carry API-key fields")
+        if kind == "api_key" and supply_channel != "hub":
+            raise ValueError("Config API-key Sources must use the hub channel")
+        if supply_channel == "native_cli" and credential_ref is not None:
+            raise ValueError("Config native Sources cannot carry an engine credential ref")
+        if supply_channel == "hub" and (not isinstance(credential_ref, str) or not credential_ref):
+            raise ValueError("Config hub Sources require an engine credential ref")
+        if kind == "api_key" and usage_payload is not None:
+            projected_exhaust_at = usage_payload.get("projected_exhaust_at") if isinstance(usage_payload, dict) else None
+            if projected_exhaust_at is not None:
+                raise ValueError("Config API-key Sources cannot carry projected exhaustion")
         return cls(
             id=source_id,
             kind=kind,
@@ -970,10 +2023,6 @@ class ModelHubSourceConfig:
                 "model_hub.sources.last_discovered_at",
             ),
             base_url=base_url,
-            experimental_consent_at=_validate_optional_datetime(
-                consent_at,
-                "model_hub.sources.experimental_consent_at",
-            ),
             usage=ModelHubSourceUsageConfig.from_payload(usage_payload) if usage_payload is not None else None,
             credential_ref=credential_ref,
             account_label=account_label,
@@ -1000,38 +2049,53 @@ class ModelHubSourceConfig:
         }
         if self.usage is not None:
             payload["usage"] = self.usage.to_payload()
-        if self.experimental_consent_at is not None:
-            payload["experimental_consent_at"] = self.experimental_consent_at
         return payload
 
 
-@dataclass
-class ModelHubMappingConfig:
-    builtin_id: str
-    target_model_id: str
-    enabled: bool
+@dataclass(frozen=True)
+class ModelHubRouteHopConfig:
+    source_id: str
+    model_id: str
 
     @classmethod
-    def from_payload(cls, payload: dict) -> "ModelHubMappingConfig":
-        if not isinstance(payload, dict):
-            raise ValueError("Config 'model_hub.agents.mappings' entries must be objects")
-        builtin_id = payload.get("builtin_id")
-        target_model_id = payload.get("target_model_id")
-        enabled = payload.get("enabled")
-        if not isinstance(builtin_id, str) or not builtin_id:
-            raise ValueError("Config 'model_hub.agents.mappings.builtin_id' is invalid")
-        if not isinstance(target_model_id, str) or not target_model_id:
-            raise ValueError("Config 'model_hub.agents.mappings.target_model_id' is invalid")
-        if not isinstance(enabled, bool):
-            raise ValueError("Config 'model_hub.agents.mappings.enabled' must be a boolean")
-        return cls(builtin_id=builtin_id, target_model_id=target_model_id, enabled=enabled)
+    def from_payload(cls, payload: object) -> "ModelHubRouteHopConfig":
+        if not isinstance(payload, dict) or set(payload) != {"source_id", "model_id"}:
+            raise ValueError("Config 'model_hub.agents.routes.hops' entries must contain source_id and model_id")
+        source_id = payload.get("source_id")
+        model_id = payload.get("model_id")
+        if not isinstance(source_id, str) or re.fullmatch(r"src_[a-z0-9]{8,}", source_id) is None:
+            raise ValueError("Config 'model_hub.agents.routes.hops.source_id' is invalid")
+        if (
+            not isinstance(model_id, str)
+            or not model_id
+            or _contains_model_hub_credential_material(model_id)
+        ):
+            raise ValueError("Config 'model_hub.agents.routes.hops.model_id' is invalid")
+        return cls(source_id=source_id, model_id=model_id)
 
     def to_payload(self) -> dict:
-        return {
-            "builtin_id": self.builtin_id,
-            "target_model_id": self.target_model_id,
-            "enabled": self.enabled,
-        }
+        return {"source_id": self.source_id, "model_id": self.model_id}
+
+
+@dataclass
+class ModelHubRouteConfig:
+    hops: tuple[ModelHubRouteHopConfig, ...] = ()
+
+    @classmethod
+    def from_payload(cls, payload: object) -> "ModelHubRouteConfig":
+        if not isinstance(payload, dict) or set(payload) != {"hops"}:
+            raise ValueError("Config 'model_hub.agents.routes' entries must contain hops")
+        hops = payload.get("hops")
+        if not isinstance(hops, list):
+            raise ValueError("Config 'model_hub.agents.routes.hops' must be an array")
+        parsed = tuple(ModelHubRouteHopConfig.from_payload(hop) for hop in hops)
+        pairs = [(hop.source_id, hop.model_id) for hop in parsed]
+        if len(set(pairs)) != len(pairs):
+            raise ValueError("Config 'model_hub.agents.routes.hops' must contain unique pairs")
+        return cls(hops=parsed)
+
+    def to_payload(self) -> dict:
+        return {"hops": [hop.to_payload() for hop in self.hops]}
 
 
 @dataclass
@@ -1043,14 +2107,18 @@ class ModelHubMenuConfig:
     def from_payload(cls, payload: dict) -> "ModelHubMenuConfig":
         if not isinstance(payload, dict):
             raise ValueError("Config 'model_hub.agents.menu' must be an object")
+        if set(payload) - {"view", "checked"}:
+            raise ValueError("Config 'model_hub.agents.menu' contains unknown fields")
         view = payload.get("view")
         checked = payload.get("checked")
-        if view not in {"featured", "full"}:
+        if not isinstance(view, str) or view not in {"featured", "full"}:
             raise ValueError("Config 'model_hub.agents.menu.view' is invalid")
         if not isinstance(checked, list) or not all(isinstance(item, str) for item in checked):
             raise ValueError("Config 'model_hub.agents.menu.checked' must be an array of strings")
         if len(set(checked)) != len(checked):
             raise ValueError("Config 'model_hub.agents.menu.checked' must be unique")
+        if any(_contains_model_hub_credential_material(item) for item in checked):
+            raise ValueError("Config 'model_hub.agents.menu.checked' is invalid")
         return cls(view=view, checked=list(checked))
 
     def to_payload(self) -> dict:
@@ -1059,27 +2127,23 @@ class ModelHubMenuConfig:
 
 @dataclass
 class ModelHubAgentSourcesConfig:
-    policy: Literal["follow", "custom"] = "follow"
     order: list[str] = field(default_factory=list)
 
     @classmethod
     def from_payload(cls, payload: dict) -> "ModelHubAgentSourcesConfig":
         if not isinstance(payload, dict):
             raise ValueError("Config 'model_hub.agents.sources' must be an object")
-        if set(payload) != {"policy", "order"}:
-            raise ValueError("Config 'model_hub.agents.sources' must contain policy and order")
-        policy = payload.get("policy")
+        if set(payload) != {"order"}:
+            raise ValueError("Config 'model_hub.agents.sources' must contain only order")
         order = payload.get("order")
-        if policy not in {"follow", "custom"}:
-            raise ValueError("Config 'model_hub.agents.sources.policy' is invalid")
         if not isinstance(order, list) or not all(isinstance(item, str) for item in order):
             raise ValueError("Config 'model_hub.agents.sources.order' must be an array of strings")
         if len(set(order)) != len(order):
             raise ValueError("Config 'model_hub.agents.sources.order' must be unique")
-        return cls(policy=policy, order=list(order))
+        return cls(order=list(order))
 
     def to_payload(self) -> dict:
-        return {"policy": self.policy, "order": list(self.order)}
+        return {"order": list(self.order)}
 
 
 @dataclass
@@ -1088,7 +2152,7 @@ class ModelHubAgentSupplyConfig:
     mode: Literal["hub", "direct"]
     menu_kind: Literal["fixed", "open"]
     sources: ModelHubAgentSourcesConfig = field(default_factory=ModelHubAgentSourcesConfig)
-    mappings: list[ModelHubMappingConfig] = field(default_factory=list)
+    routes: dict[str, ModelHubRouteConfig] = field(default_factory=dict)
     menu: Optional[ModelHubMenuConfig] = None
 
     @classmethod
@@ -1097,33 +2161,53 @@ class ModelHubAgentSupplyConfig:
             return cls(backend="opencode", mode=mode, menu_kind="open", menu=ModelHubMenuConfig())
         if backend not in {"claude", "codex"}:
             raise ValueError(f"Unsupported Model Hub backend: {backend}")
-        return cls(backend=backend, mode=mode, menu_kind="fixed")
+        return cls(
+            backend=backend,
+            mode=mode,
+            menu_kind="fixed",
+            routes={model_id: ModelHubRouteConfig() for model_id in model_hub_fixed_menu_ids(backend)},
+        )
 
     @classmethod
     def from_payload(cls, payload: dict, *, expected_backend: Optional[str] = None) -> "ModelHubAgentSupplyConfig":
         if not isinstance(payload, dict):
             raise ValueError("Config 'model_hub.agents' entries must be objects")
-        backend = payload.get("backend") or expected_backend
+        if set(payload) - {"backend", "mode", "menu_kind", "sources", "routes", "menu"}:
+            raise ValueError("Config 'model_hub.agents' contains unknown fields")
+        raw_backend = payload.get("backend")
+        backend = expected_backend if raw_backend is None else raw_backend
         mode = payload.get("mode")
         menu_kind = payload.get("menu_kind")
-        if backend not in {"claude", "codex", "opencode"} or (
+        if not isinstance(backend, str) or backend not in {"claude", "codex", "opencode"} or (
             expected_backend is not None and backend != expected_backend
         ):
             raise ValueError("Config 'model_hub.agents.backend' is invalid")
-        if mode not in {"hub", "direct"}:
+        if not isinstance(mode, str) or mode not in {"hub", "direct"}:
             raise ValueError("Config 'model_hub.agents.mode' is invalid")
         expected_menu_kind = "open" if backend == "opencode" else "fixed"
-        if menu_kind != expected_menu_kind:
+        if not isinstance(menu_kind, str) or menu_kind != expected_menu_kind:
             raise ValueError("Config 'model_hub.agents.menu_kind' is invalid for backend")
-        mappings_payload = payload.get("mappings") or []
-        if not isinstance(mappings_payload, list):
-            raise ValueError("Config 'model_hub.agents.mappings' must be an array")
+        routes_payload = payload.get("routes", {})
+        if not isinstance(routes_payload, dict):
+            raise ValueError("Config 'model_hub.agents.routes' must be an object")
+        if any(not isinstance(model_id, str) or not model_id for model_id in routes_payload):
+            raise ValueError("Config 'model_hub.agents.routes' keys must be non-empty strings")
         menu_payload = payload.get("menu")
         sources_payload = payload.get("sources")
         if backend == "opencode" and menu_payload is None:
             menu_payload = {"view": "featured", "checked": []}
         if backend != "opencode" and menu_payload is not None:
             raise ValueError("Config 'model_hub.agents.menu' is only valid for opencode")
+        routes = {
+            model_id: ModelHubRouteConfig.from_payload(route)
+            for model_id, route in routes_payload.items()
+        }
+        menu = ModelHubMenuConfig.from_payload(menu_payload) if menu_payload is not None else None
+        if any(_contains_model_hub_credential_material(model_id) for model_id in routes):
+            raise ValueError("Config 'model_hub.agents.routes' contains an invalid model id")
+        if backend == "opencode":
+            for identifier in (*routes, *(menu.checked if menu else ())):
+                canonical_opencode_menu_identity(identifier)
         return cls(
             backend=backend,
             mode=mode,
@@ -1133,8 +2217,8 @@ class ModelHubAgentSupplyConfig:
                 if sources_payload is not None
                 else ModelHubAgentSourcesConfig()
             ),
-            mappings=[ModelHubMappingConfig.from_payload(mapping) for mapping in mappings_payload],
-            menu=ModelHubMenuConfig.from_payload(menu_payload) if menu_payload is not None else None,
+            routes=routes,
+            menu=menu,
         )
 
     def to_payload(self) -> dict:
@@ -1143,7 +2227,10 @@ class ModelHubAgentSupplyConfig:
             "mode": self.mode,
             "menu_kind": self.menu_kind,
             "sources": self.sources.to_payload(),
-            "mappings": [mapping.to_payload() for mapping in self.mappings],
+            "routes": {
+                model_id: route.to_payload()
+                for model_id, route in self.routes.items()
+            },
             "menu": self.menu.to_payload() if self.menu else None,
         }
 
@@ -1156,7 +2243,6 @@ class ModelHubConfig:
             backend: ModelHubAgentSupplyConfig.default(backend, mode="direct") for backend in MODEL_HUB_BACKENDS
         }
     )
-    subscription_hub_experimental: bool = False
 
     @staticmethod
     def source_eligible_for_backend(
@@ -1165,8 +2251,10 @@ class ModelHubConfig:
     ) -> bool:
         if backend not in MODEL_HUB_BACKENDS:
             return False
+        if source.supply_channel == "hub":
+            return True
         if source.kind == "api_key":
-            return source.supply_channel == "hub"
+            return False
         expected_backend = {"anthropic": "claude", "openai": "codex"}.get(source.vendor)
         return expected_backend == backend
 
@@ -1188,51 +2276,80 @@ class ModelHubConfig:
         ]
 
     def effective_source_order(self, backend: str) -> list[str]:
-        sources = self.agents[backend].sources
-        if sources.policy == "follow":
-            return self.recommended_source_order(backend)
-        return list(sources.order)
-
-    def refresh_follow_orders(self) -> None:
-        for backend in MODEL_HUB_BACKENDS:
-            sources = self.agents[backend].sources
-            if sources.policy == "follow":
-                sources.order = self.recommended_source_order(backend)
+        return list(self.agents[backend].sources.order)
 
     @classmethod
     def from_payload(cls, payload: dict) -> "ModelHubConfig":
         if not isinstance(payload, dict):
             raise ValueError("Config 'model_hub' must be an object")
+        if set(payload) - {"sources", "agents"}:
+            raise ValueError("Config 'model_hub' contains unknown fields")
         sources_payload = payload.get("sources") or []
         agents_payload = payload.get("agents") or {}
-        experimental = payload.get("subscription_hub_experimental", False)
         if not isinstance(sources_payload, list):
             raise ValueError("Config 'model_hub.sources' must be an array")
         if not isinstance(agents_payload, dict):
             raise ValueError("Config 'model_hub.agents' must be an object")
-        if not isinstance(experimental, bool):
-            raise ValueError("Config 'model_hub.subscription_hub_experimental' must be a boolean")
+        if set(agents_payload) - set(MODEL_HUB_BACKENDS):
+            raise ValueError("Config 'model_hub.agents' contains unknown backends")
         sources = [ModelHubSourceConfig.from_payload(source) for source in sources_payload]
         source_ids = [source.id for source in sources]
         if len(set(source_ids)) != len(source_ids):
             raise ValueError("Config 'model_hub.sources' contains duplicate ids")
-        agents = {
-            backend: ModelHubAgentSupplyConfig.from_payload(
-                agents_payload.get(backend) or ModelHubAgentSupplyConfig.default(backend, mode="direct").to_payload(),
+        for backend in MODEL_HUB_BACKENDS:
+            native_sources = [
+                source
+                for source in sources
+                if source.supply_channel == "native_cli"
+                and cls.source_eligible_for_backend(source, backend)
+            ]
+            if len(native_sources) > 1:
+                raise ValueError(
+                    f"Config 'model_hub.sources' contains multiple native sources for '{backend}'"
+                )
+        agents = {}
+        for backend in MODEL_HUB_BACKENDS:
+            if backend not in agents_payload:
+                raw_agent = ModelHubAgentSupplyConfig.default(backend, mode="direct").to_payload()
+            else:
+                raw_agent = agents_payload[backend]
+                if not isinstance(raw_agent, dict):
+                    raise ValueError(f"Config 'model_hub.agents.{backend}' must be an object")
+                if "routes" not in raw_agent:
+                    raise ValueError(f"Config 'model_hub.agents.{backend}.routes' is required")
+            agents[backend] = ModelHubAgentSupplyConfig.from_payload(
+                raw_agent,
                 expected_backend=backend,
             )
-            for backend in MODEL_HUB_BACKENDS
-        }
-        for source in sources:
-            if source.kind == "subscription" and source.supply_channel == "hub":
-                if not experimental or not source.experimental_consent_at:
-                    raise ValueError("Config hub-held subscription source requires recorded experimental consent")
-            elif source.experimental_consent_at is not None:
-                raise ValueError("Config experimental consent is only valid for hub-held subscription sources")
+            expected_menu_ids = (
+                model_hub_fixed_menu_ids(backend)
+                if backend in {"claude", "codex"}
+                else tuple(agents[backend].menu.checked if agents[backend].menu else ())
+            )
+            missing_route = next(
+                (model_id for model_id in expected_menu_ids if model_id not in agents[backend].routes),
+                None,
+            )
+            if missing_route is not None:
+                raise ValueError(
+                    f"Config 'model_hub.agents.{backend}.routes' is missing menu model '{missing_route}'"
+                )
+            if backend in {"claude", "codex"}:
+                extra_route = next(
+                    (
+                        model_id
+                        for model_id in agents[backend].routes
+                        if model_id not in expected_menu_ids
+                    ),
+                    None,
+                )
+                if extra_route is not None:
+                    raise ValueError(
+                        f"Config 'model_hub.agents.{backend}.routes' contains non-menu model '{extra_route}'"
+                    )
         config = cls(
             sources=sources,
             agents=agents,
-            subscription_hub_experimental=experimental,
         )
         for backend in MODEL_HUB_BACKENDS:
             configured_sources = agents[backend].sources
@@ -1253,16 +2370,23 @@ class ModelHubConfig:
                     f"Config 'model_hub.agents.{backend}.sources.order' contains "
                     f"ineligible or missing source '{invalid_id}'"
                 )
-            if configured_sources.policy == "follow":
-                recommended = config.recommended_source_order(backend)
-                configured_sources.order = recommended
+            for model_id, route in agents[backend].routes.items():
+                for hop in route.hops:
+                    source = next((item for item in sources if item.id == hop.source_id), None)
+                    if source is None:
+                        raise ValueError(
+                            f"Config 'model_hub.agents.{backend}.routes.{model_id}' references missing source '{hop.source_id}'"
+                        )
+                    if not config.source_eligible_for_backend(source, backend):
+                        raise ValueError(
+                            f"Config 'model_hub.agents.{backend}.routes.{model_id}' references ineligible source '{hop.source_id}'"
+                        )
         return config
 
     def to_payload(self) -> dict:
         return {
             "sources": [source.to_payload() for source in self.sources],
             "agents": {backend: self.agents[backend].to_payload() for backend in MODEL_HUB_BACKENDS},
-            "subscription_hub_experimental": self.subscription_hub_experimental,
         }
 
 
@@ -1427,16 +2551,131 @@ class V2Config:
     # into the wizard). Legacy configs that predate the flag have it derived in
     # ``from_payload`` from the old condition.
     setup_completed: bool = False
+    # Non-persisted diagnostics from disk migration/recovery. They let callers
+    # surface a repair notice without weakening the strict write validator.
+    load_warnings: ClassVar[tuple[str, ...]] = ()
 
     @classmethod
-    def load(cls, config_path: Optional[Path] = None) -> "V2Config":
+    def default(cls) -> "V2Config":
+        """Return the minimal safe config used for first-run and recovery."""
+
+        return cls(
+            mode="self_host",
+            version="v2",
+            slack=SlackConfig(bot_token="", app_token=""),
+            platforms=PlatformsConfig(enabled=[], primary=WORKBENCH_PLATFORM_ID),
+            runtime=RuntimeConfig(default_cwd=str(Path.home() / "work")),
+            agents=AgentsConfig(
+                opencode=OpenCodeConfig(enabled=True, cli_path="opencode"),
+                claude=ClaudeConfig(enabled=True, cli_path="claude"),
+                codex=CodexConfig(enabled=False, cli_path="codex"),
+            ),
+            model_hub=ModelHubConfig(),
+            platform=WORKBENCH_PLATFORM_ID,
+        )
+
+    @classmethod
+    def load(
+        cls,
+        config_path: Optional[Path] = None,
+        *,
+        _migration_reload_depth: int = 0,
+    ) -> "V2Config":
         paths.ensure_data_dirs()
         path = config_path or paths.get_config_path()
         with CONFIG_LOCK:
             if not path.exists():
                 raise FileNotFoundError(f"Config not found: {path}")
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        return cls.from_payload(payload)
+            raw_bytes = b""
+            try:
+                raw_bytes = path.read_bytes()
+                raw = raw_bytes.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                backup = _backup_config_file(path, "invalid-encoding", content=raw_bytes)
+                warning = f"Config is not valid UTF-8; using recovery defaults: {exc.reason}"
+                logger.error("%s (backup=%s)", warning, backup)
+                config = cls.default()
+                config.load_warnings = (warning,)
+                return config
+
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            backup = _backup_config_file(path, "invalid-json", content=raw_bytes)
+            warning = f"Config JSON could not be parsed; using recovery defaults: {exc.msg}"
+            logger.error("%s (backup=%s)", warning, backup)
+            config = cls.default()
+            config.load_warnings = (warning,)
+            return config
+
+        if not isinstance(payload, dict):
+            backup = _backup_config_file(path, "invalid-root", content=raw_bytes)
+            warning = "Config root is not an object; using recovery defaults"
+            logger.error("%s (backup=%s)", warning, backup)
+            config = cls.default()
+            config.load_warnings = (warning,)
+            return config
+
+        migrated_payload, migrated, migration_warnings = _migrate_config_payload_on_load(payload)
+        candidate = migrated_payload
+        recovery_warnings: list[str] = []
+        recovered_sections: set[str] = set()
+        while True:
+            try:
+                config = cls.from_payload(candidate)
+                break
+            except (TypeError, ValueError) as exc:
+                section = _recovery_section_for_error(exc)
+                if section is None or section in recovered_sections:
+                    warning = f"Config could not be loaded; using recovery defaults: {exc}"
+                    logger.error("%s", warning)
+                    config = cls.default()
+                    recovery_warnings.append(warning)
+                    break
+                if not _reset_recoverable_config_section(candidate, section):
+                    warning = f"Config section '{section}' could not be recovered; using recovery defaults: {exc}"
+                    logger.error("%s", warning)
+                    config = cls.default()
+                    recovery_warnings.append(warning)
+                    break
+                recovered_sections.add(section)
+                recovery_warnings.append(f"Recovered invalid config section '{section}': {exc}")
+
+        all_warnings = tuple(dict.fromkeys((*migration_warnings, *recovery_warnings)))
+        if migrated and not migration_warnings and not recovery_warnings:
+            persisted_payload = copy.deepcopy(payload)
+            persisted_payload["model_hub"] = config.model_hub.to_payload()
+            try:
+                backup, persistence_warning = _persist_migrated_config_payload(
+                    path,
+                    raw,
+                    persisted_payload,
+                )
+            except OSError as exc:
+                persistence_warning = f"Model Hub config migration could not be persisted: {exc}"
+            if persistence_warning:
+                all_warnings = tuple(dict.fromkeys((*all_warnings, persistence_warning)))
+                logger.warning("%s (%s)", persistence_warning, path)
+                if "file changed" in persistence_warning and _migration_reload_depth == 0:
+                    winning_config = cls.load(
+                        config_path=path,
+                        _migration_reload_depth=1,
+                    )
+                    winning_config.load_warnings = tuple(
+                        dict.fromkeys((*winning_config.load_warnings, persistence_warning))
+                    )
+                    return winning_config
+            else:
+                logger.info("Migrated Model Hub config in place (backup=%s)", backup)
+        elif migration_warnings or recovery_warnings:
+            label = "model-hub-migration" if migration_warnings and not recovery_warnings else "recovery"
+            backup = _backup_config_file(path, label, content=raw_bytes)
+            logger.warning(
+                "Started with a recovered config; original file preserved at %s",
+                backup,
+            )
+        config.load_warnings = all_warnings
+        return config
 
     @classmethod
     def from_payload(cls, payload: dict) -> "V2Config":
@@ -1444,23 +2683,40 @@ class V2Config:
             raise ValueError("Config payload must be an object")
 
         mode = payload.get("mode")
-        if mode not in {"self_host", "saas"}:
+        if not isinstance(mode, str) or mode not in {"self_host", "saas"}:
             raise ValueError("Config 'mode' must be 'self_host' or 'saas'")
 
-        platform = payload.get("platform") or "slack"
-        try:
-            get_platform_descriptor(platform)
-        except ValueError as err:
-            supported_text = "', '".join(supported_platform_ids())
-            raise ValueError(f"Config 'platform' must be one of: '{supported_text}'") from err
-
+        raw_platform = payload.get("platform")
         platforms_payload = payload.get("platforms")
         if platforms_payload is not None and not isinstance(platforms_payload, dict):
             raise ValueError("Config 'platforms' must be an object")
+        if platforms_payload is None:
+            if raw_platform is not None and not isinstance(raw_platform, str):
+                raise ValueError("Config 'platform' must be a string")
+            platform = raw_platform or "slack"
+            try:
+                get_platform_descriptor(platform)
+            except ValueError as err:
+                supported_text = "', '".join(supported_platform_ids())
+                raise ValueError(f"Config 'platform' must be one of: '{supported_text}'") from err
+        else:
+            # ``platforms`` is the current source of truth. A stale legacy
+            # compatibility field must not disable otherwise valid transports.
+            platform = platforms_payload.get("primary") or "slack"
         if platforms_payload:
+            enabled_payload = platforms_payload.get("enabled")
+            if enabled_payload is not None and not isinstance(enabled_payload, list):
+                raise ValueError("Config 'platforms.enabled' must be an array")
+            if isinstance(enabled_payload, list) and any(
+                not isinstance(item, str) for item in enabled_payload
+            ):
+                raise ValueError("Config 'platforms.enabled' entries must be strings")
+            primary_payload = platforms_payload.get("primary")
+            if primary_payload is not None and not isinstance(primary_payload, str):
+                raise ValueError("Config 'platforms.primary' must be a string")
             platforms = PlatformsConfig(
-                enabled=list(platforms_payload.get("enabled") or []),
-                primary=platforms_payload.get("primary") or platform,
+                enabled=list(enabled_payload or []),
+                primary=primary_payload or platform,
             )
         else:
             platforms = PlatformsConfig(enabled=[platform], primary=platform)
@@ -1487,7 +2743,23 @@ class V2Config:
                 platform_configs[descriptor.id] = None
                 continue
 
-            platform_configs[descriptor.id] = descriptor.create_config(platform_payload)
+            for credential_field in descriptor.credential_fields:
+                credential_value = platform_payload.get(credential_field)
+                if credential_value is not None and not isinstance(credential_value, str):
+                    raise ValueError(
+                        f"Config '{descriptor.config_key}.{credential_field}' must be a string"
+                    )
+
+            try:
+                platform_configs[descriptor.id] = descriptor.create_config(platform_payload)
+            except (AttributeError, TypeError) as exc:
+                # Platform validators may call string methods or compare enum
+                # values before the dataclass layer can validate their types.
+                # Convert those payload errors into a qualified config error so
+                # disk loading can recover only the affected platform section.
+                raise ValueError(
+                    f"Config '{descriptor.config_key}' contains invalid field types"
+                ) from exc
 
         # Avibe runs in-process with no credentials — auto-populate its
         # config when missing so legacy ``platforms.enabled`` lists that
@@ -1674,7 +2946,7 @@ class V2Config:
         update = UpdateConfig(**_filter_dataclass_fields(UpdateConfig, update_payload))
 
         ack_mode = payload.get("ack_mode", "typing")
-        if ack_mode not in {"reaction", "message", "typing"}:
+        if not isinstance(ack_mode, str) or ack_mode not in {"reaction", "message", "typing"}:
             raise ValueError("Config 'ack_mode' must be 'reaction', 'message', or 'typing'")
 
         show_duration = payload.get("show_duration", False)
@@ -1768,6 +3040,11 @@ class V2Config:
     def save(self, config_path: Optional[Path] = None) -> None:
         """Persist non-Memory changes while preserving the durable Memory unit."""
 
+        if self.load_warnings:
+            raise ValueError(
+                "Config was loaded with recovery warnings; repair the backed-up "
+                "config before saving changes"
+            )
         paths.ensure_data_dirs()
         path = config_path or paths.get_config_path()
         with _memory_config_transaction(path):
@@ -1843,9 +3120,7 @@ class V2Config:
             "agent_status_no_output_ms": self.agent_status_no_output_ms,
             "setup_completed": self.setup_completed,
         }
-        content = json.dumps(payload, indent=2)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        _atomic_write_text(path, content)
+        _write_config_payload(path, payload)
 
     def enabled_platforms(self) -> list[str]:
         return list(self.platforms.enabled)

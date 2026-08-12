@@ -4,10 +4,12 @@ import { useNavigate } from 'react-router-dom';
 import clsx from 'clsx';
 import { ExternalLink, MessageCircle, Minus, Plus, X, type LucideIcon } from 'lucide-react';
 
+import { appTabHref } from '../../apps/appLaunch';
 import { APP_REGISTRY } from '../../apps/registry';
 import { showPageAvatar, showPageIconUrl } from '../../apps/showPageAvatar';
 import { ShowPageAvatarContent } from '../../apps/showPageAvatarTile';
 import { useWindowManager, type WindowInstance } from '../../context/WindowManagerContext';
+import { useStandaloneAppTab } from '../../context/StandaloneAppTabContext';
 import { useUnsavedChangesActionGuard } from '../../context/useUnsavedChangesActionGuard';
 import { clampToLayer, resizeBounds, type ResizeDir } from '../../lib/windowBounds';
 import { WindowBodyGestureShield } from './WindowBodyGestureShield';
@@ -164,9 +166,17 @@ export const AppWindow: React.FC<{
   const showpageSid = win.appId === 'showpage' ? (win.params?.sessionId as string | undefined) : undefined;
   const showpageAvatar = showpageSid ? showPageAvatar(showpageSid, win.title ?? '') : null;
   const focused = wm.focusedId === win.id;
+  // A single-app tab has no sidebar, hence no Dock/Apps launcher to restore a minimized
+  // window from — so this window doesn't offer minimize at all (see `lights`). The whole
+  // TAB, not just its app route: stepping out to /chat lends the Dock back only until Back
+  // returns, which would leave anything minimized in between stranded and inert.
+  const standaloneTab = useStandaloneAppTab();
   // A standalone-surface app (v1: showpage) exposes an external URL for its own
   // browser tab; the title bar then shows an open-in-new-tab button.
   const externalHref = def.externalHref?.(win.params);
+  const safeExternalHref = externalHref
+    ? appTabHref({ appId: win.appId, sessionId: showpageSid })
+    : null;
   // The same app may own a session chat (v1: showpage) — the title bar then also
   // shows a chat-bubble button that jumps there and minimizes this window.
   const chatHref = def.chatHref?.(win.params);
@@ -205,7 +215,14 @@ export const AppWindow: React.FC<{
     },
     // Minimize is a mounted hide (no exit animation): the body keeps running and
     // `inert` on the root pulls focus out, so nothing is trapped in a hidden window.
-    { key: 'min', color: '#febc2e', Glyph: Minus, onClick: () => wm.minimize(win.id), label: t('apps.window.minimize') },
+    // Withheld on a single-app tab: minimizing sends the window to the Dock, and that tab
+    // renders no sidebar — so the Apps launcher, the only surface that can restore an
+    // undocked window (a preview, a second Editor), isn't there. Without this the window
+    // would be hidden, inert, and unreachable, taking any unsaved buffer with it on reload
+    // (a standalone tab never persists its windows).
+    ...(standaloneTab
+      ? []
+      : [{ key: 'min', color: '#febc2e', Glyph: Minus, onClick: () => wm.minimize(win.id), label: t('apps.window.minimize') }]),
     { key: 'max', color: '#28c840', Glyph: Plus, onClick: () => wm.toggleMaximize(win.id), label: t('apps.window.maximize') },
   ];
 
@@ -226,16 +243,21 @@ export const AppWindow: React.FC<{
       // and React/the browser moves focus out automatically.
       inert={win.minimized}
       tabIndex={-1}
-      onPointerDown={(e) => {
+      onPointerDownCapture={() => {
+        // Capture runs before toolbar controls stop propagation, so every pointer
+        // activation claims the window without stealing DOM focus from the target.
         wm.focus(win.id);
+      }}
+      onPointerDown={(e) => {
         // Give the window DOM focus (so ⌘W/⌘M target it) — but don't steal focus from
-        // an inner control/editor/terminal the click lands in (xterm's screen isn't a
-        // textarea, so it needs an explicit exemption or terminal input would break).
+        // an inner control/editor/terminal the click lands in. FocusCapture below
+        // then gives the same window foreground ownership and raises its z-order.
         const tgt = e.target as HTMLElement;
         if (!tgt.closest('input,textarea,select,button,a,[contenteditable="true"],.monaco-editor,.xterm')) {
           rootRef.current?.focus({ preventScroll: true });
         }
       }}
+      onFocusCapture={() => wm.focus(win.id)}
       onAnimationEnd={(e) => {
         // Only the root's own close animation drives the unmount (ignore the
         // entrance, and any child animation bubbling up). Minimize doesn't animate
@@ -343,16 +365,20 @@ export const AppWindow: React.FC<{
                 // Jump to the owning session's chat and drop the window to the Dock
                 // (chat visible immediately; the Dock thumbnail brings the app back).
                 authorization.runNavigation(() => navigate(chatHref));
-                wm.minimize(win.id);
+                // Same reason the minimize light is withheld above: this tab's chrome —
+                // and with it the Dock — comes back only WHILE it sits on /chat. Going
+                // Back to the standalone app route hides the Dock again and would strand
+                // the window minimized and inert, so leave it shown instead.
+                if (!standaloneTab) wm.minimize(win.id);
               }}
               className="grid size-6 place-items-center rounded-md text-muted transition hover:bg-foreground/[0.06] hover:text-foreground"
             >
               <MessageCircle className="size-3.5" />
             </button>
           )}
-          {externalHref && (
+          {safeExternalHref && (
             <a
-              href={externalHref}
+              href={safeExternalHref}
               target="_blank"
               rel="noopener noreferrer"
               title={t('apps.window.openInNewTab')}

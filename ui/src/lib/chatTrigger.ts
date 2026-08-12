@@ -55,7 +55,45 @@ type TriggerFields = Pick<
   | 'source_session_id'
   | 'source_session_title'
   | 'source_session_agent_name'
->;
+> & { metadata?: Record<string, unknown> };
+
+const VAULT_CALLBACK_STATUS_KEYS: Record<string, string> = {
+  'provision:fulfilled': 'chat.source.vaultProvided',
+  'access:approved': 'chat.source.vaultAccessApproved',
+  'sign:approved': 'chat.source.vaultSigned',
+  'access:denied': 'chat.source.vaultDenied',
+  'sign:denied': 'chat.source.vaultDenied',
+  'provision:denied': 'chat.source.vaultDenied',
+  'access:failed': 'chat.source.vaultFailed',
+  'sign:failed': 'chat.source.vaultFailed',
+  'provision:failed': 'chat.source.vaultFailed',
+  'access:expired': 'chat.source.vaultExpired',
+  'sign:expired': 'chat.source.vaultExpired',
+  'provision:expired': 'chat.source.vaultExpired',
+};
+
+function vaultCallbackMetadata(message: TriggerFields): { requestType: string; status: string } | null {
+  if (message.source !== 'harness') return null;
+  const metadata = message.metadata;
+  const sourceActor = typeof metadata?.source_actor === 'string' ? metadata.source_actor : '';
+  if (!sourceActor.startsWith('vault:')) return null;
+  const requestType = typeof metadata?.vault_request_type === 'string' ? metadata.vault_request_type : '';
+  const status = typeof metadata?.vault_request_status === 'string' ? metadata.vault_request_status : '';
+  return { requestType, status };
+}
+
+export function isVaultCallback(message: TriggerFields): boolean {
+  if (message.source !== 'harness') return false;
+  const metadata = message.metadata;
+  const sourceActor = typeof metadata?.source_actor === 'string' ? metadata.source_actor : '';
+  return sourceActor.startsWith('vault:');
+}
+
+export function vaultCallbackStatusKey(message: TriggerFields): string | null {
+  const metadata = vaultCallbackMetadata(message);
+  if (!metadata) return null;
+  return VAULT_CALLBACK_STATUS_KEYS[`${metadata.requestType}:${metadata.status}`] ?? null;
+}
 
 // ``agentFallback`` is the localized word for "agent" (chat.source.agentFallback);
 // passed in so this stays a pure, translation-free mapper.
@@ -96,6 +134,7 @@ export function chatTriggerLink(message: TriggerFields, agentFallback: string): 
 // Pure so the branch is unit-tested alongside chatTriggerLink.
 export function harnessChipLabelKey(message: TriggerFields): string {
   if (message.source === 'harness' && message.source_session_id) return 'chat.source.from';
+  if (isVaultCallback(message)) return 'chat.source.vault';
   const kind = message.author_name;
   if (kind === 'show_intent') return 'chat.source.showIntent';
   if (kind === 'watch') return 'chat.source.watch';

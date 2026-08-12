@@ -823,18 +823,23 @@ class SQLiteSessionsService:
         self,
         session_id: str,
         *,
+        agent_id: str | None = None,
+        agent_name: str | None = None,
         model: str | None = None,
         reasoning_effort: str | None = None,
+        expected_route: Mapping[str, Any] | None = None,
     ) -> bool:
-        """Pin the model / effort a turn is about to run with into EMPTY columns.
+        """Pin the resolved Agent identity and route into EMPTY columns.
 
         A session created on an inherited default carries NULLs (dispatch
-        resolves the live Agent default); the first turn pins the resolved
-        values — same lifecycle as the backend pin on native bind. Called at
-        dispatch time (turn START), so a user's later explicit header pick —
-        including an explicit clear back to NULL — happens after this write and
-        is never undone by it. COALESCE keeps the fill-if-empty atomic against
-        a concurrent pick. Returns True when a row was updated.
+        resolves the live Agent default); the first turn pins the resolved Agent
+        identity, model, and effort — same lifecycle as the backend pin on native
+        bind. Called at dispatch time (turn START). The writer reservation
+        serializes the marker read with this write, while ``expected_route`` makes
+        a stale turn a no-op if the user has already changed any Agent, model,
+        effort, or explicit-pin part of the route.
+        COALESCE keeps each setting fill-if-empty. Returns True when a row was
+        updated.
 
         A setting the row pins EXPLICITLY is never filled, even when its column
         is empty: that is the whole point of the explicit-override marker (a
@@ -842,6 +847,7 @@ class SQLiteSessionsService:
         it here would turn the first turn into the thing the rebind was preventing
         -- the Agent's current default becoming the session's pinned model."""
         with self.engine.begin() as conn:
+            reserve_write_lock(conn)
             pinned = explicit_override_names(
                 _json_loads(
                     conn.execute(
@@ -852,7 +858,18 @@ class SQLiteSessionsService:
                     {},
                 )
             )
+            if expected_route is not None and "explicit_overrides" in expected_route:
+                expected_pinned = {
+                    str(name)
+                    for name in (expected_route.get("explicit_overrides") or [])
+                }
+                if pinned != expected_pinned:
+                    return False
             values: dict[str, Any] = {}
+            if agent_id:
+                values["agent_id"] = func.coalesce(func.nullif(agent_sessions.c.agent_id, ""), agent_id)
+            if agent_name:
+                values["agent_name"] = func.coalesce(func.nullif(agent_sessions.c.agent_name, ""), agent_name)
             if model and "model" not in pinned:
                 values["model"] = func.coalesce(func.nullif(agent_sessions.c.model, ""), model)
             if reasoning_effort and "reasoning_effort" not in pinned:
@@ -862,12 +879,26 @@ class SQLiteSessionsService:
             if not values:
                 return False
             values["updated_at"] = _utc_now_iso()
-            result = conn.execute(
+            statement = (
                 agent_sessions.update()
                 .where(agent_sessions.c.id == str(session_id))
                 .where(agent_sessions.c.status != "archived")
                 .values(**values)
             )
+            for field in (
+                "agent_id",
+                "agent_name",
+                "agent_backend",
+                "agent_variant",
+                "model",
+                "reasoning_effort",
+            ):
+                if expected_route is not None and field in expected_route:
+                    statement = statement.where(
+                        func.coalesce(getattr(agent_sessions.c, field), "")
+                        == str(expected_route.get(field) or "")
+                    )
+            result = conn.execute(statement)
             return bool(result.rowcount)
 
     def bind_agent_session_by_id(
@@ -964,6 +995,8 @@ class SQLiteSessionsService:
                 ).where(agent_sessions.c.id == str(session_id))
             ).mappings().first()
             current_backend = str((route_row or {}).get("agent_backend") or "")
+            parsed_route_metadata = _json_loads((route_row or {}).get("metadata_json"), {})
+            route_metadata = parsed_route_metadata if isinstance(parsed_route_metadata, dict) else {}
             already_bound = bool(decode_session_value((route_row or {}).get("native_session_id")))
             backend_changes = bool(requested_backend) and requested_backend != current_backend
             if backend_changes and not already_bound:
@@ -982,16 +1015,27 @@ class SQLiteSessionsService:
                 adopt_values = dict(values)
                 adopt_values["agent_backend"] = requested_backend
                 adopt_values["agent_variant"] = requested_backend or "default"
-                adopt_values["model"] = None
-                adopt_values["reasoning_effort"] = None
-                adopt_values["metadata_json"] = json.dumps(
-                    reconcile_explicit_overrides(
-                        _json_loads((route_row or {}).get("metadata_json"), {}),
-                        cleared=OVERRIDABLE_SETTING_COLUMNS,
-                    ),
-                    separators=(",", ":"),
-                    ensure_ascii=False,
+                # Only Workbench performs turn-start materialization. Its
+                # backend-less row therefore owns the resolved route already and
+                # initial adoption must keep it. Placeholder IM rows never pass
+                # through that lifecycle, so their old route is incompatible with
+                # the newly adopted backend and must be cleared like a concrete
+                # backend-to-backend replacement (HFR-250).
+                preserves_materialized_workbench_route = (
+                    not _is_owned_backend(current_backend)
+                    and route_metadata.get("created_via") == "workbench"
                 )
+                if not preserves_materialized_workbench_route:
+                    adopt_values["model"] = None
+                    adopt_values["reasoning_effort"] = None
+                    adopt_values["metadata_json"] = json.dumps(
+                        reconcile_explicit_overrides(
+                            route_metadata,
+                            cleared=OVERRIDABLE_SETTING_COLUMNS,
+                        ),
+                        separators=(",", ":"),
+                        ensure_ascii=False,
+                    )
                 adopt_values["native_session_id"] = encoded_session_id
                 adopted = conn.execute(
                     agent_sessions.update()
@@ -2250,9 +2294,11 @@ def _delete_agent_session_rows(
         # the read pins a snapshot, and the reclaim's UPDATE then fails outright with
         # ``SQLITE_BUSY_SNAPSHOT`` ("database is locked") on exactly the interleaving this
         # whole guard exists to survive. Measured, not assumed. Leaving the reclaim in
-        # place is also the recoverable half: the definitions were bound to the session
+        # place is also the recoverable half: the definitions were owned by the session
         # the user asked to clear, ``pause`` keeps them re-enablable, and the kept row is
-        # a superseded one the thread has already moved off.
+        # a superseded one the thread has already moved off. Owner-only Tasks briefly
+        # receive the same orphan marker as a successful teardown; the refused-claim
+        # branch removes it again once it proves the owner row is still live.
         reclaim_bound_definitions(conn, session_id, mode=reclaim_mode, reason=reclaim_reason)
         claimed = bool(
             conn.execute(
@@ -2263,6 +2309,10 @@ def _delete_agent_session_rows(
             ).rowcount
         )
         if not claimed:
+            if reclaim_mode == RECLAIM_PAUSE:
+                from storage.background import clear_task_resume_blocks_for_available_owner
+
+                clear_task_resume_blocks_for_available_owner(conn, session_id)
             logger.warning(
                 "Skipped hard-deleting session %s: it stopped matching the teardown "
                 "query concurrently (superseded, re-anchored or already gone)",

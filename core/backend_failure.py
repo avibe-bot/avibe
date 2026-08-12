@@ -3,9 +3,16 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
+from inspect import Parameter, signature
 from typing import Any
 
-from core.delivery_evidence import DeliveryEvidence
+from core.delivery_evidence import (
+    ACK_EVIDENCE_DELIVERY_ONLY,
+    ACK_EVIDENCE_RECEIPT,
+    DeliveryEvidence,
+)
+from core.delivery_target import routed_delivery_context
 from core.message_output import MessageOutput, terminal_output_for, terminal_turn_output
 from vibe.message_types import spec_for
 
@@ -32,13 +39,30 @@ def _terminal_output(request: Any, output: MessageOutput | None) -> MessageOutpu
 
 
 def _harness_run_identity(context: Any, request: Any) -> str:
-    """The run id a harness execution's failure notice is keyed by, if any."""
+    """The Run id proving that this Turn was entered through Harness, if any."""
 
     for source in (getattr(request, "context", None), context):
         payload = getattr(source, "platform_specific", None) or {}
         identity = str(payload.get("task_execution_id") or "").strip()
         if identity:
             return identity
+        accepted = payload.get("accepted_agent_run_ids")
+        if isinstance(accepted, list):
+            for value in accepted:
+                identity = str(value or "").strip()
+                if identity:
+                    return identity
+    return ""
+
+
+def _turn_failure_identity(context: Any, request: Any) -> str:
+    """Stable user-visible failure identity shared by every Run in one Turn."""
+
+    for source in (getattr(request, "context", None), context):
+        payload = getattr(source, "platform_specific", None) or {}
+        identity = str(payload.get("turn_token") or "").strip()
+        if identity:
+            return f"turn:{identity}"
     return ""
 
 
@@ -57,19 +81,17 @@ def _failure_identity(
     if identity and authoritative:
         return identity
 
-    # A harness execution is keyed by its RUN, whichever backend reported the
-    # failure. Codex and OpenCode pass their own turn/message/session id at five
-    # call sites, and preferring that over the run id meant the live notification
-    # and the drain's replay had different identities — so the drain could not see
-    # the message the live path had already persisted, and sent a duplicate. The
-    # run id is the one identity BOTH paths can derive, the live one from its
-    # context and the drain from the durable row.
+    # A Harness failure is user-visible once per TURN, whichever backend reported
+    # it and however many Runs that Turn accepted. Codex and OpenCode pass their
+    # own turn/message/session ids at five call sites, so the durable turn token is
+    # the shared identity both the live notification and every linked Run can carry.
+    # Legacy callers without a turn token still fall back to the Harness Run id.
     #
     # Non-harness contexts have no run to align to, so a backend's explicit id
     # still wins there and that path is unchanged.
     harness_identity = _harness_run_identity(context, request)
     if harness_identity:
-        return harness_identity
+        return _turn_failure_identity(context, request) or harness_identity
 
     if identity:
         return identity
@@ -141,6 +163,68 @@ def backend_failure_notification_output(
         run_id=terminal.run_id,
         metadata=metadata,
     )
+
+
+def _acknowledges_target(
+    context: Any,
+    evidence: str | None,
+) -> bool:
+    if evidence == ACK_EVIDENCE_RECEIPT:
+        return True
+    target_platform = getattr(routed_delivery_context(context), "platform", None)
+    return (
+        evidence == ACK_EVIDENCE_DELIVERY_ONLY
+        and bool(target_platform)
+        and target_platform != "avibe"
+    )
+
+
+def terminal_backend_failure_output(
+    context: Any,
+    *,
+    request: Any = None,
+    output: MessageOutput | None = None,
+    failure_id: str | None = None,
+    delivery: DeliveryEvidence | None = None,
+) -> MessageOutput:
+    """Attach one monotonic Turn failure-delivery contract to a terminal output.
+
+    Some failures use the ordinary ``notify`` dispatcher while others need a
+    specialized visible path, such as an OAuth recovery button. Both must settle
+    with the same evidence contract or a later Harness Run cannot distinguish an
+    error the user already saw from an error that still needs a fallback notice.
+    """
+
+    terminal = _terminal_output(request, output)
+    if not (_turn_failure_identity(context, request) or _harness_run_identity(context, request)):
+        return terminal
+
+    metadata = dict(terminal.metadata)
+    existing = metadata.get("turn_failure_notification")
+    existing_notification = dict(existing) if isinstance(existing, dict) else {}
+    identity = str(existing_notification.get("failure_id") or "").strip()
+    if not identity:
+        identity = _failure_identity(context, request, failure_id)
+
+    incoming_ack = delivery.ack_evidence if delivery is not None else None
+    existing_ack = str(existing_notification.get("ack_evidence") or "").strip() or None
+    ack_priority = {None: 0, ACK_EVIDENCE_DELIVERY_ONLY: 1, ACK_EVIDENCE_RECEIPT: 2}
+    ack_evidence = (
+        incoming_ack
+        if ack_priority.get(incoming_ack, 1 if incoming_ack else 0)
+        > ack_priority.get(existing_ack, 1 if existing_ack else 0)
+        else existing_ack
+    )
+    existing_notification.update(
+        {
+            "failure_id": identity,
+            "ack_evidence": ack_evidence,
+            "delivered": bool(existing_notification.get("delivered"))
+            or _acknowledges_target(context, ack_evidence),
+        }
+    )
+    metadata["turn_failure_notification"] = existing_notification
+    return replace(terminal, metadata=metadata)
 
 
 async def emit_replayed_backend_failure(
@@ -226,47 +310,29 @@ async def emit_backend_failure(
     failure_id: str | None = None,
     delivery: DeliveryEvidence | None = None,
 ) -> bool:
-    """Settle one terminal backend failure, notifying live only outside Harness.
+    """Notify and settle one terminal backend failure.
 
     Backend adapters own structured failure recognition. This helper owns the
     shared representation and keeps visible delivery separate from lifecycle
-    settlement. Harness executions already own a durable owed-notice row whose drain
-    applies streak suppression, callback coordination, claims, and retry policy. For
-    those runs this emitter settles only; the drain is the single delivery owner.
-    Non-Harness callers retain immediate auth recovery and notification. The return
-    value is true when auth recovery supplied that immediate notification.
+    settlement. A live Agent Turn is the primary owner of its user-visible error,
+    including a Turn entered through Harness. Linked Runs retain durable owed notices
+    only as one Turn-scoped fallback when this notification cannot be acknowledged.
+    Non-Harness callers retain immediate auth recovery. The return value is true when
+    auth recovery supplied that immediate notification.
 
     ``delivery``, when supplied, is filled in with what the notify attempt actually
-    proved. Nothing here can report that otherwise: this function DISCARDS the
-    result of ``emit_agent_message`` and returns normally whether or not the notify
-    was delivered, so a caller that owes a durable notice had no way to tell a
-    delivered notice from a lost one and would ack on a send that never happened.
-    Callers with nothing durable at stake pass nothing and are unaffected.
+    proved. A durable Turn or legacy Harness Run supplies an evidence object
+    automatically so Runs attached after settlement inherit the same proof. A clean
+    return alone is not enough to distinguish a delivered message from a lost one.
     """
 
     backend_name = str(backend or "backend").strip() or "backend"
     error, visible = _failure_texts(backend_name, diagnostic, display_text)
     terminal = _terminal_output(request, output)
-    async def settle_terminal_failure() -> None:
-        await controller.emit_agent_message(
-            context,
-            "result",
-            "",
-            is_error=True,
-            level="silent",
-            output=terminal,
-            terminal_error=error,
-        )
-
-    # A Harness run is durable before the backend executes. Its terminal settlement
-    # stamps the owed notice atomically, and that notice drain is the only layer with
-    # enough definition history to suppress a recurring failure streak correctly.
-    # Sending here as well creates two competing delivery owners and lets every live
-    # failure bypass that policy before the drain can classify it.
-    if _harness_run_identity(context, request):
-        await settle_terminal_failure()
-        return False
-
+    harness_run_id = _harness_run_identity(context, request)
+    owns_failure_contract = bool(
+        _turn_failure_identity(context, request) or harness_run_id
+    )
     notification = backend_failure_notification_output(
         context,
         backend_name,
@@ -274,10 +340,33 @@ async def emit_backend_failure(
         output=terminal,
         failure_id=failure_id,
     )
+    notification_identity = str(notification.metadata.get("failure_id") or "").strip()
+    live_delivery = delivery
+    if owns_failure_contract and live_delivery is None:
+        live_delivery = DeliveryEvidence()
+
+    async def settle_terminal_failure() -> None:
+        terminal_output = terminal_backend_failure_output(
+            context,
+            request=request,
+            output=terminal,
+            failure_id=notification_identity,
+            delivery=live_delivery,
+        )
+        await controller.emit_agent_message(
+            context,
+            "result",
+            "",
+            is_error=True,
+            level="silent",
+            output=terminal_output,
+            terminal_error=error,
+        )
 
     # Auth recovery is unconditional for non-Harness live callers, and there is no
     # switch to turn it off. A real interactive 401 should offer its reset-OAuth
-    # affordance immediately; a Harness failure is reported by the durable drain.
+    # affordance immediately; a Harness Turn uses the ordinary backend failure
+    # notification so the Run fallback remains backend-neutral.
     #
     # The one caller that must not do that — the owed-notice drain, replaying a
     # possibly hours-old failure it read back from a durable row — does not call this
@@ -286,7 +375,7 @@ async def emit_backend_failure(
     # live behaviours switched off one at a time.
     auth_service = getattr(controller, "agent_auth_service", None)
     maybe_recover = getattr(auth_service, "maybe_emit_auth_recovery_message", None)
-    if callable(maybe_recover):
+    if not harness_run_id and callable(maybe_recover):
         try:
             handled_auth = await maybe_recover(
                 context,
@@ -301,20 +390,37 @@ async def emit_backend_failure(
         if handled_auth:
             return True
 
-    # ``delivery`` is passed ONLY when a caller asked for it. Sending it
-    # unconditionally changed the call signature for every controller-like object
-    # that implements ``emit_agent_message`` without the new keyword, which is a
-    # breaking change for an optional diagnostic — three suites caught it.
+    # ``delivery`` is passed only when the emitter supports it. Durable Turn and
+    # Harness contexts create the object automatically, but controller-like test
+    # and integration doubles with the legacy signature must keep working.
     notify_kwargs: dict[str, Any] = {"output": notification}
-    if delivery is not None:
-        notify_kwargs["delivery"] = delivery
+    if live_delivery is not None:
+        emit = controller.emit_agent_message
+        try:
+            parameters = signature(emit).parameters.values()
+            accepts_delivery = any(
+                parameter.name == "delivery" or parameter.kind is Parameter.VAR_KEYWORD
+                for parameter in parameters
+            )
+        except (TypeError, ValueError):
+            accepts_delivery = False
+        if accepts_delivery:
+            notify_kwargs["delivery"] = live_delivery
     try:
-        await controller.emit_agent_message(
+        delivered_id = await controller.emit_agent_message(
             context,
             "notify",
             visible,
             **notify_kwargs,
         )
+        if (
+            live_delivery is not None
+            and live_delivery.delivered_id is None
+            and delivered_id is not None
+            and not bool((context.platform_specific or {}).get("suppress_delivery"))
+        ):
+            live_delivery.delivered_id = str(delivered_id)
+            live_delivery.send_returned = True
     finally:
         await settle_terminal_failure()
     return False

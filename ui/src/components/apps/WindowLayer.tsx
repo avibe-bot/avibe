@@ -7,6 +7,7 @@ import { useDock } from '../../context/DockContext';
 import { dockIdToSession } from '../../context/dockDoc';
 import { useApi } from '../../context/ApiContext';
 import { useWindowManager, type WindowInstance } from '../../context/WindowManagerContext';
+import { useStandaloneAppTab } from '../../context/StandaloneAppTabContext';
 import { useShowPageInventory } from '../useShowPages';
 import { ShowPageAnnotationHost } from '../workbench/ShowPageAnnotationHost';
 import { AppWindow } from './AppWindow';
@@ -17,6 +18,7 @@ import {
 } from './showPageWindowState';
 import { inTerminalSurface, inTextEntrySurface, windowIdForKeyboardTarget } from './windowChords';
 import { shouldGuardUnload } from './windowUnload';
+import { isDesktopViewport } from '../../lib/useIsDesktop';
 
 const ShowPageWindow: React.FC<{
   archived: boolean;
@@ -78,6 +80,12 @@ export const WindowLayer: React.FC = () => {
   // Any window open and NOT minimized — drives the layer's aria-hidden AND the
   // beforeunload guard (§7.1g).
   const anyShown = shouldGuardUnload(windows);
+  // A single-app tab renders no sidebar, so there is no Dock to restore a minimized
+  // window from — the titlebar drops its minimize light there, and ⌘/Ctrl+M goes with it
+  // rather than hiding a window the user can't get back. Held for the whole tab, even
+  // while it steps onto a chrome-bearing route like /chat, since Back takes the Dock away
+  // again (the flag is the mount-frozen document one; see StandaloneAppTabContext).
+  const standaloneTab = useStandaloneAppTab();
   const ref = useRef<HTMLDivElement | null>(null);
   const [size, setSize] = useState({ w: 0, h: 0 });
   const [archivedSessionIds, setArchivedSessionIds] = useState<ReadonlySet<string>>(() => new Set());
@@ -121,14 +129,14 @@ export const WindowLayer: React.FC = () => {
       if (key === 'w') {
         e.preventDefault();
         if (confirmClose(targetId)) close(targetId);
-      } else if (key === 'm') {
+      } else if (key === 'm' && !standaloneTab) {
         e.preventDefault();
         minimize(targetId);
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [close, minimize, confirmClose]);
+  }, [close, minimize, confirmClose, standaloneTab]);
 
   // ⌥W closes the focused in-app window — a browser-safe alternative to ⌘W, which
   // the browser reserves for tab-close (not interceptable). Uses `code` (macOS
@@ -161,7 +169,7 @@ export const WindowLayer: React.FC = () => {
       // The window layer is desktop-only (`hidden md:block`); on a narrowed
       // viewport the windows are hidden, so a stale non-minimized window must not
       // prompt on tab-close. Gate on the same md breakpoint, checked at unload time.
-      if (!window.matchMedia?.('(min-width: 768px)').matches) return;
+      if (!isDesktopViewport()) return;
       e.preventDefault();
       e.returnValue = '';
     };
@@ -175,7 +183,7 @@ export const WindowLayer: React.FC = () => {
   // for character entry; the Windows layer is desktop-only.
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (!window.matchMedia?.('(min-width: 768px)').matches) return;
+      if (!isDesktopViewport()) return;
       const index = dockIndexFromShortcut(e);
       const target = e.target instanceof Element ? e.target : document.activeElement;
       if (index === null || inTextEntrySurface(target)) return;

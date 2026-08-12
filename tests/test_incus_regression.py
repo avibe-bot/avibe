@@ -299,6 +299,7 @@ def test_tenant_exec_exports_regression_guard_override() -> None:
     assert "[ ! -f /etc/avibe-regression.env ] || . /etc/avibe-regression.env" in command
     assert "VIBE_DEPLOYMENT_ENV=regression" in command
     assert "AVIBE_ALLOW_DEV_STATE_MIGRATION=1" in command
+    assert "VIBE_INTERNAL_DISPATCH_SOCKET=/tmp/vibe_remote/dispatch.sock" in command
 
 
 def test_remote_ref_prefixes_resource_names_only() -> None:
@@ -535,9 +536,23 @@ def test_ui_public_assets_are_part_of_source_fingerprint(tmp_path: Path) -> None
     assert before != after
 
 
+def test_legacy_voice_realtime_build_flag_does_not_change_ui_fingerprint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REGRESSION_VOICE_REALTIME_ENABLED", "false")
+    before = incus_regression.compute_fingerprints(tmp_path)["ui_source"]
+
+    monkeypatch.setenv("REGRESSION_VOICE_REALTIME_ENABLED", "true")
+    after = incus_regression.compute_fingerprints(tmp_path)["ui_source"]
+
+    assert before == after
+
+
 def test_runtime_env_payload_maps_show_runtime_and_llm_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("REGRESSION_SHOW_RUNTIME_GITHUB_REF", "main")
     monkeypatch.setenv("REGRESSION_SLACK_CHANNEL", "C123")
+    monkeypatch.setenv("REGRESSION_VOICE_REALTIME_ENABLED", "false")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
 
     payload = incus_regression.runtime_env_payload().decode()
@@ -548,6 +563,8 @@ def test_runtime_env_payload_maps_show_runtime_and_llm_env(monkeypatch: pytest.M
     assert "VIBE_SHOW_RUNTIME_SOURCE=github-source" in payload
     assert "VIBE_SHOW_RUNTIME_GITHUB_REF=main" in payload
     assert "REGRESSION_SLACK_CHANNEL=C123" in payload
+    assert "VITE_VOICE_REALTIME_ENABLED" not in payload
+    assert "REGRESSION_VOICE_REALTIME_ENABLED" not in payload
     assert "OPENAI_API_KEY=sk-test" in payload
 
 
@@ -1994,7 +2011,7 @@ def test_update_builds_ui_before_editable_install() -> None:
     assert build_index < install_index
 
 
-def test_force_ui_rebuilds_even_when_fingerprints_match() -> None:
+def test_force_ui_rebuilds_with_realtime_enabled_by_default() -> None:
     commands = []
 
     class RecordingRunner:

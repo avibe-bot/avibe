@@ -4,9 +4,12 @@ import os
 import sys
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
+
+import httpx
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
@@ -14,10 +17,15 @@ sys.path.insert(0, str(ROOT))
 from config.v2_config import (
     AgentsConfig,
     ModelHubModelConfig,
+    ModelHubRouteConfig,
+    ModelHubRouteHopConfig,
     ModelHubSourceConfig,
     ModelHubSourceStateConfig,
+    PlatformsConfig,
+    RemoteAccessConfig,
     RuntimeConfig,
     SlackConfig,
+    UiConfig,
     V2Config,
 )
 from core.agent_auth_service import AgentAuthService
@@ -36,6 +44,8 @@ from vibe.claude_config import (
     materialize_claude_subprocess_env,
     read_claude_settings_env,
 )
+from vibe import remote_access, ui_server
+from vibe.ui_server import app
 
 
 class _FakeNextTurnRuntime:
@@ -82,6 +92,203 @@ class _ReloadingV2ConfigController:
     @property
     def config(self):
         return V2Config.load()
+
+
+def _save_remote_web_auth_config() -> V2Config:
+    config = V2Config(
+        mode="self_host",
+        version="v2",
+        platform="slack",
+        platforms=PlatformsConfig(enabled=["slack"], primary="slack"),
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+        ui=UiConfig(),
+        remote_access=RemoteAccessConfig(),
+    )
+    cloud = config.remote_access.vibe_cloud
+    cloud.enabled = True
+    cloud.public_url = "https://alex.avibe.bot"
+    cloud.client_id = "vr_client_123"
+    cloud.instance_id = "inst_123"
+    cloud.session_secret = "session-secret"
+    cloud.authorization_endpoint = "https://backend.test/oauth/authorize"
+    cloud.redirect_uri = "https://alex.avibe.bot/auth/callback"
+    config.save()
+    return config
+
+
+def test_remote_web_oauth_cold_launch_retry_is_single_owner(monkeypatch, tmp_path):
+    """Scenario: AUTH-SETUP-209"""
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_remote_web_auth_config()
+    ui_dist = tmp_path / "ui-dist"
+    ui_dist.mkdir()
+    (ui_dist / "index.html").write_text("<html><body>Avibe shell</body></html>", encoding="utf-8")
+    monkeypatch.setattr(ui_server, "get_ui_dist_path", lambda: ui_dist)
+    with ui_server._auth_ratelimit_lock:
+        ui_server._auth_ratelimit.clear()
+
+    harness = SimpleNamespace(
+        primary=app.test_client(),
+        retry=app.test_client(),
+        base_url="https://alex.avibe.bot",
+        peer={"REMOTE_ADDR": "203.0.113.10"},
+        config=config,
+    )
+    runner = ScenarioRunner(harness)
+
+    def cold_launch(current):
+        response = current.primary.get(
+            "/old-route",
+            base_url=current.base_url,
+            environ_base=current.peer,
+            follow_redirects=False,
+        )
+        assert response.status_code == 200
+        assert response.text == "<html><body>Avibe shell</body></html>"
+        assert response.headers.get("Location") is None
+        assert ui_server.REMOTE_OAUTH_COOKIE_NAME not in response.headers.get("Set-Cookie", "")
+
+    def start_background_providers(current):
+        session = current.primary.get(
+            "/api/session",
+            base_url=current.base_url,
+            environ_base=current.peer,
+        )
+        assert session.get_json() == {"remote": True, "authenticated": False}
+
+        def request(path):
+            return app.test_client().get(
+                path,
+                base_url=current.base_url,
+                environ_base=current.peer,
+                follow_redirects=False,
+            )
+
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            responses = list(pool.map(request, ("/status", "/api/events", "/api/config")))
+        for response in responses:
+            assert response.status_code == 401
+            assert response.get_json()["error"] == "remote_access_login_required"
+            assert response.headers.get("Location") is None
+            assert ui_server.REMOTE_OAUTH_COOKIE_NAME not in response.headers.get("Set-Cookie", "")
+
+    def begin_explicit_login(current):
+        response = current.primary.get(
+            "/auth/login?next=/old-route",
+            base_url=current.base_url,
+            environ_base=current.peer,
+            follow_redirects=False,
+        )
+        authorize = httpx.URL(response.headers["Location"])
+        current.first_state = authorize.params["state"]
+        state_payload = ui_server._read_oauth_state(
+            current.config.remote_access.vibe_cloud.session_secret,
+            current.first_state,
+        )
+        assert response.status_code == 302
+        assert authorize.host == "backend.test"
+        assert state_payload is not None
+        assert state_payload["next"] == "/old-route"
+        assert state_payload["retry"] is False
+
+    def lose_browser_context_and_retry(current):
+        response = current.retry.get(
+            f"/auth/callback?code=lost-context&state={current.first_state}",
+            base_url=current.base_url,
+            environ_base=current.peer,
+            follow_redirects=False,
+        )
+        retry_target = response.headers["Location"]
+        assert response.status_code == 302
+        assert retry_target == f"/old-route?{ui_server.REMOTE_OAUTH_RETRY_PARAM}=1"
+
+        retry_shell = current.retry.get(
+            retry_target,
+            base_url=current.base_url,
+            environ_base=current.peer,
+            headers={"Accept": "text/html"},
+            follow_redirects=False,
+        )
+        assert retry_shell.status_code == 200
+        assert retry_shell.text == "<html><body>Avibe shell</body></html>"
+
+        login = current.retry.get(
+            f"/auth/login?{httpx.QueryParams({'next': retry_target})}",
+            base_url=current.base_url,
+            environ_base=current.peer,
+            follow_redirects=False,
+        )
+        authorize = httpx.URL(login.headers["Location"])
+        current.retry_state = authorize.params["state"]
+        current.retry_nonce = authorize.params["nonce"]
+        state_payload = ui_server._read_oauth_state(
+            current.config.remote_access.vibe_cloud.session_secret,
+            current.retry_state,
+        )
+        assert login.status_code == 302
+        assert authorize.host == "backend.test"
+        assert state_payload is not None
+        assert state_payload["next"] == "/old-route"
+        assert state_payload["retry"] is True
+
+    def complete_retry(current):
+        monkeypatch.setattr(
+            remote_access,
+            "exchange_oauth_code",
+            lambda _config, code, _verifier: {
+                "claims": {
+                    "email": "alex@example.com",
+                    "sub": "user-1",
+                    "nonce": current.retry_nonce,
+                    "code": code,
+                }
+            },
+        )
+        callback = current.retry.get(
+            f"/auth/callback?code=accepted&state={current.retry_state}",
+            base_url=current.base_url,
+            environ_base=current.peer,
+            follow_redirects=False,
+        )
+        assert callback.status_code == 302
+        assert callback.headers["Location"] == "/old-route"
+
+        session = current.retry.get(
+            "/api/session",
+            base_url=current.base_url,
+            environ_base=current.peer,
+        )
+        assert session.get_json()["authenticated"] is True
+        shell = current.retry.get(
+            callback.headers["Location"],
+            base_url=current.base_url,
+            environ_base=current.peer,
+            follow_redirects=False,
+        )
+        assert shell.status_code == 200
+        assert shell.text == "<html><body>Avibe shell</body></html>"
+
+    asyncio.run(
+        runner.run(
+            ScenarioStep("cold_launch_unknown_route", cold_launch),
+            ScenarioStep("start_background_providers", start_background_providers),
+            ScenarioStep("begin_explicit_login", begin_explicit_login),
+            ScenarioStep("retry_after_browser_context_loss", lose_browser_context_and_retry),
+            ScenarioStep("complete_retry", complete_retry),
+        )
+    )
+    ScenarioExpect.step_history(
+        runner,
+        [
+            "cold_launch_unknown_route",
+            "start_background_providers",
+            "begin_explicit_login",
+            "retry_after_browser_context_loss",
+            "complete_retry",
+        ],
+    )
 
 
 class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
@@ -560,7 +767,14 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
         harness.store.config.sources.append(source)
-        harness.store.config.refresh_follow_orders()
+        harness.store.config.agents["claude"].sources.order.append(source.id)
+        harness.store.config.agents["claude"].routes["claude-opus-4-6"] = (
+            ModelHubRouteConfig(
+                hops=(
+                    ModelHubRouteHopConfig(source.id, "claude-opus-4-6"),
+                )
+            )
+        )
 
         with self.assertRaises(ModelHubError) as refused:
             await harness.service.reauth_source(source.id, {})
@@ -636,7 +850,14 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
             models=[ModelHubModelConfig(id="claude-opus-4-6", provenance="discovered")],
         )
         harness.store.config.sources.append(source)
-        harness.store.config.refresh_follow_orders()
+        harness.store.config.agents["claude"].sources.order.append(source.id)
+        harness.store.config.agents["claude"].routes["claude-opus-4-6"] = (
+            ModelHubRouteConfig(
+                hops=(
+                    ModelHubRouteHopConfig(source.id, "claude-opus-4-6"),
+                )
+            )
+        )
         ack = {"acknowledge_irreversible": True}
 
         # 1. A second start for the same source is handed the SAME flow, and the

@@ -25,6 +25,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core import scheduled_tasks as scheduled_tasks_module
@@ -40,6 +42,9 @@ PROJECTED_FIELDS = (
     "health",
     "consecutive_failures",
     "recent_failures",
+    "processing_health",
+    "processing_consecutive_failures",
+    "processing_recent_failures",
     "lifecycle_state",
     "lifecycle_detail",
 )
@@ -195,9 +200,18 @@ def test_task_and_watch_mutations_return_the_enriched_projection(capsys) -> None
 
         assert show(definition_id) == 0
         shown = _definition(capsys)
-        assert shown["health"] == "failing", f"{label}: the seeded streak is not visible at all"
+        if label.startswith("watch"):
+            assert shown["health"] == "unknown", f"{label}: an unobserved waiter was guessed healthy"
+            assert shown["processing_health"] == "failing", (
+                f"{label}: the seeded downstream streak is not visible at all"
+            )
+            assert shown["processing_consecutive_failures"] == 2, (
+                f"{label}: downstream processing lost the streak"
+            )
+        else:
+            assert shown["health"] == "failing", f"{label}: the seeded streak is not visible at all"
+            assert shown["consecutive_failures"] == 2, f"{label} lost the streak"
         assert _projected(payload) == _projected(shown), f"{label} disagrees with show"
-        assert payload["consecutive_failures"] == 2, f"{label} lost the streak"
 
     task_store = _FailureSeedingTaskStore()
     add_args = _parse(
@@ -271,3 +285,116 @@ def test_task_and_watch_mutations_return_the_enriched_projection(capsys) -> None
 
         assert cli.cmd_watch_update(_parse(["watch", "update", watch_id, "--name", "renamed"])) == 0
         _assert_matches_show("watch update", _definition(capsys), cli.cmd_watch_show, watch_id)
+
+
+def test_watch_health_separates_waiter_from_event_processing(tmp_path, monkeypatch) -> None:
+    """HFR-436 — provenance does not create one shared health lifecycle."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    watch_store = ManagedWatchStore()
+    watch = watch_store.add_watch(
+        name="successful waiter",
+        session_key="slack::channel::C123",
+        command=[],
+        shell_command="true",
+        prefix=None,
+        cwd=None,
+        mode="once",
+        timeout_seconds=30,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=0,
+        post_to=None,
+        deliver_key=None,
+    )
+    sqlite = SQLiteBackgroundTaskStore()
+    try:
+        unobserved = sqlite.get_watch(watch.id)
+    finally:
+        sqlite.close()
+    assert unobserved is not None and unobserved["health"] == "unknown"
+    assert watch_store.mark_cycle_start(watch.id)
+    assert watch_store.mark_cycle_result(
+        watch.id,
+        exit_code=0,
+        error=None,
+        event_detected=True,
+        disable=True,
+    )
+    _seed_failed_runs(watch.id, request_type="watch")
+
+    sqlite = SQLiteBackgroundTaskStore()
+    try:
+        projected = sqlite.get_watch(watch.id)
+    finally:
+        sqlite.close()
+
+    assert projected is not None
+    assert projected["last_error"] is None
+    assert projected["health"] == "healthy"
+    assert projected["consecutive_failures"] == 0
+    assert projected["processing_health"] == "failing"
+    assert projected["processing_consecutive_failures"] == 2
+
+
+@pytest.mark.parametrize("mode", ["once", "forever"])
+def test_watch_retry_health_depends_on_enabled_state_not_mode(
+    tmp_path,
+    monkeypatch,
+    mode,
+) -> None:
+    """An allowed retry is healthy exactly while the Watch remains armed."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    watch_store = ManagedWatchStore()
+    watch = watch_store.add_watch(
+        name=f"{mode} bounded retries",
+        session_key="slack::channel::C123",
+        command=[],
+        shell_command="exit 75",
+        prefix=None,
+        cwd=None,
+        mode=mode,
+        timeout_seconds=30,
+        lifetime_timeout_seconds=60,
+        retry_exit_codes=[75],
+        retry_delay_seconds=0,
+        post_to=None,
+        deliver_key=None,
+    )
+    assert watch_store.mark_cycle_start(watch.id)
+    assert watch_store.mark_cycle_result(
+        watch.id,
+        exit_code=75,
+        error="retry later",
+        disable=False,
+    )
+
+    sqlite = SQLiteBackgroundTaskStore()
+    try:
+        retrying = sqlite.get_watch(watch.id)
+    finally:
+        sqlite.close()
+    assert retrying is not None
+    assert retrying["enabled"] is True
+    assert retrying["lifecycle_state"] == "waiting"
+    assert retrying["health"] == "healthy"
+    assert retrying["consecutive_failures"] == 0
+
+    assert watch_store.mark_cycle_start(watch.id)
+    assert watch_store.mark_cycle_result(
+        watch.id,
+        exit_code=75,
+        error="retry budget exhausted",
+        disable=True,
+    )
+    sqlite = SQLiteBackgroundTaskStore()
+    try:
+        retired = sqlite.get_watch(watch.id)
+    finally:
+        sqlite.close()
+    assert retired is not None
+    assert retired["enabled"] is False
+    assert retired["lifecycle_state"] == "finished"
+    assert retired["health"] == "failing"
+    assert retired["consecutive_failures"] == 1

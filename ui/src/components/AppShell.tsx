@@ -1,10 +1,11 @@
 import React, { useEffect, useState } from 'react';
 import { Link, NavLink, Outlet, useLocation } from 'react-router-dom';
-import { ArrowLeft, Bot, Brain, ChevronDown, Cpu, FolderTree, Globe, Grid2x2, Hash, Inbox, LayoutDashboard, LayoutGrid, Link as LinkIcon, Menu, MessageCircle, PlugZap, Plus, Settings, Sparkles, X } from 'lucide-react';
+import { AlertTriangle, ArrowLeft, Bot, Brain, ChevronDown, Cpu, FolderTree, Globe, Grid2x2, Hash, Inbox, LayoutDashboard, LayoutGrid, Link as LinkIcon, Menu, MessageCircle, PlugZap, Plus, Settings, Sparkles, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
-import { isStandaloneAppTab } from '../apps/appLaunch';
+import { APP_TAB_PARAM, isStandaloneAppRoutePath, isStandaloneAppTab } from '../apps/appLaunch';
+import { StandaloneAppTabContext } from '../context/StandaloneAppTabContext';
 import { modelHubEnabledFromConfig } from './settings/models/featureFlags';
 import { memoryNavShouldBeVisible } from '../lib/memorySettings';
 import { useApi } from '../context/ApiContext';
@@ -215,6 +216,36 @@ const MobileTabBar: React.FC<{ items: ShellNavItem[]; center?: CenterButton }> =
   );
 };
 
+type ConfigRecoveryProjection = {
+  config_recovery?: {
+    required?: boolean;
+    warnings?: unknown[];
+  };
+};
+
+const ConfigRecoveryNotice: React.FC<{ config: ConfigRecoveryProjection | null }> = ({ config }) => {
+  const { t } = useTranslation();
+  if (!config?.config_recovery?.required) return null;
+
+  return (
+    <div className="fixed inset-x-2 top-2 z-[70] mx-auto flex max-w-3xl items-start gap-3 rounded-lg border border-gold/45 bg-surface px-3 py-2.5 shadow-xl" role="alert">
+      <AlertTriangle className="mt-0.5 size-4 shrink-0 text-gold" />
+      <div className="min-w-0 flex-1">
+        <p className="text-[13px] font-semibold text-foreground">{t('configRecovery.title')}</p>
+        <p className="mt-0.5 break-words text-[12px] text-muted">
+          {t('configRecovery.body')}
+        </p>
+      </div>
+      <Link
+        to="/admin/settings/diagnostics"
+        className="shrink-0 text-[12px] font-semibold text-gold hover:underline"
+      >
+        {t('configRecovery.action')}
+      </Link>
+    </div>
+  );
+};
+
 export const AppShell: React.FC = () => {
   const { t } = useTranslation();
   const { status } = useStatus();
@@ -285,12 +316,44 @@ export const AppShell: React.FC = () => {
     setAppsDrawerOpen(false);
   }, [location.pathname]);
 
+  // A single-app tab sitting on the app's own route (⌘/Ctrl-clicked Terminal / Files /
+  // Editor, or that URL bookmarked): the tab exists to show ONE app, so it drops EVERY
+  // piece of shell chrome — sidebar, mobile brand header, bottom tab bar, page padding —
+  // and hands the whole viewport to the app. Both halves matter: the flag alone would
+  // strip the chrome off any page such a tab later navigates to, and the route alone
+  // would strip it inside the normal workbench.
+  //
+  // Route-scoped, and therefore LOCAL to the layout: what `StandaloneAppTabContext`
+  // publishes is the mount-frozen document flag instead, because the window controls
+  // that read it must stay decided for the tab's whole life (see the context doc). The
+  // app pages read the same context and mount only on these routes, so for them the two
+  // agree anyway.
+  const chromeless = standaloneAppTab && isStandaloneAppRoutePath(location.pathname);
+
+  // Keep the visible URL honest about standalone mode. An in-tab app-to-app navigation
+  // (Files → "Open in Editor" / "Open Terminal Here") lands on `/apps/editor` WITHOUT the
+  // marker, while the document is still the single-app tab — `standaloneAppTab` is frozen
+  // at mount by design. Reloading, bookmarking, or copying that URL would otherwise bring
+  // back the full workbench chrome and the restored window layout the tab exists to avoid.
+  //
+  // `history.replaceState` rather than a router navigate: this only corrects what the
+  // address bar shows, and leaving the router's own location (and `location.key`) untouched
+  // keeps launch effects keyed on it — the Terminal's "open one tab per launch" — from
+  // firing a second time for the same navigation.
+  useEffect(() => {
+    if (!chromeless) return;
+    const url = new URL(window.location.href);
+    if (url.searchParams.get(APP_TAB_PARAM) === '1') return;
+    url.searchParams.set(APP_TAB_PARAM, '1');
+    window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`);
+  }, [chromeless, location.pathname, location.search]);
+
   const hasChannelPlatforms = enabledPlatforms.some((platform) => platformSupportsChannels(config, platform));
   const modelHubEnabled = modelHubEnabledFromConfig(config);
   const isRunning = status.state === 'running';
 
   if (location.pathname === '/setup') {
-    return <Outlet />;
+    return <><ConfigRecoveryNotice config={config} /><Outlet /></>;
   }
 
   // Two shell modes share the same chrome (brand + bottom status):
@@ -407,7 +470,8 @@ export const AppShell: React.FC = () => {
   const isChat = location.pathname.startsWith('/chat/');
   const isSearch = location.pathname === '/search';
   const isFullScreenMobile = isChat || isSearch;
-  const showBottomNav = !isFullScreenMobile && location.pathname !== '/setup';
+
+  const showBottomNav = !isFullScreenMobile && !chromeless && location.pathname !== '/setup';
 
   return (
     // Mobile: a LOCKED, full-viewport flex column (overflow-hidden) so the
@@ -419,13 +483,23 @@ export const AppShell: React.FC = () => {
     // pans the locked page to lift the focused composer above the keyboard.
     // Desktop: normal document flow.
     <WindowManagerProvider standalone={standaloneAppTab}>
+    <StandaloneAppTabContext.Provider value={standaloneAppTab}>
     <DockProvider>
     <ShowPageDragProvider>
-    <div className="flex h-[var(--app-shell-h)] flex-col overflow-hidden bg-background text-foreground md:block md:h-auto md:min-h-screen md:overflow-visible">
+    {/* Chromeless (single-app tab): the locked full-viewport column applies on DESKTOP too —
+        the app fills the browser area exactly, with nothing to scroll around it. */}
+    <div
+      className={clsx(
+        'flex h-[var(--app-shell-h)] flex-col overflow-hidden bg-background text-foreground',
+        !chromeless && 'md:block md:h-auto md:min-h-screen md:overflow-visible'
+      )}
+    >
+      <ConfigRecoveryNotice config={config} />
       {/* The sidebar forms its own stacking context BELOW the window layer (aside z-10 < window
           layer z-20), so a maximized window covers the WHOLE sidebar — including the Apps launcher.
           The Apps button no longer floats on top in full-screen (a Dock redesign comes later);
           un-maximize to reach it. */}
+      {!chromeless && (
       <aside className="fixed inset-y-0 left-0 z-10 hidden w-[240px] flex-col border-r border-border bg-surface md:flex">
         {/* Workbench packs more rows (search/inbox/capabilities/projects) into the
             sidebar, so it runs a tighter vertical rhythm than admin — less outer
@@ -540,11 +614,13 @@ export const AppShell: React.FC = () => {
           </div>
         </div>
       </aside>
+      )}
 
       {/* Chat and Search are fixed full-screen surfaces with their own header
           bars, so the brand header is hidden there (otherwise it would sit
-          behind them). */}
-      {!isFullScreenMobile && (
+          behind them). A chromeless single-app tab hides it for the same
+          reason: the app owns the viewport. */}
+      {!isFullScreenMobile && !chromeless && (
         <header className="sticky top-0 z-40 flex h-[calc(4rem+env(safe-area-inset-top))] shrink-0 items-center justify-between gap-2 border-b border-border bg-background/92 px-4 pt-[env(safe-area-inset-top)] backdrop-blur md:hidden">
           <div className="flex min-w-0 items-center gap-2">
             <img
@@ -566,12 +642,17 @@ export const AppShell: React.FC = () => {
           // Mobile: the internal scroll area of the locked flex-column shell, so
           // the document itself never scrolls. Desktop: normal flow (min-h-screen
           // + sidebar offset).
-          'flex-1 min-h-0 overflow-y-auto md:ml-[240px] md:min-h-screen md:flex-none md:overflow-visible md:pb-0',
-          showBottomNav ? 'pb-[calc(5.5rem+env(safe-area-inset-bottom))]' : 'pb-0',
-          location.pathname.startsWith('/admin/settings') ? 'page-glow-settings' : 'page-glow-console'
+          chromeless
+            // Single-app tab: no sidebar offset, no scroll, no page glow — the app body
+            // is the only thing in the viewport and sizes itself to this box (h-full).
+            ? 'min-h-0 flex-1 overflow-hidden'
+            : 'flex-1 min-h-0 overflow-y-auto md:ml-[240px] md:min-h-screen md:flex-none md:overflow-visible md:pb-0',
+          !chromeless && (showBottomNav ? 'pb-[calc(5.5rem+env(safe-area-inset-bottom))]' : 'pb-0'),
+          !chromeless &&
+            (location.pathname.startsWith('/admin/settings') ? 'page-glow-settings' : 'page-glow-console')
         )}
       >
-        <div className="mx-auto w-full px-4 py-5 md:px-10 md:py-8">
+        <div className={clsx('w-full', chromeless ? 'h-full' : 'mx-auto px-4 py-5 md:px-10 md:py-8')}>
           {/* A crashing page only replaces the content area — the sidebar + chrome stay usable, and
               navigating elsewhere clears the error without a manual retry. Key on location.key (not
               just pathname) so a query-only navigation (e.g. /search?q=…) also resets. */}
@@ -653,6 +734,7 @@ export const AppShell: React.FC = () => {
     </div>
     </ShowPageDragProvider>
     </DockProvider>
+    </StandaloneAppTabContext.Provider>
     </WindowManagerProvider>
   );
 };

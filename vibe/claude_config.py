@@ -37,6 +37,11 @@ MANAGED_ENV_VALUES = {
     "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
 }
 
+# Passed through the SDK as a process-local ``--settings`` override. Keeping it
+# out of ``MANAGED_ENV_VALUES`` ensures Avibe never persists this policy into
+# the user's Claude Code settings.
+CLAUDE_MEMORY_DISABLED_SETTINGS = '{"autoMemoryEnabled":false}'
+
 # Keys we recognise inside ``~/.claude/settings.json``'s ``env`` block.
 # Claude Code assigns header semantics from the selected variable, independently
 # from ``ANTHROPIC_BASE_URL``. Avibe preserves that native distinction instead

@@ -31,18 +31,20 @@ from vibe.message_types import build_partial_index_predicate
 pytestmark = pytest.mark.no_sqlite_template
 
 
-HEAD_REVISION = "20260806_0047"
+HEAD_REVISION = "20260811_0052"
 MESSAGE_PARTIAL_INDEX_PREDICATES = {
     "ix_messages_inbox_activity": (
         "session_id is not null and type in "
-        "('user', 'harness', 'annotation', 'result', 'notify', 'error', 'assistant')"
+        "('user', 'harness', 'agent_initiated', 'annotation', 'output', "
+        "'result', 'notify', 'vault', 'error', 'assistant')"
     ),
     "ix_messages_inbox_agent_reply": (
-        "session_id is not null and type in ('result', 'notify', 'error')"
+        "session_id is not null and type in ('output', 'result', 'notify', 'vault', 'error')"
     ),
     "ix_messages_inbox_user_send": (
         "session_id is not null and ((author = 'user' and type = 'user') "
         "or (author = 'harness' and type = 'harness') "
+        "or (author = 'harness' and type = 'agent_initiated') "
         "or (author = 'harness' and type = 'annotation'))"
     ),
 }
@@ -75,14 +77,306 @@ def test_message_partial_index_ddl_matches_catalog_contract(
     )
 
 
-def test_show_annotation_migration_predicate_matches_catalog() -> None:
+def test_message_index_migration_matches_catalog() -> None:
     migration = import_module(
-        "storage.alembic.versions.20260727_0038_show_annotation_type"
+        "storage.alembic.versions.20260809_0049_vault_message_type"
     )
 
+    assert migration.UPGRADE_ACTIVITY_PREDICATE == build_partial_index_predicate(
+        "ix_messages_inbox_activity"
+    )
+    assert migration.UPGRADE_AGENT_REPLY_PREDICATE == build_partial_index_predicate(
+        "ix_messages_inbox_agent_reply"
+    )
     assert migration.UPGRADE_USER_SEND_PREDICATE == build_partial_index_predicate(
         "ix_messages_inbox_user_send"
     )
+
+
+def test_accepted_steer_receipt_migration_preserves_upgrade_and_downgrade_invariants(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision="20260809_0049")
+    engine = create_sqlite_engine(db_path)
+    now = "2026-08-11T00:00:00Z"
+    with engine.begin() as conn:
+        conn.exec_driver_sql(
+            """
+            insert into agent_sessions (
+                id, scope_id, agent_name, agent_backend, agent_variant,
+                session_anchor, workdir, native_session_id, status, visibility,
+                pinned, agent_status, metadata_json, created_at, updated_at,
+                last_active_at
+            ) values (
+                'ses_receipt_migration', null, 'codex', 'codex', 'codex',
+                'receipt-migration', '/tmp', '', 'active', 'foreground',
+                0, 'idle', '{}', ?, ?, ?
+            )
+            """,
+            (now, now, now),
+        )
+        initial = message_deliveries.insert_delivery(
+            conn,
+            delivery_id="msg_receipt_anchor",
+            session_id="ses_receipt_migration",
+            priority="p3",
+            state="reserved",
+            snapshot=message_deliveries.message_snapshot(
+                scope_id=None,
+                session_id="ses_receipt_migration",
+                platform="avibe",
+                author="user",
+                source="user",
+                message_type="user",
+                text="anchor",
+            ),
+            dispatch_text="anchor",
+            now=now,
+        )
+        claimed = message_deliveries.claim_start_batch(
+            conn,
+            turn_id="turn_receipt_migration",
+            session_id="ses_receipt_migration",
+            backend="codex",
+            deliveries=[initial],
+            dispatch_text="anchor",
+        )
+        turn = message_deliveries.bind_native_start(
+            conn,
+            "turn_receipt_migration",
+            expected_version=int(claimed["turn"]["version"]),
+            runtime_key="runtime",
+            runtime_turn_id="runtime-turn",
+            native_turn_id="native-turn",
+        )
+        assert turn is not None
+        steer = message_deliveries.insert_delivery(
+            conn,
+            delivery_id="msg_receipt_candidate",
+            session_id="ses_receipt_migration",
+            priority="p1",
+            state="reserved",
+            snapshot=message_deliveries.message_snapshot(
+                scope_id=None,
+                session_id="ses_receipt_migration",
+                platform="avibe",
+                author="user",
+                source="user",
+                message_type="user",
+                text="candidate",
+            ),
+            dispatch_text="candidate",
+            now=now,
+        )
+        steering = message_deliveries.open_steer_attempt(
+            conn,
+            "msg_receipt_candidate",
+            expected_version=int(steer["version"]),
+            turn_id="turn_receipt_migration",
+            attempt_id="attempt_receipt_migration",
+            expected_native_turn_id="native-turn",
+        )
+        assert steering is not None
+        assert message_deliveries.mark_attempt_unknown(
+            conn,
+            "msg_receipt_candidate",
+            expected_version=int(steering["version"]),
+            receipt={"reason": "receipt_persistence_lost"},
+        ) is not None
+
+    command.upgrade(migrations.alembic_config(db_path), "head")
+    with engine.connect() as conn:
+        assert conn.exec_driver_sql(
+            "select state, current_receipt_outcome, current_receipt_json "
+            "from message_deliveries where id = 'msg_receipt_candidate'"
+        ).one() == (
+            "reconciling_steer",
+            "unknown",
+            '{"reason":"receipt_persistence_lost"}',
+        )
+    with engine.begin() as conn:
+        conn.execute(
+            message_deliveries.message_deliveries.update()
+            .where(message_deliveries.message_deliveries.c.id == "msg_receipt_candidate")
+            .values(
+                current_receipt_outcome="accepted",
+                current_receipt_json='{"reason":"native-accepted"}',
+            )
+        )
+    with engine.connect() as conn:
+        assert conn.exec_driver_sql(
+            "select state, current_receipt_outcome from message_deliveries "
+            "where id = 'msg_receipt_candidate'"
+        ).one() == ("reconciling_steer", "accepted")
+
+    with pytest.raises(RuntimeError, match="0050 downgrade refused"):
+        command.downgrade(migrations.alembic_config(db_path), "20260809_0049")
+
+    with engine.begin() as conn:
+        conn.execute(
+            message_deliveries.message_deliveries.update()
+            .where(message_deliveries.message_deliveries.c.id == "msg_receipt_candidate")
+            .values(
+                current_receipt_outcome="unknown",
+                current_receipt_json='{"reason":"receipt_persistence_lost"}',
+            )
+        )
+    command.downgrade(migrations.alembic_config(db_path), "20260809_0049")
+    with engine.connect() as conn:
+        assert conn.exec_driver_sql(
+            "select state, current_receipt_outcome, current_receipt_json "
+            "from message_deliveries where id = 'msg_receipt_candidate'"
+        ).one() == (
+            "reconciling_steer",
+            "unknown",
+            '{"reason":"receipt_persistence_lost"}',
+        )
+        assert conn.exec_driver_sql("select version_num from alembic_version").one() == (
+            "20260809_0049",
+        )
+    with pytest.raises(IntegrityError):
+        with engine.begin() as conn:
+            conn.exec_driver_sql(
+                "update message_deliveries set current_receipt_outcome = 'accepted' "
+                "where id = 'msg_receipt_candidate'"
+            )
+
+
+def test_callback_terminal_turn_identity_migration_preserves_rows_and_scope(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision="20260811_0050")
+    command.upgrade(migrations.alembic_config(db_path), "head")
+    now = "2026-08-11T00:00:00Z"
+
+    def insert_callback(
+        conn,
+        *,
+        run_id: str,
+        terminal_turn_id: str,
+        session_id: str,
+    ) -> None:
+        conn.execute(
+            """
+            insert into agent_runs (
+                id, run_type, status, source_kind, session_id,
+                callback_terminal_turn_id, cancel_requested,
+                created_at, updated_at, metadata_json
+            ) values (?, 'agent_run', 'queued', 'callback', ?, ?, 0, ?, ?, '{}')
+            """,
+            (run_id, session_id, terminal_turn_id, now, now),
+        )
+
+    with sqlite3.connect(db_path) as conn:
+        columns = {row[1] for row in conn.execute("pragma table_info('agent_runs')")}
+        assert "callback_terminal_turn_id" in columns
+        assert "where run_type = 'agent_run'" in _index_sql(
+            conn, "uq_agent_runs_callback_terminal_turn_session"
+        ).lower()
+        insert_callback(
+            conn,
+            run_id="callback-one",
+            terminal_turn_id="turn-one",
+            session_id="session-one",
+        )
+        conn.commit()
+
+    with pytest.raises(sqlite3.IntegrityError):
+        with sqlite3.connect(db_path) as conn:
+            insert_callback(
+                conn,
+                run_id="callback-duplicate",
+                terminal_turn_id="turn-one",
+                session_id="session-one",
+            )
+
+    with sqlite3.connect(db_path) as conn:
+        insert_callback(
+            conn,
+            run_id="callback-other-turn",
+            terminal_turn_id="turn-two",
+            session_id="session-one",
+        )
+        insert_callback(
+            conn,
+            run_id="callback-other-session",
+            terminal_turn_id="turn-one",
+            session_id="session-two",
+        )
+        conn.commit()
+
+    command.downgrade(migrations.alembic_config(db_path), "20260811_0050")
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute(
+            "select name from sqlite_master where type = 'index' and name = ?",
+            ("uq_agent_runs_callback_terminal_turn_session",),
+        ).fetchone() is None
+        assert conn.execute(
+            "select id from agent_runs where source_kind = 'callback' order by id"
+        ).fetchall() == [
+            ("callback-one",),
+            ("callback-other-session",),
+            ("callback-other-turn",),
+        ]
+
+
+def test_agent_lifecycle_message_index_migration_upgrades_and_downgrades(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision="20260806_0047")
+
+    with sqlite3.connect(db_path) as conn:
+        previous_activity = _index_sql(conn, "ix_messages_inbox_activity")
+        previous_agent_reply = _index_sql(conn, "ix_messages_inbox_agent_reply")
+        previous_user_send = _index_sql(conn, "ix_messages_inbox_user_send")
+        conn.execute(
+            "insert into messages "
+            "(id, platform, author, type, content_json, metadata_json, created_at, updated_at) "
+            "values (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "legacy-vault-waiter",
+                "avibe",
+                "harness",
+                "notify",
+                '{"text":"legacy Vault result"}',
+                '{"source_kind":"callback","source_actor":"vault:vrq_legacy"}',
+                "2026-08-09T00:00:00.000000Z",
+                "2026-08-09T00:00:00.000000Z",
+            ),
+        )
+        conn.commit()
+
+    run_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        assert _index_sql(conn, "ix_messages_inbox_activity").endswith(
+            MESSAGE_PARTIAL_INDEX_PREDICATES["ix_messages_inbox_activity"]
+        )
+        assert _index_sql(conn, "ix_messages_inbox_user_send").endswith(
+            MESSAGE_PARTIAL_INDEX_PREDICATES["ix_messages_inbox_user_send"]
+        )
+        assert _index_sql(conn, "ix_messages_inbox_agent_reply").endswith(
+            MESSAGE_PARTIAL_INDEX_PREDICATES["ix_messages_inbox_agent_reply"]
+        )
+        assert conn.execute("select version_num from alembic_version").fetchone() == (
+            HEAD_REVISION,
+        )
+        assert conn.execute(
+            "select type from messages where id = ?", ("legacy-vault-waiter",)
+        ).fetchone() == ("vault",)
+
+    command.downgrade(migrations.alembic_config(db_path), "20260806_0047")
+
+    with sqlite3.connect(db_path) as conn:
+        assert _index_sql(conn, "ix_messages_inbox_activity") == previous_activity
+        assert _index_sql(conn, "ix_messages_inbox_agent_reply") == previous_agent_reply
+        assert _index_sql(conn, "ix_messages_inbox_user_send") == previous_user_send
+        assert conn.execute(
+            "select type from messages where id = ?", ("legacy-vault-waiter",)
+        ).fetchone() == ("notify",)
 
 
 class _Pre335Cursor(sqlite3.Cursor):
@@ -1671,6 +1965,122 @@ def test_retirement_marker_migration_is_forward_only(tmp_path: Path) -> None:
     assert "retired_at" in columns
     assert row == ("2026-07-26T00:00:00+00:00", None)
     assert version == (HEAD_REVISION,)
+
+
+def test_orphaned_owner_task_migration_marks_unbound_definitions(tmp_path: Path) -> None:
+    """0052 blocks every resumable orphan and stops the ones still enabled."""
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision="20260811_0051")
+
+    with sqlite3.connect(db_path) as conn:
+        _insert_scope(conn, "sc1")
+        for session_id, anchor in (
+            ("ses-live-owner", "live-owner"),
+            ("ses-target", "target"),
+            ("ses-archived-owner", "archived-owner"),
+        ):
+            _insert_agent_session(
+                conn,
+                row_id=session_id,
+                scope_id="sc1",
+                anchor=anchor,
+                workdir="/tmp",
+                backend="codex",
+                native=f"native-{session_id}",
+                last_active="2026-08-11T00:00:00+00:00",
+            )
+        conn.execute(
+            "update agent_sessions set status = 'archived' where id = 'ses-archived-owner'"
+        )
+
+        def insert_task(
+            task_id: str,
+            owner_session_id: str | None,
+            *,
+            session_id: str | None = None,
+            session_policy: str | None = "create_per_run",
+            enabled: int = 1,
+            last_error: str | None = None,
+        ) -> None:
+            metadata = (
+                json.dumps({"created_by": {"caller": {"session_id": owner_session_id}}})
+                if owner_session_id is not None
+                else "{}"
+            )
+            conn.execute(
+                """
+                insert into run_definitions (
+                    id, definition_type, name, session_policy, session_id, enabled,
+                    last_error, created_at, updated_at, metadata_json
+                ) values (?, 'scheduled', ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    task_id,
+                    task_id,
+                    session_policy,
+                    session_id,
+                    enabled,
+                    last_error,
+                    "2026-08-11T00:00:00+00:00",
+                    "2026-08-11T00:00:00+00:00",
+                    metadata,
+                ),
+            )
+
+        insert_task("missing-owner", "ses-removed-owner")
+        insert_task("pure-command", "ses-removed-owner", session_policy=None)
+        insert_task("blank-target", "ses-removed-owner", session_id="   ")
+        insert_task("whitespace-target", "ses-removed-owner", session_id="\t\n\r")
+        insert_task("archived-owner", "ses-archived-owner")
+        insert_task("live-owner", "ses-live-owner")
+        insert_task("target-fallback", "ses-removed-owner", session_id="ses-target")
+        insert_task("legacy-unowned", None)
+        insert_task(
+            "already-paused",
+            "ses-removed-owner",
+            enabled=0,
+            last_error="manual pause",
+        )
+        conn.commit()
+
+    run_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        rows = {
+            row[0]: row[1:]
+            for row in conn.execute(
+                "select id, enabled, session_id, last_error, metadata_json from run_definitions"
+            )
+        }
+
+    def owner_marker(task_id: str) -> dict | None:
+        metadata = json.loads(rows[task_id][3])
+        return metadata.get("orphaned_task_owner")
+
+    expected_paused = {
+        "missing-owner": (None, "ses-removed-owner"),
+        "pure-command": (None, "ses-removed-owner"),
+        "blank-target": ("   ", "ses-removed-owner"),
+        "whitespace-target": ("\t\n\r", "ses-removed-owner"),
+        "archived-owner": (None, "ses-archived-owner"),
+    }
+    for task_id, (session_id, owner_session_id) in expected_paused.items():
+        assert rows[task_id][:3] == (0, session_id, None)
+        assert owner_marker(task_id) == {
+            "reason_code": "task_owner_session_unavailable",
+            "owner_session_id": owner_session_id,
+        }
+
+    assert rows["live-owner"][:3] == (1, None, None)
+    assert rows["target-fallback"][:3] == (1, "ses-target", None)
+    assert rows["legacy-unowned"][:3] == (1, None, None)
+    assert rows["already-paused"][:3] == (0, None, "manual pause")
+    assert owner_marker("already-paused") == {
+        "reason_code": "task_owner_session_unavailable",
+        "owner_session_id": "ses-removed-owner",
+    }
+    for task_id in ("live-owner", "target-fallback", "legacy-unowned"):
+        assert owner_marker(task_id) is None
 
 
 def test_show_annotation_migration_changes_only_the_user_send_index(

@@ -1470,8 +1470,9 @@ class SessionHandler(BaseHandler):
             agent_system_prompt=agent_system_prompt,
         )
 
-        # Create extra_args for CLI passthrough (fallback for model)
-        extra_args: Dict[str, str | None] = {}
+        # Echo native input frames so the long-lived receiver can correlate
+        # accepted steering with Claude's actual input consumption.
+        extra_args: Dict[str, str | None] = {"replay-user-messages": None}
         if runtime_model:
             extra_args["model"] = runtime_model
 
@@ -1489,7 +1490,10 @@ class SessionHandler(BaseHandler):
         # V2Config-driven Anthropic env composition, centralised so the
         # control-channel client (``agent_auth_service``) cannot drift
         # away from this site's auth_mode handling.
-        from vibe.claude_config import build_claude_subprocess_env
+        from vibe.claude_config import (
+            CLAUDE_MEMORY_DISABLED_SETTINGS,
+            build_claude_subprocess_env,
+        )
         from core.git_runtime import prepend_vendored_git_to_path
 
         claude_env = build_claude_subprocess_env(getattr(self.config, "claude", None))
@@ -1516,6 +1520,7 @@ class SessionHandler(BaseHandler):
             "resume": stored_claude_session_id if stored_claude_session_id else None,
             "fork_session": bool(fork_session and stored_claude_session_id),
             "extra_args": extra_args,
+            "settings": CLAUDE_MEMORY_DISABLED_SETTINGS,
             "setting_sources": claude_setting_sources_for_launch(model_hub_launch),
             "sandbox": CLAUDE_REMOTE_SANDBOX,
             # Disable interactive-only Claude Code tools that remote IM sessions

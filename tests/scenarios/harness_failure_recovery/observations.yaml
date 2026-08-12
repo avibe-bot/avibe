@@ -272,3 +272,31 @@ observations:
       the failed terminal result is the existing release action for Avibe's per-Session
       runtime gate and durable Run. Timeout must perform them in that order and must
       not fall through to the empty successful-result path.
+  - id: HFR-OBS-023
+    date: 2026-08-08
+    source: live Watch d5efa8fcbdc2 and its three Runs in one failed Agent Turn
+    result: confirmed
+    detail: >-
+      A Watch waiter and the Agent Turn it starts are different lifecycle owners.
+      The observed waiter exited zero, retired normally, and queued one Run, while
+      that Run and two Runs from other definitions were steered into the same Turn.
+      One backend transport failure then settled all three Runs. Per-definition
+      owed-notice ownership converted that single Turn failure into three Harness
+      failure messages and projected every successful waiter as unhealthy. The
+      durable Watch-to-Run link is necessary provenance, but failure visibility
+      belongs to the Turn and waiter health belongs to the waiter. Linked Runs need
+      only one Turn-scoped fallback when the primary backend notification cannot be
+      acknowledged; downstream processing health must remain a separate projection.
+  - id: HFR-OBS-024
+    date: 2026-08-08
+    source: issue #953 Watch and Agent Run history
+    result: confirmed
+    detail: >-
+      A level-triggered forever Watch returned exit zero while the observed
+      condition remained true. The supervisor immediately re-ran the waiter after
+      every success and treated each identical level as a new event. In 18.139
+      seconds the one definition created 274 Agent Runs: 174 completed no-op Runs
+      and 100 more queued Runs. Queue coalescing cannot repair this because the
+      producer has already asserted 274 distinct events. The event lifecycle must
+      include its Agent follow-up, and the Watch owner must stop admitting events
+      when successful exits remain implausibly dense.

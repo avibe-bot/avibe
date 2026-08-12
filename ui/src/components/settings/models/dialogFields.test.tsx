@@ -90,16 +90,14 @@ describe('the class: the models dialogs do not hand-roll a field', () => {
 
   it('sweeps a non-trivial file set', () => {
     expect(files.length).toBeGreaterThan(10);
-    expect(files).toContain('ReplaceKeyDialog.tsx');
+    expect(files).toContain('AddApiKeyDialog.tsx');
   });
 
   /**
    * An upper bound, not an equality: a NEW file that writes its own `<label>` is
-   * the regression, while `menus/AddCustomModelDialog.tsx` is a pre-existing local
-   * copy from another lane (disclosed in the PR, not silently rewritten here) and
-   * this list must not start failing on the day someone deletes it.
+   * the regression. The shared field itself is the only allowed owner.
    */
-  const MAY_WRITE_A_LABEL = ['dialogFields.tsx', join('menus', 'AddCustomModelDialog.tsx')];
+  const MAY_WRITE_A_LABEL = ['dialogFields.tsx'];
 
   it('leaves <label> to the shared field', () => {
     const handRolled = files.filter((f) => /<label\b/.test(read(f)));

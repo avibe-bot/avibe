@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from core.message_output import HARNESS_PROMPT_ECHO_SPEC_KEY
+from core.message_context import SCHEDULED_DISPATCH_METADATA_APPLIED_KEY
 from modules.im import MessageContext
 
 # Reuses the isolated module loader (and controller/session stubs) from the
@@ -75,6 +76,18 @@ class MessageHandlerHarnessEchoTests(unittest.IsolatedAsyncioTestCase):
         # ``AgentService._begin_turn_status``, so a queued turn stays quiet.
         controller.message_dispatcher.emit_harness_prompt.assert_not_awaited()
 
+    async def test_durable_scheduled_text_with_metadata_marker_is_not_decorated_twice(self):
+        controller, handler = _build_handler()
+        context = _scheduled_context(
+            **{SCHEDULED_DISPATCH_METADATA_APPLIED_KEY: True}
+        )
+
+        await handler.handle_scheduled_message(context, "[Current Time: ...]\nFrom: #source\nwork")
+
+        handler._prepend_message_metadata.assert_not_awaited()
+        _agent_name, request = controller.agent_service.requests[0]
+        self.assertEqual(request.message, "[Current Time: ...]\nFrom: #source\nwork")
+
     async def test_subagent_prefixed_prompt_is_staged_unstripped(self):
         """Scenario: MESSAGE-DELIVERY-018
 
@@ -110,6 +123,44 @@ class MessageHandlerHarnessEchoTests(unittest.IsolatedAsyncioTestCase):
         _agent_name, request = controller.agent_service.requests[0]
         self.assertEqual(request.subagent_name, "echo-probe")
         self.assertEqual(request.message, "audit the queue")
+
+    async def test_scheduled_subagent_prefix_routes_before_hidden_provenance(self):
+        controller, handler = _build_handler()
+        del handler._prepend_message_metadata
+        context = _scheduled_context(
+            source_kind="agent",
+            source_actor="source-session",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            agents_dir = project / ".codex" / "agents"
+            agents_dir.mkdir(parents=True)
+            (agents_dir / "echo-probe.toml").write_text(
+                "\n".join(
+                    [
+                        'name = "echo-probe"',
+                        'description = "probe agent"',
+                        'developer_instructions = "probe"',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            handler.session_handler.get_session_info = (
+                lambda context, source="human": (
+                    "base-session",
+                    str(project),
+                    f"base-session:{project}",
+                )
+            )
+
+            await handler.handle_scheduled_message(context, "echo-probe: audit the queue")
+
+        _agent_name, request = controller.agent_service.requests[0]
+        self.assertEqual(request.subagent_name, "echo-probe")
+        self.assertEqual(
+            request.message,
+            "From: #source-session\naudit the queue",
+        )
 
     async def test_human_turn_never_stages_a_prompt(self):
         controller, handler = _build_handler()

@@ -142,6 +142,14 @@ Agent routing model:
   `scope_settings.agent_backend` are not route selectors; new routing must follow
   the selected Vibe Agent and its backend
 
+Persisted-shape rule:
+
+- on-disk artifacts written by any released version are a shipped surface, even
+  behind a feature flag
+- a schema change must load older releases' files via migration or safe
+  degradation (a broken optional-feature section disables that feature and
+  warns; startup never fails), with load fixtures covering the released shapes
+
 Source-of-truth rule:
 
 - when changing persistent product behavior, align with V2 config and current Web UI flows rather than legacy assumptions
@@ -175,22 +183,22 @@ Source-of-truth rule:
 
 ### Review Loop for PRs
 
-- the rules in this section are the self-sufficient baseline for every PR; a
-  fuller implementation-lane standard (roles and authority, contracts,
-  close-out details) lives in the multi-repo workspace at
-  `~/vibe-remote-project/.agents/skills/pr-delivery-loop/SKILL.md` — follow it
-  whenever that workspace file is available in your environment
+- the rules in this section are the self-sufficient baseline for every PR; use
+  the `pr-delivery-loop` skill for every implementation task to apply the fuller
+  standard for roles, authority, contracts, and close-out
 - open PRs non-draft; draft PRs do not trigger the Codex bot review
 - the GitHub Codex bot is the review gate: after every push confirm a review
   of the new head starts, comment `@codex review` if none appears, and treat a
   trigger as accepted only once the bot reacts 👀 to that comment
-- a bot pass is a plain issue comment naming the reviewed commit; close-out
-  requires zero unresolved review threads on the current head, not just a
-  0-finding latest review
+- a bot pass is either an authenticated Codex-bot issue comment with the pass
+  phrase and exact reviewed commit, or a head-bound Codex-bot `+1` captured as
+  new waiter activity after the prior review was terminal; close-out requires
+  zero unresolved review threads across the entire PR, including earlier and
+  outdated heads, not just a 0-finding latest review
 - after opening a PR, use the `background-watch-hook` skill to keep a
-  review-fix loop running until the review passes; use its bundled
-  `wait_pr.py` / `wait_action.py`, never hand-rolled waiters, and create the
-  watch immediately without waiting to be reminded
+  review-fix loop running until the review passes; use that skill's bundled PR
+  and Actions waiters rather than hand-rolling one, and create the watch
+  immediately without waiting to be reminded
 - PR descriptions must name the changed capability, list affected scenario IDs
   when a catalog exists, and state which evidence layers were updated: unit,
   contract, scenario, and residual manual checks
