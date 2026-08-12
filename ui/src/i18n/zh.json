@@ -1317,7 +1317,7 @@
     "memory_repair_failed": "修复记忆索引失败。请查看当前健康状态，准备好后再试。",
     "memory_rebuild_root_busy": "另一个进程正在使用记忆根目录。请稍后重试重建。",
     "memory_operation_in_progress": "记忆操作正在进行中，请等待完成。",
-    "memory_factory_reset_failed": "工厂重置未能完成。记忆数据可能已部分删除；请从「设置 → 记忆」重试。",
+    "memory_factory_reset_failed": "重新初始化记忆未能完成。记忆数据可能已部分删除；请从「设置 → 依赖」重试。",
     "memory_embedding_rebuild_required": "更改 Embedding 端点或模型会重建记忆索引。请确认后继续。"
   },
   "apps": {
@@ -3861,8 +3861,8 @@
       "userId": "用户 ID",
       "noPreview": "没有可用的文本预览。",
       "recorderDegraded": "新的模型调用暂时没有被记录，已有记录仍可查看。",
-      "recorderCorrupt": "模型调用记录已损坏，需要先「清除全部」后才能恢复记录。",
-      "clearAction": "打开「清除全部」",
+      "recorderCorrupt": "模型调用记录已损坏，需要先「清理记忆数据」后才能恢复记录。",
+      "clearAction": "打开「清理记忆数据」",
       "sectionUnavailable": "{{section}}不可用（{{reason}}），其他部分可能仍然完整。",
       "sectionPartial": "{{section}}部分可用（{{reason}}）。",
       "sectionStale": "{{section}}的数据已过期（{{reason}}）。",
@@ -3970,7 +3970,7 @@
         "本地 Memory 队列会在等待处理时保留原始消息和附件副本。如果一次提交需要人工恢复，即使处理停止，这些副本也可能继续保留。",
         "提炼记忆时，消息内容会发送到上面配置的模型接口处理，使用搜索时搜索查询也会发送给相应的服务商。这些接口与 Agent 使用的模型是分开的，对方会按其自身政策处理数据。",
         "Avibe 的本地 Memory 存储保留在这台机器上，其中包括本安装所有用户和项目的脱敏模型调用诊断。诊断仍可能包含敏感对话内容，最多保留 14 天或 5,000 次调用。发送到模型接口的副本不在此本地存储中。关闭记忆只是暂停记录，不会删除已有数据。",
-        "「清除全部」会删除 Avibe 在本机上管理的记忆数据，涵盖本安装所有用户和项目，包括画像、记忆条目和待处理的消息。它无法撤回已发送给模型接口的内容，也不会触碰原始聊天记录。",
+        "「清理记忆数据」会删除 Avibe 在本机上管理的记忆数据，涵盖本安装所有用户和项目，包括画像、记忆条目和待处理的消息。它无法撤回已发送给模型接口的内容，也不会触碰原始聊天记录。",
         "不同平台的账号各自拥有独立的记忆，互不关联。"
       ],
       "clearKeyLabel": "清除已保存的密钥",
@@ -3986,8 +3986,8 @@
       "embeddingIdentityHint": "更改向量模型接口地址或模型会重建本地索引，已有记忆不会丢失。"
     },
     "clear": {
-      "button": "清除全部",
-      "confirmTitle": "清除本安装的全部记忆数据？",
+      "button": "清理记忆数据",
+      "confirmTitle": "清理本安装的记忆数据？",
       "confirmDescription": "这会删除 Avibe 在本机上管理的记忆数据，涵盖本安装所有用户和项目，包括画像、已提炼的记忆和待处理的消息。",
       "removesTitle": "将会删除：",
       "removes": [
@@ -4004,18 +4004,20 @@
         "记忆目录之外的其他数据（如日志和备份）",
         "磁盘上的物理残留（这不是安全擦除）"
       ],
-      "confirmLabel": "清除全部",
+      "confirmLabel": "清理记忆数据",
       "clearing": "清除中…",
       "cleared": "记忆数据已清除。",
       "failed": "清除失败。"
     },
     "factoryReset": {
-      "button": "工厂重置",
-      "retry": "重试工厂重置",
-      "artifactRepairRequired": "固定的记忆运行时无效前无法执行工厂重置。请先在依赖页面修复。",
-      "confirmTitle": "要工厂重置记忆吗？",
+      "button": "重新初始化记忆",
+      "retry": "重试初始化",
+      "artifactRepairRequired": "固定的记忆运行时未安装并就绪前无法重新初始化记忆。请先修复。",
+      "dependenciesHint": "永久替换两个可变记忆根目录；记忆设置和已安装的运行时会保留。",
+      "settingsUnavailable": "记忆设置暂不可用。请重新检查后再初始化。",
+      "confirmTitle": "重新初始化记忆？",
       "confirmDescription": "这会永久移除两个可变记忆根目录；设置和已安装的记忆运行时会保留。",
-      "confirmLabel": "工厂重置",
+      "confirmLabel": "重新初始化记忆",
       "deletesTitle": "只会删除：",
       "deletes": [
         "已安装的记忆根目录（memory）",
@@ -4027,7 +4029,7 @@
         "已固定并安装的记忆运行时",
         "原始 Avibe 聊天记录以及这两个根目录之外的数据"
       ],
-      "resultTitle": "工厂重置结果",
+      "resultTitle": "记忆初始化结果",
       "resultCompleted": "全新的记忆状态已就绪。下方逐根目录报告是最终结果。",
       "rootOutcome": "{{path}}：{{deleted}}",
       "unknownRoot": "未知根目录",
@@ -4035,8 +4037,8 @@
       "partial": "已部分删除",
       "absent": "不存在",
       "retained": "已保留",
-      "completed": "记忆工厂重置已完成。",
-      "failed": "记忆工厂重置失败。请查看结果，准备好后重试。"
+      "completed": "记忆初始化已完成。",
+      "failed": "记忆初始化失败。请查看结果，准备好后重试。"
     },
     "kind": {
       "profile": "画像",

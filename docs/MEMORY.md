@@ -40,7 +40,7 @@ scrubbed, and large fields are truncated or replaced with omission markers.
 Diagnostic payloads can still contain sensitive conversation text; treat access
 to the operator log accordingly.
 
-Rows remain readable until normal expiry or Clear all. Retention runs while
+Rows remain readable until normal expiry or Clear Memory Data. Retention runs while
 Memory is disabled as well: rows expire after 14 days and only the newest 5,000
 calls are kept.
 
@@ -55,7 +55,7 @@ finish before starting another one.
    Memory must be enabled. This restarts the Memory engine without changing
    settings, rebuilding indexes, or deleting retained data. If the call-log
    database is corrupt and recording remains degraded after a restart, use
-   **Clear all** before escalating further.
+   **Clear Memory Data** before escalating further.
 2. **Repair index**: Use it when restarting does not clear index health
    warnings or pending work. The **Repair index** action is shown only when
    Memory is enabled and `repair_available` is true (the installed Memory
@@ -87,25 +87,26 @@ finish before starting another one.
    cleared. Fix the runtime problem, then select **Restart engine**;
    **Retry rebuild** may no longer be offered.
 
-### Clear all
+### Clear Memory Data
 
-Before Factory reset, use **Clear all** when retained Memory data or the
-call-log database is corrupt. Clear all creates and verifies a private snapshot
+Before Reinitialize Memory, use **Clear Memory Data** when retained Memory data or the
+call-log database is corrupt. Clear Memory Data creates and verifies a private snapshot
 of the queue, provider data, call log, and pinned attachments, then removes only
 those four Avibe-owned surfaces under a maintenance journal. It does not delete
 the `memory` or `state/memory` roots themselves, original Avibe chats, copies
 already sent to providers, or data outside those surfaces (including logs,
 backups, and user-created snapshots); it is not a secure wipe.
 
-If Clear all is interrupted, Processing Record shows explicit **Resume Clear**
+If Clear Memory Data is interrupted, Processing Record shows explicit **Resume Clear**
 and **Abort and restore** actions for that operation. **Resume Clear** continues
 the journaled deletion; **Abort and restore** restores every surface from the
 verified snapshot and is available only after the initial snapshot is complete.
 Nothing resumes automatically, and Memory remains fenced until one action
 reaches a terminal result.
 
-4. **Factory reset**: Use it only as a last resort when the earlier actions
-   cannot recover Memory. It is available under **Settings > Memory** when the
+4. **Reinitialize Memory**: Use it only as a last resort when the earlier actions
+   cannot recover Memory. It is available on the Memory Runtime card under
+   **Settings > Dependencies** when the
    pinned, installed Memory artifact is valid. It permanently deletes exactly
    the installed Memory root (`memory`) and the mutable Memory state root
    (`state/memory`). Only a successful cutover starts fresh, usable Memory. It
@@ -113,7 +114,7 @@ reaches a terminal result.
    artifact, original Avibe chats, and data outside those two roots. If engine
    or sidecar activation fails after deletion, the old contents under `memory`
    and `state/memory` stay deleted, but construction of the fresh runtime may
-   have recreated empty or partial roots. Factory reset reports a visible status
+   have recreated empty or partial roots. Reinitialize Memory reports a visible status
    for each root independently: **deleted**, **partially deleted**, **absent**,
    or **retained**. Settings also shows a generic failure status, not a
    per-root error or reason; read each root's status independently rather than
@@ -125,17 +126,17 @@ reaches a terminal result.
    processing settings under **Settings > Memory** while the factory-reset
    recovery intent is pending. Endpoint repair does not fix a retained or
    partially deleted root. After correcting the applicable cause, select
-   **Retry factory reset** to continue recovery.
+   **Retry initialization** to continue recovery.
    Memory stays fenced and unavailable while the factory-reset recovery intent
    is pending.
    Retry is idempotent: it continues any remaining deletion while preserving
    the truthful outcome reported for each root.
 
-### Factory reset
+### Reinitialize Memory
 
-When Memory state is corrupt beyond rebuild, use **Factory reset** in Settings > Memory. The action is available only while the pinned `memory-runtime` artifact is installed and ready; repair that artifact from Settings > Dependencies first when it is invalid. The confirmation pauses for five seconds and names the exact two mutable roots that will be removed: `<effective_home>/memory` and `<effective_home>/state/memory`.
+When Memory state is corrupt beyond rebuild, use **Reinitialize Memory** beside Repair on the Memory Runtime card in Settings > Dependencies. The action remains visible but unavailable until the pinned `memory-runtime` artifact is installed and ready; repair that artifact first when it is invalid. The confirmation pauses for five seconds and names the exact two mutable roots that will be removed: `<effective_home>/memory` and `<effective_home>/state/memory`.
 
-Factory reset keeps Memory settings, credentials, and the installed artifact. The request waits for its final result and reports each root independently, so a partial deletion is shown as partial rather than claimed as a clean success. A durable `factory_reset` recovery intent makes Retry idempotent after a crash; while that intent is pending, other Memory controls remain disabled and the action is labeled **Retry factory reset**. Factory reset is not a secure wipe and does not remove original chats or copies already sent to remote endpoints.
+Reinitialize Memory keeps Memory settings, credentials, and the installed artifact. The request waits for its final result and reports each root independently, so a partial deletion is shown as partial rather than claimed as a clean success. A durable internal `factory_reset` recovery intent makes retry idempotent after a crash; while that intent is pending, other Memory controls remain disabled and the action is labeled **Retry initialization**. Reinitialize Memory is not a secure wipe and does not remove original chats or copies already sent to remote endpoints.
 
 ## Capture delivery and flush coordination
 
