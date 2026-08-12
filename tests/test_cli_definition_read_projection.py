@@ -20,6 +20,7 @@ PAST = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
 CANONICAL_FIELDS = (
     "lifecycle_state",
     "lifecycle_detail",
+    "lifecycle_finished_at",
     "next_run_at",
     "waiting_since",
     "running_since",

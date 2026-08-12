@@ -78,6 +78,7 @@ describe('lifecycleLabel', () => {
     ['error', 'harness.lifecycle.error'],
     [null, 'harness.lifecycle.finished'],
     ['missed', 'harness.lifecycle.missed'],
+    ['canceled', 'harness.lifecycle.canceled'],
   ] as const;
 
   it.each(outcomes)('maps finished detail %s to %s', (detail, expected) => {
@@ -111,6 +112,7 @@ describe('lifecycleLabel', () => {
       'timeout',
       'error',
       'missed',
+      'canceled',
       'unknown',
     ]);
   });
@@ -736,18 +738,39 @@ describe('definitionRowLine', () => {
   it.each([
     [
       'an executed one-shot',
-      { schedule_type: 'at', run_at: at(-2 * DAY), last_run_at: at(-DAY), updated_at: at(-3 * DAY) },
+      {
+        schedule_type: 'at',
+        run_at: at(-2 * DAY),
+        lifecycle_finished_at: at(-DAY),
+        last_run_at: at(-3 * DAY),
+        updated_at: at(-3 * DAY),
+      },
       at(-DAY),
     ],
     [
-      'a one-shot with no recorded run or finish',
+      'a missed one-shot with a retirement transition',
       { schedule_type: 'at', run_at: at(-DAY), retired_at: at(-HOUR), updated_at: at(-3 * DAY) },
-      at(-HOUR),
+      null,
     ],
     ['a retired watch', { mode: 'once', last_finished_at: at(-DAY), updated_at: at(-3 * DAY) }, at(-DAY)],
     ['a cron task', { cron: '0 * * * *', last_run_at: at(-HOUR), updated_at: at(-3 * DAY) }, at(-HOUR)],
   ])('dates finished %s by the exact available fact', (_name, row, expected) => {
     expect(definitionStateSince(row, 'finished')).toBe(expected);
+  });
+
+  it('does not borrow an old manual run time for an ownerless consumed one-shot', () => {
+    expect(
+      definitionStateSince(
+        {
+          schedule_type: 'at',
+          lifecycle_detail: null,
+          last_run_at: at(-3 * DAY),
+          retired_at: at(-HOUR),
+          updated_at: at(-MINUTE),
+        },
+        'finished',
+      ),
+    ).toBeNull();
   });
 
   it('dates a missed one-shot only from its retirement transition', () => {

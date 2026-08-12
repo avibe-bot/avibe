@@ -1273,6 +1273,7 @@ def test_task_run_missing_id_returns_guidance(tmp_path: Path) -> None:
 
 def test_task_list_hides_completed_one_shots_by_default(tmp_path: Path, capsys) -> None:
     store = cli.ScheduledTaskStore()
+    requests = cli.TaskExecutionStore()
     store.add_task(
         session_key="slack::channel::C123",
         prompt="recurring",
@@ -1287,11 +1288,17 @@ def test_task_list_hides_completed_one_shots_by_default(tmp_path: Path, capsys) 
         run_at="2026-03-31T09:00:00+08:00",
         timezone_name="Asia/Shanghai",
     )
-    done.enabled = False
-    done.retired_at = "2026-03-31T09:00:00+08:00"
-    done.retirement_reason = "schedule_consumed"
-    store.upsert_task(done)
-    store.mark_task_result(done.id, error=None)
+    done_run = requests.enqueue_task_run(
+        done.id,
+        source_kind="scheduler",
+        task=done,
+        expected_run_at=done.run_at,
+        expected_timezone=done.timezone,
+    )
+    assert done_run is not None
+    claimed_done = requests.claim(done_run.id)
+    assert claimed_done is not None
+    assert requests.complete(claimed_done, ok=True) == "succeeded"
     failed = store.add_task(
         session_key="slack::channel::C123",
         prompt="failed one-shot",
@@ -1299,11 +1306,19 @@ def test_task_list_hides_completed_one_shots_by_default(tmp_path: Path, capsys) 
         run_at="2026-03-31T10:00:00+08:00",
         timezone_name="Asia/Shanghai",
     )
-    failed.enabled = False
-    failed.retired_at = "2026-03-31T10:00:00+08:00"
-    failed.retirement_reason = "schedule_consumed"
-    store.upsert_task(failed)
-    store.mark_task_result(failed.id, error="delivery failed")
+    failed_run = requests.enqueue_task_run(
+        failed.id,
+        source_kind="scheduler",
+        task=failed,
+        expected_run_at=failed.run_at,
+        expected_timezone=failed.timezone,
+    )
+    assert failed_run is not None
+    claimed_failed = requests.claim(failed_run.id)
+    assert claimed_failed is not None
+    assert requests.complete(
+        claimed_failed, ok=False, error="delivery failed"
+    ) == "failed"
 
     with patch("vibe.cli._task_store", return_value=store):
         result = cli.cmd_task_list()

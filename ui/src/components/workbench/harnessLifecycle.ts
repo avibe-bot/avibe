@@ -10,7 +10,7 @@ import { formatElapsed } from '../../lib/agentGraph';
 // ---------------------------------------------------------------------------
 
 export type HarnessLifecycleState = 'running' | 'waiting' | 'paused' | 'finished';
-export type HarnessLifecycleDetail = 'normal' | 'timeout' | 'error' | 'missed';
+export type HarnessLifecycleDetail = 'normal' | 'timeout' | 'error' | 'missed' | 'canceled';
 
 // The filter chips, and the lifecycle states each one selects.
 //
@@ -107,7 +107,7 @@ export function lifecycleLabel(
 }
 
 const STATES = new Set<string>(['running', 'waiting', 'paused', 'finished']);
-export const LIFECYCLE_DETAILS = ['normal', 'timeout', 'error', 'missed'] as const;
+export const LIFECYCLE_DETAILS = ['normal', 'timeout', 'error', 'missed', 'canceled'] as const;
 const DETAILS = new Set<string>(LIFECYCLE_DETAILS);
 
 // ---------------------------------------------------------------------------
@@ -323,6 +323,7 @@ export type HarnessDefinitionFacts = {
   last_started_at?: string | null;
   last_finished_at?: string | null;
   retired_at?: string | null;
+  lifecycle_finished_at?: string | null;
   last_error?: string | null;
   updated_at?: string | null;
   // Derived server-side from the definition's own run history, because
@@ -537,8 +538,12 @@ export function definitionStateSince(
     // A missed one-shot may carry results from an earlier manual run. Its
     // retirement transition is the only clock that owns the Missed state.
     case 'finished':
-      if (row.lifecycle_detail === 'missed') return row.retired_at ?? null;
+      if (row.lifecycle_detail === 'missed') return row.lifecycle_finished_at ?? row.retired_at ?? null;
+      if (row.schedule_type === 'at') {
+        return row.lifecycle_finished_at ?? null;
+      }
       return (
+        row.lifecycle_finished_at ??
         row.last_finished_at ??
         row.last_run_at ??
         row.retired_at ??

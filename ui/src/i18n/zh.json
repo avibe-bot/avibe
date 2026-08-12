@@ -3307,6 +3307,7 @@
       "timeout": "已超时",
       "error": "出错结束",
       "missed": "已错过",
+      "canceled": "已取消",
       "unknown": "未知"
     },
     "kind": {

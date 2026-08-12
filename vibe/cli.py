@@ -1949,6 +1949,7 @@ def _task_payload(task, *, brief: bool = False):
 _CANONICAL_DEFINITION_FIELDS = (
     "lifecycle_state",
     "lifecycle_detail",
+    "lifecycle_finished_at",
     "next_run_at",
     "waiting_since",
     "running_since",
@@ -1995,6 +1996,8 @@ def _task_projection_state(task: Mapping[str, object]) -> str:
     if lifecycle_state in {"waiting", "running"}:
         return "active"
     if lifecycle_state == "finished":
+        if task.get("lifecycle_detail") == "canceled":
+            return "canceled"
         return (
             "failed"
             if task.get("lifecycle_detail") in {"timeout", "error", "missed"}

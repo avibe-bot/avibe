@@ -409,7 +409,7 @@ def test_only_a_finished_row_reports_an_ending(state) -> None:
     assert definition_lifecycle_detail(lifecycle_state=state, last_exit_code=1, last_error="boom") is None
 
 
-def test_a_missed_one_shot_without_run_evidence_claims_no_ending() -> None:
+def test_a_legacy_one_shot_without_owner_evidence_claims_no_ending() -> None:
     assert (
         definition_lifecycle_detail(
             lifecycle_state="finished",
@@ -428,7 +428,58 @@ def test_a_missed_one_shot_without_run_evidence_claims_no_ending() -> None:
             last_exit_code=None,
             last_error=None,
         )
-        == "normal"
+        is None
+    )
+
+
+def test_legacy_consumed_one_shot_without_owner_stays_visible_in_compact(store) -> None:
+    """Unknown legacy ownership must not be backfilled into a successful ending."""
+
+    _task(
+        store,
+        "legacy-consumed",
+        schedule_type="at",
+        cron=None,
+        run_at=PAST,
+        enabled=False,
+        retired_at=NOW,
+        retirement_reason=TASK_RETIREMENT_SCHEDULE_CONSUMED,
+        last_run_at=NOW,
+        last_run_id=None,
+    )
+
+    row = store.get_scheduled_task("legacy-consumed")
+    assert row["lifecycle_detail"] is None
+    assert row["last_run_at"] is None
+    compact = store.list_scheduled_tasks_page(
+        page_request=PageRequest(limit=20),
+        include_successful_finished=False,
+    )
+    assert {item["id"] for item in compact.items} == {"legacy-consumed"}
+
+
+@pytest.mark.parametrize(
+    ("status", "exit_code", "timed_out", "expected"),
+    [
+        ("succeeded", None, None, "normal"),
+        ("canceled", None, None, "canceled"),
+        ("failed", 1, False, "error"),
+        ("failed", 124, True, "timeout"),
+    ],
+)
+def test_consumed_one_shot_ending_comes_from_its_owner_run(
+    status, exit_code, timed_out, expected
+) -> None:
+    assert (
+        definition_lifecycle_detail(
+            lifecycle_state="finished",
+            definition_type="scheduled",
+            retirement_reason=TASK_RETIREMENT_SCHEDULE_CONSUMED,
+            terminal_run_status=status,
+            terminal_run_exit_code=exit_code,
+            terminal_run_timed_out=timed_out,
+        )
+        == expected
     )
 
 
@@ -920,7 +971,11 @@ def test_a_past_one_shot_without_a_recovery_fact_stays_nonterminal(store) -> Non
     ) is None
 
     assert store.retire_missed_one_shot(
-        "missed-it", expected_run_at=PAST, expected_timezone="UTC", retired_at=NOW
+        "missed-it",
+        expected_run_at=PAST,
+        expected_timezone="UTC",
+        expected_updated_at=NOW,
+        retired_at=NOW,
     )
     row = store.get_scheduled_task("missed-it")
     assert row["lifecycle_state"] == "finished"

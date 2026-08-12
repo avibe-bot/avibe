@@ -4292,8 +4292,11 @@ scenarios:
     backend: shared
     # A manual early run leaves the future schedule armed. The scheduler writes
     # retired_at and schedule_consumed in the same transaction as its Run; the
-    # retired one-shot requires a new schedule before it can be resumed, and a
-    # late result from the old Run cannot retire that replacement schedule.
+    # definition points at that exact consuming Run for terminal status, time, and
+    # compact-list success. Registered schedule identity and definition revision
+    # reject a stale callback after an edit or a switch to cron; the retired
+    # one-shot requires a new schedule before it can be resumed, and a late result
+    # from the old Run cannot retire that replacement schedule.
     test: tests/test_scheduled_tasks.py::test_hfr_477_scheduler_consumes_one_shot_atomically_but_manual_run_does_not
   - id: HFR-478
     name: missed one-shot recovery records the exact observed schedule
@@ -4301,8 +4304,10 @@ scenarios:
     kind: recovery
     layer: contract
     backend: shared
-    # APScheduler's misfire event records schedule_missed only while run_at and
-    # timezone still match; an event from a replaced schedule cannot retire it.
+    # APScheduler's physical job generation retains its registered run_at,
+    # timezone, and definition revision. The misfire records schedule_missed only
+    # while all still match an enabled at schedule; an event from a replacement
+    # that resolves to the same instant still cannot retire it.
     test: tests/test_scheduled_tasks.py::test_hfr_478_misfire_retires_only_the_schedule_apscheduler_observed
   - id: HFR-479
     name: Watch retirement outcome has one cycle owner

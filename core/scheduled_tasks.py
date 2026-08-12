@@ -553,6 +553,7 @@ class TaskExecutionResult:
     exit_code: Optional[int] = None
     stdout: Optional[str] = None
     stderr: Optional[str] = None
+    timed_out: Optional[bool] = None
     #: The Agent turn a failed ``--on-failure agent`` command fire queued, already
     #: durable when this is set. It rides the run row's metadata so the settle that
     #: transitions the run also records that its failure has a REPORT, which is what
@@ -1061,6 +1062,7 @@ class ScheduledTask:
     created_at: str = field(default_factory=_utc_now_iso)
     updated_at: str = field(default_factory=_utc_now_iso)
     last_run_at: Optional[str] = None
+    last_run_id: Optional[str] = None
     retired_at: Optional[str] = None
     retirement_reason: Optional[str] = None
     last_error: Optional[str] = None
@@ -1113,6 +1115,7 @@ class ScheduledTask:
             created_at=str(payload.get("created_at") or _utc_now_iso()),
             updated_at=str(payload.get("updated_at") or _utc_now_iso()),
             last_run_at=payload.get("last_run_at"),
+            last_run_id=payload.get("last_run_id"),
             retired_at=payload.get("retired_at"),
             retirement_reason=payload.get("retirement_reason"),
             last_error=payload.get("last_error"),
@@ -1733,6 +1736,7 @@ class ScheduledTaskStore:
         if (schedule_type, run_at, timezone_name) != previous_schedule:
             task.retired_at = None
             task.retirement_reason = None
+            task.last_run_id = None
         if update_command_fields:
             # Gated like ``cwd``: an edit that says nothing about the command must not
             # clear it, and ``last_exit_code`` is runtime state no edit ever rewrites.
@@ -1765,6 +1769,7 @@ class ScheduledTaskStore:
         *,
         expected_run_at: str,
         expected_timezone: str,
+        expected_updated_at: str,
     ) -> bool:
         """Retire the exact one-shot schedule APScheduler reported missed."""
 
@@ -1776,6 +1781,7 @@ class ScheduledTaskStore:
             or task.retired_at is not None
             or task.run_at != expected_run_at
             or task.timezone != expected_timezone
+            or task.updated_at != expected_updated_at
         ):
             return False
         if self._sqlite is not None:
@@ -1783,6 +1789,7 @@ class ScheduledTaskStore:
                 task_id,
                 expected_run_at=expected_run_at,
                 expected_timezone=expected_timezone,
+                expected_updated_at=expected_updated_at,
             )
             if landed:
                 self.load()
@@ -1790,6 +1797,7 @@ class ScheduledTaskStore:
         task.enabled = False
         task.retired_at = _utc_now_iso()
         task.retirement_reason = TASK_RETIREMENT_SCHEDULE_MISSED
+        task.last_run_id = None
         task.updated_at = task.retired_at
         self._save()
         return True
@@ -2383,6 +2391,7 @@ class TaskExecutionStore:
         suppress_scheduler_successor: bool = False,
         expected_run_at: Optional[str] = None,
         expected_timezone: Optional[str] = None,
+        expected_updated_at: Optional[str] = None,
     ) -> Optional[TaskExecutionRequest]:
         if task is None:
             request = TaskExecutionRequest(
@@ -2428,6 +2437,11 @@ class TaskExecutionStore:
             suppress_scheduler_successor=suppress_scheduler_successor,
             expected_run_at=expected_run_at,
             expected_timezone=expected_timezone,
+            expected_updated_at=(
+                expected_updated_at
+                if expected_updated_at is not None
+                else task.updated_at if expected_run_at is not None else None
+            ),
         )
 
     def enqueue_definition_run(
@@ -2449,6 +2463,7 @@ class TaskExecutionStore:
         suppress_scheduler_successor: bool = False,
         expected_run_at: Optional[str] = None,
         expected_timezone: Optional[str] = None,
+        expected_updated_at: Optional[str] = None,
     ) -> Optional[TaskExecutionRequest]:
         request = TaskExecutionRequest(
             id=uuid4().hex[:12],
@@ -2480,6 +2495,7 @@ class TaskExecutionStore:
             suppress_scheduler_successor=suppress_scheduler_successor,
             expected_run_at=expected_run_at,
             expected_timezone=expected_timezone,
+            expected_updated_at=expected_updated_at,
         )
         if snapshot is None:
             return None
@@ -3344,6 +3360,7 @@ class TaskExecutionStore:
         exit_code: Optional[int] = None,
         stdout: Optional[str] = None,
         stderr: Optional[str] = None,
+        timed_out: Optional[bool] = None,
         escalation_run_id: Optional[str] = None,
     ) -> Optional[str]:
         """Settle one claimed request.
@@ -3383,6 +3400,8 @@ class TaskExecutionStore:
             extra_metadata["interrupt_reason"] = interrupt_reason
         if failure_code:
             extra_metadata["failure_code"] = failure_code
+        if timed_out is not None:
+            extra_metadata[COMMAND_TIMED_OUT_METADATA_KEY] = bool(timed_out)
         if escalation_run_id:
             extra_metadata["escalation_run_id"] = escalation_run_id
         if self._sqlite is not None:
@@ -3431,7 +3450,7 @@ class TaskExecutionStore:
             payload["stdout"] = stdout
         if stderr is not None:
             payload["stderr"] = stderr
-        if interrupt_reason or failure_code or escalation_run_id:
+        if interrupt_reason or failure_code or timed_out is not None or escalation_run_id:
             # The file backend has no owed-notice machinery at all, so this records the
             # class where its only reader — an operator looking at the completed JSON —
             # can see it, rather than dropping the one fact the caller went to the
@@ -3443,6 +3462,11 @@ class TaskExecutionStore:
                 **(existing if isinstance(existing, dict) else {}),
                 **({"interrupt_reason": interrupt_reason} if interrupt_reason else {}),
                 **({"failure_code": failure_code} if failure_code else {}),
+                **(
+                    {COMMAND_TIMED_OUT_METADATA_KEY: bool(timed_out)}
+                    if timed_out is not None
+                    else {}
+                ),
                 **({"escalation_run_id": escalation_run_id} if escalation_run_id else {}),
             }
         with tempfile.NamedTemporaryFile(
@@ -3920,6 +3944,11 @@ class ScheduledTaskService:
         # be torn down by name: cancelling the watch no longer stops it.
         self._notice_drain_task: Optional["asyncio.Task[Any]"] = None
         self._job_signatures: Dict[str, tuple[Any, ...]] = {}
+        # Logical Task id -> the physical APScheduler job generation. One-shot
+        # job ids are unique per registration so a queued event from a replaced
+        # DateTrigger cannot be mistaken for its successor.
+        self._job_ids: Dict[str, str] = {}
+        self._one_shot_job_identities: Dict[str, tuple[str, str, str, str]] = {}
         self._running = False
         self._watch_store_restart_count = 0
         # Claimed requests currently executing, keyed by request id, so a
@@ -5437,6 +5466,7 @@ class ScheduledTaskService:
         if not self._owns_service_instance():
             return
         desired_ids = set()
+        desired_job_ids = set()
         for task in self.store.list_tasks():
             if not task.enabled or task.retired_at is not None:
                 continue
@@ -5450,17 +5480,26 @@ class ScheduledTaskService:
                 task.session_key,
                 task.prompt,
                 task.enabled,
+                task.updated_at if task.schedule_type == "at" else None,
             )
-            if self._job_signatures.get(task.id) == signature and self.scheduler.get_job(task.id):
+            job_id = self._job_ids.get(task.id, task.id)
+            if self._job_signatures.get(task.id) == signature and self.scheduler.get_job(job_id):
+                desired_job_ids.add(job_id)
                 continue
-            if self.scheduler.get_job(task.id):
-                self.scheduler.remove_job(task.id)
+            if self.scheduler.get_job(job_id):
+                self.scheduler.remove_job(job_id)
+            self._one_shot_job_identities.pop(job_id, None)
             try:
                 trigger = self._build_trigger(task)
+                job_id = (
+                    f"{task.id}:at:{uuid4().hex[:12]}"
+                    if task.schedule_type == "at"
+                    else task.id
+                )
                 self.scheduler.add_job(
                     self._run_task,
                     trigger=trigger,
-                    id=task.id,
+                    id=job_id,
                     replace_existing=True,
                     coalesce=True,
                     max_instances=1,
@@ -5468,18 +5507,34 @@ class ScheduledTaskService:
                         task.id,
                         task.run_at if task.schedule_type == "at" else None,
                         task.timezone if task.schedule_type == "at" else None,
+                        task.updated_at if task.schedule_type == "at" else None,
+                        job_id,
                     ],
                 )
             except Exception as exc:
                 self._job_signatures.pop(task.id, None)
+                self._job_ids.pop(task.id, None)
                 logger.error("Failed to reconcile scheduled task %s: %s", task.id, exc, exc_info=True)
                 continue
+            self._job_ids[task.id] = job_id
+            desired_job_ids.add(job_id)
+            if task.schedule_type == "at" and task.run_at:
+                self._one_shot_job_identities[job_id] = (
+                    task.id,
+                    task.run_at,
+                    task.timezone,
+                    task.updated_at,
+                )
             self._job_signatures[task.id] = signature
 
         for job in list(self.scheduler.get_jobs()):
-            if job.id not in desired_ids:
+            if job.id not in desired_job_ids:
                 self.scheduler.remove_job(job.id)
-                self._job_signatures.pop(job.id, None)
+                self._one_shot_job_identities.pop(job.id, None)
+        for task_id in set(self._job_ids) - desired_ids:
+            job_id = self._job_ids.pop(task_id)
+            self._one_shot_job_identities.pop(job_id, None)
+            self._job_signatures.pop(task_id, None)
 
     def _build_trigger(self, task: ScheduledTask):
         tz = ZoneInfo(task.timezone)
@@ -5504,53 +5559,62 @@ class ScheduledTaskService:
         an edit cannot terminalize the replacement definition.
         """
 
-        task = self.store.refresh_task(str(event.job_id))
-        if (
-            task is None
-            or task.schedule_type != "at"
-            or not task.enabled
-            or task.retired_at is not None
-            or not task.run_at
-        ):
+        job_id = str(event.job_id)
+        identity = self._one_shot_job_identities.get(job_id)
+        if identity is None:
             return
+        task_id, expected_run_at, expected_timezone, expected_updated_at = identity
         try:
-            scheduled = resolve_run_at(task.run_at, task.timezone)
+            scheduled = resolve_run_at(expected_run_at, expected_timezone)
         except Exception:
             logger.warning(
-                "Ignoring misfire for task %s with an invalid stored run_at",
-                task.id,
+                "Ignoring misfire for task %s with an invalid registered run_at",
+                task_id,
                 exc_info=True,
             )
             return
         if scheduled != event.scheduled_run_time:
             logger.info(
-                "Ignoring stale misfire for task %s: event=%s current=%s",
-                task.id,
+                "Ignoring stale misfire for task %s: event=%s registered=%s",
+                task_id,
                 event.scheduled_run_time,
                 scheduled,
             )
             return
+        self.store.refresh_task(task_id)
         if self.store.retire_missed_one_shot(
-            task.id,
-            expected_run_at=task.run_at,
-            expected_timezone=task.timezone,
+            task_id,
+            expected_run_at=expected_run_at,
+            expected_timezone=expected_timezone,
+            expected_updated_at=expected_updated_at,
         ):
-            self._job_signatures.pop(task.id, None)
+            self._job_signatures.pop(task_id, None)
             _publish_task_definitions_updated()
+        if self._job_ids.get(task_id) == job_id:
+            self._job_ids.pop(task_id, None)
+            self._job_signatures.pop(task_id, None)
+        self._one_shot_job_identities.pop(job_id, None)
 
     async def _run_task(
         self,
         task_id: str,
         expected_run_at: Optional[str] = None,
         expected_timezone: Optional[str] = None,
+        expected_updated_at: Optional[str] = None,
+        expected_job_id: Optional[str] = None,
     ) -> None:
         if not self._owns_service_instance():
+            return
+        if expected_job_id is not None and self._job_ids.get(task_id) != expected_job_id:
             return
         task = await self._run_runtime_sync(self.store.refresh_task, task_id)
         if not task or not task.enabled:
             return
         if expected_run_at is not None and (
-            task.run_at != expected_run_at or task.timezone != expected_timezone
+            task.schedule_type != "at"
+            or task.run_at != expected_run_at
+            or task.timezone != expected_timezone
+            or task.updated_at != expected_updated_at
         ):
             return
         queued = await self._run_runtime_sync(
@@ -5561,9 +5625,10 @@ class ScheduledTaskService:
             suppress_scheduler_successor=True,
             expected_run_at=expected_run_at,
             expected_timezone=expected_timezone,
+            expected_updated_at=expected_updated_at,
         )
         if queued is not None:
-            if task.schedule_type == "at":
+            if expected_run_at is not None:
                 # The SQLite enqueue atomically retired the definition with this
                 # Run. Reload the process mirror and wake open Workbench pages.
                 await self._run_runtime_sync(self.store.load)
@@ -7893,6 +7958,7 @@ class ScheduledTaskService:
         exit_code: Optional[int] = None
         stdout: Optional[str] = None
         stderr: Optional[str] = None
+        timed_out: Optional[bool] = None
         #: The already-durable escalation turn a failed ``--on-failure agent`` command
         #: fire queued, or ``None``. Recorded on THIS run's metadata by ``complete()``,
         #: which is what stops the same failure being reported twice.
@@ -7937,6 +8003,7 @@ class ScheduledTaskService:
                 exit_code = result.exit_code
                 stdout = result.stdout
                 stderr = result.stderr
+                timed_out = result.timed_out
                 escalation_run_id = result.escalation_run_id
             elif request.request_type in {
                 "hook_send",
@@ -8108,6 +8175,7 @@ class ScheduledTaskService:
                     exit_code=exit_code,
                     stdout=stdout,
                     stderr=stderr,
+                    timed_out=timed_out,
                     escalation_run_id=escalation_run_id,
                 )
                 # A STOP THAT NEVER BECAME A ``CancelledError``. ``cancel_run`` can
@@ -8506,6 +8574,7 @@ class ScheduledTaskService:
             exit_code=exit_code,
             stdout=stdout_value,
             stderr=stderr_value,
+            timed_out=timed_out,
             escalation_run_id=escalation_run_id,
         )
 
@@ -9278,8 +9347,10 @@ class ScheduledTaskService:
             return
         if retire_one_shot:
             try:
-                if self.scheduler.get_job(task.id) is not None:
-                    self.scheduler.remove_job(task.id)
+                job_id = self._job_ids.pop(task.id, task.id)
+                if self.scheduler.get_job(job_id) is not None:
+                    self.scheduler.remove_job(job_id)
+                self._one_shot_job_identities.pop(job_id, None)
                 self._job_signatures.pop(task.id, None)
             except Exception:
                 logger.exception(
