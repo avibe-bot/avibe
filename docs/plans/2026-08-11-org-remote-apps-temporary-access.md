@@ -1,11 +1,13 @@
-# Temporary Organization Remote App Access
+# Temporary Organization Remote Runtime Access
 
 ## Decision
 
-Until the authorization model in [#1313](https://github.com/avibe-bot/avibe/issues/1313)
-ships, every authenticated active Organization member may use Apps, Files,
-Editor, Terminal, and Show Pages through remote access. This rollout rule is
-not projected as a capability and does not add an App ACL.
+The original Apps-only decision in this document was superseded by
+[#1343](https://github.com/avibe-bot/avibe/issues/1343). Until granular runtime
+capabilities and resource ACLs ship, every authenticated active Organization
+member may use the complete Avibe runtime through remote access. This rollout
+rule is not projected as a capability and does not grant durable resource
+ownership.
 
 ## Open Surfaces
 
@@ -14,12 +16,20 @@ not projected as a capability and does not add an App ACL.
 - Terminal WebSocket connections and subject-scoped session deletion
 - authenticated Show Page inventory, content, mutations, Dock pins, events,
   annotations, icons, and HMR
+- Harness, Agent definitions, Skills, Vault, Settings, service control, Model
+  Hub, Project administration, and the other explicit runtime routes listed in
+  the temporary active-Organization-member policy
+
+Vault access is intentional for this temporary rollout. Active Organization
+members may reach secret, grant, approval, signing, VMK, and audit operations;
+[#1343](https://github.com/avibe-bot/avibe/issues/1343) records this accepted
+risk and the requirement to replace it with granular authorization.
 
 ## Retained Boundaries
 
 - Organization management keeps its existing Cloud authorization boundary.
-- Config and service control, Harness, Vault, and unknown local-only routes
-  remain fail-closed.
+- Unknown routes and control-plane routes outside the explicit temporary
+  runtime matrix remain fail-closed.
 - Terminal requests still require an exact allowed Origin, a signed remote
   session, active Organization membership, authorization refresh, and
   subject-scoped session IDs.
@@ -31,6 +41,7 @@ not projected as a capability and does not add an App ACL.
 
 ## Removal
 
-Replace the exact temporary HTTP/WebSocket policy and Show Page resource-context
-bypass when #1313 defines and implements per-App capabilities and resource ACLs.
-The replacement must preserve fail-closed handling for new or unknown endpoints.
+Replace the exact temporary HTTP/WebSocket and resource-context bypasses as
+[#1343](https://github.com/avibe-bot/avibe/issues/1343) defines and implements
+granular capabilities and resource ACLs. The replacement must preserve
+fail-closed handling for new or unknown endpoints.
