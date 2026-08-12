@@ -116,6 +116,7 @@
   },
   "nav": {
     "dashboard": "控制台",
+    "organization": "组织",
     "appLibrary": "应用库",
     "channels": "群组",
     "users": "私聊",
