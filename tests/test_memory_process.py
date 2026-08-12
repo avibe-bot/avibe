@@ -2262,6 +2262,12 @@ def _inject_real_rebuild_process(
     monkeypatch: pytest.MonkeyPatch,
     host: _FakeProcessHost,
 ) -> None:
+    async def preflight(
+        self: memory_runtime.MemoryRuntime,
+        config: MemoryConfig | None = None,
+    ) -> dict[str, bool]:
+        return {"ok": True}
+
     def rebuild_process(
         python,
         *,
@@ -2279,6 +2285,7 @@ def _inject_real_rebuild_process(
             _host=host,
         )
 
+    monkeypatch.setattr(memory_runtime.MemoryRuntime, "preflight", preflight)
     monkeypatch.setattr(memory_runtime, "EverOSRebuildProcess", rebuild_process)
 
 
