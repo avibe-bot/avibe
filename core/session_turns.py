@@ -907,33 +907,78 @@ class SessionTurnManager:
             if str(sink.get("turn_token") or "") == turn_id:
                 self._append_accepted_agent_run_ids(sink, run_ids)
 
-    def owned_agent_run_ids(self) -> set[str]:
-        """Run ids owned by a durable Delivery or a live process projection."""
+    def _project_owned_agent_run_ids(
+        self,
+        candidate_run_ids: Optional[set[str]] = None,
+    ) -> set[str]:
+        """Read Run ownership without reconciling or settling lifecycle state."""
+
+        candidates = (
+            {str(run_id) for run_id in candidate_run_ids if str(run_id or "").strip()}
+            if candidate_run_ids is not None
+            else None
+        )
+
+        def _eligible(run_ids: set[str]) -> set[str]:
+            return run_ids if candidates is None else run_ids & candidates
+
         owned: set[str] = set()
         for turn in list(self.in_flight.values()):
-            owned |= self._agent_run_ids_from_spec(getattr(turn.context, "platform_specific", None))
+            owned |= _eligible(
+                self._agent_run_ids_from_spec(
+                    getattr(turn.context, "platform_specific", None)
+                )
+            )
         for sink in list(self.active_turn_sinks.values()):
-            owned |= self._agent_run_ids_from_spec(sink)
-        if self._durable_schema_available():
-            self._reconcile_terminal_agent_runs()
+            owned |= _eligible(self._agent_run_ids_from_spec(sink))
+        if self._durable_schema_available() and candidates != set():
+            stmt = (
+                select(agent_runs.c.id)
+                .join(
+                    delivery_rows,
+                    delivery_rows.c.id == agent_runs.c.delivery_id,
+                )
+                .where(
+                    agent_runs.c.status.in_(
+                        ["queued", "pending", "running", "processing"]
+                    )
+                )
+                .where(delivery_rows.c.state != "retired")
+            )
+            if candidates is not None:
+                stmt = (
+                    stmt.outerjoin(
+                        session_turn_rows,
+                        session_turn_rows.c.id == delivery_rows.c.turn_id,
+                    )
+                    .where(agent_runs.c.id.in_(candidates))
+                    .where(
+                        or_(
+                            delivery_rows.c.turn_id.is_(None),
+                            session_turn_rows.c.state.in_(
+                                delivery_store.TURN_OWNER_STATES
+                            ),
+                        )
+                    )
+                )
             with self._sqlite_engine().connect() as conn:
                 owned.update(
                     str(run_id)
-                    for run_id in conn.execute(
-                        select(agent_runs.c.id)
-                        .join(
-                            delivery_rows,
-                            delivery_rows.c.id == agent_runs.c.delivery_id,
-                        )
-                        .where(
-                            agent_runs.c.status.in_(
-                                ["queued", "pending", "running", "processing"]
-                            )
-                        )
-                        .where(delivery_rows.c.state != "retired")
-                    ).scalars()
+                    for run_id in conn.execute(stmt).scalars()
                 )
         return owned
+
+    def snapshot_owned_agent_run_ids(self, candidate_run_ids: set[str]) -> set[str]:
+        """Expose the side-effect-free ownership projection to operator views."""
+
+        return self._project_owned_agent_run_ids(candidate_run_ids)
+
+    def owned_agent_run_ids(self) -> set[str]:
+        """Reconcile terminal turns, then return every currently owned Run id."""
+
+        if self._durable_schema_available():
+            self._reconcile_terminal_agent_runs()
+        return self._project_owned_agent_run_ids()
 
     def accepted_agent_run_ids_for_turn(self, turn_id: str) -> list[str]:
         """Read restart-stable Run attribution for one exact logical Turn."""
