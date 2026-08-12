@@ -44,47 +44,92 @@ Rows remain readable until normal expiry or Clear all. Retention runs while
 Memory is disabled as well: rows expire after 14 days and only the newest 5,000
 calls are kept.
 
-## Recovery and Clear
+## Recovery ladder
 
-While Memory is enabled, **Restart engine** replaces only the managed sidecar;
-it does not change Memory settings or delete retained data. Use it when the
-recorder reports a transient failure. If the call-log database is corrupt,
-recording remains degraded across restarts; use **Clear all** to remove the
-corrupt owned files before recording can resume.
+Use these actions in order, from least to most destructive:
 
-Changing the embedding endpoint or model requires confirmation because Avibe
-must rebuild the local vector index. The confirmed settings are saved first,
-Markdown memory is preserved, and **Restart engine** stays unavailable until
-the rebuild completes. If rebuilding fails, correct the API key if needed and
-select **Retry rebuild**; the warning remains until a retry succeeds.
+Avibe refuses conflicting Memory maintenance requests. Let the current action
+finish before starting another one.
 
-When the installed Memory Runtime reports the admitted artifact sync capability,
-Processing Record offers **Repair index** in the Memory Runtime section, even
-when the current health projection cannot be loaded. Repair runs the
-pathless `cascade sync` command while the live sidecar remains available; it
-rescans Markdown memory and drains pending work without replacing the index.
-Avibe asks for confirmation because embedding work may use API quota. The action
-is unavailable while rebuild, factory reset, clear, restart, or another Memory
-mutation is active. Completion is judged from the returned cascade health
-projection: the UI accepts only the exact final response envelope, treating any
-malformed or extended response as a repair failure. A healthy projection is
-completed, while an unhealthy projection is shown as completed with warnings.
-A failed request is a closed error that can be retried manually after the
-conflicting condition is resolved; the UI does not
-poll, parse command output, or create a repair history.
+1. **Restart engine**: Use it for a temporary recorder or engine failure.
+   Memory must be enabled. This restarts the Memory engine without changing
+   settings, rebuilding indexes, or deleting retained data. If the call-log
+   database is corrupt and recording remains degraded after a restart, use
+   **Clear all** before escalating further.
+2. **Repair index**: Use it when restarting does not clear index health
+   warnings or pending work. The **Repair index** action is shown only when
+   Memory is enabled and `repair_available` is true (the installed Memory
+   artifact must advertise repair capability and no rebuild or factory-reset
+   marker may be pending). With a loaded health snapshot it appears beside
+   **Processing queue**; an unavailable snapshot moves it beside **Engine
+   status** rather than hiding it. Running Repair also requires the live Memory
+   Runtime and sidecar to be available.
+   Requests while Memory is disabled are refused, and an unavailable runtime or
+   sidecar causes Repair to fail. Repair rescans Markdown memory and drains
+   pending work while keeping the engine available; it preserves the existing
+   index and may use Embedding API quota. **Memory index repair completed with
+   health warnings.** means the repair finished but the returned health is still
+   unhealthy. Address the reported condition, then select **Repair index**
+   again; a failed repair can be retried the same way.
+3. **Rebuild index**: Use it after changing the Embedding endpoint or model,
+   or to recover a pending rebuild. Confirming **Save and rebuild** saves the
+   new settings before rebuilding the local vector index and preserves Markdown
+   memory. If rebuilding fails before settlement, the confirmed change remains
+   saved, the recovery intent and rebuild warning remain, and **Restart engine**
+   stays unavailable. An Embedding endpoint or model correction changes the
+   vector-space identity, so edit it and reconfirm **Save and rebuild**; do not
+   apply that correction through **Retry rebuild**. While the rebuild marker is
+   pending, LLM endpoint or model corrections may be saved normally before
+   selecting **Retry rebuild**; API-key-only corrections for either provider
+   may also be saved under the marker without touching the fenced runtime,
+   after which select **Retry rebuild**. If rebuilding completes but the later
+   engine or sidecar activation fails, the recovery intent may already be
+   cleared. Fix the runtime problem, then select **Restart engine**;
+   **Retry rebuild** may no longer be offered.
 
-Clear all first creates and verifies a private snapshot of the queue, provider
-root, call log, and pinned attachments. It then removes those four owned
-surfaces under a maintenance fence and records each step in an independent
-journal. An interrupted operation is never resumed automatically: Processing
-Record exposes explicit Resume and Abort actions for the exact operation. Abort
-restores every surface from the verified snapshot.
+### Clear all
 
-Completed clear removes the dedicated local Memory data, processing queue,
-indexes, pinned attachment copies, and retained provider-call diagnostics owned
-by this installation. It does not remove original Avibe chats, copies already
-sent to a provider, general logs, crash reports, backups, or data outside the
-dedicated Memory directory. It is not a secure wipe of the storage device.
+Before Factory reset, use **Clear all** when retained Memory data or the
+call-log database is corrupt. Clear all creates and verifies a private snapshot
+of the queue, provider data, call log, and pinned attachments, then removes only
+those four Avibe-owned surfaces under a maintenance journal. It does not delete
+the `memory` or `state/memory` roots themselves, original Avibe chats, copies
+already sent to providers, or data outside those surfaces (including logs,
+backups, and user-created snapshots); it is not a secure wipe.
+
+If Clear all is interrupted, Processing Record shows explicit **Resume Clear**
+and **Abort and restore** actions for that operation. **Resume Clear** continues
+the journaled deletion; **Abort and restore** restores every surface from the
+verified snapshot and is available only after the initial snapshot is complete.
+Nothing resumes automatically, and Memory remains fenced until one action
+reaches a terminal result.
+
+4. **Factory reset**: Use it only as a last resort when the earlier actions
+   cannot recover Memory. It is available under **Settings > Memory** when the
+   pinned, installed Memory artifact is valid. It permanently deletes exactly
+   the installed Memory root (`memory`) and the mutable Memory state root
+   (`state/memory`). Only a successful cutover starts fresh, usable Memory. It
+   preserves Memory settings and credentials, the pinned, installed Memory
+   artifact, original Avibe chats, and data outside those two roots. If engine
+   or sidecar activation fails after deletion, the old contents under `memory`
+   and `state/memory` stay deleted, but construction of the fresh runtime may
+   have recreated empty or partial roots. Factory reset reports a visible status
+   for each root independently: **deleted**, **partially deleted**, **absent**,
+   or **retained**. Settings also shows a generic failure status, not a
+   per-root error or reason; read each root's status independently rather than
+   treating the result as a clean reset. If a root is **retained** or
+   **partially deleted**, inspect the service logs and filesystem permissions
+   for that root and correct the deletion failure. If deletion completed but
+   engine or sidecar activation failed because a persisted LLM or Embedding
+   endpoint, model, or credential is invalid, correct the corresponding
+   processing settings under **Settings > Memory** while the factory-reset
+   recovery intent is pending. Endpoint repair does not fix a retained or
+   partially deleted root. After correcting the applicable cause, select
+   **Retry factory reset** to continue recovery.
+   Memory stays fenced and unavailable while the factory-reset recovery intent
+   is pending.
+   Retry is idempotent: it continues any remaining deletion while preserving
+   the truthful outcome reported for each root.
 
 ### Factory reset
 
