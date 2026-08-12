@@ -155,6 +155,72 @@ def test_safe_call_retries_runtime_error_then_falls_back():
     assert running_agents._safe_call(_always, []) == []
 
 
+def test_snapshot_projects_exact_run_ownership_and_probe_failure():
+    controller = _make_controller()
+    controller.scheduled_task_service = types.SimpleNamespace(
+        snapshot_owned_agent_run_ids=lambda candidates: candidates & {"run-b", "run-a"}
+    )
+
+    snapshot = running_agents.snapshot_running_agents(
+        controller,
+        ownership_candidate_run_ids=["run-a", "run-b", "run-c"],
+    )
+
+    assert snapshot["ownership_available"] is True
+    assert snapshot["owned_run_ids"] == ["run-a", "run-b"]
+    assert snapshot["ownership_error"] is None
+
+    def _failed_probe(_candidates):
+        raise RuntimeError("turn provider unavailable")
+
+    controller.scheduled_task_service.snapshot_owned_agent_run_ids = _failed_probe
+    failed = running_agents.snapshot_running_agents(
+        controller,
+        ownership_candidate_run_ids=["run-a"],
+    )
+    assert failed["ownership_available"] is False
+    assert failed["owned_run_ids"] == []
+    assert failed["ownership_error"] == "ownership_probe_failed"
+
+
+def test_scheduled_service_ownership_snapshot_uses_pure_turn_projection():
+    from core.scheduled_tasks import ScheduledTaskService
+
+    calls = []
+    service = object.__new__(ScheduledTaskService)
+    service._inflight_executions = {"run-drain": object()}
+    service.controller = types.SimpleNamespace(
+        session_turns=types.SimpleNamespace(
+            snapshot_owned_agent_run_ids=lambda candidates: calls.append(
+                ("snapshot", candidates)
+            )
+            or {"run-turn"},
+            owned_agent_run_ids=lambda: calls.append("reconcile") or {"run-turn"},
+        )
+    )
+
+    assert service.snapshot_owned_agent_run_ids({"run-drain", "run-turn"}) == {
+        "run-drain",
+        "run-turn",
+    }
+    assert calls == [("snapshot", {"run-drain", "run-turn"})]
+
+
+def test_default_running_agents_snapshot_does_not_query_run_ownership():
+    controller = _make_controller()
+    controller.scheduled_task_service = types.SimpleNamespace(
+        snapshot_owned_agent_run_ids=lambda _candidates: pytest.fail(
+            "ordinary UI snapshot must not query Run ownership"
+        )
+    )
+
+    snapshot = running_agents.snapshot_running_agents(controller)
+
+    assert snapshot["owned_run_ids"] == []
+    assert snapshot["ownership_available"] is True
+    assert snapshot["ownership_error"] is None
+
+
 def test_claude_active_and_idle_rows():
     c_active = _FakeClaudeClient("slack_111", "nat-a", "opus")
     c_active._fake_pid = 4242

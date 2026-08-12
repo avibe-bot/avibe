@@ -2620,6 +2620,11 @@ class Controller:
                     "controller runtime work lane shutdown failed"
                 ) from controller_errors[0]
 
+        dispatcher = getattr(self, "message_dispatcher", None)
+        drain_activity = getattr(dispatcher, "drain_agent_run_activity", None)
+        if callable(drain_activity):
+            await drain_activity()
+
         service_stops: list[asyncio.Task[None]] = []
         for service_name in ("scheduled_task_service", "watch_service"):
             service = getattr(self, service_name, None)

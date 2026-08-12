@@ -13,6 +13,8 @@ import {
   definitionStateSince,
   definitionStatusCount,
   definitionSurvivesToggle,
+  definitionFailureSummaryKey,
+  definitionHasNeutralWatchExit,
   formatWallTime,
   humanizeCron,
   humanizeGap,
@@ -77,7 +79,8 @@ describe('lifecycleLabel', () => {
     ['timeout', 'harness.lifecycle.timeout'],
     ['error', 'harness.lifecycle.error'],
     [null, 'harness.lifecycle.finished'],
-    ['missed', 'harness.lifecycle.finished'],
+    ['missed', 'harness.lifecycle.missed'],
+    ['canceled', 'harness.lifecycle.canceled'],
   ] as const;
 
   it.each(outcomes)('maps finished detail %s to %s', (detail, expected) => {
@@ -110,8 +113,127 @@ describe('lifecycleLabel', () => {
       'normal',
       'timeout',
       'error',
+      'missed',
+      'canceled',
       'unknown',
     ]);
+  });
+});
+
+describe('definitionFailureSummaryKey', () => {
+  // SCT-061 final UI contract:
+  // timeout -> translated timeout summary + optional exit code;
+  // nonzero exit -> translated generic failure summary + exit code;
+  // unknown -> translated generic failure summary;
+  // raw technical details -> present but collapsed by default.
+  const cases = [
+    [
+      'task timeout',
+      { metadata: { last_command_timed_out: true }, last_exit_code: 124, last_error: 'permission denied' },
+      'harness.failure.timeout',
+    ],
+    [
+      'legacy task timeout detail without explicit fact',
+      { lifecycle_detail: 'timeout', last_exit_code: 124, last_error: 'command returned status 124' },
+      'harness.failure.generic',
+    ],
+    [
+      'watch timeout',
+      { lifecycle_state: 'finished', lifecycle_detail: 'timeout', retry_exit_codes: [], last_exit_code: 124, last_error: 'permission denied' },
+      'harness.failure.generic',
+    ],
+    [
+      'task nonzero exit',
+      { last_exit_code: 7, last_error: 'timed out while opening stderr' },
+      'harness.failure.generic',
+    ],
+    [
+      'watch nonzero exit',
+      { last_exit_code: 2, last_error: 'timed out while opening stderr' },
+      'harness.failure.generic',
+    ],
+    ['task unknown failure', { lifecycle_detail: 'error', last_error: null }, 'harness.failure.generic'],
+    ['watch unknown failure', { health: 'failing', last_error: null }, 'harness.failure.generic'],
+  ] as const;
+
+  it.each(cases)('maps %s without classifying stderr prose', (_name, row, expected) => {
+    expect(definitionFailureSummaryKey(row)).toBe(expected);
+  });
+
+  it('does not let stderr wording change the category', () => {
+    const facts = { last_exit_code: 9, lifecycle_detail: 'error' };
+    const classify = (lastError: string) => definitionFailureSummaryKey({ ...facts }, Boolean(lastError));
+    expect(classify('timed out')).toBe(classify('command not found'));
+  });
+
+  it('uses only error presence for an otherwise unknown failure', () => {
+    expect(definitionFailureSummaryKey({ health: 'healthy' }, true)).toBe('harness.failure.generic');
+    expect(definitionFailureSummaryKey({ health: 'healthy' }, false)).toBeNull();
+  });
+
+  it('does not turn technical text into a failure when structured facts say healthy', () => {
+    expect(definitionFailureSummaryKey({ health: 'healthy', last_exit_code: null })).toBeNull();
+  });
+
+  it('keeps structured last-run failure visible after health history ages out', () => {
+    expect(
+      definitionFailureSummaryKey({ health: 'healthy', lifecycle_detail: 'error', last_exit_code: 7 }),
+    ).toBe('harness.failure.generic');
+    expect(
+      definitionFailureSummaryKey({
+        health: 'healthy',
+        lifecycle_detail: 'timeout',
+        metadata: { last_command_timed_out: true },
+        last_exit_code: 124,
+      }),
+    ).toBe('harness.failure.timeout');
+  });
+
+  it('keeps the summary key set translated and in parity', () => {
+    expect(Object.keys(en.harness.failure).sort()).toEqual(['circuitPaused', 'generic', 'timeout']);
+    expect(Object.keys(zh.harness.failure).sort()).toEqual(Object.keys(en.harness.failure).sort());
+    for (const detailKey of ['failureSummary', 'technicalDetails', 'lastExitCode'] as const) {
+      expect(typeof en.harness.detail[detailKey]).toBe('string');
+      expect(typeof zh.harness.detail[detailKey]).toBe('string');
+    }
+    expect(zh.harness.failure.timeout).toBe('最近一次运行已超时。');
+    expect(zh.harness.failure.generic).toBe('最近一次运行失败。');
+    expect(zh.harness.failure.circuitPaused).toBe('此 Watch 因短时间内重复事件而暂停。');
+  });
+
+  it('uses structured pause and cancellation facts without parsing diagnostics', () => {
+    expect(
+      definitionFailureSummaryKey(
+        {
+          lifecycle_state: 'paused',
+          retry_exit_codes: [75],
+          metadata: { watch_circuit_breaker: { status: 'tripped' } },
+        },
+        true,
+      ),
+    ).toBe('harness.failure.circuitPaused');
+    expect(
+      definitionFailureSummaryKey({ metadata: { last_result_status: 'canceled' } }, true),
+    ).toBeNull();
+    expect(
+      definitionFailureSummaryKey({ metadata: { last_result_status: 'failed' } }, true),
+    ).toBe('harness.failure.generic');
+  });
+});
+
+describe('definitionHasNeutralWatchExit', () => {
+  it.each([
+    ['no-event completion', { health: 'healthy', lifecycle_state: 'waiting', lifecycle_detail: null, last_exit_code: 64, retry_exit_codes: [] }, true],
+    ['default retry exit', { health: 'healthy', lifecycle_state: 'waiting', lifecycle_detail: null, last_exit_code: 75, retry_exit_codes: [75] }, true],
+    ['custom retry exit', { health: 'healthy', lifecycle_state: 'waiting', lifecycle_detail: null, last_exit_code: 90, retry_exit_codes: [75, 90] }, true],
+    ['manual pause preserves retry history', { health: 'failing', lifecycle_state: 'paused', lifecycle_detail: null, retired_at: null, last_exit_code: 75, retry_exit_codes: [75] }, true],
+    ['legacy pause without retirement evidence', { health: 'failing', lifecycle_state: 'paused', lifecycle_detail: null, last_exit_code: 75, retry_exit_codes: [75] }, false],
+    ['terminal retry exit', { health: 'failing', lifecycle_state: 'finished', retired_at: '2026-08-12T00:00:00Z', last_exit_code: 1, retry_exit_codes: [1] }, false],
+    ['unconfigured watch exit', { health: 'healthy', lifecycle_state: 'waiting', lifecycle_detail: null, last_exit_code: 9, retry_exit_codes: [75] }, false],
+    ['finished error with no-event code', { health: 'healthy', lifecycle_state: 'finished', lifecycle_detail: 'error', last_exit_code: 64, retry_exit_codes: [] }, false],
+    ['task exit without watch evidence', { last_exit_code: 75 }, false],
+  ] as const)('classifies %s from structured fields', (_name, row, expected) => {
+    expect(definitionHasNeutralWatchExit(row)).toBe(expected);
   });
 });
 
@@ -735,18 +857,62 @@ describe('definitionRowLine', () => {
   it.each([
     [
       'an executed one-shot',
-      { schedule_type: 'at', run_at: at(-2 * DAY), last_run_at: at(-DAY), updated_at: at(-3 * DAY) },
+      {
+        schedule_type: 'at',
+        run_at: at(-2 * DAY),
+        lifecycle_finished_at: at(-DAY),
+        last_run_at: at(-3 * DAY),
+        updated_at: at(-3 * DAY),
+      },
       at(-DAY),
     ],
     [
-      'a one-shot with no recorded run or finish',
-      { schedule_type: 'at', run_at: at(-DAY), updated_at: at(-3 * DAY) },
-      at(-DAY),
+      'a missed one-shot with a retirement transition',
+      { schedule_type: 'at', run_at: at(-DAY), retired_at: at(-HOUR), updated_at: at(-3 * DAY) },
+      null,
     ],
     ['a retired watch', { mode: 'once', last_finished_at: at(-DAY), updated_at: at(-3 * DAY) }, at(-DAY)],
     ['a cron task', { cron: '0 * * * *', last_run_at: at(-HOUR), updated_at: at(-3 * DAY) }, at(-HOUR)],
   ])('dates finished %s by the exact available fact', (_name, row, expected) => {
     expect(definitionStateSince(row, 'finished')).toBe(expected);
+  });
+
+  it('does not borrow an old manual run time for an ownerless consumed one-shot', () => {
+    expect(
+      definitionStateSince(
+        {
+          schedule_type: 'at',
+          lifecycle_detail: null,
+          last_run_at: at(-3 * DAY),
+          retired_at: at(-HOUR),
+          updated_at: at(-MINUTE),
+        },
+        'finished',
+      ),
+    ).toBeNull();
+  });
+
+  it('dates a missed one-shot only from its retirement transition', () => {
+    const retiredAt = at(-HOUR);
+    expect(
+      definitionStateSince(
+        {
+          lifecycle_detail: 'missed',
+          retired_at: retiredAt,
+          last_finished_at: at(-2 * DAY),
+          last_run_at: at(-3 * DAY),
+          run_at: at(-4 * DAY),
+          updated_at: at(-MINUTE),
+        },
+        'finished',
+      ),
+    ).toBe(retiredAt);
+    expect(
+      definitionStateSince(
+        { lifecycle_detail: 'missed', last_run_at: at(-3 * DAY), updated_at: at(-MINUTE) },
+        'finished',
+      ),
+    ).toBeNull();
   });
 
   it('does not report an intentionally retired waiter as dead', () => {

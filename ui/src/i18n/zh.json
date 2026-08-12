@@ -3259,6 +3259,8 @@
       "timeoutNone": "不限时",
       "timeoutDefault": "{{duration}}（默认）",
       "lastExitCode": "最近退出码",
+      "failureSummary": "失败摘要",
+      "technicalDetails": "技术详情",
       "escalation": "失败后 → 交给 Agent",
       "triagePrompt": "排查提示词",
       "cwdFromSession": "跟随绑定会话，否则运行时默认目录或 Avibe 状态目录",
@@ -3337,7 +3339,14 @@
       "normal": "正常结束",
       "timeout": "已超时",
       "error": "出错结束",
+      "missed": "已错过",
+      "canceled": "已取消",
       "unknown": "未知"
+    },
+    "failure": {
+      "timeout": "最近一次运行已超时。",
+      "generic": "最近一次运行失败。",
+      "circuitPaused": "此 Watch 因短时间内重复事件而暂停。"
     },
     "kind": {
       "task": "定时任务",

@@ -6645,7 +6645,8 @@ def test_new_teardown_keeps_a_session_superseded_inside_its_window(tmp_path: Pat
 
 
 _DEFINITION_RESUME_SELECT = (
-    "SELECT run_definitions.definition_type, run_definitions.mode, run_definitions.enabled, "
+    "SELECT run_definitions.definition_type, run_definitions.mode, "
+    "run_definitions.schedule_type, run_definitions.retired_at, run_definitions.enabled, "
     "run_definitions.session_id, run_definitions.metadata_json FROM run_definitions "
     "WHERE run_definitions.id = ? AND run_definitions.deleted_at IS NULL"
 )

@@ -1,6 +1,9 @@
+/* @vitest-environment jsdom */
+
 import { createInstance } from 'i18next';
 import type { ReactElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { fireEvent, render as renderDom } from '@testing-library/react';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { MemoryRouter } from 'react-router-dom';
 import { describe, expect, it } from 'vitest';
@@ -99,6 +102,7 @@ const watch = (overrides: Partial<HarnessWatch>): HarnessWatch => ({
   last_event_at: null,
   last_error: null,
   last_exit_code: null,
+  metadata: {},
   lifecycle_state: 'paused',
   lifecycle_detail: null,
   next_run_at: null,
@@ -434,6 +438,37 @@ describe('HealthBadge', () => {
     expect(html).toContain(`>${i18n.t('harness.health.failing')} 4<`);
     expect(html).toContain('text-pink');
   });
+
+  it('never exposes raw stderr through the default badge tooltip', () => {
+    const raw = 'database password rejected';
+    const html = render(
+      <HealthBadge
+        row={watch({ health: 'failing', consecutive_failures: 1, recent_failures: 1, last_error: raw })}
+      />,
+    );
+
+    expect(html).toContain(`title="${en.harness.failure.generic}"`);
+    expect(html).not.toContain(raw);
+  });
+
+  it('does not turn a circuit-breaker pause into an ordinary failure tooltip', () => {
+    const html = render(
+      <HealthBadge
+        row={watch({
+          health: 'failing',
+          consecutive_failures: 1,
+          recent_failures: 1,
+          lifecycle_state: 'paused',
+          metadata: { watch_circuit_breaker: { status: 'tripped' } },
+          last_exit_code: 0,
+          last_error: 'localized circuit pause detail',
+        })}
+      />,
+    );
+
+    expect(html).not.toContain(`title="${en.harness.failure.generic}"`);
+    expect(html).not.toContain('localized circuit pause detail');
+  });
 });
 
 describe('ProcessingHealthBadge', () => {
@@ -752,6 +787,73 @@ describe('TaskDetail command task', () => {
     );
   });
 
+  it('shows a translated failure summary and keeps raw diagnostics collapsed', () => {
+    const raw = 'pg_dump: connection refused';
+    const html = detail(
+      task({
+        shell_command: 'pg_dump app',
+        last_exit_code: 7,
+        last_error: raw,
+        lifecycle_detail: 'error',
+      }),
+    );
+
+    expect(html).toContain(en.harness.failure.generic);
+    expect(html).toContain(`>${en.harness.detail.lastExitCode}<`);
+    expect(html).toContain('>7<');
+    expect(html).toContain(`>${en.harness.detail.technicalDetails}<`);
+    expect(html).toContain(raw);
+    expect(html).toMatch(/<details(?![^>]*\bopen\b)[^>]*>/);
+    expect(html.indexOf(en.harness.failure.generic)).toBeLessThan(html.indexOf(raw));
+  });
+
+  it('uses the generic summary when only an opaque technical error is available', () => {
+    const raw = 'command not found: localized stderr';
+    const html = detail(task({ shell_command: 'missing-tool', last_error: raw }));
+
+    expect(html).toContain(en.harness.failure.generic);
+    expect(html).toContain(`>${en.harness.detail.technicalDetails}<`);
+    expect(html).toContain(raw);
+    expect(html).toMatch(/<details(?![^>]*\bopen\b)[^>]*>/);
+  });
+
+  it('keeps a legacy Task timeout detail generic without the explicit timeout fact', () => {
+    const raw = 'command returned status 124';
+    const html = detail(
+      task({
+        shell_command: 'backup --self-timeout',
+        lifecycle_detail: 'timeout',
+        last_exit_code: 124,
+        last_error: raw,
+        metadata: {},
+      }),
+    );
+
+    expect(html).toContain(en.harness.failure.generic);
+    expect(html).not.toContain(en.harness.failure.timeout);
+    expect(html).toContain(`>${en.harness.detail.technicalDetails}<`);
+    expect(html).toContain(raw);
+    expect(html).toMatch(/<details(?![^>]*\bopen\b)[^>]*>/);
+  });
+
+  it('keeps a canceled Task diagnostic collapsed without calling it a failure', () => {
+    const raw = 'Run canceled by user';
+    const html = detail(
+      task({
+        shell_command: 'make release',
+        health: 'healthy',
+        last_error: raw,
+        metadata: { last_result_status: 'canceled' },
+      }),
+    );
+
+    expect(html).not.toContain(en.harness.failure.generic);
+    expect(html).not.toContain(en.harness.failure.timeout);
+    expect(html).toContain(`>${en.harness.detail.technicalDetails}<`);
+    expect(html).toContain(raw);
+    expect(html).toMatch(/<details(?![^>]*\bopen\b)[^>]*>/);
+  });
+
   it('leaves a message task rendering exactly as it does today', () => {
     const html = detail(task({ name: 'Nightly digest', prompt: 'Summarize #ops', message: 'Summarize #ops' }));
 
@@ -837,6 +939,206 @@ describe('WatchDetail runtime', () => {
 
     expect(html).toContain(`>${i18n.t('harness.detail.eventProcessing')}<`);
     expect(html).toContain(`>${i18n.t('harness.processingHealth.unknown')}<`);
+  });
+
+  it('keeps an insufficiently evidenced Watch timeout generic and technical details collapsed', () => {
+    const raw = 'localized-looking stderr must stay technical';
+    const html = render(
+      <WatchDetail
+        watch={watch({
+          lifecycle_state: 'finished',
+          lifecycle_detail: 'timeout',
+          last_exit_code: 124,
+          last_error: raw,
+        })}
+        onToggleEnabled={() => undefined}
+        pending={false}
+      />,
+    );
+
+    expect(html).toContain(en.harness.failure.generic);
+    expect(html).not.toContain(en.harness.failure.timeout);
+    expect(html).toContain(`>${en.harness.detail.lastExitCode}<`);
+    expect(html).toContain('>124<');
+    expect(html).toContain(`>${en.harness.detail.technicalDetails}<`);
+    expect(html).toContain(raw);
+    expect(html).toMatch(/<details(?![^>]*\bopen\b)[^>]*>/);
+  });
+
+  it('keeps configured retry and no-event exits neutral', () => {
+    for (const last_exit_code of [64, 75]) {
+      const html = render(
+        <WatchDetail
+          watch={watch({
+            enabled: true,
+            retry_exit_codes: [75],
+            health: 'healthy',
+            lifecycle_state: 'waiting',
+            lifecycle_detail: null,
+            last_exit_code,
+          })}
+          onToggleEnabled={() => undefined}
+          pending={false}
+        />,
+      );
+      expect(html).toContain(`<span class="font-mono text-[11px] text-muted">${last_exit_code}</span>`);
+    }
+  });
+
+  it('keeps a healthy retry diagnostic without presenting it as a failure', () => {
+    const raw = 'avibe-watch: still waiting';
+    const html = render(
+      <WatchDetail
+        watch={watch({
+          enabled: true,
+          retry_exit_codes: [75],
+          health: 'healthy',
+          lifecycle_state: 'waiting',
+          lifecycle_detail: null,
+          last_exit_code: 75,
+          last_error: raw,
+        })}
+        onToggleEnabled={() => undefined}
+        pending={false}
+      />,
+    );
+
+    expect(html).not.toContain(en.harness.failure.generic);
+    expect(html).toContain(`<span class="font-mono text-[11px] text-muted">75</span>`);
+    expect(html).toContain(`>${en.harness.detail.technicalDetails}<`);
+    expect(html).toContain(raw);
+    expect(html).toMatch(/<details(?![^>]*\bopen\b)[^>]*>/);
+  });
+
+  it('keeps retry history neutral after the user manually pauses a Watch', () => {
+    const raw = 'avibe-watch: still waiting';
+    const html = render(
+      <WatchDetail
+        watch={watch({
+          enabled: false,
+          retry_exit_codes: [75],
+          health: 'failing',
+          lifecycle_state: 'paused',
+          lifecycle_detail: null,
+          retired_at: null,
+          last_exit_code: 75,
+          last_error: raw,
+        })}
+        onToggleEnabled={() => undefined}
+        pending={false}
+      />,
+    );
+
+    expect(html).not.toContain(en.harness.failure.generic);
+    expect(html).toContain('<span class="font-mono text-[11px] text-muted">75</span>');
+    expect(html).toContain(raw);
+    expect(html).toMatch(/<details(?![^>]*\bopen\b)[^>]*>/);
+  });
+
+  it('keeps a terminal missing-cwd retry exit as a failure', () => {
+    const raw = 'working directory is unavailable';
+    const html = render(
+      <WatchDetail
+        watch={watch({
+          enabled: false,
+          retry_exit_codes: [1],
+          health: 'failing',
+          lifecycle_state: 'finished',
+          lifecycle_detail: 'error',
+          retired_at: '2026-08-12T00:00:00Z',
+          last_exit_code: 1,
+          last_error: raw,
+        })}
+        onToggleEnabled={() => undefined}
+        pending={false}
+      />,
+    );
+
+    expect(html).toContain(en.harness.failure.generic);
+    expect(html).toContain('<span class="font-mono text-[11px] text-pink">1</span>');
+    expect(html).toContain(raw);
+    expect(html).toMatch(/<details(?![^>]*\bopen\b)[^>]*>/);
+  });
+
+  it('does not call a Watch lifetime expiry a run timeout', () => {
+    const html = render(
+      <WatchDetail
+        watch={watch({
+          enabled: false,
+          health: 'failing',
+          lifecycle_state: 'finished',
+          lifecycle_detail: 'timeout',
+          last_exit_code: 124,
+          last_error: 'watch lifetime expired before the next cycle',
+        })}
+        onToggleEnabled={() => undefined}
+        pending={false}
+      />,
+    );
+
+    expect(html).toContain(en.harness.failure.generic);
+    expect(html).not.toContain(en.harness.failure.timeout);
+  });
+
+  it('shows a stable circuit-pause summary and keeps the reason technical', () => {
+    const raw = 'Watch paused after rapid event burst';
+    const html = render(
+      <WatchDetail
+        watch={watch({
+          enabled: false,
+          health: 'failing',
+          lifecycle_state: 'paused',
+          lifecycle_detail: null,
+          last_exit_code: 0,
+          last_error: raw,
+          metadata: { watch_circuit_breaker: { status: 'tripped', exit_code: 0 } },
+        })}
+        onToggleEnabled={() => undefined}
+        pending={false}
+      />,
+    );
+
+    expect(html).toContain(en.harness.failure.circuitPaused);
+    expect(html).not.toContain(en.harness.failure.generic);
+    expect(html).not.toContain(en.harness.failure.timeout);
+    expect(html).toContain('text-amber');
+    expect(html).toContain(`>${en.harness.detail.technicalDetails}<`);
+    expect(html).toContain(raw);
+    expect(html).toMatch(/<details(?![^>]*\bopen\b)[^>]*>/);
+  });
+
+  it('resets technical details when selecting another definition', () => {
+    const renderInteractive = (ui: ReactElement) =>
+      renderDom(
+        <I18nextProvider i18n={i18n}>
+          <MemoryRouter>{ui}</MemoryRouter>
+        </I18nextProvider>,
+      );
+    const view = renderInteractive(
+      <TaskDetail
+        task={task({ id: 'task-a', shell_command: 'first', last_error: 'first technical error' })}
+        onToggleEnabled={() => undefined}
+        pending={false}
+      />,
+    );
+    const details = view.container.querySelector('details');
+    expect(details?.open).toBe(false);
+    fireEvent.click(details?.querySelector('summary') as HTMLElement);
+    expect(view.container.querySelector('details')?.open).toBe(true);
+
+    view.rerender(
+      <I18nextProvider i18n={i18n}>
+        <MemoryRouter>
+          <TaskDetail
+            task={task({ id: 'task-b', shell_command: 'second', last_error: 'second technical error' })}
+            onToggleEnabled={() => undefined}
+            pending={false}
+          />
+        </MemoryRouter>
+      </I18nextProvider>,
+    );
+    expect(view.container.querySelector('details')?.open).toBe(false);
+    view.unmount();
   });
 });
 

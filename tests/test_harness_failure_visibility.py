@@ -34,6 +34,7 @@ from storage.background import (
     OWED_NOTICE_INDEX,
     RUN_INTERRUPTION_REASONS,
     SQLiteBackgroundTaskStore,
+    TASK_RETIREMENT_SCHEDULE_CONSUMED,
     owed_notice_eligible,
 )
 
@@ -2173,20 +2174,19 @@ def test_circuit_repair_failure_copy_does_not_claim_a_stale_pause_state(
     assert "remains paused" not in body
 
 
-def test_a_failed_one_shot_notice_says_finished_not_paused(tmp_path: Path) -> None:
+def test_a_retired_one_shot_notice_says_finished_not_paused(tmp_path: Path) -> None:
     """The task-side twin of the retired-watch copy fix — FINISHED IS NOT PAUSED.
 
-    A failed ``at`` task is disabled by ``mark_task_result(disable_one_shot=True)``
-    before its notice renders, so the generic disabled branch told the user the task
+    A consumed ``at`` task is disabled and retired before its notice renders, so
+    the generic disabled branch told the user the task
     was PAUSED and offered ``vibe task resume`` — while the canonical lifecycle
-    projection (``definition_lifecycle_expression``) classifies a past one-shot as
+    projection (``definition_lifecycle_expression``) classifies the persisted retirement as
     FINISHED and the CLI reads the same combination as a failed one-shot. One
     surface's copy contradicted every other surface and named a lifecycle action
     that re-arms nothing.
 
-    The distinction is read through the projection's own question —
-    ``compute_next_run_at`` returns ``None`` exactly when the named instant is
-    behind us — so the copy and the badge cannot disagree. The explicit re-run
+    The distinction is read through the projection's own persisted marker, so
+    the copy and the badge cannot disagree. The explicit re-run
     affordance is retained: ``vibe task run`` is real and is the honest next step
     for a failed one-shot.
 
@@ -2200,7 +2200,7 @@ def test_a_failed_one_shot_notice_says_finished_not_paused(tmp_path: Path) -> No
     from vibe.i18n import t as i18n_t
 
     sqlite, requests = _store(tmp_path)
-    # The instant is named and behind us; ``mark_task_result`` left the switch off.
+    # The scheduler consumed this instant and persisted that transition.
     _task(
         sqlite,
         "task-once",
@@ -2209,6 +2209,8 @@ def test_a_failed_one_shot_notice_says_finished_not_paused(tmp_path: Path) -> No
         cron=None,
         run_at="2026-07-20T00:00:00+00:00",
         enabled=False,
+        retired_at=_EPOCH,
+        retirement_reason=TASK_RETIREMENT_SCHEDULE_CONSUMED,
     )
     _task(sqlite, "task-paused", name="paused cron", enabled=False)
     store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
@@ -2246,10 +2248,8 @@ def test_a_failed_one_shot_notice_says_finished_not_paused(tmp_path: Path) -> No
         f"a genuinely paused cron task keeps the resume copy: {control!r}"
     )
 
-    # A naive ``run_at`` is resolved in the task's own timezone by both the SQL
-    # lifecycle projection and ``compute_next_run_at``. This Shanghai wall clock
-    # is one hour in the past there but seven hours ahead if misread as UTC, so it
-    # consumes the exact disagreement the SQLite connection UDF closes.
+    # A naive ``run_at`` is resolved in the task's own timezone for the next-fire
+    # projection. Lifecycle itself reads only the persisted retirement fact.
     from datetime import datetime, timedelta, timezone
     from zoneinfo import ZoneInfo
 
@@ -2270,6 +2270,8 @@ def test_a_failed_one_shot_notice_says_finished_not_paused(tmp_path: Path) -> No
         run_at=naive_past_shanghai,
         timezone="Asia/Shanghai",
         enabled=False,
+        retired_at=_EPOCH,
+        retirement_reason=TASK_RETIREMENT_SCHEDULE_CONSUMED,
     )
     store.load()
     assert sqlite.definition_lifecycle_state("task-tz", definition_type="task") == "finished"
@@ -2291,7 +2293,7 @@ def test_a_failed_one_shot_notice_says_finished_not_paused(tmp_path: Path) -> No
         {"failure_id": "failure:run-tz", "interrupt_reason": None},
     )
     assert i18n_t("harness.notice.taskFinished", "en") in tz_body, (
-        f"the copy and badge must both read the task-zone instant as FINISHED: {tz_body!r}"
+        f"the copy and badge must both read persisted retirement as FINISHED: {tz_body!r}"
     )
     assert "vibe task resume task-tz" not in tz_body, f"a finished task must not offer resume: {tz_body!r}"
 

@@ -21,6 +21,19 @@
   },
   "harness": {
     "agentInitiatedContinuation": "Agent 主动发起的续接",
+    "cli": {
+      "help": {
+        "command": "检查统一的 Harness 实时状态和异常",
+        "description": "检查活跃 Run、已启用 Watch、即将触发的 Task 和实时异常。",
+        "status": "显示有界的实时状态与异常快照"
+      },
+      "error": {
+        "sqliteRequired": "Harness 状态需要 SQLite Task 存储。",
+        "controllerStatus": "控制器返回状态码 {status}。",
+        "controllerTimeout": "控制器请求超时。",
+        "controllerUnavailable": "无法连接控制器。"
+      }
+    },
     "promptEcho": {
       "scheduled": "⏰ 定时任务",
       "watch": "👀 监听",
@@ -67,7 +80,9 @@
       "exitedWithDetail": "\u547d\u4ee4\u9000\u51fa\uff0c\u72b6\u6001\u7801 {code}\uff1a{detail}"
     },
     "task": {
-      "resultNotRecorded": "\u65e0\u6cd5\u8bb0\u5f55\u672c\u6b21\u8fd0\u884c\u7684\u7ed3\u679c\uff1a\u4efb\u52a1\u5728\u8fd0\u884c\u671f\u95f4\u88ab\u56de\u6536\u3001\u6539\u7ed1\u6216\u5220\u9664\uff0c\u5176\u5b58\u50a8\u72b6\u6001\u672a\u53d1\u751f\u53d8\u5316\u3002"
+      "resultNotRecorded": "\u65e0\u6cd5\u8bb0\u5f55\u672c\u6b21\u8fd0\u884c\u7684\u7ed3\u679c\uff1a\u4efb\u52a1\u5728\u8fd0\u884c\u671f\u95f4\u88ab\u56de\u6536\u3001\u6539\u7ed1\u6216\u5220\u9664\uff0c\u5176\u5b58\u50a8\u72b6\u6001\u672a\u53d1\u751f\u53d8\u5316\u3002",
+      "schedulerCallbackFailed": "\u8ba1\u5212\u89e6\u53d1\u5728\u5165\u961f\u524d\u5931\u8d25\uff1a{detail}",
+      "scheduleReplaced": "\u672c\u6b21\u8ba1\u5212\u89e6\u53d1\u5c5e\u4e8e\u4efb\u52a1\u7684\u65e7\u8c03\u5ea6\u7248\u672c\uff0c\u56e0\u6b64\u672a\u6267\u884c\u3002"
     },
     "queueCoalesced": {
       "summary": "[Avibe Harness] 同一个 watch/task callback 在滚动 {window} 秒窗口内触发了 {count} 次。已将这些排队 callback 合并为一次 Agent turn。",
@@ -233,6 +248,10 @@
     "taskOwnerUnavailable": {
       "message": "这个 Task 的管理 Session 已不可用。",
       "hint": "请从可用的 Agent Session 创建替代 Task，再用 `vibe task remove {id}` 删除这条失去管理者的定义。"
+    },
+    "taskScheduleRetired": {
+      "message": "这个一次性 Task 的计划已经结束。",
+      "hint": "请先用 `vibe task update {id} --at <time>` 设置新的未来时间，再恢复它。"
     },
     "sessionFork": {
       "agentUnavailable": {
