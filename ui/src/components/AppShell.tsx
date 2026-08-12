@@ -35,7 +35,6 @@ import { InstallHint } from './InstallHint';
 import logoImg from '../assets/logo.png';
 import { getEnabledPlatforms, platformSupportsChannels } from '../lib/platforms';
 import { useViewportHeightVar } from '../lib/useViewportHeightVar';
-import { OrganizationShell } from '../features/organization/OrganizationShell';
 import {
   adminLandingPath,
   filterLocalSystemNavItems,
@@ -63,9 +62,9 @@ type ShellNavItem = {
   variant?: 'workbench';
 };
 
-// Keep the Organization routes available for direct access while the product
-// entry points remain hidden. Re-enable every shell surface from one switch.
-const ORGANIZATION_NAV_ENABLED = false;
+// Organization is exposed from the admin control panel only. The workbench
+// keeps its compact navigation focused on agent work.
+const ORGANIZATION_NAV_ENABLED = true;
 
 const isItemActive = (item: ShellNavItem, pathname: string): boolean =>
   item.match
@@ -339,12 +338,6 @@ export const AppShell: React.FC = () => {
     url.searchParams.set(APP_TAB_PARAM, '1');
     window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`);
   }, [chromeless, location.pathname, location.search]);
-
-  // Organization takes over the whole shell, so it returns after every hook above
-  // has run — an early return before them would make those hooks conditional.
-  if (location.pathname.startsWith('/admin/organization')) {
-    return <OrganizationShell />;
-  }
 
   if (
     location.pathname === '/setup' &&
@@ -633,16 +626,6 @@ export const AppShell: React.FC = () => {
                 Control Panel → Back to Workbench, the mint counterpart. */}
             <div className="flex items-stretch gap-2">
               {canUseApps && <AppsLauncher />}
-              {shellMode === 'workbench' && ORGANIZATION_NAV_ENABLED && (
-                <Link
-                  to="/admin/organization/overview"
-                  title={t('nav.organization')}
-                  aria-label={t('nav.organization')}
-                  className="group flex w-11 shrink-0 items-center justify-center rounded-lg border border-border-strong text-foreground transition-colors hover:bg-foreground/[0.04]"
-                >
-                  <Building2 className="size-[18px] text-muted group-hover:text-foreground" />
-                </Link>
-              )}
               {shellMode === 'workbench' && (capabilities.can_manage_instance || canUseRuntimeSurfaces) && (
                 <Link
                   to={adminLandingPath(capabilities.can_use_system, canUseRuntimeSurfaces)}
@@ -726,16 +709,6 @@ export const AppShell: React.FC = () => {
               when not yet installed; null everywhere else). Version / language /
               theme / account live in the More tab. */}
           <div className="flex items-center gap-1.5">
-            {ORGANIZATION_NAV_ENABLED && (
-              <Link
-                to="/admin/organization/overview"
-                title={t('nav.organization')}
-                aria-label={t('nav.organization')}
-                className="grid size-9 place-items-center rounded-lg text-muted transition-colors hover:bg-foreground/[0.05] hover:text-foreground"
-              >
-                <Building2 className="size-[18px]" />
-              </Link>
-            )}
             <InstallHint />
           </div>
         </header>
@@ -756,7 +729,14 @@ export const AppShell: React.FC = () => {
             (location.pathname.startsWith('/admin/settings') ? 'page-glow-settings' : 'page-glow-console')
         )}
       >
-        <div className={clsx('w-full', chromeless ? 'h-full' : 'mx-auto px-4 py-5 md:px-10 md:py-8')}>
+        <div className={clsx(
+          'w-full',
+          chromeless
+            ? 'h-full'
+            : location.pathname.startsWith('/admin/organization')
+              ? 'mx-auto'
+              : 'mx-auto px-4 py-5 md:px-10 md:py-8',
+        )}>
           {/* A crashing page only replaces the content area — the sidebar + chrome stay usable, and
               navigating elsewhere clears the error without a manual retry. Key on location.key (not
               just pathname) so a query-only navigation (e.g. /search?q=…) also resets. */}
