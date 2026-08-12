@@ -1968,6 +1968,27 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(enhanced.text, "report")
         self.assertEqual([file.path for file in enhanced.files], ["/tmp/a(b)[c]#d.md"])
 
+    def test_angle_wrapped_file_links_commonmark_source_matrix(self):
+        cases = {
+            r"[a\]b](<file:///tmp/report.md>)": "/tmp/report.md",
+            r"[double](<file:///tmp/a\\(b.txt>)": r"/tmp/a\(b.txt",
+            "[refs](<file:///tmp/a&amp;b.txt>)": "/tmp/a&b.txt",
+            "[upper](<FILE:///tmp/upper.txt>)": "/tmp/upper.txt",
+        }
+        for text, expected_path in cases.items():
+            with self.subTest(text=text):
+                enhanced = process_reply(text)
+                self.assertEqual(len(enhanced.files), 1)
+                self.assertEqual(enhanced.files[0].path, expected_path)
+
+    def test_angle_wrapped_file_links_require_whitespace_before_title(self):
+        text = '[report](<file:///tmp/report.md>"download")'
+
+        enhanced = process_reply(text)
+
+        self.assertEqual(enhanced.text, text)
+        self.assertEqual(enhanced.files, [])
+
     def test_angle_wrapped_file_links_support_titles_and_reject_bad_titles(self):
         valid = [
             '[double](<file:///tmp/report.md> "download")',
@@ -1982,6 +2003,7 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             '[unclosed](<file:///tmp/report.md> "download)',
             r"[nested](<file:///tmp/report.md> (download (copy)))",
             '[marker](<file:///tmp/report.md> `download`)',
+            '[no-space](<file:///tmp/report.md>"download")',
         ]
         for text in invalid:
             with self.subTest(text=text):
@@ -2004,6 +2026,14 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([file.is_image for file in escaped_image.files], [False])
         self.assertEqual(even_escaped_image.text, r"\\preview")
         self.assertEqual([file.is_image for file in even_escaped_image.files], [True])
+
+    def test_angle_wrapped_file_links_ignore_raw_html_attributes(self):
+        text = '<span title="[hidden](<file:///tmp/hidden.txt>)">visible</span>'
+
+        enhanced = process_reply(text)
+
+        self.assertEqual(enhanced.text, text)
+        self.assertEqual(enhanced.files, [])
 
     def test_angle_wrapped_file_links_reject_malformed_markdown_and_code(self):
         specimens = [

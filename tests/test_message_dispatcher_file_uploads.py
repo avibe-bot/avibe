@@ -94,7 +94,7 @@ class MessageDispatcherFileUploadTests(unittest.IsolatedAsyncioTestCase):
             file_path.write_bytes(b"png")
             escaped_path = str(file_path).replace("(", r"\(").replace(")", r"\)")
             enhanced = process_reply(
-                f'![preview](<file://{escaped_path}> "download")'
+                f'![preview](<FILE://{escaped_path}> "download")'
             )
 
             self.assertEqual(enhanced.text, "preview")

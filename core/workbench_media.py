@@ -371,13 +371,13 @@ def rewrite_agent_media(conn: Connection, *, scope_id: str | None, session_id: s
     and non-absolute paths are left untouched. Best-effort: a registration
     failure leaves that one link as written rather than dropping the reply.
     """
-    if not text or "file://" not in text:
+    if not text or "file://" not in text.casefold():
         return text
 
     def _replace(match) -> str:
         bang, label, url = match.group(1), match.group(2), match.group(3)
         parsed = _parse_file_uri(url)
-        if parsed.scheme != "file":
+        if parsed.scheme.casefold() != "file":
             return match.group(0)
         path = _file_uri_to_local_path(parsed)
         if not os.path.isabs(path):

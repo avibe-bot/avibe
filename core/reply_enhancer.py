@@ -21,6 +21,7 @@ import os
 import re
 from bisect import bisect_left
 from dataclasses import dataclass, field
+from html import unescape as html_unescape
 from typing import List, Tuple
 from urllib.parse import unquote, urlparse
 
@@ -195,7 +196,7 @@ _BARE_FILE_URI = r"file://(?:[^()]+|\([^)]*\))+"
 _BARE_FILE_LINK_RE = re.compile(
     rf"(!?)\[([^\]]*)\]\(({_BARE_FILE_URI})\)"
 )
-_FILE_LINK_LABEL_RE = re.compile(r"(!?)\[([^\]]*)\]\(")
+_FILE_LINK_OPENER_RE = re.compile(r"(!?)\[")
 _COMMONMARK_ASCII_PUNCTUATION = frozenset(
     r'''!"#$%&'()*+,-./:;<=>?@[\]^_`{|}~'''
 )
@@ -345,7 +346,7 @@ def _extract_file_links(
     for match in _file_link_matches(text, markdown_mask):
         bang, label, url = match.groups()
         parsed = _parse_file_uri(url)
-        if parsed.scheme != "file":
+        if parsed.scheme.casefold() != "file":
             continue
         path = _file_uri_to_local_path(parsed)
         if not os.path.isabs(path):
@@ -359,7 +360,7 @@ def _file_uri_to_local_path(parsed) -> str:
     """Convert a parsed file URI into a local path for the current OS."""
     # CommonMark pointy destinations permit backslash-escaped angle brackets;
     # those escapes are Markdown syntax, not part of the local filename.
-    path = unquote(_unescape_commonmark_destination_characters(parsed.path))
+    path = unquote(parsed.path)
     if os.name != "nt":
         return path
 
@@ -390,17 +391,34 @@ def _unescape_commonmark_destination_characters(value: str) -> str:
 
 def _protect_file_uri_delimiters(value: str) -> str:
     """Keep escaped URI delimiters in the local path during URL parsing."""
-    return re.sub(
-        r"\\([?#])",
-        lambda match: f"%{ord(match.group(1)):02X}",
-        value,
-    )
+    chars: List[str] = []
+    cursor = 0
+    while cursor < len(value):
+        if value[cursor] == "\\":
+            slash_start = cursor
+            while cursor < len(value) and value[cursor] == "\\":
+                cursor += 1
+            slash_count = cursor - slash_start
+            if cursor < len(value) and value[cursor] in "?#":
+                chars.append("\\" * (slash_count - slash_count % 2))
+                if slash_count % 2:
+                    chars.append(f"%{ord(value[cursor]):02X}")
+                else:
+                    chars.append(value[cursor])
+                cursor += 1
+                continue
+            chars.append("\\" * slash_count)
+            continue
+        chars.append(value[cursor])
+        cursor += 1
+    return "".join(chars)
 
 
 def _parse_file_uri(value: str):
     """Parse a source-level CommonMark destination without losing path punctuation."""
     protected = _protect_file_uri_delimiters(value)
-    return urlparse(_unescape_commonmark_destination_characters(protected))
+    normalized = _unescape_commonmark_destination_characters(protected)
+    return urlparse(html_unescape(normalized))
 
 
 def _scan_angle_file_link(
@@ -432,17 +450,19 @@ def _scan_angle_file_link(
         uri_chars.append(text[cursor])
         cursor += 1
     raw_uri = "".join(uri_chars)
-    if cursor >= len(text) or not _unescape_commonmark_destination_characters(
-        raw_uri
-    ).startswith("file://"):
+    normalized_uri = _unescape_commonmark_destination_characters(raw_uri)
+    if cursor >= len(text) or not normalized_uri[:7].casefold() == "file://":
         return None
 
     cursor += 1
+    title_start = cursor
     while cursor < len(text) and text[cursor].isspace():
         cursor += 1
     if cursor >= len(text):
         return None
     if text[cursor] != ")":
+        if cursor == title_start:
+            return None
         marker = text[cursor]
         if marker not in "\"'(":
             return None
@@ -526,8 +546,11 @@ def _file_link_matches(
 ) -> List[_FileLinkMatch | re.Match]:
     """Find eligible link ranges using a mask, then recover original groups."""
     matches: List[_FileLinkMatch | re.Match] = []
-    mask = markdown_mask if markdown_mask is not None else _mask_markdown_code(text)
-    for candidate in _FILE_LINK_LABEL_RE.finditer(mask):
+    mask = _mask_file_link_candidates(
+        text,
+        markdown_mask if markdown_mask is not None else _mask_markdown_code(text),
+    )
+    for candidate in _FILE_LINK_OPENER_RE.finditer(mask):
         opener_start = candidate.start()
         bang = candidate.group(1) == "!"
         bracket_start = opener_start + (1 if bang else 0)
@@ -536,11 +559,17 @@ def _file_link_matches(
         while prefix_cursor >= 0 and text[prefix_cursor] == "\\":
             backslash_count += 1
             prefix_cursor -= 1
+        if not bang and opener_start > 0 and text[opener_start - 1] == "!":
+            # The bracket half of an image opener is discovered separately by
+            # the linear opener scan; let the ``![`` candidate own the link.
+            continue
         if backslash_count % 2:
             if not bang:
                 continue
             opener_start = bracket_start
-        label_end = candidate.end() - 2
+        label_end = _scan_file_link_label_end(mask, bracket_start)
+        if label_end is None:
+            continue
         if mask[label_end + 2 : label_end + 3] == "<":
             angle_match = _scan_angle_file_link(text, mask, opener_start, label_end)
             if angle_match is not None:
@@ -555,6 +584,38 @@ def _file_link_matches(
                 matches.append(original_match)
                 continue
     return matches
+
+
+def _scan_file_link_label_end(mask: str, bracket_start: int) -> int | None:
+    """Find an unescaped ``](`` label boundary in one linear pass."""
+    cursor = bracket_start + 1
+    while cursor < len(mask):
+        if mask[cursor] == "\\" and cursor + 1 < len(mask):
+            if mask[cursor + 1] in _COMMONMARK_ASCII_PUNCTUATION:
+                cursor += 2
+                continue
+        if mask[cursor] != "]":
+            cursor += 1
+            continue
+        if mask[cursor + 1 : cursor + 2] == "(":
+            return cursor
+        cursor += 1
+    return None
+
+
+def _mask_file_link_candidates(text: str, mask: str) -> str:
+    """Also hide raw-HTML inline tokens from file-link candidate discovery."""
+    ranges: List[Tuple[int, int]] = []
+    terminators = {
+        "-->": _substring_positions(text, "-->"),
+        "?>": _substring_positions(text, "?>"),
+        "]]>": _substring_positions(text, "]]>") ,
+        ">": _substring_positions(text, ">"),
+    }
+    for start, end in _inline_angle_token_ranges(text):
+        if _raw_html_end(text, start, terminators) == end:
+            ranges.append((start, end))
+    return _mask_ranges(mask, ranges) if ranges else mask
 
 
 def _extract_secret_requests(
