@@ -25,9 +25,11 @@ description: The implementation-lane standard for delivering a PR across the Avi
   review and CI gates, thread resolution, circuit breaking, authority, and
   close-out criteria.
 - Refer to the dependency by skill name. Do not hard-code an installation path,
-  vendor its scripts here, or hand-roll a replacement waiter. If
-  `background-watch-hook` is unavailable, install or enable it before starting
-  a review loop, or report the missing dependency as a blocker.
+  vendor its scripts here, or hand-roll a replacement waiter. It is a
+  workspace-level dependency, not a repository payload: companion repositories
+  must not copy it just to satisfy this policy. The active agent environment
+  must expose it by skill name before a managed wait starts; if it does not,
+  report that environment blocker rather than changing repository scope.
 
 ## Roles & authority
 
@@ -355,9 +357,13 @@ turn ends because you armed a watch and are waiting, say exactly that.
    CI check set is present and fully successful, and
    `gh pr view --json mergeStateStatus` == `CLEAN` — so that a check which
    errors, returns empty, or omits an expected check reads as *do not merge*.
-   Then merge with `gh pr merge --match-head-commit <validated-head-sha>` — no
-   re-review, no spawning anyone. If the gate is not CLEAN, report exactly
-   what's missing instead of refusing by role.
+   Then merge the validated PR explicitly with
+   `gh pr merge <validated-pr-number-or-url> --squash
+   --match-head-commit <validated-head-sha>` — no re-review, no spawning
+   anyone. The explicit PR target and `--squash` keep the command
+   noninteractive even when the orchestrator is running outside the PR's
+   worktree. If the gate is not CLEAN, report exactly what's missing instead
+   of refusing by role.
 
 ## 6. While waiting, don't idle
 

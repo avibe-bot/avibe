@@ -7197,6 +7197,19 @@ async def _archive_cancel_turn(session_id: str) -> None:
         logger.debug("archive: cancel in-flight turn failed for %s", session_id, exc_info=True)
 
 
+def _session_archive_unavailable_response():
+    """Fail closed when the controller cannot own the archive lifecycle."""
+
+    from core.services import settings as settings_service
+
+    lang = settings_service.load_config_or_default().language
+    return _coded_error_response(
+        "session_archive_unavailable",
+        t("error.sessionArchiveUnavailable", lang),
+        503,
+    )
+
+
 async def _archive_release_vault_scopes(session_id: str, revoked_vault_scopes: list[dict[str, str]]) -> None:
     from vibe import api
 
@@ -7262,6 +7275,10 @@ async def _archive_publish_run_updates(
 async def sessions_archive(session_id: str):
     """Permanently archive a session and reclaim its bound resources.
 
+    For an active row, the controller owns one closed lifecycle operation: it
+    holds Memory capture admission across final flush and the first irreversible
+    archive write. If that controller seam is unavailable, archive fails closed.
+
     The DB-level teardown (status, tasks/watches, runs, Show Page) is atomic in
     ``archive_session``. Cancelling an in-flight chat turn lives in the controller
     process, so we fire it best-effort in the BACKGROUND after the commit — the
@@ -7269,22 +7286,75 @@ async def sessions_archive(session_id: str):
     writes into hidden history rather than re-surfacing the session.
     """
     from core.services import sessions as workbench_sessions_service
+    from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID
     from vibe.sse_broker import broker
 
     engine = _projects_engine()
+    if str(session_id) == WORKSPACE_NOTICE_SESSION_ID:
+        return _reserved_session_response(
+            RESERVED_SESSION_PROTECTED_I18N_KEY,
+            code="reserved_session",
+        )
     try:
-        with engine.begin() as conn:
-            session = workbench_sessions_service.archive_session(conn, session_id)
+        with engine.connect() as conn:
+            existing_session = workbench_sessions_service.get_session(conn, session_id)
     except LookupError as err:
         return jsonify({"error": str(err)}), 404
-    except PermissionError as err:
-        # A session the runtime reserves (today: the workspace-notifications row that
-        # is D5 rung (5)'s home). ``storage`` raises a machine ``code`` and carries no
-        # user-facing text, because the configured language is only resolvable up here.
-        code = getattr(err, "code", "forbidden")
-        if code == "reserved_session":
-            return _reserved_session_response(RESERVED_SESSION_PROTECTED_I18N_KEY, code=code)
-        return _coded_error_response(code, str(err), 403)
+    if existing_session.get("status") == "archived":
+        try:
+            with engine.begin() as conn:
+                session = workbench_sessions_service.archive_session(
+                    conn,
+                    session_id,
+                )
+        except LookupError as err:
+            return jsonify({"error": str(err)}), 404
+        except PermissionError as err:
+            code = getattr(err, "code", "forbidden")
+            if code == "reserved_session":
+                return _reserved_session_response(
+                    RESERVED_SESSION_PROTECTED_I18N_KEY,
+                    code=code,
+                )
+            return _coded_error_response(code, str(err), 403)
+    else:
+        from vibe import internal_client
+
+        try:
+            archive_result = await internal_client.memory_archive_session(session_id)
+        except (
+            internal_client.InternalServerUnavailable,
+            internal_client.InternalServerTimeout,
+        ):
+            return _session_archive_unavailable_response()
+        except Exception:
+            logger.debug(
+                "archive: controller lifecycle failed for %s",
+                session_id,
+                exc_info=True,
+            )
+            return _session_archive_unavailable_response()
+
+        status_code = archive_result.get("status_code")
+        body = archive_result.get("body")
+        body = body if isinstance(body, dict) else {}
+        if status_code == 404 and body.get("error") == "session_not_found":
+            return jsonify({"error": f"Session not found: {session_id}"}), 404
+        if status_code == 403 and body.get("error") == "reserved_session":
+            return _reserved_session_response(
+                RESERVED_SESSION_PROTECTED_I18N_KEY,
+                code="reserved_session",
+            )
+        candidate = body.get("session")
+        if (
+            status_code != 200
+            or body.get("ok") is not True
+            or not isinstance(candidate, dict)
+            or candidate.get("id") != session_id
+            or candidate.get("status") != "archived"
+        ):
+            return _session_archive_unavailable_response()
+        session = candidate
 
     revoked_vault_scopes = session.pop("revoked_vault_grant_scopes", [])
     reclaimed = session.get("reclaimed") or {}

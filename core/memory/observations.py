@@ -13,6 +13,16 @@ class AddAck:
 
 
 @dataclass(frozen=True)
+class AddRejected:
+    request_id: str | None
+    error_code: str | None
+    server_fault: bool
+
+
+AddResult: TypeAlias = AddAck | AddRejected
+
+
+@dataclass(frozen=True)
 class FlushSucceeded:
     request_id: str | None
     status: Literal["extracted", "no_extraction"] | None
@@ -30,4 +40,11 @@ class FlushUnknown:
     reason: Literal["timeout", "transport"]
 
 
-FlushResult: TypeAlias = FlushSucceeded | FlushRejected | FlushUnknown
+@dataclass(frozen=True)
+class FlushRetryable:
+    """A failure proven to occur before provider submission."""
+
+    error_code: Literal["memory_sidecar_unavailable"] = "memory_sidecar_unavailable"
+
+
+FlushResult: TypeAlias = FlushSucceeded | FlushRejected | FlushUnknown | FlushRetryable

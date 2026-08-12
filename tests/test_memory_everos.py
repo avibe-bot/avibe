@@ -10,22 +10,70 @@ import pytest
 
 from core.memory.everos import (
     AddAck,
+    AddRejected,
     EverOSPort,
     FlushRejected,
+    FlushRetryable,
     FlushSucceeded,
     FlushUnknown,
     MemoryProviderFailure,
+    MemoryProviderSystemFailure,
     ProviderAttachment,
     ProviderCapture,
 )
-from core.memory.types import MemoryProfile, MemoryProfileExplicitInfo, MemoryProfileTrait
+from core.memory.store import _provider_session_ref
+from core.memory.types import (
+    MemoryProfile,
+    MemoryProfileExplicitInfo,
+    MemoryProfileTrait,
+    ProviderSessionRef,
+)
 
 
 PROJECT = "p-22222222222222222222222222222222"
+PRINCIPAL = "owner-1"
+SESSION_REF = ProviderSessionRef(
+    principal_id=PRINCIPAL,
+    epoch=7,
+    project_ref=PROJECT,
+    session_id="src--one--e1",
+)
+WIRE_SESSION_ID = "src--one--e1"
 
 
 def _sidecar_transport(handler):
     return patch("core.memory.everos.httpx.AsyncHTTPTransport", return_value=httpx.MockTransport(handler))
+
+
+class _FailingResponseStream(httpx.AsyncByteStream):
+    def __init__(
+        self,
+        failure_type: type[httpx.TransportError],
+        request: httpx.Request,
+    ) -> None:
+        self._failure_type = failure_type
+        self._request = request
+
+    async def __aiter__(self):
+        raise self._failure_type("response body lost", request=self._request)
+        yield b""  # pragma: no cover - keeps this an async generator
+
+
+def _health_envelope(recorder) -> dict:
+    return {
+        "status": "ok",
+        "version": "1.2.3",
+        "capabilities": {
+            "llm": True,
+            "embed": True,
+            "rerank": True,
+            "multimodal_llm": True,
+            "parser": True,
+        },
+        "disabled_features": [],
+        "cascade": None,
+        "recorder": recorder,
+    }
 
 
 def test_add_and_flush_are_separate_and_parse_provider_envelopes() -> None:
@@ -47,14 +95,12 @@ def test_add_and_flush_are_separate_and_parse_provider_envelopes() -> None:
         provider = EverOSPort(Path("/tmp/everos.sock"))
         ack = await provider.add(
             ProviderCapture(
-                principal_id="owner-1",
-                session_ref="src--one--e1",
+                session_ref=SESSION_REF,
                 text="remember this",
                 provider_timestamp_ms=1_725_000_001_234,
-                project_ref=PROJECT,
             )
         )
-        flushed = await provider.flush("src--one--e1", PROJECT)
+        flushed = await provider.flush(SESSION_REF)
         return ack, flushed
 
     with _sidecar_transport(handler):
@@ -62,17 +108,19 @@ def test_add_and_flush_are_separate_and_parse_provider_envelopes() -> None:
 
     assert ack == AddAck(request_id="add-request", status="accumulated")
     assert flushed == FlushSucceeded(request_id="flush-request", status="extracted")
+    assert SESSION_REF.session_id == WIRE_SESSION_ID
+    assert len(SESSION_REF.session_id.encode("utf-8")) <= 128
 
     assert requests == [
         (
             "/api/v2/memory/add",
             {
-                "session_id": "src--one--e1",
+                "session_id": WIRE_SESSION_ID,
                 "app_id": "avibe",
                 "project_id": PROJECT,
                 "messages": [
                     {
-                        "sender_id": "owner-1",
+                        "sender_id": PRINCIPAL,
                         "role": "user",
                         "timestamp": 1_725_000_001_234,
                         "content": "remember this",
@@ -82,75 +130,204 @@ def test_add_and_flush_are_separate_and_parse_provider_envelopes() -> None:
         ),
         (
             "/api/v2/memory/flush",
-            {"session_id": "src--one--e1", "app_id": "avibe", "project_id": PROJECT},
+            {
+                "session_id": WIRE_SESSION_ID,
+                "app_id": "avibe",
+                "project_id": PROJECT,
+            },
         ),
     ]
 
 
-@pytest.mark.parametrize(
-    "status_code,retryable",
-    [
-        # These responses reject the request itself and cannot recover on replay.
-        (415, False),
-        (400, False),
-        (403, False),
-        (404, False),
-        (422, False),
-        # Statuses that describe a condition a later attempt may find cleared.
-        (408, True),
-        (409, True),
-        (423, True),
-        (425, True),
-        (429, True),
-        (500, True),
-        (503, True),
-    ],
-)
-def test_add_rejection_is_retryable_only_when_a_replay_could_succeed(
-    status_code: int,
-    retryable: bool,
-) -> None:
-    def handler(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(status_code, json={"error": {"code": "rejected"}})
+def test_provider_capture_has_one_canonical_session_identity() -> None:
+    capture = ProviderCapture(SESSION_REF, "capture", 1)
+    scope_key = b"s" * 32
+    raw_session_id = "same-raw-session"
+    same_raw_session_other_principal = ProviderSessionRef(
+        principal_id="owner-2",
+        epoch=SESSION_REF.epoch,
+        project_ref=PROJECT,
+        session_id=_provider_session_ref(
+            scope_key,
+            "owner-2",
+            PROJECT,
+            raw_session_id,
+            SESSION_REF.epoch,
+        ),
+    )
+    same_raw_session_next_epoch = ProviderSessionRef(
+        principal_id=PRINCIPAL,
+        epoch=SESSION_REF.epoch + 1,
+        project_ref=PROJECT,
+        session_id=_provider_session_ref(
+            scope_key,
+            PRINCIPAL,
+            PROJECT,
+            raw_session_id,
+            SESSION_REF.epoch + 1,
+        ),
+    )
+    current_session = _provider_session_ref(
+        scope_key,
+        PRINCIPAL,
+        PROJECT,
+        raw_session_id,
+        SESSION_REF.epoch,
+    )
 
-    async def run() -> MemoryProviderFailure:
-        with pytest.raises(MemoryProviderFailure) as raised:
-            await EverOSPort(Path("/tmp/everos.sock")).add(
-                ProviderCapture(
-                    "owner-1",
-                    "src--one--e1",
-                    "remember this",
-                    1_725_000_001_234,
-                    PROJECT,
-                )
-            )
-        return raised.value
+    assert tuple(ProviderCapture.__dataclass_fields__) == (
+        "session_ref",
+        "text",
+        "provider_timestamp_ms",
+        "attachments",
+    )
+    assert capture.session_ref.principal_id == PRINCIPAL
+    derived_session_ids = {
+        current_session,
+        same_raw_session_other_principal.session_id,
+        same_raw_session_next_epoch.session_id,
+    }
+    assert len(derived_session_ids) == 3
+    assert all(len(session_id.encode("utf-8")) <= 128 for session_id in derived_session_ids)
+
+
+def test_add_marks_response_disconnect_as_ambiguous() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadError("response lost", request=request)
+
+    async def run() -> None:
+        provider = EverOSPort(Path("/tmp/everos.sock"))
+        await provider.add(ProviderCapture(SESSION_REF, "capture", 1))
 
     with _sidecar_transport(handler):
-        failure = asyncio.run(run())
+        with pytest.raises(MemoryProviderSystemFailure) as raised:
+            asyncio.run(run())
 
-    assert failure.error == "memory_processing_failed"
-    assert failure.retryable is retryable
+    assert raised.value.ambiguous is True
 
 
-def test_add_treats_missing_provider_configuration_as_retryable() -> None:
+def test_add_keeps_connect_timeout_on_retryable_system_outage_path() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectTimeout("connection stalled", request=request)
+
+    async def run() -> None:
+        provider = EverOSPort(Path("/tmp/everos.sock"))
+        await provider.add(ProviderCapture(SESSION_REF, "capture", 1))
+
+    with _sidecar_transport(handler):
+        with pytest.raises(MemoryProviderSystemFailure) as raised:
+            asyncio.run(run())
+
+    assert raised.value.error == "memory_sidecar_unavailable"
+    assert raised.value.ambiguous is False
+
+
+@pytest.mark.parametrize("failure_type", [httpx.WriteError, httpx.CloseError])
+def test_add_marks_post_submission_transport_failures_as_ambiguous(
+    failure_type: type[httpx.TransportError],
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise failure_type("response lost", request=request)
+
+    async def run() -> None:
+        provider = EverOSPort(Path("/tmp/everos.sock"))
+        await provider.add(ProviderCapture(SESSION_REF, "capture", 1))
+
+    with _sidecar_transport(handler):
+        with pytest.raises(MemoryProviderSystemFailure) as raised:
+            asyncio.run(run())
+
+    assert raised.value.ambiguous is True
+
+
+def test_add_rejects_overlong_receipt_without_truncating() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"request_id": "x" * 129, "data": {"status": "accumulated"}},
+        )
+
+    async def run() -> AddAck:
+        return await EverOSPort(Path("/tmp/everos.sock")).add(
+            ProviderCapture(SESSION_REF, "capture", 1)
+        )
+
+    with _sidecar_transport(handler):
+        ack = asyncio.run(run())
+
+    assert ack == AddAck(request_id=None, status="accumulated")
+
+
+@pytest.mark.parametrize(
+    "status_code",
+    [
+        400,
+        403,
+        404,
+        408,
+        409,
+        415,
+        422,
+        423,
+        425,
+        429,
+        500,
+        503,
+    ],
+)
+def test_add_provider_rejection_is_terminal(status_code: int) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            status_code,
+            json={
+                "request_id": "rejected-request",
+                "error": {"code": "rejected"},
+            },
+        )
+
+    async def run() -> AddRejected:
+        result = await EverOSPort(Path("/tmp/everos.sock")).add(
+            ProviderCapture(
+                SESSION_REF,
+                "remember this",
+                1_725_000_001_234,
+            )
+        )
+        assert isinstance(result, AddRejected)
+        return result
+
+    with _sidecar_transport(handler):
+        rejection = asyncio.run(run())
+
+    assert rejection == AddRejected(
+        request_id="rejected-request",
+        error_code="rejected",
+        server_fault=status_code >= 500,
+    )
+
+
+def test_add_treats_missing_provider_configuration_as_terminal_rejection() -> None:
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             422,
             json={"error": {"code": "PROVIDER_NOT_CONFIGURED"}},
         )
 
-    async def run() -> MemoryProviderFailure:
-        with pytest.raises(MemoryProviderFailure) as raised:
-            await EverOSPort(Path("/tmp/everos.sock")).add(
-                ProviderCapture("owner", "session", "capture", 1, PROJECT)
-            )
-        return raised.value
+    async def run() -> AddRejected:
+        result = await EverOSPort(Path("/tmp/everos.sock")).add(
+            ProviderCapture(SESSION_REF, "capture", 1)
+        )
+        assert isinstance(result, AddRejected)
+        return result
 
     with _sidecar_transport(handler):
-        failure = asyncio.run(run())
+        rejection = asyncio.run(run())
 
-    assert failure.retryable is True
+    assert rejection == AddRejected(
+        request_id=None,
+        error_code="PROVIDER_NOT_CONFIGURED",
+        server_fault=False,
+    )
 
 
 def test_add_forwards_typed_workbench_attachments_without_reading_them() -> None:
@@ -161,11 +338,9 @@ def test_add_forwards_typed_workbench_attachments_without_reading_them() -> None
         return httpx.Response(200, json={"data": {"status": "accumulated"}})
 
     capture = ProviderCapture(
-        principal_id="owner-1",
-        session_ref="src--one--e1",
+        session_ref=SESSION_REF,
         text="remember this diagram",
         provider_timestamp_ms=1_725_000_001_234,
-        project_ref=PROJECT,
         attachments=(
             ProviderAttachment(
                 kind="image",
@@ -190,7 +365,7 @@ def test_add_forwards_typed_workbench_attachments_without_reading_them() -> None
     ]
 
 
-def test_write_routes_degrade_unusable_2xx_bodies_without_replaying_writes(caplog) -> None:
+def test_flush_treats_unusable_2xx_body_as_unknown_without_replaying_write(caplog) -> None:
     requests: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -199,21 +374,21 @@ def test_write_routes_degrade_unusable_2xx_bodies_without_replaying_writes(caplo
 
     async def run():
         provider = EverOSPort(Path("/tmp/everos.sock"))
-        ack = await provider.add(ProviderCapture("owner", "session", "capture", 1, PROJECT))
-        result = await provider.flush("session", PROJECT)
+        ack = await provider.add(ProviderCapture(SESSION_REF, "capture", 1))
+        result = await provider.flush(SESSION_REF)
         return ack, result
 
     with _sidecar_transport(handler):
         ack, result = asyncio.run(run())
 
     assert ack == AddAck(request_id=None, status=None)
-    assert result == FlushSucceeded(request_id=None, status=None)
+    assert result == FlushUnknown(reason="transport")
     assert requests == ["/api/v2/memory/add", "/api/v2/memory/flush"]
     assert "add returned 2xx with an unusable response body" in caplog.text
     assert "flush returned 2xx with an unusable response body" in caplog.text
 
 
-def test_write_routes_log_and_drop_unsupported_status_values(caplog) -> None:
+def test_flush_treats_unsupported_2xx_status_as_unknown(caplog) -> None:
     responses = iter(
         [
             httpx.Response(200, json={"data": {"status": "future-add"}}),
@@ -223,15 +398,15 @@ def test_write_routes_log_and_drop_unsupported_status_values(caplog) -> None:
 
     async def run():
         provider = EverOSPort(Path("/tmp/everos.sock"))
-        ack = await provider.add(ProviderCapture("owner", "session", "capture", 1, PROJECT))
-        result = await provider.flush("session", PROJECT)
+        ack = await provider.add(ProviderCapture(SESSION_REF, "capture", 1))
+        result = await provider.flush(SESSION_REF)
         return ack, result
 
     with _sidecar_transport(lambda _request: next(responses)):
         ack, result = asyncio.run(run())
 
     assert ack == AddAck(request_id=None, status=None)
-    assert result == FlushSucceeded(request_id=None, status=None)
+    assert result == FlushUnknown(reason="transport")
     assert "add returned an unsupported status value" in caplog.text
     assert "flush returned an unsupported status value" in caplog.text
 
@@ -254,37 +429,128 @@ def test_flush_maps_non_2xx_envelopes_to_rejected(response: httpx.Response, expe
         return response
 
     with _sidecar_transport(handler):
-        result = asyncio.run(EverOSPort(Path("/tmp/everos.sock")).flush("session", PROJECT))
+        result = asyncio.run(EverOSPort(Path("/tmp/everos.sock")).flush(SESSION_REF))
 
     assert result == expected
+
+
+@pytest.mark.parametrize(
+    ("operation", "result_type", "route"),
+    [
+        ("add", AddRejected, "/api/v2/memory/add"),
+        ("flush", FlushRejected, "/api/v2/memory/flush"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("status_code", "failure_type", "server_fault"),
+    [
+        (422, httpx.ReadTimeout, False),
+        (503, httpx.ReadError, True),
+    ],
+)
+def test_write_preserves_non_2xx_verdict_when_response_body_is_lost(
+    operation: str,
+    result_type: type[AddRejected] | type[FlushRejected],
+    route: str,
+    status_code: int,
+    failure_type: type[httpx.TransportError],
+    server_fault: bool,
+) -> None:
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        return httpx.Response(
+            status_code,
+            stream=_FailingResponseStream(failure_type, request),
+        )
+
+    async def run():
+        provider = EverOSPort(Path("/tmp/everos.sock"))
+        if operation == "add":
+            return await provider.add(ProviderCapture(SESSION_REF, "capture", 1))
+        return await provider.flush(SESSION_REF)
+
+    with _sidecar_transport(handler):
+        result = asyncio.run(run())
+
+    assert isinstance(result, result_type)
+    assert (result.request_id, result.error_code, result.server_fault) == (
+        None,
+        None,
+        server_fault,
+    )
+    assert requests == [route]
+
+
+@pytest.mark.parametrize(
+    ("operation", "route"),
+    [
+        ("add", "/api/v2/memory/add"),
+        ("flush", "/api/v2/memory/flush"),
+    ],
+)
+def test_write_keeps_2xx_body_disconnect_unknown_without_replaying(
+    operation: str,
+    route: str,
+) -> None:
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        return httpx.Response(
+            200,
+            stream=_FailingResponseStream(httpx.ReadError, request),
+        )
+
+    async def run():
+        provider = EverOSPort(Path("/tmp/everos.sock"))
+        if operation == "add":
+            return await provider.add(ProviderCapture(SESSION_REF, "capture", 1))
+        return await provider.flush(SESSION_REF)
+
+    with _sidecar_transport(handler):
+        if operation == "add":
+            with pytest.raises(MemoryProviderSystemFailure) as raised:
+                asyncio.run(run())
+            assert raised.value.ambiguous is True
+        else:
+            assert asyncio.run(run()) == FlushUnknown(reason="transport")
+
+    assert requests == [route]
 
 
 @pytest.mark.parametrize(
     ("failure_type", "expected"),
     [
         (httpx.ReadTimeout, FlushUnknown("timeout")),
-        (httpx.ConnectError, FlushUnknown("transport")),
+        (httpx.ReadError, FlushUnknown("transport")),
+        (httpx.WriteError, FlushUnknown("transport")),
+        (httpx.CloseError, FlushUnknown("transport")),
+        (httpx.ConnectTimeout, FlushRetryable()),
+        (httpx.PoolTimeout, FlushRetryable()),
+        (httpx.ConnectError, FlushRetryable()),
     ],
 )
-def test_flush_maps_timeout_and_transport_to_unknown(failure_type, expected) -> None:
+def test_flush_preserves_pre_and_post_submission_failure_classification(
+    failure_type,
+    expected,
+) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         raise failure_type("failed", request=request)
 
     with _sidecar_transport(handler):
-        result = asyncio.run(EverOSPort(Path("/tmp/everos.sock")).flush("session", PROJECT))
+        result = asyncio.run(EverOSPort(Path("/tmp/everos.sock")).flush(SESSION_REF))
 
     assert result == expected
 
 
 def test_search_uses_public_search_only_and_maps_episode_and_nested_fact() -> None:
-    paths: list[str] = []
+    requests: list[tuple[str, dict]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        paths.append(request.url.path)
         payload = json.loads(request.content)
-        assert payload["top_k"] == 2
-        assert payload["include_profile"] is True
-        assert payload["enable_llm_rerank"] is False
+        requests.append((request.url.path, payload))
         return httpx.Response(
             200,
             json={
@@ -307,12 +573,33 @@ def test_search_uses_public_search_only_and_maps_episode_and_nested_fact() -> No
 
     async def run():
         provider = EverOSPort(Path("/tmp/everos.sock"))
-        return await provider.search("owner-1", PROJECT, "language", 2)
+        return await provider.search(
+            PRINCIPAL,
+            PROJECT,
+            "language",
+            2,
+            session_ref=SESSION_REF,
+        )
 
     with _sidecar_transport(handler):
         items = asyncio.run(run())
 
-    assert paths == ["/api/v2/memory/search"]
+    assert requests == [
+        (
+            "/api/v2/memory/search",
+            {
+                "user_id": PRINCIPAL,
+                "app_id": "avibe",
+                "project_id": PROJECT,
+                "query": "language",
+                "method": "hybrid",
+                "top_k": 2,
+                "include_profile": True,
+                "enable_llm_rerank": False,
+                "filters": {"session_id": WIRE_SESSION_ID},
+            },
+        )
+    ]
     assert items[0].kind == "episode"
     assert items[0].text == "Preferred language\nThe owner uses Python."
     assert items[0].date == "2026-07-22"
@@ -320,15 +607,47 @@ def test_search_uses_public_search_only_and_maps_episode_and_nested_fact() -> No
     assert items[1].text == "Uses Python for automation."
 
 
-def test_profile_uses_search_and_reports_empty_profile_as_non_failure() -> None:
+def test_agentic_search_fails_before_any_sidecar_request(monkeypatch) -> None:
+    provider = EverOSPort(Path("/tmp/everos.sock"))
+
+    async def unexpected_request(*_args, **_kwargs):
+        pytest.fail("agentic search must fail before an HTTP request")
+
+    monkeypatch.setattr(provider, "_sidecar_request", unexpected_request)
+
+    async def run() -> MemoryProviderFailure:
+        with pytest.raises(MemoryProviderFailure) as raised:
+            await provider.search(
+                PRINCIPAL,
+                PROJECT,
+                "language",
+                2,
+                method="agentic",
+            )
+        return raised.value
+
+    failure = asyncio.run(run())
+
+    assert failure.error == "memory_capability_unavailable"
+    assert failure.retryable is False
+
+
+def test_profile_uses_get_and_reports_empty_profile_as_non_failure() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/api/v2/memory/search"
-        assert json.loads(request.content)["query"] == "profile"
-        return httpx.Response(200, json={"data": {"profiles": [], "episodes": []}})
+        assert request.url.path == "/api/v2/memory/get"
+        assert json.loads(request.content) == {
+            "user_id": PRINCIPAL,
+            "app_id": "avibe",
+            "project_id": "default",
+            "memory_type": "profile",
+            "page": 1,
+            "page_size": 1,
+        }
+        return httpx.Response(200, json={"data": {"profiles": []}})
 
     async def run():
         provider = EverOSPort(Path("/tmp/everos.sock"))
-        return await provider.profile("owner-1", PROJECT)
+        return await provider.profile(PRINCIPAL, PROJECT)
 
     with _sidecar_transport(handler):
         items = asyncio.run(run())
@@ -584,7 +903,7 @@ def test_processing_health_uses_owned_child_callback_when_present() -> None:
 )
 def test_recorder_health_validates_the_closed_sidecar_projection(recorder, expected) -> None:
     def handler(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"status": "ok", "recorder": recorder})
+        return httpx.Response(200, json=_health_envelope(recorder))
 
     with _sidecar_transport(handler):
         health = asyncio.run(EverOSPort(Path("/tmp/everos.sock")).recorder_health())
@@ -619,14 +938,16 @@ def test_sidecar_failure_logs_never_contain_capture_or_response_canaries(caplog)
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(500, content=response_canary.encode("utf-8"))
 
-    async def run() -> None:
-        with pytest.raises(MemoryProviderFailure):
-            await EverOSPort(Path("/tmp/everos.sock")).add(
-                ProviderCapture("owner-1", "src--one--e1", capture_canary, 1_725_000_001_234, PROJECT)
-            )
+    async def run() -> AddRejected:
+        result = await EverOSPort(Path("/tmp/everos.sock")).add(
+            ProviderCapture(SESSION_REF, capture_canary, 1_725_000_001_234)
+        )
+        assert isinstance(result, AddRejected)
+        return result
 
     with _sidecar_transport(handler):
-        asyncio.run(run())
+        rejection = asyncio.run(run())
 
+    assert rejection.error_code is None
     assert capture_canary not in caplog.text
     assert response_canary not in caplog.text

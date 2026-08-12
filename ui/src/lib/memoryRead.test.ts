@@ -33,7 +33,7 @@ describe('classifyMemoryResult', () => {
     });
   });
 
-  it('lets the failure log declare its own untagged success shape', () => {
+  it('supports an explicitly declared legacy untagged success shape', () => {
     const hasItems = (value: unknown): boolean => Array.isArray((value as { items?: unknown })?.items);
     const result = { items: [], retention_days: 90 };
     expect(classifyMemoryResult(result, hasItems)).toEqual({ kind: 'ok', value: result });

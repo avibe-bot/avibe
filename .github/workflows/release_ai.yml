@@ -120,7 +120,7 @@ jobs:
           python scripts/build_memory_runtime.py \
             --output-dir runtime-artifacts \
             --platform "${{ matrix.artifact }}" \
-            --metadata-output "runtime-artifacts/memory-runtime-1.2.1-${{ matrix.artifact }}.json"
+            --metadata-output "runtime-artifacts/memory-runtime-1.2.3-${{ matrix.artifact }}.json"
 
       - name: Upload Memory Runtime bundle
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
@@ -234,6 +234,22 @@ jobs:
           print("vibe/show_runtime_manifest.json")
           print("vibe/memory_runtime_manifest.json")
           PY
+
+      - name: Run Memory Runtime release guard for GitHub-only assets
+        shell: bash
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          if [[ "$TAG" != gh-v* ]]; then
+            echo "Skipping GitHub-only Memory Runtime guard for $TAG."
+            exit 0
+          fi
+          rm -rf memory-release-guard-assets
+          mkdir -p memory-release-guard-assets
+          cp vibe/memory_runtime_manifest.json memory-release-guard-assets/memory-runtime-manifest.json
+          cp runtime-artifacts/memory-runtime-*.tar.gz memory-release-guard-assets/
+          python scripts/memory_runtime_release_guard.py \
+            --manifest vibe/memory_runtime_manifest.json \
+            verify --asset-dir memory-release-guard-assets
 
       - name: Add Show Runtime release assets
         shell: bash

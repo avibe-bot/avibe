@@ -20,10 +20,11 @@ import contextlib
 import socket
 import sys
 import tempfile
+import threading
 import types
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, Mock
+from unittest.mock import AsyncMock, MagicMock, Mock, call
 
 import httpx
 import pytest
@@ -33,6 +34,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core import internal_server, session_turns
 from core.message_context import build_context_turn_sink_key
+from core.memory.maintenance import MemoryStoreUnavailableError
+from core.memory.runtime import MemorySessionLifecycleBusyError
 from core.run_settlement import SETTLED_BY_STOPPED, SETTLED_BY_TERMINAL_RESULT
 from core.services.agent_steering import SteerOutcome, result as steer_result
 from core.services.dispatch import (
@@ -233,7 +236,23 @@ def _build_controller_double(handler=None):
 
     controller = MagicMock()
     controller.message_handler = MagicMock()
-    controller.message_handler.handle_user_message = AsyncMock(side_effect=handler or (lambda ctx, text: None))
+
+    async def _handle_user_message(context, text):
+        payload = context.platform_specific or {}
+        lifecycle_admission = payload.pop(
+            session_turns.TURN_LIFECYCLE_ADMISSION_KEY,
+            None,
+        )
+        release = getattr(lifecycle_admission, "release", None)
+        if callable(release):
+            release()
+        if handler is not None:
+            return await handler(context, text)
+        return None
+
+    controller.message_handler.handle_user_message = AsyncMock(
+        side_effect=_handle_user_message,
+    )
 
     sinks: dict = {}
     controller.active_turn_sinks = sinks
@@ -294,6 +313,856 @@ def _build_controller_double(handler=None):
     # (a bare MagicMock would blow up ``json.dumps`` in ``_sse_event``).
     controller._t = lambda key, **kwargs: key
     return controller
+
+
+def test_controller_double_releases_turn_lifecycle_admission_before_handler() -> None:
+    async def _exercise() -> None:
+        lock = asyncio.Lock()
+        await lock.acquire()
+        admission = session_turns.TurnLifecycleAdmission(lock)
+        context = MessageContext(
+            user_id="U",
+            channel_id="C",
+            platform="avibe",
+            platform_specific={
+                session_turns.TURN_LIFECYCLE_ADMISSION_KEY: admission,
+            },
+        )
+
+        async def handler(received_context, _text):
+            assert session_turns.TURN_LIFECYCLE_ADMISSION_KEY not in received_context.platform_specific
+            assert lock.locked() is False
+
+        controller = _build_controller_double(handler=handler)
+        await controller.message_handler.handle_user_message(context, "hello")
+
+    asyncio.run(_exercise())
+
+
+def test_memory_final_flush_delegates_identity_to_controller() -> None:
+    controller = _build_controller_double()
+    controller.memory_scope_for_cli_session = Mock(
+        side_effect=AssertionError("the endpoint must not resolve identity")
+    )
+    controller.final_flush_memory_cli_session = AsyncMock(
+        side_effect=lambda session_id, **_kwargs: session_id == "ses-memory"
+    )
+    app = internal_server.create_app(controller)
+
+    async def _exercise():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            present = await client.post(
+                "/internal/memory/final-flush",
+                json={"session_id": "ses-memory"},
+            )
+            absent = await client.post(
+                "/internal/memory/final-flush",
+                json={"session_id": "ses-absent"},
+            )
+        return present, absent
+
+    present, absent = asyncio.run(_exercise())
+
+    assert present.status_code == 200
+    assert present.json() == {"ok": True, "flushed": True}
+    assert absent.status_code == 200
+    assert absent.json() == {"ok": True, "flushed": False}
+    assert controller.final_flush_memory_cli_session.await_args_list == [
+        call("ses-memory", deadline_seconds=5.0),
+        call("ses-absent", deadline_seconds=5.0),
+    ]
+    controller.memory_scope_for_cli_session.assert_not_called()
+
+
+def test_memory_archive_session_delegates_raw_identity_with_bounded_lifecycle() -> None:
+    controller = _build_controller_double()
+    controller.memory_scope_for_cli_session = Mock(
+        side_effect=AssertionError("the endpoint must not resolve identity")
+    )
+    controller.archive_memory_cli_session = AsyncMock(
+        return_value={"id": "ses-memory", "status": "archived"}
+    )
+    app = internal_server.create_app(controller)
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            return await client.post(
+                "/internal/memory/archive-session",
+                json={"session_id": "ses-memory"},
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": True,
+        "session": {"id": "ses-memory", "status": "archived"},
+    }
+    # The UI transport waits without a reporting deadline, while the controller
+    # still bounds provider lifecycle work before its shielded archive commit.
+    controller.archive_memory_cli_session.assert_awaited_once_with(
+        "ses-memory",
+        deadline_seconds=5.0,
+    )
+    controller.memory_scope_for_cli_session.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"session_id": "   "},
+        {"session_id": " ses-memory"},
+        {"session_id": 123},
+        {"session_id": "ses-memory", "principal_id": "u-untrusted"},
+    ],
+)
+def test_memory_archive_session_rejects_widened_or_invalid_payloads(
+    payload: dict[str, object],
+) -> None:
+    controller = _build_controller_double()
+    controller.archive_memory_cli_session = AsyncMock(return_value={})
+    app = internal_server.create_app(controller)
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            return await client.post(
+                "/internal/memory/archive-session",
+                json=payload,
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 400
+    assert response.json() == {"ok": False, "error": "memory_invalid_input"}
+    controller.archive_memory_cli_session.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "error,status_code,error_code",
+    [
+        (LookupError("missing"), 404, "session_not_found"),
+        (
+            MemorySessionLifecycleBusyError("busy"),
+            503,
+            "memory_session_lifecycle_busy",
+        ),
+        (RuntimeError("failed"), 503, "session_archive_unavailable"),
+    ],
+)
+def test_memory_archive_session_returns_closed_failure_codes(
+    error: Exception,
+    status_code: int,
+    error_code: str,
+) -> None:
+    controller = _build_controller_double()
+    controller.archive_memory_cli_session = AsyncMock(side_effect=error)
+    app = internal_server.create_app(controller)
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            return await client.post(
+                "/internal/memory/archive-session",
+                json={"session_id": "ses-memory"},
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == status_code
+    assert response.json() == {"ok": False, "error": error_code}
+
+
+def test_memory_recovery_reads_resolve_only_signed_ui_operators() -> None:
+    from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+    from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+
+    secret = "test-memory-ui-secret"
+    calls: list[tuple[str, str | None]] = []
+
+    class Runtime:
+        def principal_for_user_key(self, user_key: str) -> str:
+            return {
+                "avibe:local": "u-local-principal",
+                "avibe:remote:subject-2": "u-remote-principal",
+            }[user_key]
+
+        async def processing_record_payload(
+            self,
+            *,
+            verified_user_key: str | None = None,
+        ):
+            calls.append(("processing-record", verified_user_key))
+            return {
+                "status": "ok",
+                "runtime": {"source": {"status": "unavailable"}, "health": None},
+                "sources": {},
+                "anomalies": {"source": {"status": "available"}, "items": []},
+                "maintenance": {"source": {"status": "available"}},
+            }
+
+        async def failure_log_payload(
+            self,
+            *,
+            verified_user_key: str | None = None,
+        ):
+            calls.append(("failures", verified_user_key))
+            return {"status": "ok", "items": [], "recovery": None}
+
+        async def maintenance_payload(
+            self,
+            *,
+            verified_user_key: str | None = None,
+        ):
+            calls.append(("maintenance", verified_user_key))
+            return {
+                "status": "ok",
+                "data_exists": False,
+                "can_clear": True,
+                "clear_recovery": None,
+            }
+
+    controller = _build_controller_double()
+    controller.memory_runtime = Runtime()
+    app = internal_server.create_app(controller, memory_ui_secret=secret)
+
+    def headers(path: str, user_key: str) -> dict[str, str]:
+        return {
+            MEMORY_USER_KEY_HEADER: user_key,
+            MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
+                secret,
+                method="GET",
+                path=path,
+                user_key=user_key,
+            ),
+        }
+
+    async def _exercise():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            composite = await client.get(
+                "/internal/memory/processing-record",
+                headers=headers(
+                    "/internal/memory/processing-record",
+                    "avibe:remote:subject-2",
+                ),
+            )
+            local = await client.get(
+                "/internal/memory/failures",
+                headers=headers("/internal/memory/failures", "avibe:local"),
+            )
+            remote = await client.get(
+                "/internal/memory/maintenance",
+                headers=headers(
+                    "/internal/memory/maintenance",
+                    "avibe:remote:subject-2",
+                ),
+            )
+            unsigned = await client.get("/internal/memory/failures")
+            return composite, local, remote, unsigned
+
+    composite, local, remote, unsigned = asyncio.run(_exercise())
+
+    assert composite.status_code == local.status_code == remote.status_code == unsigned.status_code == 200
+    assert "avibe:remote:subject-2" not in composite.text
+    assert "u-remote-principal" not in composite.text
+    assert calls == [
+        ("processing-record", "avibe:remote:subject-2"),
+        ("failures", "avibe:local"),
+        ("maintenance", "avibe:remote:subject-2"),
+        ("failures", None),
+    ]
+
+
+def test_memory_rebuild_requires_signed_ui_operator() -> None:
+    from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+    from core.memory.ui_access import MEMORY_UI_PROOF_HEADER
+
+    secret = "test-memory-ui-secret"
+    runtime = SimpleNamespace(rebuild=AsyncMock())
+    controller = _build_controller_double()
+    controller.memory_runtime = runtime
+    app = internal_server.create_app(controller, memory_ui_secret=secret)
+
+    async def _exercise() -> tuple[httpx.Response, httpx.Response]:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            unsigned = await client.post(
+                "/internal/memory/rebuild",
+                json={"confirm": True},
+            )
+            invalid = await client.post(
+                "/internal/memory/rebuild",
+                json={"confirm": True},
+                headers={
+                    MEMORY_USER_KEY_HEADER: "avibe:local",
+                    MEMORY_UI_PROOF_HEADER: "invalid-proof",
+                },
+            )
+        return unsigned, invalid
+
+    unsigned, invalid = asyncio.run(_exercise())
+
+    assert unsigned.status_code == invalid.status_code == 403
+    assert unsigned.json() == invalid.json() == {
+        "ok": False,
+        "error": "memory_access_denied",
+        "result": "failed",
+    }
+    runtime.rebuild.assert_not_awaited()
+
+
+def test_memory_factory_reset_requires_signed_ui_operator() -> None:
+    from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+    from core.memory.ui_access import MEMORY_UI_PROOF_HEADER
+
+    secret = "test-memory-ui-secret"
+    controller = _build_controller_double()
+    controller.factory_reset_memory = AsyncMock()
+    app = internal_server.create_app(controller, memory_ui_secret=secret)
+
+    async def _exercise() -> tuple[httpx.Response, httpx.Response]:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            unsigned = await client.post(
+                "/internal/memory/factory-reset",
+                json={"confirm": True},
+            )
+            invalid = await client.post(
+                "/internal/memory/factory-reset",
+                json={"confirm": True},
+                headers={
+                    MEMORY_USER_KEY_HEADER: "avibe:local",
+                    MEMORY_UI_PROOF_HEADER: "invalid-proof",
+                },
+            )
+        return unsigned, invalid
+
+    unsigned, invalid = asyncio.run(_exercise())
+    assert unsigned.status_code == invalid.status_code == 403
+    assert unsigned.json() == invalid.json() == {
+        "ok": False,
+        "error": "memory_access_denied",
+        "result": "failed",
+    }
+    controller.factory_reset_memory.assert_not_awaited()
+
+
+def test_memory_factory_reset_posts_exact_confirmation_and_returns_final_result() -> None:
+    from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+    from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+
+    secret = "test-memory-ui-secret"
+    result = {
+        "ok": True,
+        "result": "completed",
+        "data_deleted": True,
+        "data_remaining": False,
+        "roots": [
+            {"path": "memory", "existed": True, "deleted": True},
+            {"path": "state/memory", "existed": True, "deleted": True},
+        ],
+    }
+    controller = _build_controller_double()
+    controller.memory_runtime = SimpleNamespace(_rebuild_running=lambda: False)
+    controller.factory_reset_memory = AsyncMock(return_value=result)
+    app = internal_server.create_app(controller, memory_ui_secret=secret)
+    path = "/internal/memory/factory-reset"
+    headers = {
+        MEMORY_USER_KEY_HEADER: "avibe:local",
+        MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
+            secret,
+            method="POST",
+            path=path,
+            user_key="avibe:local",
+        ),
+    }
+
+    async def _exercise() -> tuple[httpx.Response, httpx.Response]:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            accepted = await client.post(path, json={"confirm": True}, headers=headers)
+            invalid = await client.post(path, json={"confirm": True, "extra": 1}, headers=headers)
+        return accepted, invalid
+
+    accepted, invalid = asyncio.run(_exercise())
+    assert accepted.status_code == 200
+    assert accepted.json() == result
+    assert invalid.status_code == 400
+    assert invalid.json() == {
+        "ok": False,
+        "error": "memory_invalid_input",
+        "result": "failed",
+    }
+    controller.factory_reset_memory.assert_awaited_once_with()
+
+
+def test_memory_factory_reset_validates_confirmation_before_runtime_lookup() -> None:
+    from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+    from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+
+    secret = "test-memory-ui-secret"
+    path = "/internal/memory/factory-reset"
+    controller = _build_controller_double()
+    controller.memory_runtime = None
+    controller.factory_reset_memory = AsyncMock()
+    app = internal_server.create_app(controller, memory_ui_secret=secret)
+    headers = {
+        MEMORY_USER_KEY_HEADER: "avibe:local",
+        MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
+            secret,
+            method="POST",
+            path=path,
+            user_key="avibe:local",
+        ),
+    }
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post(path, json={"confirm": False}, headers=headers)
+
+    response = asyncio.run(_exercise())
+    assert response.status_code == 400
+    assert response.json() == {
+        "ok": False,
+        "error": "memory_invalid_input",
+        "result": "failed",
+    }
+    controller.factory_reset_memory.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"confirm": False},
+        {"confirm": True, "extra": True},
+        None,
+    ],
+)
+def test_memory_rebuild_rejects_non_exact_confirmation(payload: object) -> None:
+    from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+    from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+
+    secret = "test-memory-ui-secret"
+    path = "/internal/memory/rebuild"
+    user_key = "avibe:local"
+    runtime = SimpleNamespace(rebuild=AsyncMock(), factory_reset_pending=True)
+    controller = _build_controller_double()
+    controller.memory_runtime = runtime
+    controller._memory_factory_reset_task = SimpleNamespace(done=lambda: False)
+    app = internal_server.create_app(controller, memory_ui_secret=secret)
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post(
+                path,
+                json=payload,
+                headers={
+                    MEMORY_USER_KEY_HEADER: user_key,
+                    MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
+                        secret,
+                        method="POST",
+                        path=path,
+                        user_key=user_key,
+                    ),
+                },
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "ok": False,
+        "error": "memory_invalid_input",
+        "result": "failed",
+    }
+    runtime.rebuild.assert_not_awaited()
+
+
+def test_memory_repair_requires_signed_user_and_exact_confirmation() -> None:
+    from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+    from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+
+    secret = "test-memory-ui-secret"
+    path = "/internal/memory/repair"
+    user_key = "avibe:local"
+    runtime = SimpleNamespace(
+        repair=AsyncMock(
+            return_value={
+                "ok": False,
+                "error": "memory_operation_in_progress",
+                "result": "failed",
+            }
+        )
+    )
+    controller = _build_controller_double()
+    controller.memory_runtime = runtime
+    app = internal_server.create_app(controller, memory_ui_secret=secret)
+    signed = {
+        MEMORY_USER_KEY_HEADER: user_key,
+        MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
+            secret,
+            method="POST",
+            path=path,
+            user_key=user_key,
+        ),
+    }
+
+    async def _exercise() -> tuple[httpx.Response, httpx.Response, httpx.Response]:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            unsigned = await client.post(path, json={"confirm": True})
+            malformed = await client.post(path, json={"confirm": False}, headers=signed)
+            conflict = await client.post(path, json={"confirm": True}, headers=signed)
+        return unsigned, malformed, conflict
+
+    unsigned, malformed, conflict = asyncio.run(_exercise())
+    assert unsigned.status_code == 403
+    assert unsigned.json() == {
+        "ok": False,
+        "error": "memory_access_denied",
+        "result": "failed",
+    }
+    assert malformed.status_code == 400
+    assert malformed.json() == {
+        "ok": False,
+        "error": "memory_invalid_input",
+        "result": "failed",
+    }
+    assert conflict.status_code == 409
+    assert conflict.json() == {
+        "ok": False,
+        "error": "memory_operation_in_progress",
+        "result": "failed",
+    }
+    runtime.repair.assert_awaited_once_with()
+
+
+@pytest.mark.parametrize("runtime_available", [False, True])
+def test_memory_repair_validates_confirmation_before_runtime_state(runtime_available: bool) -> None:
+    from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+    from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+
+    secret = "test-memory-ui-secret"
+    path = "/internal/memory/repair"
+    user_key = "avibe:local"
+    controller = _build_controller_double()
+    if runtime_available:
+        controller.memory_runtime = SimpleNamespace(repair=AsyncMock())
+        controller._memory_factory_reset_task = SimpleNamespace(done=lambda: False)
+    else:
+        controller.memory_runtime = None
+    app = internal_server.create_app(controller, memory_ui_secret=secret)
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post(
+                path,
+                json={"confirm": False},
+                headers={
+                    MEMORY_USER_KEY_HEADER: user_key,
+                    MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
+                        secret,
+                        method="POST",
+                        path=path,
+                        user_key=user_key,
+                    ),
+                },
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "ok": False,
+        "error": "memory_invalid_input",
+        "result": "failed",
+    }
+    if runtime_available:
+        controller.memory_runtime.repair.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("result", "expected_status"),
+    [
+        ({"ok": True, "result": "completed", "health": {}}, 200),
+        (
+            {
+                "ok": False,
+                "error": "memory_runtime_unsupported",
+                "result": "failed",
+            },
+            409,
+        ),
+        (
+            {
+                "ok": False,
+                "error": "memory_repair_failed",
+                "result": "timed_out",
+            },
+            503,
+        ),
+    ],
+)
+def test_memory_repair_maps_runtime_status(result: dict, expected_status: int) -> None:
+    from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+    from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+
+    secret = "test-memory-ui-secret"
+    path = "/internal/memory/repair"
+    user_key = "avibe:local"
+    runtime = SimpleNamespace(repair=AsyncMock(return_value=result))
+    controller = _build_controller_double()
+    controller.memory_runtime = runtime
+    app = internal_server.create_app(controller, memory_ui_secret=secret)
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post(
+                path,
+                json={"confirm": True},
+                headers={
+                    MEMORY_USER_KEY_HEADER: user_key,
+                    MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
+                        secret,
+                        method="POST",
+                        path=path,
+                        user_key=user_key,
+                    ),
+                },
+            )
+
+    response = asyncio.run(_exercise())
+    assert response.status_code == expected_status
+    assert response.json() == result
+
+
+def test_processing_record_degrades_signed_operator_lookup_failure() -> None:
+    from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+    from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+
+    secret = "test-memory-ui-secret"
+    verified_user_keys: list[str | None] = []
+
+    class Runtime:
+        def principal_for_user_key(self, _user_key: str) -> str:
+            raise MemoryStoreUnavailableError("Memory store is unavailable")
+
+        async def processing_record_payload(
+            self,
+            *,
+            verified_user_key: str | None = None,
+        ) -> dict[str, object]:
+            verified_user_keys.append(verified_user_key)
+            return {
+                "status": "ok",
+                "runtime": {"source": {"status": "unavailable"}, "health": None},
+                "sources": {},
+                "anomalies": {"source": {"status": "unavailable"}, "items": []},
+                "maintenance": {
+                    "source": {"status": "unavailable"},
+                    "can_clear": False,
+                    "clear_recovery": None,
+                },
+            }
+
+    controller = _build_controller_double()
+    controller.memory_runtime = Runtime()
+    app = internal_server.create_app(controller, memory_ui_secret=secret)
+    path = "/internal/memory/processing-record"
+    user_key = "avibe:remote:subject-2"
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            return await client.get(
+                path,
+                headers={
+                    MEMORY_USER_KEY_HEADER: user_key,
+                    MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
+                        secret,
+                        method="GET",
+                        path=path,
+                        user_key=user_key,
+                    ),
+                },
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+    assert verified_user_keys == [user_key]
+
+
+def test_processing_record_route_leaves_operator_lookup_to_runtime() -> None:
+    from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+    from core.memory.ui_access import MEMORY_UI_PROOF_HEADER, build_ui_read_proof
+
+    secret = "test-memory-ui-secret"
+    verified_user_keys: list[str | None] = []
+
+    class Runtime:
+        def principal_for_user_key(self, _user_key: str) -> str:
+            raise AssertionError("the socket route must not resolve Memory operators")
+
+        async def processing_record_payload(
+            self,
+            *,
+            verified_user_key: str | None = None,
+        ) -> dict[str, object]:
+            verified_user_keys.append(verified_user_key)
+            return {
+                "status": "ok",
+                "runtime": {"source": {"status": "unavailable"}, "health": None},
+                "sources": {},
+                "anomalies": {"source": {"status": "available"}, "items": []},
+                "maintenance": {"source": {"status": "available"}},
+            }
+
+    controller = _build_controller_double()
+    controller.memory_runtime = Runtime()
+    app = internal_server.create_app(controller, memory_ui_secret=secret)
+    path = "/internal/memory/processing-record"
+    user_key = "avibe:remote:subject-2"
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            return await client.get(
+                path,
+                headers={
+                    MEMORY_USER_KEY_HEADER: user_key,
+                    MEMORY_UI_PROOF_HEADER: build_ui_read_proof(
+                        secret,
+                        method="GET",
+                        path=path,
+                        user_key=user_key,
+                    ),
+                },
+            )
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 200
+    assert verified_user_keys == [user_key]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"session_id": "   "},
+        {"session_id": 123},
+        {"session_id": "ses-memory", "extra": True},
+    ],
+)
+def test_memory_final_flush_rejects_invalid_payloads(payload: dict[str, object]) -> None:
+    controller = _build_controller_double()
+    controller.final_flush_memory_cli_session = AsyncMock(return_value=True)
+    app = internal_server.create_app(controller)
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            return await client.post("/internal/memory/final-flush", json=payload)
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 400
+    assert response.json() == {"ok": False, "error": "memory_invalid_input"}
+    controller.final_flush_memory_cli_session.assert_not_awaited()
+
+
+def test_memory_remember_route_rejects_capture_queued_across_runtime_replacement() -> None:
+    """The production CLI route cannot repopulate the fresh reset aggregate."""
+
+    from core.controller import Controller
+    from core.memory import CaptureAccepted
+    from core.memory.http_headers import CALLER_SESSION_HEADER
+
+    class Module:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def capture(self, _request):  # noqa: ANN001, ANN202
+            self.calls += 1
+            return CaptureAccepted()
+
+    old_module = Module()
+    fresh_module = Module()
+    old_runtime = SimpleNamespace(retired=False, available=True, module=old_module)
+    fresh_runtime = SimpleNamespace(retired=False, available=True, module=fresh_module)
+    controller = Controller.__new__(Controller)
+    controller.memory_runtime = old_runtime
+    controller.memory_scope_for_cli_session = lambda _session_id: (
+        "u-" + "1" * 32,
+        "p-" + "2" * 32,
+    )
+    app = internal_server.create_app(controller)
+
+    async def _exercise() -> httpx.Response:
+        gate = controller._memory_replacement_lock()
+        await gate.acquire()
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://test",
+        ) as client:
+            request = asyncio.create_task(
+                client.post(
+                    "/internal/memory/remember",
+                    json={"text": "remember this"},
+                    headers={CALLER_SESSION_HEADER: "session-1"},
+                )
+            )
+            for _ in range(20):
+                await asyncio.sleep(0)
+                if getattr(gate, "_waiters", None):
+                    break
+            assert getattr(gate, "_waiters", None)
+            controller.memory_runtime = fresh_runtime
+            gate.release()
+            return await request
+
+    response = asyncio.run(_exercise())
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "skipped",
+        "reason": "memory_operation_in_progress",
+    }
+    assert old_module.calls == 0
+    assert fresh_module.calls == 0
 
 
 # ---------------------------------------------------------------------
@@ -633,6 +1502,31 @@ def test_dispatch_rejects_missing_session_id():
     resp = asyncio.run(_dispatch_round_trip({"text": "hi"}))
     assert resp.status_code == 400
     assert "session_id" in resp.json()["error"]
+
+
+def test_dispatch_context_does_not_restore_memory_admission_from_transient_payload(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _engine, session = _create_test_session(
+        tmp_path,
+        native_id="proj_memory_classification",
+    )
+
+    _text, context = asyncio.run(
+        internal_server._build_dispatch_payload(
+            {
+                "session_id": session["id"],
+                "text": "remember this",
+                "memory_cli_admitted": True,
+                "is_ordinary_text": True,
+            }
+        )
+    )
+
+    assert context.is_ordinary_text is None
+    assert "memory_cli_admitted" not in (context.platform_specific or {})
 
 
 def test_register_turn_sink_ignores_duplicate_and_pop_is_identity_guarded():

@@ -23,11 +23,15 @@ from core.memory.types import (
     MemoryProfile,
     MemoryProfileExplicitInfo,
     MemoryProfileTrait,
+    ProviderSessionRef,
     is_memory_error_code,
 )
 from core.memory.observations import (
     AddAck,
+    AddRejected,
+    AddResult,
     FlushRejected,
+    FlushRetryable,
     FlushResult,
     FlushSucceeded,
     FlushUnknown,
@@ -58,12 +62,32 @@ ProviderAttachment = CaptureAttachment
 
 
 @dataclass(frozen=True)
+class ProviderHealthSnapshot:
+    """Allowlisted public EverOS health facts, with no Avibe readiness verdict."""
+
+    status: Literal["ok"]
+    version: str
+    capabilities: dict[str, bool]
+    disabled_features: tuple[str, ...]
+    cascade: dict[str, object] | None
+    recorder: dict[str, str | None]
+
+    def payload(self) -> dict[str, object]:
+        return {
+            "status": self.status,
+            "version": self.version,
+            "capabilities": dict(self.capabilities),
+            "disabled_features": list(self.disabled_features),
+            "cascade": dict(self.cascade) if self.cascade is not None else None,
+            "recorder": dict(self.recorder),
+        }
+
+
+@dataclass(frozen=True)
 class ProviderCapture:
-    principal_id: str
-    session_ref: str
+    session_ref: ProviderSessionRef
     text: str
     provider_timestamp_ms: int
-    project_ref: str
     attachments: tuple[CaptureAttachment, ...] = ()
 
 
@@ -75,6 +99,7 @@ class MemoryProviderFailure(RuntimeError):
         error: MemoryErrorCode = "memory_processing_failed",
         *,
         retryable: bool = True,
+        ambiguous: bool = False,
     ) -> None:
         closed_error: MemoryErrorCode = (
             error if is_memory_error_code(error) else "memory_processing_failed"
@@ -82,6 +107,7 @@ class MemoryProviderFailure(RuntimeError):
         super().__init__(closed_error)
         self.error = closed_error
         self.retryable = bool(retryable)
+        self.ambiguous = bool(ambiguous)
 
 
 class MemoryProviderSystemFailure(MemoryProviderFailure):
@@ -90,11 +116,13 @@ class MemoryProviderSystemFailure(MemoryProviderFailure):
     def __init__(
         self,
         error: MemoryErrorCode = "memory_sidecar_unavailable",
+        *,
+        ambiguous: bool = False,
     ) -> None:
         closed_error: MemoryErrorCode = (
             error if is_memory_error_code(error) else "memory_sidecar_unavailable"
         )
-        super().__init__(closed_error, retryable=True)
+        super().__init__(closed_error, retryable=True, ambiguous=ambiguous)
 
 
 class EverOSPort:
@@ -144,7 +172,13 @@ class EverOSPort:
 
         return self._socket_path
 
-    async def add(self, capture: ProviderCapture) -> AddAck:
+    @property
+    def agentic_budget_enforced(self) -> bool:
+        """EverOS 1.2.3 exposes no model-call or token budget enforcement."""
+
+        return False
+
+    async def add(self, capture: ProviderCapture) -> AddResult:
         """Durably hand one capture to EverOS and return its acknowledgement."""
 
         content: str | list[dict[str, str]] = capture.text
@@ -166,12 +200,12 @@ class EverOSPort:
             "POST",
             "/api/v2/memory/add",
             {
-                "session_id": capture.session_ref,
+                "session_id": capture.session_ref.session_id,
                 "app_id": _APP_ID,
-                "project_id": capture.project_ref,
+                "project_id": capture.session_ref.project_ref,
                 "messages": [
                     {
-                        "sender_id": capture.principal_id,
+                        "sender_id": capture.session_ref.principal_id,
                         "role": "user",
                         "timestamp": capture.provider_timestamp_ms,
                         "content": content,
@@ -180,17 +214,18 @@ class EverOSPort:
             },
             timeout_seconds=self._add_timeout_seconds,
         )
+        envelope = _optional_json_object(raw)
         if not 200 <= status_code < 300:
             logger.warning("EverOS add rejected status=%s", status_code)
-            # A request the provider rejects on its own terms fails identically
-            # however often it is replayed. Retrying one keeps a poison row
-            # cycling the shared processing-fault breaker, which freezes capture
-            # for every session, so it is sent straight to terminal instead.
-            raise MemoryProviderFailure(
-                "memory_processing_failed",
-                retryable=not _deterministic_client_rejection(status_code, raw),
+            error = envelope.get("error") if envelope is not None else None
+            error_code = error.get("code") if isinstance(error, dict) else None
+            return AddRejected(
+                request_id=_bounded_opaque_string(
+                    envelope.get("request_id") if envelope else None
+                ),
+                error_code=_bounded_opaque_string(error_code),
+                server_fault=status_code >= 500,
             )
-        envelope = _optional_json_object(raw)
         data = envelope.get("data") if envelope is not None else None
         status = data.get("status") if isinstance(data, dict) else None
         if envelope is None:
@@ -198,11 +233,11 @@ class EverOSPort:
         elif status is not None and status not in {"accumulated", "extracted"}:
             logger.warning("EverOS add returned an unsupported status value")
         return AddAck(
-            request_id=_bounded_opaque_string(envelope.get("request_id") if envelope else None),
+            request_id=_strict_receipt_id(envelope.get("request_id") if envelope else None),
             status=status if status in {"accumulated", "extracted"} else None,
         )
 
-    async def flush(self, session_ref: str, project_id: str) -> FlushResult:
+    async def flush(self, session_ref: ProviderSessionRef) -> FlushResult:
         """Trigger distillation and return a total provider outcome."""
 
         try:
@@ -210,19 +245,27 @@ class EverOSPort:
                 "POST",
                 "/api/v2/memory/flush",
                 {
-                    "session_id": session_ref,
+                    "session_id": session_ref.session_id,
                     "app_id": _APP_ID,
-                    "project_id": project_id,
+                    "project_id": session_ref.project_ref,
                 },
                 timeout_seconds=self._flush_timeout_seconds,
             )
-        except MemoryProviderSystemFailure:
-            return FlushUnknown(reason="transport")
+        except MemoryProviderSystemFailure as failure:
+            return (
+                FlushUnknown(reason="transport")
+                if failure.ambiguous
+                else FlushRetryable()
+            )
         except MemoryProviderFailure as failure:
             reason: Literal["timeout", "transport"] = (
                 "timeout" if failure.error == "memory_provider_timeout" else "transport"
             )
-            return FlushUnknown(reason=reason)
+            return (
+                FlushUnknown(reason=reason)
+                if failure.ambiguous or reason == "timeout"
+                else FlushRetryable()
+            )
 
         envelope = _optional_json_object(raw)
         request_id = _bounded_opaque_string(envelope.get("request_id") if envelope else None)
@@ -233,10 +276,12 @@ class EverOSPort:
                 logger.warning("EverOS flush returned 2xx with an unusable response body")
             elif status is not None and status not in {"extracted", "no_extraction"}:
                 logger.warning("EverOS flush returned an unsupported status value")
-            return FlushSucceeded(
-                request_id=request_id,
-                status=status if status in {"extracted", "no_extraction"} else None,
-            )
+            if (
+                request_id is None
+                or status not in {"extracted", "no_extraction"}
+            ):
+                return FlushUnknown(reason="transport")
+            return FlushSucceeded(request_id=request_id, status=status)
         error = envelope.get("error") if envelope is not None else None
         error_code = error.get("code") if isinstance(error, dict) else None
         return FlushRejected(
@@ -265,17 +310,47 @@ class EverOSPort:
                 trust_env=False,
             ) as client:
                 async with client.stream(method, route, json=payload) as response:
+                    status_code = response.status_code
                     try:
                         raw = await _read_bounded_response(response)
                     except MemoryProviderFailure:
                         raw = None
-                    status_code = response.status_code
+                    except (httpx.TransportError, OSError):
+                        if 200 <= status_code < 300:
+                            raise
+                        logger.warning(
+                            "EverOS sidecar rejection body lost route=%s status=%s",
+                            route,
+                            status_code,
+                        )
+                        raw = None
+        except (httpx.ConnectTimeout, httpx.PoolTimeout) as exc:
+            logger.warning("EverOS sidecar connection timeout route=%s latency_ms=%s", route, _elapsed_ms(started))
+            raise MemoryProviderSystemFailure() from exc
         except httpx.TimeoutException as exc:
             logger.warning("EverOS sidecar timeout route=%s latency_ms=%s", route, _elapsed_ms(started))
-            raise MemoryProviderFailure("memory_provider_timeout") from exc
-        except (httpx.HTTPError, OSError) as exc:
+            raise MemoryProviderFailure(
+                "memory_provider_timeout",
+                ambiguous=True,
+            ) from exc
+        except (
+            httpx.ReadError,
+            httpx.RemoteProtocolError,
+            httpx.WriteError,
+            httpx.CloseError,
+        ) as exc:
+            logger.warning(
+                "EverOS sidecar response lost route=%s latency_ms=%s",
+                route,
+                _elapsed_ms(started),
+            )
+            raise MemoryProviderSystemFailure(ambiguous=True) from exc
+        except httpx.ConnectError as exc:
             logger.warning("EverOS sidecar unavailable route=%s latency_ms=%s", route, _elapsed_ms(started))
             raise MemoryProviderSystemFailure() from exc
+        except (httpx.HTTPError, OSError) as exc:
+            logger.warning("EverOS sidecar transport failed route=%s latency_ms=%s", route, _elapsed_ms(started))
+            raise MemoryProviderSystemFailure(ambiguous=True) from exc
         logger.debug(
             "EverOS sidecar write complete route=%s status=%s latency_ms=%s",
             route,
@@ -290,12 +365,40 @@ class EverOSPort:
         project_id: str,
         query: str,
         limit: int,
+        *,
+        method: Literal["keyword", "vector", "hybrid", "agentic"] = "hybrid",
+        include_profile: bool = True,
+        session_ref: ProviderSessionRef | None = None,
     ) -> tuple[MemoryItem, ...]:
-        data = await self._search_data(principal_id, project_id, query, limit)
+        data = await self._search_data(
+            principal_id,
+            project_id,
+            query,
+            limit,
+            method=method,
+            include_profile=include_profile,
+            session_ref=session_ref,
+        )
         return _map_search_items(data, principal_id=principal_id, limit=limit)
 
     async def profile(self, principal_id: str, project_id: str) -> tuple[MemoryItem, ...]:
-        data = await self._search_data(principal_id, project_id, _PROFILE_QUERY, 1)
+        del project_id
+        body = await self._sidecar_request(
+            "POST",
+            "/api/v2/memory/get",
+            {
+                "user_id": principal_id,
+                "app_id": _APP_ID,
+                "project_id": "default",
+                "memory_type": "profile",
+                "page": 1,
+                "page_size": 1,
+            },
+            require_json=True,
+        )
+        data = body.get("data") if isinstance(body, dict) else None
+        if not isinstance(data, dict) or not _is_bounded_json_value(data):
+            raise MemoryProviderFailure("memory_provider_response_invalid")
         profile = _map_profile_item(data, principal_id=principal_id)
         # "Valid response, no profile payload" is exactly "zero items returned",
         # so it needs no state on this provider: one EverOSPort serves every
@@ -304,38 +407,27 @@ class EverOSPort:
 
     async def health(self) -> bool:
         try:
-            await self._sidecar_request("GET", "/health", None, require_json=False)
+            await self.health_snapshot()
         except MemoryProviderFailure:
             return False
         return True
 
+    async def health_snapshot(self) -> ProviderHealthSnapshot:
+        """Read and strictly project the public sidecar health response once."""
+
+        payload = await self._sidecar_request("GET", "/health", None, require_json=True)
+        snapshot = _provider_health_snapshot(payload)
+        if snapshot is None:
+            raise MemoryProviderFailure("memory_provider_response_invalid", retryable=False)
+        return snapshot
+
     async def recorder_health(self) -> dict[str, str | None]:
         """Return the closed recorder state projected by the sidecar health route."""
         try:
-            payload = await self._sidecar_request(
-                "GET", "/health", None, require_json=True
-            )
+            snapshot = await self.health_snapshot()
         except MemoryProviderFailure:
             return dict(_RECORDER_HEALTH_FALLBACK)
-        recorder = payload.get("recorder") if payload is not None else None
-        if not isinstance(recorder, dict) or set(recorder) != {"state", "reason"}:
-            return dict(_RECORDER_HEALTH_FALLBACK)
-        state = recorder.get("state")
-        reason = recorder.get("reason")
-        valid = (
-            (state == "active" and reason is None)
-            or (
-                state == "degraded"
-                and reason in _RECORDER_HEALTH_REASONS
-            )
-            or (
-                state == "disabled"
-                and reason in {None, "writer_failures"}
-            )
-        )
-        if not valid:
-            return dict(_RECORDER_HEALTH_FALLBACK)
-        return {"state": state, "reason": reason}
+        return dict(snapshot.recorder)
 
     async def processing_healthy(self) -> bool:
         """Probe both configured model endpoints with fixed synthetic requests.
@@ -389,21 +481,41 @@ class EverOSPort:
         project_id: str,
         query: str,
         limit: int,
+        *,
+        method: Literal["keyword", "vector", "hybrid", "agentic"],
+        include_profile: bool,
+        session_ref: ProviderSessionRef | None,
     ) -> dict[str, Any]:
+        if method not in {"keyword", "vector", "hybrid", "agentic"}:
+            raise MemoryProviderFailure("memory_invalid_input", retryable=False)
+        if method == "agentic" and not self.agentic_budget_enforced:
+            raise MemoryProviderFailure(
+                "memory_capability_unavailable",
+                retryable=False,
+            )
+        if session_ref is not None and (
+            session_ref.principal_id != principal_id
+            or session_ref.project_ref != project_id
+        ):
+            raise MemoryProviderFailure("memory_access_denied", retryable=False)
+        request: dict[str, Any] = {
+            "user_id": principal_id,
+            "app_id": _APP_ID,
+            "project_id": project_id,
+            "query": query,
+            "method": method,
+            "top_k": limit,
+            "include_profile": include_profile,
+            "enable_llm_rerank": False,
+        }
+        if session_ref is not None:
+            request["filters"] = {"session_id": session_ref.session_id}
         body = await self._sidecar_request(
             "POST",
             "/api/v2/memory/search",
-            {
-                "user_id": principal_id,
-                "app_id": _APP_ID,
-                "project_id": project_id,
-                "query": query,
-                "method": "hybrid",
-                "top_k": limit,
-                "include_profile": True,
-                "enable_llm_rerank": False,
-            },
+            request,
             require_json=True,
+            capability_rejection=True,
         )
         if not isinstance(body, dict):
             raise MemoryProviderFailure("memory_provider_response_invalid")
@@ -419,6 +531,7 @@ class EverOSPort:
         payload: dict[str, Any] | None,
         *,
         require_json: bool,
+        capability_rejection: bool = False,
     ) -> dict[str, Any] | None:
         started = time.monotonic()
         transport = httpx.AsyncHTTPTransport(uds=str(self._socket_path))
@@ -437,7 +550,11 @@ class EverOSPort:
                             response.status_code,
                             _elapsed_ms(started),
                         )
-                        raise MemoryProviderFailure("memory_processing_failed")
+                        raise MemoryProviderFailure(
+                            "memory_capability_unavailable"
+                            if capability_rejection and response.status_code == 422
+                            else "memory_processing_failed"
+                        )
                     if not require_json:
                         await _read_bounded_response(response)
                         logger.debug(
@@ -501,36 +618,6 @@ class EverOSPort:
             logger.info("Memory processing probe unavailable endpoint=%s", path)
             return False
         return bool(validator(value))
-
-
-#: 4xx statuses that describe a passing condition rather than a request the
-#: provider can never accept. Everything else in 4xx is deterministic, and the
-#: default is deliberately the strict one because the two mistakes do not cost
-#: the same: a wrongly retryable capture is replayed up to MAX_MESSAGE_ATTEMPTS
-#: times, and every replay can re-open the shared processing-fault breaker, which
-#: freezes capture for BREAKER_RETRY_SECONDS across every session; a wrongly
-#: terminal one drops a single capture for a single session.
-_TRANSIENT_CLIENT_STATUS_CODES = frozenset({408, 409, 423, 425, 429})
-
-
-def _deterministic_client_rejection(status_code: int, raw: bytes | None = None) -> bool:
-    """Whether a status means this exact request can never be accepted.
-
-    EverOS 1.2.1 uses 422 both for deterministic DTO rejection and for a
-    missing provider configuration. The latter can recover after settings are
-    repaired, so its machine-readable envelope overrides the status taxonomy.
-
-    408, 425 and 429 are temporary by definition; 409 and 423 describe a state
-    a later attempt may find cleared, which is worth the bounded replay even
-    though a conflict can also be permanent.
-    """
-
-    envelope = _optional_json_object(raw)
-    error = envelope.get("error") if envelope is not None else None
-    error_code = error.get("code") if isinstance(error, dict) else None
-    if status_code == 422 and error_code == "PROVIDER_NOT_CONFIGURED":
-        return False
-    return 400 <= status_code < 500 and status_code not in _TRANSIENT_CLIENT_STATUS_CODES
 
 
 async def _read_bounded_response(response: httpx.Response) -> bytes:
@@ -804,6 +891,12 @@ def _bounded_opaque_string(value: object, *, max_bytes: int = 128) -> str | None
     return raw[:max_bytes].decode("utf-8", errors="ignore")
 
 
+def _strict_receipt_id(value: object, *, max_bytes: int = 128) -> str | None:
+    if not isinstance(value, str):
+        return None
+    return value if len(value.encode("utf-8")) <= max_bytes else None
+
+
 def _optional_json_object(raw: bytes | None) -> dict[str, Any] | None:
     if raw is None:
         return None
@@ -812,6 +905,119 @@ def _optional_json_object(raw: bytes | None) -> dict[str, Any] | None:
     except (TypeError, ValueError):
         return None
     return value if isinstance(value, dict) and _is_bounded_json_value(value) else None
+
+
+def _provider_health_snapshot(payload: dict[str, Any] | None) -> ProviderHealthSnapshot | None:
+    if not isinstance(payload, dict) or payload.get("status") != "ok":
+        return None
+    version = payload.get("version")
+    if not _safe_health_token(version, max_bytes=64, allow_dot=True):
+        return None
+    capabilities = payload.get("capabilities")
+    capability_keys = {"llm", "embed", "rerank", "multimodal_llm", "parser"}
+    if (
+        not isinstance(capabilities, dict)
+        or set(capabilities) != capability_keys
+        or any(type(capabilities[key]) is not bool for key in capability_keys)
+    ):
+        return None
+    disabled = payload.get("disabled_features")
+    if (
+        not isinstance(disabled, list)
+        or len(disabled) > 32
+        or any(not _safe_health_token(item, max_bytes=64) for item in disabled)
+    ):
+        return None
+    recorder = _project_recorder_health(payload.get("recorder"))
+    if recorder is None:
+        return None
+    cascade = _project_cascade_health(payload.get("cascade"))
+    if payload.get("cascade") is not None and cascade is None:
+        return None
+    return ProviderHealthSnapshot(
+        status="ok",
+        version=version,
+        capabilities={key: capabilities[key] for key in sorted(capability_keys)},
+        disabled_features=tuple(disabled),
+        cascade=cascade,
+        recorder=recorder,
+    )
+
+
+def _project_recorder_health(value: object) -> dict[str, str | None] | None:
+    if not isinstance(value, dict) or set(value) != {"state", "reason"}:
+        return None
+    state = value.get("state")
+    reason = value.get("reason")
+    valid = (
+        (state == "active" and reason is None)
+        or (state == "degraded" and reason in _RECORDER_HEALTH_REASONS)
+        or (state == "disabled" and reason in {None, "writer_failures"})
+    )
+    return {"state": state, "reason": reason} if valid else None
+
+
+def _project_cascade_health(value: object) -> dict[str, object] | None:
+    if value is None:
+        return None
+    expected = {
+        "healthy",
+        "reasons",
+        "pending",
+        "failed_permanent",
+        "failed_retryable",
+        "drain_consecutive_failures",
+        "unrecoverable_total",
+        "optimize_failure_streak",
+        "prune_stale_seconds",
+    }
+    if not isinstance(value, dict) or set(value) != expected or type(value.get("healthy")) is not bool:
+        return None
+    count_keys = expected - {"healthy", "reasons", "prune_stale_seconds"}
+    if any(
+        type(value.get(key)) is not int or not 0 <= value[key] <= 2**53
+        for key in count_keys
+    ):
+        return None
+    stale = value.get("prune_stale_seconds")
+    if (
+        isinstance(stale, bool)
+        or not isinstance(stale, (int, float))
+        or not math.isfinite(float(stale))
+        or not 0 <= float(stale) <= 10**12
+    ):
+        return None
+    reasons = value.get("reasons")
+    if not isinstance(reasons, list) or len(reasons) > 8 or any(not isinstance(item, str) for item in reasons):
+        return None
+    projected_reasons = tuple(dict.fromkeys(_cascade_reason_token(item) for item in reasons))
+    return {
+        "healthy": value["healthy"],
+        "reasons": list(projected_reasons),
+        **{key: value[key] for key in sorted(count_keys)},
+        "prune_stale_seconds": float(stale),
+    }
+
+
+def _cascade_reason_token(value: str) -> str:
+    if value.startswith("drain loop failing"):
+        return "drain_failures"
+    if value.startswith("optimize stuck"):
+        return "optimize_stuck"
+    if value.startswith("version cleanup stalled"):
+        return "prune_stale"
+    if value.startswith("cascade health probe failed"):
+        return "health_probe_failed"
+    return "unknown"
+
+
+def _safe_health_token(value: object, *, max_bytes: int, allow_dot: bool = False) -> bool:
+    if not isinstance(value, str) or not value or not value.isascii():
+        return False
+    allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+    if allow_dot:
+        allowed += ".+"
+    return len(value.encode("ascii")) <= max_bytes and all(character in allowed for character in value)
 
 
 def _normalized_endpoint_url(value: str | None) -> str | None:
@@ -833,9 +1039,9 @@ def _elapsed_ms(started: float) -> int:
 
 @runtime_checkable
 class MemoryProviderPort(Protocol):
-    async def add(self, capture: ProviderCapture) -> AddAck: ...
+    async def add(self, capture: ProviderCapture) -> AddResult: ...
 
-    async def flush(self, session_ref: str, project_id: str) -> FlushResult: ...
+    async def flush(self, session_ref: ProviderSessionRef) -> FlushResult: ...
 
     async def search(
         self,
@@ -843,15 +1049,24 @@ class MemoryProviderPort(Protocol):
         project_id: str,
         query: str,
         limit: int,
+        *,
+        method: Literal["keyword", "vector", "hybrid", "agentic"] = "hybrid",
+        include_profile: bool = True,
+        session_ref: ProviderSessionRef | None = None,
     ) -> tuple[MemoryItem, ...]: ...
 
     async def profile(self, principal_id: str, project_id: str) -> tuple[MemoryItem, ...]: ...
 
     async def health(self) -> bool: ...
 
+    async def health_snapshot(self) -> ProviderHealthSnapshot: ...
+
     async def recorder_health(self) -> dict[str, str | None]: ...
 
     async def processing_healthy(self) -> bool: ...
+
+    @property
+    def agentic_budget_enforced(self) -> bool: ...
 
 
 @dataclass
@@ -863,11 +1078,14 @@ class FakeMemoryProvider:
     search_items: tuple[MemoryItem, ...] = ()
     profile_items: tuple[MemoryItem, ...] = ()
     captures: list[ProviderCapture] = field(default_factory=list)
-    flushes: list[str] = field(default_factory=list)
-    flush_projects: list[str] = field(default_factory=list)
+    flushes: list[ProviderSessionRef] = field(default_factory=list)
     search_scopes: list[tuple[str, str]] = field(default_factory=list)
     profile_scopes: list[tuple[str, str]] = field(default_factory=list)
+    search_policies: list[
+        tuple[str, bool, ProviderSessionRef | None]
+    ] = field(default_factory=list)
     ingest_failures: Deque[BaseException] = field(default_factory=deque)
+    add_results: Deque[AddResult] = field(default_factory=deque)
     flush_results: Deque[FlushResult] = field(default_factory=deque)
     search_failure: BaseException | None = None
     profile_failure: BaseException | None = None
@@ -876,19 +1094,43 @@ class FakeMemoryProvider:
     recorder_health_state: dict[str, str | None] = field(
         default_factory=lambda: {"state": "disabled", "reason": None}
     )
+    health_snapshot_value: ProviderHealthSnapshot = field(
+        default_factory=lambda: ProviderHealthSnapshot(
+            status="ok",
+            version="1.2.3",
+            capabilities={
+                "llm": True,
+                "embed": True,
+                "rerank": True,
+                "multimodal_llm": True,
+                "parser": True,
+            },
+            disabled_features=(),
+            cascade=None,
+            recorder={"state": "disabled", "reason": None},
+        )
+    )
+    add_hook: Callable[[ProviderCapture], Awaitable[None]] | None = None
+    flush_hook: Callable[[ProviderSessionRef], Awaitable[None]] | None = None
+    processing_healthy_hook: Callable[[], Awaitable[None]] | None = None
 
-    async def add(self, capture: ProviderCapture) -> AddAck:
+    async def add(self, capture: ProviderCapture) -> AddResult:
         if self.ingest_failures:
             raise self.ingest_failures.popleft()
         self.captures.append(capture)
-        return AddAck(request_id=None, status="accumulated")
+        if self.add_hook is not None:
+            await self.add_hook(capture)
+        if self.add_results:
+            return self.add_results.popleft()
+        return AddAck(request_id=f"fake-add-{len(self.captures)}", status="accumulated")
 
-    async def flush(self, session_ref: str, project_id: str) -> FlushResult:
+    async def flush(self, session_ref: ProviderSessionRef) -> FlushResult:
         self.flushes.append(session_ref)
-        self.flush_projects.append(project_id)
+        if self.flush_hook is not None:
+            await self.flush_hook(session_ref)
         if self.flush_results:
             return self.flush_results.popleft()
-        return FlushSucceeded(request_id=None, status="extracted")
+        return FlushSucceeded(request_id=f"fake-flush-{len(self.flushes)}", status="extracted")
 
     async def search(
         self,
@@ -896,8 +1138,13 @@ class FakeMemoryProvider:
         project_id: str,
         query: str,
         limit: int,
+        *,
+        method: Literal["keyword", "vector", "hybrid", "agentic"] = "hybrid",
+        include_profile: bool = True,
+        session_ref: ProviderSessionRef | None = None,
     ) -> tuple[MemoryItem, ...]:
         self.search_scopes.append((principal_id, project_id))
+        self.search_policies.append((method, include_profile, session_ref))
         del query, limit
         if self.search_failure is not None:
             raise self.search_failure
@@ -914,6 +1161,13 @@ class FakeMemoryProvider:
             raise self.health_failure
         return self.healthy
 
+    async def health_snapshot(self) -> ProviderHealthSnapshot:
+        if self.health_failure is not None:
+            raise self.health_failure
+        if not self.healthy:
+            raise MemoryProviderSystemFailure()
+        return self.health_snapshot_value
+
     async def recorder_health(self) -> dict[str, str | None]:
         return dict(self.recorder_health_state)
 
@@ -926,6 +1180,12 @@ class FakeMemoryProvider:
         real EverOS adapter performs bounded authenticated LLM+embedding
         probes.
         """
+        if self.processing_healthy_hook is not None:
+            await self.processing_healthy_hook()
         if self.processing_health_failure is not None:
             raise self.processing_health_failure
         return self.processing_healthy_flag
+
+    @property
+    def agentic_budget_enforced(self) -> bool:
+        return False

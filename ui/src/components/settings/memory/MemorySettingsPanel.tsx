@@ -1,21 +1,23 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { ArrowUpRight, Loader2, Lock, ShieldAlert, Trash2 } from 'lucide-react';
+import { ArrowUpRight, Loader2, RefreshCw, ShieldAlert, Trash2 } from 'lucide-react';
 
 import { Badge } from '../../ui/badge';
 import { Button } from '../../ui/button';
 import { Checkbox } from '../../ui/checkbox';
+import { ConfirmDialog } from '../../ui/confirm-dialog';
+import { InfoHint } from '../../ui/info-hint';
 import { Input } from '../../ui/input';
 import { Label } from '../../ui/label';
 import { Switch } from '../../ui/switch';
 import { useApi } from '../../../context/ApiContext';
 import type {
   MemoryEndpointConfig,
+  MemoryMaintenance,
   MemorySettings,
   MemorySettingsPatch,
   MemorySettingsResult,
-  MemoryStatus,
 } from '../../../context/ApiContext';
 import { useToast } from '../../../context/ToastContext';
 import { buildEndpointPatch, draftFromConfig } from '../../../lib/memorySettings';
@@ -24,43 +26,46 @@ import { isMemoryOk, memoryErrorMessage } from '../../../lib/memoryRead';
 
 type MemorySettingsOk = Extract<MemorySettingsResult, { status: 'ok' }>;
 
-// One LLM/embedding endpoint's fields. `locked` disables base_url/model edits — used for the
-// embedding endpoint once memory data exists, because changing it would mix vector spaces.
 const EndpointFields: React.FC<{
   title: string;
+  help: string;
+  helpLabel: string;
   draft: EndpointDraft;
   original: MemoryEndpointConfig;
   onChange: (next: EndpointDraft) => void;
   disabled: boolean;
-  locked: boolean;
-  lockedHint?: string;
+  identityHint?: string;
   canClearKey: boolean;
-}> = ({ title, draft, original, onChange, disabled, locked, lockedHint, canClearKey }) => {
+}> = ({
+  title,
+  help,
+  helpLabel,
+  draft,
+  original,
+  onChange,
+  disabled,
+  identityHint,
+  canClearKey,
+}) => {
   const { t } = useTranslation();
-  const identityFieldsDisabled = disabled || locked;
   return (
     <div className="flex flex-col gap-3 rounded-xl border border-border bg-surface p-4">
       <div className="flex items-center gap-2">
         <span className="text-[13px] font-semibold text-foreground">{title}</span>
+        <InfoHint label={helpLabel} content={help} />
         {original.has_api_key ? (
           <Badge variant="success">{t('memory.settings.apiKeySet')}</Badge>
         ) : (
-          <Badge variant="secondary">{t('memory.settings.apiKeyNotSet')}</Badge>
+          <Badge variant="destructive">{t('memory.settings.apiKeyNotSet')}</Badge>
         )}
-        {locked ? (
-          <Badge variant="warning" className="gap-1">
-            <Lock className="size-3" />
-            {t('common.locked')}
-          </Badge>
-        ) : null}
       </div>
-      {lockedHint ? <p className="text-[11.5px] leading-snug text-muted">{lockedHint}</p> : null}
+      {identityHint ? <p className="text-[11.5px] leading-snug text-muted">{identityHint}</p> : null}
       <div className="grid gap-3 sm:grid-cols-2">
         <div className="flex flex-col gap-1.5">
           <Label className="text-[12px] text-muted">{t('memory.settings.baseUrl')}</Label>
           <Input
             value={draft.baseUrl}
-            disabled={identityFieldsDisabled}
+            disabled={disabled}
             placeholder={t('memory.settings.baseUrlPlaceholder')}
             onChange={(e) => onChange({ ...draft, baseUrl: e.target.value })}
             className="text-[13px]"
@@ -70,7 +75,7 @@ const EndpointFields: React.FC<{
           <Label className="text-[12px] text-muted">{t('memory.settings.model')}</Label>
           <Input
             value={draft.model}
-            disabled={identityFieldsDisabled}
+            disabled={disabled}
             placeholder={t('memory.settings.modelPlaceholder')}
             onChange={(e) => onChange({ ...draft, model: e.target.value })}
             className="text-[13px]"
@@ -84,11 +89,12 @@ const EndpointFields: React.FC<{
           autoComplete="off"
           value={draft.apiKey}
           disabled={disabled || draft.clearKey}
-          placeholder={t('memory.settings.apiKeyPlaceholder')}
+          placeholder={original.has_api_key
+            ? t('memory.settings.apiKeyPlaceholderSet')
+            : t('memory.settings.apiKeyPlaceholder')}
           onChange={(e) => onChange({ ...draft, apiKey: e.target.value, clearKey: false })}
           className="text-[13px]"
         />
-        <p className="text-[11px] text-muted">{t('memory.settings.apiKeyClearHint')}</p>
         {canClearKey && original.has_api_key ? (
           <button
             type="button"
@@ -113,22 +119,42 @@ const EndpointFields: React.FC<{
   );
 };
 
+const identityChanged = (draft: EndpointDraft, original: MemoryEndpointConfig): boolean => {
+  const normalize = (value: string | null | undefined): string | null => value?.trim() || null;
+  return (
+    normalize(draft.baseUrl) !== normalize(original.base_url)
+    || normalize(draft.model) !== normalize(original.model)
+  );
+};
+
 export const MemorySettingsPanel: React.FC<{
   settings: MemorySettings;
-  status: MemoryStatus | null;
+  maintenance: MemoryMaintenance | null;
+  maintenanceError: string | null;
   dependencyReady: boolean;
+  rebuildBusy?: boolean;
+  repairBusy?: boolean;
+  mutationBusy?: boolean;
+  onRebuildBusyChange?: (busy: boolean) => void;
+  onSavingChange?: (saving: boolean) => void;
   onSaved: (next: MemorySettingsOk) => void;
   onReloadSettings: () => void;
-  onReloadStatus: () => void;
+  onReloadMaintenance: () => void;
   onClearAll: () => void;
   clearing: boolean;
 }> = ({
   settings,
-  status,
+  maintenance,
+  maintenanceError,
   dependencyReady,
+  rebuildBusy = false,
+  repairBusy = false,
+  mutationBusy = false,
+  onRebuildBusyChange,
+  onSavingChange,
   onSaved,
   onReloadSettings,
-  onReloadStatus,
+  onReloadMaintenance,
   onClearAll,
   clearing,
 }) => {
@@ -140,6 +166,8 @@ export const MemorySettingsPanel: React.FC<{
   const [embeddingDraft, setEmbeddingDraft] = useState<EndpointDraft>(() => draftFromConfig(settings.processing.embedding));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [confirmRebuildOpen, setConfirmRebuildOpen] = useState(false);
+  const [pendingPatch, setPendingPatch] = useState<MemorySettingsPatch | null>(null);
 
   // Reset drafts whenever a fresh settings snapshot lands (initial load or after a save).
   useEffect(() => {
@@ -148,78 +176,138 @@ export const MemorySettingsPanel: React.FC<{
     setEmbeddingDraft(draftFromConfig(settings.processing.embedding));
   }, [settings]);
 
-  // `data_exists` is only known once status resolves. Settings can render first (the two loads run
-  // concurrently), so until status is known we must NOT let the embedding endpoint be edited: a
-  // change made in that window would be silently discarded once the lock activates yet still report
-  // success. Fail closed — treat the embedding endpoint as locked while status is unknown, and only
-  // unlock it after a resolved status reports data_exists=false.
-  const statusKnown = status != null;
-  // Data already exists in the local Memory root: changing the embedding endpoint/model would mix
-  // vector spaces, so the backend rejects it; lock those fields here too, proactively.
-  const embeddingDataLock = !!status?.data_exists;
-  const embeddingLocked = !statusKnown || embeddingDataLock;
+  const rebuildRequired = settings.rebuild_required === true;
+  const factoryResetRequired = settings.factory_reset_required === true;
   const canClearKeys = !enabledDraft;
+  const canClearMemory = maintenance?.can_clear === true;
+  const busy = saving || rebuildBusy || repairBusy || mutationBusy;
 
-  // If data_exists transitions to true while the user has an unsaved embedding draft
-  // (e.g. they edited it while data_exists was false, then a poll reports data_exists
-  // true), discard that draft back to the persisted settings. Otherwise save() would
-  // drop the embedding patch (locked) yet report success — a silent discard.
-  useEffect(() => {
-    if (embeddingDataLock) {
-      setEmbeddingDraft((draft) => ({
-        ...draftFromConfig(settings.processing.embedding),
-        apiKey: draft.apiKey,
-        clearKey: draft.clearKey,
-      }));
+  const buildPatch = (): MemorySettingsPatch => {
+    const patch: MemorySettingsPatch = {};
+    if (enabledDraft !== settings.enabled) patch.enabled = enabledDraft;
+    // A key clear is accepted only while the resulting state stays disabled.
+    const allowClear = !enabledDraft;
+    const llmPatch = buildEndpointPatch(llmDraft, settings.processing.llm, allowClear);
+    // Identity fields stay editable even when data exists; rebuild confirmation
+    // is the safety gate instead of a silent lock.
+    const embeddingPatch = buildEndpointPatch(
+      embeddingDraft,
+      settings.processing.embedding,
+      allowClear,
+      false,
+    );
+    if (llmPatch || embeddingPatch) {
+      patch.processing = {};
+      if (llmPatch) patch.processing.llm = llmPatch;
+      if (embeddingPatch) patch.processing.embedding = embeddingPatch;
     }
-  }, [embeddingDataLock, settings]);
+    return patch;
+  };
 
-  const save = async () => {
+  const submitPatch = async (patch: MemorySettingsPatch) => {
     setSaving(true);
+    onSavingChange?.(true);
     setError(null);
+    const needsRebuild = Boolean(patch.confirm_rebuild);
+    if (needsRebuild) onRebuildBusyChange?.(true);
     try {
-      const patch: MemorySettingsPatch = {};
-      if (enabledDraft !== settings.enabled) patch.enabled = enabledDraft;
-      // A key clear is accepted only while the resulting state stays disabled.
-      const allowClear = !enabledDraft;
-      const llmPatch = buildEndpointPatch(llmDraft, settings.processing.llm, allowClear);
-      const embeddingPatch = buildEndpointPatch(
-        embeddingDraft,
-        settings.processing.embedding,
-        allowClear,
-        embeddingLocked,
-      );
-      if (llmPatch || embeddingPatch) {
-        patch.processing = {};
-        if (llmPatch) patch.processing.llm = llmPatch;
-        if (embeddingPatch) patch.processing.embedding = embeddingPatch;
-      }
-      if (Object.keys(patch).length === 0) {
-        showToast(t('memory.settings.saved'), 'success');
-        return;
-      }
       const res = await api.saveMemorySettings(patch);
       if (isMemoryOk(res)) {
         onSaved(res);
-        showToast(t('memory.settings.saved'), 'success');
+        const runtime = res.runtime as { ok?: boolean; error?: string } | undefined;
+        // Ordinary reconcile also returns runtime.ok; only a confirmed rebuild
+        // (needsRebuild) or Retry path should announce rebuild outcomes.
+        if (needsRebuild && runtime && typeof runtime.ok === 'boolean') {
+          showToast(
+            runtime.ok
+              ? t('memory.settings.rebuildCompleted')
+              : memoryErrorMessage(t, runtime.error || 'memory_rebuild_failed'),
+            runtime.ok ? 'success' : 'error',
+          );
+        } else {
+          showToast(t('memory.settings.saved'), 'success');
+        }
+        setConfirmRebuildOpen(false);
+        setPendingPatch(null);
       } else {
         setError(memoryErrorMessage(t, (res as { error?: string })?.error));
-        // Reconciliation may roll back endpoint fields. Reload both resources
-        // instead of restoring drafts from the stale pre-save snapshot.
+        // Confirmed rebuild keeps the candidate on failure. Exit the confirm
+        // modal so a second click cannot re-submit a now-non-identity patch;
+        // Retry rebuild is the recovery control under the pending marker.
+        setConfirmRebuildOpen(false);
+        setPendingPatch(null);
         onReloadSettings();
-        onReloadStatus();
+        onReloadMaintenance();
       }
     } catch {
       setError(t('memory.settings.saveFailed'));
+      setConfirmRebuildOpen(false);
+      setPendingPatch(null);
       onReloadSettings();
-      onReloadStatus();
+      onReloadMaintenance();
     } finally {
       setSaving(false);
+      onSavingChange?.(false);
+      if (needsRebuild) onRebuildBusyChange?.(false);
+    }
+  };
+
+  const save = async () => {
+    const patch = buildPatch();
+    if (Object.keys(patch).length === 0) {
+      showToast(t('memory.settings.saved'), 'success');
+      return;
+    }
+    if (
+      identityChanged(embeddingDraft, settings.processing.embedding)
+      && !factoryResetRequired
+    ) {
+      // Retain the draft and open confirmation; the same patch is replayed with
+      // confirm_rebuild: true after the user accepts the cost/duration disclosure.
+      setPendingPatch(patch);
+      setConfirmRebuildOpen(true);
+      return;
+    }
+    await submitPatch(patch);
+  };
+
+  const confirmRebuild = async () => {
+    if (!pendingPatch) return;
+    await submitPatch({ ...pendingPatch, confirm_rebuild: true });
+  };
+
+  const retryRebuild = async () => {
+    onRebuildBusyChange?.(true);
+    setError(null);
+    try {
+      const res = await api.rebuildMemoryRuntime();
+      if (res.ok) {
+        showToast(t('memory.settings.rebuildCompleted'), 'success');
+        onReloadSettings();
+        onReloadMaintenance();
+      } else {
+        setError(memoryErrorMessage(t, res.error));
+        onReloadSettings();
+        onReloadMaintenance();
+      }
+    } catch {
+      setError(t('memory.settings.rebuildFailed'));
+      onReloadSettings();
+      onReloadMaintenance();
+    } finally {
+      onRebuildBusyChange?.(false);
     }
   };
 
   return (
     <div className="flex flex-col gap-4">
+      {rebuildRequired ? (
+        <div className="flex flex-col gap-1 rounded-xl border border-warning/40 bg-warning/10 px-4 py-3">
+          <span className="text-[13px] font-semibold text-foreground">{t('memory.settings.rebuildRequiredTitle')}</span>
+          <span className="text-[12px] leading-snug text-muted">{t('memory.settings.rebuildRequiredDescription')}</span>
+        </div>
+      ) : null}
+
       <div className="flex items-start justify-between gap-4 rounded-xl border border-border bg-surface px-4 py-3.5">
         <div className="flex min-w-0 flex-col gap-1">
           <span className="text-[13px] font-semibold text-foreground">{t('memory.settings.enableLabel')}</span>
@@ -240,37 +328,31 @@ export const MemorySettingsPanel: React.FC<{
         <Switch
           checked={enabledDraft}
           onCheckedChange={setEnabledDraft}
-          disabled={saving || (!enabledDraft && !dependencyReady)}
+          disabled={busy || factoryResetRequired || rebuildRequired || (!enabledDraft && !dependencyReady)}
           label={t('memory.settings.enableLabel')}
         />
       </div>
 
       <EndpointFields
         title={t('memory.settings.llmTitle')}
+        help={t('memory.settings.llmHelp')}
+        helpLabel={t('memory.settings.llmHelpLabel')}
         draft={llmDraft}
         original={settings.processing.llm}
         onChange={setLlmDraft}
-        disabled={saving}
-        locked={false}
+        disabled={busy}
         canClearKey={canClearKeys}
       />
 
       <EndpointFields
         title={t('memory.settings.embeddingTitle')}
+        help={t('memory.settings.embeddingHelp')}
+        helpLabel={t('memory.settings.embeddingHelpLabel')}
         draft={embeddingDraft}
         original={settings.processing.embedding}
         onChange={setEmbeddingDraft}
-        disabled={saving}
-        locked={embeddingLocked}
-        // Distinguish the two lock reasons: data-exists (permanent until Clear all) vs status not
-        // yet resolved (transient — re-enables once status confirms no data exists).
-        lockedHint={
-          embeddingDataLock
-            ? t('memory.settings.embeddingLocked')
-            : !statusKnown
-              ? t('memory.settings.embeddingStatusPending')
-              : undefined
-        }
+        disabled={busy}
+        identityHint={t('memory.settings.embeddingIdentityHint')}
         canClearKey={canClearKeys}
       />
 
@@ -278,12 +360,29 @@ export const MemorySettingsPanel: React.FC<{
         <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">{error}</div>
       ) : null}
 
-      <div className="flex items-center justify-between gap-3">
-        <Button onClick={() => void save()} disabled={saving}>
-          {saving ? <Loader2 className="size-3.5 animate-spin" /> : null}
-          {saving ? t('memory.settings.saving') : t('memory.settings.save')}
-        </Button>
-        <Button variant="destructive" size="sm" onClick={onClearAll} disabled={clearing}>
+      {maintenanceError ? (
+        <div className="rounded-xl border border-border bg-surface px-4 py-3 text-[12px] text-muted">{maintenanceError}</div>
+      ) : null}
+
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <Button onClick={() => void save()} disabled={busy}>
+            {saving ? <Loader2 className="size-3.5 animate-spin" /> : null}
+            {saving ? t('memory.settings.saving') : t('memory.settings.save')}
+          </Button>
+          {rebuildRequired && !factoryResetRequired ? (
+            <Button variant="secondary" onClick={() => void retryRebuild()} disabled={busy}>
+              {rebuildBusy ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
+              {rebuildBusy ? t('memory.settings.retryingRebuild') : t('memory.settings.retryRebuild')}
+            </Button>
+          ) : null}
+        </div>
+        <Button
+          variant="destructive"
+          size="sm"
+          onClick={onClearAll}
+          disabled={clearing || !canClearMemory || busy || factoryResetRequired}
+        >
           <Trash2 className="size-3.5" />
           {t('memory.clear.button')}
         </Button>
@@ -300,6 +399,18 @@ export const MemorySettingsPanel: React.FC<{
           ))}
         </ul>
       </div>
+
+      <ConfirmDialog
+        open={confirmRebuildOpen}
+        onOpenChange={(open) => {
+          setConfirmRebuildOpen(open);
+          if (!open) setPendingPatch(null);
+        }}
+        title={t('memory.settings.rebuildConfirmTitle')}
+        description={t('memory.settings.rebuildConfirmDescription')}
+        confirmLabel={t('memory.settings.rebuildConfirmLabel')}
+        onConfirm={confirmRebuild}
+      />
     </div>
   );
 };
