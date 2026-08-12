@@ -85,8 +85,14 @@ def trim_edge_symbols(text: str) -> str:
     return (text or "").strip(EDGE_SYMBOLS)
 
 
-def build_trailing_excerpt(text: str, limit: int, *, prefix_ellipsis: bool = True) -> str:
-    cleaned = normalize_preview_text(text)
+def build_trailing_excerpt(
+    text: str,
+    limit: int,
+    *,
+    prefix_ellipsis: bool = True,
+    strip_quick_replies: bool = True,
+) -> str:
+    cleaned = normalize_preview_text(text, strip_quick_replies=strip_quick_replies)
     if not cleaned:
         return ""
     excerpt = cleaned if len(cleaned) <= limit else cleaned[-limit:]
@@ -98,8 +104,18 @@ def build_trailing_excerpt(text: str, limit: int, *, prefix_ellipsis: bool = Tru
     return f"...{excerpt}" if prefix_ellipsis else excerpt
 
 
-def build_tail_preview(text: str, limit: int = 15) -> str:
-    return build_trailing_excerpt(text, limit, prefix_ellipsis=True)
+def build_tail_preview(
+    text: str,
+    limit: int = 15,
+    *,
+    strip_quick_replies: bool = True,
+) -> str:
+    return build_trailing_excerpt(
+        text,
+        limit,
+        prefix_ellipsis=True,
+        strip_quick_replies=strip_quick_replies,
+    )
 
 
 def build_resume_preview(text: str, limit: int = 200) -> str:

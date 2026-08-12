@@ -333,12 +333,19 @@ class ClaudeNativeSessionProvider(NativeSessionProvider):
                     if parts:
                         preview = "\n".join(parts)
                         break
-        if not preview:
+        assistant_preview = bool(preview)
+        if not assistant_preview:
             preview = str(
                 item.locator.get("first_prompt") or item.locator.get("history_display") or ""
             )
-        item.last_agent_message = normalize_preview_text(preview)
-        item.last_agent_tail = build_tail_preview(item.last_agent_message or preview or item.native_session_id)
+        item.last_agent_message = normalize_preview_text(
+            preview,
+            strip_quick_replies=assistant_preview,
+        )
+        item.last_agent_tail = build_tail_preview(
+            item.last_agent_message or preview or item.native_session_id,
+            strip_quick_replies=assistant_preview,
+        )
         return item
 
     def get_title(

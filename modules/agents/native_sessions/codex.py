@@ -83,10 +83,14 @@ class CodexNativeSessionProvider(NativeSessionProvider):
                 if texts:
                     preview = "\n".join(texts)
                     break
-        if not preview:
+        assistant_preview = bool(preview)
+        if not assistant_preview:
             preview = str(item.locator.get("title") or item.locator.get("first_user_message") or "")
         item.last_agent_message = preview
-        item.last_agent_tail = build_tail_preview(preview or item.native_session_id)
+        item.last_agent_tail = build_tail_preview(
+            preview or item.native_session_id,
+            strip_quick_replies=assistant_preview,
+        )
         return item
 
     @classmethod

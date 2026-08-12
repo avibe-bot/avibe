@@ -98,9 +98,13 @@ class OpenCodeNativeSessionProvider(NativeSessionProvider):
                         break
         except Exception as exc:
             logger.warning("Failed to hydrate OpenCode session %s: %s", item.native_session_id, exc)
+        assistant_preview = bool(preview)
         item.last_agent_message = preview
         fallback = str(item.locator.get("title") or item.native_session_id)
-        item.last_agent_tail = build_tail_preview(preview or fallback)
+        item.last_agent_tail = build_tail_preview(
+            preview or fallback,
+            strip_quick_replies=assistant_preview,
+        )
         return item
 
     def running_fork_point_before_latest_user(

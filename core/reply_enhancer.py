@@ -197,6 +197,10 @@ _BUTTON_TOKEN_RE = re.compile(
 # (Detection matches the whole block instead of scanning for ``|``, which a URL
 # may itself contain.)
 _PLAIN_LINKS_ONLY_RE = re.compile(r"(?:\s*\[[^\]]+\]\(" + _PLAIN_URL + r"\)\s*)+")
+_PLAIN_LINK_ROW_ONLY_RE = re.compile(
+    r"\s*\[[^\]]+\]\(" + _PLAIN_URL + r"\)\s*"
+    r"(?:[|｜]\s*\[[^\]]+\]\(" + _PLAIN_URL + r"\)\s*)+"
+)
 
 
 def _is_markdown_table_delimiter_line(line: str) -> bool:
@@ -974,6 +978,10 @@ def _extract_buttons(
         return [], text
 
     block = m.group(1)
+    if pattern is _UNSEPARATED_BUTTON_ROW_RE and _PLAIN_LINK_ROW_ONLY_RE.fullmatch(
+        block.strip()
+    ):
+        return [], text
     # A block made up solely of plain Markdown links with no ``|``/``｜``
     # separator is a genuine reference-link section (``---\n[Release notes](…)``,
     # possibly several on their own lines), not a button group — leave the text

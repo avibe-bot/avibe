@@ -1489,6 +1489,18 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reply.text, text)
         self.assertEqual(reply.buttons, [])
 
+    def test_process_reply_preserves_separator_free_markdown_link_list(self):
+        text = (
+            "Links\n"
+            "[Documentation](https://example.com/docs) | "
+            "[Issues](https://example.com/issues)"
+        )
+
+        reply = process_reply(text)
+
+        self.assertEqual(reply.text, text)
+        self.assertEqual(reply.buttons, [])
+
     def test_process_reply_preserves_markdown_table_last_row(self):
         text = (
             "Option | Status\n"

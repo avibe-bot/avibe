@@ -626,6 +626,15 @@ def test_native_session_titles_preserve_button_like_user_prompt_content() -> Non
     assert normalize_title_text(text) == "Compare these values: [A] | [B]"
 
 
+def test_native_session_tail_can_preserve_metadata_button_like_content() -> None:
+    text = "Compare these values:\n[A] | [B]"
+
+    tail = build_tail_preview(text, limit=200, strip_quick_replies=False)
+
+    assert tail.startswith("Compare these values:")
+    assert "[A] | [B" in tail
+
+
 def test_native_session_previews_preserve_markdown_table_rows() -> None:
     text = (
         "Option | Status\n"
