@@ -370,7 +370,7 @@ export function definitionFailureSummaryKey(
     row.lifecycle_detail != null && row.lifecycle_detail !== 'normal' && !successfulWatchExit;
   const failed =
     timedOut ||
-    row.health === 'failing' ||
+    (row.health === 'failing' && !successfulWatchExit) ||
     lifecycleFailure ||
     (typeof exitCode === 'number' && exitCode !== 0 && !successfulWatchExit);
   if (!failed) return null;

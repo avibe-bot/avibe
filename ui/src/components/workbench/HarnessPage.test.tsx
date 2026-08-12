@@ -914,7 +914,7 @@ describe('WatchDetail runtime', () => {
           watch={watch({
             enabled: true,
             retry_exit_codes: [75],
-            health: 'healthy',
+            health: 'failing',
             lifecycle_detail: 'error',
             last_exit_code,
           })}
