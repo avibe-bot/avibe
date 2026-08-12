@@ -239,16 +239,16 @@ async def test_memory_factory_004_capture_queued_for_reset_cannot_use_fresh_runt
 
 
 @pytest.mark.asyncio
-async def test_memory_factory_005_retry_deletes_owned_permissive_child_home(
+async def test_memory_factory_005_retry_deletes_owned_inaccessible_child_home(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """MEMORY-FACTORY-005: retry hardens and deletes a real permissive tree."""
+    """MEMORY-FACTORY-005: retry hardens and deletes a real inaccessible tree."""
     _create_roots(tmp_path)
     local = tmp_path / "memory" / ".child-home" / ".local"
     (local / "share").mkdir(mode=0o700, parents=True)
     (local / "share" / "cache.db").write_bytes(b"memory")
-    local.chmod(0o777)
+    local.chmod(0o000)
     old = _Runtime(tmp_path)
     controller = _controller(old)
     controller.config.memory = replace(

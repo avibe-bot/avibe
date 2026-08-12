@@ -967,6 +967,8 @@ def _open_removal_directory(
     before: os.stat_result,
     root_device: int,
 ) -> int:
+    if stat.S_IMODE(before.st_mode) != 0o700:
+        _harden_removal_directory_at(parent_fd, name, before, root_device)
     try:
         descriptor = os.open(
             name,
@@ -988,6 +990,88 @@ def _open_removal_directory(
         os.close(descriptor)
         raise
     return descriptor
+
+
+def _harden_removal_directory_at(
+    parent_fd: int,
+    name: str,
+    before: os.stat_result,
+    root_device: int,
+) -> None:
+    path_descriptor_flag = getattr(os, "O_PATH", 0)
+    if path_descriptor_flag:
+        # O_PATH pins even a mode-000 directory; procfs then applies chmod to
+        # that inode instead of resolving the possibly swapped parent entry.
+        try:
+            anchor = os.open(
+                name,
+                path_descriptor_flag
+                | required_no_follow_flag()
+                | int(getattr(os, "O_DIRECTORY", 0))
+                | int(getattr(os, "O_CLOEXEC", 0)),
+                dir_fd=parent_fd,
+            )
+        except OSError as error:
+            raise ConfinedFilesystemError(
+                "confined removal directory cannot be anchored safely"
+            ) from error
+        try:
+            anchored = os.fstat(anchor)
+            _require_removal_directory_identity(anchored, before, root_device)
+            try:
+                os.chmod(f"/proc/self/fd/{anchor}", 0o700)
+            except OSError as error:
+                raise ConfinedFilesystemError(
+                    "confined removal directory cannot be hardened safely"
+                ) from error
+            _require_removal_directory_identity(
+                os.fstat(anchor),
+                before,
+                root_device,
+                require_private=True,
+            )
+        finally:
+            os.close(anchor)
+    else:
+        try:
+            os.chmod(
+                name,
+                0o700,
+                dir_fd=parent_fd,
+                follow_symlinks=False,
+            )
+        except (NotImplementedError, OSError, ValueError) as error:
+            raise ConfinedFilesystemError(
+                "confined removal directory cannot be hardened safely"
+            ) from error
+
+    try:
+        hardened = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except OSError as error:
+        raise ConfinedFilesystemError(
+            "confined directory changed during removal"
+        ) from error
+    _require_removal_directory_identity(
+        hardened,
+        before,
+        root_device,
+        require_private=True,
+    )
+
+
+def _require_removal_directory_identity(
+    info: os.stat_result,
+    before: os.stat_result,
+    root_device: int,
+    *,
+    require_private: bool = False,
+) -> None:
+    _require_directory(info, "confined removal directory")
+    _require_device(info, root_device, "confined removal directory")
+    if (info.st_dev, info.st_ino) != (before.st_dev, before.st_ino):
+        raise ConfinedFilesystemError("confined directory changed during removal")
+    if require_private:
+        _require_exact_private_directory(info, "confined removal directory")
 
 
 def _relative_to_home(path: Path, home: Path) -> Path:

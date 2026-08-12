@@ -598,8 +598,8 @@ def test_confined_replace_and_cleanup_accept_owner_only_directory_modes(
     assert not target.exists()
 
 
-@pytest.mark.parametrize("mode", (0o500, 0o755, 0o777))
-def test_remove_confined_path_hardens_owned_openable_directories(
+@pytest.mark.parametrize("mode", (0o000, 0o500, 0o755, 0o777))
+def test_remove_confined_path_hardens_owned_directories(
     tmp_path: Path,
     mode: int,
 ) -> None:
@@ -614,6 +614,175 @@ def test_remove_confined_path_hardens_owned_openable_directories(
     remove_confined_path(home, target)
 
     assert not target.exists()
+
+
+def test_remove_confined_path_rejects_directory_swap_during_permission_hardening(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+    target = home / "target"
+    target.mkdir(mode=0o700)
+    locked = target / "locked"
+    locked.mkdir(mode=0o700)
+    (locked / "original.txt").write_text("original", encoding="utf-8")
+    locked.chmod(0o000)
+    held = target / "held-locked"
+
+    from core.memory import confined_filesystem
+
+    real_chmod = confined_filesystem.os.chmod
+    swapped = False
+
+    def swap_before_chmod(path, mode, *args, **kwargs):
+        nonlocal swapped
+        anchored_path = os.fspath(path).startswith("/proc/self/fd/")
+        if (
+            not swapped
+            and (path == locked.name or anchored_path)
+            and (kwargs.get("dir_fd") is not None or anchored_path)
+        ):
+            swapped = True
+            locked.rename(held)
+            locked.mkdir(mode=0o700)
+            (locked / "replacement.txt").write_text("replacement", encoding="utf-8")
+            locked.chmod(0o000)
+        return real_chmod(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(confined_filesystem.os, "chmod", swap_before_chmod)
+    try:
+        with pytest.raises(ConfinedFilesystemError, match="changed during removal"):
+            remove_confined_path(home, target)
+    finally:
+        real_chmod(locked, 0o700)
+        real_chmod(held, 0o700)
+
+    assert swapped
+    assert (locked / "replacement.txt").read_text(encoding="utf-8") == "replacement"
+    assert (held / "original.txt").read_text(encoding="utf-8") == "original"
+
+
+def test_remove_confined_path_does_not_follow_symlink_swapped_in_during_hardening(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+    target = home / "target"
+    target.mkdir(mode=0o700)
+    locked = target / "locked"
+    locked.mkdir(mode=0o700)
+    locked.chmod(0o000)
+    held = target / "held-locked"
+    outside = tmp_path / "outside"
+    outside.mkdir(mode=0o755)
+    victim = outside / "victim.txt"
+    victim.write_text("outside survives", encoding="utf-8")
+
+    from core.memory import confined_filesystem
+
+    real_chmod = confined_filesystem.os.chmod
+    swapped = False
+
+    def swap_before_chmod(path, mode, *args, **kwargs):
+        nonlocal swapped
+        anchored_path = os.fspath(path).startswith("/proc/self/fd/")
+        if (
+            not swapped
+            and (path == locked.name or anchored_path)
+            and (kwargs.get("dir_fd") is not None or anchored_path)
+        ):
+            swapped = True
+            locked.rename(held)
+            locked.symlink_to(outside, target_is_directory=True)
+        return real_chmod(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(confined_filesystem.os, "chmod", swap_before_chmod)
+    try:
+        with pytest.raises(ConfinedFilesystemError):
+            remove_confined_path(home, target)
+    finally:
+        real_chmod(held, 0o700)
+
+    assert swapped
+    assert locked.is_symlink()
+    assert stat.S_IMODE(outside.stat().st_mode) == 0o755
+    assert victim.read_text(encoding="utf-8") == "outside survives"
+
+
+def test_remove_confined_path_rechecks_device_after_permission_hardening(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+    target = home / "target"
+    target.mkdir(mode=0o700)
+    target.chmod(0o000)
+
+    from core.memory import confined_filesystem
+
+    real_chmod = confined_filesystem.os.chmod
+    real_stat = confined_filesystem.os.stat
+    hardened = False
+
+    def mark_hardened(path, mode, *args, **kwargs):
+        nonlocal hardened
+        result = real_chmod(path, mode, *args, **kwargs)
+        anchored_path = os.fspath(path).startswith("/proc/self/fd/")
+        if (path == target.name and kwargs.get("dir_fd") is not None) or anchored_path:
+            hardened = True
+        return result
+
+    def cross_device_after_hardening(path, *args, **kwargs):
+        info = real_stat(path, *args, **kwargs)
+        if path == target.name and hardened:
+            values = list(info)
+            values[2] = info.st_dev + 1
+            return os.stat_result(values)
+        return info
+
+    monkeypatch.setattr(confined_filesystem.os, "chmod", mark_hardened)
+    monkeypatch.setattr(confined_filesystem.os, "stat", cross_device_after_hardening)
+    try:
+        with pytest.raises(ConfinedFilesystemError, match="filesystem boundary"):
+            remove_confined_path(home, target)
+    finally:
+        target.chmod(0o700)
+
+    assert hardened
+    assert target.is_dir()
+
+
+def test_remove_confined_path_fails_closed_without_anchored_hardening(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+    target = home / "target"
+    target.mkdir(mode=0o700)
+    target.chmod(0o000)
+
+    from core.memory import confined_filesystem
+
+    real_chmod = confined_filesystem.os.chmod
+
+    def unsupported_chmod(path, mode, *args, **kwargs):
+        anchored_path = os.fspath(path).startswith("/proc/self/fd/")
+        if kwargs.get("dir_fd") is not None or anchored_path:
+            raise NotImplementedError("anchored chmod unavailable")
+        return real_chmod(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(confined_filesystem.os, "chmod", unsupported_chmod)
+    try:
+        with pytest.raises(ConfinedFilesystemError, match="cannot be hardened safely"):
+            remove_confined_path(home, target)
+    finally:
+        real_chmod(target, 0o700)
+
+    assert target.is_dir()
 
 
 def test_remove_anchored_entry_rejects_foreign_owned_directory(
