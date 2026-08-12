@@ -65,6 +65,7 @@ import {
   definitionActiveCount,
   definitionChipLabel,
   definitionExitCodeTone,
+  definitionHasNeutralWatchExit,
   definitionHealth,
   definitionFailureSummaryKey,
   definitionProcessingHealth,
@@ -2162,7 +2163,9 @@ const FailureDetails: React.FC<{
   // The mapper uses structured facts only. A stored error without enough
   // structure still proves an unclassified failure, so keep the default copy
   // generic instead of letting raw stderr choose a category.
-  const summaryKey = definitionFailureSummaryKey(row) ?? (row.last_error ? 'harness.failure.generic' : null);
+  const summaryKey =
+    definitionFailureSummaryKey(row) ??
+    (row.last_error && !definitionHasNeutralWatchExit(row) ? 'harness.failure.generic' : null);
   const disclosureKey = `${'retry_exit_codes' in row ? 'watch' : 'task'}:${row.id}`;
   if (!summaryKey && !row.last_error) return null;
   return (

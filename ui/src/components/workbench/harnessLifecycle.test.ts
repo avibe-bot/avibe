@@ -14,6 +14,7 @@ import {
   definitionStatusCount,
   definitionSurvivesToggle,
   definitionFailureSummaryKey,
+  definitionHasNeutralWatchExit,
   formatWallTime,
   humanizeCron,
   humanizeGap,
@@ -185,6 +186,18 @@ describe('definitionFailureSummaryKey', () => {
     }
     expect(zh.harness.failure.timeout).toBe('最近一次运行已超时。');
     expect(zh.harness.failure.generic).toBe('最近一次运行失败。');
+  });
+});
+
+describe('definitionHasNeutralWatchExit', () => {
+  it.each([
+    ['no-event completion', { last_exit_code: 64, retry_exit_codes: [] }, true],
+    ['default retry exit', { last_exit_code: 75, retry_exit_codes: [75] }, true],
+    ['custom retry exit', { last_exit_code: 90, retry_exit_codes: [75, 90] }, true],
+    ['unconfigured watch exit', { last_exit_code: 9, retry_exit_codes: [75] }, false],
+    ['task exit without watch evidence', { last_exit_code: 75 }, false],
+  ] as const)('classifies %s from structured fields', (_name, row, expected) => {
+    expect(definitionHasNeutralWatchExit(row)).toBe(expected);
   });
 });
 

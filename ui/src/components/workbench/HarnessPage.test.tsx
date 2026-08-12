@@ -926,6 +926,30 @@ describe('WatchDetail runtime', () => {
     }
   });
 
+  it('keeps a healthy retry diagnostic without presenting it as a failure', () => {
+    const raw = 'avibe-watch: still waiting';
+    const html = render(
+      <WatchDetail
+        watch={watch({
+          enabled: true,
+          retry_exit_codes: [75],
+          health: 'healthy',
+          lifecycle_detail: 'error',
+          last_exit_code: 75,
+          last_error: raw,
+        })}
+        onToggleEnabled={() => undefined}
+        pending={false}
+      />,
+    );
+
+    expect(html).not.toContain(en.harness.failure.generic);
+    expect(html).toContain(`<span class="font-mono text-[11px] text-muted">75</span>`);
+    expect(html).toContain(`>${en.harness.detail.technicalDetails}<`);
+    expect(html).toContain(raw);
+    expect(html).toMatch(/<details(?![^>]*\bopen\b)[^>]*>/);
+  });
+
   it('resets technical details when selecting another definition', () => {
     const renderInteractive = (ui: ReactElement) =>
       renderDom(

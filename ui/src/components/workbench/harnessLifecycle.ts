@@ -351,6 +351,14 @@ export type HarnessDefinitionFacts = {
 
 export type HarnessFailureSummaryKey = 'harness.failure.timeout' | 'harness.failure.generic';
 
+export function definitionHasNeutralWatchExit(
+  row: Pick<HarnessDefinitionFacts, 'last_exit_code' | 'retry_exit_codes'>,
+): boolean {
+  if (!Array.isArray(row.retry_exit_codes)) return false;
+  const exitCode = row.last_exit_code;
+  return exitCode === 64 || (typeof exitCode === 'number' && row.retry_exit_codes.includes(exitCode));
+}
+
 // The UI can only name a timeout when the scheduler's structured fact or the
 // already-projected lifecycle detail proves it. The remaining structured
 // failure facts collapse to one generic category; last_error is deliberately
@@ -363,9 +371,7 @@ export function definitionFailureSummaryKey(
 ): HarnessFailureSummaryKey | null {
   const timedOut = row.metadata?.last_command_timed_out === true || row.lifecycle_detail === 'timeout';
   const exitCode = row.last_exit_code;
-  const successfulWatchExit =
-    Array.isArray(row.retry_exit_codes) &&
-    (exitCode === 64 || row.retry_exit_codes.includes(exitCode ?? Number.NaN));
+  const successfulWatchExit = definitionHasNeutralWatchExit(row);
   const lifecycleFailure =
     row.lifecycle_detail != null && row.lifecycle_detail !== 'normal' && !successfulWatchExit;
   const failed =
@@ -383,9 +389,8 @@ export function definitionExitCodeTone(
     'health' | 'lifecycle_detail' | 'last_exit_code' | 'metadata' | 'retry_exit_codes'
   >,
 ): 'neutral' | 'failure' {
-  return row.last_exit_code != null && row.last_exit_code !== 0 && definitionFailureSummaryKey(row)
-    ? 'failure'
-    : 'neutral';
+  if (definitionHasNeutralWatchExit(row)) return 'neutral';
+  return row.last_exit_code != null && row.last_exit_code !== 0 ? 'failure' : 'neutral';
 }
 
 // ``failing`` = the newest verdict failed; ``degraded`` = the newest succeeded but
