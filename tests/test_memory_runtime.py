@@ -2351,6 +2351,8 @@ async def test_runtime_repairs_artifact_without_activating_pending_recovery(
 ) -> None:
     """Repair admits only the pointer while every durable recovery fence remains set."""
 
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+
     class _RepairArtifact(FakeMemoryArtifactManager):
         def ensure(self, *, force: bool = False) -> dict:
             self.ensure_calls.append(force)
@@ -2377,8 +2379,17 @@ async def test_runtime_repairs_artifact_without_activating_pending_recovery(
         rolled_back.append(True)
 
     artifact = _RepairArtifact(python=Path(sys.executable))
+    pending = MemoryConfig(enabled=False, recovery_intent=recovery_intent)
+    V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+        memory=pending,
+    ).save()
     runtime = memory_runtime_factory(
-        MemoryConfig(enabled=False, recovery_intent=recovery_intent),
+        pending,
         artifact_manager=artifact,
         effective_home=tmp_path,
     )
@@ -2397,6 +2408,7 @@ async def test_runtime_repairs_artifact_without_activating_pending_recovery(
     assert rolled_back == []
     assert runtime._config.recovery_intent == recovery_intent
     assert runtime._restart_config.recovery_intent == recovery_intent
+    assert V2Config.load().memory.recovery_intent == recovery_intent
     await memory_runtime_factory.close(runtime)
 
 
@@ -2603,6 +2615,109 @@ async def test_artifact_repair_rejects_uninspectable_root_without_pending_recove
             lambda: pytest.fail("ordinary repair must not commit"),
             lambda: pytest.fail("nothing was committed to roll back"),
         )
+
+    await memory_runtime_factory.close(runtime)
+
+
+async def test_synthetic_rebuild_fence_cannot_authorize_pointer_only_admission(
+    tmp_path: Path,
+    memory_runtime_factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed durable-config read must not become artifact admission authority."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    persisted = MemoryConfig(enabled=True, processing=_processing_config())
+    V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+        memory=persisted,
+    ).save()
+    runtime = memory_runtime_factory(
+        persisted,
+        artifact_manager=_installed_artifact(),
+        effective_home=tmp_path,
+    )
+
+    with monkeypatch.context() as config_failure:
+        config_failure.setattr(
+            V2Config,
+            "load",
+            classmethod(
+                lambda cls, config_path=None: (_ for _ in ()).throw(
+                    ValueError("durable config unavailable")
+                )
+            ),
+        )
+        assert await runtime.rebuild() == {
+            "ok": False,
+            "error": "memory_rebuild_failed",
+            "result": "failed",
+        }
+
+    assert runtime.rebuild_pending is True
+    assert V2Config.load().memory.recovery_intent is None
+    committed: list[bool] = []
+    with pytest.raises(
+        MemoryRuntimeActivationError,
+        match="provider root could not be inspected",
+    ):
+        runtime._coordinate_artifact_activation(
+            MemoryArtifactCandidate(
+                provider_root_format="everos-1.2.3",
+                compatible_provider_root_formats=frozenset({"everos-1.2.3"}),
+                artifact_fingerprint="candidate",
+            ),
+            None,
+            lambda: committed.append(True),
+            lambda: pytest.fail("nothing was committed to roll back"),
+        )
+    assert committed == []
+
+    await memory_runtime_factory.close(runtime)
+
+
+async def test_pointer_only_admission_requires_matching_durable_recovery_intent(
+    tmp_path: Path,
+    memory_runtime_factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stale in-memory fence cannot borrow another durable recovery authority."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+        memory=MemoryConfig(enabled=False, recovery_intent="factory_reset"),
+    ).save()
+    runtime = memory_runtime_factory(
+        MemoryConfig(enabled=False, recovery_intent="rebuild"),
+        artifact_manager=_installed_artifact(),
+        effective_home=tmp_path,
+    )
+
+    committed: list[bool] = []
+    with pytest.raises(
+        MemoryRuntimeActivationError,
+        match="provider root could not be inspected",
+    ):
+        runtime._coordinate_artifact_activation(
+            MemoryArtifactCandidate(
+                provider_root_format="everos-1.2.3",
+                compatible_provider_root_formats=frozenset({"everos-1.2.3"}),
+                artifact_fingerprint="candidate",
+            ),
+            None,
+            lambda: committed.append(True),
+            lambda: pytest.fail("nothing was committed to roll back"),
+        )
+    assert committed == []
 
     await memory_runtime_factory.close(runtime)
 

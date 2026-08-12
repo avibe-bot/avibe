@@ -446,6 +446,19 @@ class MemoryRuntime:
             for config in (self._config, self._restart_config)
         )
 
+    def _durable_recovery_pending(self) -> bool:
+        """Verify pointer-only repair authority from the persisted config."""
+
+        try:
+            durable_intent = V2Config.load().memory.recovery_intent
+        except Exception:
+            logger.exception("Memory artifact admission could not load durable recovery intent")
+            return False
+        return durable_intent in MEMORY_RECOVERY_INTENTS and any(
+            config.recovery_intent == durable_intent
+            for config in (self._config, self._restart_config)
+        )
+
     @property
     def factory_reset_pending(self) -> bool:
         """Whether this aggregate is fenced by a durable factory-reset intent."""
@@ -2618,7 +2631,7 @@ class MemoryRuntime:
         # A durable recovery marker deliberately fences runtime activation.
         # Repair still needs to publish an admitted pointer so explicit Retry
         # can proceed, but it must not resurrect the pending runtime.
-        if self.recovery_pending:
+        if self.recovery_pending and self._durable_recovery_pending():
             commit()
             return
 
