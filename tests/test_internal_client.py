@@ -351,22 +351,129 @@ def test_memory_remember_round_trip(socket_path):
     assert result == {"status_code": 200, "body": {"status": "accepted"}}
 
 
-def test_memory_failures_round_trip(socket_path):
-    app = FastAPI()
+def test_memory_final_flush_round_trip(socket_path):
+    captured: dict = {}
 
-    @app.get("/internal/memory/failures")
-    async def _failures():
-        return {"items": [], "retention_days": 90}
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["method"] = request.method
+        captured["path"] = request.url.path
+        captured["payload"] = json.loads(request.content)
+        return httpx.Response(200, json={"ok": True, "flushed": True})
+
+    async def _exercise():
+        transport = httpx.MockTransport(handler)
+        with patch("vibe.internal_client.httpx.AsyncHTTPTransport", return_value=transport):
+            return await internal_client.memory_final_flush(
+                "ses-memory",
+                socket_path=socket_path,
+            )
+
+    result = asyncio.run(_exercise())
+
+    assert captured == {
+        "method": "POST",
+        "path": "/internal/memory/final-flush",
+        "payload": {"session_id": "ses-memory"},
+    }
+    assert result == {
+        "status_code": 200,
+        "body": {"ok": True, "flushed": True},
+    }
+
+
+def test_memory_archive_session_round_trip_uses_only_session_identity(socket_path):
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["method"] = request.method
+        captured["path"] = request.url.path
+        captured["payload"] = json.loads(request.content)
+        captured["timeout"] = request.extensions["timeout"]
+        return httpx.Response(
+            200,
+            json={
+                "ok": True,
+                "session": {"id": "ses-memory", "status": "archived"},
+            },
+        )
+
+    async def _exercise():
+        transport = httpx.MockTransport(handler)
+        with patch("vibe.internal_client.httpx.AsyncHTTPTransport", return_value=transport):
+            return await internal_client.memory_archive_session(
+                "ses-memory",
+                socket_path=socket_path,
+            )
+
+    result = asyncio.run(_exercise())
+
+    assert captured == {
+        "method": "POST",
+        "path": "/internal/memory/archive-session",
+        "payload": {"session_id": "ses-memory"},
+        "timeout": {
+            "connect": 5.0,
+            "read": None,
+            "write": None,
+            "pool": None,
+        },
+    }
+    assert result == {
+        "status_code": 200,
+        "body": {
+            "ok": True,
+            "session": {"id": "ses-memory", "status": "archived"},
+        },
+    }
+
+
+def test_memory_recovery_reads_round_trip_signed_operator(monkeypatch, socket_path):
+    from core.memory import ui_access
+
+    captured: list[httpx.Request] = []
+    monkeypatch.setattr(ui_access, "_process_secret", "test-ui-controller-secret")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, json={"status": "ok"})
 
     async def _go():
-        fake_transport = httpx.ASGITransport(app=app)
-        with patch("vibe.internal_client.httpx.AsyncHTTPTransport", return_value=fake_transport):
-            return await internal_client.memory_failures(socket_path=socket_path)
+        with patch(
+            "vibe.internal_client.httpx.AsyncHTTPTransport",
+            return_value=httpx.MockTransport(handler),
+        ):
+            processing_record = await internal_client.memory_processing_record(
+                user_key="avibe:remote:user-1",
+                socket_path=socket_path,
+            )
+            failures = await internal_client.memory_failures(
+                user_key="avibe:remote:user-1",
+                socket_path=socket_path,
+            )
+            maintenance = await internal_client.memory_maintenance(
+                user_key="avibe:remote:user-1",
+                socket_path=socket_path,
+            )
+            return processing_record, failures, maintenance
 
-    assert asyncio.run(_go()) == {
-        "status_code": 200,
-        "body": {"items": [], "retention_days": 90},
-    }
+    processing_record, failures, maintenance = asyncio.run(_go())
+
+    assert processing_record == {"status_code": 200, "body": {"status": "ok"}}
+    assert failures == {"status_code": 200, "body": {"status": "ok"}}
+    assert maintenance == {"status_code": 200, "body": {"status": "ok"}}
+    assert [request.url.path for request in captured] == [
+        "/internal/memory/processing-record",
+        "/internal/memory/failures",
+        "/internal/memory/maintenance",
+    ]
+    for request in captured:
+        assert request.headers["x-avibe-memory-user-key"] == "avibe:remote:user-1"
+        assert request.headers["x-avibe-memory-ui-proof"] == ui_access.build_ui_read_proof(
+            "test-ui-controller-secret",
+            method="GET",
+            path=request.url.path,
+            user_key="avibe:remote:user-1",
+        )
 
 
 def test_memory_sync_read_helpers_use_verified_uds(socket_path):
@@ -392,7 +499,18 @@ def test_memory_sync_read_helpers_use_verified_uds(socket_path):
     assert captured == [
         ("/internal/memory/status", None),
         ("/internal/memory/profile", None),
-        ("/internal/memory/search", {"query": "find this", "limit": 4}),
+        (
+            "/internal/memory/search",
+            {
+                "query": "find this",
+                "policy": {
+                    "mode": "hybrid",
+                    "max_results": 4,
+                    "include_profile": True,
+                    "include_current_session": False,
+                },
+            },
+        ),
     ]
 
 
@@ -438,6 +556,7 @@ def test_memory_clear_signs_the_selected_ui_owner(monkeypatch, socket_path):
         captured["headers"] = dict(request.headers)
         captured["path"] = request.url.path
         captured["payload"] = json.loads(request.content)
+        captured["timeout"] = request.extensions.get("timeout")
         return httpx.Response(200, json={"status": "completed", "epoch": 2})
 
     async def _go():
@@ -456,12 +575,146 @@ def test_memory_clear_signs_the_selected_ui_owner(monkeypatch, socket_path):
     assert result["status_code"] == 200
     assert captured["path"] == "/internal/memory/clear"
     assert captured["payload"] == {"confirm": True}
+    assert captured["timeout"] == {
+        "connect": 5.0,
+        "read": None,
+        "write": None,
+        "pool": None,
+    }
     assert headers["x-avibe-memory-user-key"] == "avibe:remote:user-1"
     assert headers["x-avibe-memory-ui-proof"] == ui_access.build_ui_read_proof(
         "test-ui-controller-secret",
         method="POST",
         path="/internal/memory/clear",
         user_key="avibe:remote:user-1",
+    )
+
+
+def test_memory_rebuild_signs_owner_and_posts_exact_confirmation(monkeypatch, socket_path):
+    from core.memory import ui_access
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(ui_access, "_process_secret", "test-ui-controller-secret")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["headers"] = dict(request.headers)
+        captured["path"] = request.url.path
+        captured["payload"] = json.loads(request.content)
+        captured["timeout"] = request.extensions.get("timeout")
+        return httpx.Response(200, json={"ok": True, "result": "completed"})
+
+    async def _go():
+        with patch(
+            "vibe.internal_client.httpx.AsyncHTTPTransport",
+            return_value=httpx.MockTransport(handler),
+        ):
+            return await internal_client.memory_rebuild(
+                user_key="avibe:remote:user-1",
+                socket_path=socket_path,
+            )
+
+    result = asyncio.run(_go())
+    headers = captured["headers"]
+
+    assert result == {
+        "status_code": 200,
+        "body": {"ok": True, "result": "completed"},
+    }
+    assert captured["path"] == "/internal/memory/rebuild"
+    assert captured["payload"] == {"confirm": True}
+    assert captured["timeout"] == {
+        "connect": 5.0,
+        "read": None,
+        "write": None,
+        "pool": None,
+    }
+    assert headers["x-avibe-memory-user-key"] == "avibe:remote:user-1"
+    assert headers["x-avibe-memory-ui-proof"] == ui_access.build_ui_read_proof(
+        "test-ui-controller-secret",
+        method="POST",
+        path="/internal/memory/rebuild",
+        user_key="avibe:remote:user-1",
+    )
+
+
+def test_memory_factory_reset_signs_owner_and_posts_exact_confirmation(monkeypatch, socket_path):
+    from core.memory import ui_access
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(ui_access, "_process_secret", "test-ui-controller-secret")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["headers"] = dict(request.headers)
+        captured["path"] = request.url.path
+        captured["payload"] = json.loads(request.content)
+        captured["timeout"] = request.extensions.get("timeout")
+        return httpx.Response(200, json={"ok": True, "result": "completed"})
+
+    async def _go():
+        with patch(
+            "vibe.internal_client.httpx.AsyncHTTPTransport",
+            return_value=httpx.MockTransport(handler),
+        ):
+            return await internal_client.memory_factory_reset(
+                user_key="avibe:remote:user-1",
+                socket_path=socket_path,
+            )
+
+    result = asyncio.run(_go())
+    headers = captured["headers"]
+    assert result == {
+        "status_code": 200,
+        "body": {"ok": True, "result": "completed"},
+    }
+    assert captured["path"] == "/internal/memory/factory-reset"
+    assert captured["payload"] == {"confirm": True}
+    assert captured["timeout"] == {
+        "connect": 5.0,
+        "read": None,
+        "write": None,
+        "pool": None,
+    }
+    assert headers["x-avibe-memory-user-key"] == "avibe:remote:user-1"
+    assert headers["x-avibe-memory-ui-proof"] == ui_access.build_ui_read_proof(
+        "test-ui-controller-secret",
+        method="POST",
+        path="/internal/memory/factory-reset",
+        user_key="avibe:remote:user-1",
+    )
+
+
+def test_memory_repair_signs_owner_and_posts_exact_confirmation(monkeypatch, socket_path):
+    from core.memory import ui_access
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(ui_access, "_process_secret", "test-ui-controller-secret")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["headers"] = dict(request.headers)
+        captured["path"] = request.url.path
+        captured["payload"] = json.loads(request.content)
+        captured["timeout"] = request.extensions.get("timeout")
+        return httpx.Response(200, json={"ok": True, "result": "completed", "health": {}})
+
+    async def _go():
+        with patch(
+            "vibe.internal_client.httpx.AsyncHTTPTransport",
+            return_value=httpx.MockTransport(handler),
+        ):
+            return await internal_client.memory_repair(
+                user_key="avibe:remote:user-1",
+                socket_path=socket_path,
+            )
+
+    result = asyncio.run(_go())
+    headers = captured["headers"]
+    assert result["status_code"] == 200
+    assert captured["path"] == "/internal/memory/repair"
+    assert captured["payload"] == {"confirm": True}
+    assert captured["timeout"] == {"connect": 5.0, "read": None, "write": None, "pool": None}
+    assert headers["x-avibe-memory-user-key"] == "avibe:remote:user-1"
+    assert headers["x-avibe-memory-ui-proof"] == ui_access.build_ui_read_proof(
+        "test-ui-controller-secret", method="POST", path="/internal/memory/repair", user_key="avibe:remote:user-1"
     )
 
 

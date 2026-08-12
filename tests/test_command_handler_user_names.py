@@ -1,3 +1,4 @@
+import asyncio
 import importlib.util
 import os
 import sys
@@ -7,6 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from core.memory.runtime import MemorySessionLifecycleBusyError
 from modules.im import MessageContext
 
 # Imported before ``_load_command_handlers_class`` runs: that loader swaps
@@ -298,6 +300,236 @@ class CommandHandlerUserNameTests(unittest.IsolatedAsyncioTestCase):
             [("wx-chat", "🆕 已开启新的会话。你下一条消息会从全新对话开始。")],
         )
 
+    async def test_new_flushes_before_clear_and_continues_after_failed_flush(self):
+        controller = _StubController({"display_name": "小王"})
+        calls = []
+
+        async def _final_flush(context, raw_session_id, *, deadline_seconds):
+            calls.append(("flush", context, raw_session_id, deadline_seconds))
+            raise RuntimeError("provider unavailable")
+
+        async def _clear_sessions(session_key):
+            calls.append(("clear", session_key))
+            return {}
+
+        controller.final_flush_memory_session = _final_flush
+        controller.agent_service.clear_sessions = _clear_sessions  # type: ignore[attr-defined]
+        handler = CommandHandlers(controller)
+        context = MessageContext(user_id="wx-user", channel_id="wx-chat", platform="wechat")
+
+        await handler.handle_new(context)
+
+        self.assertEqual(
+            calls,
+            [
+                ("flush", context, "wechat_wx-chat", 5.0),
+                ("clear", "wechat::wx-chat"),
+            ],
+        )
+        self.assertEqual(len(controller.im_client.sent_messages), 1)
+
+    async def test_new_holds_memory_session_fence_through_reset(self):
+        controller = _StubController({"display_name": "Alex"})
+        admission_lock = asyncio.Lock()
+        reset_entered = asyncio.Event()
+        release_reset = asyncio.Event()
+        capture_enqueued = asyncio.Event()
+        calls = []
+
+        async def _run_lifecycle(
+            context,
+            raw_session_id,
+            operation,
+            *,
+            deadline_seconds,
+        ):
+            self.assertEqual(raw_session_id, "wechat_wx-chat")
+            self.assertEqual(deadline_seconds, 5.0)
+            async with admission_lock:
+                calls.append(("flush", context))
+                return await operation()
+
+        async def _clear_sessions(session_key):
+            calls.append(("clear", session_key))
+            reset_entered.set()
+            await release_reset.wait()
+            return {}
+
+        async def _capture_same_session():
+            async with admission_lock:
+                calls.append(("capture", "wechat_wx-chat"))
+                capture_enqueued.set()
+
+        controller.run_memory_session_lifecycle = _run_lifecycle
+        controller.agent_service.clear_sessions = _clear_sessions  # type: ignore[attr-defined]
+        handler = CommandHandlers(controller)
+        context = MessageContext(
+            user_id="wx-user",
+            channel_id="wx-chat",
+            platform="wechat",
+        )
+
+        new_task = asyncio.create_task(handler.handle_new(context))
+        await asyncio.wait_for(reset_entered.wait(), timeout=1.0)
+        capture_task = asyncio.create_task(_capture_same_session())
+        await asyncio.sleep(0)
+
+        self.assertFalse(capture_enqueued.is_set())
+        release_reset.set()
+        await new_task
+        await capture_task
+        self.assertEqual(
+            calls,
+            [
+                ("flush", context),
+                ("clear", "wechat::wx-chat"),
+                ("capture", "wechat_wx-chat"),
+            ],
+        )
+
+    async def test_new_waits_for_an_admitted_turn_capture_before_reset(self):
+        controller = _StubController({"display_name": "Alex"})
+        turn_lock = asyncio.Lock()
+        reset_entered = asyncio.Event()
+
+        class _TurnManager:
+            async def run_session_lifecycle(
+                self,
+                raw_session_id,
+                operation,
+                *,
+                deadline_seconds,
+            ):
+                self_outer.assertEqual(raw_session_id, "wechat_wx-chat")
+                self_outer.assertEqual(deadline_seconds, 5.0)
+                async with turn_lock:
+                    return await operation()
+
+        self_outer = self
+        controller.session_turns = _TurnManager()
+
+        async def _clear_sessions(_session_key):
+            reset_entered.set()
+            return {}
+
+        controller.agent_service.clear_sessions = _clear_sessions  # type: ignore[attr-defined]
+        handler = CommandHandlers(controller)
+        context = MessageContext(
+            user_id="wx-user",
+            channel_id="wx-chat",
+            platform="wechat",
+        )
+
+        await turn_lock.acquire()
+        new_task = asyncio.create_task(handler.handle_new(context))
+        await asyncio.sleep(0)
+        self.assertFalse(reset_entered.is_set())
+
+        turn_lock.release()
+        await new_task
+        self.assertTrue(reset_entered.is_set())
+
+    async def _run_new_with_memory_lifecycle_error(
+        self,
+        error: Exception,
+        *,
+        language: str,
+    ) -> _StubController:
+        controller = _StubController({"display_name": "Alex"})
+        controller.config.language = language
+
+        async def _busy_lifecycle(
+            _context,
+            _raw_session_id,
+            _operation,
+            *,
+            deadline_seconds,
+        ):
+            self.assertEqual(deadline_seconds, 5.0)
+            raise error
+
+        controller.run_memory_session_lifecycle = _busy_lifecycle
+        handler = CommandHandlers(controller)
+        context = MessageContext(
+            user_id="wx-user",
+            channel_id="wx-chat",
+            platform="wechat",
+        )
+
+        await handler.handle_new(context)
+        return controller
+
+    async def test_new_localizes_memory_session_fence_timeout_in_english(self):
+        controller = await self._run_new_with_memory_lifecycle_error(
+            MemorySessionLifecycleBusyError(
+                "memory capture admission did not quiesce before the deadline"
+            ),
+            language="en",
+        )
+
+        self.assertEqual(controller.cleared_sessions, [])
+        self.assertEqual(
+            controller.im_client.sent_messages,
+            [
+                (
+                    "wx-chat",
+                    "❌ Memory is still processing this session. Please try /new again.",
+                )
+            ],
+        )
+
+    async def test_new_localizes_memory_session_fence_timeout_in_chinese(self):
+        controller = await self._run_new_with_memory_lifecycle_error(
+            MemorySessionLifecycleBusyError(
+                "memory capture admission did not quiesce before the deadline"
+            ),
+            language="zh",
+        )
+
+        self.assertEqual(controller.cleared_sessions, [])
+        self.assertEqual(
+            controller.im_client.sent_messages,
+            [("wx-chat", "❌ 记忆系统仍在处理当前会话，请稍后重试 /new。")],
+        )
+
+    async def test_new_preserves_generic_error_detail(self):
+        controller = await self._run_new_with_memory_lifecycle_error(
+            RuntimeError("provider unavailable"),
+            language="zh",
+        )
+
+        self.assertEqual(controller.cleared_sessions, [])
+        self.assertEqual(
+            controller.im_client.sent_messages,
+            [("wx-chat", "❌ 清除会话时出错：provider unavailable")],
+        )
+
+    async def test_new_does_not_flush_a_fallback_session_anchor(self):
+        controller = _StubController({"display_name": "Alex"})
+        flush_calls = []
+        clear_base_calls = []
+
+        async def _final_flush(*args, **kwargs):
+            flush_calls.append((args, kwargs))
+
+        def _raise_for_missing_canonical_anchor(_context):
+            raise RuntimeError("session identity unavailable")
+
+        controller.final_flush_memory_session = _final_flush
+        controller.session_handler.get_base_session_id = _raise_for_missing_canonical_anchor
+        controller.sessions = type(
+            "Sessions",
+            (),
+            {"clear_session_base": lambda _self, key, anchor: clear_base_calls.append((key, anchor)) or 1},
+        )()
+        handler = CommandHandlers(controller)
+        context = MessageContext(user_id="U1", channel_id="C1", message_id="M1", platform="slack")
+
+        await handler.handle_new(context)
+
+        self.assertEqual(flush_calls, [])
+        self.assertEqual(clear_base_calls, [("slack::C1", "slack_M1")])
+
     async def test_new_command_reports_paused_bound_definitions(self):
         """D2 — `/new` pauses definitions pinned to the session it clears, and says so.
 
@@ -491,6 +723,26 @@ class CommandHandlerUserNameTests(unittest.IsolatedAsyncioTestCase):
         controller = _StubController({"display_name": "Alex"})
         setattr(controller.config, "platform", "telegram")
         controller.agent_service.clear_sessions = _clear_sessions  # type: ignore[attr-defined]
+        flush_calls = []
+        call_order = []
+
+        async def _run_lifecycle(
+            context,
+            raw_session_id,
+            operation,
+            *,
+            deadline_seconds,
+        ):
+            call_order.append("flush")
+            flush_calls.append((context, raw_session_id, deadline_seconds))
+            return await operation()
+
+        controller.run_memory_session_lifecycle = _run_lifecycle
+        controller.session_handler = type(
+            "SessionHandler",
+            (),
+            {"get_base_session_id": staticmethod(lambda _context: "telegram_-100123_1")},
+        )()
         handler = CommandHandlers(controller)
         controller.im_client.started_topic_context = MessageContext(
             user_id="42",
@@ -498,6 +750,13 @@ class CommandHandlerUserNameTests(unittest.IsolatedAsyncioTestCase):
             thread_id="99",
             platform="telegram",
         )
+        original_start = controller.im_client.start_new_topic_session
+
+        async def _start_new_topic(context):
+            call_order.append("topic")
+            return await original_start(context)
+
+        controller.im_client.start_new_topic_session = _start_new_topic
         context = MessageContext(
             user_id="42",
             channel_id="-100123",
@@ -513,6 +772,8 @@ class CommandHandlerUserNameTests(unittest.IsolatedAsyncioTestCase):
             [("-100123", "🆕 已开启新的会话。你下一条消息会从全新对话开始。")],
         )
         self.assertEqual(controller.im_client.sent_contexts[0].thread_id, "99")
+        self.assertEqual(flush_calls, [(context, "telegram_-100123_1", 5.0)])
+        self.assertEqual(call_order, ["flush", "topic"])
 
     async def test_slack_dm_start_skips_channel_info_lookup(self):
         controller = _StubController({"display_name": "Alex"})

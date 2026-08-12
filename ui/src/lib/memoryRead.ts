@@ -8,9 +8,9 @@ import type { TFunction } from 'i18next';
 // of a generic error.
 export const MEMORY_FORBIDDEN_ERROR = 'memory_disabled';
 
-// Every Memory route body is discriminated: `status: 'ok'` on success, `status: 'failed'` with a
-// closed error code otherwise. A dependency-missing failure from the internal handler carries only
-// `error`, so require the tag rather than merely rejecting 'failed'.
+// Every current Memory route body is discriminated: `status: 'ok'` on success, `status: 'failed'`
+// with a closed error code otherwise. A dependency-missing failure from the internal handler carries
+// only `error`, so require the tag rather than merely rejecting 'failed'.
 export const isMemoryOk = <T,>(value: T): value is Extract<T, { status: 'ok' }> =>
   !!value && typeof value === 'object' && (value as { status?: unknown }).status === 'ok';
 
@@ -28,9 +28,8 @@ export type MemoryReadOutcome<T> =
 /**
  * Discriminate one Memory route body.
  *
- * `accept` exists because not every route tags success the same way: the
- * failure log answers with a bare `{ items, retention_days }` while the rest
- * carry `status: 'ok'`. A forbidden body satisfies no `accept`, so the
+ * `accept` remains available for compatibility callers with an explicitly untagged success shape.
+ * A forbidden body satisfies no `accept`, so the
  * forbidden verdict rides along on the failure rather than pre-empting it —
  * callers that don't distinguish it still surface its error code.
  */

@@ -245,6 +245,7 @@
       }
     },
     "sessionArchived": "该会话已归档，无法再修改。",
+    "sessionArchiveUnavailable": "Avibe 控制器当前不可用，暂时无法归档该会话。请稍后重试。",
     "workbenchAttachment": {
       "session_not_found": "当前会话已不可用。",
       "file_required": "请选择要上传的文件。",
@@ -290,6 +291,7 @@
     "channelNotEnabled": "此频道未启用。请前往控制面板启用它。",
     "unknownCommand": "未知命令：`/{command}`\n\n请使用 `@avibe /start` 访问所有机器人功能。",
     "clearSession": "清除会话时出错：{error}",
+    "memorySessionLifecycleBusy": "记忆系统仍在处理当前会话，请稍后重试 /new。",
     "settingsFailed": "无法打开设置。请重试。",
     "cwdChangeFailed": "无法打开目录更改对话框。请重试。",
     "resumeFailed": "无法打开恢复对话框。请重试。",
@@ -673,9 +675,54 @@
   },
   "memory": {
     "cli": {
+      "help": {
+        "command": "通过运行中的控制器使用本地记忆",
+        "status": "显示记忆状态",
+        "profile": "显示记忆档案",
+        "search": "搜索本地记忆",
+        "remember": "将长期个人信息加入队列",
+        "query": "搜索内容",
+        "limit": "最大结果数（1-20）",
+        "text": "要记住的文本（最多 4,000 个字符）",
+        "json": "输出机器可读格式"
+      },
       "error": "记忆 {operation} 失败：{code}",
-      "status": "记忆状态：{state}",
-      "counts": "处理中：{syncing}；成功：{succeeded}；结果未知：{unknown}；失败：{failed}；已放弃：{dead}；已跳过：{missed}",
+      "status": "记忆来源：{state}",
+      "provider": "EverOS {version}：{state}",
+      "sourceReason": "来源原因：{reason}",
+      "sourceState": {
+        "available": "可用",
+        "stale": "数据已过期",
+        "unavailable": "不可用",
+        "unknown": "未知"
+      },
+      "providerState": {
+        "ok": "正常",
+        "unknown": "未知"
+      },
+      "unknownVersion": "未知版本",
+      "reason": {
+        "memoryDisabled": "记忆功能已禁用",
+        "invalidInput": "记忆输入无效",
+        "accessDenied": "记忆访问被拒绝",
+        "inputTooLarge": "记忆输入过大",
+        "queueFull": "记忆队列已满",
+        "lowDiskSpace": "磁盘空间不足",
+        "storeUnavailable": "记忆存储不可用",
+        "runtimeMissing": "记忆运行时缺失",
+        "runtimeUnsupported": "记忆运行时不受支持",
+        "runtimeInstallFailed": "记忆运行时安装失败",
+        "reconcileFailed": "记忆协调失败",
+        "restartFailed": "记忆重启失败",
+        "sidecarUnavailable": "记忆 sidecar 不可用",
+        "providerTimeout": "记忆服务请求超时",
+        "providerResponseInvalid": "记忆服务响应无效",
+        "capabilityUnavailable": "记忆能力不可用",
+        "processingFailed": "记忆处理失败",
+        "clearFailed": "清除记忆失败",
+        "factoryResetFailed": "记忆初始化失败",
+        "unknown": "未知原因"
+      },
       "fault": {
         "credential": "记忆引擎无法调用已配置的模型接口，请检查 API Key 余额/权限。",
         "engine": "记忆引擎内部错误，可尝试修复记忆运行时。"
