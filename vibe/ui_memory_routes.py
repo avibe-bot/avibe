@@ -787,12 +787,13 @@ async def _apply_memory_settings_patch(
             from config.v2_config import memory_config_to_payload
             preflight = await _memory_internal_result(
                 lambda: internal_client.memory_preflight(
-                    payload={"memory": memory_config_to_payload(candidate, include_secrets=True)},
+                    payload={"memory": memory_config_to_payload(candidate.memory, include_secrets=True)},
                     user_key=user_key,
                 )
             )
             if preflight[0].get("ok") is not True:
                 failure = dict(preflight[0])
+                failure.pop("ok", None)
                 failure["status"] = "failed"
                 failure["diagnostic"] = _memory_preflight_projection(preflight[0])
                 failure_code = preflight[1] if preflight[1] >= 500 else 409

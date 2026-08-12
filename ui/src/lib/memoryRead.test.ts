@@ -61,4 +61,10 @@ describe('memoryErrorMessage', () => {
   it('names an absent code rather than rendering an empty error', () => {
     expect(memoryErrorMessage(t, null)).toBe('common.unknown');
   });
+
+  it('appends a provider diagnostic only when one is present', () => {
+    expect(memoryErrorMessage(t, 'memory_embedding_unavailable', 'HTTP 404')).toBe(
+      'Known failure: HTTP 404',
+    );
+  });
 });

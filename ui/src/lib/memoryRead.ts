@@ -46,5 +46,11 @@ export function classifyMemoryResult<T>(
 }
 
 /** Map a closed backend error code to its localized message. */
-export const memoryErrorMessage = (t: TFunction, code: string | null | undefined): string =>
-  code ? t(`errors.${code}`, { defaultValue: code }) : t('common.unknown');
+export const memoryErrorMessage = (
+  t: TFunction,
+  code: string | null | undefined,
+  message?: string | null,
+): string => {
+  const base = code ? t(`errors.${code}`, { defaultValue: code }) : t('common.unknown');
+  return message ? `${base}: ${message}` : base;
+};

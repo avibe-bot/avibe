@@ -107,6 +107,16 @@ def _local_headers() -> dict[str, str]:
     return {"Origin": "http://127.0.0.1:15131"}
 
 
+@pytest.fixture(autouse=True)
+def _preflight_passes_by_default(monkeypatch):
+    """Keep legacy route fixtures focused unless a test exercises preflight."""
+
+    async def preflight(*, payload: dict, user_key: str):
+        return {"status_code": 200, "body": {"ok": True}}
+
+    monkeypatch.setattr(internal_client, "memory_preflight", preflight)
+
+
 def test_memory_factory_reset_public_result_keeps_truthful_root_contract() -> None:
     payload = {
         "ok": False,
@@ -1296,6 +1306,69 @@ def test_memory_confirmed_first_embedding_identity_runs_retained_rebuild(
     ]
     persisted = V2Config.load().memory
     assert persisted.processing.embedding.base_url == "https://embed.example.test/v1"
+    assert persisted.processing.embedding.model == "embed-v1"
+    assert persisted.recovery_intent is None
+
+
+def test_memory_confirmed_preflight_failure_keeps_config_unchanged(monkeypatch, tmp_path) -> None:
+    """Scenario: MEMORY-REBUILD-301"""
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    current = MemoryConfig(
+        enabled=False,
+        processing=MemoryProcessingConfig(
+            llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-key"),
+            embedding=MemoryEndpointConfig("https://embed.example.test/v1", "embed-v1", "embed-key"),
+        ),
+    )
+    _save_memory(current)
+    from config.paths import get_config_path
+
+    config_before = get_config_path().read_bytes()
+
+    async def preflight(*, payload: dict, user_key: str):
+        assert user_key == "avibe:local"
+        assert payload["memory"]["processing"]["embedding"]["model"] == "embed-v2"
+        return {
+            "status_code": 409,
+            "body": {
+                "ok": False,
+                "error": "memory_embedding_unavailable",
+                "diagnostic": {
+                    "side": "embedding",
+                    "http_status": 404,
+                    "provider_error_code": "model_not_supported",
+                    "message": "model unavailable",
+                },
+            },
+        }
+
+    monkeypatch.setattr(internal_client, "memory_preflight", preflight)
+    client = app.test_client()
+    response = client.patch(
+        "/api/memory/settings",
+        json={
+            "processing": {"embedding": {"model": "embed-v2"}},
+            "confirm_rebuild": True,
+        },
+        headers=csrf_headers(client, "http://127.0.0.1:15131"),
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 409
+    assert response.get_json() == {
+        "status": "failed",
+        "error": "memory_embedding_unavailable",
+        "diagnostic": {
+            "side": "embedding",
+            "http_status": 404,
+            "provider_error_code": "model_not_supported",
+            "message": "model unavailable",
+        },
+    }
+    assert get_config_path().read_bytes() == config_before
+    persisted = V2Config.load().memory
     assert persisted.processing.embedding.model == "embed-v1"
     assert persisted.recovery_intent is None
 

@@ -2063,7 +2063,7 @@ export type MemoryRuntimeRestartResult = { ok: true; state?: string } | { ok: fa
 
 export type MemoryRuntimeRebuildResult =
   | { ok: true; result?: string; state?: string }
-  | { ok: false; error?: string; result?: string };
+  | { ok: false; error?: string; result?: string; diagnostic?: MemoryFailureDiagnostic };
 
 export type MemoryRuntimeRepairResult =
   | {

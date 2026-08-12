@@ -232,9 +232,7 @@ export const MemorySettingsPanel: React.FC<{
       } else {
         const failure = res as { error?: string; diagnostic?: { message?: string } };
         setError(
-          failure.diagnostic?.message
-            ? `${memoryErrorMessage(t, failure.error)}: ${failure.diagnostic.message}`
-            : memoryErrorMessage(t, failure.error),
+          memoryErrorMessage(t, failure.error, failure.diagnostic?.message),
         );
         // Confirmed rebuild keeps the candidate on failure. Exit the confirm
         // modal so a second click cannot re-submit a now-non-identity patch;
@@ -291,7 +289,7 @@ export const MemorySettingsPanel: React.FC<{
         onReloadSettings();
         onReloadMaintenance();
       } else {
-        setError(memoryErrorMessage(t, res.error));
+        setError(memoryErrorMessage(t, res.error, res.diagnostic?.message));
         onReloadSettings();
         onReloadMaintenance();
       }

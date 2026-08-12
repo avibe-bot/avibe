@@ -18,10 +18,10 @@ scenarios:
     status: covered
     kind: validation
     layer: scenario
-    test: tests/test_memory_everos.py::test_processing_preflight_projects_sanitized_provider_error
+    test: tests/test_ui_memory_routes.py::test_memory_confirmed_preflight_failure_keeps_config_unchanged
     given: A candidate processing identity is submitted
     when: The provider returns a bounded error response
-    then: The side-specific error is projected and credentials/raw payloads are absent
+    then: The side-specific error is projected, credentials/raw payloads are absent, and durable configuration is unchanged
   - id: MEMORY-REBUILD-001
     name: Confirmed embedding identity write persists intent and reaches a closed rebuild result
     status: covered

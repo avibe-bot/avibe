@@ -1788,7 +1788,16 @@ class MemoryRuntime:
         )
         return (await provider.preflight()).payload()
 
-    def _record_preflight_call(self, *, side, request, response, failure) -> None:
+    def _record_preflight_call(
+        self,
+        *,
+        side,
+        request,
+        response,
+        failure,
+        base_url=None,
+        api_key=None,
+    ) -> None:
         record_preflight_call(
             self._call_log_db_path,
             kind="embedding" if side == "embedding" else "llm",
@@ -1797,18 +1806,8 @@ class MemoryRuntime:
             response=response,
             status="error" if failure is not None else "ok",
             error=failure.diagnostic.message if failure is not None else None,
-            provider_base_urls=tuple(
-                value for value in (
-                    self._config.processing.llm.base_url,
-                    self._config.processing.embedding.base_url,
-                ) if value
-            ),
-            exact_redaction_values=tuple(
-                value for value in (
-                    self._config.processing.llm.api_key,
-                    self._config.processing.embedding.api_key,
-                ) if value
-            ),
+            provider_base_urls=(base_url,) if base_url else (),
+            exact_redaction_values=(api_key,) if api_key else (),
         )
 
     async def rebuild(self) -> dict[str, Any]:

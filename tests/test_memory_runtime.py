@@ -4228,6 +4228,11 @@ async def test_rebuild_settlement_survives_candidate_activation_failure(
         effective_home=tmp_path,
     )
     monkeypatch.setattr(runtime, "_provider_data_exists_strict", lambda: False)
+    monkeypatch.setattr(
+        runtime,
+        "preflight",
+        lambda config=None: asyncio.sleep(0, result={"ok": True}),
+    )
 
     assert await runtime.rebuild() == {
         "ok": False,
