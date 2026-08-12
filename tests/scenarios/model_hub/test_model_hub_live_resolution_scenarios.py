@@ -30,10 +30,20 @@ from core.handlers.model_hub.adapter import (
     RawOutcomeKind,
 )
 from core.handlers.model_hub.events import BoundedEventLog
+from core.handlers.model_hub.provenance import BoundedProvenanceStore
 from core.handlers.model_hub.revocations import CredentialRevocationJournal
-from core.handlers.model_hub.service import ModelHubService
+from core.handlers.model_hub.service import (
+    PRE_ATTEMPT_SETTLEMENT_GENERATION,
+    ModelHubService,
+)
 from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
-from modules.agents.model_hub import ModelHubRuntimeRouter, bind_launch
+from core.run_settlement import SETTLED_BY_TERMINAL_RESULT
+from modules.agents.model_hub import (
+    ModelHubRuntimeRouter,
+    bind_launch,
+    bind_persisted_launch,
+    persisted_launch_identity,
+)
 
 
 class MemoryStore:
@@ -200,6 +210,7 @@ def _service(
         store=store,
         adapter=adapter,
         events=BoundedEventLog(tmp_path / "events.json"),
+        provenance=BoundedProvenanceStore(tmp_path / "provenance.json"),
         revocations=CredentialRevocationJournal(tmp_path / "revocations.json"),
         now=now,
     )
@@ -626,33 +637,206 @@ def test_mh_evt_002_switch_events_survive_router_and_service_restart(tmp_path: P
     asyncio.run(exercise())
 
 
-def test_native_failure_settlement_rejects_a_stale_attempt(tmp_path: Path) -> None:
+def _restart_runtime(
+    tmp_path: Path,
+    store: MemoryStore,
+    clock: datetime,
+) -> tuple[ModelHubService, ModelHubTurnGateway, ModelHubRuntimeRouter]:
+    """Build one runtime over durable state, as a process restart would."""
+
+    service = _service(tmp_path, store, AdapterBoundaryFake([]), now=lambda: clock)
+    gateway = ModelHubTurnGateway(service)
+    router = ModelHubRuntimeRouter(
+        service=service,
+        turn_gateway=gateway,
+        native_cli_ready=lambda backend: True,
+    )
+    return service, gateway, router
+
+
+def test_mh_set_001_restored_attempt_cannot_settle_health_after_a_newer_attempt(
+    tmp_path: Path,
+) -> None:
+    """MH-SET-001: a pre-restart attempt never overwrites a newer attempt's Source."""
+
     async def exercise() -> None:
         clock = datetime(2026, 7, 25, tzinfo=timezone.utc)
         native = _source("src_native01", channel="native_cli", kind="subscription")
-        backup = _source("src_backup01")
-        store = MemoryStore(_config(native, backup))
-        service = _service(tmp_path, store, AdapterBoundaryFake([]), now=lambda: clock)
-        gateway = ModelHubTurnGateway(service)
-        router = ModelHubRuntimeRouter(
-            service=service,
-            turn_gateway=gateway,
-            native_cli_ready=lambda backend: True,
+        store = MemoryStore(_config(native, _source("src_backup01")))
+
+        first_service, first_gateway, first_router = _restart_runtime(
+            tmp_path, store, clock
+        )
+        launch = await first_router.resolve(
+            "codex",
+            _requested_model("codex"),
+            process_scope="/restored",
+            turn_id="turn_pre_restart",
+        )
+        assert launch.channel == "native_cli"
+        assert launch.settlement_generation is not None
+        identity = persisted_launch_identity(launch)
+        # The pre-restart turn already recorded its terminal history on disk.
+        first_gateway.correlation.settle(
+            "turn_pre_restart",
+            settled_by=SETTLED_BY_TERMINAL_RESULT,
+            ts=clock.isoformat(),
+        )
+        history_before_restart = first_service.provenance.get("turn_pre_restart")
+        assert history_before_restart is not None
+        await first_gateway.close()
+
+        service, gateway, router = _restart_runtime(tmp_path, store, clock)
+        try:
+            context = SimpleNamespace(
+                platform_specific={"turn_token": "turn_pre_restart"}
+            )
+            restored = bind_persisted_launch(context, identity)
+            assert restored is not None
+            assert restored.settlement_generation == PRE_ATTEMPT_SETTLEMENT_GENERATION
+
+            newer = await router.resolve(
+                "codex",
+                _requested_model("codex"),
+                process_scope="/newer",
+                turn_id="turn_after_restart",
+            )
+            assert newer.source_id == native.id
+            assert newer.settlement_generation is not None
+            assert restored.settlement_generation < newer.settlement_generation
+
+            # The restored context's late quota failure is not fresh enough to
+            # judge the Source the newer attempt is using.
+            assert await router.record_native_failure(
+                context,
+                "usage quota exceeded",
+            ) is False
+
+            current = next(
+                source for source in store.load().sources if source.id == native.id
+            )
+            assert current.state.status == native.state.status == "standby"
+            assert current.state.retry_at is None
+            assert current.state.detail_key is None
+            assert BoundedEventLog(tmp_path / "events.json").list(limit=10) == []
+            # Refusing the health write is not punitive: durable history stays.
+            assert service.provenance.get("turn_pre_restart") == history_before_restart
+
+            # The live attempt still owns its Source and settles normally.
+            newer_context = SimpleNamespace(
+                platform_specific={"turn_token": "turn_after_restart"}
+            )
+            bind_launch(newer_context, newer)
+            assert await router.record_native_failure(
+                newer_context,
+                "usage quota exceeded",
+            ) is True
+            assert next(
+                source for source in store.load().sources if source.id == native.id
+            ).state.status == "cooldown"
+        finally:
+            await gateway.close()
+
+    asyncio.run(exercise())
+
+
+def test_mh_set_002_restored_attempt_settles_a_source_this_runtime_left_alone(
+    tmp_path: Path,
+) -> None:
+    """MH-SET-002: a restored attempt still cools a Source no newer attempt claimed."""
+
+    async def exercise() -> None:
+        clock = datetime(2026, 7, 25, tzinfo=timezone.utc)
+        native = _source("src_native01", channel="native_cli", kind="subscription")
+        store = MemoryStore(_config(native, _source("src_backup01")))
+
+        _first_service, first_gateway, first_router = _restart_runtime(
+            tmp_path, store, clock
+        )
+        launch = await first_router.resolve(
+            "codex",
+            _requested_model("codex"),
+            process_scope="/restored",
+            turn_id="turn_pre_restart",
+        )
+        identity = persisted_launch_identity(launch)
+        await first_gateway.close()
+
+        _service_after_restart, gateway, router = _restart_runtime(
+            tmp_path, store, clock
         )
         try:
-            launch = await router.resolve("codex", _requested_model("codex"))
-            assert launch.settlement_generation is not None
-            service._reserve_settlement_generation(native.id)
-            context = SimpleNamespace()
-            bind_launch(context, launch)
+            context = SimpleNamespace(
+                platform_specific={"turn_token": "turn_pre_restart"}
+            )
+            restored = bind_persisted_launch(context, identity)
+            assert restored is not None
+            assert restored.settlement_generation == PRE_ATTEMPT_SETTLEMENT_GENERATION
 
             assert await router.record_native_failure(
                 context,
                 "usage quota exceeded",
             ) is True
 
-            current = next(source for source in store.load().sources if source.id == native.id)
-            assert current.state.status == native.state.status
+            current = next(
+                source for source in store.load().sources if source.id == native.id
+            )
+            assert current.state.status == "cooldown"
+            assert current.state.detail_key == "models.source.cooldown.quota_exhausted"
+            assert [
+                event["kind"]
+                for event in BoundedEventLog(tmp_path / "events.json").list(limit=10)
+            ] == ["cooldown"]
+        finally:
+            await gateway.close()
+
+    asyncio.run(exercise())
+
+
+def test_mh_set_003_released_launch_identity_shape_restores_without_certifying_freshness(
+    tmp_path: Path,
+) -> None:
+    """MH-SET-003: any released on-disk launch identity loads into a stale-safe attempt."""
+
+    async def exercise() -> None:
+        clock = datetime(2026, 7, 25, tzinfo=timezone.utc)
+        native = _source("src_native01", channel="native_cli", kind="subscription")
+        store = MemoryStore(_config(native, _source("src_backup01")))
+        _service_instance, gateway, router = _restart_runtime(tmp_path, store, clock)
+        try:
+            newer = await router.resolve(
+                "codex",
+                _requested_model("codex"),
+                process_scope="/newer",
+                turn_id="turn_after_restart",
+            )
+            assert newer.source_id == native.id
+
+            context = SimpleNamespace(
+                platform_specific={"turn_token": "turn_pre_restart"}
+            )
+            # A released identity carries no generation, and a payload that does
+            # carry one still cannot certify itself against this runtime's ledger.
+            restored = bind_persisted_launch(
+                context,
+                {
+                    "backend": "codex",
+                    "channel": "native_cli",
+                    "source_id": native.id,
+                    "target_model": _requested_model("codex"),
+                    "settlement_generation": 4096,
+                },
+            )
+
+            assert restored is not None
+            assert restored.settlement_generation == PRE_ATTEMPT_SETTLEMENT_GENERATION
+            assert await router.record_native_failure(
+                context,
+                "usage quota exceeded",
+            ) is False
+            assert next(
+                source for source in store.load().sources if source.id == native.id
+            ).state.status == "standby"
             assert BoundedEventLog(tmp_path / "events.json").list(limit=10) == []
         finally:
             await gateway.close()

@@ -108,6 +108,13 @@ from .revocations import CredentialRevocationJournal
 CONTRACT_VERSION = 5
 AGENT_CHAIN_CONTRACT_VERSION = 5
 PROBE_RESULT_CONTRACT_VERSION = 5
+# Settlement generations are minted per attempt start and live only in this
+# runtime's ledger, which restarts with the process. Every generation this
+# runtime mints is therefore strictly greater than this pre-attempt value, and
+# an attempt that started before the ledger existed settles as this value: older
+# than any attempt this runtime can start, yet still able to settle a Source that
+# this runtime has not attempted again.
+PRE_ATTEMPT_SETTLEMENT_GENERATION = 0
 logger = logging.getLogger(__name__)
 
 _NATIVE_VENDOR_BACKENDS = {"anthropic": "claude", "openai": "codex"}
@@ -536,7 +543,7 @@ class ModelHubService:
             lambda _backend, _source: True
         )
         self._mutation_lock = asyncio.Lock()
-        self._next_settlement_generation = 0
+        self._next_settlement_generation = PRE_ATTEMPT_SETTLEMENT_GENERATION
         self._latest_source_attempt_generation: dict[str, int] = {}
         self._engine_synced = False
         self._engine_preparation_failed = False
@@ -3944,11 +3951,14 @@ class ModelHubService:
         settlement_rule = source_settlement_rule(event_reason)
         if not settlement_rule.may_write_health:
             return event_reason, False
-        generation = (
-            settlement_generation
-            if settlement_generation is not None
-            else self._reserve_settlement_generation(source.id)
-        )
+        # Generations are minted at attempt start and nowhere else. A settlement
+        # that carries none cannot prove it is not superseded, so it does not
+        # write Source health; minting one here would let any stale attempt
+        # certify itself as the newest. History, the terminal outcome, and the
+        # projection are produced by the caller and stay unaffected.
+        if settlement_generation is None:
+            return event_reason, False
+        generation = settlement_generation
         async with self._mutation_lock:
             config = self.store.load()
             try:

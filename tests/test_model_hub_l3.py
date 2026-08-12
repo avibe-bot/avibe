@@ -2392,6 +2392,7 @@ def test_handle_settlement_records_history_before_source_transition_event(
         source = _source("src_ordered1", "Ordered settlement")
         service = _service(tmp_path, sources=[source])
         requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        settlement_generation = service._reserve_settlement_generation(source.id)
         resolved = ResolvedInvocation(
             backend="codex",
             requested_model_id=requested_model,
@@ -2400,6 +2401,7 @@ def test_handle_settlement_records_history_before_source_transition_event(
             model_id="shared-model",
             handle=None,
             outcome=None,
+            settlement_generation=settlement_generation,
         )
         outcome = _outcome(
             RawOutcomeKind.HTTP_ERROR,
@@ -2537,6 +2539,7 @@ def test_streamed_auth_settlement_uses_exact_credential_capability(
         assert source.credential_ref is not None
         if refreshable:
             service.adapter.refreshable_credential_refs.add(source.credential_ref)
+        settlement_generation = service._reserve_settlement_generation(source.id)
         resolved = ResolvedInvocation(
             backend="codex",
             requested_model_id=requested_model,
@@ -2546,6 +2549,7 @@ def test_streamed_auth_settlement_uses_exact_credential_capability(
             handle=None,
             outcome=None,
             credential_ref=source.credential_ref,
+            settlement_generation=settlement_generation,
         )
         outcome = _outcome(
             RawOutcomeKind.HTTP_ERROR,
@@ -3379,6 +3383,7 @@ def test_shared_source_transition_event_is_emitted_once_for_concurrent_turns(
         source = _source("src_sharedtx1", "Shared transition")
         service = _service(tmp_path, sources=[source])
         requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        settlement_generation = service._reserve_settlement_generation(source.id)
         resolved = ResolvedInvocation(
             backend="codex",
             requested_model_id=requested_model,
@@ -3387,6 +3392,7 @@ def test_shared_source_transition_event_is_emitted_once_for_concurrent_turns(
             model_id="shared-model",
             handle=None,
             outcome=None,
+            settlement_generation=settlement_generation,
         )
         outcome = _outcome(
             RawOutcomeKind.HTTP_ERROR,
@@ -5698,17 +5704,21 @@ def test_shared_source_cooldown_emits_only_on_state_transition(
     )
 
     async def cool_twice() -> tuple[bool, bool]:
+        first_generation = service._reserve_settlement_generation(source.id)
         _first_reason, first_persisted = await service._settle_fallback_source(
             source,
             decision,
             backend="claude",
             model_id=menu_models["claude"],
+            settlement_generation=first_generation,
         )
+        repeated_generation = service._reserve_settlement_generation(source.id)
         _repeated_reason, repeated_persisted = await service._settle_fallback_source(
             source,
             decision,
             backend="codex",
             model_id=menu_models["codex"],
+            settlement_generation=repeated_generation,
         )
         return first_persisted, repeated_persisted
 
@@ -5733,6 +5743,7 @@ def test_late_shorter_cooldown_keeps_the_longest_concurrent_deadline(
             ("claude", fixture["first_seconds"], "quota_exhausted"),
             ("codex", fixture["late_seconds"], "server_error"),
         ):
+            generation = service._reserve_settlement_generation(source.id)
             await service._settle_fallback_source(
                 source,
                 ResolutionDecision(
@@ -5742,6 +5753,7 @@ def test_late_shorter_cooldown_keeps_the_longest_concurrent_deadline(
                 ),
                 backend=backend,
                 model_id=menu_models[backend],
+                settlement_generation=generation,
             )
 
     asyncio.run(cool_in_completion_order())
@@ -5769,18 +5781,22 @@ def test_late_transient_settlement_preserves_needs_action_state(
     )
 
     async def settle_in_order() -> None:
+        blocker_generation = service._reserve_settlement_generation(source.id)
         await service._settle_fallback_source(
             source,
             ResolutionDecision("fallback", reason="credential_revoked"),
             backend="claude",
             model_id=menu_models["claude"],
             detail_key="models.source.needs_action.credential_revoked",
+            settlement_generation=blocker_generation,
         )
+        transient_generation = service._reserve_settlement_generation(source.id)
         await service._settle_fallback_source(
             source,
             transient,
             backend="codex",
             model_id=menu_models["codex"],
+            settlement_generation=transient_generation,
         )
 
     asyncio.run(settle_in_order())

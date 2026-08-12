@@ -35,7 +35,12 @@ from core.handlers.model_hub.resolver import (
     source_after_cooldown_recovery,
     source_eligible_for_backend,
 )
-from core.handlers.model_hub.service import ModelHubError, ModelHubService, create_default_service
+from core.handlers.model_hub.service import (
+    PRE_ATTEMPT_SETTLEMENT_GENERATION,
+    ModelHubError,
+    ModelHubService,
+    create_default_service,
+)
 from core.services.settings import load_config_or_default
 from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
 
@@ -131,6 +136,10 @@ def persisted_launch_identity(launch: ModelHubLaunch | None) -> dict[str, str] |
 
     if launch is None or launch.channel == "direct" or not launch.source_id:
         return None
+    # The attempt's settlement generation is deliberately not persisted: it
+    # indexes the minting runtime's in-memory ledger and means nothing to the
+    # runtime that restores this identity. ``bind_persisted_launch`` supplies the
+    # only generation that is true across runtimes.
     return {
         "backend": launch.backend,
         "channel": launch.channel,
@@ -162,6 +171,11 @@ def bind_persisted_launch(context: Any, payload: object) -> ModelHubLaunch | Non
         target_model=target_model,
         runtime_model=target_model,
         source_id=source_id,
+        # Restoring an identity means the attempt outlived the runtime that
+        # started it, so every attempt this runtime starts is newer. The
+        # pre-attempt generation states exactly that: a later attempt on this
+        # Source rejects this settlement, and an untouched Source still accepts it.
+        settlement_generation=PRE_ATTEMPT_SETTLEMENT_GENERATION,
     )
     bind_launch(context, launch)
     return launch
@@ -923,7 +937,7 @@ class ModelHubRuntimeRouter:
         source = next((item for item in config.sources if item.id == launch.source_id), None)
         if source is None:
             return False
-        await self.service._settle_fallback_source(
+        _reason, persisted = await self.service._settle_fallback_source(
             source,
             decision,
             backend=launch.backend,
@@ -931,7 +945,7 @@ class ModelHubRuntimeRouter:
             settlement_generation=launch.settlement_generation,
         )
         setattr(context, _CONTEXT_FAILURE_RECORDED_ATTR, True)
-        return True
+        return persisted
 
     async def prepare_opencode_overlay(self) -> OpenCodeOverlay | None:
         config = self.service.store.load()

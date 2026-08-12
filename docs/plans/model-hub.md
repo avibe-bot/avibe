@@ -690,6 +690,20 @@ cooldown naturally restores the configured leading hop without mutating order.
 The Model Gateway and Usage pages remain the pull surfaces for takeover state,
 connector color, recent switches, and usage; provenance remains a debug affordance.
 
+**Settlement freshness is owned by the attempt that started (round-7 audit, fixed
+round-8).** Because health is source-global and every turn re-runs the algorithm, a
+failure only describes the Source *as the failing attempt used it*. Each attempt
+therefore takes a monotonic settlement generation **at attempt start and nowhere else**,
+and a settlement whose generation is older than the newest attempt on that Source writes
+no health. Two consequences are normative. A settlement that carries no generation cannot
+prove it was not superseded, so it also writes no health — minting one at settlement time
+would let any stale attempt certify itself as the newest, which is exactly how a restored
+pre-restart failure cooled a standby Source. And because the generation ledger is
+in-memory and restarts with the process, a persisted launch identity restores as
+*pre-attempt*: older than every attempt this runtime can start, yet still able to settle a
+Source this runtime has not attempted again. Refusing a health write is never punitive —
+history, the terminal outcome, and the projection are unaffected.
+
 **Takeover projection.** A configured route is in **takeover** exactly when its current
 hop is not the first stored hop and that first hop is unavailable for a
 self-healing quota/cooldown or live connection-backoff reason. This is computed from the resolved chain's current

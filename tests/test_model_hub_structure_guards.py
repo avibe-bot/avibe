@@ -395,6 +395,34 @@ def test_g3_settlement_returns_are_consumed() -> None:
     assert cancel_at < exit_at < settle_at < reraise_at
 
 
+def test_settlement_generations_are_reserved_only_at_attempt_start() -> None:
+    allowed_owners = {
+        SERVICE: {"probe_agent", "resolve"},
+        ROUTER: {"resolve"},
+    }
+    for path, expected in allowed_owners.items():
+        tree = _tree(path)
+        parents = {
+            child: parent
+            for parent in ast.walk(tree)
+            for child in ast.iter_child_nodes(parent)
+        }
+        owners = {
+            _owner_name(node, parents)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and _call_name(node) == "_reserve_settlement_generation"
+        }
+        assert owners == expected
+
+    settlement_owner = _functions(_tree(SERVICE))["_settle_fallback_source"]
+    assert not any(
+        isinstance(node, ast.Call)
+        and _call_name(node) == "_reserve_settlement_generation"
+        for node in ast.walk(settlement_owner)
+    )
+
+
 def test_terminal_projection_commit_and_render_have_one_choke_point() -> None:
     # Review 4913624792: render-before-commit and orphaned projections must fail.
     tree = _tree(TURN_GATEWAY)
