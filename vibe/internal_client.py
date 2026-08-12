@@ -36,6 +36,7 @@ logger = logging.getLogger(__name__)
 _SOCKET_ERRORS = (httpx.TransportError, OSError)
 _SOCKET_CONNECT_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, OSError)
 _OWNER_ONLY_SOCKET_MODES = frozenset({0o600, 0o700})
+_CHECK_POSIX_SOCKET_MODE = os.name != "nt"
 
 # A transport deadline shorter than the operation it wraps turns a slow
 # success into a reported failure while the controller keeps working, and
@@ -69,6 +70,10 @@ MEMORY_INSTALL_TIMEOUT_SECONDS = 300.0
 # The controller bounds final flush at 5s. Keep the transport outside that
 # bound so the UI does not archive while a timed-out controller call still runs.
 MEMORY_FINAL_FLUSH_TIMEOUT_SECONDS = 7.0
+# Clearing can include provider-side deletion and journal recovery. Keep the
+# transport outside the controller's bounded operation so a slow success does
+# not race a retry from the settings UI.
+MEMORY_CLEAR_TIMEOUT_SECONDS = 150.0
 
 
 class InternalServerUnavailable(Exception):
@@ -109,7 +114,7 @@ def _verified_socket_path(socket_path: Optional[Path]) -> Path:
         raise InternalServerUnavailable(f"dispatch socket is unsafe at {target}")
     if hasattr(os, "getuid") and info.st_uid != os.getuid():
         raise InternalServerUnavailable(f"dispatch socket owner mismatch at {target}")
-    if stat.S_IMODE(info.st_mode) not in _OWNER_ONLY_SOCKET_MODES:
+    if _CHECK_POSIX_SOCKET_MODE and stat.S_IMODE(info.st_mode) not in _OWNER_ONLY_SOCKET_MODES:
         raise InternalServerUnavailable(f"dispatch socket mode mismatch at {target}")
     return target
 
@@ -120,6 +125,67 @@ async def _verified_socket_path_async(socket_path: Optional[Path]) -> Path:
     return await asyncio.to_thread(_verified_socket_path, socket_path)
 
 
+async def stream_dispatch(
+    payload: dict[str, Any],
+    *,
+    socket_path: Optional[Path] = None,
+    timeout: float = 1800.0,
+) -> AsyncIterator[tuple[str, dict[str, Any]]]:
+    """Send a dispatch request and yield the turn's SSE events as they arrive.
+
+    Each yielded tuple is ``(event_name, parsed_data)`` — e.g. ``("turn.start",
+    {...})``, ``("turn.chunk", {...})``, ``("turn.end", {...})``. The caller
+    re-encodes them for the browser. Raises ``InternalServerUnavailable`` for
+    connect-time failures so the caller can degrade.
+
+    NB: the web **Chat** page no longer uses this (it's fire-and-forget +
+    ``message.new``); this streaming round-trip backs the **Show-page** dispatch
+    flow (``_run_show_event_dispatch`` re-publishes each event as ``show.dispatch``).
+    """
+
+    target = await _verified_socket_path_async(socket_path)
+
+    transport = httpx.AsyncHTTPTransport(uds=str(target))
+    try:
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://localhost",
+            timeout=httpx.Timeout(timeout, connect=5.0),
+        ) as client:
+            try:
+                stream = client.stream("POST", "/internal/dispatch", json=payload)
+            except _SOCKET_ERRORS as exc:
+                raise InternalServerUnavailable(str(exc)) from exc
+
+            async with stream as resp:
+                if resp.status_code >= 400:
+                    detail = await resp.aread()
+                    raise InternalServerUnavailable(
+                        f"dispatch endpoint returned {resp.status_code}: {detail!r}"
+                    )
+
+                current_event: Optional[str] = None
+                async for line in resp.aiter_lines():
+                    if not line:
+                        # Blank line ends an SSE event block; reset the
+                        # event-name buffer so a missing ``event:`` field
+                        # on the next block defaults to ``message``.
+                        current_event = None
+                        continue
+                    if line.startswith("event:"):
+                        current_event = line.split(":", 1)[1].strip()
+                    elif line.startswith("data:"):
+                        raw = line[5:].lstrip()
+                        try:
+                            parsed = json.loads(raw)
+                        except json.JSONDecodeError:
+                            logger.warning("internal_client: invalid SSE data line %r", raw)
+                            continue
+                        yield (current_event or "message", parsed)
+    except InternalServerUnavailable:
+        raise
+    except _SOCKET_ERRORS as exc:
+        raise InternalServerUnavailable(str(exc)) from exc
 async def stream_events(
     *,
     socket_path: Optional[Path] = None,
@@ -315,6 +381,255 @@ async def reconcile_agent_backends(
     return {"status_code": resp.status_code, "body": resp.json() if resp.content else {}}
 
 
+async def reconcile_memory(
+    *,
+    socket_path: Optional[Path] = None,
+    timeout: float = MEMORY_RECONCILE_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    """Ask the controller to apply persisted Memory settings in place."""
+
+    return await _memory_request("POST", "/internal/reconcile-memory", socket_path=socket_path, timeout=timeout)
+
+
+def memory_install_runtime_sync(
+    *,
+    socket_path: Optional[Path] = None,
+    timeout: float = MEMORY_INSTALL_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    """Ask the controller to install EverOS through its live lifecycle."""
+
+    return _memory_request_sync(
+        "POST",
+        "/internal/memory/install-runtime",
+        socket_path=socket_path,
+        timeout=timeout,
+    )
+
+
+async def memory_status(
+    *,
+    socket_path: Optional[Path] = None,
+    timeout: float = MEMORY_STATUS_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    return await _memory_request("GET", "/internal/memory/status", socket_path=socket_path, timeout=timeout)
+
+
+async def memory_failures(
+    *,
+    socket_path: Optional[Path] = None,
+    timeout: float = 10.0,
+) -> dict[str, Any]:
+    return await _memory_request("GET", "/internal/memory/failures", socket_path=socket_path, timeout=timeout)
+
+
+async def memory_profile(
+    *,
+    user_key: str,
+    socket_path: Optional[Path] = None,
+    timeout: float = MEMORY_READ_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    return await _memory_request(
+        "GET",
+        "/internal/memory/profile",
+        headers=_memory_user_key_headers(
+            "GET",
+            "/internal/memory/profile",
+            user_key,
+        ),
+        socket_path=socket_path,
+        timeout=timeout,
+    )
+
+
+async def memory_search(
+    query: str,
+    limit: int,
+    *,
+    user_key: str,
+    socket_path: Optional[Path] = None,
+    timeout: float = MEMORY_READ_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    return await _memory_request(
+        "POST",
+        "/internal/memory/search",
+        payload={"query": query, "limit": limit},
+        headers=_memory_user_key_headers(
+            "POST",
+            "/internal/memory/search",
+            user_key,
+        ),
+        socket_path=socket_path,
+        timeout=timeout,
+    )
+
+
+async def memory_clear(
+    *,
+    socket_path: Optional[Path] = None,
+    timeout: float = MEMORY_CLEAR_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    return await _memory_request(
+        "POST",
+        "/internal/memory/clear",
+        payload={"confirm": True},
+        headers=_memory_user_key_headers(
+            "POST",
+            "/internal/memory/clear",
+            "avibe:local",
+        ),
+        socket_path=socket_path,
+        timeout=timeout,
+    )
+
+
+def memory_status_sync(
+    *,
+    caller_session_id: str | None = None,
+    socket_path: Optional[Path] = None,
+    timeout: float = MEMORY_STATUS_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    return _memory_request_sync(
+        "GET",
+        "/internal/memory/status",
+        headers=_memory_cli_session_headers(caller_session_id),
+        socket_path=socket_path,
+        timeout=timeout,
+    )
+
+
+def memory_profile_sync(
+    *,
+    caller_session_id: str | None = None,
+    socket_path: Optional[Path] = None,
+    timeout: float = MEMORY_READ_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    return _memory_request_sync(
+        "GET",
+        "/internal/memory/profile",
+        headers=_memory_cli_session_headers(caller_session_id),
+        socket_path=socket_path,
+        timeout=timeout,
+    )
+
+
+def memory_search_sync(
+    query: str,
+    limit: int,
+    *,
+    caller_session_id: str | None = None,
+    socket_path: Optional[Path] = None,
+    timeout: float = MEMORY_READ_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    return _memory_request_sync(
+        "POST",
+        "/internal/memory/search",
+        payload={"query": query, "limit": limit},
+        headers=_memory_cli_session_headers(caller_session_id),
+        socket_path=socket_path,
+        timeout=timeout,
+    )
+
+
+def memory_remember_sync(
+    text: str,
+    *,
+    caller_session_id: str | None = None,
+    socket_path: Optional[Path] = None,
+    timeout: float = 10.0,
+) -> dict[str, Any]:
+    return _memory_request_sync(
+        "POST",
+        "/internal/memory/remember",
+        payload={"text": text},
+        headers=_memory_cli_session_headers(caller_session_id),
+        socket_path=socket_path,
+        timeout=timeout,
+    )
+
+
+async def _memory_request(
+    method: str,
+    route: str,
+    *,
+    payload: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
+    socket_path: Optional[Path] = None,
+    timeout: float,
+) -> dict[str, Any]:
+    target = await _verified_socket_path_async(socket_path)
+    transport = httpx.AsyncHTTPTransport(uds=str(target))
+    try:
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://localhost",
+            timeout=httpx.Timeout(timeout, connect=min(timeout, 5.0)),
+        ) as client:
+            response = await client.request(method, route, json=payload, headers=headers)
+    except _SOCKET_ERRORS as exc:
+        raise InternalServerUnavailable(str(exc)) from exc
+    try:
+        body = response.json() if response.content else {}
+    except ValueError:
+        body = {"status": "failed", "error": "memory_provider_response_invalid"}
+    return {"status_code": response.status_code, "body": body}
+
+
+def _memory_request_sync(
+    method: str,
+    route: str,
+    *,
+    payload: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
+    socket_path: Optional[Path] = None,
+    timeout: float,
+) -> dict[str, Any]:
+    target = _verified_socket_path(socket_path)
+    transport = httpx.HTTPTransport(uds=str(target))
+    try:
+        with httpx.Client(
+            transport=transport,
+            base_url="http://localhost",
+            timeout=httpx.Timeout(timeout, connect=5.0),
+        ) as client:
+            response = client.request(method, route, json=payload, headers=headers)
+    except _SOCKET_ERRORS as exc:
+        raise InternalServerUnavailable(str(exc)) from exc
+    try:
+        body = response.json() if response.content else {}
+    except ValueError:
+        body = {"status": "failed", "error": "memory_provider_response_invalid"}
+    return {"status_code": response.status_code, "body": body}
+
+
+def _memory_cli_session_headers(session_id: str | None) -> dict[str, str] | None:
+    session_id = str(session_id or "").strip()
+    if not session_id:
+        return None
+    from core.memory.http_headers import CALLER_SESSION_HEADER
+
+    return {CALLER_SESSION_HEADER: session_id}
+
+
+def _memory_user_key_headers(method: str, path: str, user_key: str) -> dict[str, str]:
+    from core.memory.http_headers import MEMORY_USER_KEY_HEADER
+    from core.memory.ui_access import (
+        MEMORY_UI_PROOF_HEADER,
+        build_ui_read_proof,
+        process_ui_read_secret,
+    )
+
+    headers = {MEMORY_USER_KEY_HEADER: user_key}
+    secret = process_ui_read_secret()
+    if secret:
+        headers[MEMORY_UI_PROOF_HEADER] = build_ui_read_proof(
+            secret,
+            method=method,
+            path=path,
+            user_key=user_key,
+        )
+    return headers
+
+
 async def test_backend_auth(
     backend: str,
     *,
@@ -382,6 +697,16 @@ async def memory_rebuild(
         headers=_memory_user_key_headers("POST", path, user_key),
         socket_path=socket_path,
         timeout=None,
+    )
+
+async def memory_preflight(
+    *, payload: dict, user_key: str, socket_path: Optional[Path] = None,
+) -> dict[str, Any]:
+    path = "/internal/memory/preflight"
+    return await _memory_request(
+        "POST", path, payload=payload,
+        headers=_memory_user_key_headers("POST", path, user_key),
+        socket_path=socket_path, timeout=None,
     )
 
 
@@ -986,7 +1311,11 @@ async def turn_state(session_id: str, *, socket_path: Optional[Path] = None) -> 
     return {"status_code": resp.status_code, "body": resp.json() if resp.content else {}}
 
 
-async def list_running_agents(*, socket_path: Optional[Path] = None) -> dict[str, Any]:
+async def list_running_agents(
+    *,
+    run_ids: Optional[list[str]] = None,
+    socket_path: Optional[Path] = None,
+) -> dict[str, Any]:
     """Fetch the controller's read-only running-agents snapshot.
 
     Returns ``{status_code, body}``; raises ``InternalServerUnavailable`` on
@@ -1004,7 +1333,13 @@ async def list_running_agents(*, socket_path: Optional[Path] = None) -> dict[str
             base_url="http://localhost",
             timeout=httpx.Timeout(3.0, connect=0.5),
         ) as client:
-            resp = await client.get("/internal/running-agents")
+            if run_ids is None:
+                resp = await client.get("/internal/running-agents")
+            else:
+                resp = await client.post(
+                    "/internal/running-agents/snapshot",
+                    json={"run_ids": run_ids},
+                )
     except httpx.ReadTimeout as exc:
         raise InternalServerTimeout(str(exc)) from exc
     except _SOCKET_CONNECT_ERRORS as exc:

@@ -154,6 +154,43 @@ def test_task_resume_rejects_orphaned_owner_without_execution_target(
     assert cli.ScheduledTaskStore().get_task(task.id).enabled is False
 
 
+def test_task_resume_rejects_retired_one_shot_until_schedule_changes(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from storage.importer import ensure_sqlite_state
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    store = cli.ScheduledTaskStore()
+    task = store.add_task(
+        session_key="",
+        prompt="send digest",
+        schedule_type="at",
+        run_at="2026-08-11T00:00:00+00:00",
+        timezone_name="UTC",
+    )
+    task.enabled = False
+    task.retired_at = "2026-08-11T00:00:01+00:00"
+    task.retirement_reason = "schedule_missed"
+    store.upsert_task(task)
+
+    with patch("vibe.cli._task_store", return_value=store):
+        result, payload = _capture_stderr_json(
+            cli.cmd_task_set_enabled,
+            task.id,
+            True,
+        )
+
+    assert result == 1
+    assert payload["code"] == "task_schedule_retired"
+    assert payload["details"] == {"task_id": task.id}
+    saved = cli.ScheduledTaskStore().get_task(task.id)
+    assert saved is not None
+    assert saved.enabled is False
+    assert saved.retirement_reason == "schedule_missed"
+
+
 def test_task_update_preserves_archived_agent_reference(capsys) -> None:
     db_path = cli.paths.get_sqlite_state_path()
     agent_store = cli.VibeAgentStore(db_path)
@@ -783,7 +820,10 @@ def test_task_show_missing_id_returns_guidance(tmp_path: Path) -> None:
     assert payload["help_command"] == "vibe task list"
 
 
-def test_task_add_records_caller_context_metadata(tmp_path: Path, capsys, monkeypatch) -> None:
+def test_remote_task_add_is_rejected_without_persisting_definition(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
     # ``patch.dict(..., clear=False)`` below pins only the five ids this test names, so
     # the ORIGIN half of the contract (platform/channel/session_key/...) leaked in from
     # the Avibe Agent shell that runs the suite and appeared in the asserted metadata.
@@ -806,6 +846,17 @@ def test_task_add_records_caller_context_metadata(tmp_path: Path, capsys, monkey
         "AVIBE_CALLER_SOURCE": "agent_turn",
         "AVIBE_CALLER_BACKEND": "codex",
         "AVIBE_NATIVE_SESSION_ID": "native-codex-1",
+        "AVIBE_CALLER_REMOTE": "1",
+        "AVIBE_CALLER_RESOURCE_CONTEXT": json.dumps(
+            {
+                "sub": "remote-editor",
+                "vibe_instance_role": "editor",
+                "vibe_instance_access_source": "email",
+                "vibe_group_ids": [],
+                "claims_issued_at": 1_900_000_000,
+                "authorization_expires_at": 1_900_043_200,
+            }
+        ),
     }
 
     with (
@@ -813,25 +864,11 @@ def test_task_add_records_caller_context_metadata(tmp_path: Path, capsys, monkey
         patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
         patch("vibe.cli._task_store", return_value=store),
     ):
-        result = cli.cmd_task_add(args)
+        result, payload = _capture_stderr_json(cli.cmd_task_add, args)
 
-    assert result == 0
-    payload = json.loads(capsys.readouterr().out)
-    assert "task" not in payload
-    expected = {
-        "kind": "caller_context",
-        "caller": {
-            "session_id": "sesCaller",
-            "run_id": "runCaller",
-            "source": "agent_turn",
-            "backend": "codex",
-            "native_session_id": "native-codex-1",
-        },
-    }
-    assert payload["definition"]["metadata"]["created_by"] == expected
-    stored = cli.ScheduledTaskStore(store_path).get_task(payload["definition"]["id"])
-    assert stored is not None
-    assert stored.metadata["created_by"] == expected
+    assert result == 1
+    assert payload["code"] == "remote_autonomous_harness_disabled"
+    assert cli.ScheduledTaskStore(store_path).list_tasks() == []
 
 
 def test_task_add_create_per_run_scope_id_records_session_scope_metadata(tmp_path: Path, capsys) -> None:
@@ -1236,6 +1273,7 @@ def test_task_run_missing_id_returns_guidance(tmp_path: Path) -> None:
 
 def test_task_list_hides_completed_one_shots_by_default(tmp_path: Path, capsys) -> None:
     store = cli.ScheduledTaskStore()
+    requests = cli.TaskExecutionStore()
     store.add_task(
         session_key="slack::channel::C123",
         prompt="recurring",
@@ -1250,7 +1288,18 @@ def test_task_list_hides_completed_one_shots_by_default(tmp_path: Path, capsys) 
         run_at="2026-03-31T09:00:00+08:00",
         timezone_name="Asia/Shanghai",
     )
-    store.mark_task_result(done.id, error=None)
+    done_run = requests.enqueue_task_run(
+        done.id,
+        source_kind="scheduler",
+        task=done,
+        expected_run_at=done.run_at,
+        expected_timezone=done.timezone,
+        expected_job_id="done-job",
+    )
+    assert done_run is not None
+    claimed_done = requests.claim(done_run.id)
+    assert claimed_done is not None
+    assert requests.complete(claimed_done, ok=True) == "succeeded"
     failed = store.add_task(
         session_key="slack::channel::C123",
         prompt="failed one-shot",
@@ -1258,7 +1307,20 @@ def test_task_list_hides_completed_one_shots_by_default(tmp_path: Path, capsys) 
         run_at="2026-03-31T10:00:00+08:00",
         timezone_name="Asia/Shanghai",
     )
-    store.mark_task_result(failed.id, error="delivery failed")
+    failed_run = requests.enqueue_task_run(
+        failed.id,
+        source_kind="scheduler",
+        task=failed,
+        expected_run_at=failed.run_at,
+        expected_timezone=failed.timezone,
+        expected_job_id="failed-job",
+    )
+    assert failed_run is not None
+    claimed_failed = requests.claim(failed_run.id)
+    assert claimed_failed is not None
+    assert requests.complete(
+        claimed_failed, ok=False, error="delivery failed"
+    ) == "failed"
 
     with patch("vibe.cli._task_store", return_value=store):
         result = cli.cmd_task_list()
@@ -1556,6 +1618,48 @@ def test_task_run_enqueues_request(tmp_path: Path, capsys) -> None:
     assert payload["ok"] is True
     assert payload["task_id"] == task.id
     assert (request_root / "pending" / f"{payload['execution_id']}.json").exists()
+
+
+def test_task_run_enqueues_manual_rerun_for_retired_one_shot(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    store = cli.ScheduledTaskStore()
+    requests = cli.TaskExecutionStore()
+    task = store.add_task(
+        session_key="slack::channel::C123",
+        prompt="hello",
+        schedule_type="at",
+        run_at="2026-03-31T09:00:00+08:00",
+        timezone_name="Asia/Shanghai",
+    )
+    owner = requests.enqueue_task_run(
+        task.id,
+        source_kind="scheduler",
+        task=task,
+        expected_run_at=task.run_at,
+        expected_timezone=task.timezone,
+        expected_job_id="generation-a",
+    )
+    assert owner is not None
+    store.load()
+    retired = store.get_task(task.id)
+    terminal = (retired.retired_at, retired.retirement_reason, retired.last_run_id)
+
+    with (
+        patch("vibe.cli._task_store", return_value=store),
+        patch("vibe.cli._task_request_store", return_value=requests),
+    ):
+        result = cli.cmd_task_run(task.id)
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    manual = requests.get_run(payload["execution_id"])
+    assert manual is not None and manual["source_kind"] == "cli"
+    assert "task_schedule_consumed" not in manual["metadata"]
+    current = cli.ScheduledTaskStore().get_task(task.id)
+    assert current is not None and current.enabled is False
+    assert (current.retired_at, current.retirement_reason, current.last_run_id) == terminal
 
 
 def test_task_update_requires_at_least_one_change(tmp_path: Path) -> None:
@@ -4560,6 +4664,8 @@ _CALLER_CONTEXT_ENV_VARS = (
     "AVIBE_CALLER_SESSION_KEY",
     "AVIBE_CALLER_MESSAGE_ID",
     "AVIBE_CALLER_WORKSPACE_ID",
+    "AVIBE_CALLER_REMOTE",
+    "AVIBE_CALLER_RESOURCE_CONTEXT",
 )
 
 

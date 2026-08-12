@@ -291,6 +291,47 @@ def test_managed_watch_store_recovery_accepts_empty_command_arguments(tmp_path: 
     assert recovered[0].command == [sys.executable, "wait.py", ""]
 
 
+def test_remote_origin_watch_is_disabled_before_waiter_spawn(tmp_path: Path) -> None:
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    watch = store.add_watch(
+        name="Legacy remote watch",
+        session_key="slack::channel::C123",
+        command=[sys.executable, "-c", "raise AssertionError('must not run')"],
+        shell_command=None,
+        prefix=None,
+        cwd=str(tmp_path),
+        mode="once",
+        timeout_seconds=5,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=30,
+        post_to=None,
+        deliver_key=None,
+    )
+    watch.metadata = {"resource_user_context": {"sub": "legacy-remote-user"}}
+    store.upsert_watch(watch)
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=store,
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+        runtime_store=WatchRuntimeStateStore(tmp_path / "watch_runtime.json"),
+    )
+    service._running = True
+    service._requires_service_lease = False
+
+    async def unexpected_run_cycle(*_args, **_kwargs):
+        raise AssertionError("remote-origin waiter must not spawn")
+
+    service._run_cycle = unexpected_run_cycle  # type: ignore[method-assign]
+    asyncio.run(service._run_watch(watch.id))
+
+    saved = store.get_watch(watch.id)
+    assert saved is not None
+    assert saved.enabled is False
+    assert saved.last_started_at is None
+    assert saved.last_error == "remote_autonomous_harness_disabled"
+
+
 def test_managed_watch_exec_uses_stable_supervisor(tmp_path: Path, monkeypatch) -> None:
     captured: dict[str, object] = {}
     store = ManagedWatchStore(tmp_path / "watches.json")
@@ -546,6 +587,67 @@ def test_managed_watch_store_uses_sqlite_when_path_is_default(tmp_path: Path, mo
     assert saved is not None
     assert saved.session_id == "sesk8m4q2p7x"
     assert sqlite.get_watch(watch.id)["command"] == ["python3", "wait.py"]
+
+
+def test_hfr_479_late_cycle_cannot_replace_committed_watch_terminal_outcome(
+    tmp_path: Path,
+) -> None:
+    """HFR-479 -- the retiring cycle owns definition terminal fields forever."""
+
+    sqlite = SQLiteBackgroundTaskStore(tmp_path / "state" / "vibe.sqlite")
+    winner = ManagedWatchStore(tmp_path / "winner.json")
+    winner._sqlite = sqlite
+    late = ManagedWatchStore(tmp_path / "late.json")
+    late._sqlite = sqlite
+    watch = winner.add_watch(
+        name="ordered retirement",
+        session_key="",
+        command=[],
+        shell_command="true",
+        prefix=None,
+        cwd=None,
+        mode="forever",
+        timeout_seconds=0,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=0,
+        post_to=None,
+        deliver_key=None,
+    )
+    late.load()
+    late.maybe_reload()  # establish the invalidation baseline before retirement
+    requests = TaskExecutionStore(tmp_path / "requests")
+    requests._sqlite = sqlite
+
+    assert winner.mark_cycle_result(
+        watch.id,
+        exit_code=7,
+        error="terminal cycle failed",
+        disable=True,
+    )
+    late_run = requests.build_hook_send(
+        session_key="",
+        prompt="late cycle evidence",
+        run_type="watch",
+        definition_id=watch.id,
+        source_kind="watch",
+    )
+    assert late.mark_cycle_result(
+        watch.id,
+        exit_code=0,
+        error=None,
+        event_detected=True,
+        disable=False,
+        queued_run=late_run.to_dict(),
+    )
+
+    stored = sqlite.get_watch(watch.id)
+    assert stored is not None
+    assert stored["retired_at"] is not None
+    assert stored["last_finished_at"] == stored["retired_at"]
+    assert stored["last_exit_code"] == 7
+    assert stored["last_error"] == "terminal cycle failed"
+    assert sqlite.get_run(late_run.id) is not None
 
 
 def test_sqlite_remove_watch_soft_deletes_watch_but_keeps_runtime(tmp_path: Path) -> None:

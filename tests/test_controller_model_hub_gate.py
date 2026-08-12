@@ -42,9 +42,10 @@ def test_controller_builds_one_model_hub_aggregate_after_explicit_opt_in(monkeyp
     calls = []
 
     class Gateway:
-        def __init__(self, value):
-            calls.append(("gateway", value))
+        def __init__(self, value, *, language_provider):
+            calls.append(("gateway", value, language_provider))
             self.service = value
+            self.language_provider = language_provider
 
     class Router:
         def __init__(self, *, service, turn_gateway):
@@ -63,6 +64,7 @@ def test_controller_builds_one_model_hub_aggregate_after_explicit_opt_in(monkeyp
     monkeypatch.setattr(turn_gateway, "ModelHubTurnGateway", Gateway)
     monkeypatch.setattr(agent_model_hub, "ModelHubRuntimeRouter", Router)
     controller = Controller.__new__(Controller)
+    controller.config = SimpleNamespace(language="zh")
     controller.vibe_agent_store = SimpleNamespace(
         get_default_agent=lambda: SimpleNamespace(
             backend="codex",
@@ -78,8 +80,9 @@ def test_controller_builds_one_model_hub_aggregate_after_explicit_opt_in(monkeyp
     assert controller.model_hub_runtime.turn_gateway is controller.model_hub_turn_gateway
     assert captured["requested_model_override"]("codex") == "agent-model"
     assert captured["requested_model_override"]("claude") is None
+    assert controller.model_hub_turn_gateway.language_provider() == "zh"
     assert calls == [
-        ("gateway", service),
+        ("gateway", service, controller.model_hub_turn_gateway.language_provider),
         ("router", service, controller.model_hub_turn_gateway),
     ]
 

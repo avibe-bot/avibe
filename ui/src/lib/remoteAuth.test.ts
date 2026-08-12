@@ -8,12 +8,62 @@ const platform = vi.hoisted(() => ({
 vi.mock('./platform', () => platform);
 
 import {
+  canAdministerMemory,
+  canArchiveProjects,
+  canEditAgentDefinitions,
+  canEditProjectDefaultAgent,
+  canEditProjectInstructions,
+  canManageSkills,
+  canManageVaultSecrets,
+  canRegisterWebPush,
+  canUseHarness,
   checkRemoteAuthForPath,
   deferRemoteAuthRedirect,
   remoteLoginPath,
+  shouldBypassSetupForRemoteOwner,
   REMOTE_AUTH_REQUIRED_EVENT,
   shouldDeferRemoteAuthRedirect,
 } from './remoteAuth';
+
+describe('agent definition editing', () => {
+  it('keeps the Agent editor available on a local instance', () => {
+    expect(canEditAgentDefinitions({ remote: false })).toBe(true);
+  });
+
+  it('allows an active Organization member to edit on a remote instance', () => {
+    expect(canEditAgentDefinitions({ remote: true, temporaryUnrestrictedOrgAccess: true })).toBe(true);
+  });
+
+  it('keeps unauthenticated or non-member remote sessions denied', () => {
+    expect(canEditAgentDefinitions({ remote: true })).toBe(false);
+  });
+});
+
+// Runtime controls use the signed temporary Organization admission signal.
+describe('runtime-policy workbench controls', () => {
+  const predicates = {
+    canManageSkills,
+    canManageVaultSecrets,
+    canRegisterWebPush,
+    canUseHarness,
+    canArchiveProjects,
+    canEditProjectInstructions,
+    canEditProjectDefaultAgent,
+    canAdministerMemory,
+  };
+
+  it.each(Object.entries(predicates))('keeps %s available on a local instance', (_name, predicate) => {
+    expect(predicate({ remote: false })).toBe(true);
+  });
+
+  it.each(Object.entries(predicates))('allows %s for an active Organization member', (_name, predicate) => {
+    expect(predicate({ remote: true, temporaryUnrestrictedOrgAccess: true })).toBe(true);
+  });
+
+  it.each(Object.entries(predicates))('withholds %s for a remote non-member', (_name, predicate) => {
+    expect(predicate({ remote: true })).toBe(false);
+  });
+});
 
 describe('remote auth navigation', () => {
   beforeEach(() => {
@@ -57,6 +107,7 @@ describe('remote auth navigation', () => {
       const getSession = vi.fn(async () => ({ remote: true, authenticated: false }));
 
       await expect(checkRemoteAuthForPath(path, getSession)).resolves.toEqual({
+        session: { remote: true, authenticated: false },
         loginRequired: true,
         checkSetup: false,
       });
@@ -68,7 +119,11 @@ describe('remote auth navigation', () => {
     await expect(checkRemoteAuthForPath(
       '/inbox',
       async () => ({ remote: true, authenticated: true }),
-    )).resolves.toEqual({ loginRequired: false, checkSetup: true });
+    )).resolves.toEqual({
+      session: { remote: true, authenticated: true },
+      loginRequired: false,
+      checkSetup: true,
+    });
   });
 
   it('signals AuthGuard instead of navigating automatically', () => {
@@ -81,5 +136,39 @@ describe('remote auth navigation', () => {
     expect(dispatchEvent).toHaveBeenCalledOnce();
     expect(dispatchEvent.mock.calls[0]?.[0]).toBeInstanceOf(Event);
     expect(dispatchEvent.mock.calls[0]?.[0].type).toBe(REMOTE_AUTH_REQUIRED_EVENT);
+  });
+});
+
+describe('setup bypass for remote runtime access', () => {
+  it('bypasses setup for an authenticated owner or active Organization member', () => {
+    expect(
+      shouldBypassSetupForRemoteOwner({
+        remote: true,
+        authenticated: true,
+        capabilities: { can_manage_instance: true },
+      }),
+    ).toBe(true);
+    expect(
+      shouldBypassSetupForRemoteOwner({
+        remote: true,
+        authenticated: true,
+        capabilities: { can_manage_instance: false },
+        temporaryUnrestrictedOrgAccess: true,
+      }),
+    ).toBe(true);
+    expect(
+      shouldBypassSetupForRemoteOwner({
+        remote: true,
+        authenticated: true,
+        capabilities: { can_manage_instance: false },
+      }),
+    ).toBe(false);
+    expect(
+      shouldBypassSetupForRemoteOwner({
+        remote: false,
+        authenticated: true,
+        capabilities: { can_manage_instance: true },
+      }),
+    ).toBe(false);
   });
 });

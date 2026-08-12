@@ -13,6 +13,15 @@ status_legend:
   manual: currently validated only by human regression
   gap: not covered yet
 scenarios:
+  - id: MEMORY-REBUILD-301
+    name: Candidate preflight rejects unavailable providers without changing durable config
+    status: covered
+    kind: validation
+    layer: scenario
+    test: tests/test_ui_memory_routes.py::test_memory_confirmed_preflight_failure_keeps_config_unchanged
+    given: A candidate processing identity is submitted
+    when: The provider returns a bounded error response
+    then: The side-specific error is projected, credentials/raw payloads are absent, and durable configuration is unchanged
   - id: MEMORY-REBUILD-001
     name: Confirmed embedding identity write persists intent and reaches a closed rebuild result
     status: covered
@@ -44,3 +53,12 @@ scenarios:
     given: The user has confirmed a different embedding identity
     when: The rebuild reports that the provider root is busy
     then: The closed error is returned and the candidate plus rebuild intent remain durable for Retry
+  - id: MEMORY-REBUILD-202
+    name: Missing runtime artifact can be admitted while rebuild remains fenced
+    status: covered
+    kind: recovery
+    layer: scenario
+    test: tests/test_memory_runtime.py::test_pending_rebuild_install_publishes_artifact_for_explicit_retry
+    given: A rebuild intent is durable and no managed Memory runtime artifact is admitted
+    when: Dependencies installs a valid artifact and the user explicitly retries rebuild
+    then: Install publishes only the admitted pointer with claims and sidecar fenced, and Retry consumes the artifact and clears the intent on success

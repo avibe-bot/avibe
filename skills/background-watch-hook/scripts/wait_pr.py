@@ -33,6 +33,7 @@ from _github_wait_common import (  # noqa: E402
     github_get,
     github_graphql,
     github_request,
+    InitialRequestRetriesExhausted,
     LAST_DELIVERY_ENV,
     later_since,
     list_paginated,
@@ -40,6 +41,7 @@ from _github_wait_common import (  # noqa: E402
     max_id,
     min_interval_for_unauthenticated,
     REQUEST_TIMEOUT_SECONDS,
+    RETRY_EXIT_CODE,
     retry_initial_request,
     requests_per_poll,
     ResponseCache,
@@ -848,6 +850,21 @@ def _write_new_pr_cursor_output(path: str | None, *, pr_cursor: int) -> None:
 
     with open(path, "w", encoding="utf-8") as handle:
         json.dump({"pr_cursor": pr_cursor}, handle)
+
+
+def _startup_failure_exit_code(error: Any) -> int:
+    """How a failure *before* the first poll should end this run.
+
+    Nothing has been observed yet, so no activity is lost by ending the run early.
+    A transient failure that merely outlasted the bounded startup retries -- a
+    truncated body on a large PR, a blip in the network -- must therefore exit
+    ``RETRY_EXIT_CODE`` so a managed retry-capable watch can re-arm itself instead
+    of dying and leaving the PR unwatched until somebody notices. Genuinely
+    terminal failures (a bad token, a PR that does not exist) still exit 1:
+    retrying those would poll forever without ever succeeding.
+    """
+
+    return RETRY_EXIT_CODE if isinstance(error, InitialRequestRetriesExhausted) else 1
 
 
 def _watch_identity(args: argparse.Namespace) -> str:
@@ -1682,7 +1699,7 @@ def main() -> int:
             )
             if viewer_result.error is not None:
                 print(f"GitHub viewer lookup failed: {viewer_result.error}", file=sys.stderr)
-                return 1
+                return _startup_failure_exit_code(viewer_result.error)
             viewer_login = viewer_result.value
         if token is not None and not viewer_login:
             print(
@@ -1742,7 +1759,7 @@ def main() -> int:
     )
     if initial_request.error is not None:
         print(f"Failed to fetch initial PR state: {initial_request.error}", file=sys.stderr)
-        return 1
+        return _startup_failure_exit_code(initial_request.error)
     if initial_request.value is None:
         print("Initial GitHub PR state request completed without a result", file=sys.stderr)
         return 1

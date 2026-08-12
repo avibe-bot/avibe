@@ -24,7 +24,8 @@ import { useDock } from '../context/DockContext';
 import { useWindowManager } from '../context/WindowManagerContext';
 import { copyTextToClipboard } from '../lib/utils';
 import { internalPwaLinkTarget, openLinkInNewContext } from '../lib/pwaNavigation';
-import { copyHref, displayLink, type ShowPageLinkInfo } from '../lib/showPageLinks';
+import { copyHref, displayLink } from '../lib/showPageLinks';
+import type { ShowPageVisibilityResult } from '../lib/showPageAccess';
 import { type ShowPage, type ShowPagesController, type Visibility } from './useShowPages';
 import { appTabHref, isAppleContextClick, tabModifierLabel, type LaunchModifiers } from '../apps/appLaunch';
 import { filterShowPages, type ShowPageFilter } from '../apps/appLibrary';
@@ -64,7 +65,7 @@ interface RowProps {
   onSetVisibility: (visibility: Visibility) => void;
   onRotate: () => void;
   onCopy: () => void;
-  onShareIdSaved: (payload: ShowPageLinkInfo) => void;
+  onShareIdSaved: (payload: ShowPageVisibilityResult, sessionId: string) => void;
 }
 
 function ShowPageRow({

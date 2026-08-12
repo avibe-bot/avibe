@@ -84,6 +84,9 @@ class _StubSessions:
         self.recorded.append(key)
         return True
 
+    def seed_legacy_claim(self, channel_id, thread_ts, message_ts):
+        self._claimed.add((channel_id, thread_ts, message_ts))
+
 
 class _StubSettingsManager:
     def __init__(self):

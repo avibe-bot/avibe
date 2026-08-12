@@ -2,54 +2,48 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import socket
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Mapping
+from typing import Any, AsyncIterator, BinaryIO, Mapping
 
 import aiohttp
 
 from config.v2_config import normalize_model_hub_base_url
-from core.handlers.model_hub.adapter import RawCallOutcome, RawOutcomeKind
+from core.handlers.model_hub.adapter import (
+    ENGINE_TRANSPORT_TIMEOUT_SECONDS,
+    RawCallOutcome,
+    RawOutcomeKind,
+)
+from core.handlers.model_hub.classification import UPSTREAM_MACHINE_ERROR_CODES
+from core.handlers.model_hub.stream_wire import (
+    ErrorEnvelopePath,
+    ProtocolObservation,
+    ProtocolSSEState,
+    SSE_MAX_FRAME_BYTES,
+    SSE_MAX_PRELUDE_BYTES,
+    SSEFrameLimitError,
+    observe_protocol_response,
+)
 from vibe.model_hub_runtime.state import SourceRecord
 
 
 _MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 _STREAM_CHUNK_BYTES = 64 * 1024
 _MODEL_PROBE_BYTES = 4 * 1024 * 1024
-_SAFE_ERROR_CODES = frozenset(
-    {
-        "api_error",
-        # Closed mirror of classification._BANNED_PATTERNS account-status
-        # tokens; the runtime preserves only exact machine codes.
-        "account_banned",
-        "account_disabled",
-        "account_suspended",
-        "authentication_error",
-        "billing_error",
-        "context_length_exceeded",
-        "insufficient_quota",
-        "invalid_api_key",
-        "invalid_request_error",
-        "model_not_found",
-        "not_found_error",
-        "overloaded_error",
-        "permission_error",
-        "quota_exceeded",
-        "rate_limit_error",
-        "rate_limit_exceeded",
-        "request_too_large",
-        "server_error",
-    }
-)
+_PRELUDE_MEMORY_BYTES = SSE_MAX_FRAME_BYTES
 _OFFICIAL_BASE_URLS = {
     "anthropic": "https://api.anthropic.com/v1",
     "openai": "https://api.openai.com/v1",
     "codex": "https://api.openai.com/v1",
 }
 _PROTOCOL_HEADERS = frozenset({"anthropic-beta", "anthropic-version", "openai-beta"})
+logger = logging.getLogger(__name__)
 
 
 class EngineClientError(RuntimeError):
@@ -59,14 +53,88 @@ class EngineClientError(RuntimeError):
         *,
         status_code: int | None = None,
         error_type: str | None = None,
+        error_code: str | None = None,
+        error_candidates: tuple[str, ...] = (),
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.error_type = error_type
+        self.error_code = error_code
+        self.error_candidates = error_candidates
 
 
 class _ResponseTooLargeError(RuntimeError):
     pass
+
+
+class _StreamPrelude:
+    """Per-invocation byte owner that spills pre-output data out of memory."""
+
+    def __init__(
+        self,
+        *,
+        memory_limit: int | None = None,
+        total_limit: int | None = None,
+    ) -> None:
+        self._memory_limit = _PRELUDE_MEMORY_BYTES if memory_limit is None else memory_limit
+        self._total_limit = SSE_MAX_PRELUDE_BYTES if total_limit is None else total_limit
+        self._memory = bytearray()
+        self._file: BinaryIO | None = None
+        self._stored_bytes = 0
+        self._closed = False
+
+    @property
+    def in_memory_bytes(self) -> int:
+        return len(self._memory)
+
+    @property
+    def spilled(self) -> bool:
+        return self._file is not None
+
+    @property
+    def stored_bytes(self) -> int:
+        return self._stored_bytes
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    def write(self, data: bytes) -> bool:
+        if self._closed:
+            raise RuntimeError("stream prelude is closed")
+        if self._stored_bytes + len(data) > self._total_limit:
+            return False
+        if self._file is None and len(self._memory) + len(data) <= self._memory_limit:
+            self._memory.extend(data)
+            self._stored_bytes += len(data)
+            return True
+        if self._file is None:
+            self._file = tempfile.TemporaryFile()
+            self._file.write(self._memory)
+            self._memory.clear()
+        self._file.write(data)
+        self._stored_bytes += len(data)
+        return True
+
+    async def chunks(self) -> AsyncIterator[bytes]:
+        if self._closed:
+            return
+        if self._file is None:
+            if self._memory:
+                yield bytes(self._memory)
+            return
+        self._file.seek(0)
+        while chunk := self._file.read(_STREAM_CHUNK_BYTES):
+            yield chunk
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._memory.clear()
+        if self._file is not None:
+            self._file.close()
+            self._file = None
 
 
 @dataclass(frozen=True)
@@ -84,13 +152,34 @@ class EngineInvokeHandle:
         *,
         stream: AsyncIterator[bytes] | None,
         outcome: asyncio.Future[RawCallOutcome],
+        stream_closer: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self._stream = stream
         self._outcome = outcome
+        self._stream_closer = stream_closer
+        self._close_lock = asyncio.Lock()
+        self._stream_closed = False
 
     @property
     def stream(self) -> AsyncIterator[bytes] | None:
         return self._stream
+
+    @property
+    def outcome_available(self) -> bool:
+        return self._outcome.done()
+
+    async def close_stream(self) -> None:
+        async with self._close_lock:
+            if self._stream_closed:
+                return
+            try:
+                stream_close = getattr(self._stream, "aclose", None)
+                if stream_close is not None:
+                    await stream_close()
+            finally:
+                if self._stream_closer is not None:
+                    await self._stream_closer()
+                self._stream_closed = True
 
     async def outcome(self) -> RawCallOutcome:
         return await asyncio.shield(self._outcome)
@@ -99,7 +188,12 @@ class EngineInvokeHandle:
 class EngineClient:
     """Narrow loopback-only client for the engine data and management APIs."""
 
-    def __init__(self, connection: EngineConnection, *, timeout: float = 60.0) -> None:
+    def __init__(
+        self,
+        connection: EngineConnection,
+        *,
+        timeout: float = ENGINE_TRANSPORT_TIMEOUT_SECONDS,
+    ) -> None:
         parsed = urllib.parse.urlparse(connection.base_url)
         if parsed.scheme != "http" or parsed.hostname != "127.0.0.1" or parsed.username or parsed.password:
             raise ValueError("engine client requires a credential-free 127.0.0.1 URL")
@@ -155,9 +249,7 @@ class EngineClient:
         body["model"] = f"{source.prefix}/{model_id}"
         body["stream"] = stream
         headers = {
-            key.lower(): value
-            for key, value in (request_headers or {}).items()
-            if key.lower() in _PROTOCOL_HEADERS
+            key.lower(): value for key, value in (request_headers or {}).items() if key.lower() in _PROTOCOL_HEADERS
         }
         headers.update(
             {
@@ -177,6 +269,9 @@ class EngineClient:
         session = aiohttp.ClientSession(timeout=timeout, trust_env=False)
         response: aiohttp.ClientResponse | None = None
         first_received = False
+        model_output_started = False
+        ownership_transferred = False
+        prelude: _StreamPrelude | None = None
         try:
             response = await asyncio.wait_for(
                 session.post(
@@ -195,14 +290,24 @@ class EngineClient:
                     )
                 except (_ResponseTooLargeError, asyncio.TimeoutError, aiohttp.ClientError):
                     payload = b""
-                outcome = _outcome(
-                    kind=RawOutcomeKind.HTTP_ERROR,
+                observed_payload = observe_protocol_response(
+                    request_protocol,
+                    streamed=False,
+                    data=payload,
+                )
+                outcome = _reduce_protocol_observation(
+                    ProtocolObservation(
+                        outcome="failed_terminal",
+                        error_payload=payload,
+                        error_envelope_paths=observed_payload.error_envelope_paths,
+                        message=f"upstream returned HTTP {response.status}",
+                    ),
                     source=source,
                     model_id=model_id,
                     http_status=response.status,
-                    error_code=_error_code(payload),
-                    message=f"upstream returned HTTP {response.status}",
+                    stream_started=False,
                 )
+                assert outcome is not None
                 response.close()
                 await session.close()
                 return completed_handle(outcome)
@@ -216,11 +321,11 @@ class EngineClient:
                 await session.close()
                 return completed_handle(
                     _outcome(
-                        kind=RawOutcomeKind.PROTOCOL_ERROR,
+                        kind=RawOutcomeKind.NETWORK_ERROR,
                         source=source,
                         model_id=model_id,
                         http_status=response.status,
-                        message="upstream response ended before the first byte",
+                        message="upstream response ended before a protocol terminal event",
                     )
                 )
             first_received = True
@@ -238,28 +343,85 @@ class EngineClient:
                     response.close()
                     await session.close()
                     return completed_handle(
-                        _outcome(
-                            kind=RawOutcomeKind.PROTOCOL_ERROR,
-                            source=source,
-                            model_id=model_id,
-                            http_status=response.status,
-                            message="upstream response exceeded the local limit",
-                            stream_started=True,
+                        _protocol_error_outcome(
+                            ProtocolObservation(
+                                outcome="protocol_error",
+                                message="upstream response exceeded the local limit",
+                            ),
+                            source,
+                            model_id,
+                            response.status,
+                            False,
                         )
                     )
-                if not _is_json(first):
-                    response.close()
-                    await session.close()
-                    return completed_handle(
-                        _outcome(
-                            kind=RawOutcomeKind.PROTOCOL_ERROR,
-                            source=source,
-                            model_id=model_id,
-                            http_status=response.status,
-                            message="upstream returned an invalid JSON response",
-                            stream_started=True,
-                        )
-                    )
+                observation = observe_protocol_response(
+                    request_protocol,
+                    streamed=False,
+                    data=first,
+                )
+                outcome = _reduce_protocol_observation(
+                    observation,
+                    source=source,
+                    model_id=model_id,
+                    http_status=response.status,
+                    stream_started=observation.outcome == "served",
+                )
+                assert outcome is not None
+                response.close()
+                await session.close()
+                ownership_transferred = True
+                return (
+                    buffered_handle(first, outcome)
+                    if outcome.kind == RawOutcomeKind.SUCCESS
+                    else completed_handle(outcome)
+                )
+
+            prelude = _StreamPrelude()
+            wire_state, prelude_outcome = await _read_stream_prelude(
+                response=response,
+                first=first,
+                prelude=prelude,
+                source=source,
+                model_id=model_id,
+                protocol=request_protocol,
+                timeout=self.timeout,
+            )
+            model_output_started = wire_state.model_output_started
+            if prelude_outcome is not None:
+                response.close()
+                await session.close()
+                if prelude_outcome.kind == RawOutcomeKind.SUCCESS:
+                    handle = buffered_prelude_handle(prelude, prelude_outcome)
+                    ownership_transferred = True
+                    return handle
+                prelude.close()
+                return completed_handle(prelude_outcome)
+
+            loop = asyncio.get_running_loop()
+            outcome_future: asyncio.Future[RawCallOutcome] = loop.create_future()
+            response_stream = _response_stream(
+                response=response,
+                session=session,
+                prelude=prelude,
+                source=source,
+                model_id=model_id,
+                protocol=request_protocol,
+                outcome_future=outcome_future,
+                wire_state=wire_state,
+            )
+
+            async def close_response_stream() -> None:
+                prelude.close()
+                response.close()
+                await session.close()
+
+            handle = EngineInvokeHandle(
+                stream=response_stream,
+                outcome=outcome_future,
+                stream_closer=close_response_stream,
+            )
+            ownership_transferred = True
+            return handle
         except asyncio.TimeoutError:
             if response is not None:
                 response.close()
@@ -271,7 +433,20 @@ class EngineClient:
                     model_id=model_id,
                     http_status=response.status if response is not None and first_received else None,
                     message="upstream request timed out",
-                    stream_started=first_received,
+                    stream_started=model_output_started if stream else False,
+                )
+            )
+        except SSEFrameLimitError as exc:
+            if response is not None:
+                response.close()
+            await session.close()
+            return completed_handle(
+                _protocol_error_outcome(
+                    ProtocolObservation(outcome="protocol_error", message=str(exc)),
+                    source,
+                    model_id,
+                    response.status if response is not None else None,
+                    model_output_started if stream else False,
                 )
             )
         except aiohttp.ClientError:
@@ -283,23 +458,19 @@ class EngineClient:
                     kind=RawOutcomeKind.NETWORK_ERROR,
                     source=source,
                     model_id=model_id,
+                    error_code="engine_down",
                     http_status=response.status if response is not None and first_received else None,
                     message="upstream request failed",
-                    stream_started=first_received,
+                    stream_started=model_output_started if stream else False,
                 )
             )
-
-        loop = asyncio.get_running_loop()
-        outcome_future: asyncio.Future[RawCallOutcome] = loop.create_future()
-        response_stream = _response_stream(
-            response=response,
-            session=session,
-            first=first,
-            source=source,
-            model_id=model_id,
-            outcome_future=outcome_future,
-        )
-        return EngineInvokeHandle(stream=response_stream, outcome=outcome_future)
+        finally:
+            if not ownership_transferred:
+                if prelude is not None:
+                    prelude.close()
+                if response is not None:
+                    response.close()
+                await session.close()
 
     def _request_json(
         self,
@@ -326,10 +497,13 @@ class EngineClient:
                 raw = response.read(_MAX_RESPONSE_BYTES + 1)
         except urllib.error.HTTPError as exc:
             raw = exc.read(_MAX_RESPONSE_BYTES)
+            error_type, error_code, error_candidates = _raw_error_fields(raw)
             raise EngineClientError(
                 f"engine API returned HTTP {exc.code}",
                 status_code=exc.code,
-                error_type=_error_code(raw),
+                error_type=error_type,
+                error_code=error_code,
+                error_candidates=error_candidates,
             ) from None
         except (urllib.error.URLError, TimeoutError, socket.timeout, OSError) as exc:
             raise EngineClientError("engine API is unavailable", error_type=type(exc).__name__) from None
@@ -431,66 +605,273 @@ async def _read_limited(
             raise _ResponseTooLargeError
 
 
+async def _read_stream_prelude(
+    *,
+    response: aiohttp.ClientResponse,
+    first: bytes,
+    prelude: _StreamPrelude,
+    source: SourceRecord,
+    model_id: str,
+    protocol: str,
+    timeout: float,
+) -> tuple[ProtocolSSEState, RawCallOutcome | None]:
+    """Buffer transport metadata until the sole first-model-output fact."""
+
+    wire_state = ProtocolSSEState(protocol)
+    if not prelude.write(first):
+        return wire_state, _prelude_ended_outcome(source, model_id, response.status)
+    wire_state.observe(first)
+    while not wire_state.model_output_started:
+        outcome = _observed_stream_terminal_outcome(
+            wire_state,
+            source,
+            model_id,
+            response.status,
+        )
+        if outcome is not None:
+            return wire_state, outcome
+        chunk = await asyncio.wait_for(
+            response.content.read(_STREAM_CHUNK_BYTES),
+            timeout=timeout,
+        )
+        if not chunk:
+            completion = _observed_stream_terminal_outcome(
+                wire_state,
+                source,
+                model_id,
+                response.status,
+            )
+            if completion is not None:
+                return wire_state, completion
+            return (
+                wire_state,
+                _prelude_ended_outcome(source, model_id, response.status),
+            )
+        if not prelude.write(chunk):
+            return wire_state, _prelude_ended_outcome(source, model_id, response.status)
+        wire_state.observe(chunk)
+    return wire_state, None
+
+
+def _prelude_ended_outcome(
+    source: SourceRecord,
+    model_id: str,
+    http_status: int,
+) -> RawCallOutcome:
+    return _outcome(
+        kind=RawOutcomeKind.NETWORK_ERROR,
+        source=source,
+        model_id=model_id,
+        http_status=http_status,
+        message="upstream stream ended before model output",
+    )
+
+
 async def _response_stream(
     *,
     response: aiohttp.ClientResponse,
     session: aiohttp.ClientSession,
-    first: bytes,
+    prelude: _StreamPrelude,
     source: SourceRecord,
     model_id: str,
+    protocol: str,
     outcome_future: asyncio.Future[RawCallOutcome],
+    wire_state: ProtocolSSEState,
 ) -> AsyncIterator[bytes]:
     outcome: RawCallOutcome | None = None
     try:
-        yield first
+        async for chunk in prelude.chunks():
+            yield chunk
+        prelude.close()
         async for chunk in response.content.iter_chunked(_STREAM_CHUNK_BYTES):
             if chunk:
+                wire_state.observe(chunk)
                 yield chunk
-        outcome = _outcome(
-            kind=RawOutcomeKind.SUCCESS,
-            source=source,
-            model_id=model_id,
-            http_status=response.status,
-            stream_started=True,
+        outcome = _observed_stream_terminal_outcome(
+            wire_state,
+            source,
+            model_id,
+            response.status,
         )
-    except asyncio.TimeoutError:
-        outcome = _outcome(
-            kind=RawOutcomeKind.TIMEOUT,
-            source=source,
-            model_id=model_id,
-            http_status=response.status,
-            message="upstream response timed out after streaming started",
-            stream_started=True,
-        )
-    except aiohttp.ClientError:
-        outcome = _outcome(
-            kind=RawOutcomeKind.NETWORK_ERROR,
-            source=source,
-            model_id=model_id,
-            http_status=response.status,
-            message="upstream response failed after streaming started",
-            stream_started=True,
-        )
-    finally:
-        response.close()
-        await session.close()
         if outcome is None:
             outcome = _outcome(
                 kind=RawOutcomeKind.NETWORK_ERROR,
                 source=source,
                 model_id=model_id,
                 http_status=response.status,
-                message="upstream response stream was not fully consumed",
-                stream_started=True,
+                message="upstream stream ended before a protocol terminal event",
+                stream_started=wire_state.model_output_started,
             )
-        if not outcome_future.done():
+    except SSEFrameLimitError as exc:
+        outcome = _protocol_error_outcome(
+            ProtocolObservation(outcome="protocol_error", message=str(exc)),
+            source,
+            model_id,
+            response.status,
+            wire_state.model_output_started,
+        )
+    except asyncio.TimeoutError:
+        outcome = _observed_stream_terminal_outcome(
+            wire_state,
+            source,
+            model_id,
+            response.status,
+        )
+        if outcome is None:
+            outcome = _outcome(
+                kind=RawOutcomeKind.TIMEOUT,
+                source=source,
+                model_id=model_id,
+                http_status=response.status,
+                message="upstream response timed out after streaming started",
+                stream_started=wire_state.model_output_started,
+            )
+    except aiohttp.ClientError:
+        outcome = _observed_stream_terminal_outcome(
+            wire_state,
+            source,
+            model_id,
+            response.status,
+        )
+        if outcome is not None:
+            logger.debug("ignoring transport error after protocol terminal marker")
+        else:
+            outcome = _outcome(
+                kind=RawOutcomeKind.NETWORK_ERROR,
+                source=source,
+                model_id=model_id,
+                http_status=response.status,
+                error_code="engine_down",
+                message="upstream response failed after streaming started",
+                stream_started=wire_state.model_output_started,
+            )
+    finally:
+        if outcome is None:
+            outcome = _observed_stream_terminal_outcome(
+                wire_state,
+                source,
+                model_id,
+                response.status,
+            )
+        prelude.close()
+        response.close()
+        await session.close()
+        if outcome is not None and not outcome_future.done():
             outcome_future.set_result(outcome)
+
+
+def _observed_stream_terminal_outcome(
+    wire_state: ProtocolSSEState,
+    source: SourceRecord,
+    model_id: str,
+    http_status: int,
+) -> RawCallOutcome | None:
+    observation = wire_state.terminal_observation()
+    return _reduce_protocol_observation(
+        observation,
+        source=source,
+        model_id=model_id,
+        http_status=http_status,
+        stream_started=wire_state.model_output_started,
+    )
+
+
+def _reduce_protocol_observation(
+    observation: ProtocolObservation | None,
+    *,
+    source: SourceRecord,
+    model_id: str,
+    http_status: int | None,
+    stream_started: bool,
+) -> RawCallOutcome | None:
+    """Sole conversion from protocol observations to runtime call outcomes."""
+
+    if observation is None or observation.outcome is None:
+        return None
+    if observation.outcome == "served":
+        return _outcome(
+            kind=RawOutcomeKind.SUCCESS,
+            source=source,
+            model_id=model_id,
+            http_status=http_status,
+            stream_started=stream_started,
+        )
+    if observation.outcome == "failed_terminal":
+        error_type, error_code, candidates = _raw_error_fields(
+            observation.error_payload or b"",
+            observation.error_envelope_paths,
+        )
+        return _outcome(
+            kind=RawOutcomeKind.HTTP_ERROR,
+            source=source,
+            model_id=model_id,
+            http_status=http_status,
+            error_type=error_type,
+            error_code=error_code,
+            error_candidates=candidates,
+            message=observation.message or "upstream returned a protocol error event",
+            stream_started=stream_started,
+        )
+    return _outcome(
+        kind=RawOutcomeKind.PROTOCOL_ERROR,
+        source=source,
+        model_id=model_id,
+        http_status=http_status,
+        message=observation.message or "upstream emitted invalid protocol data",
+        stream_started=stream_started,
+    )
+
+
+def _protocol_error_outcome(
+    observation: ProtocolObservation,
+    source: SourceRecord,
+    model_id: str,
+    http_status: int | None,
+    stream_started: bool,
+) -> RawCallOutcome:
+    outcome = _reduce_protocol_observation(
+        observation,
+        source=source,
+        model_id=model_id,
+        http_status=http_status,
+        stream_started=stream_started,
+    )
+    assert outcome is not None and outcome.kind is RawOutcomeKind.PROTOCOL_ERROR
+    return outcome
 
 
 def completed_handle(outcome: RawCallOutcome) -> EngineInvokeHandle:
     future = asyncio.get_running_loop().create_future()
     future.set_result(outcome)
     return EngineInvokeHandle(stream=None, outcome=future)
+
+
+def buffered_handle(payload: bytes, outcome: RawCallOutcome) -> EngineInvokeHandle:
+    async def body() -> AsyncIterator[bytes]:
+        yield payload
+
+    future = asyncio.get_running_loop().create_future()
+    future.set_result(outcome)
+    return EngineInvokeHandle(stream=body(), outcome=future)
+
+
+def buffered_prelude_handle(
+    prelude: _StreamPrelude,
+    outcome: RawCallOutcome,
+) -> EngineInvokeHandle:
+    async def body() -> AsyncIterator[bytes]:
+        try:
+            async for chunk in prelude.chunks():
+                yield chunk
+        finally:
+            prelude.close()
+
+    async def close() -> None:
+        prelude.close()
+
+    future = asyncio.get_running_loop().create_future()
+    future.set_result(outcome)
+    return EngineInvokeHandle(stream=body(), outcome=future, stream_closer=close)
 
 
 def _outcome(
@@ -500,6 +881,8 @@ def _outcome(
     model_id: str,
     http_status: int | None = None,
     error_code: str | None = None,
+    error_type: str | None = None,
+    error_candidates: tuple[str, ...] = (),
     message: str | None = None,
     stream_started: bool = False,
 ) -> RawCallOutcome:
@@ -511,6 +894,8 @@ def _outcome(
         stream_started=stream_started,
         model_id=model_id,
         source_id=source.source_id,
+        error_type=error_type,
+        error_candidates=error_candidates,
     )
 
 
@@ -524,32 +909,38 @@ def _endpoint_for_protocol(protocol: str) -> str:
     raise ValueError("unsupported source protocol")
 
 
-def _error_code(payload: bytes) -> str | None:
+def _raw_error_fields(
+    payload: bytes,
+    envelope_paths: tuple[ErrorEnvelopePath, ...] = (("error",),),
+) -> tuple[str | None, str | None, tuple[str, ...]]:
     try:
         decoded = json.loads(payload.decode("utf-8"))
     except (UnicodeDecodeError, ValueError):
-        return None
+        return None, None, ()
     if not isinstance(decoded, dict):
-        return None
-    error = decoded.get("error")
-    if isinstance(error, dict):
-        for value in (error.get("type"), error.get("code")):
-            safe_value = _safe_error_code(value)
-            if safe_value is not None:
-                return safe_value
-        return None
-    return _safe_error_code(decoded.get("code"))
+        return None, None, ()
+    types: list[str] = []
+    codes: list[str] = []
+    for path in envelope_paths:
+        envelope: object = decoded
+        for component in path:
+            if not isinstance(envelope, Mapping) or component not in envelope:
+                envelope = None
+                break
+            envelope = envelope[component]
+        if not isinstance(envelope, Mapping):
+            continue
+        error_type = _safe_error_code(envelope["type"]) if "type" in envelope else None
+        error_code = _safe_error_code(envelope["code"]) if "code" in envelope else None
+        if error_type is not None:
+            types.append(error_type)
+        if error_code is not None:
+            codes.append(error_code)
+    candidates = tuple(dict.fromkeys((*types, *codes)))
+    return (types[0] if types else None, codes[0] if codes else None, candidates)
 
 
 def _safe_error_code(value: object) -> str | None:
-    if not isinstance(value, str) or value not in _SAFE_ERROR_CODES:
+    if not isinstance(value, str) or value not in UPSTREAM_MACHINE_ERROR_CODES:
         return None
     return value
-
-
-def _is_json(payload: bytes) -> bool:
-    try:
-        json.loads(payload.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
-        return False
-    return True

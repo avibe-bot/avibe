@@ -311,6 +311,34 @@ def test_sidecar_child_environment_is_allowlisted_and_generated_config_has_no_ke
     assert "AVIBE_MEMORY_CALL_LOG_DB" not in environment
 
 
+def test_sidecar_child_home_preparation_hardens_every_created_directory(
+    tmp_path: Path,
+) -> None:
+    process = EverOSProcess(
+        sys.executable,
+        effective_home=tmp_path,
+        settings=_settings(),
+    )
+    previous_umask = os.umask(0o022)
+    try:
+        process._prepare_owned_directories()
+    finally:
+        os.umask(previous_umask)
+
+    child_home = tmp_path / "memory" / ".child-home"
+    created = [child_home]
+    created.extend(path for path in child_home.rglob("*") if path.is_dir())
+    assert {path.relative_to(child_home).as_posix() for path in created} == {
+        ".",
+        ".cache",
+        ".config",
+        ".local",
+        ".local/share",
+        ".local/state",
+    }
+    assert all(stat.S_IMODE(path.stat().st_mode) == 0o700 for path in created)
+
+
 def test_pinned_attachment_uri_matches_process_body_and_sidecar_guard(
     monkeypatch, tmp_path: Path
 ) -> None:
@@ -517,6 +545,19 @@ async def test_processing_probe_reaps_child_when_its_caller_is_cancelled(monkeyp
     else:
         raise AssertionError("processing probe cancellation was swallowed")
     assert cleanup_calls
+
+
+async def test_probe_stderr_drain_keeps_only_bounded_tail() -> None:
+    reader = asyncio.StreamReader()
+    payload = b"head-secret\n" + (b"x" * 100_000) + b"\ntail-marker"
+    reader.feed_data(payload)
+    reader.feed_eof()
+
+    tail = await memory_process._drain_probe_stderr(reader)
+
+    assert len(tail) <= memory_process._PROCESSING_PROBE_STDERR_BYTES
+    assert b"head-secret" not in tail
+    assert tail.endswith(b"tail-marker")
 
 
 async def test_sidecar_stop_signals_isolated_child_group(tmp_path: Path) -> None:
@@ -2249,6 +2290,12 @@ def _inject_real_rebuild_process(
     monkeypatch: pytest.MonkeyPatch,
     host: _FakeProcessHost,
 ) -> None:
+    async def preflight(
+        self: memory_runtime.MemoryRuntime,
+        config: MemoryConfig | None = None,
+    ) -> dict[str, bool]:
+        return {"ok": True}
+
     def rebuild_process(
         python,
         *,
@@ -2266,6 +2313,7 @@ def _inject_real_rebuild_process(
             _host=host,
         )
 
+    monkeypatch.setattr(memory_runtime.MemoryRuntime, "preflight", preflight)
     monkeypatch.setattr(memory_runtime, "EverOSRebuildProcess", rebuild_process)
 
 

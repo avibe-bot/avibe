@@ -38,6 +38,8 @@ export const createLatestAsyncAuthorityByKey = <K, T>(
   };
 
   return {
+    /** Advances one key before an authoritative write echo is installed. */
+    invalidate: (key: K): void => advance(key),
     /** Advances retired keys so their pending requests cannot regain ownership. */
     invalidateExcept: (activeKeys: ReadonlySet<K>): void => {
       for (const key of latestRequest.keys()) {

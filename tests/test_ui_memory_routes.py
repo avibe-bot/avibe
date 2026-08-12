@@ -18,9 +18,48 @@ from config.v2_config import (
     V2Config,
 )
 from core.memory.operation_lock import MemoryOperationLease
-from tests.ui_server_test_helpers import csrf_headers
+from tests.ui_server_test_helpers import csrf_headers, remote_session_cookie
 from vibe import api, internal_client, remote_access, ui_memory_routes, ui_server
 from vibe.ui_server import app
+
+
+def _active_org_member_cookie(config: V2Config, email: str, subject: str) -> str:
+    return remote_session_cookie(
+        config,
+        email,
+        subject,
+        role="viewer",
+        access_source="organization_group",
+        organization_id="org-1",
+        organization_member_id="member-1",
+        organization_role="member",
+        group_ids=[],
+    )
+
+
+def test_memory_rebuild_result_preserves_closed_preflight_diagnostic() -> None:
+    payload, status = ui_memory_routes._memory_rebuild_result(
+        {
+            "ok": False,
+            "error": "memory_embedding_unavailable",
+            "result": "failed",
+            "diagnostic": {
+                "side": "embedding",
+                "http_status": 404,
+                "provider_error_code": "model_not_supported",
+                "message": "unsupported model",
+                "raw": "must not cross",
+            },
+        },
+        409,
+    )
+    assert status == 409
+    assert payload["diagnostic"] == {
+        "side": "embedding",
+        "http_status": 404,
+        "provider_error_code": "model_not_supported",
+        "message": "unsupported model",
+    }
 
 
 def _save_config(tmp_path) -> None:
@@ -62,24 +101,40 @@ def _renewable_remote_session_cookie(
     email: str,
     subject: str,
 ) -> str:
-    expires_at = int(time.time()) + (remote_access.SESSION_TTL_SECONDS // 2) - 60
-    payload = {
-        "email": email,
-        "sub": subject,
-        "instance_id": config.remote_access.vibe_cloud.instance_id,
-        "iat": expires_at - remote_access.SESSION_TTL_SECONDS,
-        "exp": expires_at,
-    }
-    payload_text = urllib.parse.quote(json.dumps(payload, separators=(",", ":")), safe="")
-    signature = remote_access._session_signature(
-        config.remote_access.vibe_cloud.session_secret,
-        payload_text,
+    current = remote_session_cookie(
+        config,
+        email,
+        subject,
+        role="viewer",
+        access_source="organization_group",
+        organization_id="org-1",
+        organization_member_id=f"member-{subject}",
+        organization_role="member",
+        group_ids=[],
     )
-    return f"{payload_text}.{signature}"
+    payload_text, _signature = current.rsplit(".", 1)
+    payload = json.loads(urllib.parse.unquote(payload_text))
+    expires_at = int(time.time()) + (remote_access.SESSION_TTL_SECONDS // 2) - 60
+    payload["iat"] = expires_at - remote_access.SESSION_TTL_SECONDS
+    payload["exp"] = expires_at
+    return remote_access._encode_session_cookie(
+        config.remote_access.vibe_cloud.session_secret,
+        payload,
+    )
 
 
 def _local_headers() -> dict[str, str]:
     return {"Origin": "http://127.0.0.1:15131"}
+
+
+@pytest.fixture(autouse=True)
+def _preflight_passes_by_default(monkeypatch):
+    """Keep legacy route fixtures focused unless a test exercises preflight."""
+
+    async def preflight(*, payload: dict, user_key: str):
+        return {"status_code": 200, "body": {"ok": True}}
+
+    monkeypatch.setattr(internal_client, "memory_preflight", preflight)
 
 
 def test_memory_factory_reset_public_result_keeps_truthful_root_contract() -> None:
@@ -489,7 +544,7 @@ def test_memory_authenticated_avibe_cloud_uses_the_remote_workbench_principal(
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        remote_access.make_session_cookie(config, "alex@example.com", "user-1"),
+        _active_org_member_cookie(config, "alex@example.com", "user-1"),
         domain="alex.avibe.bot",
     )
     remote_headers = {"Origin": "https://alex.avibe.bot"}
@@ -540,13 +595,16 @@ def test_memory_authenticated_avibe_cloud_uses_the_remote_workbench_principal(
     ]
 
 
-def test_memory_diagnostics_patch_is_rejected_for_remote_ui(monkeypatch, tmp_path) -> None:
+def test_active_org_member_memory_patch_rejects_retired_diagnostics_field(
+    monkeypatch,
+    tmp_path,
+) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_remote_config(tmp_path)
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        remote_access.make_session_cookie(config, "alex@example.com", "user-1"),
+        _active_org_member_cookie(config, "alex@example.com", "user-1"),
         domain="alex.avibe.bot",
     )
     calls: list[bool] = []
@@ -601,7 +659,7 @@ def test_memory_avibe_cloud_read_still_requires_same_origin(monkeypatch, tmp_pat
     client = app.test_client()
     client.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
-        remote_access.make_session_cookie(config, "alex@example.com", "user-1"),
+        _active_org_member_cookie(config, "alex@example.com", "user-1"),
         domain="alex.avibe.bot",
     )
 
@@ -1217,6 +1275,11 @@ def test_memory_confirmed_first_embedding_identity_runs_retained_rebuild(
     _save_config(tmp_path)
     observed: list[tuple[str | None, str | None, str | None]] = []
 
+    async def unexpected_preflight(*, payload: dict, user_key: str):
+        raise AssertionError("incomplete disabled candidates do not need live preflight")
+
+    monkeypatch.setattr(internal_client, "memory_preflight", unexpected_preflight)
+
     async def rebuild(*, user_key: str):
         persisted = V2Config.load().memory
         observed.append(
@@ -1271,6 +1334,69 @@ def test_memory_confirmed_first_embedding_identity_runs_retained_rebuild(
     ]
     persisted = V2Config.load().memory
     assert persisted.processing.embedding.base_url == "https://embed.example.test/v1"
+    assert persisted.processing.embedding.model == "embed-v1"
+    assert persisted.recovery_intent is None
+
+
+def test_memory_confirmed_preflight_failure_keeps_config_unchanged(monkeypatch, tmp_path) -> None:
+    """Scenario: MEMORY-REBUILD-301"""
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    current = MemoryConfig(
+        enabled=False,
+        processing=MemoryProcessingConfig(
+            llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-key"),
+            embedding=MemoryEndpointConfig("https://embed.example.test/v1", "embed-v1", "embed-key"),
+        ),
+    )
+    _save_memory(current)
+    from config.paths import get_config_path
+
+    config_before = get_config_path().read_bytes()
+
+    async def preflight(*, payload: dict, user_key: str):
+        assert user_key == "avibe:local"
+        assert payload["memory"]["processing"]["embedding"]["model"] == "embed-v2"
+        return {
+            "status_code": 409,
+            "body": {
+                "ok": False,
+                "error": "memory_embedding_unavailable",
+                "diagnostic": {
+                    "side": "embedding",
+                    "http_status": 404,
+                    "provider_error_code": "model_not_supported",
+                    "message": "model unavailable",
+                },
+            },
+        }
+
+    monkeypatch.setattr(internal_client, "memory_preflight", preflight)
+    client = app.test_client()
+    response = client.patch(
+        "/api/memory/settings",
+        json={
+            "processing": {"embedding": {"model": "embed-v2"}},
+            "confirm_rebuild": True,
+        },
+        headers=csrf_headers(client, "http://127.0.0.1:15131"),
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 409
+    assert response.get_json() == {
+        "status": "failed",
+        "error": "memory_embedding_unavailable",
+        "diagnostic": {
+            "side": "embedding",
+            "http_status": 404,
+            "provider_error_code": "model_not_supported",
+            "message": "model unavailable",
+        },
+    }
+    assert get_config_path().read_bytes() == config_before
+    persisted = V2Config.load().memory
     assert persisted.processing.embedding.model == "embed-v1"
     assert persisted.recovery_intent is None
 
@@ -1390,8 +1516,14 @@ def test_memory_confirmed_rebuild_failure_keeps_candidate(monkeypatch, tmp_path)
             "status_code": 409,
             "body": {
                 "ok": False,
-                "error": "memory_rebuild_root_busy",
-                "result": "root_busy",
+                "error": "memory_embedding_unavailable",
+                "result": "failed",
+                "diagnostic": {
+                    "side": "embedding",
+                    "http_status": 404,
+                    "provider_error_code": "model_not_supported",
+                    "message": "provider_error",
+                },
             },
         }
 
@@ -1410,7 +1542,13 @@ def test_memory_confirmed_rebuild_failure_keeps_candidate(monkeypatch, tmp_path)
 
     assert response.status_code == 409
     body = response.get_json()
-    assert body["error"] == "memory_rebuild_root_busy"
+    assert body["error"] == "memory_embedding_unavailable"
+    assert body["diagnostic"] == {
+        "side": "embedding",
+        "http_status": 404,
+        "provider_error_code": "model_not_supported",
+        "message": "provider_error",
+    }
     assert body["rebuild_required"] is True
     persisted = V2Config.load().memory
     assert persisted.processing.embedding.model == "embed-v2"

@@ -16,11 +16,25 @@
     "event": {
       "acceptanceUnknown": "Show 事件可能仍在处理中，未在本地重复提交。",
       "dispatchFailed": "Show 事件已记录，但未能投递对应的 Agent turn。",
-      "idConflict": "此 Show 事件 ID 已绑定到不同的事件内容。"
+      "idConflict": "此 Show 事件 ID 已绑定到不同的事件内容。",
+      "unsupportedEventType": "Show Page 写入必须使用受支持的人类事件或标记解析类型。"
     }
   },
   "harness": {
     "agentInitiatedContinuation": "Agent 主动发起的续接",
+    "cli": {
+      "help": {
+        "command": "检查统一的 Harness 实时状态和异常",
+        "description": "检查活跃 Run、已启用 Watch、即将触发的 Task 和实时异常。",
+        "status": "显示有界的实时状态与异常快照"
+      },
+      "error": {
+        "sqliteRequired": "Harness 状态需要 SQLite Task 存储。",
+        "controllerStatus": "控制器返回状态码 {status}。",
+        "controllerTimeout": "控制器请求超时。",
+        "controllerUnavailable": "无法连接控制器。"
+      }
+    },
     "promptEcho": {
       "scheduled": "⏰ 定时任务",
       "watch": "👀 监听",
@@ -67,7 +81,9 @@
       "exitedWithDetail": "\u547d\u4ee4\u9000\u51fa\uff0c\u72b6\u6001\u7801 {code}\uff1a{detail}"
     },
     "task": {
-      "resultNotRecorded": "\u65e0\u6cd5\u8bb0\u5f55\u672c\u6b21\u8fd0\u884c\u7684\u7ed3\u679c\uff1a\u4efb\u52a1\u5728\u8fd0\u884c\u671f\u95f4\u88ab\u56de\u6536\u3001\u6539\u7ed1\u6216\u5220\u9664\uff0c\u5176\u5b58\u50a8\u72b6\u6001\u672a\u53d1\u751f\u53d8\u5316\u3002"
+      "resultNotRecorded": "\u65e0\u6cd5\u8bb0\u5f55\u672c\u6b21\u8fd0\u884c\u7684\u7ed3\u679c\uff1a\u4efb\u52a1\u5728\u8fd0\u884c\u671f\u95f4\u88ab\u56de\u6536\u3001\u6539\u7ed1\u6216\u5220\u9664\uff0c\u5176\u5b58\u50a8\u72b6\u6001\u672a\u53d1\u751f\u53d8\u5316\u3002",
+      "schedulerCallbackFailed": "\u8ba1\u5212\u89e6\u53d1\u5728\u5165\u961f\u524d\u5931\u8d25\uff1a{detail}",
+      "scheduleReplaced": "\u672c\u6b21\u8ba1\u5212\u89e6\u53d1\u5c5e\u4e8e\u4efb\u52a1\u7684\u65e7\u8c03\u5ea6\u7248\u672c\uff0c\u56e0\u6b64\u672a\u6267\u884c\u3002"
     },
     "queueCoalesced": {
       "summary": "[Avibe Harness] 同一个 watch/task callback 在滚动 {window} 秒窗口内触发了 {count} 次。已将这些排队 callback 合并为一次 Agent turn。",
@@ -234,6 +250,10 @@
       "message": "这个 Task 的管理 Session 已不可用。",
       "hint": "请从可用的 Agent Session 创建替代 Task，再用 `vibe task remove {id}` 删除这条失去管理者的定义。"
     },
+    "taskScheduleRetired": {
+      "message": "这个一次性 Task 的计划已经结束。",
+      "hint": "请先用 `vibe task update {id} --at <time>` 设置新的未来时间，再恢复它。"
+    },
     "sessionFork": {
       "agentUnavailable": {
         "message": "源会话的 Agent 已无法用于创建新的复刻会话。",
@@ -242,6 +262,7 @@
     },
     "sessionArchived": "该会话已归档，无法再修改。",
     "sessionArchiveUnavailable": "Avibe 控制器当前不可用，暂时无法归档该会话。请稍后重试。",
+    "projectAccessDenied": "你没有权限在这个项目中创建会话。",
     "workbenchAttachment": {
       "session_not_found": "当前会话已不可用。",
       "file_required": "请选择要上传的文件。",
@@ -773,6 +794,7 @@
       "invalid_source_order": "来源顺序包含不可用、不适用或重复的来源。",
       "mode_switch_blocked": "当前供给模式或选择阻止了此操作。",
       "engine_down": "本地模型网关不可用。",
+      "engine_down_streamed": "本地模型网关不可用。本回合输出可能不完整。",
       "migration_item_conflict": "此迁移项与当前模型网关状态冲突。",
       "stream_interrupted": "上游流已中断。",
       "upstream_protocol_error": "上游响应不符合预期协议。",
@@ -800,7 +822,6 @@
         "credential_revoked": "凭证已撤销",
         "balance_exhausted": "余额不足",
         "account_banned": "账户不可用",
-        "permission_denied": "请求权限被拒绝",
         "unclassified_error": "来源发生未分类错误",
         "no_enabled_source": "没有已启用的来源",
         "no_eligible_source": "没有适用的来源",
@@ -813,12 +834,10 @@
     "launch": {
       "retry": "下一回合已自动换线，直接重试即可",
       "waiting": "模型 {model} 暂时不可用，等待 {source} 于 {retry_at} 自动恢复。",
+      "waiting_without_retry": "模型 {model} 的路线已恢复，直接重试即可。",
       "interrupted": "模型 {model} 当前不可用：{blockers}。请前往 Models 处理。",
-      "native_cli_unavailable": "当前进程无法使用 CLI 登录",
       "route_unconfigured": "模型 {model} 尚未配置路由。请前往 Models 配置。",
-      "no_enabled_source": "模型 {model} 没有已启用的来源。请前往 Models 配置。",
-      "no_eligible_source": "模型 {model} 没有适用于 {backend} 的来源。请前往 Models 配置。",
-      "model_unsupported": "没有来源支持模型 {model}。请前往 Models 配置。"
+      "request_incompatible": "此请求不兼容；切换模型来源也无法解决。"
     }
   },
   "remote_access": {

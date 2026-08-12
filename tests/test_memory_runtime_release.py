@@ -4,11 +4,15 @@ import hashlib
 import io
 import json
 import os
+import subprocess
+import sys
 import tarfile
+import tempfile
 from pathlib import Path
 
 import pytest
 
+from scripts import build_memory_runtime as runtime_builder
 from scripts import generate_memory_runtime_manifest as manifest_generator
 from scripts.build_memory_runtime import (
     EVEROS_VERSION,
@@ -16,6 +20,8 @@ from scripts.build_memory_runtime import (
     LOCK_SHA256,
     PYTHON_VERSION,
     UV_VERSION,
+    _short_socket_directory,
+    _temporary_directory,
     create_archive,
     prune_runtime,
 )
@@ -39,6 +45,46 @@ def test_release_workflows_emit_metadata_for_the_current_runtime_version() -> No
         workflow = (workflows / name).read_text(encoding="utf-8")
         assert expected in workflow
         assert "memory-runtime-1.2.1-${{ matrix.artifact }}.json" not in workflow
+
+
+def test_release_workflows_build_memory_runtime_under_runner_temp() -> None:
+    workflows = Path(__file__).resolve().parents[1] / ".github/workflows"
+
+    for name in ("release_ai.yml", "publish.yml"):
+        workflow = (workflows / name).read_text(encoding="utf-8")
+        build_step = workflow.split("- name: Build Memory Runtime bundle", 1)[1]
+        build_step = build_step.split("- name: Upload Memory Runtime bundle", 1)[0]
+        assert "TMPDIR: ${{ runner.temp }}" in build_step
+
+
+def test_memory_runtime_scratch_paths_resolve_the_system_temp_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_temp = tmp_path / "real-temp"
+    real_temp.mkdir()
+    linked_temp = tmp_path / "linked-temp"
+    linked_temp.symlink_to(real_temp, target_is_directory=True)
+    monkeypatch.setattr(tempfile, "tempdir", str(linked_temp))
+
+    with _temporary_directory("memory-runtime-test-") as scratch:
+        assert scratch.parent == real_temp.resolve(strict=True)
+        assert scratch == scratch.resolve(strict=True)
+
+
+def test_memory_runtime_health_home_uses_a_short_canonical_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    long_temp = tmp_path / ("long-temp-" * 12)
+    long_temp.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(long_temp))
+
+    with _short_socket_directory("mrv-") as health_home:
+        socket_path = health_home / "memory" / ".rt" / "everos.sock"
+        assert health_home.parent == Path("/tmp").resolve(strict=True)
+        assert health_home == health_home.resolve(strict=True)
+        assert len(os.fsencode(socket_path)) < 104
 
 
 def test_github_only_release_runs_memory_runtime_guard_before_uploading_assets() -> None:
@@ -133,6 +179,76 @@ def test_generate_memory_runtime_manifest_records_verified_platform_archives(tmp
             "size": archive.stat().st_size,
             "bin_path": "bin/python",
         }
+
+
+def test_build_outputs_metadata_accepted_by_manifest_generator(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def fake_run(
+        command: list[str],
+        *,
+        cwd: Path,
+        capture_output: bool = False,
+    ) -> subprocess.CompletedProcess[str]:
+        if command == ["uv", "--version"]:
+            stdout = f"uv {UV_VERSION}\n"
+        elif command[:3] == ["uv", "python", "install"]:
+            binary = cwd / "managed" / "bin" / "python"
+            binary.parent.mkdir(parents=True)
+            binary.write_bytes(b"embedded-python")
+            binary.chmod(0o755)
+            stdout = ""
+        elif command[:3] == ["uv", "python", "find"]:
+            stdout = f"{cwd / 'managed' / 'bin' / 'python'}\n"
+        elif command[:2] == ["uv", "export"]:
+            output = Path(command[command.index("--output-file") + 1])
+            output.write_text("", encoding="utf-8")
+            stdout = ""
+        elif command[:3] == ["uv", "pip", "sync"]:
+            stdout = ""
+        elif command[1:4] == ["-I", "-B", "-c"]:
+            stdout = f"{EVEROS_VERSION}\n{PYTHON_VERSION}\n"
+        elif command[1:] == ["-c", "import platform; print(platform.python_version())"]:
+            stdout = f"{PYTHON_VERSION}\n"
+        else:
+            raise AssertionError(f"Unexpected Memory Runtime subprocess: {command}")
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(runtime_builder, "_run", fake_run)
+    monkeypatch.setattr(runtime_builder, "_sidecar_health_smoke", lambda *args, **kwargs: None)
+
+    for platform in PLATFORMS:
+        metadata_path = tmp_path / f"memory-runtime-{EVEROS_VERSION}-{platform}.json"
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "build_memory_runtime.py",
+                "--output-dir",
+                str(tmp_path),
+                "--platform",
+                platform,
+                "--metadata-output",
+                str(metadata_path),
+            ],
+        )
+
+        assert runtime_builder.main() == 0
+        output = json.loads(capsys.readouterr().out)
+
+        assert set(output) == {"ok", "archive", "metadata"}
+        assert json.loads(metadata_path.read_text(encoding="utf-8")) == output["metadata"]
+
+    manifest = manifest_generator.build_manifest(
+        archive_dir=tmp_path,
+        tag="v3.1.0",
+        repo="avibe-bot/avibe",
+        output=tmp_path / "manifest.json",
+    )
+
+    assert set(manifest["archives"]) == set(PLATFORMS)
 
 
 def test_generate_memory_runtime_manifest_fails_when_platform_archive_missing(tmp_path: Path) -> None:

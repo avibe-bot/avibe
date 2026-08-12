@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { AlertTriangle, Clock, Copy, Eye, Globe, History, Inbox, KeyRound, Link2, Loader2, MoreHorizontal, Pencil, Plus, Puzzle, RefreshCw, Settings, ShieldCheck, Tag, Trash2, Wallet, X } from 'lucide-react';
+import { AlertTriangle, Clock, Copy, Eye, Globe, History, Inbox, KeyRound, Link2, Loader2, Lock, MoreHorizontal, Pencil, Plus, Puzzle, RefreshCw, Settings, ShieldCheck, Tag, Trash2, Wallet, X } from 'lucide-react';
 import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
 import { CapabilityTabs } from './CapabilityTabs';
@@ -21,8 +21,13 @@ import { vaultRequestSessionDisplay } from '../ui/vault-request-session';
 import { VaultRequestSessionLink } from '../ui/vault-request-session-link';
 import { VaultSecretDialog } from '../ui/vault-secret-dialog';
 import { VaultSettingsDialog } from '../ui/vault-settings-dialog';
+import { canManageVaultSecrets } from '../../lib/remoteAuth';
 import { useProtectedVault } from '../../lib/useProtectedVault';
 import { useVaultRequestRefresh } from '../../lib/useVaultRequestRefresh';
+import {
+  canUseRuntimeSurfaces,
+  useInstanceAuthorization,
+} from '../../context/InstanceAuthorizationContext';
 
 const PENDING_REQUEST_EXPIRY_GRACE_MS = 100;
 const MAX_BROWSER_TIMEOUT_MS = 2_147_483_647;
@@ -39,7 +44,8 @@ const SecretRow: React.FC<{
   onEdit: (secret: VaultSecret) => void;
   onDelete: (secret: VaultSecret) => void;
   onReveal: (secret: VaultSecret) => void;
-}> = ({ secret: s, onEdit, onDelete, onReveal }) => {
+  canManage: boolean;
+}> = ({ secret: s, onEdit, onDelete, onReveal, canManage }) => {
   const { t } = useTranslation();
   const [menuOpen, setMenuOpen] = useState(false);
   const isKeypair = s.kind === 'keypair';
@@ -96,7 +102,7 @@ const SecretRow: React.FC<{
         </span>
         {isKeypair && s.signing_addresses ? <SigningAddressList addresses={s.signing_addresses} className="mt-1" /> : null}
       </div>
-      <div className="ml-auto">
+      {canManage ? <div className="ml-auto">
         <Popover open={menuOpen} onOpenChange={setMenuOpen}>
           <PopoverTrigger asChild>
             <Button variant="ghost" size="icon" aria-label={t('vaults.rowActions')} aria-haspopup="menu">
@@ -162,7 +168,7 @@ const SecretRow: React.FC<{
             </button>
           </PopoverContent>
         </Popover>
-      </div>
+      </div> : null}
     </div>
   );
 };
@@ -229,7 +235,9 @@ function describeGrant(g: VaultGrant, t: TFunction): { Icon: typeof KeyRound; la
  * and an inline × to revoke. A grant is a fixed protected set keyed by grant_id — the chip
  * summarizes its `source_selector`, never a group.
  */
-const GrantChip: React.FC<{ grant: VaultGrant; now: number; onRevoke: (grant: VaultGrant) => void }> = ({
+// ``onRevoke`` is omitted when the current runtime policy withholds revocation,
+// which renders the chip read-only.
+const GrantChip: React.FC<{ grant: VaultGrant; now: number; onRevoke?: (grant: VaultGrant) => void }> = ({
   grant: g,
   now,
   onRevoke,
@@ -258,14 +266,16 @@ const GrantChip: React.FC<{ grant: VaultGrant; now: number; onRevoke: (grant: Va
       <span className={cn('font-mono tabular-nums', rem.urgent ? 'text-warning' : 'text-mint/80')}>
         {rem.expired ? t('vaults.grants.expired') : chipCountdown(rem)}
       </span>
-      <button
-        type="button"
-        onClick={() => onRevoke(g)}
-        aria-label={t('vaults.grants.revoke')}
-        className="flex size-4 items-center justify-center rounded-full text-mint/70 transition-colors hover:bg-mint/15 hover:text-mint"
-      >
-        <X className="size-3" />
-      </button>
+      {onRevoke ? (
+        <button
+          type="button"
+          onClick={() => onRevoke(g)}
+          aria-label={t('vaults.grants.revoke')}
+          className="flex size-4 items-center justify-center rounded-full text-mint/70 transition-colors hover:bg-mint/15 hover:text-mint"
+        >
+          <X className="size-3" />
+        </button>
+      ) : null}
     </span>
   );
 };
@@ -482,6 +492,15 @@ export const VaultsPage: React.FC = () => {
   const api = useApi();
   const { showToast } = useToast();
   const vault = useProtectedVault();
+  const { capabilities, remote, hasTemporaryUnrestrictedOrgAccess } = useInstanceAuthorization();
+  const canUseRuntime = canUseRuntimeSurfaces(remote, hasTemporaryUnrestrictedOrgAccess);
+  const canManage =
+    (capabilities.can_manage_instance || canUseRuntime) &&
+    canManageVaultSecrets({
+      remote,
+      temporaryUnrestrictedOrgAccess: hasTemporaryUnrestrictedOrgAccess,
+    });
+  const canReadVaultState = capabilities.can_manage_instance || canUseRuntime;
   const [searchParams, setSearchParams] = useSearchParams();
   const [secrets, setSecrets] = useState<VaultSecret[]>([]);
   const [grants, setGrants] = useState<VaultGrant[]>([]);
@@ -519,6 +538,10 @@ export const VaultsPage: React.FC = () => {
     } finally {
       setLoading(false);
     }
+    if (!canReadVaultState) {
+      setGrants([]);
+      return;
+    }
     // Active grants are a best-effort control strip; a grants failure (e.g. an
     // older backend without the route) must neither blank out the secret
     // inventory nor surface an error toast, so suppress error handling here.
@@ -528,7 +551,7 @@ export const VaultsPage: React.FC = () => {
     } catch {
       setGrants([]);
     }
-  }, [api]);
+  }, [api, canReadVaultState]);
 
   useEffect(() => {
     refresh();
@@ -548,6 +571,7 @@ export const VaultsPage: React.FC = () => {
       },
       onError: () => setEventBridgeConnected(false),
       onVaultsUpdated: () => refresh(),
+      onAuthorizationChanged: () => refresh(),
     });
   }, [api, refresh]);
 
@@ -724,8 +748,8 @@ export const VaultsPage: React.FC = () => {
         stackActionsOnMobile
         actions={
           <>
-            <VaultLockIndicator className="max-sm:order-last max-sm:w-full max-sm:justify-between" />
-            <Button
+            {canManage ? <VaultLockIndicator className="max-sm:order-last max-sm:w-full max-sm:justify-between" /> : null}
+            {canReadVaultState ? <Button
               variant={showAudit ? 'secondary' : 'ghost'}
               size="icon"
               className="max-sm:border max-sm:border-border max-sm:bg-surface"
@@ -733,8 +757,8 @@ export const VaultsPage: React.FC = () => {
               aria-label={t('vaults.history')}
             >
               <History className="size-4" />
-            </Button>
-            <Button
+            </Button> : null}
+            {canManage ? <Button
               variant={showSettings ? 'secondary' : 'ghost'}
               size="icon"
               className="max-sm:border max-sm:border-border max-sm:bg-surface"
@@ -742,7 +766,7 @@ export const VaultsPage: React.FC = () => {
               aria-label={t('vaults.settings.title')}
             >
               <Settings className="size-4" />
-            </Button>
+            </Button> : null}
             <Button
               variant="ghost"
               size="icon"
@@ -752,18 +776,25 @@ export const VaultsPage: React.FC = () => {
             >
               <RefreshCw className="size-4" />
             </Button>
-            <Button className="max-sm:flex-1" onClick={() => setAdding(true)}>
-              <Plus className="size-4" />
-              {t('vaults.add')}
-            </Button>
+            {canManage ? (
+              <Button className="max-sm:flex-1" onClick={() => setAdding(true)}>
+                <Plus className="size-4" />
+                {t('vaults.add')}
+              </Button>
+            ) : remote && !canUseRuntime ? (
+              <Badge variant="secondary" title={t('vaults.remoteReadOnlyHint')}>
+                <Lock className="size-3" />
+                {t('vaults.remoteReadOnly')}
+              </Badge>
+            ) : null}
           </>
         }
       />
       {error && (
         <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">{error}</div>
       )}
-      <PendingRequestsSection onResolved={refresh} focusRequestId={focusRequestId} onFocusRequestOpened={clearFocusedRequest} />
-      {grants.length > 0 && (
+      {canManage ? <PendingRequestsSection onResolved={refresh} focusRequestId={focusRequestId} onFocusRequestOpened={clearFocusedRequest} /> : null}
+      {canReadVaultState && grants.length > 0 && (
         <div className="flex flex-col gap-2">
           <div className="flex items-center gap-2 px-1">
             <ShieldCheck className="size-4 text-mint" />
@@ -773,7 +804,7 @@ export const VaultsPage: React.FC = () => {
           </div>
           <div className="flex flex-wrap gap-2">
             {grants.map((g) => (
-              <GrantChip key={g.id} grant={g} now={now} onRevoke={onRevokeGrant} />
+              <GrantChip key={g.id} grant={g} now={now} onRevoke={canManage ? onRevokeGrant : undefined} />
             ))}
           </div>
         </div>
@@ -822,11 +853,18 @@ export const VaultsPage: React.FC = () => {
       ) : (
         <div className="flex flex-col gap-2">
           {visibleSecrets.map((s) => (
-            <SecretRow key={s.name} secret={s} onEdit={onEdit} onDelete={onDelete} onReveal={revealSecret} />
+            <SecretRow
+              key={s.name}
+              secret={s}
+              onEdit={onEdit}
+              onDelete={onDelete}
+              onReveal={revealSecret}
+              canManage={canManage}
+            />
           ))}
         </div>
       )}
-      {showAudit && (
+      {canReadVaultState && showAudit && (
         <div className="rounded-2xl border border-border bg-surface p-4">
           <div className="mb-2 text-sm font-semibold">{t('vaults.audit.title')}</div>
           {audit.length === 0 ? (
@@ -844,8 +882,8 @@ export const VaultsPage: React.FC = () => {
           )}
         </div>
       )}
-      <VaultSettingsDialog open={showSettings} onOpenChange={setShowSettings} />
-      <VaultSecretDialog
+      {canManage ? <VaultSettingsDialog open={showSettings} onOpenChange={setShowSettings} /> : null}
+      {canManage ? <VaultSecretDialog
         open={adding}
         onOpenChange={(o) => {
           if (!o) setAdding(false);
@@ -856,8 +894,8 @@ export const VaultsPage: React.FC = () => {
           showToast(t('vaults.created', { name }), 'success');
           refresh();
         }}
-      />
-      <VaultSecretDialog
+      /> : null}
+      {canManage ? <VaultSecretDialog
         open={editTarget != null}
         editSecret={editTarget}
         onOpenChange={(o) => {
@@ -870,7 +908,7 @@ export const VaultsPage: React.FC = () => {
           showToast(t('vaults.saved', { name }), 'success');
           refresh();
         }}
-      />
+      /> : null}
       <ConfirmDialog
         open={deleteTarget != null}
         onOpenChange={(open) => {

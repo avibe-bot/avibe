@@ -12,7 +12,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field, fields
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, ClassVar, Iterator, List, Literal, Mapping, Optional, Union
+from typing import Callable, ClassVar, Iterator, List, Literal, Mapping, Optional, Union, get_args
 from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
 from config import paths
@@ -1423,6 +1423,10 @@ class MemoryDiagnosticsConfig:
         self.log_provider_calls = True
 
 
+MemoryRecoveryIntent = Literal["rebuild", "factory_reset"]
+MEMORY_RECOVERY_INTENTS = frozenset(get_args(MemoryRecoveryIntent))
+
+
 @dataclass
 class MemoryConfig:
     """Persisted local EverOS configuration; credentials are API-write-only."""
@@ -1430,14 +1434,14 @@ class MemoryConfig:
     enabled: bool = False
     processing: MemoryProcessingConfig = field(default_factory=MemoryProcessingConfig)
     diagnostics: MemoryDiagnosticsConfig = field(default_factory=MemoryDiagnosticsConfig)
-    recovery_intent: Literal["rebuild", "factory_reset"] | None = None
+    recovery_intent: MemoryRecoveryIntent | None = None
 
     def validate(self) -> None:
         if not isinstance(self.enabled, bool):
             raise ValueError("Config 'memory.enabled' must be a boolean")
         if self.recovery_intent is not None and (
             not isinstance(self.recovery_intent, str)
-            or self.recovery_intent not in {"rebuild", "factory_reset"}
+            or self.recovery_intent not in MEMORY_RECOVERY_INTENTS
         ):
             raise ValueError(
                 "Config 'memory.recovery_intent' must be 'rebuild', 'factory_reset', or null"
@@ -1556,8 +1560,6 @@ def memory_config_to_payload(
 
 
 def _optional_memory_object(value: object, *, name: str) -> dict[str, object]:
-    if value is None:
-        return {}
     if not isinstance(value, dict):
         raise ValueError(f"Config '{name}' must be an object")
     return value
@@ -1568,19 +1570,19 @@ def memory_config_from_payload(payload: object) -> MemoryConfig:
 
     payload = _optional_memory_object(payload, name="memory")
     processing_payload = _optional_memory_object(
-        payload.get("processing"),
+        payload.get("processing", {}),
         name="memory.processing",
     )
     llm_payload = _optional_memory_object(
-        processing_payload.get("llm"),
+        processing_payload.get("llm", {}),
         name="memory.processing.llm",
     )
     embedding_payload = _optional_memory_object(
-        processing_payload.get("embedding"),
+        processing_payload.get("embedding", {}),
         name="memory.processing.embedding",
     )
     diagnostics_payload = _optional_memory_object(
-        payload.get("diagnostics"),
+        payload.get("diagnostics", {}),
         name="memory.diagnostics",
     )
 
@@ -1593,7 +1595,7 @@ def memory_config_from_payload(payload: object) -> MemoryConfig:
         recovery_intent = payload.get("recovery_intent")
         if recovery_intent is not None and (
             not isinstance(recovery_intent, str)
-            or recovery_intent not in {"rebuild", "factory_reset"}
+            or recovery_intent not in MEMORY_RECOVERY_INTENTS
         ):
             raise ValueError(
                 "Config 'memory.recovery_intent' must be 'rebuild', 'factory_reset', or null"
@@ -2815,7 +2817,7 @@ class V2Config:
             avault=avault,
         )
 
-        memory = memory_config_from_payload(payload.get("memory"))
+        memory = memory_config_from_payload(payload.get("memory", {}))
 
         model_hub_payload = payload.get("model_hub")
         if model_hub_payload is None:

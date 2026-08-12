@@ -11,6 +11,7 @@ from __future__ import annotations
 import struct
 import zlib
 from datetime import datetime, timezone
+from unittest.mock import patch
 
 from sqlalchemy import select
 
@@ -18,7 +19,7 @@ from core.workbench_media import MAX_WORKBENCH_ATTACHMENT_BYTES, rewrite_agent_m
 from storage import media_service, settings_service
 from storage.db import create_sqlite_engine
 from storage.migrations import run_migrations
-from storage.models import agent_sessions, media_objects
+from storage.models import agent_sessions, media_object_references, media_objects
 
 
 def _now() -> str:
@@ -139,6 +140,99 @@ def test_rewrite_in_place_image_file_and_external(tmp_path):
     assert all(r["source"] == "agent_reply" for r in rows)
 
 
+def test_rewrite_angle_wrapped_file_links(tmp_path):
+    db = tmp_path / "vibe.sqlite"
+    run_migrations(db)
+    engine = create_sqlite_engine(db)
+
+    image = tmp_path / "图片 文件.png"
+    image.write_bytes(b"image")
+    report = tmp_path / "My Report (最终).md"
+    report.write_text("report", encoding="utf-8")
+    text = f"![图片](<file://{image}>) and [下载报告](<file://{report}>)"
+
+    with engine.begin() as conn:
+        scope_id = _seed_scope_and_session(conn)
+        out = rewrite_agent_media(conn, scope_id=scope_id, session_id="sess_x", text=text)
+
+    assert "file://" not in out
+    assert out.startswith("![图片](</api/media/")
+    assert "and [下载报告](</api/media/" in out
+    with engine.connect() as conn:
+        rows = conn.execute(select(media_objects)).mappings().all()
+    assert {row["local_path"] for row in rows} == {
+        str(image.resolve()),
+        str(report.resolve()),
+    }
+    assert sorted(row["kind"] for row in rows) == ["file", "image"]
+
+
+def test_rewrite_legacy_bare_space_link_and_reject_malformed_authority(tmp_path):
+    db = tmp_path / "vibe.sqlite"
+    run_migrations(db)
+    engine = create_sqlite_engine(db)
+    report = tmp_path / "My Report.md"
+    report.write_text("report", encoding="utf-8")
+    malformed = "[bad](<file://[bad/path>)"
+    text = f'[report](file://{report} "download") and {malformed}'
+
+    with engine.begin() as conn:
+        scope_id = _seed_scope_and_session(conn)
+        out = rewrite_agent_media(
+            conn,
+            scope_id=scope_id,
+            session_id="sess_x",
+            text=text,
+        )
+
+    assert out.startswith("[report](/api/media/")
+    assert out.endswith(f' "download") and {malformed}')
+    with engine.connect() as conn:
+        rows = conn.execute(select(media_objects)).mappings().all()
+    assert [row["local_path"] for row in rows] == [str(report.resolve())]
+
+
+def test_rewrite_legacy_bare_space_link_after_malformed_prefix(tmp_path):
+    db = tmp_path / "vibe.sqlite"
+    run_migrations(db)
+    engine = create_sqlite_engine(db)
+    report = tmp_path / "Good Report.md"
+    report.write_text("report", encoding="utf-8")
+    prefix = "[bad](file:///tmp/My Report "
+    text = f"{prefix}[report](file://{report})"
+
+    with engine.begin() as conn:
+        scope_id = _seed_scope_and_session(conn)
+        out = rewrite_agent_media(
+            conn,
+            scope_id=scope_id,
+            session_id="sess_x",
+            text=text,
+        )
+
+    assert out.startswith(f"{prefix}[report](/api/media/")
+    with engine.connect() as conn:
+        rows = conn.execute(select(media_objects)).mappings().all()
+    assert [row["local_path"] for row in rows] == [str(report.resolve())]
+
+
+def test_rewrite_does_not_materialize_file_links_inside_code(tmp_path):
+    db = tmp_path / "vibe.sqlite"
+    run_migrations(db)
+    engine = create_sqlite_engine(db)
+    image = tmp_path / "code.png"
+    image.write_bytes(b"image")
+    text = f"Example `![code](<file://{image}>)` and:\n\n```md\n![fenced](<file://{image}>)\n```"
+
+    with engine.begin() as conn:
+        scope_id = _seed_scope_and_session(conn)
+        out = rewrite_agent_media(conn, scope_id=scope_id, session_id="sess_x", text=text)
+
+    assert out == text
+    with engine.connect() as conn:
+        assert conn.execute(select(media_objects)).first() is None
+
+
 def test_resolve_attachment_specs(tmp_path):
     db = tmp_path / "vibe.sqlite"
     run_migrations(db)
@@ -256,17 +350,36 @@ def test_register_dedups_same_fingerprint(tmp_path):
 
     with engine.begin() as conn:
         scope_id = _seed_scope_and_session(conn)
+        conn.execute(
+            agent_sessions.insert().values(
+                id="other",
+                scope_id=scope_id,
+                agent_backend="claude",
+                agent_variant="default",
+                session_anchor="other-anchor",
+                native_session_id="other-native",
+                status="active",
+                metadata_json="{}",
+                created_at=_now(),
+                updated_at=_now(),
+            )
+        )
         t1 = media_service.register(
             conn, scope_id=scope_id, session_id="sess_x", kind="image",
             source="agent_reply", local_path=str(shot),
         )
-        # Same file (path + size + mtime), DIFFERENT session → same token: dedup is
-        # machine-global, so the proxy URL stays stable + cacheable.
+        # Same file in the same authorization scope stays stable + cacheable.
+        assert media_service.register(
+            conn, scope_id=scope_id, session_id="sess_x", kind="image",
+            source="agent_reply", local_path=str(shot),
+        ) == t1
+        # A different session receives a distinct token so authorization checks
+        # use that referencing session instead of the first dedup registration.
         t2 = media_service.register(
             conn, scope_id=scope_id, session_id="other", kind="image",
             source="agent_reply", local_path=str(shot),
         )
-        assert t2 == t1
+        assert t2 != t1
         # Content change (new size + mtime) → fresh token, busting the cache.
         shot.write_bytes(b"abcdef-changed")
         t3 = media_service.register(
@@ -277,7 +390,13 @@ def test_register_dedups_same_fingerprint(tmp_path):
 
     with engine.connect() as conn:
         rows = conn.execute(select(media_objects)).mappings().all()
-    assert len(rows) == 2  # original (reused once) + the changed file
+        references = conn.execute(select(media_object_references)).mappings().all()
+    assert len(rows) == 3  # two authorization scopes + changed content
+    assert {(row["token"], row["session_id"]) for row in references} == {
+        (t1, "sess_x"),
+        (t2, "other"),
+        (t3, "sess_x"),
+    }
 
 
 def test_register_reads_image_dimensions(tmp_path):
@@ -353,3 +472,70 @@ def test_rewrite_appends_image_dimensions(tmp_path):
     # …and a non-image link gets no dimension query.
     assert "/api/media/" in out.split(" and ")[1]
     assert "?w=" not in out.split(" and ")[1]
+
+
+def test_rewrite_angle_file_link_unescapes_path_and_ignores_title(tmp_path):
+    db = tmp_path / "vibe.sqlite"
+    run_migrations(db)
+    engine = create_sqlite_engine(db)
+    report = tmp_path / "report (final).md"
+    report.write_text("report", encoding="utf-8")
+    escaped_report = str(report).replace("(", "\\(").replace(")", "\\)")
+    text = f'[report](<FILE://{escaped_report}> "download")'
+
+    with engine.begin() as conn:
+        scope_id = _seed_scope_and_session(conn)
+        out = rewrite_agent_media(conn, scope_id=scope_id, session_id="sess_x", text=text)
+
+    assert out.startswith("[report](</api/media/")
+    assert out.endswith('> "download")')
+
+
+def test_rewrite_commonmark_owned_destination_preserves_source_syntax(tmp_path):
+    db = tmp_path / "vibe.sqlite"
+    run_migrations(db)
+    engine = create_sqlite_engine(db)
+    report = tmp_path / "report & (final).md"
+    report.write_text("report", encoding="utf-8")
+    escaped_report = (
+        str(report)
+        .replace("&", "&amp;")
+        .replace("(", r"\(")
+        .replace(")", r"\)")
+    )
+    text = (
+        f'[outer [report](<f&#105;le://{escaped_report}>\n "download")]'
+        " and [draft](<file:relative.md>)"
+    )
+
+    with engine.begin() as conn:
+        scope_id = _seed_scope_and_session(conn)
+        out = rewrite_agent_media(conn, scope_id=scope_id, session_id="sess_x", text=text)
+
+    assert out.startswith("[outer [report](</api/media/")
+    assert out.endswith('>\n "download")] and [draft](<file:relative.md>)')
+    with engine.connect() as conn:
+        rows = conn.execute(select(media_objects)).mappings().all()
+    assert [row["local_path"] for row in rows] == [str(report.resolve())]
+
+
+def test_rewrite_failure_preserves_original_destination_source(tmp_path):
+    db = tmp_path / "vibe.sqlite"
+    run_migrations(db)
+    engine = create_sqlite_engine(db)
+    text = '[report](<f&#105;le:///tmp/a&amp;b.md> "download")'
+
+    with engine.begin() as conn:
+        scope_id = _seed_scope_and_session(conn)
+        with patch(
+            "core.workbench_media.register_agent_reply_media",
+            side_effect=RuntimeError("registration failed"),
+        ):
+            out = rewrite_agent_media(
+                conn,
+                scope_id=scope_id,
+                session_id="sess_x",
+                text=text,
+            )
+
+    assert out == text

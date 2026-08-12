@@ -3,7 +3,9 @@ import { useTranslation } from 'react-i18next';
 import { Bell, BellOff, Loader2, Smartphone } from 'lucide-react';
 
 import { useApi } from '@/context/ApiContext';
+import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
 import { useToast } from '@/context/ToastContext';
+import { canRegisterWebPush } from '@/lib/remoteAuth';
 import { Button } from '../ui/button';
 import { Badge } from '../ui/badge';
 import {
@@ -22,11 +24,16 @@ type Status = 'checking' | 'unsupported' | 'needs_install' | 'disabled' | 'enabl
 export const WebPushControl: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
+  const { remote, hasTemporaryUnrestrictedOrgAccess } = useInstanceAuthorization();
   const { showToast } = useToast();
   const [status, setStatus] = useState<Status>('checking');
   const [busy, setBusy] = useState(false);
   const [testing, setTesting] = useState(false);
   const [support, setSupport] = useState<WebPushSupportState | null>(null);
+  const canRegister = canRegisterWebPush({
+    remote,
+    temporaryUnrestrictedOrgAccess: hasTemporaryUnrestrictedOrgAccess,
+  });
 
   const refresh = async () => {
     const nextSupport = getWebPushSupportState();
@@ -55,9 +62,10 @@ export const WebPushControl: React.FC = () => {
   };
 
   useEffect(() => {
+    if (!canRegister) return;
     void refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [canRegister]);
 
   const onEnable = async () => {
     setBusy(true);
@@ -110,6 +118,15 @@ export const WebPushControl: React.FC = () => {
       setTesting(false);
     }
   };
+
+  if (!canRegister) {
+    return (
+      <Badge variant="secondary" className="h-8 rounded-lg px-3">
+        <BellOff className="size-3" />
+        {t('workbench.inbox.notifications.localOnly')}
+      </Badge>
+    );
+  }
 
   if (status === 'checking') {
     return (

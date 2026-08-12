@@ -12,12 +12,19 @@ import { GatewayModule } from './GatewayModule';
 import { InstallGatewayDialog } from './InstallGatewayDialog';
 import { ModelHubInfoHint } from './ModelHubInfoHint';
 import { RecentSwitchesCard } from './RecentSwitchesCard';
-import { RouteChainDialog } from './RouteChainDialog';
+import { RouteChainDialog, type RouteCollectionObservation, type RouteCommitReconciliation, type RouteReport } from './RouteChainDialog';
+import { routeChainMatchesAttempt } from './routeChainDraft';
 import { SourceDetailPanel } from './SourceDetailPanel';
 import { SourceOrderDrawer } from './SourceOrderDrawer';
 import { SourcesCard } from './SourcesCard';
 import { modelsSurfaceKindFromReads } from './modelHubSurfaceState';
+import { focusModelHubProjection } from './modelHubFocus';
 import { buildSupplyRelations } from './supplyRelations';
+import {
+  emptySuspendedRouteAttempts,
+  holdSuspendedRouteAttempt,
+  releaseSuspendedRouteAttempt,
+} from './suspendedRouteAttempts';
 import { SupplyGraph, SupplyLegend } from './SupplyGraph';
 import './modelHubSurface.css';
 import { agentsWithEcho, createLatestAsyncAuthority, createLatestAsyncAuthorityByKey, createLatestEntityAuthorityByKey, createPendingWrites, mapWithConcurrency } from './asyncLifetime';
@@ -32,6 +39,7 @@ import {
   beginRegionRead,
   failRegionRead,
   foldRegionRead,
+  degradedRegion,
   loadingRegion,
   readyRegion,
   regionFailed,
@@ -39,7 +47,8 @@ import {
   unreadRegion,
   type RegionRead,
 } from './regionRead';
-import { agentHasLiveChainProjection, freshRuntimeProjection, pollRuntimeStatus, runtimeHasInstallAsset, startRuntimeWithStatusRefresh } from './runtimeLifecycle';
+import { freshRuntimeProjection, pollRuntimeStatus, runtimeHasInstallAsset, startRuntimeWithStatusRefresh } from './runtimeLifecycle';
+import { createRouteProjectionReconciler, type RouteProjectionStatus } from './routeProjectionReconciliation';
 import { backendVisual } from './vendorMeta';
 import type { AgentBackend, AgentSupply, ResolutionEvent, RuntimeDependency, Source } from './types';
 
@@ -61,6 +70,15 @@ const readAgentChains = async (agent: AgentSupply): Promise<ModelChainIndex> => 
   ),
 );
 
+const readExactAgentChain = async (
+  agent: AgentSupply,
+  modelId: string,
+): Promise<ModelChainIndex> => ({
+  [modelChainKey(agent.backend, modelId)]: readyRegion(
+    await modelsApi.getAgentChain(agent.backend, modelId),
+  ),
+});
+
 const settleAgentChainIndex = (
   previous: ModelChainIndex,
   agent: AgentSupply,
@@ -68,6 +86,17 @@ const settleAgentChainIndex = (
 ): ModelChainIndex => {
   const prefix = `${agent.backend}\u0000`;
   const next = Object.fromEntries(Object.entries(previous).filter(([key]) => !key.startsWith(prefix)));
+  for (const [key, read] of Object.entries(incoming)) {
+    next[key] = settleRegionRead(previous[key] ?? loadingRegion(), read);
+  }
+  return next;
+};
+
+const settleExactAgentChain = (
+  previous: ModelChainIndex,
+  incoming: ModelChainIndex,
+): ModelChainIndex => {
+  const next = { ...previous };
   for (const [key, read] of Object.entries(incoming)) {
     next[key] = settleRegionRead(previous[key] ?? loadingRegion(), read);
   }
@@ -160,10 +189,10 @@ export const RuntimePill: React.FC<{
     : <span className={className}>{content}</span>;
 };
 
-const ModelHubShell: React.FC<{ actions?: React.ReactNode; detailBack?: () => void; children: React.ReactNode }> = ({ actions, detailBack, children }) => {
+const ModelHubShell: React.FC<{ actions?: React.ReactNode; detailBack?: () => void; children: React.ReactNode; rootRef?: React.Ref<HTMLDivElement> }> = ({ actions, detailBack, children, rootRef }) => {
   const { t } = useTranslation();
   return (
-    <div className="model-hub-shell">
+    <div ref={rootRef} className="model-hub-shell">
       <header className="model-hub-shell-head">
         {detailBack
           ? <button type="button" onClick={detailBack} aria-label={t('settings.models.sourceDetail.back') as string} title={t('settings.models.sourceDetail.back') as string} className="model-hub-detail-back"><ArrowLeft aria-hidden="true" /></button>
@@ -259,7 +288,19 @@ export const SettingsModelsPage: React.FC = () => {
   const [apiKeyOpen, setApiKeyOpen] = React.useState(false);
   const [orderBackend, setOrderBackend] = React.useState<AgentBackend | null>(null);
   const [adoptAgent, setAdoptAgent] = React.useState<AgentSupply | null>(null);
-  const [routeTarget, setRouteTarget] = React.useState<{ backend: AgentBackend; modelId: string } | null>(null);
+  const [routeTarget, setRouteTarget] = React.useState<{ agent: AgentSupply; modelId: string; opener: HTMLElement | null } | null>(null);
+  const [routeCommitStatus, setRouteCommitStatus] = React.useState<RouteProjectionStatus | null>(null);
+  const [routeCommitBackend, setRouteCommitBackend] = React.useState<AgentBackend | null>(null);
+  const [suspendedRouteAttempts, setSuspendedRouteAttempts] = React.useState(
+    emptySuspendedRouteAttempts,
+  );
+  const suspendedHubFrontiersRef = React.useRef(new Map<AgentBackend, AgentSupply>());
+  const suspendedSourceBaselinesRef = React.useRef(
+    new Map<AgentBackend, RegionRead<Source[]>>(),
+  );
+  const suspendedChainBaselinesRef = React.useRef(
+    new Map<AgentBackend, RegionRead<ModelChainIndex>>(),
+  );
   const [selectedSourceId, setSelectedSourceId] = React.useState<string | null>(null);
   const [agentWrites, setAgentWrites] = React.useState<ReadonlySet<string>>(() => new Set());
   const [switchFailures, setSwitchFailures] = React.useState<ReadonlySet<string>>(() => new Set());
@@ -268,6 +309,7 @@ export const SettingsModelsPage: React.FC = () => {
   const [sourceCollectionReads] = React.useState(() => createSourceCollectionReadAuthority(modelsApi));
   const [agentCollectionReads] = React.useState(() => createAgentCollectionReadAuthority(modelsApi));
   const overviewRef = React.useRef<HTMLDivElement>(null);
+  const pageRef = React.useRef<HTMLDivElement>(null);
   const aliveRef = React.useRef(true);
   const [sourceEntityAuthority] = React.useState(() => createLatestEntityAuthorityByKey(
     (source: Source) => source.id,
@@ -330,14 +372,19 @@ export const SettingsModelsPage: React.FC = () => {
     });
   }, [runtimeHealth, runtimeRead.kind, runtimeRecoveryPending, startingRuntime]);
 
-  const [chainReadAuthority] = React.useState(() => createLatestAsyncAuthorityByKey<AgentBackend, { agent: AgentSupply; chains: ModelChainIndex }>((_backend, incoming) => {
+  const [chainReadAuthority] = React.useState(() => createLatestAsyncAuthorityByKey<AgentBackend, { agent: AgentSupply; chains: ModelChainIndex; scope: 'backend' | 'model' }>((_backend, incoming) => {
     if (!aliveRef.current) return;
-    setChainsRead((previous) => readyRegion(settleAgentChainIndex(foldRegionRead<ModelChainIndex, ModelChainIndex>(previous, {
-      loading: () => ({}),
-      ready: (data) => data,
-      unread: () => ({}),
-      degraded: (staleData) => staleData,
-    }), incoming.agent, incoming.chains)));
+    setChainsRead((previous) => {
+      const current = foldRegionRead<ModelChainIndex, ModelChainIndex>(previous, {
+        loading: () => ({}),
+        ready: (data) => data,
+        unread: () => ({}),
+        degraded: (staleData) => staleData,
+      });
+      return readyRegion(incoming.scope === 'backend'
+        ? settleAgentChainIndex(current, incoming.agent, incoming.chains)
+        : settleExactAgentChain(current, incoming.chains));
+    });
   }));
 
   const refreshAgentChains = React.useCallback(async (agent: AgentSupply) => {
@@ -350,11 +397,16 @@ export const SettingsModelsPage: React.FC = () => {
     await chainReadAuthority.run(agent.backend, async () => ({
       agent,
       chains: await readAgentChains(agent),
+      scope: 'backend' as const,
     }));
   }, [chainReadAuthority]);
 
   const refreshAllAgentChains = React.useCallback((agentRows: AgentSupply[]) => {
     const hubAgents = agentRows.filter((agent) => agent.mode === 'hub');
+    const suspendedBackends = new Set(suspendedRouteAttempts.keys());
+    const probeAgents = hubAgents.filter((agent) =>
+      !suspendedBackends.has(agent.backend)
+      && agent.backend !== routeCommitBackend);
     const activeBackends = new Set(hubAgents.map((agent) => agent.backend));
     chainReadAuthority.invalidateExcept(activeBackends);
     setChainsRead((previous) => readyRegion(Object.fromEntries(
@@ -365,8 +417,8 @@ export const SettingsModelsPage: React.FC = () => {
         degraded: (staleData) => staleData,
       })).filter(([key]) => activeBackends.has(key.split('\u0000')[0] as AgentBackend)),
     )));
-    for (const agent of hubAgents) void refreshAgentChains(agent);
-  }, [chainReadAuthority, refreshAgentChains]);
+    for (const agent of probeAgents) void refreshAgentChains(agent);
+  }, [chainReadAuthority, refreshAgentChains, routeCommitBackend, suspendedRouteAttempts]);
 
   React.useEffect(() => {
     const freshSupply = foldRegionRead<AgentSupply[], AgentSupply[] | null>(supplyRead, {
@@ -596,18 +648,170 @@ export const SettingsModelsPage: React.FC = () => {
     && runtimeRead.kind === 'loading';
   const directEmpty = modelsSurfaceKindFromReads(supplyRead, sourcesRead) === 'direct_empty';
   const installedAgents = agents.filter((agent) => agent.cli_present);
+  const installedSupplyRead = foldRegionRead<AgentSupply[], RegionRead<AgentSupply[]>>(supplyRead, {
+    loading: () => loadingRegion(),
+    ready: () => readyRegion(installedAgents),
+    unread: (retryable) => unreadRegion(retryable),
+    degraded: (_staleData, cause, retryable) => degradedRegion(installedAgents, cause, retryable),
+  });
   const selectSource = React.useCallback((sourceId: string | null) => {
     sourceIntentAuthority.commit(() => setSelectedSourceId(sourceId));
   }, [sourceIntentAuthority]);
   const selectedSource = sources.find((source) => source.id === selectedSourceId) ?? null;
   const orderAgent = agents.find((agent) => agent.backend === orderBackend && agent.mode === 'hub') ?? null;
-  const routeAgent = agents.find((agent) => agent.backend === routeTarget?.backend && agentHasLiveChainProjection(runtime, agent)) ?? null;
-  const routeSelection = routeTarget && routeAgent ? {
-    agent: routeAgent,
+  const currentRouteAgent = routeTarget
+    ? installedAgents.find((agent) => agent.backend === routeTarget.agent.backend) ?? null
+    : null;
+  const routeSelection = routeTarget ? {
+    agent: currentRouteAgent ?? routeTarget.agent,
     modelId: routeTarget.modelId,
-    read: chains[modelChainKey(routeTarget.backend, routeTarget.modelId)],
+    read: chains[modelChainKey(routeTarget.agent.backend, routeTarget.modelId)],
+    available: supplyRead.kind !== 'ready' || currentRouteAgent !== null,
   } : null;
-  const supplyRelations = React.useMemo(() => buildSupplyRelations(agents, sources, chains, runtime), [agents, chains, runtime, sources]);
+  const focusRouteDestination = React.useCallback((target: NonNullable<typeof routeTarget>) => {
+    requestAnimationFrame(() => {
+      focusModelHubProjection({
+        root: pageRef.current,
+        activeTarget: target.opener,
+        backend: target.agent.backend,
+        modelId: target.modelId,
+      });
+    });
+  }, []);
+  const routeObserved = React.useCallback((next: RouteReport['chain']) => {
+    setChainsRead((previous) => readyRegion({
+      ...foldRegionRead<ModelChainIndex, ModelChainIndex>(previous, {
+        loading: () => ({}),
+        ready: (data) => data,
+        unread: () => ({}),
+        degraded: (staleData) => staleData,
+      }),
+      [modelChainKey(next.backend, next.model_id)]: readyRegion(next),
+    }));
+  }, []);
+  const readRouteAgents = React.useCallback(async (): Promise<RouteCollectionObservation<AgentSupply[]>> => {
+    const result = await agentCollectionReads.read();
+    if (result.kind === 'stale') throw new Error('route_agents_read_superseded');
+    return {
+      value: result.value,
+      install: () => setSupplyRead(readyRegion(result.value)),
+    };
+  }, [agentCollectionReads]);
+  const readRouteSources = React.useCallback(async (): Promise<RouteCollectionObservation<Source[]>> => {
+    const snapshot = sourceEntityAuthority.beginSnapshot();
+    const result = await sourceCollectionReads.read();
+    if (result.kind === 'stale') throw new Error('route_sources_read_superseded');
+    return {
+      value: result.value,
+      install: () => sourceEntityAuthority.settleSnapshot(snapshot, result.value),
+    };
+  }, [sourceCollectionReads, sourceEntityAuthority]);
+  const routeProjectionReconciler = React.useMemo(() => createRouteProjectionReconciler({
+    readAgents: readRouteAgents,
+    readSources: readRouteSources,
+    onFailure: (member) => {
+      if (member === 'agents') setSupplyRead(failRegionRead);
+      else setSourcesRead(failRegionRead);
+    },
+    onStatus: setRouteCommitStatus,
+  }), [readRouteAgents, readRouteSources]);
+  const routeCommitted = React.useCallback((result: RouteReport) => {
+    chainReadAuthority.invalidate(result.chain.backend);
+    routeObserved(result.chain);
+    setSuspendedRouteAttempts((attempts) =>
+      releaseSuspendedRouteAttempt(attempts, result.chain.backend),
+    );
+    suspendedHubFrontiersRef.current.delete(result.chain.backend);
+    suspendedSourceBaselinesRef.current.delete(result.chain.backend);
+    suspendedChainBaselinesRef.current.delete(result.chain.backend);
+    setRouteCommitBackend(result.chain.backend);
+    routeProjectionReconciler.start(result.chain.backend);
+  }, [chainReadAuthority, routeObserved, routeProjectionReconciler]);
+  React.useEffect(() => {
+    if (routeCommitStatus && !routeCommitStatus.pending && routeCommitStatus.failed.size === 0) {
+      setRouteCommitBackend(null);
+    }
+  }, [routeCommitStatus]);
+  const retryRouteCommit = React.useCallback(() => {
+    if (routeCommitStatus?.pending || !routeCommitStatus?.failed.size) return;
+    routeProjectionReconciler.retry();
+  }, [routeCommitStatus, routeProjectionReconciler]);
+  const routeCommitReconciliation = React.useMemo<RouteCommitReconciliation | null>(() => routeCommitStatus ? ({
+    pending: routeCommitStatus.pending,
+    failed: routeCommitStatus.failed.size > 0,
+    retry: retryRouteCommit,
+  }) : null, [retryRouteCommit, routeCommitStatus]);
+  React.useEffect(() => {
+    const heldBackends = new Set(suspendedRouteAttempts.keys());
+    for (const backend of suspendedHubFrontiersRef.current.keys()) {
+      if (!heldBackends.has(backend)) suspendedHubFrontiersRef.current.delete(backend);
+    }
+    for (const backend of suspendedSourceBaselinesRef.current.keys()) {
+      if (!heldBackends.has(backend)) suspendedSourceBaselinesRef.current.delete(backend);
+    }
+    for (const backend of suspendedChainBaselinesRef.current.keys()) {
+      if (!heldBackends.has(backend)) suspendedChainBaselinesRef.current.delete(backend);
+    }
+    const freshAgents = foldRegionRead<AgentSupply[], AgentSupply[] | null>(supplyRead, {
+      loading: () => null,
+      ready: (data) => data,
+      unread: () => null,
+      degraded: () => null,
+    });
+    for (const held of suspendedRouteAttempts.values()) {
+      const freshAgent = freshAgents?.find((row) => row.backend === held.backend) ?? null;
+      if (!freshAgent || freshAgent.mode !== 'hub') {
+        suspendedHubFrontiersRef.current.delete(held.backend);
+        suspendedSourceBaselinesRef.current.set(held.backend, sourcesRead);
+        continue;
+      }
+      if (sourcesRead === suspendedSourceBaselinesRef.current.get(held.backend) || sourcesRead.kind !== 'ready') continue;
+      if (suspendedHubFrontiersRef.current.get(held.backend) === freshAgent) continue;
+      suspendedHubFrontiersRef.current.set(held.backend, freshAgent);
+      suspendedChainBaselinesRef.current.set(held.backend, chainsRead);
+      void (async () => {
+        try {
+          await chainReadAuthority.run(held.backend, async () => ({
+            agent: freshAgent,
+            chains: await readExactAgentChain(freshAgent, held.modelId),
+            scope: 'model' as const,
+          }));
+          if (suspendedHubFrontiersRef.current.get(held.backend) !== freshAgent) return;
+        } catch {
+          if (suspendedHubFrontiersRef.current.get(held.backend) !== freshAgent) return;
+          setChainsRead((previous) => readyRegion({
+            ...foldRegionRead<ModelChainIndex, ModelChainIndex>(previous, {
+              loading: () => ({}),
+              ready: (data) => data,
+              unread: () => ({}),
+              degraded: (staleData) => staleData,
+            }),
+            [modelChainKey(held.backend, held.modelId)]: unreadRegion(),
+          }));
+        }
+      })();
+    }
+  }, [chainReadAuthority, chainsRead, sourcesRead, supplyRead, suspendedRouteAttempts]);
+  React.useEffect(() => {
+    for (const held of suspendedRouteAttempts.values()) {
+      if (!suspendedHubFrontiersRef.current.has(held.backend) || chainsRead === suspendedChainBaselinesRef.current.get(held.backend)) continue;
+      const observed = foldRegionRead(chainsRead, {
+        loading: () => null,
+        ready: (index) => foldRegionRead(index[modelChainKey(held.backend, held.modelId)] ?? unreadRegion(), {
+          loading: () => null,
+          ready: (data) => data,
+          unread: () => null,
+          degraded: () => null,
+        }),
+        unread: () => null,
+        degraded: () => null,
+      });
+      if (observed && routeChainMatchesAttempt(observed, held)) {
+        routeCommitted({ chain: observed, removed_hops: null, interrupted: null });
+      }
+    }
+  }, [chainsRead, routeCommitted, suspendedRouteAttempts]);
+  const supplyRelations = React.useMemo(() => buildSupplyRelations(installedAgents, sources, chains, runtime), [chains, installedAgents, runtime, sources]);
   const takeoverCount = React.useMemo(() => new Set(
     supplyRelations.filter(({ kind }) => kind === 'takeover').map(({ backend }) => backend),
   ).size, [supplyRelations]);
@@ -630,6 +834,7 @@ export const SettingsModelsPage: React.FC = () => {
 
   return (
     <ModelHubShell
+      rootRef={pageRef}
       detailBack={selectedSourceId ? () => selectSource(null) : undefined}
       actions={!landingLoading
         ? directEmpty && installedAgents.length === 0
@@ -657,9 +862,9 @@ export const SettingsModelsPage: React.FC = () => {
                   {tab === 'sources' ? <div className="model-hub-overview">
                     <div className="model-hub-overview-body">
                       <div ref={overviewRef} className="model-hub-overview-grid relative flex flex-col gap-4">
-                        <SourcesCard read={sourcesRead} onRetry={() => void retrySources()} onOpenSource={(source) => selectSource(source.id)} onAddApiKey={() => setApiKeyOpen(true)} />
+                        <SourcesCard read={sourcesRead} readFailureCopy={routeCommitStatus?.failed.has('sources') ? t('settings.models.routeDialog.impact.refreshFail') : undefined} onRetry={() => routeCommitStatus?.failed.has('sources') ? retryRouteCommit() : void retrySources()} onOpenSource={(source) => selectSource(source.id)} onAddApiKey={() => setApiKeyOpen(true)} />
                         <div className="hidden lg:block" aria-hidden="true" />
-                        <GatewayModule supply={supplyRead} sources={sources} chains={chains} runtime={runtime} runtimeSnapshot={retainedRuntime} onRetry={() => void retrySupply()} pendingBackends={agentWrites} switchFailures={switchFailures} connectingBackend={adoptAgent?.backend ?? null} onConnectHub={setAdoptAgent} onSwitchDirect={switchToDirect} onOpenOrder={(agent) => setOrderBackend(agent.backend)} onOpenRoute={(agent, modelId) => setRouteTarget({ backend: agent.backend, modelId })} onProbeSettled={(agent) => void refreshAgentChains(agent)} />
+                        <GatewayModule supply={installedSupplyRead} readFailureCopy={routeCommitStatus?.failed.has('agents') ? t('settings.models.routeDialog.impact.refreshFail') : undefined} sources={sources} chains={chains} runtime={runtime} runtimeSnapshot={retainedRuntime} onRetry={() => routeCommitStatus?.failed.has('agents') ? retryRouteCommit() : void retrySupply()} pendingBackends={agentWrites} switchFailures={switchFailures} connectingBackend={adoptAgent?.backend ?? null} onConnectHub={setAdoptAgent} onSwitchDirect={switchToDirect} onOpenOrder={(agent) => setOrderBackend(agent.backend)} onOpenRoute={(agent, modelId, opener) => setRouteTarget({ agent, modelId, opener })} onProbeSettled={(agent) => void refreshAgentChains(agent)} />
                         <SupplyGraph containerRef={overviewRef} relations={supplyRelations} />
                       </div>
                       <SupplyLegend relations={supplyRelations} />
@@ -670,7 +875,54 @@ export const SettingsModelsPage: React.FC = () => {
                 </div>}
       <AddApiKeyDialog open={apiKeyOpen} sourceReads={sourceCollectionReads} onClose={() => setApiKeyOpen(false)} onAdded={(created) => void sourceAdded(created)} />
       {orderAgent && <SourceOrderDrawer open agent={orderAgent} sources={sources} sourceReads={sourceCollectionReads} onClose={() => setOrderBackend(null)} onSaved={agentSaved} orderWrite={{ pending: agentWrites.has(orderAgent.backend), track: (work) => agentWriteRegistry.track(orderAgent.backend, work) }} />}
-      <RouteChainDialog selection={routeSelection} sources={sources} onClose={() => setRouteTarget(null)} />
+      <RouteChainDialog
+        selection={routeSelection}
+        sources={sources}
+        onClose={() => {
+          const target = routeTarget;
+          setRouteTarget(null);
+          if (target) focusRouteDestination(target);
+        }}
+        onCommitted={routeCommitted}
+        commitReconciliation={routeCommitReconciliation}
+        onObserved={routeObserved}
+        readAgents={readRouteAgents}
+        readSources={readRouteSources}
+        onDirectMode={(attempt, observedAgent) => {
+          const landingBackend = attempt?.backend ?? routeTarget?.agent.backend;
+          if (landingBackend) {
+            suspendedSourceBaselinesRef.current.set(landingBackend, sourcesRead);
+            setSuspendedRouteAttempts((attempts) =>
+              attempt
+                ? holdSuspendedRouteAttempt(attempts, attempt)
+                : releaseSuspendedRouteAttempt(attempts, landingBackend),
+            );
+          }
+          const target = routeTarget;
+          setRouteTarget(null);
+          if (target) focusRouteDestination(target);
+          void (async () => {
+            let landing = observedAgent;
+            if (!landing) {
+              try {
+                const observation = await readRouteAgents();
+                observation.install();
+                landing = observation.value.find((row) => row.backend === landingBackend) ?? null;
+              } catch {
+                setSupplyRead(failRegionRead);
+                return;
+              }
+            }
+            if (landing?.mode !== 'hub') return;
+            try {
+              const sourceObservation = await readRouteSources();
+              sourceObservation.install();
+            } catch {
+              setSourcesRead(failRegionRead);
+            }
+          })();
+        }}
+      />
       {adoptAgent && (
         <EnableGatewayDialog
           key={adoptAgent.backend}

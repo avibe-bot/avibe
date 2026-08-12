@@ -46,7 +46,7 @@ from core.scheduled_tasks import (
     resolve_session_id_target,
     session_anchor_for_target,
 )
-from core.caller_context import caller_context_from_env
+from core.caller_context import caller_context_from_env, caller_resource_user_context
 from core.command_runner import command_line_preview
 from core.vibe_agents import AgentArchivedEditError, AgentArchiveError, AgentNameValidationError, AgentReferenceRewriteError, VibeAgent, VibeAgentStore, iter_global_agent_files, parse_agent_file, validate_agent_backend
 from core.watches import (
@@ -75,7 +75,9 @@ from storage.db import create_sqlite_engine
 from storage.background import (
     DefinitionWriteConflict,
     SQLiteBackgroundTaskStore,
+    TASK_RETIREMENT_SCHEDULE_MISSED,
     TaskResumeBlocked,
+    TaskScheduleRetired,
     compute_next_run_at,
     normalize_run_status,
 )
@@ -274,6 +276,25 @@ def _print_task_error(exc: Exception, *, help_command: str | None = None) -> Non
     # payload builder below.
     if isinstance(exc, UnresolvableSessionTarget) and exc.reason == "reserved":
         exc = _reserved_session_cli_error(exc)
+    from storage.resource_access_service import (
+        REMOTE_AUTONOMOUS_HARNESS_DISABLED_CODE,
+        ResourceAccessError,
+    )
+
+    if (
+        isinstance(exc, ResourceAccessError)
+        and exc.code == REMOTE_AUTONOMOUS_HARNESS_DISABLED_CODE
+    ):
+        try:
+            lang = V2Config.load().language
+        except Exception:
+            lang = "en"
+        exc = TaskCliError(
+            str(exc),
+            code=exc.code,
+            hint=i18n_t("harness.notice.remoteExecutionDisabled", lang),
+            help_command=help_command,
+        )
     if isinstance(exc, TaskCliError):
         payload = {
             "schema_version": 1,
@@ -338,7 +359,7 @@ def _print_cli_payload(kind: str, **fields) -> None:
     print(json.dumps(_cli_payload(kind, **fields), indent=2))
 
 
-def _memory_cli_language() -> str:
+def _configured_cli_language() -> str:
     """Read an optional configured language without creating or migrating state."""
 
     try:
@@ -348,6 +369,10 @@ def _memory_cli_language() -> str:
         return normalize_language(language if isinstance(language, str) else None)
     except Exception:
         return "en"
+
+
+def _memory_cli_language() -> str:
+    return _configured_cli_language()
 
 
 _MEMORY_CLI_SOURCE_STATE_I18N_KEYS = {
@@ -1904,12 +1929,12 @@ def _task_display_name(task) -> str:
 
 
 def _task_state(task) -> str:
-    if task.enabled:
-        return "active"
     if _is_failed_one_shot(task):
         return "failed"
     if _is_completed_one_shot(task):
         return "completed"
+    if task.enabled:
+        return "active"
     return "paused"
 
 
@@ -2013,6 +2038,7 @@ def _task_payload(task, *, brief: bool = False):
 _CANONICAL_DEFINITION_FIELDS = (
     "lifecycle_state",
     "lifecycle_detail",
+    "lifecycle_finished_at",
     "next_run_at",
     "waiting_since",
     "running_since",
@@ -2059,7 +2085,14 @@ def _task_projection_state(task: Mapping[str, object]) -> str:
     if lifecycle_state in {"waiting", "running"}:
         return "active"
     if lifecycle_state == "finished":
-        return "failed" if task.get("lifecycle_detail") in {"timeout", "error"} else "completed"
+        lifecycle_detail = task.get("lifecycle_detail")
+        if lifecycle_detail == "canceled":
+            return "canceled"
+        if lifecycle_detail in {"timeout", "error", "missed"}:
+            return "failed"
+        if lifecycle_detail == "normal":
+            return "completed"
+        return "unknown"
     if lifecycle_state == "paused":
         return "paused"
     return "unknown"
@@ -2222,18 +2255,21 @@ def _supported_task_platforms() -> set[str]:
 def _is_completed_one_shot(task) -> bool:
     return (
         task.schedule_type == "at"
-        and not task.enabled
+        and bool(task.retired_at)
         and bool(task.last_run_at)
         and not task.last_error
+        and task.retirement_reason != TASK_RETIREMENT_SCHEDULE_MISSED
     )
 
 
 def _is_failed_one_shot(task) -> bool:
     return (
         task.schedule_type == "at"
-        and not task.enabled
-        and bool(task.last_run_at)
-        and bool(task.last_error)
+        and bool(task.retired_at)
+        and (
+            task.retirement_reason == TASK_RETIREMENT_SCHEDULE_MISSED
+            or (bool(task.last_run_at) and bool(task.last_error))
+        )
     )
 
 
@@ -3186,6 +3222,12 @@ def _agent_payload(agent, *, brief: bool = False) -> dict:
 def _run_payload(run: dict, *, brief: bool = False) -> dict:
     normalized = dict(run)
     normalized["status"] = normalize_run_status(normalized.get("status"))
+    activity_at = normalized.get("last_activity_at") or normalized.get("started_at")
+    activity_basis = (
+        "output"
+        if normalized.get("last_activity_at")
+        else ("start" if activity_at else None)
+    )
     if brief:
         return {
             "id": normalized.get("id"),
@@ -3196,6 +3238,9 @@ def _run_payload(run: dict, *, brief: bool = False) -> dict:
             "definition_id": normalized.get("definition_id") or normalized.get("task_id"),
             "created_at": normalized.get("created_at"),
             "started_at": normalized.get("started_at"),
+            "last_activity_at": activity_at,
+            "activity_basis": activity_basis,
+            "activity_age_seconds": _seconds_since_iso(activity_at),
             "completed_at": normalized.get("completed_at"),
             "error": normalized.get("error"),
             "callback_session_id": normalized.get("callback_session_id"),
@@ -3205,11 +3250,95 @@ def _run_payload(run: dict, *, brief: bool = False) -> dict:
     return normalized
 
 
+def cmd_harness_status(_args) -> int:
+    """Print one bounded operational snapshot across Harness work types."""
+
+    from core.services.harness_status import build_harness_status
+    from vibe import internal_client
+
+    try:
+        language = _configured_cli_language()
+        request_store = _task_request_store()
+        sqlite_store = request_store.sqlite_backend
+        if sqlite_store is None:
+            raise RuntimeError(i18n_t("harness.cli.error.sqliteRequired", language))
+        fetch_limit = MAX_PAGE_LIMIT + 1
+        raw_runs = sqlite_store.list_active_runs(limit=fetch_limit)
+        raw_watches = sqlite_store.list_enabled_definitions(
+            "watch",
+            limit=fetch_limit,
+        )
+        raw_tasks = sqlite_store.list_enabled_definitions(
+            "scheduled",
+            limit=fetch_limit,
+        )
+        runs_truncated = len(raw_runs) > MAX_PAGE_LIMIT
+
+        try:
+            response = asyncio.run(
+                internal_client.list_running_agents(
+                    run_ids=[str(row.get("id")) for row in raw_runs if row.get("id")]
+                )
+            )
+            body = response.get("body") if isinstance(response, dict) else None
+            runtime_snapshot = dict(body) if isinstance(body, dict) else {}
+            status_code = response.get("status_code") if isinstance(response, dict) else None
+            runtime_snapshot["available"] = status_code == 200 and bool(
+                runtime_snapshot.get("ok")
+            )
+            if not runtime_snapshot["available"]:
+                runtime_snapshot["error"] = i18n_t(
+                    "harness.cli.error.controllerStatus",
+                    language,
+                    status=status_code,
+                )
+        except internal_client.InternalServerTimeout:
+            runtime_snapshot = {
+                "available": False,
+                "error": i18n_t("harness.cli.error.controllerTimeout", language),
+            }
+        except internal_client.InternalServerUnavailable:
+            runtime_snapshot = {
+                "available": False,
+                "error": i18n_t("harness.cli.error.controllerUnavailable", language),
+            }
+
+        # Ownership is a point-in-time controller fact. Keep only Runs that were
+        # active on both sides of that snapshot so a Run completing during the
+        # request cannot be mislabeled as owner-missing.
+        active_run_ids_after = sqlite_store.active_run_ids(
+            row.get("id") for row in raw_runs
+        )
+        raw_runs = [
+            row for row in raw_runs if str(row.get("id")) in active_run_ids_after
+        ]
+
+        snapshot = build_harness_status(
+            runs=raw_runs[:MAX_PAGE_LIMIT],
+            watches=raw_watches[:MAX_PAGE_LIMIT],
+            tasks=raw_tasks[:MAX_PAGE_LIMIT],
+            runtime_snapshot=runtime_snapshot,
+            truncated={
+                "runs": runs_truncated,
+                "watches": len(raw_watches) > MAX_PAGE_LIMIT,
+                "tasks": len(raw_tasks) > MAX_PAGE_LIMIT,
+            },
+        )
+        _print_cli_payload("harness_status", **snapshot)
+        return 0
+    except Exception as exc:
+        _print_task_error(exc, help_command="vibe harness status --help")
+        return 1
+
+
 def _seconds_since_iso(timestamp: object) -> float | None:
     if not isinstance(timestamp, str) or not timestamp.strip():
         return None
+    text = timestamp.strip()
+    if text.endswith(("Z", "z")):
+        text = f"{text[:-1]}+00:00"
     try:
-        started_at = datetime.fromisoformat(timestamp)
+        started_at = datetime.fromisoformat(text)
     except ValueError:
         return None
     if started_at.tzinfo is None:
@@ -3457,6 +3586,7 @@ def cmd_task_add(args):
     reserved_session_id: Optional[str] = None
     try:
         caller_context = caller_context_from_env()
+        caller_user_context = caller_resource_user_context(caller_context)
         command, shell_command, has_command = _resolve_task_command(
             args,
             help_command="vibe task add --help",
@@ -3641,6 +3771,7 @@ def cmd_task_add(args):
                 metadata=metadata,
                 expected_enabled_agent_id=expected_enabled_agent_id,
                 expected_reference_agent_id=expected_reference_agent_id,
+                user_context=caller_user_context,
             )
         else:
             try:
@@ -3673,6 +3804,7 @@ def cmd_task_add(args):
                 metadata=metadata,
                 expected_enabled_agent_id=expected_enabled_agent_id,
                 expected_reference_agent_id=expected_reference_agent_id,
+                user_context=caller_user_context,
             )
         reserved_session_id = None
         warnings = _collect_target_warnings(session_target, delivery_target)
@@ -3765,6 +3897,18 @@ def cmd_task_set_enabled(task_id: str, enabled: bool):
                     "task_id": task_id,
                     "owner_session_id": exc.owner_session_id,
                 },
+            )
+        )
+        return 1
+    except TaskScheduleRetired as exc:
+        lang = _memory_cli_language()
+        _print_task_error(
+            TaskCliError(
+                i18n_t("error.taskScheduleRetired.message", lang),
+                code=exc.code,
+                hint=i18n_t("error.taskScheduleRetired.hint", lang, id=task_id),
+                help_command=f"vibe task update {task_id} --help",
+                details={"task_id": task_id},
             )
         )
         return 1
@@ -4079,6 +4223,7 @@ def cmd_task_update(args):
                 help_command="vibe task update --help",
             )
         caller_context = caller_context_from_env()
+        caller_user_context = caller_resource_user_context(caller_context)
         scope_arg_present = (getattr(args, "scope_id", None) is not None) or bool(getattr(args, "same_scope", False))
         if scope_arg_present and not (
             bool(getattr(args, "create_session", False)) or bool(getattr(args, "create_session_per_run", False))
@@ -4434,6 +4579,7 @@ def cmd_task_update(args):
             metadata=metadata,
             expected_enabled_agent_id=expected_enabled_agent_id,
             expected_reference_agent_id=expected_reference_agent_id,
+            user_context=caller_user_context,
         )
         reserved_session_id = None
         warnings = _collect_target_warnings(session_target, delivery_target)
@@ -9681,6 +9827,7 @@ def cmd_watch_add(args):
     reserved_session_id: Optional[str] = None
     try:
         caller_context = caller_context_from_env()
+        caller_user_context = caller_resource_user_context(caller_context)
         session_default_notice = _apply_caller_session_default(
             args,
             caller_context,
@@ -9781,6 +9928,7 @@ def cmd_watch_add(args):
             metadata=_definition_metadata_with_scope(caller_context, scope_id=scope_key, session_workdir=session_workdir),
             expected_enabled_agent_id=expected_enabled_agent_id,
             expected_reference_agent_id=expected_reference_agent_id,
+            user_context=caller_user_context,
         )
         reserved_session_id = None
         runtime_store = _watch_runtime_store()
@@ -9905,6 +10053,7 @@ def cmd_watch_update(args):
                 help_command="vibe watch update --help",
             )
         caller_context = caller_context_from_env()
+        caller_user_context = caller_resource_user_context(caller_context)
         scope_arg_present = (getattr(args, "scope_id", None) is not None) or bool(getattr(args, "same_scope", False))
         if scope_arg_present and not (
             bool(getattr(args, "create_session", False)) or bool(getattr(args, "create_session_per_run", False))
@@ -10208,6 +10357,7 @@ def cmd_watch_update(args):
             **changes,
             expected_enabled_agent_id=expected_enabled_agent_id,
             expected_reference_agent_id=expected_reference_agent_id,
+            user_context=caller_user_context,
         )
         reserved_session_id = None
         runtime_entry = _watch_runtime_store().load().get("watches", {}).get(updated.id)
@@ -14453,6 +14603,24 @@ def build_parser():
     runs_cancel_parser.add_argument("run_id")
     _add_json_noop(runs_cancel_parser)
 
+    harness_help_language = _configured_cli_language()
+    harness_parser = subparsers.add_parser(
+        "harness",
+        help=i18n_t("harness.cli.help.command", harness_help_language),
+        description=i18n_t("harness.cli.help.description", harness_help_language),
+        error_help_command="vibe harness --help",
+    )
+    harness_subparsers = harness_parser.add_subparsers(
+        dest="harness_command",
+        metavar="{status}",
+    )
+    harness_subparsers.required = True
+    harness_status_parser = harness_subparsers.add_parser(
+        "status",
+        help=i18n_t("harness.cli.help.status", harness_help_language),
+    )
+    _add_json_noop(harness_status_parser)
+
     session_parser = subparsers.add_parser(
         "session",
         help="Inspect, control, and update Agent sessions",
@@ -15745,6 +15913,10 @@ def main():
         if args.runs_command == "cancel":
             sys.exit(cmd_runs_cancel(args))
         parser.error("runs command is required")
+    if args.command == "harness":
+        if args.harness_command == "status":
+            sys.exit(cmd_harness_status(args))
+        parser.error("harness command is required")
     if args.command == "session":
         if args.session_command == "list":
             sys.exit(cmd_session_list(args))

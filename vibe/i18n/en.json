@@ -16,11 +16,25 @@
     "event": {
       "acceptanceUnknown": "The Show event may still be processing. It was not replayed locally.",
       "dispatchFailed": "The Show event was recorded, but its agent turn could not be delivered.",
-      "idConflict": "This Show event ID is already bound to different event contents."
+      "idConflict": "This Show event ID is already bound to different event contents.",
+      "unsupportedEventType": "Show Page writes require a supported human event or mark resolution type."
     }
   },
   "harness": {
     "agentInitiatedContinuation": "Agent-initiated continuation",
+    "cli": {
+      "help": {
+        "command": "Inspect unified Harness live state and anomalies",
+        "description": "Inspect active Runs, armed Watches, upcoming Tasks, and live anomalies.",
+        "status": "Show the bounded live/anomaly snapshot"
+      },
+      "error": {
+        "sqliteRequired": "Harness status requires the SQLite task store.",
+        "controllerStatus": "The controller returned status {status}.",
+        "controllerTimeout": "The controller request timed out.",
+        "controllerUnavailable": "The controller is unreachable."
+      }
+    },
     "promptEcho": {
       "scheduled": "⏰ Scheduled task",
       "watch": "👀 Watch",
@@ -67,7 +81,9 @@
       "exitedWithDetail": "Command exited with status {code}: {detail}"
     },
     "task": {
-      "resultNotRecorded": "The result of this run could not be recorded: the task was reclaimed, repointed or removed while it was running, so its stored state is unchanged."
+      "resultNotRecorded": "The result of this run could not be recorded: the task was reclaimed, repointed or removed while it was running, so its stored state is unchanged.",
+      "schedulerCallbackFailed": "The scheduled fire failed before it could be queued: {detail}",
+      "scheduleReplaced": "This scheduled fire belongs to an earlier task schedule and was not executed."
     },
     "queueCoalesced": {
       "summary": "[Avibe Harness] The same watch/task callback fired {count} times within a rolling {window}-second window. The queued callbacks were coalesced into this single Agent turn.",
@@ -234,6 +250,10 @@
       "message": "This Task's managing Session is no longer available.",
       "hint": "Create a replacement Task from an available Agent Session, then remove this orphaned definition with `vibe task remove {id}`."
     },
+    "taskScheduleRetired": {
+      "message": "This one-shot Task's schedule has already ended.",
+      "hint": "Set a new future time with `vibe task update {id} --at <time>`, then resume it."
+    },
     "sessionFork": {
       "agentUnavailable": {
         "message": "The source session's Agent is no longer available for a new fork.",
@@ -242,6 +262,7 @@
     },
     "sessionArchived": "This session is archived and can no longer be changed.",
     "sessionArchiveUnavailable": "This session cannot be archived while the Avibe controller is unavailable. Please try again shortly.",
+    "projectAccessDenied": "You do not have permission to create a session in this project.",
     "workbenchAttachment": {
       "session_not_found": "This session is no longer available.",
       "file_required": "Choose a file to upload.",
@@ -773,6 +794,7 @@
       "invalid_source_order": "The source order contains an unavailable, ineligible, or duplicate source.",
       "mode_switch_blocked": "This operation is blocked by the current supply mode or selection.",
       "engine_down": "The local model gateway is unavailable.",
+      "engine_down_streamed": "The local model gateway is unavailable. This turn's output may be incomplete.",
       "migration_item_conflict": "This migration item conflicts with the current model gateway state.",
       "stream_interrupted": "The upstream stream was interrupted.",
       "upstream_protocol_error": "The upstream response did not match the expected protocol.",
@@ -800,7 +822,6 @@
         "credential_revoked": "credential revoked",
         "balance_exhausted": "balance exhausted",
         "account_banned": "account unavailable",
-        "permission_denied": "request permission denied",
         "unclassified_error": "unclassified source error",
         "no_enabled_source": "no source is enabled",
         "no_eligible_source": "no source is eligible",
@@ -813,12 +834,10 @@
     "launch": {
       "retry": "The next turn has already switched routes. Retry directly.",
       "waiting": "Model {model} is temporarily unavailable. Waiting for {source} to recover at {retry_at}.",
+      "waiting_without_retry": "The route for model {model} has recovered. Retry directly.",
       "interrupted": "Model {model} is unavailable: {blockers}. Open Models to resolve it.",
-      "native_cli_unavailable": "CLI login is not available in this process",
       "route_unconfigured": "Model {model} has no configured route. Open Models to configure one.",
-      "no_enabled_source": "Model {model} has no enabled source. Open Models to configure one.",
-      "no_eligible_source": "Model {model} has no source eligible for {backend}. Open Models to configure one.",
-      "model_unsupported": "No source supports model {model}. Open Models to configure one."
+      "request_incompatible": "This request is incompatible; switching Sources will not help."
     }
   },
   "remote_access": {

@@ -14,6 +14,8 @@ import sys
 import sysconfig
 import tarfile
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 
@@ -53,6 +55,24 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: file.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+@contextmanager
+def _temporary_directory(prefix: str) -> Iterator[Path]:
+    """Create scratch space beneath the canonical system temp directory."""
+
+    temp_root = Path(tempfile.gettempdir()).resolve(strict=True)
+    with tempfile.TemporaryDirectory(prefix=prefix, dir=temp_root) as temporary:
+        yield Path(temporary)
+
+
+@contextmanager
+def _short_socket_directory(prefix: str) -> Iterator[Path]:
+    """Create canonical scratch space short enough for Unix-domain sockets."""
+
+    temp_root = Path("/tmp").resolve(strict=True)
+    with tempfile.TemporaryDirectory(prefix=prefix, dir=temp_root) as temporary:
+        yield Path(temporary)
 
 
 def _platform_tag() -> str:
@@ -142,8 +162,8 @@ def create_archive(*, runtime_root: Path, output: Path, platform: str) -> dict[s
 def verify_archive(archive_path: Path, *, binary_sha256: str) -> None:
     """Extract and smoke the final bytes in a new directory."""
 
-    with tempfile.TemporaryDirectory(prefix="avibe-memory-runtime-verify-") as temporary_value:
-        destination = Path(temporary_value) / "runtime"
+    with _temporary_directory("avibe-memory-runtime-verify-") as temporary:
+        destination = temporary / "runtime"
         destination.mkdir()
         destination_resolved = destination.resolve()
         with tarfile.open(archive_path, "r:gz") as archive:
@@ -171,8 +191,8 @@ def verify_archive(archive_path: Path, *, binary_sha256: str) -> None:
         if _sha256(binary) != binary_sha256:
             raise SystemExit("Memory Runtime extracted Python checksum mismatch")
         _smoke(binary, cwd=destination.parent)
-        with tempfile.TemporaryDirectory(prefix="mrv-health-", dir="/tmp") as health_home:
-            _sidecar_health_smoke(binary, effective_home=Path(health_home))
+        with _short_socket_directory("mrv-") as health_home:
+            _sidecar_health_smoke(binary, effective_home=health_home)
 
 
 def prune_runtime(runtime_root: Path) -> None:
@@ -329,8 +349,7 @@ def build_runtime(
     if uv_identity.split()[:2] != ["uv", UV_VERSION]:
         raise SystemExit(f"Memory Runtime builder requires uv {UV_VERSION}")
 
-    with tempfile.TemporaryDirectory(prefix="avibe-memory-runtime-") as temporary_value:
-        temporary = Path(temporary_value)
+    with _temporary_directory("avibe-memory-runtime-") as temporary:
         _run([uv_command, "python", "install", python_version], cwd=temporary)
         found = _run(
             [uv_command, "python", "find", "--no-project", "--managed-python", python_version],
@@ -405,6 +424,16 @@ def build_runtime(
     return archive, metadata
 
 
+def build_output(*, archive: Path, metadata: dict[str, object]) -> dict[str, object]:
+    """Return transport status with reusable manifest metadata kept explicit."""
+
+    return {
+        "ok": True,
+        "archive": str(archive),
+        "metadata": metadata,
+    }
+
+
 def main() -> int:
     repository = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(description="Build an Avibe-managed EverOS Memory Runtime archive.")
@@ -417,7 +446,11 @@ def main() -> int:
     parser.add_argument("--uv", default="uv")
     parser.add_argument("--python-version", default=PYTHON_VERSION)
     parser.add_argument("--platform", choices=sorted(EXPECTED_PLATFORMS))
-    parser.add_argument("--metadata-output", type=Path)
+    parser.add_argument(
+        "--metadata-output",
+        type=Path,
+        help="Write generator-compatible Memory Runtime metadata JSON to this path.",
+    )
     args = parser.parse_args()
     archive, metadata = build_runtime(
         output_dir=args.output_dir,
@@ -429,7 +462,7 @@ def main() -> int:
     if args.metadata_output is not None:
         args.metadata_output.parent.mkdir(parents=True, exist_ok=True)
         args.metadata_output.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    print(json.dumps({"ok": True, "archive": str(archive), **metadata}, indent=2, sort_keys=True))
+    print(json.dumps(build_output(archive=archive, metadata=metadata), indent=2, sort_keys=True))
     return 0
 
 

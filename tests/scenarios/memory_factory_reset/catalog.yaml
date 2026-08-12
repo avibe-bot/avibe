@@ -47,6 +47,15 @@ scenarios:
     given: A capture observes the old runtime before Factory Reset publishes a replacement
     when: The replacement gate opens after the fresh aggregate is published
     then: The capture is rejected without writing to either runtime
+  - id: MEMORY-FACTORY-005
+    name: Retry deletes a same-owner inaccessible child-home tree
+    status: covered
+    kind: service_boundary
+    layer: scenario
+    test: tests/scenarios/memory_factory_reset/test_memory_factory_reset_scenarios.py::test_memory_factory_005_retry_deletes_owned_inaccessible_child_home
+    given: On an O_PATH host, a durable reset retry encounters a real child-home tree containing a same-owner 0000 directory
+    when: The Controller replacement gate retries Factory Reset
+    then: The directory is hardened through its pinned descriptor and both mutable roots are deleted
   - id: MEMORY-FACTORY-101
     name: Invalid artifact disables reset
     status: covered

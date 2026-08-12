@@ -608,6 +608,44 @@ def test_fifo_segment_starts_one_turn_and_materializes_one_merged_message(manage
     assert stored["delivered_at"] == accepted[0]["materialized_at"]
 
 
+def test_memory_fifo_segment_merges_only_one_user(managers) -> None:
+    manager, _other, engine, _engine_b, starts = managers
+    active_turn_id, _ = asyncio.run(_activate(manager, text="active"))
+    queued = [
+        asyncio.run(
+            manager.deliver(
+                DeliveryRequest(
+                    session_id="ses_fsm",
+                    priority="p3",
+                    content=text,
+                    metadata={
+                        "_memory_user_id": user_id,
+                        "_memory_ordinary_text": True,
+                    },
+                ),
+                context=_context(),
+            )
+        )
+        for text, user_id in (
+            ("alice one", "remote:alice"),
+            ("alice two", "remote:alice"),
+            ("bob one", "remote:bob"),
+        )
+    ]
+
+    assert asyncio.run(manager.terminalize_turn(active_turn_id))
+    queued_starts = [(turn_id, text) for turn_id, text in starts if turn_id != active_turn_id]
+    assert len(queued_starts) == 1
+    alice_turn_id, dispatch_text = queued_starts[0]
+    assert dispatch_text == "alice one\nalice two"
+
+    first, second, third = [_row(engine, str(item.delivery_id)) for item in queued]
+    assert first["turn_id"] == alice_turn_id
+    assert second["turn_id"] == alice_turn_id
+    assert third["turn_id"] is None
+    assert third["state"] == "queued"
+
+
 def test_fifo_segment_does_not_merge_different_message_authors(managers) -> None:
     manager, _other, engine, _engine_b, starts = managers
     active_turn_id, _ = asyncio.run(_activate(manager, text="active"))
@@ -6531,12 +6569,59 @@ def test_owned_run_sweep_retries_terminal_turn_settlement_before_orphaning(
             select(agent_runs.c.status).where(agent_runs.c.id == run_id)
         ).scalar_one() == "running"
 
+    assert run_id not in manager.snapshot_owned_agent_run_ids({run_id})
+    assert settlement.calls == 1
     assert run_id not in manager.owned_agent_run_ids()
     assert settlement.calls == 2
     with engine.connect() as conn:
         assert conn.execute(
             select(agent_runs.c.status).where(agent_runs.c.id == run_id)
         ).scalar_one() == "succeeded"
+
+
+def test_snapshot_retains_pre_turn_delivery_ownership(managers) -> None:
+    manager, _restarted, engine, _engine_b, _starts = managers
+    run_id = "run-queued-delivery-owner"
+    delivery_id = delivery_store.new_delivery_id()
+    now = "2026-08-01T00:00:00Z"
+    with engine.begin() as conn:
+        delivery_store.insert_delivery(
+            conn,
+            delivery_id=delivery_id,
+            session_id="ses_fsm",
+            priority="p3",
+            state="queued",
+            snapshot=delivery_store.message_snapshot(
+                scope_id=None,
+                session_id="ses_fsm",
+                platform="avibe",
+                author="harness",
+                source="harness",
+                message_type="harness",
+                text="queued owner",
+            ),
+            dispatch_text="queued owner",
+            now=now,
+        )
+        conn.execute(
+            agent_runs.insert().values(
+                id=run_id,
+                definition_id=None,
+                run_type="agent_run",
+                status="running",
+                cancel_requested=0,
+                session_id="ses_fsm",
+                callback_session_id="ses_callback",
+                callback_status="pending",
+                delivery_id=delivery_id,
+                created_at=now,
+                started_at=now,
+                updated_at=now,
+                metadata_json="{}",
+            )
+        )
+
+    assert manager.snapshot_owned_agent_run_ids({run_id}) == {run_id}
 
 
 @pytest.mark.parametrize("sent_before_recovery", [False, True])

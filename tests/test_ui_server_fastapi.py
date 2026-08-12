@@ -715,6 +715,20 @@ def _machine_coded_error_builders():
             "share_id_taken",
             409,
         ),
+        (
+            "show_page_missing",
+            lambda: ui_server._show_page_error_response(_Coded("missing", "show_page_not_found")),
+            "show_page_not_found",
+            404,
+        ),
+        (
+            "show_page_email_transient",
+            lambda: ui_server._show_page_error_response(
+                _Coded("temporary failure", "show_page_email_access_transient")
+            ),
+            "show_page_email_access_transient",
+            503,
+        ),
         ("dock", lambda: ui_server._dock_error_response(_Coded("nope", "show_page_not_found")), "show_page_not_found", 404),
         (
             "show_page_icon",
@@ -1462,6 +1476,52 @@ def test_harness_task_resume_rejects_orphaned_owner_without_target(
     }
 
 
+def test_harness_task_resume_rejects_retired_one_shot(monkeypatch, tmp_path):
+    from storage.background import SQLiteBackgroundTaskStore
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    store = SQLiteBackgroundTaskStore()
+    try:
+        store.upsert_scheduled_task(
+            {
+                "id": "retired-task",
+                "name": "Retired task",
+                "prompt": "run it",
+                "schedule_type": "at",
+                "run_at": "2026-08-11T00:00:00+00:00",
+                "timezone": "UTC",
+                "enabled": False,
+                "retired_at": "2026-08-11T00:00:01+00:00",
+                "retirement_reason": "schedule_missed",
+                "created_at": "2026-08-11T00:00:00+00:00",
+                "updated_at": "2026-08-11T00:00:01+00:00",
+            }
+        )
+    finally:
+        store.close()
+
+    client = app.test_client()
+    response = client.patch(
+        "/api/harness/tasks/retired-task",
+        json={"enabled": True},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 409
+    body = response.get_json()
+    assert body["code"] == "task_schedule_retired"
+    assert body["details"] == {"task_id": "retired-task"}
+    store = SQLiteBackgroundTaskStore()
+    try:
+        saved = store.get_scheduled_task("retired-task")
+    finally:
+        store.close()
+    assert saved is not None
+    assert saved["enabled"] is False
+    assert saved["retirement_reason"] == "schedule_missed"
+
+
 def test_harness_bootstrap_returns_counts_and_selected_page(monkeypatch, tmp_path):
     from storage.background import SQLiteBackgroundTaskStore
 
@@ -1639,6 +1699,8 @@ def test_project_patch_forwards_stable_agent_ids_and_localizes_conflicts(monkeyp
         headers=csrf_headers(client),
     )
 
+    authorization_context = captured.pop("authorization_context")
+    assert authorization_context.is_instance_owner
     assert captured == {
         "project_id": "proj-stale",
         "display_name": None,
@@ -2467,6 +2529,118 @@ def test_json_api_gzip_skips_sse_streaming_response():
     assert materialized_response is materialized
     assert materialized_response.body == body
     assert "Content-Encoding" not in materialized_response.headers
+
+
+def test_workbench_events_filter_privileged_events_for_viewers(monkeypatch, tmp_path):
+    from storage import projects_service
+    from storage.db import create_sqlite_engine
+    from storage.workbench_sessions_service import create_session
+    from vibe.authorization import AuthorizationContext
+    from vibe.sse_broker import broker
+    from vibe.ui_compat import g
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    engine = create_sqlite_engine()
+    try:
+        with engine.begin() as conn:
+            project = projects_service.create_project(conn, str(project_dir))
+            session = create_session(conn, scope_id=project["scope_id"], agent_backend="codex")
+    finally:
+        engine.dispose()
+
+    async def collect_next_live_event() -> str:
+        with app.test_request_context("/api/events"):
+            g.authorization_context = AuthorizationContext(instance_role="viewer", is_remote=True)
+            response = await ui_server.workbench_events()
+            iterator = response.body_iterator.__aiter__()
+            try:
+                initial_chunks = [await iterator.__anext__() for _ in range(3)]
+                broker.publish("vaults.updated", {"secret_name": "hidden-secret"})
+                broker.publish("authorization.changed", {"project_ids": ["hidden-project"]})
+                broker.publish("message.new", {"session_id": session["id"]})
+                live_chunks = [
+                    await asyncio.wait_for(iterator.__anext__(), timeout=1)
+                    for _ in range(2)
+                ]
+            finally:
+                await iterator.aclose()
+        chunks = [*initial_chunks, *live_chunks]
+        return "".join(chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk for chunk in chunks)
+
+    body = asyncio.run(collect_next_live_event())
+
+    assert "event: authorization.changed" in body
+    assert "event: message.new" in body
+    assert "hidden-project" not in body
+    assert "hidden-secret" not in body
+
+
+def test_workbench_events_allow_show_events_to_temporary_org_viewers() -> None:
+    from vibe.authorization import AuthorizationContext
+    from vibe.sse_broker import broker
+    from vibe.ui_compat import g
+
+    async def collect_show_event() -> str:
+        with app.test_request_context("/api/events"):
+            g.authorization_context = AuthorizationContext(
+                instance_role="viewer",
+                instance_access_source="organization_group",
+                organization_id="org-1",
+                organization_member_id="member-1",
+                organization_role="member",
+                is_remote=True,
+            )
+            response = await ui_server.workbench_events()
+            iterator = response.body_iterator.__aiter__()
+            try:
+                for _ in range(3):
+                    await iterator.__anext__()
+                broker.publish(
+                    "show.event",
+                    {
+                        "session_id": "show-session-1",
+                        "payload": {
+                            "screenshot": {
+                                "path": "/private/host/path.png",
+                                "attachmentId": "attachment-1",
+                            }
+                        },
+                    },
+                )
+                chunk = await asyncio.wait_for(iterator.__anext__(), timeout=1)
+            finally:
+                await iterator.aclose()
+        return chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk
+
+    body = asyncio.run(collect_show_event())
+
+    assert "event: show.event" in body
+    assert "show-session-1" in body
+    assert "/private/host/path.png" not in body
+
+
+def test_workbench_events_end_at_authorization_refresh_deadline():
+    from vibe.authorization import AuthorizationContext
+    from vibe.ui_compat import g
+
+    async def collect_until_expired() -> list[str | bytes]:
+        with app.test_request_context("/api/events"):
+            g.authorization_context = AuthorizationContext(instance_role="owner", is_remote=True)
+            g.remote_authorization_refresh_at = ui_server.time.time()
+            response = await ui_server.workbench_events()
+            iterator = response.body_iterator.__aiter__()
+            try:
+                chunks = [await iterator.__anext__() for _ in range(3)]
+                with pytest.raises(StopAsyncIteration):
+                    await asyncio.wait_for(iterator.__anext__(), timeout=1)
+            finally:
+                await iterator.aclose()
+        return chunks
+
+    assert len(asyncio.run(collect_until_expired())) == 3
 
 
 def test_json_api_gzip_skips_attachments_and_existing_encoding():

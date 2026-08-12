@@ -31,7 +31,7 @@ from vibe.message_types import build_partial_index_predicate
 pytestmark = pytest.mark.no_sqlite_template
 
 
-HEAD_REVISION = "20260811_0052"
+HEAD_REVISION = "20260812_0053"
 MESSAGE_PARTIAL_INDEX_PREDICATES = {
     "ix_messages_inbox_activity": (
         "session_id is not null and type in "
@@ -858,7 +858,10 @@ def test_session_delivery_fsm_upgrade_and_downgrade_preserve_existing_rows(
             for row in conn.execute("pragma foreign_key_list(messages)")
             if row[2] == "agent_sessions" and row[3] == "session_id"
         )
-        version = conn.execute("select version_num from alembic_version").fetchone()
+        versions = {
+            row[0]
+            for row in conn.execute("select version_num from alembic_version")
+        }
     assert "session_turns" not in tables
     assert "message_deliveries" not in tables
     assert existing == ("hello", "queued", "ses_fsm")
@@ -866,7 +869,7 @@ def test_session_delivery_fsm_upgrade_and_downgrade_preserve_existing_rows(
     assert restored_dedupe == ("harness_dedupe", "watch:legacy:run-1")
     assert restored_agent_run == ("queued", "agent_run:run-legacy")
     assert message_session_fk[6] == "SET NULL"
-    assert version == ("20260729_0042",)
+    assert versions == {"20260725_0038", "20260729_0042"}
 
 
 def test_session_delivery_migration_uses_live_dedupe_for_harness_provenance(
@@ -1967,6 +1970,52 @@ def test_retirement_marker_migration_is_forward_only(tmp_path: Path) -> None:
     assert version == (HEAD_REVISION,)
 
 
+def test_retirement_reason_migration_preserves_legacy_unknowns(tmp_path: Path) -> None:
+    """0053 adds no inferred reason from clocks, edits, or run history."""
+
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision="20260811_0052")
+    with sqlite3.connect(db_path) as conn:
+        conn.executemany(
+            """
+            insert into run_definitions (
+                id, definition_type, schedule_type, run_at, enabled,
+                last_run_at, retired_at, created_at, updated_at, metadata_json
+            ) values (?, 'scheduled', 'at', ?, 0, ?, ?, ?, ?, '{}')
+            """,
+            (
+                (
+                    "legacy-ran",
+                    "2026-07-26T09:00:00+00:00",
+                    "2026-07-26T09:01:00+00:00",
+                    "2026-07-26T09:01:00+00:00",
+                    "2026-07-25T00:00:00+00:00",
+                    "2026-07-31T00:00:00+00:00",
+                ),
+                (
+                    "legacy-missed",
+                    "2026-07-26T10:00:00+00:00",
+                    None,
+                    "2026-07-26T10:00:01+00:00",
+                    "2026-07-25T00:00:00+00:00",
+                    "2026-07-31T00:00:00+00:00",
+                ),
+            ),
+        )
+        conn.commit()
+
+    run_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            "select id, retirement_reason from run_definitions order by id"
+        ).fetchall()
+        version = conn.execute("select version_num from alembic_version").fetchone()
+
+    assert rows == [("legacy-missed", None), ("legacy-ran", None)]
+    assert version == (HEAD_REVISION,)
+
+
 def test_orphaned_owner_task_migration_marks_unbound_definitions(tmp_path: Path) -> None:
     """0052 blocks every resumable orphan and stops the ones still enabled."""
     db_path = tmp_path / "vibe.sqlite"
@@ -2174,12 +2223,15 @@ def test_show_annotation_migration_changes_only_the_user_send_index(
             "select * from messages order by id"
         ).fetchall()
         user_send_index = _index_sql(conn, "ix_messages_inbox_user_send")
-        version = conn.execute("select version_num from alembic_version").fetchone()
+        versions = {
+            row[0]
+            for row in conn.execute("select version_num from alembic_version")
+        }
 
     assert downgraded_rows == original_rows
     assert user_send_index.endswith(migration.DOWNGRADE_USER_SEND_PREDICATE)
     assert "(platform, session_id, created_at desc, id desc)" in user_send_index
-    assert version == ("20260726_0037",)
+    assert versions == {"20260725_0038", "20260726_0037"}
 
 
 def test_session_pinning_migration_preserves_existing_sessions_as_unpinned(tmp_path: Path) -> None:
@@ -5072,10 +5124,12 @@ def test_ensure_sqlite_state_imports_background_json(tmp_path: Path) -> None:
                         "session_id": "sesk8m4q2p7x",
                         "session_key": "slack::channel::C123",
                         "prompt": "hello",
-                        "schedule_type": "cron",
-                        "cron": "0 * * * *",
+                        "schedule_type": "at",
+                        "run_at": "2026-05-15T01:00:00+00:00",
                         "timezone": "UTC",
-                        "enabled": True,
+                        "enabled": False,
+                        "retired_at": "2026-05-15T01:00:00+00:00",
+                        "retirement_reason": "schedule_consumed",
                         "created_at": "2026-05-15T00:00:00+00:00",
                         "updated_at": "2026-05-15T00:00:00+00:00",
                     }
@@ -5099,7 +5153,8 @@ def test_ensure_sqlite_state_imports_background_json(tmp_path: Path) -> None:
                         "lifetime_timeout_seconds": 3600,
                         "retry_exit_codes": [75],
                         "retry_delay_seconds": 30,
-                        "enabled": True,
+                        "enabled": False,
+                        "retired_at": "2026-05-15T02:00:00+00:00",
                         "created_at": "2026-05-15T00:00:00+00:00",
                         "updated_at": "2026-05-15T00:00:00+00:00",
                     }
@@ -5149,12 +5204,25 @@ def test_ensure_sqlite_state_imports_background_json(tmp_path: Path) -> None:
     assert report.counts["background_runs_imported"] == 2
     with sqlite3.connect(db_path) as conn:
         tasks = conn.execute(
-            "select definition_type, session_id, legacy_session_key from run_definitions order by id"
+            "select definition_type, session_id, legacy_session_key, retired_at, retirement_reason "
+            "from run_definitions order by id"
         ).fetchall()
         runs = conn.execute("select id, run_type, status, session_id, error from agent_runs order by id").fetchall()
     assert tasks == [
-        ("scheduled", "sesk8m4q2p7x", "slack::channel::C123"),
-        ("watch", "sesk8m4q2p7x", "slack::channel::C123"),
+        (
+            "scheduled",
+            "sesk8m4q2p7x",
+            "slack::channel::C123",
+            "2026-05-15T01:00:00+00:00",
+            "schedule_consumed",
+        ),
+        (
+            "watch",
+            "sesk8m4q2p7x",
+            "slack::channel::C123",
+            "2026-05-15T02:00:00+00:00",
+            None,
+        ),
     ]
     assert runs == [
         ("hook-1", "hook_send", "queued", "sesk8m4q2p7x", None),
@@ -5449,3 +5517,126 @@ def _write_discovered_chats(path: Path) -> None:
         ),
         encoding="utf-8",
     )
+
+
+def test_media_reference_migration_backfills_legacy_cross_session_tokens(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision="20260725_0035")
+    now = "2026-07-25T00:00:00Z"
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            insert into scopes (
+                id, platform, scope_type, native_id, native_type, is_private,
+                supports_threads, metadata_json, first_seen_at, last_seen_at, updated_at
+            ) values (
+                'avibe::project::proj_media', 'avibe', 'project', 'proj_media', null,
+                1, 1, '{}', ?, ?, ?
+            )
+            """,
+            (now, now, now),
+        )
+        for session_id in ("ses_media_original", "ses_media_reuse"):
+            conn.execute(
+                """
+                insert into agent_sessions (
+                    id, scope_id, agent_backend, agent_variant, session_anchor,
+                    native_session_id, status, visibility, metadata_json,
+                    created_at, updated_at, last_active_at
+                ) values (?, 'avibe::project::proj_media', 'codex', 'codex', ?, '',
+                          'active', 'foreground', '{}', ?, ?, ?)
+                """,
+                (session_id, session_id, now, now, now),
+            )
+        conn.execute(
+            """
+            insert into media_objects (
+                token, scope_id, session_id, kind, source, local_path, created_at
+            ) values (
+                'legacy-shared-token', 'avibe::project::proj_media',
+                'ses_media_original', 'file', 'agent_reply', '/tmp/legacy.txt', ?
+            )
+            """,
+            (now,),
+        )
+        conn.execute(
+            """
+            insert into messages (
+                id, scope_id, session_id, platform, author, type, source,
+                content_text, content_json, metadata_json, created_at, updated_at
+            ) values (
+                'msg_legacy_media', 'avibe::project::proj_media', 'ses_media_reuse',
+                'avibe', 'agent', 'result', 'agent',
+                'See [attachment](/api/media/legacy-shared-token)', '{}', '{}', ?, ?
+            )
+            """,
+            (now, now),
+        )
+        conn.commit()
+
+    run_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        references = set(
+            conn.execute(
+                "select token, session_id from media_object_references"
+            )
+        )
+        version = conn.execute("select version_num from alembic_version").fetchone()
+
+    assert references == {
+        ("legacy-shared-token", "ses_media_original"),
+        ("legacy-shared-token", "ses_media_reuse"),
+    }
+    assert version == (HEAD_REVISION,)
+
+
+def test_background_tables_ready_requires_project_acl_and_media_references(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision="20260725_0035")
+
+    assert background_tables_ready(db_path) is False
+
+    run_migrations(db_path)
+
+    assert background_tables_ready(db_path) is True
+
+
+def test_run_migrations_upgrades_released_0030_to_acl_head(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+
+    run_migrations(db_path, revision="20260707_0029")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "update messages set author = 'harness', type = 'harness' "
+            "where source = 'harness' and author = 'user' and type = 'user'"
+        )
+        conn.execute("drop index if exists ix_messages_inbox_user_send")
+        conn.execute(
+            "create index ix_messages_inbox_user_send "
+            "on messages (platform, session_id, created_at desc, id desc) "
+            "where session_id is not null and "
+            "((author = 'user' and type = 'user') or "
+            "(author = 'harness' and type = 'harness'))"
+        )
+        conn.execute(
+            "update alembic_version set version_num = '20260716_0030'"
+        )
+        conn.commit()
+
+    run_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        version = conn.execute("select version_num from alembic_version").fetchone()
+        tables = {
+            row[0]
+            for row in conn.execute("select name from sqlite_master where type = 'table'")
+        }
+        assert version == (HEAD_REVISION,)
+        assert build_partial_index_predicate("ix_messages_inbox_activity") in _index_sql(
+            conn,
+            "ix_messages_inbox_activity",
+        )
+        assert "resource_access_policies" in tables
+        assert "resource_access_groups" in tables

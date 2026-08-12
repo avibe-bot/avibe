@@ -1,0 +1,117 @@
+import { renderToStaticMarkup } from 'react-dom/server';
+import { describe, expect, it, vi } from 'vitest';
+
+import type { ShowPageAccess } from '@/lib/showPageAccess';
+import {
+  ShowPageOrganizationAuthorizationPrompt,
+  ShowPageWorkspaceAccessControl,
+} from './ShowPageWorkspaceAccessControl';
+
+vi.mock('react-i18next', () => ({
+  useTranslation: () => ({ t: (key: string) => key }),
+}));
+
+vi.mock('@/context/ApiContext', () => ({
+  ApiError: class ApiError extends Error {
+    code = null;
+  },
+  useApi: () => ({
+    getShowPageAuthorizedEmails: vi.fn(),
+    replaceShowPageAuthorizedEmails: vi.fn(),
+  }),
+}));
+
+vi.mock('@/components/ui/confirm-dialog', () => ({
+  ConfirmDialog: ({ open, title }: { open: boolean; title: string }) => (
+    <div data-confirm-open={String(open)}>{title}</div>
+  ),
+}));
+
+const access = (overrides: Partial<ShowPageAccess> = {}): ShowPageAccess => ({
+  ok: true,
+  mode: 'organization',
+  instance_id: 'inst-1',
+  organization_id: 'org-1',
+  access_level: 'private',
+  group_ids: [],
+  policy_revision: 4,
+  last_applied_control_plane_revision: 4,
+  can_use: true,
+  can_manage: true,
+  can_publish_public: true,
+  public_link_enabled: false,
+  ...overrides,
+});
+
+const renderControl = (value: ShowPageAccess) => renderToStaticMarkup(
+  <ShowPageWorkspaceAccessControl access={value} active={false} sessionId="session-1" />,
+);
+
+describe('ShowPageWorkspaceAccessControl', () => {
+  it('offers explicit reauthorization after an Organization subject mismatch', () => {
+    const html = renderToStaticMarkup(
+      <ShowPageOrganizationAuthorizationPrompt gate="subject_mismatch" onAuthorize={() => undefined} />,
+    );
+
+    expect(html).toContain('chat.showPage.organizationSubjectMismatch');
+    expect(html).toContain('chat.showPage.organizationSignInAgain');
+    expect(html).toContain('<button');
+  });
+
+  it('keeps the normal Organization sign-in action on the same recovery component', () => {
+    const html = renderToStaticMarkup(
+      <ShowPageOrganizationAuthorizationPrompt gate="authorization_required" onAuthorize={() => undefined} />,
+    );
+
+    expect(html).toContain('chat.showPage.organizationSignInDesc');
+    expect(html).toContain('chat.showPage.organizationSignIn');
+    expect(html).toContain('<button');
+  });
+
+  it('gives Personal an email audience without Organization choices', () => {
+    const html = renderControl(access({
+      mode: 'personal',
+      instance_id: null,
+      organization_id: null,
+      policy_revision: null,
+      last_applied_control_plane_revision: null,
+    }));
+
+    expect(html).toContain('chat.showPage.workspaceLevels.private');
+    expect(html).not.toContain('chat.showPage.workspaceLevels.public');
+    expect(html).not.toContain('chat.showPage.workspaceLevels.scope');
+    expect(html).not.toContain('<select');
+    expect(html).toContain('chat.showPage.emailAccess');
+  });
+
+  it('renders all Organization audiences and keeps the public wire value labeled as Organization', () => {
+    const html = renderControl(access({ access_level: 'public' }));
+
+    expect(html).toContain('value="private"');
+    expect(html).toContain('value="public" selected=""');
+    expect(html).toContain('value="scope"');
+    expect(html).toContain('chat.showPage.workspaceLevels.public');
+    expect(html).toContain('chat.showPage.emailAccess');
+  });
+
+  it('keeps the Organization audience read-only for a non-owner viewer', () => {
+    const html = renderControl(access({ can_manage: false, can_publish_public: false }));
+
+    expect(html).toContain('<select disabled=""');
+    expect(html).toContain('chat.showPage.workspaceReadOnly');
+    expect(html).not.toContain('chat.showPage.emailAccessDesc');
+  });
+
+  it('hides exact-email grants from an Organization admin who does not own the page', () => {
+    const html = renderControl(access({ can_manage: true, can_publish_public: false }));
+
+    expect(html).not.toContain('chat.showPage.emailAccess');
+  });
+
+  it('mounts the established Organization audience-narrowing confirmation', () => {
+    const html = renderControl(access({ access_level: 'public' }));
+
+    expect(html).toContain('data-confirm-open="false"');
+    expect(html).toContain('organization.resources.narrowTitle');
+  });
+});

@@ -175,6 +175,37 @@ def test_dispatch_async_missing_socket_raises_unavailable(tmp_path):
         asyncio.run(internal_client.dispatch_async({"session_id": "s", "text": "x"}, socket_path=sock))
 
 
+def test_running_agents_ownership_snapshot_posts_bounded_candidates(socket_path):
+    app = FastAPI()
+    captured: dict = {}
+
+    @app.post("/internal/running-agents/snapshot")
+    async def _snapshot(payload: dict):
+        captured.update(payload)
+        return {
+            "ok": True,
+            "agents": [],
+            "owned_run_ids": payload["run_ids"][:1],
+        }
+
+    async def _go():
+        fake_transport = httpx.ASGITransport(app=app)
+        with patch(
+            "vibe.internal_client.httpx.AsyncHTTPTransport",
+            return_value=fake_transport,
+        ):
+            return await internal_client.list_running_agents(
+                run_ids=["run-a", "run-b"],
+                socket_path=socket_path,
+            )
+
+    result = asyncio.run(_go())
+
+    assert captured == {"run_ids": ["run-a", "run-b"]}
+    assert result["status_code"] == 200
+    assert result["body"]["owned_run_ids"] == ["run-a"]
+
+
 def test_dispatch_async_read_timeout_reports_acceptance_unknown(socket_path):
     sock = socket_path
 
@@ -955,5 +986,12 @@ def test_memory_client_rejects_non_socket_symlink_and_wrong_mode_before_transpor
 
 def test_socket_verifier_accepts_umask_created_owner_only_mode(socket_path) -> None:
     os.chmod(socket_path, 0o700)
+
+    assert internal_client._verified_socket_path(socket_path) == socket_path
+
+
+def test_socket_verifier_skips_posix_mode_check_on_windows(monkeypatch, socket_path) -> None:
+    os.chmod(socket_path, 0o644)
+    monkeypatch.setattr(internal_client, "_CHECK_POSIX_SOCKET_MODE", False)
 
     assert internal_client._verified_socket_path(socket_path) == socket_path

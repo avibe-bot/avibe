@@ -4,6 +4,7 @@ import os
 import sys
 import tempfile
 import unittest
+import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
@@ -34,6 +35,12 @@ from modules.agents.codex.agent import CodexAgent
 from tests.scenario_harness.auth_setup import AuthSetupScenarioHarness, FakeProcess
 from tests.scenario_harness.core import ScenarioExpect, ScenarioRunner, ScenarioStep
 from tests.scenario_harness.model_hub_native_oauth import NativeOAuthScenarioHarness
+from tests.scenario_harness.organization_management import (
+    REMOTE_ORIGIN,
+    OrganizationManagementScenarioHarness,
+)
+from tests.scenario_harness.show_page_email_access import ShowPageEmailAccessScenarioHarness
+from vibe import cloud_management
 from vibe.api import (
     get_claude_auth,
     save_claude_auth,
@@ -46,6 +53,47 @@ from vibe.claude_config import (
 )
 from vibe import remote_access, ui_server
 from vibe.ui_server import app
+
+
+class ShowPageEmailAccessScenarioTests(unittest.TestCase):
+    def setUp(self):
+        self.harness = ShowPageEmailAccessScenarioHarness()
+        self.addCleanup(self.harness.close)
+
+    def test_exact_email_login_is_confined_to_its_signed_show_page(self):
+        """Scenario: AUTH-SETUP-401"""
+        handshake = self.harness.begin_login("session-one")
+        self.assertEqual(handshake["show_page_id"], "session-one")
+
+        callback = self.harness.complete_login(handshake)
+        self.assertEqual(callback.status_code, 302)
+        self.assertEqual(callback.headers["Location"], handshake["next_path"])
+
+        exact = self.harness.get(handshake["next_path"])
+        other = self.harness.get("/show/session-two/__show/me")
+        api = self.harness.get("/api/show-pages")
+        self.assertEqual(exact.status_code, 200)
+        self.assertEqual(exact.get_json(), {"authenticated": False, "canAnnotate": False})
+        self.assertEqual(other.status_code, 403)
+        self.assertEqual(other.get_json()["error"], "show_page_access_forbidden")
+        self.assertEqual(api.status_code, 403)
+
+        self.harness.seed_broader_session()
+        existing_session_handshake = self.harness.begin_login("session-one")
+        existing_session_callback = self.harness.complete_login(
+            existing_session_handshake,
+            instance_role="editor",
+            access_source="email",
+        )
+        self.assertEqual(existing_session_callback.status_code, 302)
+        self.assertEqual(
+            existing_session_callback.headers["Location"],
+            existing_session_handshake["next_path"],
+        )
+        self.assertEqual(
+            self.harness.get(existing_session_handshake["next_path"]).status_code,
+            200,
+        )
 
 
 class _FakeNextTurnRuntime:
@@ -86,6 +134,286 @@ class _CodexProviderBindingSessions:
 
     def bind_agent_session(self, *_args, **_kwargs):
         return "ses-provider"
+class OrganizationManagementAuthScenarioTests(unittest.TestCase):
+    def setUp(self):
+        self.harness = OrganizationManagementScenarioHarness()
+        self.addCleanup(self.harness.close)
+
+    @staticmethod
+    def _authorize_state(authorize_url: str) -> str:
+        """The `state` the browser was actually handed, read back off its own URL."""
+        query = urllib.parse.urlparse(authorize_url).query
+        return urllib.parse.parse_qs(query)["state"][0]
+
+    def test_explicit_management_sign_in_starts_interactive_handoff(self):
+        """Scenario: AUTH-SETUP-301"""
+        client = self.harness.remote_client()
+        with patch.object(
+            cloud_management,
+            "begin_authorization",
+            return_value=("https://avibe.bot/oauth/management/authorize?state=state-1", "state-1"),
+        ) as begin:
+            response = client.post(
+                "/api/cloud-management/session/start",
+                json={"mode": "interactive", "next": "/admin/organization/members"},
+                headers=self.harness.csrf(client),
+                base_url=REMOTE_ORIGIN,
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.get_json()["mode"], "interactive")
+        begin.assert_called_once()
+        self.assertFalse(begin.call_args.kwargs["silent"])
+        self.assertEqual(begin.call_args.kwargs["remote_subject"], "user-1")
+
+    def test_silent_reauthorization_stops_after_login_required(self):
+        """Scenarios: AUTH-SETUP-302, AUTH-SETUP-306"""
+        client = self.harness.remote_client()
+        # The real handshake store, not a stub: the callback only tears a browser's
+        # session down when it proves it belongs to that browser's own live
+        # handshake, so a stubbed `begin_authorization` that registers nothing would
+        # exercise a forged callback rather than this browser's failed silent retry.
+        with patch.object(
+            cloud_management,
+            "begin_authorization",
+            wraps=cloud_management.begin_authorization,
+        ) as begin:
+            first = client.post(
+                "/api/cloud-management/session/start",
+                json={"mode": "silent", "next": "/admin/organization/overview"},
+                headers=self.harness.csrf(client),
+                base_url=REMOTE_ORIGIN,
+            )
+        self.assertEqual(first.status_code, 202)
+        self.assertTrue(begin.call_args.kwargs["silent"])
+        state = self._authorize_state(first.get_json()["authorize_url"])
+
+        callback = client.get(
+            f"/auth/organization/callback?error=login_required&state={state}",
+            base_url=REMOTE_ORIGIN,
+        )
+        self.assertEqual(callback.status_code, 302)
+        self.assertIn("cloud_management_error=login_required", callback.headers["location"])
+
+        second = client.post(
+            "/api/cloud-management/session/start",
+            json={"mode": "silent", "next": "/admin/organization/overview"},
+            headers=self.harness.csrf(client),
+            base_url=REMOTE_ORIGIN,
+        )
+        self.assertEqual(second.status_code, 401)
+
+    def test_logout_suppresses_silent_reauthorization(self):
+        """Scenario: AUTH-SETUP-303"""
+        client = self.harness.remote_client()
+        client.set_cookie(cloud_management.HANDLE_COOKIE_NAME, "grant-1", domain="alex.avibe.bot")
+        client.set_cookie(cloud_management.BROWSER_COOKIE_NAME, "browser-1", domain="alex.avibe.bot")
+        logout = client.delete(
+            "/api/cloud-management/session",
+            headers=self.harness.csrf(client),
+            base_url=REMOTE_ORIGIN,
+        )
+        self.assertEqual(logout.status_code, 200)
+        session = client.get("/api/cloud-management/session", base_url=REMOTE_ORIGIN)
+        self.assertEqual(session.status_code, 200)
+        self.assertFalse(session.get_json()["can_silent_reauthorize"])
+
+    def test_subject_mismatch_is_terminal(self):
+        """Scenario: AUTH-SETUP-304"""
+        client = self.harness.remote_client()
+        client.set_cookie(cloud_management.HANDLE_COOKIE_NAME, "grant-1", domain="alex.avibe.bot")
+        client.set_cookie(cloud_management.BROWSER_COOKIE_NAME, "browser-1", domain="alex.avibe.bot")
+        with patch.object(
+            cloud_management,
+            "resolve_grant",
+            return_value=(None, "cloud_management_subject_mismatch"),
+        ):
+            response = client.get("/api/cloud-management/session", base_url=REMOTE_ORIGIN)
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.get_json()["state"], "subject_mismatch")
+
+    def test_invalid_callback_token_requires_manual_sign_in(self):
+        """Scenario: AUTH-SETUP-305"""
+        client = self.harness.remote_client()
+        client.set_cookie(cloud_management.BROWSER_COOKIE_NAME, "browser-1", domain="alex.avibe.bot")
+        # A real handshake for this browser: the token exchange has to fail on a
+        # flow the browser actually started, otherwise this asserts what a forged
+        # cross-site callback does rather than what a broken sign-in does.
+        _, state = cloud_management.begin_authorization(
+            self.harness.config,
+            browser_id="browser-1",
+            remote_subject="user-1",
+            callback_origin=REMOTE_ORIGIN,
+            next_path="/admin/organization/overview",
+            silent=False,
+        )
+        with patch.object(
+            cloud_management,
+            "complete_authorization",
+            side_effect=cloud_management.CloudManagementError(
+                "invalid_cloud_management_token",
+                status=400,
+            ),
+        ):
+            response = client.get(
+                f"/auth/organization/callback?code=bad-code&state={state}",
+                base_url=REMOTE_ORIGIN,
+            )
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("cloud_management_error=invalid_cloud_management_token", response.headers["location"])
+        session = client.get("/api/cloud-management/session", base_url=REMOTE_ORIGIN)
+        self.assertFalse(session.get_json()["can_silent_reauthorize"])
+
+    def test_remote_callback_keeps_the_bound_subject(self):
+        """Scenario: AUTH-SETUP-307"""
+        backend = SimpleNamespace(base_url="https://avibe.bot")
+        next_path = "/chat/session-1?tab=show-page"
+        with patch.object(cloud_management, "_validated_backend", return_value=backend):
+            _, state = cloud_management.begin_authorization(
+                self.harness.config,
+                browser_id="browser-1",
+                remote_subject="user-1",
+                callback_origin=REMOTE_ORIGIN,
+                next_path=next_path,
+                silent=False,
+            )
+        client = self.harness.remote_client(subject="user-2")
+        client.set_cookie(cloud_management.BROWSER_COOKIE_NAME, "browser-1", domain="alex.avibe.bot")
+        token_payload = {
+            "access_token": "not-exposed",
+            "token_type": "Bearer",
+            "subject": "user-2",
+            "vibe_instance_id": "inst_123",
+        }
+        token_claims = {
+            "sub": "user-2",
+            "email": "other@example.com",
+            "vibe_instance_id": "inst_123",
+            "exp": 4_102_444_800,
+        }
+        with (
+            patch.object(cloud_management, "_backend_request", return_value=(200, token_payload)),
+            patch.object(cloud_management, "_validate_management_token", return_value=token_claims),
+        ):
+            response = client.get(
+                f"/auth/organization/callback?code=code-1&state={state}",
+                base_url=REMOTE_ORIGIN,
+            )
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            response.headers["location"],
+            f"{next_path}&cloud_management_error=cloud_management_subject_mismatch",
+        )
+        self.assertNotIn("not-exposed", response.text)
+
+    def test_trusted_loopback_flow_can_establish_the_first_subject(self):
+        """Scenario: AUTH-SETUP-308"""
+        client = self.harness.unbound_remote_client()
+        client.set_cookie(cloud_management.BROWSER_COOKIE_NAME, "browser-1", domain="alex.avibe.bot")
+        grant = cloud_management.ManagementGrant(
+            handle="grant-1",
+            browser_id="browser-1",
+            subject="first-user",
+            email="first@example.com",
+            token="not-exposed",
+            expires_at=4_102_444_800,
+        )
+        with patch.object(
+            cloud_management,
+            "complete_authorization",
+            return_value=(grant, "/admin/organization/overview"),
+        ) as complete:
+            response = client.get(
+                "/auth/organization/callback?code=code-1&state=state-1",
+                base_url=REMOTE_ORIGIN,
+            )
+        self.assertEqual(response.status_code, 302)
+        self.assertIsNone(complete.call_args.kwargs["remote_subject"])
+
+    def test_unbound_loopback_requires_interactive_sign_in(self):
+        """Scenario: AUTH-SETUP-309"""
+        client = self.harness.unbound_remote_client()
+        loopback_origin = "http://127.0.0.1:15131"
+
+        session = client.get("/api/cloud-management/session", base_url=loopback_origin)
+        silent = client.post(
+            "/api/cloud-management/session/start",
+            json={"mode": "silent", "next": "/admin/organization/overview"},
+            headers=self.harness.csrf(client, loopback_origin),
+            base_url=loopback_origin,
+        )
+
+        self.assertEqual(session.status_code, 200)
+        self.assertFalse(session.get_json()["can_silent_reauthorize"])
+        self.assertEqual(silent.status_code, 401)
+        self.assertEqual(
+            silent.get_json(),
+            {
+                "error": "cloud_management_authorization_required",
+                "retryable": False,
+            },
+        )
+
+    def test_subject_mismatch_can_reenter_with_workbench_return_path(self):
+        """Scenario: AUTH-SETUP-310"""
+        client = self.harness.remote_client()
+        client.set_cookie(cloud_management.BROWSER_COOKIE_NAME, "browser-1", domain="alex.avibe.bot")
+        with patch.object(
+            cloud_management,
+            "complete_authorization",
+            side_effect=cloud_management.CloudManagementError(
+                "cloud_management_subject_mismatch",
+                status=409,
+            ),
+        ):
+            mismatch = client.get(
+                "/auth/organization/callback?code=wrong-user&state=state-1",
+                base_url=REMOTE_ORIGIN,
+            )
+
+        self.assertEqual(mismatch.status_code, 302)
+        self.assertIn(
+            "cloud_management_error=cloud_management_subject_mismatch",
+            mismatch.headers["location"],
+        )
+
+        clean_next = "/chat/session-1?tab=show-page"
+        with patch.object(
+            cloud_management,
+            "begin_authorization",
+            return_value=("https://avibe.bot/oauth/management/authorize?state=state-2", "state-2"),
+        ) as begin:
+            reentry = client.post(
+                "/api/cloud-management/session/start",
+                json={"mode": "interactive", "next": clean_next},
+                headers=self.harness.csrf(client),
+                base_url=REMOTE_ORIGIN,
+            )
+
+        self.assertEqual(reentry.status_code, 202)
+        self.assertEqual(begin.call_args.kwargs["next_path"], clean_next)
+
+        grant = cloud_management.ManagementGrant(
+            handle="grant-2",
+            browser_id="browser-1",
+            subject="user-1",
+            email="alex@example.com",
+            token="not-exposed",
+            expires_at=4_102_444_800,
+        )
+        with patch.object(
+            cloud_management,
+            "complete_authorization",
+            return_value=(grant, clean_next),
+        ):
+            success = client.get(
+                "/auth/organization/callback?code=right-user&state=state-2",
+                base_url=REMOTE_ORIGIN,
+            )
+
+        self.assertEqual(success.status_code, 302)
+        self.assertEqual(success.headers["location"], clean_next)
+        self.assertNotIn("cloud_management_error", success.headers["location"])
 
 
 class _ReloadingV2ConfigController:
@@ -234,17 +562,25 @@ def test_remote_web_oauth_cold_launch_retry_is_single_owner(monkeypatch, tmp_pat
         assert state_payload["retry"] is True
 
     def complete_retry(current):
-        monkeypatch.setattr(
-            remote_access,
-            "exchange_oauth_code",
-            lambda _config, code, _verifier: {
+        def exchange(_config, code, _verifier, redirect_uri=None):
+            return {
                 "claims": {
                     "email": "alex@example.com",
                     "sub": "user-1",
                     "nonce": current.retry_nonce,
                     "code": code,
-                }
-            },
+                },
+                "session_claims": {
+                    "vibe_instance_id": current.config.remote_access.vibe_cloud.instance_id,
+                    "vibe_instance_role": "owner",
+                    "vibe_instance_access_source": "owner",
+                },
+            }
+
+        monkeypatch.setattr(
+            remote_access,
+            "exchange_oauth_code",
+            exchange,
         )
         callback = current.retry.get(
             f"/auth/callback?code=accepted&state={current.retry_state}",

@@ -27,16 +27,147 @@ from core.handlers.model_hub.adapter import (
     RetainedMaterialDisposition,
     SourceBinding,
 )
-from core.handlers.model_hub.classification import classify_outcome
+from core.handlers.model_hub.classification import (
+    classify_outcome,
+    terminal_outcome_category,
+)
 from core.handlers.model_hub.request import ModelHubRequest
+from core.handlers.model_hub.stream_wire import SSE_MAX_FRAME_BYTES, SSE_MAX_LINE_BYTES
 from vibe.model_hub_runtime import client as client_module
 from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
 from vibe.model_hub_runtime.client import EngineClient, EngineClientError, EngineConnection
 from vibe.model_hub_runtime.config import write_engine_config
 from vibe.model_hub_runtime.installer import EngineRuntimeManager
 from vibe.model_hub_runtime.environment import engine_subprocess_environment
-from vibe.model_hub_runtime.state import EngineStateError, EngineStateStore
+from vibe.model_hub_runtime.state import (
+    EngineStateError,
+    EngineStateStore,
+    SourceRecord,
+)
 from vibe.model_hub_runtime.supervisor import EngineSupervisor, EngineUnavailableError
+
+
+MODEL_HUB_FIXTURES = Path(__file__).parent / "fixtures" / "model_hub"
+STREAM_TRANSPORT_BOUNDARIES = json.loads(
+    (MODEL_HUB_FIXTURES / "stream_transport_boundaries.json").read_text(encoding="utf-8")
+)["cases"]
+DEEP_JSON_ARRAY = b"[" * 10_000 + b"0" + b"]" * 10_000
+
+
+def test_stream_prelude_does_not_charge_released_keepalives_to_frame_budget() -> None:
+    keepalive = b": " + b"k" * (SSE_MAX_LINE_BYTES - 4) + b"\n\n"
+    first = keepalive * (SSE_MAX_FRAME_BYTES // len(keepalive) + 1)
+    output = b'event: content_block_delta\ndata: {"type":"content_block_delta"}\n\n'
+
+    class Content:
+        async def read(self, _size: int) -> bytes:
+            return output
+
+    response = SimpleNamespace(content=Content(), status=200)
+    source = SourceRecord(
+        source_id="src_keepalive1",
+        vendor="anthropic",
+        protocol="anthropic",
+        base_url="https://example.test",
+        credential_ref="cred_keepalive1",
+        allowed_origins=("codex",),
+        model_ids=("claude-sonnet-4-5",),
+        prefix="keepalive",
+    )
+
+    async def run() -> tuple[bytes, object, object]:
+        prelude = client_module._StreamPrelude()
+        state, outcome = await client_module._read_stream_prelude(
+            response=response,
+            first=first,
+            prelude=prelude,
+            source=source,
+            model_id="claude-sonnet-4-5",
+            protocol="anthropic",
+            timeout=1,
+        )
+        payload = b"".join([chunk async for chunk in prelude.chunks()])
+        prelude.close()
+        return payload, state, outcome
+
+    payload, state, outcome = asyncio.run(run())
+
+    assert payload == first + output
+    assert state.model_output_started is True
+    assert outcome is None
+
+
+def test_stream_prelude_total_budget_ends_as_network_failure_and_cleans_spill(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> None:
+        budget = 512 * 1024
+        keepalive = b": " + b"k" * (32 * 1024 - 4) + b"\n\n"
+        preludes: list[TrackingPrelude] = []
+
+        class TrackingPrelude(client_module._StreamPrelude):
+            def __init__(self) -> None:
+                super().__init__(memory_limit=64, total_limit=budget)
+                self.physical_close_calls = 0
+                self.spill_observed = False
+                preludes.append(self)
+
+            def write(self, data: bytes) -> bool:
+                stored = super().write(data)
+                self.spill_observed = self.spill_observed or self.spilled
+                return stored
+
+            def close(self) -> None:
+                if not self.closed:
+                    self.physical_close_calls += 1
+                super().close()
+
+        class Content:
+            async def read(self, _size: int) -> bytes:
+                return keepalive
+
+        class Response:
+            status = 200
+            headers = {"Content-Type": "text/event-stream"}
+            content = Content()
+
+            def close(self) -> None:
+                return None
+
+        class Session:
+            async def post(self, *_args, **_kwargs):
+                return Response()
+
+            async def close(self) -> None:
+                return None
+
+        source = SourceRecord(
+            source_id="src_budget001",
+            vendor="custom",
+            protocol="openai_responses",
+            base_url="https://budget.example.test/v1",
+            credential_ref="cred_budget001",
+            allowed_origins=("codex",),
+            model_ids=("model-a",),
+            prefix="budget",
+        )
+        monkeypatch.setattr(client_module, "_StreamPrelude", TrackingPrelude)
+        monkeypatch.setattr(client_module.aiohttp, "ClientSession", lambda **_: Session())
+        client = EngineClient(
+            EngineConnection("http://127.0.0.1:15220", "management", "gateway")
+        )
+
+        handle = await client.invoke(source, "model-a", {}, stream=True)
+        outcome = await handle.outcome()
+
+        assert outcome.kind == RawOutcomeKind.NETWORK_ERROR
+        assert outcome.stream_started is False
+        assert preludes[0].spill_observed is True
+        assert preludes[0].stored_bytes <= budget
+        assert preludes[0].closed is True
+        assert preludes[0].physical_close_calls == 1
+
+    asyncio.run(run())
 
 
 def _write_fixture_archive(tmp_path: Path, *, version: str = "7.2.95") -> tuple[Path, bytes]:
@@ -257,12 +388,7 @@ def test_orphaned_oauth_cleanup_never_existed_ref_is_converged(
             state_store=store,
         )
 
-        assert (
-            await adapter.cleanup_orphaned_oauth_material(
-                "cred_00000000000000000000000000000000"
-            )
-            is True
-        )
+        assert await adapter.cleanup_orphaned_oauth_material("cred_00000000000000000000000000000000") is True
 
     asyncio.run(run())
 
@@ -850,31 +976,6 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header('Content-Length', '0')
             self.end_headers()
             return
-        if payload['model'].endswith('/stalled-first-byte'):
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.send_header('Content-Length', '1')
-            self.end_headers()
-            self.wfile.flush()
-            time.sleep(1)
-            return
-        if payload['model'].endswith('/stalled-error-body'):
-            self.send_response(429)
-            self.send_header('Content-Type', 'application/json')
-            self.send_header('Content-Length', '1')
-            self.end_headers()
-            self.wfile.flush()
-            time.sleep(1)
-            return
-        if payload['model'].endswith('/stalled-non-stream'):
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.send_header('Content-Length', '2')
-            self.end_headers()
-            self.wfile.write(b'{{')
-            self.wfile.flush()
-            time.sleep(1)
-            return
         if payload['model'].endswith('/invalid-json'):
             body = b'not-json'
             self.send_response(200)
@@ -892,8 +993,8 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
         if payload['model'].endswith('/slow-stream'):
-            first = b'data: {{"type":"content_block_delta"}}\\n\\n'
-            second = b'data: {{"type":"message_stop"}}\\n\\n'
+            first = b'data: {{"object":"chat.completion.chunk","choices":[{{"delta":{{"content":"slow"}}}}]}}\\n\\n'
+            second = b'data: [DONE]\\n\\n'
             self.send_response(200)
             self.send_header('Content-Type', 'text/event-stream')
             self.send_header('Content-Length', str(len(first) + len(second)))
@@ -904,7 +1005,12 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(second)
             return
         if payload.get('stream'):
-            body = b'data: {{"type":"message_stop"}}\\n\\n'
+            if self.path == '/v1/messages':
+                body = b'event: message_stop\\ndata: {{"type":"message_stop"}}\\n\\n'
+            elif self.path == '/v1/responses':
+                body = b'event: response.completed\\ndata: {{"type":"response.completed"}}\\n\\n'
+            else:
+                body = b'data: [DONE]\\n\\n'
             self.send_response(200)
             self.send_header('Content-Type', 'text/event-stream')
             self.send_header('Content-Length', str(len(body)))
@@ -1134,7 +1240,7 @@ def test_adapter_enforces_origin_and_returns_raw_outcomes(tmp_path: Path) -> Non
         failure = await failed.outcome()
         assert failure.kind is RawOutcomeKind.HTTP_ERROR
         assert failure.http_status == 429
-        assert failure.error_code == "quota_exceeded"
+        assert failure.error_type == "quota_exceeded"
         assert "upstream-secret" not in (failure.redacted_message or "")
         unsafe_code = await adapter.invoke("src_fixture123", "unsafe-error-code", {}, False, "codex")
         assert (await unsafe_code.outcome()).error_code is None
@@ -1145,7 +1251,7 @@ def test_adapter_enforces_origin_and_returns_raw_outcomes(tmp_path: Path) -> Non
         ):
             banned = await adapter.invoke("src_fixture123", model_id, {}, False, "codex")
             banned_outcome = await banned.outcome()
-            assert banned_outcome.error_code == error_code
+            assert error_code in banned_outcome.error_candidates
             assert banned_outcome.redacted_message == "upstream returned HTTP 403"
             assert classify_outcome(banned_outcome).reason == "account_banned"
         free_text = await adapter.invoke(
@@ -1286,9 +1392,7 @@ def test_adapter_restores_source_projection_when_restart_fails(tmp_path: Path) -
         )
 
         with pytest.raises(EngineUnavailableError, match="models.engine.health_failed"):
-            await adapter.sync_sources(
-                [_binding(new_ref, base_url="https://new.example.test/v1")]
-            )
+            await adapter.sync_sources([_binding(new_ref, base_url="https://new.example.test/v1")])
 
         restored = store.get_source("src_fixture123")
         assert restored is not None
@@ -1351,9 +1455,7 @@ def test_adapter_serializes_source_sync_with_new_invocations(tmp_path: Path) -> 
             adapter.sync_sources([_binding(new_ref, base_url="https://new.example.test/v1")])
         )
         assert await asyncio.to_thread(restart_started.wait, 2)
-        invoke_task = asyncio.create_task(
-            adapter.invoke("src_fixture123", "model-a", {}, False, "codex")
-        )
+        invoke_task = asyncio.create_task(adapter.invoke("src_fixture123", "model-a", {}, False, "codex"))
         await asyncio.sleep(0.05)
         assert not invoke_task.done()
 
@@ -1386,7 +1488,7 @@ def test_adapter_engine_unavailable_does_not_forge_an_upstream_error_code(tmp_pa
         outcome = await handle.outcome()
 
         assert outcome.kind is RawOutcomeKind.NETWORK_ERROR
-        assert outcome.error_code is None
+        assert outcome.error_code == "engine_down"
         assert outcome.redacted_message is None
 
     asyncio.run(run())
@@ -1437,7 +1539,7 @@ def test_adapter_applies_changed_install_to_running_engine(
     asyncio.run(run())
 
 
-def test_adapter_stream_outcome_commits_after_first_byte(tmp_path: Path) -> None:
+def test_adapter_stream_outcome_commits_at_model_output_boundary(tmp_path: Path) -> None:
     async def run() -> None:
         supervisor, store = _fixture_supervisor(tmp_path)
         adapter = CLIProxyEngineAdapter(supervisor=supervisor, state_store=store)
@@ -1453,10 +1555,13 @@ def test_adapter_stream_outcome_commits_after_first_byte(tmp_path: Path) -> None
         handle = await adapter.invoke("src_fixture123", "model-a", {}, True, "codex")
         assert handle.stream is not None
         body = b"".join([chunk async for chunk in handle.stream])
-        assert body.startswith(b"data:")
+        assert body.startswith(b"event:")
+        assert handle.outcome_available is True
+        await handle.close_stream()
+        await handle.close_stream()
         outcome = await handle.outcome()
         assert outcome.kind is RawOutcomeKind.SUCCESS
-        assert outcome.stream_started is True
+        assert outcome.stream_started is False
         await adapter.stop()
 
     asyncio.run(run())
@@ -1482,54 +1587,1265 @@ def test_engine_client_does_not_apply_a_total_turn_timeout(tmp_path: Path) -> No
         )
         assert handle.stream is not None
         body = b"".join([chunk async for chunk in handle.stream])
-        assert b"content_block_delta" in body
-        assert b"message_stop" in body
+        assert b"chat.completion.chunk" in body
+        assert b"[DONE]" in body
         assert (await handle.outcome()).kind is RawOutcomeKind.SUCCESS
         supervisor.stop()
 
     asyncio.run(run())
 
 
+def test_engine_client_marks_loopback_stream_disconnect_as_engine_down(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> None:
+        class Content:
+            async def read(self, _size: int) -> bytes:
+                return b'data: {"choices":[{"delta":{"content":"first"}}]}\n\n'
+
+            async def iter_chunked(self, _size: int):
+                raise client_module.aiohttp.ClientConnectionError("loopback engine closed")
+                yield b""
+
+        class Response:
+            status = 200
+            content = Content()
+            headers = {"Content-Type": "text/event-stream"}
+
+            def close(self) -> None:
+                return None
+
+        class Session:
+            async def post(self, *_args, **_kwargs):
+                return Response()
+
+            async def close(self) -> None:
+                return None
+
+        monkeypatch.setattr(
+            client_module.aiohttp,
+            "ClientSession",
+            lambda **_kwargs: Session(),
+        )
+        source = SourceRecord(
+            source_id="src_fixture123",
+            vendor="custom",
+            protocol="openai_chat",
+            base_url="https://api.example.test/v1",
+            credential_ref="cred_fixture123",
+            allowed_origins=(),
+            model_ids=("model-a",),
+            prefix="source-fixture123",
+        )
+        handle = await EngineClient(
+            EngineConnection(
+                base_url="http://127.0.0.1:15220",
+                management_key="management-key",
+                gateway_token="gateway-token",
+            )
+        ).invoke(source, "model-a", {}, stream=True)
+
+        assert handle.stream is not None
+        assert [chunk async for chunk in handle.stream] == [b'data: {"choices":[{"delta":{"content":"first"}}]}\n\n']
+        outcome = await handle.outcome()
+        assert outcome.kind is RawOutcomeKind.NETWORK_ERROR
+        assert outcome.error_code == "engine_down"
+        assert outcome.stream_started is True
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize(
-    ("model_id", "stream", "expected_kind", "expected_status", "stream_started"),
+    ("protocol", "output_chunk", "terminal_chunk"),
     [
-        ("stalled-first-byte", True, RawOutcomeKind.TIMEOUT, None, False),
-        ("stalled-error-body", True, RawOutcomeKind.HTTP_ERROR, 429, False),
-        ("stalled-non-stream", False, RawOutcomeKind.TIMEOUT, 200, True),
+        (
+            "anthropic",
+            b'event: content_block_delta\ndata: {"type":"content_block_delta"}\n\n',
+            b'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+        ),
+        (
+            "openai_responses",
+            b'event: response.output_text.delta\ndata: {"type":"response.output_text.delta"}\n\n',
+            b'event: response.completed\ndata: {"type":"response.completed","sequence_number":4}\n\n',
+        ),
+        (
+            "openai_chat",
+            b'data: {"choices":[{"delta":{"content":"first"}}]}\n\n',
+            b"data: [DONE]\n\n",
+        ),
+    ],
+)
+def test_engine_client_keeps_served_after_terminal_marker_then_disconnect(
+    monkeypatch: pytest.MonkeyPatch,
+    protocol: str,
+    output_chunk: bytes,
+    terminal_chunk: bytes,
+) -> None:
+    async def run() -> None:
+        class Content:
+            async def read(self, _size: int) -> bytes:
+                return output_chunk
+
+            async def iter_chunked(self, _size: int):
+                yield terminal_chunk
+                raise client_module.aiohttp.ClientConnectionError("late disconnect")
+
+        class Response:
+            status = 200
+            content = Content()
+            headers = {"Content-Type": "text/event-stream"}
+
+            def close(self) -> None:
+                return None
+
+        class Session:
+            async def post(self, *_args, **_kwargs):
+                return Response()
+
+            async def close(self) -> None:
+                return None
+
+        monkeypatch.setattr(
+            client_module.aiohttp,
+            "ClientSession",
+            lambda **_kwargs: Session(),
+        )
+        source = SourceRecord(
+            source_id="src_fixture123",
+            vendor="custom",
+            protocol=protocol,
+            base_url="https://api.example.test/v1",
+            credential_ref="cred_fixture123",
+            allowed_origins=(),
+            model_ids=("model-a",),
+            prefix="source-fixture123",
+        )
+        handle = await EngineClient(
+            EngineConnection(
+                base_url="http://127.0.0.1:15220",
+                management_key="management-key",
+                gateway_token="gateway-token",
+            )
+        ).invoke(source, "model-a", {}, stream=True, request_protocol=protocol)
+
+        assert handle.stream is not None
+        assert [chunk async for chunk in handle.stream] == [output_chunk, terminal_chunk]
+        outcome = await handle.outcome()
+        assert outcome.kind is RawOutcomeKind.SUCCESS
+        assert outcome.stream_started is True
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("protocol", ("anthropic", "openai_responses", "openai_chat"))
+def test_engine_client_classifies_buffered_2xx_native_error_before_success(
+    monkeypatch: pytest.MonkeyPatch,
+    protocol: str,
+) -> None:
+    async def run() -> None:
+        payload = b'{"error":{"type":"rate_limit_error"}}'
+
+        class Content:
+            reads = 0
+
+            async def read(self, _size: int) -> bytes:
+                self.reads += 1
+                return payload if self.reads == 1 else b""
+
+        class Response:
+            status = 200
+            content = Content()
+            headers = {"Content-Type": "application/json"}
+
+            def close(self) -> None:
+                return None
+
+        class Session:
+            async def post(self, *_args, **_kwargs):
+                return Response()
+
+            async def close(self) -> None:
+                return None
+
+        monkeypatch.setattr(client_module.aiohttp, "ClientSession", lambda **_: Session())
+        source = SourceRecord(
+            source_id="src_fixture123",
+            vendor="custom",
+            protocol=protocol,
+            base_url="https://api.example.test/v1",
+            credential_ref="cred_fixture123",
+            allowed_origins=(),
+            model_ids=("model-a",),
+            prefix="source-fixture123",
+        )
+        handle = await EngineClient(
+            EngineConnection("http://127.0.0.1:15220", "management", "gateway")
+        ).invoke(source, "model-a", {}, stream=False, request_protocol=protocol)
+        assert handle.stream is None
+        outcome = await handle.outcome()
+        assert outcome.kind is RawOutcomeKind.HTTP_ERROR
+        assert outcome.error_type == "rate_limit_error"
+        assert outcome.stream_started is False
+        decision = classify_outcome(outcome)
+        assert decision.action == "fallback"
+        assert decision.reason == "rate_limited"
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "invalid_chunk",
+    (
+        b"event: response.in_progress\ndata: {\n\n",
+        b"event: response.in_progress\ndata: []\n\n",
+        b'event: response.in_progress\ndata: {"type":"response.in_progress","sequence_number":1}\n\n',
+        b"event: future.event\ndata: " + DEEP_JSON_ARRAY + b"\n\n",
+    ),
+)
+def test_engine_client_transparently_forwards_unvalidated_stream_data(
+    monkeypatch: pytest.MonkeyPatch,
+    invalid_chunk: bytes,
+) -> None:
+    async def run() -> None:
+        output = (
+            b'event: response.output_text.delta\ndata: {"type":"response.output_text.delta",'
+            b'"sequence_number":1}\n\n'
+        )
+        terminal = (
+            b'event: response.completed\ndata: {"type":"response.completed","sequence_number":2}\n\n'
+        )
+
+        class Content:
+            async def read(self, _size: int) -> bytes:
+                return output
+
+            async def iter_chunked(self, _size: int):
+                yield invalid_chunk
+                yield terminal
+
+        class Response:
+            status = 200
+            content = Content()
+            headers = {"Content-Type": "text/event-stream"}
+
+            def close(self) -> None:
+                return None
+
+        class Session:
+            async def post(self, *_args, **_kwargs):
+                return Response()
+
+            async def close(self) -> None:
+                return None
+
+        monkeypatch.setattr(client_module.aiohttp, "ClientSession", lambda **_: Session())
+        source = SourceRecord(
+            source_id="src_fixture123",
+            vendor="custom",
+            protocol="openai_responses",
+            base_url="https://api.example.test/v1",
+            credential_ref="cred_fixture123",
+            allowed_origins=(),
+            model_ids=("model-a",),
+            prefix="source-fixture123",
+        )
+        handle = await EngineClient(
+            EngineConnection("http://127.0.0.1:15220", "management", "gateway")
+        ).invoke(source, "model-a", {}, stream=True)
+        assert handle.stream is not None
+        assert [chunk async for chunk in handle.stream] == [output, invalid_chunk, terminal]
+        outcome = await handle.outcome()
+        assert outcome.kind is RawOutcomeKind.SUCCESS
+        assert outcome.stream_started is True
+
+    asyncio.run(run())
+
+
+def test_engine_client_ignores_deep_json_before_model_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> None:
+        unknown = b"event: future.event\ndata: " + DEEP_JSON_ARRAY + b"\n\n"
+        terminal = b'event: response.completed\ndata: {"type":"response.completed"}\n\n'
+
+        class Content:
+            reads = 0
+
+            async def read(self, _size: int) -> bytes:
+                self.reads += 1
+                return unknown if self.reads == 1 else terminal if self.reads == 2 else b""
+
+        class Response:
+            status = 200
+            content = Content()
+            headers = {"Content-Type": "text/event-stream"}
+
+            def close(self) -> None:
+                return None
+
+        class Session:
+            async def post(self, *_args, **_kwargs):
+                return Response()
+
+            async def close(self) -> None:
+                return None
+
+        monkeypatch.setattr(client_module.aiohttp, "ClientSession", lambda **_: Session())
+        source = SourceRecord(
+            source_id="src_fixture123",
+            vendor="custom",
+            protocol="openai_responses",
+            base_url="https://api.example.test/v1",
+            credential_ref="cred_fixture123",
+            allowed_origins=(),
+            model_ids=("model-a",),
+            prefix="source-fixture123",
+        )
+        handle = await EngineClient(
+            EngineConnection("http://127.0.0.1:15220", "management", "gateway")
+        ).invoke(source, "model-a", {}, stream=True)
+
+        assert handle.stream is not None
+        assert [chunk async for chunk in handle.stream] == [unknown + terminal]
+        outcome = await handle.outcome()
+        assert outcome.kind is RawOutcomeKind.SUCCESS
+        assert outcome.stream_started is False
+
+    asyncio.run(run())
+
+
+def test_engine_client_classifies_initial_stream_eof_as_network(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> None:
+        class Content:
+            async def read(self, _size: int) -> bytes:
+                return b""
+
+        class Response:
+            status = 200
+            content = Content()
+            headers = {"Content-Type": "text/event-stream"}
+
+            def close(self) -> None:
+                return None
+
+        class Session:
+            async def post(self, *_args, **_kwargs):
+                return Response()
+
+            async def close(self) -> None:
+                return None
+
+        monkeypatch.setattr(client_module.aiohttp, "ClientSession", lambda **_: Session())
+        source = SourceRecord(
+            source_id="src_fixture123",
+            vendor="custom",
+            protocol="openai_responses",
+            base_url="https://api.example.test/v1",
+            credential_ref="cred_fixture123",
+            allowed_origins=(),
+            model_ids=("model-a",),
+            prefix="source-fixture123",
+        )
+        handle = await EngineClient(
+            EngineConnection("http://127.0.0.1:15220", "management", "gateway")
+        ).invoke(source, "model-a", {}, stream=True)
+
+        assert handle.stream is None
+        outcome = await handle.outcome()
+        assert outcome.kind is RawOutcomeKind.NETWORK_ERROR
+        assert outcome.stream_started is False
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("event_type", "terminal_payload", "error_code", "expected_action", "expected_reason"),
+    [
+        (
+            "response.failed",
+            {"type": "response.failed", "response": {"error": {"code": "permission_error"}}},
+            "permission_error",
+            "surface",
+            None,
+        ),
+        (
+            "response.incomplete",
+            {"type": "response.incomplete", "response": {"error": {"code": "permission_error"}}},
+            "permission_error",
+            "surface",
+            None,
+        ),
+        (
+            "error",
+            {"type": "error", "code": "authentication_error"},
+            "authentication_error",
+            "refresh",
+            None,
+        ),
+        (
+            "error",
+            {"type": "error", "code": "invalid_api_key"},
+            "invalid_api_key",
+            "refresh",
+            None,
+        ),
+        (
+            "error",
+            {"type": "error", "code": "server_error"},
+            "server_error",
+            "fallback",
+            "server_error",
+        ),
+    ],
+)
+def test_engine_client_recognizes_responses_failure_terminals(
+    monkeypatch: pytest.MonkeyPatch,
+    event_type: str,
+    terminal_payload: dict[str, object],
+    error_code: str,
+    expected_action: str,
+    expected_reason: str | None,
+) -> None:
+    async def run() -> None:
+        terminal = json.dumps(
+            terminal_payload,
+            separators=(",", ":"),
+        ).encode()
+
+        class Content:
+            async def read(self, _size: int) -> bytes:
+                return b"event: " + event_type.encode() + b"\ndata: " + terminal + b"\n\n"
+
+            async def iter_chunked(self, _size: int):
+                if False:
+                    yield b""
+
+        class Response:
+            status = 200
+            content = Content()
+            headers = {"Content-Type": "text/event-stream"}
+
+            def close(self) -> None:
+                return None
+
+        class Session:
+            async def post(self, *_args, **_kwargs):
+                return Response()
+
+            async def close(self) -> None:
+                return None
+
+        monkeypatch.setattr(client_module.aiohttp, "ClientSession", lambda **_: Session())
+        source = SourceRecord(
+            source_id="src_fixture123",
+            vendor="custom",
+            protocol="openai_responses",
+            base_url="https://api.example.test/v1",
+            credential_ref="cred_fixture123",
+            allowed_origins=(),
+            model_ids=("model-a",),
+            prefix="source-fixture123",
+        )
+        handle = await EngineClient(EngineConnection("http://127.0.0.1:15220", "management", "gateway")).invoke(
+            source, "model-a", {}, stream=True
+        )
+        assert handle.stream is None
+        outcome = await handle.outcome()
+        assert outcome.kind is RawOutcomeKind.HTTP_ERROR
+        assert outcome.error_code == error_code
+        decision = classify_outcome(outcome)
+        assert decision.action == expected_action
+        assert decision.reason == expected_reason
+        assert decision.downstream_status == (403 if error_code == "permission_error" else None)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("protocol", "event_name", "payload"),
+    (
+        (
+            "openai_responses",
+            "response.incomplete",
+            {"type": "response.incomplete", "response": {"error": None}},
+        ),
+        (
+            "openai_responses",
+            "response.incomplete",
+            {"type": "response.incomplete", "response": {"error": {}}},
+        ),
+    ),
+)
+def test_documented_incomplete_output_is_served_without_source_failure(
+    protocol: str,
+    event_name: str | None,
+    payload: dict[str, object],
+) -> None:
+    wire_state = client_module.ProtocolSSEState(protocol)
+    event = b"" if event_name is None else b"event: " + event_name.encode() + b"\n"
+    wire_state.observe(event + b"data: " + json.dumps(payload, separators=(",", ":")).encode() + b"\n\n")
+    source = SourceRecord(
+        source_id="src_fixture123",
+        vendor="custom",
+        protocol=protocol,
+        base_url="https://api.example.test/v1",
+        credential_ref="cred_fixture123",
+        allowed_origins=(),
+        model_ids=("model-a",),
+        prefix="source-fixture123",
+    )
+    outcome = client_module._observed_stream_terminal_outcome(
+        wire_state,
+        source,
+        "model-a",
+        200,
+    )
+    assert outcome is not None
+    assert outcome.kind is RawOutcomeKind.SUCCESS
+    assert classify_outcome(outcome).action == "return"
+
+
+@pytest.mark.parametrize(
+    "finish_reason",
+    ("stop", "length", "content_filter", "tool_calls", "function_call"),
+)
+def test_chat_finish_reason_is_not_a_wire_terminal(finish_reason: str) -> None:
+    state = client_module.ProtocolSSEState("openai_chat")
+    state.observe(
+        b'data: {"choices":[{"finish_reason":"'
+        + finish_reason.encode()
+        + b'","delta":{}}]}\n\n'
+    )
+    assert state.terminal_outcome is None
+    assert state.terminal_observation() is None
+    state.observe(b"data: [DONE]\n\n")
+    assert state.terminal_outcome == "served"
+
+
+def test_downstream_close_after_chat_finish_reason_does_not_fabricate_success() -> None:
+    async def run() -> None:
+        first = b'data: {"choices":[{"finish_reason":"stop","delta":{}}]}\n\n'
+        wire_state = client_module.ProtocolSSEState("openai_chat")
+        wire_state.observe(first)
+
+        class Content:
+            async def iter_chunked(self, _size: int):
+                if False:
+                    yield b""
+
+        class Response:
+            status = 200
+            content = Content()
+
+            def close(self) -> None:
+                return None
+
+        class Session:
+            async def close(self) -> None:
+                return None
+
+        source = SourceRecord(
+            source_id="src_fixture123",
+            vendor="custom",
+            protocol="openai_chat",
+            base_url="https://api.example.test/v1",
+            credential_ref="cred_fixture123",
+            allowed_origins=(),
+            model_ids=("model-a",),
+            prefix="source-fixture123",
+        )
+        outcome_future = asyncio.get_running_loop().create_future()
+        prelude = client_module._StreamPrelude()
+        prelude.write(first)
+        stream = client_module._response_stream(
+            response=Response(),
+            session=Session(),
+            prelude=prelude,
+            source=source,
+            model_id="model-a",
+            protocol="openai_chat",
+            outcome_future=outcome_future,
+            wire_state=wire_state,
+        )
+
+        assert await anext(stream) == first
+        await stream.aclose()
+        assert outcome_future.done() is False
+
+    asyncio.run(run())
+
+
+def test_engine_client_keeps_success_after_a_later_complete_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> None:
+        first = b'event: response.output_text.delta\ndata: {"type":"response.output_text.delta"}\n\n'
+        terminal = b'event: response.completed\ndata: {"type":"response.completed"}\n\n'
+        extra = b'data: {"type":"response.output_text.delta"}\n\n'
+
+        class Content:
+            async def read(self, _size: int) -> bytes:
+                return first
+
+            async def iter_chunked(self, _size: int):
+                yield terminal
+                yield extra
+
+        class Response:
+            status = 200
+            content = Content()
+            headers = {"Content-Type": "text/event-stream"}
+
+            def close(self) -> None:
+                return None
+
+        class Session:
+            async def post(self, *_args, **_kwargs):
+                return Response()
+
+            async def close(self) -> None:
+                return None
+
+        monkeypatch.setattr(client_module.aiohttp, "ClientSession", lambda **_: Session())
+        source = SourceRecord(
+            source_id="src_fixture123",
+            vendor="custom",
+            protocol="openai_responses",
+            base_url="https://api.example.test/v1",
+            credential_ref="cred_fixture123",
+            allowed_origins=(),
+            model_ids=("model-a",),
+            prefix="source-fixture123",
+        )
+        handle = await EngineClient(EngineConnection("http://127.0.0.1:15220", "management", "gateway")).invoke(
+            source, "model-a", {}, stream=True
+        )
+        assert handle.stream is not None
+        assert [chunk async for chunk in handle.stream] == [first, terminal, extra]
+        outcome = await handle.outcome()
+        assert outcome.kind is RawOutcomeKind.SUCCESS
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("event_name", "payload_type"),
+    [
+        (None, "response.completed"),
+        ("response.failed", "response.completed"),
+        ("response.completed", "response.failed"),
+    ],
+)
+def test_engine_client_requires_terminal_event_name_and_payload_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    event_name: str | None,
+    payload_type: str,
+) -> None:
+    async def run() -> None:
+        event_line = b"" if event_name is None else f"event: {event_name}\n".encode()
+        terminal = event_line + f'data: {{"type":"{payload_type}"}}\n\n'.encode()
+
+        class Content:
+            reads = 0
+
+            async def read(self, _size: int) -> bytes:
+                self.reads += 1
+                return terminal if self.reads == 1 else b""
+
+            async def iter_chunked(self, _size: int):
+                if False:
+                    yield b""
+
+        class Response:
+            status = 200
+            content = Content()
+            headers = {"Content-Type": "text/event-stream"}
+
+            def close(self) -> None:
+                return None
+
+        class Session:
+            async def post(self, *_args, **_kwargs):
+                return Response()
+
+            async def close(self) -> None:
+                return None
+
+        monkeypatch.setattr(client_module.aiohttp, "ClientSession", lambda **_: Session())
+        source = SourceRecord(
+            source_id="src_fixture123",
+            vendor="custom",
+            protocol="openai_responses",
+            base_url="https://api.example.test/v1",
+            credential_ref="cred_fixture123",
+            allowed_origins=(),
+            model_ids=("model-a",),
+            prefix="source-fixture123",
+        )
+        handle = await EngineClient(EngineConnection("http://127.0.0.1:15220", "management", "gateway")).invoke(
+            source, "model-a", {}, stream=True
+        )
+        assert handle.stream is None
+        assert (await handle.outcome()).kind is RawOutcomeKind.NETWORK_ERROR
+
+    asyncio.run(run())
+
+
+def test_engine_client_transparently_reads_non_sse_stream_content_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> None:
+        class Content:
+            reads = 0
+
+            async def read(self, _size: int) -> bytes:
+                self.reads += 1
+                return (
+                    b'{"error":{"type":"server_error"}}'
+                    if self.reads == 1
+                    else b""
+                )
+
+        content = Content()
+
+        class Response:
+            status = 200
+            headers = {"Content-Type": "application/json; charset=utf-8"}
+
+            def __init__(self) -> None:
+                self.content = content
+
+            def close(self) -> None:
+                return None
+
+        class Session:
+            async def post(self, *_args, **_kwargs):
+                return Response()
+
+            async def close(self) -> None:
+                return None
+
+        monkeypatch.setattr(client_module.aiohttp, "ClientSession", lambda **_: Session())
+        source = SourceRecord(
+            source_id="src_fixture123",
+            vendor="custom",
+            protocol="openai_responses",
+            base_url="https://api.example.test/v1",
+            credential_ref="cred_fixture123",
+            allowed_origins=(),
+            model_ids=("model-a",),
+            prefix="source-fixture123",
+        )
+        handle = await EngineClient(EngineConnection("http://127.0.0.1:15220", "management", "gateway")).invoke(
+            source, "model-a", {}, stream=True
+        )
+        assert handle.stream is None
+        assert content.reads == 2
+        outcome = await handle.outcome()
+        assert outcome.kind is RawOutcomeKind.NETWORK_ERROR
+        assert outcome.stream_started is False
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("protocol", "first", "expected_kind"),
+    [
+        (
+            "anthropic",
+            b'event: error\ndata: {"type":"error","error":{"type":"permission_error","message":"denied"}}\n\n',
+            RawOutcomeKind.HTTP_ERROR,
+        ),
+        (
+            "openai_responses",
+            b'event: error\ndata: {"type":"error","code":"permission_error",'
+            b'"message":"denied","param":null,"sequence_number":1}\n\n',
+            RawOutcomeKind.HTTP_ERROR,
+        ),
+        (
+            "openai_chat",
+            b'data: {"object":"chat.completion.chunk","error":'
+            b'{"type":"permission_error","message":"denied"},"choices":[]}\n\n',
+            RawOutcomeKind.HTTP_ERROR,
+        ),
+        (
+            "openai_chat",
+            b'data: {"object":"chat.completion.chunk","choices":[]}\n\n',
+            RawOutcomeKind.NETWORK_ERROR,
+        ),
+    ],
+)
+def test_engine_client_requires_a_protocol_terminal_event_before_clean_eof(
+    monkeypatch: pytest.MonkeyPatch,
+    protocol: str,
+    first: bytes,
+    expected_kind: RawOutcomeKind,
+) -> None:
+    async def run() -> None:
+        class Content:
+            reads = 0
+
+            async def read(self, _size: int) -> bytes:
+                self.reads += 1
+                return first if self.reads == 1 else b""
+
+            async def iter_chunked(self, _size: int):
+                if False:
+                    yield b""
+
+        class Response:
+            status = 200
+            content = Content()
+            headers = {"Content-Type": "text/event-stream"}
+
+            def close(self) -> None:
+                return None
+
+        class Session:
+            async def post(self, *_args, **_kwargs):
+                return Response()
+
+            async def close(self) -> None:
+                return None
+
+        monkeypatch.setattr(
+            client_module.aiohttp,
+            "ClientSession",
+            lambda **_kwargs: Session(),
+        )
+        source = SourceRecord(
+            source_id="src_fixture123",
+            vendor="custom",
+            protocol=protocol,
+            base_url="https://api.example.test/v1",
+            credential_ref="cred_fixture123",
+            allowed_origins=(),
+            model_ids=("model-a",),
+            prefix="source-fixture123",
+        )
+        handle = await EngineClient(
+            EngineConnection(
+                base_url="http://127.0.0.1:15220",
+                management_key="management-key",
+                gateway_token="gateway-token",
+            )
+        ).invoke(source, "model-a", {}, stream=True, request_protocol=protocol)
+
+        assert handle.stream is None
+        outcome = await handle.outcome()
+        assert outcome.kind is expected_kind
+        decision = classify_outcome(outcome)
+        if expected_kind is RawOutcomeKind.HTTP_ERROR:
+            assert "permission_error" in outcome.error_candidates
+            assert decision.downstream_status == 403
+            assert terminal_outcome_category(outcome, decision) == "request_nonfallback"
+        else:
+            assert outcome.error_code is None
+            assert decision.reason == "network"
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("invalid_type", [None, [], {}])
+def test_engine_client_ignores_non_string_stream_event_types(
+    monkeypatch: pytest.MonkeyPatch,
+    invalid_type: object,
+) -> None:
+    async def run() -> None:
+        first = (
+            b"event: response.completed\ndata: "
+            + json.dumps({"type": invalid_type}, separators=(",", ":")).encode()
+            + b"\n\n"
+        )
+
+        class Content:
+            reads = 0
+
+            async def read(self, _size: int) -> bytes:
+                self.reads += 1
+                return first if self.reads == 1 else b""
+
+            async def iter_chunked(self, _size: int):
+                if False:
+                    yield b""
+
+        class Response:
+            status = 200
+            content = Content()
+            headers = {"Content-Type": "text/event-stream"}
+
+            def close(self) -> None:
+                return None
+
+        class Session:
+            async def post(self, *_args, **_kwargs):
+                return Response()
+
+            async def close(self) -> None:
+                return None
+
+        monkeypatch.setattr(client_module.aiohttp, "ClientSession", lambda **_: Session())
+        source = SourceRecord(
+            source_id="src_fixture123",
+            vendor="custom",
+            protocol="openai_responses",
+            base_url="https://api.example.test/v1",
+            credential_ref="cred_fixture123",
+            allowed_origins=(),
+            model_ids=("model-a",),
+            prefix="source-fixture123",
+        )
+        handle = await EngineClient(EngineConnection("http://127.0.0.1:15220", "management", "gateway")).invoke(
+            source, "model-a", {}, stream=True
+        )
+        assert handle.stream is None
+        outcome = await handle.outcome()
+        assert outcome.kind is RawOutcomeKind.NETWORK_ERROR
+        assert outcome.error_code is None
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("phase", ["connect", "first_byte"])
+def test_engine_client_cancellation_closes_pre_handle_resources(
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+) -> None:
+    async def run() -> None:
+        reached = asyncio.Event()
+        never = asyncio.Event()
+
+        class Content:
+            async def read(self, _size: int) -> bytes:
+                reached.set()
+                await never.wait()
+                return b""
+
+        class Response:
+            status = 200
+            content = Content()
+            headers = {"Content-Type": "text/event-stream"}
+
+            def __init__(self) -> None:
+                self.close_calls = 0
+
+            def close(self) -> None:
+                self.close_calls += 1
+
+        response = Response()
+
+        class Session:
+            def __init__(self, **_kwargs) -> None:
+                self.close_calls = 0
+
+            async def post(self, *_args, **_kwargs):
+                if phase == "connect":
+                    reached.set()
+                    await never.wait()
+                return response
+
+            async def close(self) -> None:
+                self.close_calls += 1
+
+        session = Session()
+        monkeypatch.setattr(
+            client_module.aiohttp,
+            "ClientSession",
+            lambda **_kwargs: session,
+        )
+        source = SourceRecord(
+            source_id="src_fixture123",
+            vendor="custom",
+            protocol="openai_chat",
+            base_url="https://api.example.test/v1",
+            credential_ref="cred_fixture123",
+            allowed_origins=(),
+            model_ids=("model-a",),
+            prefix="source-fixture123",
+        )
+        client = EngineClient(
+            EngineConnection(
+                base_url="http://127.0.0.1:15220",
+                management_key="management-key",
+                gateway_token="gateway-token",
+            )
+        )
+
+        task = asyncio.create_task(client.invoke(source, "model-a", {}, stream=True))
+        await asyncio.wait_for(reached.wait(), timeout=1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=1)
+
+        assert session.close_calls == 1
+        assert response.close_calls == (1 if phase == "first_byte" else 0)
+
+    asyncio.run(run())
+
+
+def test_slow_source_prelude_is_bounded_without_blocking_other_routes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> None:
+        blocked = asyncio.Event()
+        never = asyncio.Event()
+        preludes: list[TrackingPrelude] = []
+        slow_keepalive = b":" + b"k" * 256 + b"\n\n"
+        fast_output = b'event: response.output_text.delta\ndata: {"type":"response.output_text.delta"}\n\n'
+        fast_terminal = b'event: response.completed\ndata: {"type":"response.completed"}\n\n'
+
+        class TrackingPrelude(client_module._StreamPrelude):
+            def __init__(self) -> None:
+                super().__init__(memory_limit=64)
+                self.physical_close_calls = 0
+                preludes.append(self)
+
+            def close(self) -> None:
+                if not self.closed:
+                    self.physical_close_calls += 1
+                super().close()
+
+        class Content:
+            def __init__(self, source_id: str) -> None:
+                self.source_id = source_id
+                self.reads = 0
+
+            async def read(self, _size: int) -> bytes:
+                self.reads += 1
+                if self.source_id == "src_slow0001":
+                    if self.reads == 1:
+                        return slow_keepalive
+                    blocked.set()
+                    await never.wait()
+                    return b""
+                return fast_output
+
+            async def iter_chunked(self, _size: int):
+                yield fast_terminal
+
+        class Response:
+            status = 200
+            headers = {"Content-Type": "text/event-stream"}
+
+            def __init__(self, source_id: str) -> None:
+                self.content = Content(source_id)
+
+            def close(self) -> None:
+                return None
+
+        class Session:
+            async def post(self, *_args, json=None, **_kwargs):
+                source_id = "src_slow0001" if str(json["model"]).startswith("slow/") else "src_fast0001"
+                return Response(source_id)
+
+            async def close(self) -> None:
+                return None
+
+        class Store:
+            def __init__(self, sources: tuple[SourceRecord, ...]) -> None:
+                self.sources = {source.source_id: source for source in sources}
+
+            def get_source(self, source_id: str) -> SourceRecord | None:
+                return self.sources.get(source_id)
+
+        class Supervisor:
+            def __init__(self, client: EngineClient) -> None:
+                self._client = client
+
+            def client(self) -> EngineClient:
+                return self._client
+
+        slow = SourceRecord(
+            source_id="src_slow0001",
+            vendor="custom",
+            protocol="openai_responses",
+            base_url="https://slow.example.test/v1",
+            credential_ref="cred_slow0001",
+            allowed_origins=("codex",),
+            model_ids=("model-a",),
+            prefix="slow",
+        )
+        fast = SourceRecord(
+            source_id="src_fast0001",
+            vendor="custom",
+            protocol="openai_responses",
+            base_url="https://fast.example.test/v1",
+            credential_ref="cred_fast0001",
+            allowed_origins=("codex",),
+            model_ids=("model-a",),
+            prefix="fast",
+        )
+        monkeypatch.setattr(client_module, "_StreamPrelude", TrackingPrelude)
+        monkeypatch.setattr(client_module.aiohttp, "ClientSession", lambda **_: Session())
+        client = EngineClient(EngineConnection("http://127.0.0.1:15220", "management", "gateway"))
+        adapter = CLIProxyEngineAdapter(
+            supervisor=Supervisor(client),  # type: ignore[arg-type]
+            state_store=Store((slow, fast)),  # type: ignore[arg-type]
+        )
+
+        slow_task = asyncio.create_task(adapter.invoke(slow.source_id, "model-a", {}, True, "codex"))
+        await asyncio.wait_for(blocked.wait(), timeout=1)
+        assert preludes[0].spilled is True
+        assert preludes[0].in_memory_bytes == 0
+
+        fast_handle = await asyncio.wait_for(
+            adapter.invoke(fast.source_id, "model-a", {}, True, "codex"),
+            timeout=1,
+        )
+        assert fast_handle.stream is not None
+        chunks = [chunk async for chunk in fast_handle.stream]
+        assert b"".join(chunks) == fast_output + fast_terminal
+        assert b"".join([chunk async for chunk in preludes[0].chunks()]) == slow_keepalive
+
+        slow_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await slow_task
+        assert preludes[0].physical_close_calls == 1
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("error_type", "error_code"),
+    [
+        ("permission_error", "api_error"),
+        ("api_error", "permission_error"),
+        ("permission_error", "permission_error"),
+        ("api_error", "api_error"),
+    ],
+)
+def test_engine_error_fields_preserve_nested_candidates(
+    error_type: str,
+    error_code: str,
+) -> None:
+    payload = json.dumps({"error": {"type": error_type, "code": error_code}}).encode()
+
+    raw_type, raw_code, candidates = client_module._raw_error_fields(payload)
+
+    assert raw_type == error_type
+    assert raw_code == error_code
+    assert set(candidates) == {error_type, error_code}
+    decision = classify_outcome(
+        client_module._outcome(
+            kind=RawOutcomeKind.HTTP_ERROR,
+            source=SourceRecord(
+                source_id="src_fixture123",
+                vendor="custom",
+                protocol="openai_chat",
+                base_url="https://api.example.test/v1",
+                credential_ref="cred_fixture123",
+                allowed_origins=(),
+                model_ids=("model-a",),
+                prefix="source-fixture123",
+            ),
+            model_id="model-a",
+            http_status=503,
+            error_type=raw_type,
+            error_code=raw_code,
+            error_candidates=candidates,
+            message="permission denied",
+        )
+    )
+    if "permission_error" in {error_type, error_code}:
+        assert decision.action == "surface"
+        assert decision.error_code == "request_incompatible"
+        assert decision.downstream_status == 403
+    else:
+        assert decision.action == "fallback"
+        assert decision.reason == "server_error"
+
+
+def test_engine_error_fields_ignore_machine_codes_outside_the_trusted_envelope() -> None:
+    payload = json.dumps(
+        {
+            "error": {"type": "api_error"},
+            "request": {"type": "permission_error"},
+            "metadata": {"code": "permission_error"},
+        }
+    ).encode()
+
+    raw_type, raw_code, candidates = client_module._raw_error_fields(payload)
+
+    assert raw_type == "api_error"
+    assert raw_code is None
+    assert candidates == ("api_error",)
+
+
+@pytest.mark.parametrize(
+    ("phase", "stream", "expected_kind", "expected_status", "stream_started"),
+    [
+        ("first_byte", True, RawOutcomeKind.TIMEOUT, None, False),
+        ("error_body", True, RawOutcomeKind.HTTP_ERROR, 429, False),
+        ("non_stream", False, RawOutcomeKind.TIMEOUT, 200, False),
     ],
 )
 def test_engine_client_times_out_before_completion(
-    tmp_path: Path,
-    model_id: str,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
     stream: bool,
     expected_kind: RawOutcomeKind,
     expected_status: int | None,
     stream_started: bool,
 ) -> None:
     async def run() -> None:
-        supervisor, store = _fixture_supervisor(tmp_path / model_id)
-        credential_ref = store.store_api_key(
-            "upstream-secret",
-            base_url="https://api.example.test/v1",
-        )
-        store.sync_sources([_binding(credential_ref, model_ids=(model_id,))])
-        connection = supervisor.ensure_running()
-        source = store.get_source("src_fixture123")
-        assert source is not None
+        blocked_phase = asyncio.Event()
+        never_release = asyncio.Event()
 
-        handle = await EngineClient(connection, timeout=0.05).invoke(
+        class Content:
+            reads = 0
+
+            async def read(self, _size: int) -> bytes:
+                self.reads += 1
+                if phase == "non_stream" and self.reads == 1:
+                    return b"{"
+                blocked_phase.set()
+                await never_release.wait()
+                return b""
+
+        class Response:
+            status = 429 if phase == "error_body" else 200
+            content = Content()
+            headers = {"Content-Type": "text/event-stream"}
+
+            def close(self) -> None:
+                return None
+
+        class Session:
+            async def post(self, *_args, **_kwargs):
+                return Response()
+
+            async def close(self) -> None:
+                return None
+
+        monkeypatch.setattr(client_module.aiohttp, "ClientSession", lambda **_: Session())
+        source = SourceRecord(
+            source_id="src_fixture123",
+            vendor="custom",
+            protocol="openai_chat",
+            base_url="https://api.example.test/v1",
+            credential_ref="cred_fixture123",
+            allowed_origins=(),
+            model_ids=("model-a",),
+            prefix="source-fixture123",
+        )
+        handle = await EngineClient(
+            EngineConnection("http://127.0.0.1:15220", "management", "gateway"),
+            timeout=0.01,
+        ).invoke(
             source,
-            model_id,
+            "model-a",
             {},
             stream=stream,
         )
 
+        assert blocked_phase.is_set()
         assert handle.stream is None
         outcome = await handle.outcome()
         assert outcome.kind is expected_kind
         assert outcome.http_status == expected_status
         assert outcome.stream_started is stream_started
-        supervisor.stop()
 
     asyncio.run(run())
 
@@ -1538,7 +2854,7 @@ def test_engine_client_times_out_before_completion(
     ("model_id", "response_limit"),
     [("invalid-json", 1024), ("oversized-non-stream", 8)],
 )
-def test_engine_client_non_stream_failures_after_first_byte_block_retry(
+def test_engine_client_non_stream_unvalidated_data_stays_pre_output(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     model_id: str,
@@ -1563,12 +2879,82 @@ def test_engine_client_non_stream_failures_after_first_byte_block_retry(
             stream=False,
         )
 
-        assert handle.stream is None
+        assert (handle.stream is not None) is (model_id == "invalid-json")
+        if handle.stream is not None:
+            assert b"".join([chunk async for chunk in handle.stream])
         outcome = await handle.outcome()
-        assert outcome.kind is RawOutcomeKind.PROTOCOL_ERROR
+        assert outcome.kind is (
+            RawOutcomeKind.SUCCESS if model_id == "invalid-json" else RawOutcomeKind.PROTOCOL_ERROR
+        )
         assert outcome.http_status == 200
-        assert outcome.stream_started is True
+        assert outcome.stream_started is (model_id == "invalid-json")
         supervisor.stop()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("case", STREAM_TRANSPORT_BOUNDARIES, ids=lambda case: case["name"])
+def test_engine_client_applies_sse_limits_only_to_streams(
+    monkeypatch: pytest.MonkeyPatch,
+    case: dict[str, object],
+) -> None:
+    async def run() -> None:
+        payload = (
+            b'{"payload":"' + b"x" * (SSE_MAX_LINE_BYTES + 1) + b'"}'
+            if not case["stream"]
+            else b"data: " + b"x" * (SSE_MAX_LINE_BYTES + 1)
+        )
+
+        class Content:
+            reads = 0
+
+            async def read(self, _size: int) -> bytes:
+                self.reads += 1
+                return payload if self.reads == 1 else b""
+
+            async def iter_chunked(self, _size: int):
+                if False:
+                    yield b""
+
+        class Response:
+            status = 200
+            content = Content()
+            headers = {"Content-Type": ("text/event-stream" if case["stream"] else "application/json")}
+
+            def close(self) -> None:
+                return None
+
+        class Session:
+            async def post(self, *_args, **_kwargs):
+                return Response()
+
+            async def close(self) -> None:
+                return None
+
+        monkeypatch.setattr(client_module.aiohttp, "ClientSession", lambda **_: Session())
+        source = SourceRecord(
+            source_id="src_fixture123",
+            vendor="custom",
+            protocol="openai_chat",
+            base_url="https://api.example.test/v1",
+            credential_ref="cred_fixture123",
+            allowed_origins=(),
+            model_ids=("model-a",),
+            prefix="source-fixture123",
+        )
+        handle = await EngineClient(EngineConnection("http://127.0.0.1:15220", "management", "gateway")).invoke(
+            source, "model-a", {}, stream=bool(case["stream"])
+        )
+
+        if case["stream"]:
+            assert handle.stream is None
+            chunks = []
+        else:
+            assert handle.stream is not None
+            chunks = [chunk async for chunk in handle.stream]
+        outcome = await handle.outcome()
+        assert outcome.kind.value == case["expected_outcome"]
+        assert chunks == ([payload] if outcome.kind is RawOutcomeKind.SUCCESS else [])
 
     asyncio.run(run())
 

@@ -29,4 +29,16 @@ describe('Model Hub visual token policy', () => {
 
     expect(literals).toEqual([]);
   });
+
+  it('pins the route dialog placement, shadow, and bounded body scroll to named roles', () => {
+    const dialog = surfaceCss.match(/\.model-hub-route-dialog\s*\{([^}]*)\}/)?.[1] ?? '';
+    const body = surfaceCss.match(/\.model-hub-route-body\s*\{([^}]*)\}/)?.[1] ?? '';
+
+    expect(dialog).toContain('top: min(');
+    expect(dialog).toContain('--model-hub-route-top: 300px');
+    expect(dialog).toContain('var(--model-hub-route-top)');
+    expect(dialog).toContain('box-shadow: var(--model-hub-dialog-shadow)');
+    expect(dialog).toMatch(/max-height:\s*calc\([\s\S]*100dvh - var\(--model-hub-route-viewport-inset\) -[\s\S]*var\(--model-hub-route-viewport-inset\)/);
+    expect(body).toContain('overflow-y: auto');
+  });
 });

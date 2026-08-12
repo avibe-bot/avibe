@@ -352,11 +352,25 @@ def test_service_main_owns_monitor_shutdown(monkeypatch) -> None:
         def stop(self) -> None:
             calls.append("diagnostics.stop")
 
+    class FakeRunningLoop:
+        def is_closed(self) -> bool:
+            return False
+
+        def is_running(self) -> bool:
+            return True
+
+        def stop(self) -> None:
+            calls.append("loop.stop")
+
+        def call_soon_threadsafe(self, callback) -> None:
+            calls.append("loop.stop.scheduled")
+
     class FakeController:
         service_lock_safe_to_release = True
 
         def __init__(self, config) -> None:
             calls.append("controller.init")
+            self._loop = FakeRunningLoop()
 
         def run(self) -> None:
             calls.append("controller.run")
@@ -400,5 +414,6 @@ def test_service_main_owns_monitor_shutdown(monkeypatch) -> None:
     assert calls.index("controller.shutdown:signal 15") < calls.index(
         "controller.after-signal"
     )
+    assert "loop.stop.scheduled" not in calls
     assert calls.index("controller.run") < calls.index("diagnostics.stop")
     assert calls.index("controller.after-signal") < calls.index("lock.release")

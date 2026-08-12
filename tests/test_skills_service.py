@@ -12,6 +12,9 @@ import asyncio
 import os
 
 import pytest
+from storage import project_access_service, projects_service, resource_access_service
+from storage.db import create_sqlite_engine
+from storage.models import metadata
 
 from core.services import skills
 
@@ -30,6 +33,94 @@ class _Recorder:
     async def __call__(self, askill_path, args, *, cwd=None, timeout=skills.DEFAULT_TIMEOUT):
         self.calls.append({"path": askill_path, "args": list(args), "cwd": cwd})
         return self.result
+
+
+class _SequenceRecorder(_Recorder):
+    def __init__(self, results):
+        super().__init__(None)
+        self.results = list(results)
+
+    async def __call__(self, askill_path, args, *, cwd=None, timeout=skills.DEFAULT_TIMEOUT):
+        self.calls.append({"path": askill_path, "args": list(args), "cwd": cwd})
+        return self.results.pop(0)
+
+
+def _organization_context(
+    subject: str,
+    *,
+    group_ids: frozenset[str] | None = frozenset({"group-engineering"}),
+    role: str = "member",
+    instance_role: str = "editor",
+) -> resource_access_service.ResourceUserContext:
+    return resource_access_service.ResourceUserContext(
+        subject=subject,
+        email=f"{subject}@example.com",
+        organization_id="org-1",
+        organization_member_id=f"member-{subject}",
+        organization_role=role,
+        group_ids=group_ids,
+        instance_role=instance_role,
+        instance_access_source="organization_group",
+        is_remote=True,
+    )
+
+
+def _non_member_context(
+    *,
+    instance_role: str = "owner",
+) -> resource_access_service.ResourceUserContext:
+    return resource_access_service.ResourceUserContext(
+        subject="legacy-owner",
+        email="legacy-owner@example.com",
+        instance_role=instance_role,
+        instance_access_source="owner",
+        is_remote=True,
+    )
+
+
+def _skills_engine(monkeypatch, tmp_path):
+    engine = create_sqlite_engine(tmp_path / "skills_acl.sqlite")
+    metadata.create_all(engine)
+    monkeypatch.setattr("storage.db.get_cached_sqlite_engine", lambda: engine)
+    return engine
+
+
+def _skill_row(name: str) -> dict:
+    return {
+        "name": name,
+        "scope": "global",
+        "path": f"/skills/{name}",
+        "agents": [{"id": "codex", "name": "Codex"}],
+    }
+
+
+def _seed_skill_policy(
+    conn,
+    name: str,
+    *,
+    access_level: str,
+    group_ids: list[str] | None = None,
+    backend: str = "codex",
+    project_id: str | None = None,
+    project_dir: str | None = None,
+) -> str:
+    resource_id = skills.skill_resource_id(
+        backend,
+        scope="project" if project_id is not None else "global",
+        project_dir=project_dir,
+        project_id=project_id,
+        name=name,
+    )
+    resource_access_service.ensure_resource_policy(
+        conn,
+        resource_kind="skill",
+        resource_id=resource_id,
+        organization_id="org-1",
+        owner_user_id="owner-1",
+        access_level=access_level,
+        group_ids=group_ids,
+    )
+    return resource_id
 
 
 def test_list_global_uses_g_no_cwd(monkeypatch):
@@ -151,6 +242,587 @@ def test_update_one_skill(monkeypatch):
     assert rec.calls[0]["cwd"] == "/p"
     _run(skills.update("askill", "pdf-tools", scope="global"))
     assert rec.calls[1]["args"] == ["update", "pdf-tools", "-g", "-y"]
+
+
+def test_skill_resource_id_is_stable_and_backend_scoped(tmp_path) -> None:
+    global_id = skills.skill_resource_id("codex", scope="global", project_dir=None, name="Release Tools")
+    legacy_project_id = skills.skill_resource_id(
+        "codex",
+        scope="project",
+        project_dir=str(tmp_path / "project"),
+        name="Release Tools",
+    )
+    stable_project_id = skills.skill_resource_id(
+        "codex",
+        scope="project",
+        project_dir=str(tmp_path / "project"),
+        project_id="proj_123abc",
+        name="Release Tools",
+    )
+    moved_project_id = skills.skill_resource_id(
+        "codex",
+        scope="project",
+        project_dir=str(tmp_path / "project-renamed"),
+        project_id="proj_123abc",
+        name="Release Tools",
+    )
+
+    assert global_id == "codex:global:global:release-tools"
+    assert legacy_project_id.startswith("codex:project:project-")
+    assert legacy_project_id.endswith(":release-tools")
+    assert stable_project_id == moved_project_id
+    assert stable_project_id.startswith("codex:project:project-proj_123abc")
+    assert stable_project_id.endswith(":release-tools")
+    assert stable_project_id != legacy_project_id
+
+
+def test_active_org_members_list_all_skills_without_resource_acl_filtering(monkeypatch, tmp_path) -> None:
+    engine = _skills_engine(monkeypatch, tmp_path)
+    try:
+        with engine.begin() as connection:
+            _seed_skill_policy(connection, "private-skill", access_level="private")
+            _seed_skill_policy(connection, "public-skill", access_level="public")
+            _seed_skill_policy(
+                connection,
+                "scoped-skill",
+                access_level="scope",
+                group_ids=["group-engineering"],
+            )
+
+        rec = _Recorder(
+            {
+                "ok": True,
+                "summary": {"global": 3, "project": 0},
+                "skills": [_skill_row("private-skill"), _skill_row("public-skill"), _skill_row("scoped-skill")],
+            }
+        )
+        monkeypatch.setattr(skills, "_run_askill", rec)
+
+        owner = _run(skills.list_skills("askill", scope="global", user_context=_organization_context("owner-1")))
+        member = _run(skills.list_skills("askill", scope="global", user_context=_organization_context("member-1")))
+        missing_groups = _run(
+            skills.list_skills("askill", scope="global", user_context=_organization_context("member-2", group_ids=None))
+        )
+    finally:
+        engine.dispose()
+
+    expected_names = ["private-skill", "public-skill", "scoped-skill"]
+    assert [skill["name"] for skill in owner["skills"]] == expected_names
+    assert [skill["name"] for skill in member["skills"]] == expected_names
+    assert [skill["name"] for skill in missing_groups["skills"]] == expected_names
+    assert missing_groups["summary"] == {"global": 3, "project": 0}
+
+
+def test_active_org_members_check_all_skills_without_resource_acl_filtering(monkeypatch, tmp_path) -> None:
+    engine = _skills_engine(monkeypatch, tmp_path)
+    try:
+        with engine.begin() as connection:
+            _seed_skill_policy(connection, "private-skill", access_level="private")
+            _seed_skill_policy(connection, "public-skill", access_level="public")
+            _seed_skill_policy(
+                connection,
+                "scoped-skill",
+                access_level="scope",
+                group_ids=["group-engineering"],
+            )
+        rec = _Recorder(
+            {
+                "ok": True,
+                "summary": {"total": 3, "updateAvailable": 2, "upToDate": 1, "uncheckable": 0},
+                "skills": [
+                    {"name": "private-skill", "scope": "global", "status": "update_available"},
+                    {"name": "public-skill", "scope": "global", "status": "up_to_date"},
+                    {"name": "scoped-skill", "scope": "global", "status": "update_available"},
+                ],
+            }
+        )
+        monkeypatch.setattr(skills, "_run_askill", rec)
+
+        member = _run(skills.check("askill", scope="global", user_context=_organization_context("member-1")))
+        missing_groups = _run(
+            skills.check(
+                "askill",
+                scope="global",
+                user_context=_organization_context("member-2", group_ids=None),
+            )
+        )
+    finally:
+        engine.dispose()
+
+    expected_names = ["private-skill", "public-skill", "scoped-skill"]
+    expected_summary = {"total": 3, "updateAvailable": 2, "upToDate": 1, "uncheckable": 0}
+    assert [skill["name"] for skill in member["skills"]] == expected_names
+    assert member["summary"] == expected_summary
+    assert [skill["name"] for skill in missing_groups["skills"]] == expected_names
+    assert missing_groups["summary"] == expected_summary
+
+
+def test_active_org_members_list_project_skills_without_project_acl(monkeypatch, tmp_path) -> None:
+    engine = _skills_engine(monkeypatch, tmp_path)
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    listing = {
+        "ok": True,
+        "skills": [
+            {
+                **_skill_row("project-skill"),
+                "scope": "project",
+                "path": str(project_dir / ".agents" / "skills" / "project-skill"),
+            }
+        ],
+    }
+    try:
+        with engine.begin() as connection:
+            project = projects_service.create_project(connection, str(project_dir))
+            result = project_access_service.apply_project_access_intent(
+                connection,
+                {
+                    "project_id": project["id"],
+                    "revision": 1,
+                    "mode": "restricted",
+                    "organization_id": "org-1",
+                    "bindings": [
+                        {
+                            "principal_kind": "organization_group",
+                            "principal_value": "group-engineering",
+                            "access_role": "editor",
+                        }
+                    ],
+                },
+            )
+            assert result.outcome == "applied"
+            resource_access_service.ensure_resource_policy(
+                connection,
+                resource_kind="skill",
+                resource_id=skills.skill_resource_id(
+                    "codex",
+                    scope="project",
+                    project_dir=str(project_dir),
+                    project_id=project["id"],
+                    name="project-skill",
+                ),
+                organization_id="org-1",
+                owner_user_id="owner-1",
+                access_level="scope",
+                group_ids=["group-engineering"],
+            )
+
+        allowed_recorder = _Recorder(listing)
+        monkeypatch.setattr(skills, "_run_askill", allowed_recorder)
+        allowed = _run(
+            skills.list_skills(
+                "askill",
+                scope="project",
+                project_dir=str(project_dir),
+                project_id=project["id"],
+                user_context=_organization_context("member-1"),
+            )
+        )
+        assert [item["name"] for item in allowed["skills"]] == ["project-skill"]
+
+        allowed_all_recorder = _Recorder(listing)
+        monkeypatch.setattr(skills, "_run_askill", allowed_all_recorder)
+        allowed_all = _run(
+            skills.list_skills(
+                "askill",
+                scope="all",
+                project_dir=str(project_dir),
+                project_id=project["id"],
+                user_context=_organization_context("member-1"),
+            )
+        )
+        assert [item["name"] for item in allowed_all["skills"]] == ["project-skill"]
+
+        unmatched_group_recorder = _Recorder(listing)
+        monkeypatch.setattr(skills, "_run_askill", unmatched_group_recorder)
+        unmatched_group = _run(
+            skills.list_skills(
+                "askill",
+                scope="project",
+                project_dir=str(project_dir),
+                project_id=project["id"],
+                user_context=_organization_context(
+                    "member-2",
+                    group_ids=frozenset({"group-sales"}),
+                ),
+            )
+        )
+        assert [item["name"] for item in unmatched_group["skills"]] == ["project-skill"]
+        assert [call["args"] for call in unmatched_group_recorder.calls] == [["list", "-p"]]
+
+        unmatched_group_all_recorder = _Recorder(listing)
+        monkeypatch.setattr(skills, "_run_askill", unmatched_group_all_recorder)
+        unmatched_group_all = _run(
+            skills.list_skills(
+                "askill",
+                scope="all",
+                project_dir=str(project_dir),
+                project_id=project["id"],
+                user_context=_organization_context(
+                    "member-2",
+                    group_ids=frozenset({"group-sales"}),
+                ),
+            )
+        )
+        assert [item["name"] for item in unmatched_group_all["skills"]] == ["project-skill"]
+        assert [call["args"] for call in unmatched_group_all_recorder.calls] == [["list"]]
+    finally:
+        engine.dispose()
+
+
+def test_active_org_skill_listing_returns_complete_runtime_payload(monkeypatch, tmp_path) -> None:
+    engine = _skills_engine(monkeypatch, tmp_path)
+    raw_skill = {
+        **_skill_row("public-skill"),
+        "description": "safe description",
+        "sourceUrl": "file:///Users/alex/private-skill",
+        "installSource": "/Users/alex/private-skill",
+        "unknownLocalField": "secret",
+        "agents": [
+            {"id": "codex", "name": "Codex", "path": "/Users/alex/.codex"}
+        ],
+    }
+    try:
+        with engine.begin() as connection:
+            _seed_skill_policy(connection, "public-skill", access_level="public")
+        recorder = _Recorder(
+            {
+                "ok": True,
+                "skills": [raw_skill],
+            }
+        )
+        monkeypatch.setattr(skills, "_run_askill", recorder)
+
+        result = _run(
+            skills.list_skills(
+                "askill",
+                scope="global",
+                user_context=_organization_context("member-1"),
+            )
+        )
+    finally:
+        engine.dispose()
+
+    assert result["skills"] == [raw_skill]
+
+
+def test_active_org_members_mutate_skills_without_owner_preflight(monkeypatch, tmp_path) -> None:
+    engine = _skills_engine(monkeypatch, tmp_path)
+    try:
+        with engine.begin() as connection:
+            _seed_skill_policy(connection, "private-skill", access_level="private")
+
+        member_recorder = _Recorder({"ok": True})
+        monkeypatch.setattr(skills, "_run_askill", member_recorder)
+        assert _run(
+            skills.remove_skill(
+                "askill",
+                "private-skill",
+                scope="global",
+                user_context=_organization_context("member-1"),
+            )
+        ) == {"ok": True}
+        assert [call["args"] for call in member_recorder.calls] == [
+            ["remove", "private-skill", "-g"]
+        ]
+        with engine.connect() as connection:
+            assert resource_access_service.get_resource_policy(
+                "skill",
+                skills.skill_resource_id(
+                    "codex",
+                    scope="global",
+                    project_dir=None,
+                    name="private-skill",
+                ),
+                connection=connection,
+            ) is None
+
+        with engine.begin() as connection:
+            _seed_skill_policy(connection, "private-skill", access_level="private")
+
+        admin_editor_recorder = _Recorder({"ok": True})
+        monkeypatch.setattr(skills, "_run_askill", admin_editor_recorder)
+        assert _run(
+            skills.update(
+                "askill",
+                "private-skill",
+                scope="global",
+                user_context=_organization_context("member-2", role="admin"),
+            )
+        ) == {"ok": True}
+        assert [call["args"] for call in admin_editor_recorder.calls] == [
+            ["update", "private-skill", "-g", "-y"]
+        ]
+
+        add_result = {
+            "ok": True,
+            "action": "install",
+            "summary": {"skills": 1},
+            "selectedAgents": ["codex"],
+            "results": [{"skill": "private-skill", "success": True}],
+        }
+        add_recorder = _Recorder(add_result)
+        monkeypatch.setattr(skills, "_run_askill", add_recorder)
+        assert _run(
+            skills.add_skill(
+                "askill",
+                "gh:owner/repo",
+                scope="global",
+                skill="private-skill",
+                backends=["codex"],
+                user_context=_organization_context("member-1"),
+            )
+        ) == add_result
+        assert [call["args"] for call in add_recorder.calls] == [
+            [
+                "add",
+                "gh:owner/repo",
+                "-g",
+                "-a",
+                "codex",
+                "--skill",
+                "private-skill",
+                "-y",
+            ]
+        ]
+    finally:
+        engine.dispose()
+
+
+def test_remove_skill_deletes_only_policies_for_removed_backends(monkeypatch, tmp_path) -> None:
+    engine = _skills_engine(monkeypatch, tmp_path)
+    try:
+        with engine.begin() as connection:
+            codex_id = _seed_skill_policy(connection, "shared-skill", access_level="private")
+            claude_id = _seed_skill_policy(
+                connection,
+                "shared-skill",
+                access_level="private",
+                backend="claude",
+            )
+        recorder = _Recorder(
+            {
+                "ok": True,
+                "selectedAgents": ["codex", "claude"],
+                "removedAgents": ["codex"],
+            }
+        )
+        monkeypatch.setattr(skills, "_run_askill", recorder)
+
+        result = _run(
+            skills.remove_skill(
+                "askill",
+                "shared-skill",
+                scope="global",
+                backends=["codex", "claude"],
+                user_context=_organization_context("member-1"),
+            )
+        )
+        with engine.connect() as connection:
+            codex_policy = resource_access_service.get_resource_policy("skill", codex_id, connection=connection)
+            claude_policy = resource_access_service.get_resource_policy("skill", claude_id, connection=connection)
+    finally:
+        engine.dispose()
+
+    assert result["ok"] is True
+    assert [call["args"] for call in recorder.calls] == [
+        ["remove", "shared-skill", "-g", "-a", "codex", "claude-code"]
+    ]
+    assert codex_policy is None
+    assert claude_policy is not None
+
+
+@pytest.mark.parametrize("operation", ["remove", "update"])
+@pytest.mark.parametrize(
+    "listing",
+    [
+        {"ok": False, "error": {"code": "list_failed"}},
+        {"ok": True, "skills": []},
+        {"ok": True, "skills": "invalid"},
+    ],
+)
+def test_non_member_skill_mutations_fail_closed_when_preflight_cannot_resolve_target(
+    monkeypatch,
+    tmp_path,
+    operation: str,
+    listing: dict,
+) -> None:
+    engine = _skills_engine(monkeypatch, tmp_path)
+    recorder = _SequenceRecorder([listing])
+    monkeypatch.setattr(skills, "_run_askill", recorder)
+    try:
+        if operation == "remove":
+            mutation = skills.remove_skill(
+                "askill",
+                "missing-skill",
+                scope="global",
+                user_context=_non_member_context(),
+            )
+        else:
+            mutation = skills.update(
+                "askill",
+                "missing-skill",
+                scope="global",
+                user_context=_non_member_context(),
+            )
+        with pytest.raises(skills.SkillAccessError):
+            _run(mutation)
+    finally:
+        engine.dispose()
+
+    assert [call["args"] for call in recorder.calls] == [["list", "-g"]]
+
+
+def test_remote_skill_add_registers_private_policy(monkeypatch, tmp_path) -> None:
+    engine = _skills_engine(monkeypatch, tmp_path)
+    try:
+        rec = _SequenceRecorder(
+            [
+                {"ok": True, "skills": []},
+                {
+                    "ok": True,
+                    "action": "install",
+                    "summary": {"skills": 1},
+                    "selectedAgents": ["codex"],
+                    "results": [{"skill": "new-skill", "success": True}],
+                },
+            ]
+        )
+        monkeypatch.setattr(skills, "_run_askill", rec)
+
+        result = _run(
+            skills.add_skill(
+                "askill",
+                "gh:owner/repo",
+                scope="global",
+                skill="new-skill",
+                backends=["codex"],
+                user_context=_organization_context("member-1", instance_role="owner"),
+            )
+        )
+        with engine.connect() as connection:
+            policy = resource_access_service.get_resource_policy(
+                "skill",
+                skills.skill_resource_id("codex", scope="global", project_dir=None, name="new-skill"),
+                connection=connection,
+            )
+    finally:
+        engine.dispose()
+
+    assert result["ok"] is True
+    assert policy is not None
+    assert policy["owner_user_id"] == "member-1"
+    assert policy["access_level"] == "private"
+
+
+def test_active_org_member_can_replace_installed_legacy_skill(monkeypatch, tmp_path) -> None:
+    engine = _skills_engine(monkeypatch, tmp_path)
+    install_result = {
+        "ok": True,
+        "action": "install",
+        "summary": {"skills": 1},
+        "selectedAgents": ["codex"],
+        "results": [{"skill": "legacy-skill", "success": True}],
+    }
+    member_recorder = _Recorder(install_result)
+    monkeypatch.setattr(skills, "_run_askill", member_recorder)
+    try:
+        result = _run(
+            skills.add_skill(
+                "askill",
+                "gh:owner/repo",
+                scope="global",
+                skill="legacy-skill",
+                backends=["codex"],
+                user_context=_organization_context("member-1"),
+            )
+        )
+        with engine.connect() as connection:
+            policy = resource_access_service.get_resource_policy(
+                "skill",
+                skills.skill_resource_id(
+                    "codex",
+                    scope="global",
+                    project_dir=None,
+                    name="legacy-skill",
+                ),
+                connection=connection,
+            )
+    finally:
+        engine.dispose()
+
+    assert [call["args"] for call in member_recorder.calls] == [
+        ["add", "gh:owner/repo", "-g", "-a", "codex", "--skill", "legacy-skill", "-y"],
+    ]
+    assert result == install_result
+    assert policy is not None
+    assert policy["owner_user_id"] == "member-1"
+
+
+def test_non_member_skill_add_fails_closed_for_unresolved_installed_backend(monkeypatch, tmp_path) -> None:
+    engine = _skills_engine(monkeypatch, tmp_path)
+    recorder = _SequenceRecorder(
+        [
+            {
+                "ok": True,
+                "skills": [{**_skill_row("legacy-skill"), "agents": [{"id": "unknown"}]}],
+            }
+        ]
+    )
+    monkeypatch.setattr(skills, "_run_askill", recorder)
+    try:
+        with pytest.raises(skills.SkillAccessError):
+            _run(
+                skills.add_skill(
+                    "askill",
+                    "gh:owner/repo",
+                    scope="global",
+                    skill="legacy-skill",
+                    backends=["codex"],
+                    user_context=_non_member_context(),
+                )
+            )
+    finally:
+        engine.dispose()
+
+    assert [call["args"] for call in recorder.calls] == [["list", "-g", "-a", "codex"]]
+
+
+def test_active_org_editor_can_upload_skill_zip(monkeypatch, tmp_path) -> None:
+    import base64
+    import io
+    import tempfile
+    import zipfile
+    from pathlib import Path
+
+    from vibe import api
+
+    archive_bytes = io.BytesIO()
+    with zipfile.ZipFile(archive_bytes, "w") as archive:
+        archive.writestr("uploaded-skill/SKILL.md", "# Uploaded Skill\n")
+
+    async def preview_uploaded_skill(_callback):
+        return {"ok": True, "skills": [{"name": "uploaded-skill"}]}
+
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
+    monkeypatch.setattr(api, "_skills_guarded", preview_uploaded_skill)
+
+    result = _run(
+        api.upload_skill_zip(
+            {
+                "content_base64": base64.b64encode(archive_bytes.getvalue()).decode(
+                    "ascii"
+                )
+            },
+            user_context=_organization_context("member-1"),
+        )
+    )
+
+    unpack_dir = Path(result["dir"])
+    assert result["ok"] is True
+    assert result["skills"] == [{"name": "uploaded-skill"}]
+    assert unpack_dir.parent.parent == tmp_path
+    assert (unpack_dir / "uploaded-skill" / "SKILL.md").read_text() == "# Uploaded Skill\n"
 
 
 def test_invalid_backend_raises(monkeypatch):

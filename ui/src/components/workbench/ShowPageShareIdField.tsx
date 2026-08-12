@@ -6,7 +6,8 @@ import clsx from 'clsx';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
 import { ApiError, useApi } from '../../context/ApiContext';
-import { isValidShareId, SHARE_ID_MAX_LENGTH, type ShowPageLinkInfo } from '../../lib/showPageLinks';
+import { isValidShareId, SHARE_ID_MAX_LENGTH } from '../../lib/showPageLinks';
+import type { ShowPageVisibilityResult } from '../../lib/showPageAccess';
 
 // Editable custom suffix for a public Show Page's /p/<share_id>/ URL. Shared by
 // the in-chat share popover and the admin Show Pages page so both surfaces get
@@ -19,7 +20,7 @@ export const ShowPageShareIdField: React.FC<{
   // External busy (e.g. a visibility change in flight) disables the field.
   disabled?: boolean;
   // Receives the updated payload so the caller can refresh its link/iframe.
-  onSaved: (payload: ShowPageLinkInfo) => void;
+  onSaved: (payload: ShowPageVisibilityResult, sessionId: string) => void;
 }> = ({ sessionId, shareId, disabled, onSaved }) => {
   const { t } = useTranslation();
   const api = useApi();
@@ -58,7 +59,7 @@ export const ShowPageShareIdField: React.FC<{
     setError(null);
     try {
       const res = await api.setShowPageShareId(sessionId, trimmed);
-      onSaved(res);
+      onSaved(res, sessionId);
       setSaved(true);
       if (savedTimer.current) window.clearTimeout(savedTimer.current);
       savedTimer.current = window.setTimeout(() => setSaved(false), 1600);

@@ -14,7 +14,7 @@ import re
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Mapping, Optional
 
 from sqlalchemy import and_, case, delete, func, or_, select, update
 from sqlalchemy.engine import Connection
@@ -34,6 +34,7 @@ from storage.models import (
 )
 from storage.pagination import PageRequest, PageResult, page_result_from_limit_plus_one
 from storage.sessions_service import session_agent_display_label
+from vibe.authorization import AuthorizationContext, require_instance_role
 from vibe.message_identity import HARNESS_TYPE, INPUT_TURN_AUTHOR_TYPES, NOTIFY_TYPE, VAULT_TYPE
 from vibe.message_types import types_with
 
@@ -86,7 +87,15 @@ def _new_message_id() -> str:
     return f"msg_{int(time.time() * 1_000_000):015x}{uuid.uuid4().hex[:8]}"
 
 
-def _row_to_payload(row: dict[str, Any]) -> dict[str, Any]:
+_PRIVATE_WEB_PUSH_METADATA_PREFIX = "_web_push_"
+_PRIVATE_RESOURCE_USER_CONTEXT_KEY = "resource_user_context"
+
+
+def _row_to_payload(
+    row: dict[str, Any],
+    *,
+    include_private_metadata: bool = False,
+) -> dict[str, Any]:
     try:
         content = json.loads(row.get("content_json") or "{}")
     except json.JSONDecodeError:
@@ -95,6 +104,15 @@ def _row_to_payload(row: dict[str, Any]) -> dict[str, Any]:
         metadata = json.loads(row.get("metadata_json") or "{}")
     except json.JSONDecodeError:
         metadata = {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    elif not include_private_metadata:
+        metadata = {
+            key: value
+            for key, value in metadata.items()
+            if key != _PRIVATE_RESOURCE_USER_CONTEXT_KEY
+            and not str(key).startswith(_PRIVATE_WEB_PUSH_METADATA_PREFIX)
+        }
     return {
         "id": row["id"],
         "scope_id": row.get("scope_id"),
@@ -139,7 +157,10 @@ def _native_harness_provenance(native_message_id: Any) -> tuple[str | None, str 
 
 
 def _attach_harness_provenance(
-    conn: Connection, payloads: list[dict[str, Any]]
+    conn: Connection,
+    payloads: list[dict[str, Any]],
+    *,
+    authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Read-side provenance for every durable Harness chat message.
 
@@ -171,6 +192,7 @@ def _attach_harness_provenance(
             exec_by_msg[payload["id"]] = native_id[len(_AGENT_RUN_NATIVE_PREFIX):]
     if not exec_by_msg:
         return payloads
+    context = require_instance_role(authorization_context, "viewer")
 
     # execution_id == agent_runs.id. The source SESSION differs by run kind:
     #  - source_kind='agent'   → source_actor IS the caller session id.
@@ -240,9 +262,12 @@ def _attach_harness_provenance(
 
     meta_by_session: dict[str, dict[str, Optional[str]]] = {}
     if source_by_exec:
+        from storage import project_access_service
+
         for row in conn.execute(
             select(
                 agent_sessions.c.id,
+                agent_sessions.c.scope_id,
                 agent_sessions.c.title,
                 agent_sessions.c.agent_name,
                 agent_sessions.c.agent_backend,
@@ -261,11 +286,20 @@ def _attach_harness_provenance(
                         ),
                     ),
                 )
-            )
+                )
             .where(
                 agent_sessions.c.id.in_(set(source_by_exec.values()))
             )
         ).mappings():
+            project_id = project_access_service.project_id_from_scope_id(row["scope_id"])
+            if (
+                not context.is_instance_owner
+                and (
+                    project_id is None
+                    or not project_access_service.can_read_project(conn, context, project_id)
+                )
+            ):
+                continue
             meta_by_session[row["id"]] = {
                 "title": row["title"],
                 "agent_name": session_agent_display_label(row),
@@ -365,6 +399,7 @@ def search_messages(
     types: Optional[Iterable[str]] = None,
     limit: int = 50,
     include_archived: bool = False,
+    scope_ids: Optional[Iterable[str]] = None,
 ) -> dict[str, Any]:
     """Global message-content search, grouped by session.
 
@@ -400,6 +435,9 @@ def search_messages(
     """
     cleaned = (query or "").strip()
     if not cleaned:
+        return {"sessions": [], "total": 0, "session_count": 0}
+    allowed_scope_ids = list(dict.fromkeys(scope_ids)) if scope_ids is not None else None
+    if allowed_scope_ids == []:
         return {"sessions": [], "total": 0, "session_count": 0}
 
     like = escape_sql_like(cleaned)
@@ -452,6 +490,8 @@ def search_messages(
         .order_by(transcript_order_value().desc(), messages.c.id.desc())
         .limit(effective_limit)
     )
+    if allowed_scope_ids is not None:
+        stmt = stmt.where(agent_sessions.c.scope_id.in_(allowed_scope_ids))
 
     rows = conn.execute(stmt).mappings().all()
 
@@ -753,6 +793,8 @@ def list_session_messages(
     around_run_id: Optional[str] = None,
     limit: int = 50,
     types: Optional[Iterable[str]] = None,
+    include_private_metadata: bool = False,
+    authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
     tail: bool = False,
 ) -> dict[str, Any]:
     """Return messages for one session in chronological order with cursor pagination.
@@ -873,13 +915,20 @@ def list_session_messages(
             .order_by(order_value.desc(), messages.c.id.desc())
             .limit(effective_limit + 1)
         )
-        older = [_row_to_payload(dict(row)) for row in conn.execute(older_q).mappings().all()]
+        older = [
+            _row_to_payload(
+                dict(row), include_private_metadata=include_private_metadata
+            )
+            for row in conn.execute(older_q).mappings().all()
+        ]
         has_older = len(older) > effective_limit
         older = older[:effective_limit]
         older.reverse()
 
         anchor_rows = [
-            _row_to_payload(dict(row))
+            _row_to_payload(
+                dict(row), include_private_metadata=include_private_metadata
+            )
             for row in conn.execute(query.where(messages.c.id == anchor_id)).mappings().all()
         ]
 
@@ -893,11 +942,20 @@ def list_session_messages(
             .order_by(order_value.asc(), messages.c.id.asc())
             .limit(effective_limit + 1)
         )
-        newer = [_row_to_payload(dict(row)) for row in conn.execute(newer_q).mappings().all()]
+        newer = [
+            _row_to_payload(
+                dict(row), include_private_metadata=include_private_metadata
+            )
+            for row in conn.execute(newer_q).mappings().all()
+        ]
         has_newer = len(newer) > effective_limit
         newer = newer[:effective_limit]
 
-        merged = _attach_harness_provenance(conn, older + anchor_rows + newer)
+        merged = _attach_harness_provenance(
+            conn,
+            older + anchor_rows + newer,
+            authorization_context=authorization_context,
+        )
         return {
             "messages": merged,
             "next_after_id": newer[-1]["id"] if has_newer and newer else None,
@@ -907,9 +965,18 @@ def list_session_messages(
     if tail:
         # Newest ``limit`` rows, then flip back to chronological for the caller.
         order_value = transcript_order_value()
-        query = query.order_by(order_value.desc(), messages.c.id.desc()).limit(effective_limit + 1)
+        query = query.order_by(order_value.desc(), messages.c.id.desc()).limit(
+            effective_limit + 1
+        )
         rows = _attach_harness_provenance(
-            conn, [_row_to_payload(dict(row)) for row in conn.execute(query).mappings().all()]
+            conn,
+            [
+                _row_to_payload(
+                    dict(row), include_private_metadata=include_private_metadata
+                )
+                for row in conn.execute(query).mappings().all()
+            ],
+            authorization_context=authorization_context,
         )
         has_older = len(rows) > effective_limit
         rows = rows[:effective_limit]
@@ -931,9 +998,18 @@ def list_session_messages(
                     and_(order_value == anchor, messages.c.id < before_id),
                 )
             )
-        query = query.order_by(order_value.desc(), messages.c.id.desc()).limit(effective_limit + 1)
+        query = query.order_by(order_value.desc(), messages.c.id.desc()).limit(
+            effective_limit + 1
+        )
         rows = _attach_harness_provenance(
-            conn, [_row_to_payload(dict(row)) for row in conn.execute(query).mappings().all()]
+            conn,
+            [
+                _row_to_payload(
+                    dict(row), include_private_metadata=include_private_metadata
+                )
+                for row in conn.execute(query).mappings().all()
+            ],
+            authorization_context=authorization_context,
         )
         has_older = len(rows) > effective_limit
         rows = rows[:effective_limit]
@@ -956,9 +1032,18 @@ def list_session_messages(
                 )
             )
     order_value = transcript_order_value()
-    query = query.order_by(order_value.asc(), messages.c.id.asc()).limit(effective_limit + 1)
+    query = query.order_by(order_value.asc(), messages.c.id.asc()).limit(
+        effective_limit + 1
+    )
     rows = _attach_harness_provenance(
-        conn, [_row_to_payload(dict(row)) for row in conn.execute(query).mappings().all()]
+        conn,
+        [
+            _row_to_payload(
+                dict(row), include_private_metadata=include_private_metadata
+            )
+            for row in conn.execute(query).mappings().all()
+        ],
+        authorization_context=authorization_context,
     )
     # Probe one extra row against the clamped page size: a full page alone does
     # not prove there is another page, but the extra row does.
@@ -1013,6 +1098,7 @@ def unread_counts(
     conn: Connection,
     *,
     platform: Optional[str] = None,
+    scope_ids: Optional[Iterable[str]] = None,
 ) -> dict[str, int]:
     """Return ``{scope_id: count}`` for unread agent ``result`` messages.
 
@@ -1025,6 +1111,10 @@ def unread_counts(
     terminal ``notify`` so failed turns stay visible, but a failure notify is
     not an unread reply — it never bumps this badge.)
     """
+
+    allowed_scope_ids = list(dict.fromkeys(scope_ids)) if scope_ids is not None else None
+    if allowed_scope_ids == []:
+        return {}
 
     query = (
         select(messages.c.scope_id, func.count(messages.c.id))
@@ -1055,6 +1145,8 @@ def unread_counts(
     )
     if platform is not None:
         query = query.where(messages.c.platform == platform)
+    if allowed_scope_ids is not None:
+        query = query.where(messages.c.scope_id.in_(allowed_scope_ids))
     return {scope: int(count) for scope, count in conn.execute(query).all()}
 
 
@@ -1062,6 +1154,7 @@ def unread_counts_by_session(
     conn: Connection,
     *,
     platform: Optional[str] = None,
+    scope_ids: Optional[Iterable[str]] = None,
 ) -> dict[str, int]:
     """Return ``{session_id: count}`` for unread agent ``result`` messages.
 
@@ -1072,6 +1165,10 @@ def unread_counts_by_session(
     ``type='result'`` so the sidebar badge matches the inbox card's unread
     count (the realtime ``inbox.session.updated`` row is result-only too).
     """
+
+    allowed_scope_ids = list(dict.fromkeys(scope_ids)) if scope_ids is not None else None
+    if allowed_scope_ids == []:
+        return {}
 
     query = (
         select(messages.c.session_id, func.count(messages.c.id))
@@ -1097,10 +1194,23 @@ def unread_counts_by_session(
     )
     if platform is not None:
         query = query.where(messages.c.platform == platform)
+    if allowed_scope_ids is not None:
+        query = query.where(
+            messages.c.session_id.in_(
+                select(agent_sessions.c.id).where(
+                    agent_sessions.c.scope_id.in_(allowed_scope_ids)
+                )
+            )
+        )
     return {session_id: int(count) for session_id, count in conn.execute(query).all()}
 
 
-def total_unread(conn: Connection, *, platform: Optional[str] = None) -> int:
+def total_unread(
+    conn: Connection,
+    *,
+    platform: Optional[str] = None,
+    scope_ids: Optional[Iterable[str]] = None,
+) -> int:
     """Global unread agent-``result`` count across all non-archived sessions.
 
     This is the sum of :func:`unread_counts_by_session`, i.e. the exact number
@@ -1110,7 +1220,13 @@ def total_unread(conn: Connection, *, platform: Optional[str] = None) -> int:
     screen icon never disagrees with the in-app count.
     """
 
-    return sum(unread_counts_by_session(conn, platform=platform).values())
+    return sum(
+        unread_counts_by_session(
+            conn,
+            platform=platform,
+            scope_ids=scope_ids,
+        ).values()
+    )
 
 
 def list_inbox_sessions(
@@ -1121,6 +1237,7 @@ def list_inbox_sessions(
     limit: int = 30,
     before: Optional[str] = None,
     only_session: Optional[str] = None,
+    scope_ids: Optional[Iterable[str]] = None,
 ) -> dict[str, Any]:
     """Per-session ("Slack-like") inbox feed.
 
@@ -1135,6 +1252,10 @@ def list_inbox_sessions(
     Keyset pagination via ``before`` (an opaque ``"<last_activity_at>|<session_id>"``
     cursor returned as ``next_cursor``).
     """
+
+    allowed_scope_ids = list(dict.fromkeys(scope_ids)) if scope_ids is not None else None
+    if allowed_scope_ids == []:
+        return {"sessions": [], "next_cursor": None}
 
     def _latest_message_value(
         column_name: Optional[str],
@@ -1281,6 +1402,8 @@ def list_inbox_sessions(
     )
     if only_session:
         session_rows = session_rows.where(agent_sessions.c.id == only_session)
+    if allowed_scope_ids is not None:
+        session_rows = session_rows.where(agent_sessions.c.scope_id.in_(allowed_scope_ids))
 
     session_rows_sub = session_rows.subquery()
     query = select(session_rows_sub).where(session_rows_sub.c.preview_id.is_not(None))

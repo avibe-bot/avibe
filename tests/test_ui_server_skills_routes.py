@@ -52,6 +52,42 @@ def test_list_degrades_to_global_with_flag(folderless, monkeypatch):
     assert body["skills"][0]["scope"] == "global"
 
 
+def test_resolve_project_dir_uses_request_authorization_context(monkeypatch):
+    from vibe.authorization import AuthorizationContext
+    from vibe.ui_compat import g
+
+    seen = {}
+
+    class _Engine:
+        class _Connection:
+            def __enter__(self):
+                return object()
+
+            def __exit__(self, *_exc_info):
+                return False
+
+        def connect(self):
+            return self._Connection()
+
+    def fake_get_project(conn, project_id, *, authorization_context=None):
+        seen["project_id"] = project_id
+        seen["authorization_context"] = authorization_context
+        return {"folder_path": "/tmp/project"}
+
+    monkeypatch.setattr(ui_server, "_projects_engine", lambda: _Engine())
+    monkeypatch.setattr("storage.projects_service.get_project", fake_get_project)
+    remote_context = AuthorizationContext(instance_role="editor", is_remote=True, subject="user-1")
+
+    with app.test_request_context("/api/skills?project_id=proj-restricted"):
+        g.authorization_context = remote_context
+        assert ui_server._resolve_project_dir("proj-restricted") == "/tmp/project"
+
+    assert seen == {
+        "project_id": "proj-restricted",
+        "authorization_context": remote_context,
+    }
+
+
 def test_check_returns_empty(folderless, monkeypatch):
     monkeypatch.setattr(api, "check_skills", _boom)
 
@@ -80,6 +116,57 @@ def test_upload_drops_project_cwd(folderless, monkeypatch):
     assert res.status_code == 200
     assert res.get_json()["ok"] is True
     assert seen["project_dir"] is None  # the project cwd was dropped, not errored
+
+
+def test_list_preserves_project_id_for_real_project(monkeypatch):
+    async def fake_list(*, scope, project_dir=None, backends=None, project_id=None):
+        assert scope == "project"
+        assert project_dir == "/tmp/project"
+        assert project_id == "proj-real"
+        return {"ok": True, "skills": [{"name": "demo", "scope": "project"}]}
+
+    def fake_resolve(project_id):
+        if project_id == "proj-real":
+            return "/tmp/project"
+        raise LookupError(project_id)
+
+    monkeypatch.setattr(ui_server, "_resolve_project_dir", fake_resolve)
+    monkeypatch.setattr(api, "list_skills", fake_list)
+
+    res = app.test_client().get("/api/skills?scope=project&project_id=proj-real")
+    body = res.get_json()
+
+    assert res.status_code == 200
+    assert body["ok"] is True
+    assert body["skills"][0]["scope"] == "project"
+
+
+def test_upload_preserves_project_id_for_real_project(monkeypatch):
+    seen = {}
+
+    async def fake_upload(payload, *, project_dir=None, project_id=None):
+        seen["project_dir"] = project_dir
+        seen["project_id"] = project_id
+        return {"ok": True, "skills": [], "dir": "/tmp/askill-upload-x"}
+
+    def fake_resolve(project_id):
+        if project_id == "proj-real":
+            return "/tmp/project"
+        raise LookupError(project_id)
+
+    monkeypatch.setattr(ui_server, "_resolve_project_dir", fake_resolve)
+    monkeypatch.setattr(api, "upload_skill_zip", fake_upload)
+
+    client = app.test_client()
+    res = client.post(
+        "/api/skills/upload",
+        json={"content_base64": "", "project_id": "proj-real"},
+        headers=csrf_headers(client),
+    )
+
+    assert res.status_code == 200
+    assert res.get_json()["ok"] is True
+    assert seen == {"project_dir": "/tmp/project", "project_id": "proj-real"}
 
 
 @pytest.mark.parametrize(

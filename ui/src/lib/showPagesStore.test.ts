@@ -89,6 +89,19 @@ describe('ShowPagesInventoryStore', () => {
     release();
   });
 
+  it('withdraws a retained page immediately when access is lost', async () => {
+    const store = new ShowPagesInventoryStore({
+      getShowPages: vi.fn().mockResolvedValue({ pages: [page()] }),
+      connectWorkbenchEvents: vi.fn(() => vi.fn()),
+    });
+
+    await store.reload();
+    expect(store.getSnapshot().pages).toHaveLength(1);
+
+    store.removePage('session-1');
+    expect(store.getSnapshot().pages).toEqual([]);
+  });
+
   it('serves stale icon metadata immediately on reopen and revalidates in the background', async () => {
     const initial = deferred<{ pages: ShowPage[] }>();
     const refresh = deferred<{ pages: ShowPage[] }>();
@@ -202,6 +215,35 @@ describe('ShowPagesInventoryStore', () => {
     await flight;
     expect(getShowPages).toHaveBeenCalledTimes(2);
     expect(store.getSnapshot().pages[0].session_id).toBe('session-2');
+    release();
+  });
+
+  it('revalidates and removes revoked pages after authorization changes', async () => {
+    let handlers: EventHandlers | undefined;
+    const getShowPages = vi
+      .fn()
+      .mockResolvedValueOnce({ pages: [page()] })
+      .mockResolvedValueOnce({ pages: [] });
+    const store = new ShowPagesInventoryStore({
+      getShowPages,
+      connectWorkbenchEvents: vi.fn((next) => {
+        handlers = next;
+        return vi.fn();
+      }),
+    });
+
+    const release = store.activate();
+    await store.reload();
+    expect(store.getSnapshot().pages).toHaveLength(1);
+
+    handlers?.onAuthorizationChanged?.({
+      project_ids: [],
+      resource_kinds: ['show_page'],
+    });
+    await store.reload();
+
+    expect(getShowPages).toHaveBeenCalledTimes(2);
+    expect(store.getSnapshot().pages).toEqual([]);
     release();
   });
 

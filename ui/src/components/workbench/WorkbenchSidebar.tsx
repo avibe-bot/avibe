@@ -28,6 +28,11 @@ import type { LucideIcon } from 'lucide-react';
 
 import { useWorkbenchInbox } from '../../context/WorkbenchInboxContext';
 import { useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
+import {
+  canUseAppsSurface,
+  canUseRuntimeSurfaces,
+  useInstanceAuthorization,
+} from '../../context/InstanceAuthorizationContext';
 import { useWindowManager } from '../../context/WindowManagerContext';
 import { useUnsavedChangesActionGuard } from '../../context/useUnsavedChangesActionGuard';
 import type { InboxSession, WorkbenchProject, WorkbenchSession } from '../../context/ApiContext';
@@ -36,6 +41,8 @@ import { SESSION_ROW_MENU_POSITION_CLASS, sessionRowActionPaddingClass } from '.
 import { SessionActionMenuContent, SessionActionsTrigger } from './sessionActions';
 import { useSessionActions } from './useSessionActions';
 import { formatRelativeTime } from '../../lib/relativeTime';
+import { canArchiveProjects, canEditProjectInstructions, canUseHarness } from '../../lib/remoteAuth';
+import { canCreateLocalProject } from '../../lib/sessionInfo';
 import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
@@ -67,6 +74,7 @@ const InboxHoverPopover: React.FC<{
   unreadBySession: Record<string, number>;
   unreadSessions: number;
   totalUnread: number;
+  canMarkRead: boolean;
   onItemClick: (session: InboxSession) => void;
   onMarkAllRead: () => void;
   onMouseEnter: () => void;
@@ -76,6 +84,7 @@ const InboxHoverPopover: React.FC<{
   unreadBySession,
   unreadSessions,
   totalUnread,
+  canMarkRead,
   onItemClick,
   onMarkAllRead,
   onMouseEnter,
@@ -109,7 +118,7 @@ const InboxHoverPopover: React.FC<{
             {t('workbench.inbox.headerCount', { unread: unreadSessions, total: sessions.length })}
           </div>
         </div>
-        <button
+        {canMarkRead && <button
           type="button"
           onClick={onMarkAllRead}
           disabled={totalUnread === 0}
@@ -121,7 +130,7 @@ const InboxHoverPopover: React.FC<{
           )}
         >
           {t('workbench.inbox.markAllRead')}
-        </button>
+        </button>}
       </div>
 
       {shown.length === 0 ? (
@@ -206,7 +215,9 @@ const SessionRow: React.FC<{
   projectId: string;
   session: WorkbenchSession;
   unread: number;
-}> = ({ projectId, session, unread }) => {
+  canChat: boolean;
+  canManageMetadata: boolean;
+}> = ({ projectId, session, unread, canChat, canManageMetadata }) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const { renameSession } = useWorkbenchProjectsTree();
@@ -223,6 +234,8 @@ const SessionRow: React.FC<{
 
   const { actions, archiveDialog } = useSessionActions({
     session,
+    writable: canManageMetadata,
+    lifecycleWritable: canChat,
     projectId,
     onRenameStart: () => {
       setDraft(session.title ?? '');
@@ -291,10 +304,11 @@ const SessionRow: React.FC<{
   const displayName = session.title?.trim() || t('workbench.untitledSession');
   return (
     <>
-    <Popover open={menuOpen} onOpenChange={setMenuOpen}>
+    <Popover open={canManageMetadata && menuOpen} onOpenChange={(open) => canManageMetadata && setMenuOpen(open)}>
       <PopoverAnchor asChild>
         <div
           onContextMenu={(e) => {
+            if (!canManageMetadata) return;
             e.preventDefault();
             setMenuOpen(true);
           }}
@@ -332,14 +346,23 @@ const SessionRow: React.FC<{
               </span>
             )}
           </button>
-          {pinAction && (
-            <SessionPinAction
-              pinned={session.pinned}
-              pending={Boolean(pinAction.pending)}
-              pinLabel={t('workbench.sessionPin')}
-              unpinLabel={t('workbench.sessionUnpin')}
-              onToggle={pinAction.onSelect}
-            />
+          {canManageMetadata && (
+            <>
+              {pinAction && (
+                <SessionPinAction
+                  pinned={session.pinned}
+                  pending={Boolean(pinAction.pending)}
+                  pinLabel={t('workbench.sessionPin')}
+                  unpinLabel={t('workbench.sessionUnpin')}
+                  onToggle={pinAction.onSelect}
+                />
+              )}
+              <span className="absolute inset-y-0 right-2 flex items-center">
+                <PopoverTrigger asChild>
+                  <SessionActionsTrigger label={t('workbench.sessionActions')} open={menuOpen} />
+                </PopoverTrigger>
+              </span>
+            </>
           )}
           <span className={clsx('absolute inset-y-0 flex items-center', SESSION_ROW_MENU_POSITION_CLASS)}>
             <PopoverTrigger asChild>
@@ -373,6 +396,15 @@ const ProjectRow: React.FC<{
   onToggle: () => void;
   onCreateSession: () => void;
   creatingSession: boolean;
+  canChat: boolean;
+  canManageMetadata: boolean;
+  canManageProjects: boolean;
+  /** Whether the current runtime policy admits Project archiving. */
+  canArchive: boolean;
+  /** Whether the current runtime policy admits opening the Project in Editor. */
+  canOpenInEditor: boolean;
+  /** Whether the current runtime policy admits saving a Project's AGENTS.md. */
+  canEditAgentsMd: boolean;
   unreadBySession: Record<string, number>;
   onRename: (next: string) => Promise<void>;
   onArchive: () => Promise<void>;
@@ -387,6 +419,12 @@ const ProjectRow: React.FC<{
   onToggle,
   onCreateSession,
   creatingSession,
+  canChat,
+  canManageMetadata,
+  canManageProjects,
+  canArchive,
+  canOpenInEditor,
+  canEditAgentsMd,
   unreadBySession,
   onRename,
   onArchive,
@@ -423,7 +461,7 @@ const ProjectRow: React.FC<{
         title={project.folder_path}
         onContextMenu={(e) => {
           // Right-click opens the same menu as the ⋯ button (anchored to it).
-          if (renaming) return;
+          if (renaming || !canManageProjects) return;
           e.preventDefault();
           setMenuOpen(true);
         }}
@@ -470,7 +508,7 @@ const ProjectRow: React.FC<{
         )}
         {!renaming && (
           <>
-            <Popover open={menuOpen} onOpenChange={setMenuOpen}>
+            {canManageProjects && <Popover open={menuOpen} onOpenChange={setMenuOpen}>
               <PopoverTrigger asChild>
                 <button
                   type="button"
@@ -508,7 +546,7 @@ const ProjectRow: React.FC<{
                   <Settings2 className="size-3 text-muted" />
                   {t('workbench.projectSettings')}
                 </button>
-                {project.folder_path && (
+                {project.folder_path && canEditAgentsMd && (
                   <button
                     type="button"
                     onClick={() => {
@@ -521,7 +559,7 @@ const ProjectRow: React.FC<{
                     {t('workbench.projectEditAgents')}
                   </button>
                 )}
-                {project.folder_path && (
+                {project.folder_path && canOpenInEditor && (
                   <button
                     type="button"
                     onClick={() => {
@@ -536,23 +574,25 @@ const ProjectRow: React.FC<{
                     {t('workbench.projectOpenInEditor')}
                   </button>
                 )}
-                <button
-                  type="button"
-                  onClick={async () => {
-                    setMenuOpen(false);
-                    const ok = window.confirm(
-                      t('workbench.projectArchiveConfirm', { name: project.display_name }),
-                    );
-                    if (ok) await onArchive();
-                  }}
-                  className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] text-pink transition hover:bg-pink/[0.08]"
-                >
-                  <Archive className="size-3" />
-                  {t('workbench.projectArchive')}
-                </button>
+                {canArchive && (
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      setMenuOpen(false);
+                      const ok = window.confirm(
+                        t('workbench.projectArchiveConfirm', { name: project.display_name }),
+                      );
+                      if (ok) await onArchive();
+                    }}
+                    className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] text-pink transition hover:bg-pink/[0.08]"
+                  >
+                    <Archive className="size-3" />
+                    {t('workbench.projectArchive')}
+                  </button>
+                )}
               </PopoverContent>
-            </Popover>
-            <button
+            </Popover>}
+            {canChat && <button
               type="button"
               aria-label={t('workbench.addSession')}
               onClick={onCreateSession}
@@ -564,7 +604,7 @@ const ProjectRow: React.FC<{
               )}
             >
               {creatingSession ? <Loader2 className="size-3 animate-spin" /> : <Plus className="size-3" />}
-            </button>
+            </button>}
           </>
         )}
       </div>
@@ -584,6 +624,8 @@ const ProjectRow: React.FC<{
                 projectId={project.id}
                 session={session}
                 unread={unreadBySession[session.id] || 0}
+                canChat={canChat}
+                canManageMetadata={canManageMetadata}
               />
             ))}
           {hasMore && (
@@ -600,16 +642,20 @@ const ProjectRow: React.FC<{
         </div>
       )}
 
-      <ProjectSettingsDialog
-        project={project}
-        open={settingsOpen}
-        onClose={() => setSettingsOpen(false)}
-      />
-      <ProjectAgentsMdDialog
-        project={project}
-        open={agentsMdOpen}
-        onClose={() => setAgentsMdOpen(false)}
-      />
+      {canManageProjects && (
+        <>
+          <ProjectSettingsDialog
+            project={project}
+            open={settingsOpen}
+            onClose={() => setSettingsOpen(false)}
+          />
+          <ProjectAgentsMdDialog
+            project={project}
+            open={agentsMdOpen}
+            onClose={() => setAgentsMdOpen(false)}
+          />
+        </>
+      )}
     </div>
   );
 };
@@ -618,6 +664,27 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
   const { t } = useTranslation();
   const navigate = useNavigate();
   const authorizeRouteAction = useUnsavedChangesActionGuard();
+  const {
+    capabilities,
+    remote,
+    hasTemporaryUnrestrictedOrgAccess,
+  } = useInstanceAuthorization();
+  const canUseRuntime = canUseRuntimeSurfaces(remote, hasTemporaryUnrestrictedOrgAccess);
+  const canUseApps = canUseAppsSurface(remote, hasTemporaryUnrestrictedOrgAccess);
+  const canManageProjects = capabilities.can_manage_projects || canUseRuntime;
+  const canChat = capabilities.can_chat || canUseRuntime;
+  const canCreateProject = canUseRuntime || canCreateLocalProject(capabilities);
+  const capabilityNav = CAPABILITY_NAV.filter(({ to }) => {
+    if (canUseRuntime) return true;
+    if (to === '/harness') return (capabilities.can_manage_agents || canUseRuntime) && canUseHarness({
+      remote,
+      temporaryUnrestrictedOrgAccess: hasTemporaryUnrestrictedOrgAccess,
+    });
+    if (to === '/agents') return capabilities.can_manage_agents || canUseRuntime;
+    if (to === '/skills') return capabilities.can_use_skills || canUseRuntime;
+    if (to === '/vaults') return capabilities.can_use_vault_secrets || canUseRuntime;
+    return false;
+  });
   const { totalUnread, unreadSessions, inboxSessions, markRead, unreadBySession } = useWorkbenchInbox();
   // Projects/sessions tree — shared with the mobile ProjectsPage via the provider
   // (one EventSource + one cache, not a per-component reimplementation). The
@@ -746,6 +813,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
           unreadBySession={unreadBySession}
           unreadSessions={unreadSessions}
           totalUnread={totalUnread}
+          canMarkRead={canChat}
           onItemClick={onItemClick}
           onMarkAllRead={onMarkAllRead}
           onMouseEnter={openPopover}
@@ -753,7 +821,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
         />
       </Popover>
 
-      <div className="flex flex-col gap-1.5">
+      {capabilityNav.length > 0 && <div className="flex flex-col gap-1.5">
         <button
           type="button"
           onClick={toggleCaps}
@@ -765,7 +833,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
         </button>
         {!capsCollapsed && (
           <nav className="flex flex-col gap-0.5">
-          {CAPABILITY_NAV.map(({ to, i18nKey, icon: Icon }) => (
+          {capabilityNav.map(({ to, i18nKey, icon: Icon }) => (
             <NavLink
               key={to}
               to={to}
@@ -788,7 +856,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
           ))}
           </nav>
         )}
-      </div>
+      </div>}
 
       {/* Projects section — design.pen b8wX2. Header row carries the
           "Projects" label on the left (matching the Capabilities label
@@ -803,7 +871,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
               row above to reclaim that space for the Projects list; ⌘K still
               works. Both are roomy 28px tap targets. */}
           <div className="flex items-center gap-0.5">
-            <Button
+            {canManageProjects && <Button
               type="button"
               variant="ghost"
               size="icon"
@@ -812,8 +880,8 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
               onClick={onOpenSearch}
             >
               <Search className="size-4" />
-            </Button>
-            <Button
+            </Button>}
+            {canCreateProject && <Button
               type="button"
               variant="ghost"
               size="icon"
@@ -822,7 +890,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
               onClick={() => setShowNewProject(true)}
             >
               <FolderPlus className="size-4" />
-            </Button>
+            </Button>}
           </div>
         </div>
 
@@ -869,6 +937,18 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
                     }
                   }}
                   creatingSession={creatingSession(project.id)}
+                  canChat={canChat && (canUseRuntime || project.capabilities.can_chat)}
+                  canManageMetadata={canUseRuntime || project.capabilities.can_chat}
+                  canManageProjects={canManageProjects}
+                  canArchive={canManageProjects && canArchiveProjects({
+                    remote,
+                    temporaryUnrestrictedOrgAccess: hasTemporaryUnrestrictedOrgAccess,
+                  })}
+                  canOpenInEditor={canUseApps}
+                  canEditAgentsMd={canManageProjects && canEditProjectInstructions({
+                    remote,
+                    temporaryUnrestrictedOrgAccess: hasTemporaryUnrestrictedOrgAccess,
+                  })}
                   unreadBySession={unreadBySession}
                   onRename={(next) => renameProject(project.id, next)}
                   onArchive={() => archiveProject(project.id)}
@@ -878,7 +958,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
         </div>
       </div>
 
-      {showNewProject && (
+      {showNewProject && canCreateProject && (
         <NewProjectDialog
           onClose={() => setShowNewProject(false)}
           onCreated={(project) => {

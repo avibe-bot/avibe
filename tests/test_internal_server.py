@@ -20,6 +20,7 @@ import contextlib
 import socket
 import sys
 import tempfile
+import time
 import threading
 import types
 from pathlib import Path
@@ -34,6 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core import internal_server, session_turns
 from core.message_context import build_context_turn_sink_key
+from core.vibe_agents import VibeAgentStore
 from core.memory.maintenance import MemoryStoreUnavailableError
 from core.memory.runtime import MemorySessionLifecycleBusyError
 from core.run_settlement import SETTLED_BY_STOPPED, SETTLED_BY_TERMINAL_RESULT
@@ -45,7 +47,8 @@ from core.services.dispatch import (
     dispatch_turn,
 )
 from modules.im import MessageContext
-from storage import message_deliveries
+from storage import message_deliveries, resource_access_service
+from vibe.authorization import AuthorizationContext
 
 
 # ---------------------------------------------------------------------
@@ -73,6 +76,44 @@ def _seed_project_workdir(conn, scope_id: str, workdir: Path, *, now: str = "202
             created_at=now,
             updated_at=now,
         )
+    )
+
+
+def _seed_remote_worker(*, backend: str = "claude") -> None:
+    store = VibeAgentStore()
+    try:
+        agent = store.get("worker")
+        if agent is None:
+            agent = store.create(name="worker", backend=backend)
+        with store.engine.begin() as conn:
+            resource_access_service.ensure_resource_policy(
+                conn,
+                resource_kind="agent",
+                resource_id=agent.id,
+                organization_id="org-1",
+                owner_user_id="remote-user",
+                owner_email="remote-user@example.com",
+                access_level="public",
+            )
+    finally:
+        store.close()
+
+
+def _authorized_remote_message_metadata() -> dict:
+    return resource_access_service.metadata_with_resource_user_context(
+        {},
+        AuthorizationContext(
+            subject="remote-user",
+            email="remote-user@example.com",
+            instance_role="editor",
+            instance_access_source="organization_group",
+            organization_id="org-1",
+            organization_member_id="member-remote-user",
+            organization_role="member",
+            group_ids=frozenset({"group-engineering"}),
+            claims_issued_at=int(time.time()),
+            is_remote=True,
+        ),
     )
 
 
@@ -378,6 +419,38 @@ def test_memory_final_flush_delegates_identity_to_controller() -> None:
     controller.memory_scope_for_cli_session.assert_not_called()
 
 
+def test_running_agents_snapshot_bounds_ownership_candidates(monkeypatch) -> None:
+    controller = _build_controller_double()
+    captured = []
+
+    def _snapshot(_controller, *, ownership_candidate_run_ids=None):
+        captured.append(ownership_candidate_run_ids)
+        return {"ok": True, "agents": [], "owned_run_ids": []}
+
+    monkeypatch.setattr("core.services.running_agents.snapshot_running_agents", _snapshot)
+    app = internal_server.create_app(controller)
+
+    async def _exercise():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            valid = await client.post(
+                "/internal/running-agents/snapshot",
+                json={"run_ids": ["run-a", "run-b"]},
+            )
+            oversized = await client.post(
+                "/internal/running-agents/snapshot",
+                json={"run_ids": [f"run-{index}" for index in range(102)]},
+            )
+        return valid, oversized
+
+    valid, oversized = asyncio.run(_exercise())
+
+    assert valid.status_code == 200
+    assert oversized.status_code == 400
+    assert oversized.json()["error"] == "invalid_run_candidates"
+    assert captured == [["run-a", "run-b"]]
+
+
 def test_memory_archive_session_delegates_raw_identity_with_bounded_lifecycle() -> None:
     controller = _build_controller_double()
     controller.memory_scope_for_cli_session = Mock(
@@ -625,6 +698,23 @@ def test_memory_rebuild_requires_signed_ui_operator() -> None:
         "result": "failed",
     }
     runtime.rebuild.assert_not_awaited()
+
+
+def test_memory_preflight_requires_signed_ui_operator() -> None:
+    runtime = SimpleNamespace(preflight=AsyncMock())
+    controller = _build_controller_double()
+    controller.memory_runtime = runtime
+    app = internal_server.create_app(controller, memory_ui_secret="test-secret")
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post("/internal/memory/preflight", json={"memory": {}})
+
+    response = asyncio.run(_exercise())
+    assert response.status_code == 403
+    assert response.json() == {"ok": False, "error": "memory_access_denied"}
+    runtime.preflight.assert_not_awaited()
 
 
 def test_memory_factory_reset_requires_signed_ui_operator() -> None:
@@ -1967,6 +2057,57 @@ def test_dispatch_async_replay_of_queued_delivery_is_idempotent(monkeypatch, tmp
     assert transcript == []
 
 
+def test_dispatch_async_starts_authorized_remote_reservation(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session = _create_test_session(
+        tmp_path,
+        native_id="proj_remote_dispatch_reservation",
+    )
+    _seed_remote_worker()
+    with engine.begin() as conn:
+        remote = _reserve_submission(
+            conn,
+            scope_id=session["scope_id"],
+            session_id=session["id"],
+            text="remote reserved input",
+            metadata=_authorized_remote_message_metadata(),
+        )
+
+    controller = None
+
+    async def handler(context, _text):
+        controller.mark_turn_complete(context)
+
+    controller = _build_controller_double(handler)
+    app = internal_server.create_app(controller)
+    transport = httpx.ASGITransport(app=app)
+
+    async def _go():
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            return await client.post(
+                "/internal/dispatch_async",
+                json={
+                    "session_id": session["id"],
+                    "text": "remote reserved input",
+                    "user_message_id": remote["id"],
+                },
+            )
+
+    response = asyncio.run(_go())
+
+    assert response.status_code == 202
+    assert response.json()["ok"] is True
+    controller.message_handler.handle_user_message.assert_awaited_once()
+    with engine.connect() as conn:
+        stored = message_deliveries.get_delivery(conn, remote["id"])
+    assert stored is not None
+    assert stored["state"] == "accepted"
 def test_dispatch_async_persists_acceptance_before_a_lost_response_replay(
     monkeypatch,
     tmp_path,
@@ -3104,7 +3245,12 @@ def test_async_dispatch_flushes_one_compatible_queue_segment_on_turn_end(monkeyp
     assert seen_texts == ["first turn", "q1\nq2"]
     with engine.connect() as conn:
         assert message_deliveries.list_queued(conn, session_id) == []
-        transcript = messages_service.list_session_messages(conn, session_id=session_id, types=("user",))
+        transcript = messages_service.list_session_messages(
+            conn,
+            session_id=session_id,
+            types=("user",),
+            include_private_metadata=True,
+        )
     assert [m["text"] for m in transcript["messages"]] == ["first turn", "q1\nq2"]
     assert transcript["messages"][1]["author_id"] == "remote:user-a"
     assert transcript["messages"][1]["metadata"]["_web_push_user_key"] == "remote:user-a"
@@ -3969,6 +4115,135 @@ def test_scheduled_gate_idle_runs_turn_with_lifecycle(monkeypatch, tmp_path):
     assert captured["in_flight_while_running"] is True, "registered in_flight (Stop works) while running"
     assert events == ["turn.start", "turn.end"], "publishes the session turn lifecycle on the bus"
     assert session_id not in app.state.in_flight_dispatches, "slot released after the turn"
+
+
+def test_hfr_482_create_per_run_delivery_adopts_reserved_session(monkeypatch, tmp_path):
+    """A create-per-run Run adopts its freshly reserved Session at admission."""
+    from core.scheduled_tasks import TaskExecutionStore
+    from core.services import sessions as sessions_service
+    from storage.background import attach_agent_run_delivery_in_connection
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session = _create_test_session(
+        tmp_path,
+        native_id="proj_create_per_run_delivery",
+    )
+    session_id = session["id"]
+    request_store = TaskExecutionStore()
+    run = request_store.enqueue_definition_run(
+        definition_id="scheduled-create-per-run",
+        run_type="scheduled",
+        source_kind="scheduler",
+        session_key="",
+        session_id=None,
+        post_to=None,
+        deliver_key=None,
+        prompt="fresh session prompt",
+        agent_name="worker",
+        session_policy="create_per_run",
+    )
+    assert request_store.claim(run.id) is not None
+
+    started = asyncio.Event()
+
+    async def _fake_dispatch_turn(ctrl, ctx, text, *, source=SOURCE_HUMAN, on_chunk=None):
+        started.set()
+        return TurnDispatchOutcome(error=None, settled_by=SETTLED_BY_TERMINAL_RESULT)
+
+    monkeypatch.setattr(session_turns, "dispatch_turn_with_outcome", _fake_dispatch_turn)
+
+    controller = _build_controller_double()
+    internal_server.create_app(controller)
+    ctx = MessageContext(
+        user_id="workbench",
+        channel_id=session_id,
+        platform="avibe",
+        message_id=f"scheduled:scheduled-create-per-run:{run.id}",
+        platform_specific={
+            "agent_session_id": session_id,
+            "agent_session_target": {"agent_backend": "claude"},
+            "task_execution_id": run.id,
+            "task_trigger_kind": "scheduled",
+            "task_definition_id": "scheduled-create-per-run",
+        },
+    )
+
+    async def _go():
+        result = await controller.session_turn_gate.submit_scheduled(
+            session_id,
+            ctx,
+            "fresh session prompt",
+            delivery_intent="queue",
+        )
+        await asyncio.wait_for(started.wait(), timeout=3)
+        return result
+
+    result = asyncio.run(_go())
+
+    assert result.delivery_owner_transferred is True
+    stored = request_store.get_run(run.id)
+    assert stored is not None
+    assert stored["session_id"] == session_id
+    assert stored["delivery_id"]
+    assert stored["metadata"]["delivery_outcome"] == {
+        "intent": "queue",
+        "status": "claimed",
+        "target_was_busy": False,
+    }
+    with engine.connect() as conn:
+        delivery = message_deliveries.get_delivery(conn, stored["delivery_id"])
+    assert delivery is not None
+    assert delivery["session_id"] == session_id
+
+    unbound_existing = request_store.enqueue_definition_run(
+        definition_id="scheduled-existing",
+        run_type="scheduled",
+        source_kind="scheduler",
+        session_key="",
+        session_id=None,
+        post_to=None,
+        deliver_key=None,
+        prompt="must not adopt",
+        agent_name="worker",
+        session_policy="existing",
+    )
+    bound_create_per_run = request_store.enqueue_definition_run(
+        definition_id="scheduled-bound-create-per-run",
+        run_type="scheduled",
+        source_kind="scheduler",
+        session_key="",
+        session_id=session_id,
+        post_to=None,
+        deliver_key=None,
+        prompt="must not rebind",
+        agent_name="worker",
+        session_policy="create_per_run",
+    )
+    with engine.begin() as conn:
+        other_session = sessions_service.create_session(
+            conn,
+            scope_id=session["scope_id"],
+            agent_backend="claude",
+            agent_name="worker",
+        )
+        other_delivery = _reserve_submission(
+            conn,
+            scope_id=session["scope_id"],
+            session_id=other_session["id"],
+            text="foreign delivery",
+        )
+        assert not attach_agent_run_delivery_in_connection(
+            conn,
+            unbound_existing.id,
+            session_id=other_session["id"],
+            delivery_id=other_delivery["id"],
+        )
+        assert not attach_agent_run_delivery_in_connection(
+            conn,
+            bound_create_per_run.id,
+            session_id=other_session["id"],
+            delivery_id=other_delivery["id"],
+        )
 
 
 def test_scheduled_gate_busy_enqueues_and_leaves_chat_turn_untouched(monkeypatch, tmp_path):
@@ -6680,6 +6955,106 @@ def _manager_accepting_runs():
     return manager, runs
 
 
+def test_flush_runs_authorized_remote_fifo_head(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session = _create_test_session(
+        tmp_path,
+        native_id="proj_remote_queue_retirement",
+    )
+    _seed_remote_worker()
+    with engine.begin() as conn:
+        remote = message_deliveries.enqueue_queued(
+            conn,
+            scope_id=session["scope_id"],
+            session_id=session["id"],
+            text="remote queued input",
+            metadata=_authorized_remote_message_metadata(),
+        )
+        local = message_deliveries.enqueue_queued(
+            conn,
+            scope_id=session["scope_id"],
+            session_id=session["id"],
+            text="local queued input",
+            metadata={
+                message_deliveries.MEMORY_USER_ID_METADATA: "local",
+                message_deliveries.MEMORY_ORDINARY_TEXT_METADATA: True,
+            },
+        )
+
+    manager, runs = _manager_accepting_runs()
+    assert asyncio.run(manager.flush_queue(session["id"])) is True
+
+    assert [(text, source) for text, source, _context in runs] == [
+        ("remote queued input", SOURCE_HUMAN),
+    ]
+    with engine.connect() as conn:
+        remote_saved = message_deliveries.get_delivery(conn, remote["id"])
+        local_saved = message_deliveries.get_delivery(conn, local["id"])
+    assert remote_saved is not None
+    assert remote_saved["state"] == "accepted"
+    assert local_saved is not None
+    assert local_saved["state"] == "claimed"
+
+
+def test_claimed_authorized_remote_turn_reaches_native_dispatch(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    engine, session = _create_test_session(
+        tmp_path,
+        native_id="proj_remote_claimed_turn",
+    )
+    _seed_remote_worker()
+    turn_id = message_deliveries.new_turn_id()
+    with engine.begin() as conn:
+        queued = message_deliveries.enqueue_queued(
+            conn,
+            scope_id=session["scope_id"],
+            session_id=session["id"],
+            text="claimed remote input",
+            metadata=_authorized_remote_message_metadata(),
+        )
+        row = message_deliveries.get_delivery(conn, queued["id"])
+        assert row is not None
+        message_deliveries.claim_start_batch(
+            conn,
+            turn_id=turn_id,
+            session_id=session["id"],
+            backend="claude",
+            deliveries=[row],
+            dispatch_text="claimed remote input",
+        )
+
+    manager = session_turns.SessionTurnManager(
+        controller=types.SimpleNamespace(),
+        build_context=lambda sid: MessageContext(
+            user_id="U",
+            channel_id="C",
+            platform="avibe",
+            platform_specific={"agent_session_id": sid},
+        ),
+    )
+
+    runs = []
+
+    async def capture_run(_session_id, _context, text, **_kwargs):
+        runs.append(text)
+
+    manager._run = capture_run
+    assert asyncio.run(manager._start_persisted_turn(turn_id)) is True
+    assert runs == ["claimed remote input"]
+
+    with engine.connect() as conn:
+        saved_turn = message_deliveries.get_turn(conn, turn_id)
+        saved_delivery = message_deliveries.get_delivery(conn, queued["id"])
+    assert saved_turn is not None
+    assert saved_turn["state"] == "starting"
+    assert saved_delivery is not None
+    assert saved_delivery["state"] == "claimed"
 def test_flush_runs_scheduled_row_as_scheduled_with_provenance(tmp_path, monkeypatch):
     """A queued scheduled run flushes as its OWN SOURCE_SCHEDULED turn with its
     delivery provenance restored — not merged into a plain user turn (#84)."""

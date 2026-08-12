@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 import sys
 from pathlib import Path
@@ -535,6 +536,43 @@ async def test_hfr_284_runtime_work_stack_joins_controller_lanes_before_service_
     assert controller._runtime_work_tokens == []
 
 
+@pytest.mark.anyio
+async def test_runtime_work_stack_drains_run_activity_before_executor_stop() -> None:
+    controller = Controller.__new__(Controller)
+    controller._shutdown_tainted = False
+    controller._runtime_work_tokens = []
+    stopped: list[str] = []
+
+    class _Dispatcher:
+        async def drain_agent_run_activity(self) -> None:
+            stopped.append("activity")
+
+    class _Service:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        async def stop(self) -> None:
+            stopped.append(self.name)
+
+    class _Supervisor:
+        def quiesce(self) -> None:
+            stopped.append("quiesce")
+
+        async def stop(self) -> None:
+            stopped.append("supervisor")
+
+    controller.message_dispatcher = _Dispatcher()
+    controller.scheduled_task_service = _Service("tasks")
+    controller.watch_service = _Service("watch")
+    controller.runtime_work_supervisor = _Supervisor()
+
+    await controller._stop_runtime_work_stack()
+
+    assert stopped[0:2] == ["quiesce", "activity"]
+    assert set(stopped[2:4]) == {"tasks", "watch"}
+    assert stopped[4] == "supervisor"
+
+
 def test_request_shutdown_keeps_loop_owned_supervisor_join_alive_after_grace() -> None:
     controller = Controller.__new__(Controller)
     loop = asyncio.new_event_loop()
@@ -782,3 +820,86 @@ def test_terminal_delivery_failure_keeps_turn_owner_live() -> None:
         asyncio.run(controller.emit_agent_message(context, "result", "done"))
 
     assert completed == []
+def test_cleanup_sync_settles_the_internal_server_task(tmp_path, monkeypatch) -> None:
+    """Shutdown must cancel the task, not just abandon it.
+
+    Leaving it pending meant the done callback that records "stopped" never
+    ran, so ``internal-server.json`` kept "ready" and ``vibe status`` reported a
+    ready internal server against a service that no longer existed.
+    """
+
+    from config import paths
+    from core import internal_server
+
+    status_path = tmp_path / "runtime" / "internal-server.json"
+    monkeypatch.setattr(paths, "get_internal_server_status_path", lambda: status_path)
+
+    controller = Controller.__new__(Controller)
+    loop = asyncio.new_event_loop()
+    controller._loop = loop
+
+    class _Stopper:
+        async def stop(self) -> None:
+            return None
+
+    controller.scheduled_task_service = _Stopper()
+    controller.watch_service = _Stopper()
+    controller.runtime_command_watcher = _Stopper()
+    controller.update_checker = type("UpdateChecker", (), {"stop": lambda self: None})()
+    controller.receiver_tasks = {}
+    controller.im_client = None
+    controller._im_thread = None
+
+    async def never_returns() -> None:
+        await asyncio.Event().wait()
+
+    task = loop.create_task(never_returns())
+    controller._internal_server_task = task
+
+    try:
+        controller.cleanup_sync()
+    finally:
+        loop.close()
+
+    assert task.cancelled()
+    assert controller._internal_server_task is None
+    assert json.loads(status_path.read_text(encoding="utf-8"))["state"] == "stopped"
+
+
+def test_cleanup_sync_cancels_memory_reconcile_before_closing_runtime() -> None:
+    controller = Controller.__new__(Controller)
+    loop = asyncio.new_event_loop()
+    controller._loop = loop
+    controller.cleanup_task = None
+
+    class _Stopper:
+        async def stop(self) -> None:
+            return None
+
+    controller.scheduled_task_service = _Stopper()
+    controller.watch_service = _Stopper()
+    controller.runtime_command_watcher = _Stopper()
+    controller.update_checker = type("UpdateChecker", (), {"stop": lambda self: None})()
+    controller.receiver_tasks = {}
+    controller.im_client = None
+    controller._im_thread = None
+
+    async def never_returns() -> None:
+        await asyncio.Event().wait()
+
+    reconcile_task = loop.create_task(never_returns())
+    controller._memory_reconcile_task = reconcile_task
+
+    class _MemoryRuntime:
+        async def close(self) -> None:
+            assert reconcile_task.cancelled()
+
+    controller.memory_runtime = _MemoryRuntime()
+
+    try:
+        controller.cleanup_sync()
+    finally:
+        loop.close()
+
+    assert reconcile_task.cancelled()
+    assert controller._memory_reconcile_task is None

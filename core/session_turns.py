@@ -907,33 +907,78 @@ class SessionTurnManager:
             if str(sink.get("turn_token") or "") == turn_id:
                 self._append_accepted_agent_run_ids(sink, run_ids)
 
-    def owned_agent_run_ids(self) -> set[str]:
-        """Run ids owned by a durable Delivery or a live process projection."""
+    def _project_owned_agent_run_ids(
+        self,
+        candidate_run_ids: Optional[set[str]] = None,
+    ) -> set[str]:
+        """Read Run ownership without reconciling or settling lifecycle state."""
+
+        candidates = (
+            {str(run_id) for run_id in candidate_run_ids if str(run_id or "").strip()}
+            if candidate_run_ids is not None
+            else None
+        )
+
+        def _eligible(run_ids: set[str]) -> set[str]:
+            return run_ids if candidates is None else run_ids & candidates
+
         owned: set[str] = set()
         for turn in list(self.in_flight.values()):
-            owned |= self._agent_run_ids_from_spec(getattr(turn.context, "platform_specific", None))
+            owned |= _eligible(
+                self._agent_run_ids_from_spec(
+                    getattr(turn.context, "platform_specific", None)
+                )
+            )
         for sink in list(self.active_turn_sinks.values()):
-            owned |= self._agent_run_ids_from_spec(sink)
-        if self._durable_schema_available():
-            self._reconcile_terminal_agent_runs()
+            owned |= _eligible(self._agent_run_ids_from_spec(sink))
+        if self._durable_schema_available() and candidates != set():
+            stmt = (
+                select(agent_runs.c.id)
+                .join(
+                    delivery_rows,
+                    delivery_rows.c.id == agent_runs.c.delivery_id,
+                )
+                .where(
+                    agent_runs.c.status.in_(
+                        ["queued", "pending", "running", "processing"]
+                    )
+                )
+                .where(delivery_rows.c.state != "retired")
+            )
+            if candidates is not None:
+                stmt = (
+                    stmt.outerjoin(
+                        session_turn_rows,
+                        session_turn_rows.c.id == delivery_rows.c.turn_id,
+                    )
+                    .where(agent_runs.c.id.in_(candidates))
+                    .where(
+                        or_(
+                            delivery_rows.c.turn_id.is_(None),
+                            session_turn_rows.c.state.in_(
+                                delivery_store.TURN_OWNER_STATES
+                            ),
+                        )
+                    )
+                )
             with self._sqlite_engine().connect() as conn:
                 owned.update(
                     str(run_id)
-                    for run_id in conn.execute(
-                        select(agent_runs.c.id)
-                        .join(
-                            delivery_rows,
-                            delivery_rows.c.id == agent_runs.c.delivery_id,
-                        )
-                        .where(
-                            agent_runs.c.status.in_(
-                                ["queued", "pending", "running", "processing"]
-                            )
-                        )
-                        .where(delivery_rows.c.state != "retired")
-                    ).scalars()
+                    for run_id in conn.execute(stmt).scalars()
                 )
         return owned
+
+    def snapshot_owned_agent_run_ids(self, candidate_run_ids: set[str]) -> set[str]:
+        """Expose the side-effect-free ownership projection to operator views."""
+
+        return self._project_owned_agent_run_ids(candidate_run_ids)
+
+    def owned_agent_run_ids(self) -> set[str]:
+        """Reconcile terminal turns, then return every currently owned Run id."""
+
+        if self._durable_schema_available():
+            self._reconcile_terminal_agent_runs()
+        return self._project_owned_agent_run_ids()
 
     def accepted_agent_run_ids_for_turn(self, turn_id: str) -> list[str]:
         """Read restart-stable Run attribution for one exact logical Turn."""
@@ -1799,6 +1844,27 @@ class SessionTurnManager:
                     raise RuntimeError("runtime-rejected Delivery queue fallback lost")
             return None
 
+        denied_remote = [
+            (delivery, reason)
+            for delivery in deliveries
+            if (reason := cls._remote_delivery_execution_denial(conn, delivery)) is not None
+        ]
+        if denied_remote:
+            for delivery, reason in denied_remote:
+                if not cls._retire_delivery_not_written(
+                    conn,
+                    session_id,
+                    str(delivery["id"]),
+                    reason=reason,
+                ):
+                    raise RuntimeError("remote Delivery authorization retirement lost")
+                logger.warning(
+                    "retired remote-origin Delivery=%s before Agent dispatch: %s",
+                    delivery["id"],
+                    reason,
+                )
+            return None
+
         unstartable = [
             delivery
             for delivery in deliveries
@@ -1835,6 +1901,49 @@ class SessionTurnManager:
             dispatch_text=dispatch_text,
             attempt_id=attempt_id,
         )
+
+    @staticmethod
+    def _remote_delivery_execution_denial(
+        conn: Connection,
+        delivery: dict[str, Any],
+    ) -> str | None:
+        """Recheck deferred remote chat authority immediately before execution."""
+
+        if not delivery_store.delivery_has_remote_resource_context(delivery):
+            return None
+
+        from core.services import sessions as workbench_sessions_service
+        from core.vibe_agents import ensure_session_agent_access
+        from storage import project_access_service, resource_access_service
+
+        metadata = delivery_store.delivery_payload(delivery).get("metadata")
+        try:
+            context = resource_access_service.resource_user_context_from_metadata(metadata)
+        except resource_access_service.ResourceAccessError as error:
+            return error.code
+        if context is None or not context.can_chat:
+            return "remote_chat_access_forbidden"
+        if not project_access_service.role_allows(
+            project_access_service.get_effective_session_role(
+                conn,
+                context,
+                str(delivery["session_id"]),
+            ),
+            "editor",
+        ):
+            return "remote_project_access_forbidden"
+        try:
+            session = workbench_sessions_service.get_session(
+                conn,
+                str(delivery["session_id"]),
+                authorization_context=context,
+            )
+            ensure_session_agent_access(conn, session, user_context=context)
+        except LookupError:
+            return "remote_session_or_agent_not_found"
+        except PermissionError:
+            return "remote_agent_access_forbidden"
+        return None
 
     @staticmethod
     def _delivery_agent_runs_can_start(
@@ -3848,6 +3957,7 @@ class SessionTurnManager:
         archived_before_dispatch = False
         run_terminal_before_dispatch = False
         invalid_delivery_ids: set[str] = set()
+        remote_authorization_denials: dict[str, str] = {}
         with release_lifecycle_admission_on_error():
             with self._sqlite_engine().begin() as conn:
                 reserve_write_lock(conn)
@@ -3882,6 +3992,14 @@ class SessionTurnManager:
                     str(row["id"])
                     for row in deliveries
                     if not self._has_resolvable_delivery_input(conn, row)
+                }
+                remote_authorization_denials = {
+                    str(row["id"]): reason
+                    for row in deliveries
+                    if (
+                        reason := self._remote_delivery_execution_denial(conn, row)
+                    )
+                    is not None
                 }
                 run_ids = list(
                     dict.fromkeys(
@@ -3928,6 +4046,27 @@ class SessionTurnManager:
                 evidence_kind="agent_run_terminal_before_native_dispatch",
             )
             if terminal.get("changed"):
+                await self._resume_post_terminal(str(turn["session_id"]))
+            return False
+        if remote_authorization_denials:
+            logger.warning(
+                "durable Turn=%s failed remote authorization before Agent dispatch: %s",
+                turn_id,
+                remote_authorization_denials,
+            )
+            terminal = terminalize_and_release(
+                turn_id,
+                "not_written",
+                settled_by="remote_authorization_denied",
+                evidence_kind="remote_authorization_before_native_dispatch",
+                evidence={"denials": remote_authorization_denials},
+                retire_unwritten_delivery_ids={
+                    str(row["id"])
+                    for row in deliveries
+                },
+            )
+            if terminal.get("changed"):
+                self._publish_queue_update(str(turn["session_id"]))
                 await self._resume_post_terminal(str(turn["session_id"]))
             return False
         if invalid_delivery_ids:

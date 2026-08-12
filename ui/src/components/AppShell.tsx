@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
-import { Link, NavLink, Outlet, useLocation } from 'react-router-dom';
-import { AlertTriangle, ArrowLeft, Bot, Brain, ChevronDown, Cpu, FolderTree, Globe, Grid2x2, Hash, Inbox, LayoutDashboard, LayoutGrid, Link as LinkIcon, Menu, MessageCircle, PlugZap, Plus, Settings, Sparkles, X } from 'lucide-react';
+import { Link, Navigate, NavLink, Outlet, useLocation } from 'react-router-dom';
+import { AlertTriangle, ArrowLeft, Bot, Brain, Building2, ChevronDown, Cpu, FolderTree, Globe, Grid2x2, Hash, Inbox, LayoutDashboard, LayoutGrid, Link as LinkIcon, Menu, MessageCircle, PlugZap, Plus, Settings, Sparkles, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
@@ -11,6 +11,10 @@ import { memoryNavShouldBeVisible } from '../lib/memorySettings';
 import { useApi } from '../context/ApiContext';
 import { useStatus } from '../context/StatusContext';
 import { useWorkbenchInbox } from '../context/WorkbenchInboxContext';
+import {
+  canUseAppsSurface,
+  useInstanceAuthorization,
+} from '../context/InstanceAuthorizationContext';
 import { AccountMenu } from './AccountMenu';
 import { LanguageSwitcher } from './LanguageSwitcher';
 import { ThemeToggle } from './ThemeToggle';
@@ -18,6 +22,7 @@ import { VersionBadge } from './VersionBadge';
 import { WorkbenchSidebar } from './workbench/WorkbenchSidebar';
 import { AppsLauncher } from './AppsLauncher';
 import { ErrorBoundary } from './ui/error-boundary';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
 import { WindowManagerProvider } from '../context/WindowManagerProvider';
 import { DockProvider } from '../context/DockProvider';
 import { ShowPageDragProvider } from '../context/ShowPageDragProvider';
@@ -30,7 +35,13 @@ import { InstallHint } from './InstallHint';
 import logoImg from '../assets/logo.png';
 import { getEnabledPlatforms, platformSupportsChannels } from '../lib/platforms';
 import { useViewportHeightVar } from '../lib/useViewportHeightVar';
-import { isAdvancedSettingsPath, isMemorySettingsPath } from '../lib/adminNavigation';
+import {
+  adminLandingPath,
+  filterRuntimeAccessNavItems,
+  isAdvancedSettingsPath,
+  isLocalSystemPathForAccess,
+  isMemorySettingsPath,
+} from '../lib/adminNavigation';
 
 type ShellNavItem = {
   // Optional: a parent that only groups children (no page of its own) omits `to`
@@ -50,6 +61,10 @@ type ShellNavItem = {
   onClick?: () => void;
   variant?: 'workbench';
 };
+
+// Organization is exposed from the admin control panel only. The workbench
+// keeps its compact navigation focused on agent work.
+const ORGANIZATION_NAV_ENABLED = true;
 
 const isItemActive = (item: ShellNavItem, pathname: string): boolean =>
   item.match
@@ -250,6 +265,11 @@ export const AppShell: React.FC = () => {
   const { t } = useTranslation();
   const { status } = useStatus();
   const { totalUnread } = useWorkbenchInbox();
+  const {
+    capabilities,
+    remote,
+    hasTemporaryUnrestrictedOrgAccess,
+  } = useInstanceAuthorization();
   const api = useApi();
   const location = useLocation();
   const [enabledPlatforms, setEnabledPlatforms] = useState<string[]>([]);
@@ -278,11 +298,12 @@ export const AppShell: React.FC = () => {
   useViewportHeightVar();
 
   useEffect(() => {
+    if (!capabilities.can_manage_instance && !hasTemporaryUnrestrictedOrgAccess) return;
     api.getConfig().then((c: any) => {
       setConfig(c);
       setEnabledPlatforms(getEnabledPlatforms(c));
     }).catch(() => {});
-  }, [api]);
+  }, [api, capabilities.can_manage_instance, hasTemporaryUnrestrictedOrgAccess]);
 
   useEffect(() => {
     const refreshMemoryNav = () => {
@@ -348,9 +369,62 @@ export const AppShell: React.FC = () => {
     window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`);
   }, [chromeless, location.pathname, location.search]);
 
+  if (
+    location.pathname === '/setup' &&
+    remote &&
+    (capabilities.can_manage_instance || hasTemporaryUnrestrictedOrgAccess)
+  ) {
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-background p-4 text-foreground">
+        <Card className="w-full max-w-md">
+          <CardHeader>
+            <CardTitle>{t('setup.remoteOwner.title')}</CardTitle>
+            <CardDescription>{t('setup.remoteOwner.body')}</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <p className="text-sm leading-relaxed text-muted">{t('setup.remoteOwner.hint')}</p>
+            <Button asChild>
+              <Link to={adminLandingPath(capabilities.can_use_system, hasTemporaryUnrestrictedOrgAccess === true)}>
+                {t('setup.remoteOwner.action')}
+              </Link>
+            </Button>
+          </CardContent>
+        </Card>
+      </main>
+    );
+  }
+
   const hasChannelPlatforms = enabledPlatforms.some((platform) => platformSupportsChannels(config, platform));
   const modelHubEnabled = modelHubEnabledFromConfig(config);
   const isRunning = status.state === 'running';
+  const canUseApps = canUseAppsSurface(remote, hasTemporaryUnrestrictedOrgAccess);
+  const canUseRuntimeSurfaces = !remote || hasTemporaryUnrestrictedOrgAccess === true;
+
+  const ownerOnlyPath =
+    location.pathname === '/setup' ||
+    (location.pathname.startsWith('/admin') && !location.pathname.startsWith('/admin/organization')) ||
+    ['/agents', '/harness'].some(
+      (path) => location.pathname === path || location.pathname.startsWith(`${path}/`),
+    );
+  // The temporary Organization rollout admits these runtime/admin surfaces for
+  // active members. Remote Access pairing/tunnel controls stay on their own
+  // control-plane route and remain gated by the projected system capability.
+  const localSystemPath = isLocalSystemPathForAccess(
+    location.pathname,
+    canUseRuntimeSurfaces,
+  );
+  const resourceUseDenied =
+    (location.pathname.startsWith('/skills') && !capabilities.can_use_skills && !canUseRuntimeSurfaces) ||
+    (location.pathname.startsWith('/vaults') && !capabilities.can_use_vault_secrets && !canUseRuntimeSurfaces);
+  const appAccessDenied = location.pathname.startsWith('/apps/') && !canUseApps;
+  if (
+    (ownerOnlyPath && !capabilities.can_manage_instance && !canUseRuntimeSurfaces) ||
+    (localSystemPath && !capabilities.can_use_system) ||
+    resourceUseDenied ||
+    appAccessDenied
+  ) {
+    return <Navigate to="/" replace />;
+  }
 
   if (location.pathname === '/setup') {
     return <><ConfigRecoveryNotice config={config} /><Outlet /></>;
@@ -366,10 +440,19 @@ export const AppShell: React.FC = () => {
 
   const adminItems: ShellNavItem[] = [
     { to: '/admin/dashboard', label: t('nav.dashboard'), icon: LayoutDashboard },
-    // Permanent escape hatch to the App Library (a workbench app). Always present,
-    // so the Library is reachable from the control panel even when it is undocked
-    // (§7.1c #7). Matches any /apps/library path so it stays active on the route.
-    { to: '/apps/library', label: t('nav.appLibrary'), icon: LayoutGrid, match: (p) => p.startsWith('/apps/library') },
+    ...(ORGANIZATION_NAV_ENABLED
+      ? [{
+          to: '/admin/organization/overview',
+          label: t('nav.organization'),
+          icon: Building2,
+          match: (p: string) => p.startsWith('/admin/organization'),
+        }]
+      : []),
+    // Permanent escape hatch to the App Library (a workbench app) for principals
+    // covered by the current Apps policy. It stays reachable even when undocked.
+    ...(canUseApps
+      ? [{ to: '/apps/library', label: t('nav.appLibrary'), icon: LayoutGrid, match: (p: string) => p.startsWith('/apps/library') }]
+      : []),
     { to: '/admin/remote-access', label: t('nav.remoteAccess'), icon: Globe },
     {
       // 通讯平台: groups everything about connecting messaging platforms — the
@@ -417,16 +500,26 @@ export const AppShell: React.FC = () => {
     },
   ];
 
-  const items: ShellNavItem[] = shellMode === 'admin' ? adminItems : [];
+  // Second half of the runtime-access gate: a page the redirect above withholds
+  // must not still be advertised, or a remote owner taps a nav entry and lands
+  // back on the Workbench. With the temporary Organization rollout every admin
+  // surface except remote-access pairing is admitted, so the nav stays full.
+  const visibleAdminItems = capabilities.can_use_system
+    ? adminItems
+    : filterRuntimeAccessNavItems(adminItems, canUseRuntimeSurfaces);
 
-  // A bottom tab bar can't hold the nested admin nav (6 sections, one with a
-  // submenu), so mobile keeps a trimmed 4-tab bar — back-to-workbench (emphasized
-  // green circle), 控制台, 菜单 (opens the full nested nav sheet below), 高级设置 —
-  // and the 菜单 sheet renders the same nested adminItems so every page is
-  // reachable + groups expand. See ``adminMenuOpen``.
-  const adminMobileTabs: ShellNavItem[] = [
+  const items: ShellNavItem[] = shellMode === 'admin' ? visibleAdminItems : [];
+
+  // A bottom tab bar can't hold the nested admin nav, so mobile keeps a trimmed
+  // bar with Workbench, Control Panel, and More (which opens the full nested nav
+  // sheet). The Organization tab follows the same temporary visibility switch
+  // as every other shell entry point. See ``adminMenuOpen``.
+  const adminMobileTabsAll: ShellNavItem[] = [
     { to: '/', label: t('nav.workbench'), icon: Sparkles, variant: 'workbench' },
     { to: '/admin/dashboard', label: t('nav.dashboard'), icon: LayoutDashboard },
+    ...(ORGANIZATION_NAV_ENABLED
+      ? [{ to: '/admin/organization/overview', label: t('nav.organization'), icon: Building2 }]
+      : []),
     { label: t('nav.more'), icon: Menu, onClick: () => setAdminMenuOpen(true), match: () => adminMenuOpen },
     {
       to: '/admin/settings/messaging',
@@ -435,10 +528,15 @@ export const AppShell: React.FC = () => {
       match: (pathname) => isAdvancedSettingsPath(pathname, memoryNavVisible),
     },
   ];
-  // The 更多 sheet shows the OVERFLOW — admin sections not already on the bottom
-  // bar (控制台 + 高级设置) — so nothing is duplicated.
-  const adminBottomBarPaths = new Set(['/admin/dashboard', '/admin/settings/messaging']);
-  const adminSheetItems = adminItems
+  const adminMobileTabs = capabilities.can_use_system
+    ? adminMobileTabsAll
+    : filterRuntimeAccessNavItems(adminMobileTabsAll, canUseRuntimeSurfaces);
+  // The More sheet shows the overflow: admin sections not already on the bottom
+  // bar. Keep its filtering aligned with the currently visible primary tabs.
+  const adminBottomBarPaths = new Set(
+    adminMobileTabs.map((item) => item.to).filter((to): to is string => !!to && to !== '/'),
+  );
+  const adminSheetItems = visibleAdminItems
     .filter((item) => !item.to || !adminBottomBarPaths.has(item.to))
     // Groups start expanded in the sheet (the sheet is transient — show the
     // children up front). The desktop sidebar keeps its collapse-by-default.
@@ -451,16 +549,18 @@ export const AppShell: React.FC = () => {
   const workbenchTabs: ShellNavItem[] = [
     { to: '/inbox', label: t('nav.inbox'), icon: Inbox, badge: totalUnread },
     { to: '/projects', label: t('nav.projects'), icon: FolderTree },
-    {
-      to: '/agents',
+    ...(capabilities.can_manage_agents || capabilities.can_use_skills || capabilities.can_use_vault_secrets || canUseRuntimeSurfaces ? [{
+      to: capabilities.can_manage_agents || canUseRuntimeSurfaces ? '/agents' : capabilities.can_use_skills ? '/skills' : '/vaults',
       label: t('nav.capabilities'),
       icon: LayoutGrid,
-      match: (p) => ['/agents', '/skills', '/harness', '/vaults'].some((x) => p.startsWith(x)),
-    },
+      match: (p: string) => ['/agents', '/skills', '/harness', '/vaults'].some((x) => p.startsWith(x)),
+    }] : []),
     // Apps (§7.1b): replaces the old 更多 route tab. Tapping toggles the Dock
     // drawer (the mobile Dock) rather than navigating; `grid-2x2` distinguishes
     // it from Capabilities' `layout-grid`.
-    { label: t('nav.apps'), icon: Grid2x2, onClick: () => setAppsDrawerOpen((v) => !v), match: () => appsDrawerOpen },
+    ...(canUseApps
+      ? [{ label: t('nav.apps'), icon: Grid2x2, onClick: () => setAppsDrawerOpen((v) => !v), match: () => appsDrawerOpen }]
+      : []),
   ];
 
   // Chat is a full-screen detail (own composer) and Search is a full-screen
@@ -484,7 +584,7 @@ export const AppShell: React.FC = () => {
     // Desktop: normal document flow.
     <WindowManagerProvider standalone={standaloneAppTab}>
     <StandaloneAppTabContext.Provider value={standaloneAppTab}>
-    <DockProvider>
+    <DockProvider enabled={canUseApps}>
     <ShowPageDragProvider>
     {/* Chromeless (single-app tab): the locked full-viewport column applies on DESKTOP too —
         the app fills the browser area exactly, with nothing to scroll around it. */}
@@ -510,17 +610,20 @@ export const AppShell: React.FC = () => {
               px-4 py-2.5 row height so the logo centerline lines up with the
               chat title bar. No bottom border (it read as out of place under
               the logo). Logo is size-8 to match the header's row height. */}
-          <div className="flex shrink-0 items-center gap-2.5 px-4 py-2.5">
+          <Link
+            to="/"
+            className="group flex shrink-0 items-center gap-2.5 px-4 py-2.5 transition-colors hover:bg-foreground/[0.03] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-mint/60"
+          >
             <img
               src={logoImg}
               alt="avibe logo"
-              className="size-8 rounded-lg border border-mint/35 bg-mint/[0.08] object-cover shadow-[0_0_16px_-4px_rgba(91,255,160,0.5)]"
+              className="size-8 rounded-lg border border-mint/35 bg-mint/[0.08] object-cover shadow-[0_0_16px_-4px_rgba(91,255,160,0.5)] transition-shadow group-hover:shadow-[0_0_20px_-3px_rgba(91,255,160,0.65)]"
             />
             <div className="min-w-0 leading-tight">
               <div className="truncate text-[13px] font-semibold text-foreground">{t('appShell.title')}</div>
               <div className="truncate text-[11px] text-muted">{t('appShell.subtitle')}</div>
             </div>
-          </div>
+          </Link>
 
           {/* Middle: workspace label + nav list (scrolls). Carries the
               horizontal + top padding the outer container used to own; workbench
@@ -553,10 +656,10 @@ export const AppShell: React.FC = () => {
                 centered Chat composer. Workbench → Settings (control panel);
                 Control Panel → Back to Workbench, the mint counterpart. */}
             <div className="flex items-stretch gap-2">
-              <AppsLauncher />
-              {shellMode === 'workbench' && (
+              {canUseApps && <AppsLauncher />}
+              {shellMode === 'workbench' && (capabilities.can_manage_instance || canUseRuntimeSurfaces) && (
                 <Link
-                  to="/admin/dashboard"
+                  to={adminLandingPath(capabilities.can_use_system, canUseRuntimeSurfaces)}
                   title={t('appShell.openControlPanel')}
                   aria-label={t('appShell.openControlPanel')}
                   className="group flex w-11 shrink-0 items-center justify-center rounded-lg border border-border-strong text-foreground transition-colors hover:bg-foreground/[0.04]"
@@ -609,7 +712,7 @@ export const AppShell: React.FC = () => {
                 />
                 {isRunning ? t('common.running') : t('common.stopped')}
               </span>
-              <VersionBadge openUpward />
+              {(capabilities.can_manage_instance || canUseRuntimeSurfaces) && <VersionBadge openUpward />}
             </div>
           </div>
         </div>
@@ -622,18 +725,23 @@ export const AppShell: React.FC = () => {
           reason: the app owns the viewport. */}
       {!isFullScreenMobile && !chromeless && (
         <header className="sticky top-0 z-40 flex h-[calc(4rem+env(safe-area-inset-top))] shrink-0 items-center justify-between gap-2 border-b border-border bg-background/92 px-4 pt-[env(safe-area-inset-top)] backdrop-blur md:hidden">
-          <div className="flex min-w-0 items-center gap-2">
+          <Link
+            to="/"
+            className="flex min-w-0 items-center gap-2 rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-mint/60"
+          >
             <img
               src={logoImg}
               alt="avibe logo"
               className="size-6 shrink-0 rounded-md border border-mint/30 bg-mint/[0.08] object-cover"
             />
             <span className="truncate text-[13px] font-semibold">{t('appShell.title')}</span>
-          </div>
+          </Link>
           {/* Right side: the Add-to-Home-Screen nudge (renders only on iOS Safari
               when not yet installed; null everywhere else). Version / language /
               theme / account live in the More tab. */}
-          <InstallHint />
+          <div className="flex items-center gap-1.5">
+            <InstallHint />
+          </div>
         </header>
       )}
 
@@ -652,7 +760,14 @@ export const AppShell: React.FC = () => {
             (location.pathname.startsWith('/admin/settings') ? 'page-glow-settings' : 'page-glow-console')
         )}
       >
-        <div className={clsx('w-full', chromeless ? 'h-full' : 'mx-auto px-4 py-5 md:px-10 md:py-8')}>
+        <div className={clsx(
+          'w-full',
+          chromeless
+            ? 'h-full'
+            : location.pathname.startsWith('/admin/organization')
+              ? 'mx-auto'
+              : 'mx-auto px-4 py-5 md:px-10 md:py-8',
+        )}>
           {/* A crashing page only replaces the content area — the sidebar + chrome stay usable, and
               navigating elsewhere clears the error without a manual retry. Key on location.key (not
               just pathname) so a query-only navigation (e.g. /search?q=…) also resets. */}
@@ -668,7 +783,9 @@ export const AppShell: React.FC = () => {
         ) : (
           <MobileTabBar
             items={workbenchTabs}
-            center={{ onClick: () => setNewSessionOpen(true), label: t('appShell.newSession'), icon: Plus }}
+            center={(capabilities.can_chat || canUseRuntimeSurfaces)
+              ? { onClick: () => setNewSessionOpen(true), label: t('appShell.newSession'), icon: Plus }
+              : undefined}
           />
         )
       )}
@@ -709,15 +826,17 @@ export const AppShell: React.FC = () => {
       {/* Mobile Dock drawer — the workbench Apps tab summons it (§7.1b). Mobile-only
           (md:hidden internally); mounted inside DockProvider so it reads the same
           docked tiles + order as the desktop Dock. */}
-      {shellMode === 'workbench' && (
+      {shellMode === 'workbench' && canUseApps && (
         <MobileDockDrawer open={appsDrawerOpen} onClose={() => setAppsDrawerOpen(false)} />
       )}
 
-      <NewSessionSheet
-        open={newSessionOpen}
-        onClose={() => setNewSessionOpen(false)}
-        onOpen={() => setNewSessionOpen(true)}
-      />
+      {(capabilities.can_chat || canUseRuntimeSurfaces) && (
+        <NewSessionSheet
+          open={newSessionOpen}
+          onClose={() => setNewSessionOpen(false)}
+          onOpen={() => setNewSessionOpen(true)}
+        />
+      )}
 
       {/* ⌘K message-search palette. Mounted shell-wide so the shortcut works from
           both Workbench and Control Panel; the sidebar field is the workbench
@@ -730,7 +849,7 @@ export const AppShell: React.FC = () => {
           second launcher on top in full-screen anymore (product: avoid the fullscreen floating
           button; a Dock redesign comes later). Un-maximize via the window traffic-lights to reach
           the sidebar launcher. */}
-      <WindowLayer />
+      {canUseApps && <WindowLayer />}
     </div>
     </ShowPageDragProvider>
     </DockProvider>

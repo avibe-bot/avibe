@@ -21,9 +21,15 @@ import clsx from 'clsx';
 
 import { useWorkbenchInbox } from '../../context/WorkbenchInboxContext';
 import { useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
+import {
+  canUseRuntimeSurfaces,
+  useInstanceAuthorization,
+} from '../../context/InstanceAuthorizationContext';
 import type { ProjectSessionsState } from '../../context/WorkbenchProjectsContext';
 import type { WorkbenchProject, WorkbenchSession } from '../../context/ApiContext';
 import { formatRelativeTime } from '../../lib/relativeTime';
+import { canArchiveProjects, canEditProjectInstructions } from '../../lib/remoteAuth';
+import { canCreateLocalProject } from '../../lib/sessionInfo';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
@@ -79,6 +85,17 @@ const MobileProjectRow: React.FC<{
 }> = ({ project, open, state, onToggle }) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const { capabilities, remote, hasTemporaryUnrestrictedOrgAccess } = useInstanceAuthorization();
+  const canUseRuntime = canUseRuntimeSurfaces(remote, hasTemporaryUnrestrictedOrgAccess);
+  const canManageProjects = capabilities.can_manage_projects || canUseRuntime;
+  const canArchive = canManageProjects && canArchiveProjects({
+    remote,
+    temporaryUnrestrictedOrgAccess: hasTemporaryUnrestrictedOrgAccess,
+  });
+  const canEditAgentsMd = canManageProjects && canEditProjectInstructions({
+    remote,
+    temporaryUnrestrictedOrgAccess: hasTemporaryUnrestrictedOrgAccess,
+  });
   const { renameProject, archiveProject, createSessionForProject } = useWorkbenchProjectsTree();
   const [menuOpen, setMenuOpen] = useState(false);
   // Guards against a double-tap creating two sessions before navigation unmounts.
@@ -91,6 +108,7 @@ const MobileProjectRow: React.FC<{
   // Enter (or blur) commits, then the input unmounts and its blur fires again;
   // Escape cancels and must not let that trailing blur commit the stale draft.
   const handledRef = useRef(false);
+  const canChat = (capabilities.can_chat || canUseRuntime) && (canUseRuntime || project.capabilities.can_chat);
 
   useEffect(() => {
     if (renaming) inputRef.current?.focus();
@@ -155,7 +173,7 @@ const MobileProjectRow: React.FC<{
           )}
           {open ? <ChevronDown className="size-4 shrink-0 text-muted" /> : <ChevronRight className="size-4 shrink-0 text-muted" />}
         </button>
-        <Popover open={menuOpen} onOpenChange={setMenuOpen}>
+        {(canChat || canManageProjects) && <Popover open={menuOpen} onOpenChange={setMenuOpen}>
           <PopoverTrigger asChild>
             <Button
               type="button"
@@ -171,7 +189,7 @@ const MobileProjectRow: React.FC<{
             {/* New session — first item, mobile only. Desktop surfaces this as
                 the per-project "+" button in the sidebar, so it stays out of the
                 desktop project menu; here the "+" doesn't fit, so it lives here. */}
-            <MenuItem
+            {canChat && <MenuItem
               icon={Plus}
               onClick={async () => {
                 setMenuOpen(false);
@@ -186,7 +204,8 @@ const MobileProjectRow: React.FC<{
               }}
             >
               {t('newSession.title')}
-            </MenuItem>
+            </MenuItem>}
+            {canManageProjects && <>
             <MenuItem
               icon={Pencil}
               onClick={() => {
@@ -207,7 +226,7 @@ const MobileProjectRow: React.FC<{
             >
               {t('workbench.projectSettings')}
             </MenuItem>
-            {project.folder_path && (
+            {project.folder_path && canEditAgentsMd && (
               <MenuItem
                 icon={FileText}
                 onClick={() => {
@@ -218,7 +237,7 @@ const MobileProjectRow: React.FC<{
                 {t('workbench.projectEditAgents')}
               </MenuItem>
             )}
-            <MenuItem
+            {canArchive && <MenuItem
               icon={Archive}
               danger
               onClick={async () => {
@@ -229,12 +248,17 @@ const MobileProjectRow: React.FC<{
               }}
             >
               {t('workbench.projectArchive')}
-            </MenuItem>
+            </MenuItem>}
+            </>}
           </PopoverContent>
-        </Popover>
+        </Popover>}
       </div>
-      <ProjectSettingsDialog project={project} open={settingsOpen} onClose={() => setSettingsOpen(false)} />
-      <ProjectAgentsMdDialog project={project} open={agentsOpen} onClose={() => setAgentsOpen(false)} />
+      {canManageProjects && (
+        <>
+          <ProjectSettingsDialog project={project} open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+          <ProjectAgentsMdDialog project={project} open={agentsOpen} onClose={() => setAgentsOpen(false)} />
+        </>
+      )}
     </>
   );
 };
@@ -246,8 +270,10 @@ const MobileSessionRow: React.FC<{
   projectId: string;
   session: WorkbenchSession;
   unread: number;
+  canChat: boolean;
+  canManageMetadata: boolean;
   onOpen: () => void;
-}> = ({ projectId, session, unread, onOpen }) => {
+}> = ({ projectId, session, unread, canChat, canManageMetadata, onOpen }) => {
   const { t } = useTranslation();
   const { renameSession } = useWorkbenchProjectsTree();
   const navigate = useNavigate();
@@ -259,6 +285,8 @@ const MobileSessionRow: React.FC<{
 
   const { actions, archiveDialog } = useSessionActions({
     session,
+    writable: canManageMetadata,
+    lifecycleWritable: canChat,
     projectId,
     onRenameStart: () => {
       setDraft(session.title ?? '');
@@ -332,7 +360,7 @@ const MobileSessionRow: React.FC<{
           </span>
         )}
       </button>
-      <Popover open={menuOpen} onOpenChange={setMenuOpen}>
+      {canManageMetadata && <Popover open={menuOpen} onOpenChange={setMenuOpen}>
         <PopoverTrigger asChild>
           <SessionActionsTrigger
             label={t('workbench.sessionActions')}
@@ -347,7 +375,7 @@ const MobileSessionRow: React.FC<{
           align="end"
           onClose={() => setMenuOpen(false)}
         />
-      </Popover>
+      </Popover>}
       {archiveDialog}
     </div>
   );
@@ -361,6 +389,13 @@ const MobileSessionRow: React.FC<{
 export const ProjectsPage: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const {
+    capabilities,
+    remote,
+    hasTemporaryUnrestrictedOrgAccess,
+  } = useInstanceAuthorization();
+  const canUseRuntime = canUseRuntimeSurfaces(remote, hasTemporaryUnrestrictedOrgAccess);
+  const canCreateProject = canUseRuntime || canCreateLocalProject(capabilities);
   const { unreadBySession } = useWorkbenchInbox();
   const {
     projects,
@@ -395,7 +430,7 @@ export const ProjectsPage: React.FC = () => {
     <div className="mx-auto flex max-w-xl flex-col gap-3">
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-bold">{t('projects.title')}</h1>
-        <Button
+        {canCreateProject && <Button
           type="button"
           variant="outline"
           size="icon"
@@ -404,7 +439,7 @@ export const ProjectsPage: React.FC = () => {
           className="border-mint/35 bg-mint/[0.08] text-mint hover:bg-mint/[0.14]"
         >
           <FolderPlus className="size-4" />
-        </Button>
+        </Button>}
       </div>
 
       {/* The provider often has projects cached already (it's mounted app-wide),
@@ -470,6 +505,8 @@ export const ProjectsPage: React.FC = () => {
                     projectId={project.id}
                     session={session}
                     unread={unreadBySession[session.id] ?? 0}
+                    canChat={(capabilities.can_chat || canUseRuntime) && (canUseRuntime || project.capabilities.can_chat)}
+                    canManageMetadata={canUseRuntime || project.capabilities.can_chat}
                     onOpen={() => openSession(session.id)}
                   />
                 ))}
@@ -490,7 +527,7 @@ export const ProjectsPage: React.FC = () => {
         );
       })}
 
-      {showNewProject && (
+      {showNewProject && canCreateProject && (
         <NewProjectDialog
           onClose={() => setShowNewProject(false)}
           onCreated={(project) => {
