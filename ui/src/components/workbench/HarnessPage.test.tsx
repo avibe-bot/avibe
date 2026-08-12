@@ -541,6 +541,23 @@ describe('TaskDetail command task', () => {
     expect(html).not.toContain('/chat/');
   });
 
+  it('localizes an orphan-owner pause reason stored as a machine code', () => {
+    const html = detail(
+      task({
+        enabled: false,
+        lifecycle_state: 'paused',
+        resume_blocked: {
+          code: 'task_owner_session_unavailable',
+          owner_session_id: 'ses-removed',
+        },
+      }),
+    );
+
+    expect(html).toContain(`>${i18n.t('harness.detail.pauseReason')}<`);
+    expect(html).toContain(i18n.t('harness.taskPauseReason.ownerSessionUnavailable'));
+    expect(html).not.toContain('task_owner_session_unavailable');
+  });
+
   it('drops the Agent routing a pure command task deliberately has none of', () => {
     // SCT-043. The label helpers resolve a null to a concrete answer, so a
     // command created with the CLI's default ``--on-failure none`` — no Agent,

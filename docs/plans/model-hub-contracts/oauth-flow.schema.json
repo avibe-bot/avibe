@@ -9,9 +9,14 @@
   "additionalProperties": false,
   "properties": {
     "flow_id": { "type": "string" },
+    "client_nonce": {
+      "type": "string",
+      "pattern": "^ofn_[a-z0-9]{16,64}$",
+      "description": "Optional client-generated OAuth-start correlation echoed from the start request. Before provider work the server atomically claims the exact (client_nonce, vendor, channel) tuple; concurrent retries coalesce to its one pending start and terminal result. Provider failure or task cancellation before a flow exists releases the claim after cleanup, while success atomically converts it to the one OAuthFlow returned by every retry until its existing expires_at. Explicit cancellation retains that committed flow with state cancelled until expiry and starts no provider on a same-tuple retry."
+    },
     "intent": {
       "enum": ["create", "reauth"],
-      "description": "The flow intent determines its terminal response: create returns `{flow, source, added_to, adopted_by}`; reauth returns `{flow, source, recovered, interrupted_pairs}`. It is explicit because source_id cannot distinguish create from reauth and clients must not infer response shape from remembered UI state."
+      "description": "The flow intent determines its successful terminal response: create returns `{flow, source, added_to, adopted_by}`; reauth returns `{flow, source, recovered, interrupted_pairs}`. A local terminal materialization error instead uses the standard error envelope; only a nonempty acquisition-stage interruption report adds `interrupted_pairs`. Intent is explicit because source_id cannot distinguish create from reauth and clients must not infer response shape from remembered UI state."
     },
     "source_id": { "type": ["string", "null"], "description": "Pending or existing Source this flow binds to. Both hub and native_cli create/reauth flows set it; null is reserved for presentation-only flows outside Model Hub." },
     "vendor": { "type": "string" },
@@ -29,11 +34,22 @@
       }
     },
     "error_key": { "type": ["string", "null"], "description": "i18n key; raw upstream errors never surface" },
-    "expires_at": { "type": ["string", "null"], "format": "date-time" }
+    "expires_at": { "type": ["string", "null"], "format": "date-time", "description": "Flow expiry. A flow without client_nonce may use null for ordinary or presentation-only lifetime handling; a nonce-bearing flow always carries a non-null date-time that bounds reconciliation and retained cancellation." }
   },
+  "allOf": [
+    {
+      "if": { "required": ["client_nonce"] },
+      "then": {
+        "properties": {
+          "expires_at": { "type": "string", "format": "date-time" }
+        }
+      }
+    }
+  ],
   "examples": [
     {
       "flow_id": "oaf_claude01",
+      "client_nonce": "ofn_01j5w8z7p4n6q2rt",
       "intent": "create",
       "source_id": "src_claudepro1",
       "vendor": "anthropic",

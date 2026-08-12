@@ -3825,16 +3825,15 @@ scenarios:
     # work into one tail-boundary rewind while the durable store retains the inventory.
     test: tests/test_runtime_work_supervisor.py::test_hfr_288_expired_backoff_preserves_forward_scan_before_retry
   - id: HFR-430
-    name: an Agent Run send-now steers the exact FIFO head without stopping
+    name: an Agent Run send-now steers its own content without promoting the FIFO head
     status: covered
     kind: recovery
     layer: contract
     backend: shared
-    # The delivery intent is durable on the Agent Run. The shared owner first
-    # persists the harness-attributed row at P3, then promotes the exact FIFO head
-    # through empty P1. An active native Turn is steered without Stop, older queued
-    # work cannot be bypassed, and a refused or stale steer stays durably queued.
-    test: tests/test_internal_server.py::test_agent_run_send_now_steers_the_fifo_head_without_stopping
+    # The content-bearing legacy send-now alias normalizes to durable P1 steering.
+    # It steers that exact content into an active native Turn without Stop and does
+    # not promote an older P3 queue head. Refused or stale steering falls back to P3.
+    test: tests/test_internal_server.py::test_agent_run_send_now_steers_its_content_without_promoting_fifo
   - id: HFR-431
     name: a terminal Turn racing a successful Stop receipt remains a successful cancel
     status: covered
@@ -4275,6 +4274,16 @@ scenarios:
     # remain visible, while deleted definitions never leak their opaque id or append
     # internal error, origin, lifecycle, and inspection lines.
     test: tests/test_harness_failure_visibility.py::test_hfr_475_restart_notice_is_one_calm_action_without_internal_details
+  - id: HFR-476
+    name: Run cancellation cannot stop a shared Session Turn
+    status: covered
+    kind: cancellation
+    layer: scenario
+    backend: shared
+    # A Run-level cancel may stop the backend only when its Delivery is the exact
+    # Turn's sole initial accepted input. Steered or coalesced participants settle
+    # locally, skip their callback, and leave the shared Session Turn untouched.
+    test: tests/test_internal_server.py::test_hfr_476_run_cancel_does_not_stop_a_shared_turn
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor

@@ -629,26 +629,246 @@
       "subtitle": "按 Agent 查看每个型号现在能否运行、由谁供给；需要时可为单个型号指定路由。",
       "addSource": "添加来源",
       "loadError": "加载失败：{{detail}}",
+      "tabs": {
+        "sources": "来源与网关",
+        "usage": "用量与额度"
+      },
+      "sourceKind": {
+        "api_key": "API Key",
+        "subscription": "订阅"
+      },
+      "shell": {
+        "title": "模型",
+        "running": "网关运行中",
+        "stopped": "网关已停止 · 点击启动",
+        "degraded": "网关降级运行",
+        "unread": "网关状态未读到",
+        "notStarted": "网关未启动 · 点击启动",
+        "notInstalled": "网关组件未安装 · 点击安装",
+        "allDirect_one": "{{count}} 个后端都在直连",
+        "allDirect_other": "{{count}} 个后端都在直连",
+        "starting": "正在启动…",
+        "unsupported": "这个平台还没有网关组件",
+        "gatewayInfo": {
+          "label": "什么是网关",
+          "body": "网关是本机的一层调度：它持有你添加的来源，按你配置的顺序供给各个 Agent。"
+        },
+        "tab": {
+          "hub": "来源与网关",
+          "usage": "用量与额度"
+        }
+      },
+      "direct": {
+        "card": {
+          "current": "当前：直连",
+          "current.sub": "每个 Agent 后端各自用自己的登录，直接连厂商。"
+        },
+        "pill": {
+          "direct": "直连"
+        },
+        "backend": {
+          "claude": { "detail": "走它自己的 Claude 登录" },
+          "codex": { "detail": "走它自己的 ChatGPT 登录" },
+          "opencode": { "detail": "用它自己的模型配置" }
+        },
+        "action": {
+          "switchToGateway": "切换到网关"
+        },
+        "benefits": {
+          "title": "切换到网关，你会多出三件事",
+          "1": "额度用尽不断线",
+          "1.detail": "Claude 订阅用满时，自动换到你添加的下一个来源，对话继续。",
+          "2": "一个 Key 供给多个后端",
+          "2.detail": "同一个 API Key 可以同时给 Claude Code、Codex、OpenCode 用。",
+          "3": "按后端、按型号自己定",
+          "3.detail": "哪个后端的哪个型号走哪个来源，都可以逐条指定。"
+        },
+        "note": {
+          "perBackend": "逐个后端切换，互不影响——其余后端保持直连。切换后随时可以切换回直连。"
+        },
+        "empty": {
+          "title": "这台机器上没有找到 Agent 后端",
+          "body": "装好 Claude Code、Codex 或 OpenCode 之后，回到这一页，它们会出现在这里。",
+          "install": "安装一个后端 CLI，然后重新加载这一页。"
+        }
+      },
+      "adopt": {
+        "title": "把 {{backend}} 切换到网关",
+        "subtitle": "只影响 {{backend}}，其余后端保持原样。",
+        "vendor": {
+          "claude": "Claude",
+          "chatgpt": "ChatGPT"
+        },
+        "section": {
+          "effects": "会发生什么",
+          "undo": "可以撤回"
+        },
+        "effects": {
+          "1": "你现在的 {{vendor}} 登录成为第一个来源，继续优先使用",
+          "2": "等你添加了别的来源，这个登录用满时会自动换过去",
+          "1.opencode": "OpenCode 自己的模型配置原样保留，这次切换不改动它",
+          "2.opencode": "它的型号从此由这一页上的来源供给；还没有来源时，先添加一个",
+          "3": "型号菜单不变",
+          "4": "正在进行的对话不受影响，下一次请求开始生效",
+          "install": "先安装网关组件（{{component}}，约 {{duration}}），再切换"
+        },
+        "undo": {
+          "1": "随时可以切换回直连",
+          "2": "回退入口：这一页的 {{backend}} 卡片 → 切换到直连",
+          "3": "切回后，你添加的来源会留着，只是不再供给 {{backend}}"
+        },
+        "cancel": "取消",
+        "confirm": "切换到网关",
+        "confirm.install": "安装并切换",
+        "fail": {
+          "title": "没能切换到网关",
+          "detail": "{{request}} · {{status}} · {{reason}}",
+          "reason": {
+            "transport": "没能连上网关",
+            "refused": "网关没有接受这次切换",
+            "notReady": "网关起来了，但没有就绪",
+            "unknown": "没有给出原因"
+          }
+        }
+      },
+      "install": {
+        "duration": "1 分钟",
+        "title": "安装网关组件",
+        "subtitle": "只安装组件，后端保持现在的方式",
+        "section": {
+          "effects": "会发生什么"
+        },
+        "effects": {
+          "1": "下载并安装 {{component}}，约 {{duration}}",
+          "2": "装好后网关自动启动",
+          "3": "没有后端会被切换，型号菜单不变"
+        },
+        "confirm": "安装并启动",
+        "cancel": "取消",
+        "progress": "正在安装…",
+        "fail": {
+          "title": "安装没有完成",
+          "detail": "这次安装没有完成，组件可能处于未完成状态。重试会重新装一遍。"
+        },
+        "retry": "重试"
+      },
+      "gateway": {
+        "heading": "网关",
+        "sourceOrder": "来源顺序",
+        "switchToGateway": "切换到网关",
+        "switchToDirect": "切换到直连",
+        "fail": {
+          "switchToDirect": "没能切回直连"
+        },
+        "modelCount_one": "{{count}} 个型号",
+        "modelCount_other": "{{count}} 个型号",
+        "moreModels_one": "还有 {{count}} 个型号",
+        "moreModels_other": "还有 {{count}} 个型号",
+        "collapse_one": "还有 {{count}} 个型号",
+        "collapse_other": "还有 {{count}} 个型号",
+        "retry": "重试",
+        "supply": {
+          "none": "没有可用来源",
+          "unread": "后端供给情况没读到 · 网关本身正常"
+        },
+        "row": {
+          "current": "当前 {{source}}",
+          "currentTakeover": "当前 {{source}}（接管）"
+        },
+        "group": {
+          "subtitle": {
+            "direct": "{{mode}}",
+            "gateway": "{{mode}} · {{health}}"
+          },
+          "mode": {
+            "direct": "直连",
+            "gateway": "网关"
+          },
+          "status": {
+            "ok": "正常",
+            "degraded": "降级",
+            "waiting": "暂时全部在冷却",
+            "interrupted": "无可用来源",
+            "noSelection": "未选型号"
+          },
+          "emptyModels": "这个后端没有可用型号"
+        }
+      },
+      "takeover": {
+        "pill_one": "{{count}} 处接管中",
+        "pill_other": "{{count}} 处接管中",
+        "chip": "接管中"
+      },
+      "legend": {
+        "native": "原生",
+        "viaGateway": "网关供给",
+        "connectedUnused": "已启用 · 当前未被使用",
+        "takeover": "接管中 · 临时改走",
+        "unavailable": "供给已暂停",
+        "note": "路由链就是各后端配置的来源顺序。"
+      },
+      "usageTab": {
+        "title": "用量与额度",
+        "detail": "网关来源完成请求后，用量会显示在这里。"
+      },
       "status": {
         "allHealthy": "全部正常",
-        "needsAction": "{{count}} 个模型需要处理",
+        "needsAction_one": "{{count}} 个模型需要处理",
+        "needsAction_other": "{{count}} 个模型需要处理",
         "noIssues": "没有需要处理的模型"
       },
       "statusPill": {
-        "ok": "一切正常 · {{count}} 个 Agent 已接入中枢",
-        "none": "还没有 Agent 接入中枢",
+        "ok_one": "一切正常 · {{count}} 个 Agent 已接入网关",
+        "ok_other": "一切正常 · {{count}} 个 Agent 已接入网关",
+        "none": "还没有 Agent 使用网关",
         "engineDown": "模型服务未就绪 · 暂时无法供给",
-        "interrupted": "{{count}} 个 Agent 供给中断 · 需要处理",
-        "waiting": "{{count}} 个 Agent 正在等待来源恢复",
+        "interrupted_one": "{{count}} 个 Agent 供给中断 · 需要处理",
+        "interrupted_other": "{{count}} 个 Agent 供给中断 · 需要处理",
+        "waiting_one": "{{count}} 个 Agent 正在等待来源恢复",
+        "waiting_other": "{{count}} 个 Agent 正在等待来源恢复",
         "needsAction": "{{source}} {{detail}}",
         "cooldown": "{{source}} {{detail}} · 已自动切换，恢复后切回",
-        "andMore": "另有 {{count}} 个来源"
+        "andMore_one": "另有 {{count}} 个来源",
+        "andMore_other": "另有 {{count}} 个来源"
+      },
+      "upstream": {
+        "heading": "来源",
+        "count_one": "{{count}} 个",
+        "count_other": "{{count}} 个",
+        "group": {
+          "native": "本机原生",
+          "hub": "网关持有"
+        },
+        "kind": {
+          "nativeCredential": "原生 · 本机凭据",
+          "subscription": "订阅",
+          "apiKey": "API Key"
+        },
+        "empty": "还没有来源。先添加一个订阅或 API Key。",
+        "unread": "来源列表没读到 · 网关本身正常",
+        "retry": "重试",
+        "addSubscription": "添加订阅",
+        "addApiKey": "添加 API Key",
+        "state": {
+          "supplyingNative": "正在供给 {{backend}}（原生）",
+          "supplying": "正在供给 {{backends}}",
+          "standby": "备用",
+          "unavailableRetry": "暂不可用 · {{delay}} 后自动重试",
+          "unavailableDue": "暂不可用 · 已到重试时间"
+        }
       },
       "sources": {
         "title": "来源",
+        "info": "可用于网关路由的账号与凭据",
+        "count_one": "{{count}} 个",
+        "count_other": "{{count}} 个",
+        "group": {
+          "native": "本机原生",
+          "hub": "网关持有"
+        },
         "subtitle": "管理全局共用的账号和型号清单；来源顺序在各 Agent 卡片中调整",
-        "empty": "还没有来源，点“添加来源”连接订阅或 API Key。",
-        "modelCount": "{{count}} 个型号",
+        "modelCount_one": "{{count}} 个型号",
+        "modelCount_other": "{{count}} 个型号",
         "lastDiscovery": "上次自动获取 {{time}}",
         "neverDiscovered": "尚未自动获取",
         "addModel": "添加型号",
@@ -657,7 +877,7 @@
       },
       "source": {
         "nativeSupply": "原生供给",
-        "hubHosted": "中枢托管",
+        "hubHosted": "网关托管",
         "officialEndpoint": "官方地址",
         "customEndpoint": "自定义地址",
         "retryIn": "{{minutes}} 分后重试",
@@ -665,20 +885,36 @@
         "oauthSignedOut": "CLI 订阅未登录"
       },
       "order": {
-        "title": "来源顺序 · {{backend}}",
-        "subtitle": "从上到下依次使用；失败自动切到下一个，恢复后自动切回。这里的顺序只影响 {{backend}}。",
-        "subtitleShort": "从上到下依次使用；失败自动切到下一个，恢复后自动切回。只影响 {{backend}}。",
-        "groupEnabled": "启用 · {{count}} 个来源",
-        "groupDisabled": "未启用 · {{count}}",
-        "groupIneligible": "不适用 · {{count}}",
-        "customized": "已改为手动",
-        "restore": "恢复默认",
-        "enable": "启用",
-        "enableAria": "启用 {{name}}",
-        "disable": "取消启用",
-        "enabledEmpty": "{{backend}} 没有启用任何来源，下一个回合会失败。请从下方启用一个来源。",
-        "ineligibleUnknown": "不能供 {{backend}} 使用",
-        "ineligibleClientUnknown": "{{vendor}} 订阅只能供它自己的官方客户端使用"
+        "title": "{{backend}} · 来源顺序",
+        "subtitle": "这个后端存下来的来源顺序。改动它不会改动任何已配置的路由链。",
+        "reorder": "调整来源顺序",
+        "section": {
+          "ordered": "排在这条顺序里",
+          "ordered.note": "拖动排序",
+          "heldOut": "未排入这条顺序"
+        },
+        "action": {
+          "include": "排进来",
+          "exclude": "移出"
+        },
+        "empty": {
+          "noEligible": "这个后端还没有可用来源。",
+          "ordered": "这条顺序现在是空的。把下面的来源排进来。"
+        },
+        "cancel": "取消",
+        "save": "保存顺序",
+        "fail": {
+          "read": "来源列表没读到",
+          "save": "顺序没保存上"
+        },
+        "retry": "重试",
+        "grabbed_one": "已抓取 {{source}}，当前位置 {{position}} / {{count}}。",
+        "grabbed_other": "已抓取 {{source}}，当前位置 {{position}} / {{count}}。",
+        "moved_one": "已将 {{source}} 移到第 {{position}} 位，共 {{count}} 位。",
+        "moved_other": "已将 {{source}} 移到第 {{position}} 位，共 {{count}} 位。",
+        "dropped_one": "已将 {{source}} 放在第 {{position}} 位，共 {{count}} 位。",
+        "dropped_other": "已将 {{source}} 放在第 {{position}} 位，共 {{count}} 位。",
+        "grabCancelled": "已取消移动 {{source}}，并恢复原来的位置。"
       },
       "billing": {
         "monthly": "订阅",
@@ -715,22 +951,20 @@
         "title": "Agent",
         "subtitle": "各自选用来源、各自排序；失败自动切到下一个",
         "backendSettings": "后端设置",
-        "connectHub": "接入中枢",
-        "modelCount": "{{count}} 个模型",
-        "hubNoSupply": "已接入中枢 · 没有启用任何来源，下一个回合会失败",
-        "directNote": "仍在用 CLI 原生配置供给，未接入中枢",
+        "connectHub": "切换到网关",
+        "modelCount_one": "{{count}} 个模型",
+        "modelCount_other": "{{count}} 个模型",
+        "hubNoSupply": "已使用网关 · 没有启用任何来源，下一个回合会失败",
+        "directNote": "使用 CLI 原生配置供给",
         "sourceOrder": "来源顺序",
-        "modelListCount": "{{count}} 个型号",
+        "modelListCount_one": "{{count}} 个型号",
+        "modelListCount_other": "{{count}} 个型号",
         "enableManaged": "统一管理",
         "emptyModels": "这个 Agent 还没有型号。",
         "manageModels": "管理型号",
         "menuKind": {
           "fixed": "内置型号",
           "open": "菜单开放"
-        },
-        "policy": {
-          "follow": "默认顺序",
-          "custom": "自定义"
         },
         "attribution": {
           "interrupted": "{{names}} 供给中断",
@@ -748,41 +982,22 @@
         "blocked": "当前来源不可用",
         "currentSwitched": "当前已自动换到 {{source}}",
         "currentSource": "当前由 {{source}} 供给",
+        "takeover": "当前 {{source}}（接管）",
+        "waiting": "正在等待来源恢复",
         "source": "由 {{source}} 供给",
         "unknown": "暂时无法确认",
         "retry": "重试",
         "runtime": "模型服务未就绪",
         "runtimeAction": "去处理"
       },
-      "routes": {
-        "title": "供给方式",
-        "global": "跟随 {{backend}} 来源顺序",
-        "manual": "指定路由",
-        "liveSource": "当前由 {{source}} 供给 · {{model}}",
-        "globalPending": "正在恢复 {{backend}} 来源顺序…",
-        "globalActual": "按 {{backend}} 来源顺序，当前会由 {{source}} 供给。",
-        "globalUnavailable": "{{backend}} 来源顺序里暂时没有可用来源。",
-        "chooseTarget": "选择目标型号",
-        "searchPlaceholder": "搜索来源或型号",
-        "empty": "没有匹配的型号",
-        "availableCount": "{{count}} 个",
-        "manualBadge": "手动",
-        "addManual": "手动输入型号",
-        "multipleSources": "{{model}} · {{count}} 个来源可供给",
-        "orderDecidesSource": "实际来源由 {{backend}} 来源顺序决定",
-        "compatibility": "目标型号的思维链、缓存和工具语义可能与原型号不同。",
-        "openMenuGlobal": "开放型号按 {{backend}} 来源顺序供给，当前由 {{source}} 负责。",
-        "none": "暂无来源",
-        "expand": "展开供给方式"
-      },
-      "probe": {
-        "action": "试一下",
-        "running": "正在测试",
-        "nativeReady": "{{source}} 已就绪，可直接运行。",
-        "hubOk": "{{source}} 返回正常 · {{ms}} ms",
-        "failed": "{{source}} 未通过：{{detail}}",
-        "unknown": "来源未通过测试",
-        "error": "测试失败，请重试"
+      "routeDialog": {
+        "title": "{{model}} · 路由链",
+        "open": "打开 {{model}} 的路由链",
+        "label": "这个型号的路由链",
+        "removeHop": "移除这一跳",
+        "addHop": "添加一跳",
+        "reseed": "按来源顺序重排",
+        "hint": "这条链是写下来的配置。以后来源顺序怎么变，它都不变。"
       },
       "recent": {
         "title": "最近切换",
@@ -800,53 +1015,107 @@
         "detail": "跨厂商自动顶替（默认关）· 请求日志 · 诊断",
         "comingSoon": "高级设置即将上线"
       },
-      "addMenu": {
-        "claude": {
-          "title": "连接 Claude 订阅",
-          "subtitle": "Pro / Max · 浏览器登录"
-        },
-        "chatgpt": {
-          "title": "连接 ChatGPT 订阅",
-          "subtitle": "Plus / Pro · 浏览器登录"
-        },
-        "apiKey": {
-          "title": "添加 API Key…",
-          "subtitle": "任何厂商或兼容服务，可改地址"
-        },
-        "sheetTitle": "添加来源",
-        "sheetSubtitle": "来源只有两类：订阅账号，或一把 Key。中转站 = 改了地址的 Key。",
-        "vendorTitle": "连接订阅账号",
-        "vendorSubtitle": "走 CLI 原生登录，凭证留在本机。",
-        "apiKeySheetSubtitle": "官方或第三方地址都行；填了自定义地址就是「中转站」。",
-        "subscription": {
-          "title": "订阅账号",
-          "subtitle": "Claude Pro / ChatGPT Plus 等。走 CLI 原生登录，凭证留在本机 CLI 里。",
-          "recommended": "推荐"
-        }
-      },
       "addKey": {
         "title": "添加 API Key",
-        "subtitle": "任何厂商或兼容服务；连接一次，所有 Agent 共用。",
-        "vendorLabel": "服务商",
-        "vendorHint": "选择 Anthropic / OpenAI / 智谱 / Kimi 等厂商时，自动填官方地址。",
-        "keyLabel": "API KEY",
-        "baseUrlLabel": "服务地址（BASE URL）",
-        "baseUrlHint": "官方厂商已预填，可改；使用兼容服务（如中转、自建网关）时填它提供的地址。",
-        "discovered": "连接成功 · 发现 {{count}} 个可用模型，已加入供应清单",
-        "failed": "连接失败：{{detail}}",
-        "testing": "连接中…",
-        "vendors": {
-          "custom": "自定义 · OpenAI / Anthropic 兼容",
-          "anthropic": "Anthropic",
-          "openai": "OpenAI",
-          "zhipuai": "智谱",
-          "kimi": "Kimi",
-          "xai": "xAI"
-        }
+        "subtitle": "「添加」时自动连一次:认出接口 + 拉取型号列表",
+        "field": {
+          "name": "名称(可选)",
+          "baseUrl": "Base URL",
+          "baseUrl.hint": "粘贴任何中转 / 聚合 / 自建服务的地址即可,Avibe 会自己认出接口",
+          "apiKey": "API Key",
+          "apiKey.reveal": "显示 API Key",
+          "apiKey.conceal": "隐藏 API Key"
+        },
+        "test": "拉取型号",
+        "test.hint": "可选 ·「添加」时会自动拉一次",
+        "pull": {
+          "result_one": "拉到 {{count}} 个型号",
+          "result_other": "拉到 {{count}} 个型号",
+          "empty": "连上了,但这个来源没有可用型号"
+        },
+        "submit": "添加",
+        "adding": "连接中…",
+        "adding.detail": "连上 + 认出接口 + 首次拉取型号列表 · 通常 1–3 秒",
+        "fail": {
+          "subtitle": "认出接口是「添加」的前置条件 · 先按下面这条修,再重试",
+          "auth": "鉴权失败:401 Unauthorized",
+          "auth.detail": "检查 API Key 是否有效",
+          "address": "地址不对:404 Not Found",
+          "network": "无法连接到该地址(不可达或超时)",
+          "unclassified": "没连成,原因认不出来",
+          "engineDown": "网关没有响应,请重试",
+          "save": "没能确认这个来源已经保存"
+        },
+        "retry": "重试",
+        "undetermined": {
+          "title": "连上了、也通过了鉴权 —— 但认不出它说哪种接口",
+          "detail": "返回结构对不上任何一种已知接口",
+          "label": "接口类型 · 这一次由你提示",
+          "hint": "提示只改探测顺序 · 仍要真的连上才会保存;保存后不可更改"
+        },
+        "protocol": {
+          "anthropicMessages": "Anthropic Messages",
+          "openaiResponses": "OpenAI Responses",
+          "openaiChatCompletions": "OpenAI Chat Completions"
+        },
+        "inventory": {
+          "title": "接口已经认出来了 —— 但这次没拿到它的型号清单"
+        },
+        "addAnyway": "仍要添加",
+        "success": {
+          "title": "成功 → 弹窗关闭,直接进入「来源详情 · 型号管理」",
+          "detail": "型号列表、重新拉取、推理强度档位都在那里维护"
+        },
+        "cancel": "取消"
       },
       "field": {
         "apiKeyPlaceholder": "sk-…",
         "baseUrlPlaceholder": "https://api.example.com/v1"
+      },
+      "addSub": {
+        "title": "添加 {{vendor}} 订阅",
+        "subtitle": {
+          "claude": "claude.ai / Max · Pro",
+          "chatgpt": "chatgpt.com / Plus · Pro"
+        },
+        "opt": {
+          "added": "已添加",
+          "native": {
+            "label": "原生使用",
+            "desc": {
+              "claude": "Claude Code 直接用这个订阅，凭据只留在本机。",
+              "chatgpt": "Codex 直接用这个 ChatGPT 账号登录。"
+            }
+          },
+          "hub": {
+            "label": "登录为网关来源",
+            "desc": {
+              "claude": "把这个订阅交给网关，供给 Codex、OpenCode 等其他 Agent。",
+              "chatgpt": "网关把它供给 Codex 和其他 Agent，用量、额度、接管都能看到。"
+            }
+          }
+        },
+        "badge": {
+          "recommended": "推荐",
+          "secondary": "次选",
+          "supportedNotRecommended": "支持，不推荐"
+        },
+        "tos": {
+          "claude": "订阅条款只授权你本人在 Claude 官方客户端里使用。转供其他 Agent 属于超范围使用，账号可能被限制。"
+        },
+        "hint": {
+          "claude": "两条都要也可以，分两次添加。",
+          "chatgpt": "额度用完不会自动接管，也看不到用量。"
+        },
+        "signIn": "去登录",
+        "cancel": "取消",
+        "retry": "重试",
+        "error": {
+          "oauthFailed": "登录没有完成。可以重试。",
+          "startFailed": "没能确认登录已经开始，可以重试",
+          "engineDown": "网关没有响应，请重试",
+          "alreadyBound": "这个后端的原生登录位已经被占用了。改用网关托管添加。"
+        }
       },
       "oauth": {
         "title": {
@@ -881,100 +1150,26 @@
           "timeout": "授权超时，请重新连接",
           "generic": "连接失败，请重试",
           "finalize": "已完成授权，但创建来源失败，请重试",
-          "finalizeReauth": "已重新登录，但这个来源还是不可用，请重试",
-          "consent": "连接中枢托管订阅需先同意实验条款；请重新发起连接并在弹窗中开启「中枢托管」选项。"
-        },
-        "hubOption": {
-          "title": "由中枢托管此订阅（实验）",
-          "subtitle": "凭据由中枢保存并转发，可能违反厂商条款",
-          "on": "已开启",
-          "off": "关"
+          "finalizeReauth": "已重新登录，但这个来源还是不可用，请重试"
         }
-      },
-      "consent": {
-        "title": "由中枢托管订阅 · 风险提示",
-        "subtitle": "启用前请确认你已了解以下风险。",
-        "points": [
-          "该来源使用你本人订阅的登录凭据；厂商条款通常要求订阅仅供个人在官方客户端内使用，经由中枢代理转发属于非官方用法，可能违反其服务条款。",
-          "存在账号被风控、限流或封禁的真实风险（已有 Claude 订阅经代理使用被自动封号的先例）；是否启用由你自行决定并承担后果。",
-          "追求最稳妥时，请对订阅使用直连模式（官方客户端直接连接），或改用 API Key 来源（厂商明确允许程序化 / 代理调用）。"
-        ],
-        "confirm": "我已了解风险，继续"
       },
       "toast": {
         "reorderFailed": "顺序保存失败",
-        "connected": "已接入中枢",
+        "connected": "已接入网关",
         "connectFailed": "接入失败，请重试",
         "refreshFailed": "刷新失败，请重试"
       },
       "supply": {
-        "degraded": "已接入中枢 · 有来源不可用，已自动切到下一个",
-        "waiting": "已接入中枢 · 来源都在冷却中，恢复前的回合会失败",
-        "interrupted": "已接入中枢 · 供给中断，下一个回合会失败",
-        "noSources": "已接入中枢 · 还没有启用任何来源，下一个回合会失败",
-        "nothingRunnable": "已接入中枢 · 已启用的来源当前都无法供给，下一个回合会失败"
+        "degraded": "已接入网关 · 有来源不可用，已自动切到下一个",
+        "waiting": "已接入网关 · 来源都在冷却中，恢复前的回合会失败",
+        "interrupted": "已接入网关 · 供给中断，下一个回合会失败",
+        "noSources": "已接入网关 · 还没有启用任何来源，下一个回合会失败",
+        "nothingRunnable": "已接入网关 · 已启用的来源当前都无法供给，下一个回合会失败"
       },
       "adoption": {
-        "enabled": "已自动加入 {{list}} 的来源顺序",
-        "entry": "{{name}}（第 {{position}} 位）",
-        "none": "还没有 Agent 启用它 · 到各 Agent 的「来源顺序」里加进来才会被使用",
-        "noneSkipped": "还没有 Agent 启用它 · {{skipped}} 已改为手动，未加入——到那里手动加进来才会被使用",
-        "partlySkipped": "已自动加入 {{list}} 的来源顺序 · {{skipped}} 已改为手动，未加入——到那里手动加进来才会被使用"
-      },
-      "menus": {
-        "done": "完成",
-        "resetAll": "恢复全部默认",
-        "saveFailed": "保存失败，请重试",
-        "enrolled": "已自动把「{{sources}}」加入 {{backend}} 的来源顺序，你选的模型才有来源可用",
-        "mapping": {
-          "title": "{{backend}} · 模型菜单",
-          "subtitle": "{{backend}} 只认这些内置 model ID；每个 ID 可指定其他型号供给，只影响 {{backend}}。",
-          "builtinCol": "内置 MODEL ID",
-          "supplyCol": "实际供给",
-          "followNative": "跟随原生 · 按来源顺序供给",
-          "candidates": "来源顺序 · {{sources}}",
-          "candidatesUnavailable": "暂无来源可供给此模型",
-          "warning": "改写后思维链、缓存与工具语义与原生不完全等价",
-          "resetRow": "恢复默认",
-          "footnote": "改写只影响 {{backend}} 的这个 ID；协议转换由中枢自动完成。"
-        },
-        "opencode": {
-          "title": "OpenCode · 模型菜单",
-          "subtitle": "菜单开放：按 provider 前缀分组，前缀 + 模型 ID = 完整标识，与 OpenCode 原生写法一致。勾选 = 出现在模型选择里。",
-          "viewLabel": "菜单范围",
-          "featured": "精选 · {{count}}",
-          "full": "全量 · {{count}}",
-          "addCustom": "自定义模型",
-          "empty": "这里还没有模型。",
-          "footnote": "前缀 = 厂商标准 ID（与 OpenCode 原生一致，识别不了归 custom/）；中枢 / 直连切换不改变标识；圆点 = 可供来源。",
-          "customBadge": "自定义",
-          "provider": {
-            "anthropic": "Anthropic 协议 · Claude 系",
-            "openai": "OpenAI 协议 · GPT 系",
-            "zhipuai": "OpenAI 兼容 · GLM 系",
-            "custom": "自定义端点"
-          }
-        },
-        "custom": {
-          "title": "手动添加型号",
-          "subtitle": "补登这个来源清单里没有的型号，可用于型号选择和指定路由。",
-          "sourceLabel": "来源（它能供应这个模型）",
-          "modelIdLabel": "模型 ID",
-          "modelIdPlaceholder": "glm-5.2-air",
-          "displayNameLabel": "显示名（可选）",
-          "displayNamePlaceholder": "GLM 5.2 Air",
-          "previewLabel": "OPENCODE 标识 · 自动生成",
-          "previewEmpty": "填入模型 ID 后预览",
-          "previewHint": "provider 段自动选：可识别厂商用标准 ID（与 OpenCode 原生一致），识别不了归 custom/；来源增减、模式切换都不影响标识。",
-          "add": "添加型号",
-          "failed": "添加失败，请重试",
-          "delete": "删除模型",
-          "deleteConfirmTitle": "移除自定义模型？",
-          "deleteConfirmBody": "将从「{{source}}」的清单移除 {{model}}。",
-          "deleted": "已移除自定义模型",
-          "deleteFailed": "移除失败，请重试",
-          "deleteInUse": "该模型仍被某个 Agent 选用，请先在其菜单或指定路由里取消后再删除。"
-        }
+        "enabled": "已加入 {{list}}",
+        "route": "{{backend}} · {{model}} · 第 {{position}} 跳",
+        "none": "已连接。需要使用时，把它加到对应型号的路由中。"
       },
       "supplyMode": {
         "title": "供给方式",
@@ -984,39 +1179,41 @@
         "switchedDirect": "已切换到直连 Direct",
         "switchFailed": "切换失败，请重试",
         "hub": {
-          "title": "中枢模式 · Hub",
+          "title": "网关模式 · Gateway",
           "recommended": "推荐 · 默认",
           "openModels": "打开模型页",
-          "description": "模型 token 由「设置 → 模型」统一供给：登录、API Key、来源顺序、指定路由都在那里管理。不改动 {{backend}} 的原生配置，随时可切走。"
+          "description": "登录、API Key 和逐型号路由都在「设置 → 模型」中管理。不改动 {{backend}} 的原生配置，随时可切走。"
         },
         "direct": {
           "title": "直连模式 · Direct",
           "description": "{{backend}} 使用自己的原生配置（settings.json / CLI 登录），Avibe 仅负责启动进程、不代管模型。适合排查问题，或想完全自管配置的用户。",
-          "detected": "检测到既有直连配置：{{detail}} —— 可一键搬进中枢",
-          "import": "导入中枢…"
+          "detected": "检测到既有直连配置：{{detail}} —— 可一键导入网关",
+          "import": "导入网关…"
         },
         "fixHint": "去「模型」页添加或启用来源即可恢复。"
       },
       "migration": {
-        "title": "接入模型中枢",
-        "subtitle": "把现有的登录和 API Key 一次搬进「模型」中枢；导入后每个 Agent 各自选用来源、各自排序。",
+        "title": "接入模型网关",
+        "subtitle": "把现有的登录和 API Key 一次导入网关；导入后每个 Agent 各自选用来源、各自排序。",
         "empty": "没有检测到可迁移的原生配置。",
         "scanFailed": "扫描原生配置失败，请重试",
         "applyFailed": "导入失败，请重试",
-        "applied": "已导入 {{count}} 项",
+        "applied_one": "已导入 {{count}} 项",
+        "applied_other": "已导入 {{count}} 项",
         "later": "稍后再说",
-        "apply": "导入 {{count}} 项并启用中枢",
+        "apply_one": "导入 {{count}} 项并启用网关",
+        "apply_other": "导入 {{count}} 项并启用网关",
         "nonDestructive": "非破坏迁移：原生配置不改动、不删除，导入只是复制；随时可在「后端」页切回直连。",
         "action": {
           "import": "导入为来源",
-          "controlledImport": "受控导入 · 实验",
+          "controlledImport": "受控导入 · 预留",
           "keepNative": "保留原生",
           "reauth": "需重新授权 · 浏览器一键"
         },
         "notes": {
           "customBaseUrl": "含自定义 Base URL",
           "keepNativeSanctioned": "保留在 CLI 自己的凭据库（受官方认可）",
-          "keepNativeReauthHint": "保持原生；可在中枢内重新授权以托管（实验）",
+          "keepNativeReauthHint": "保持原生；需要网关托管时另行添加订阅",
           "fromOpencode": "来自 opencode 配置"
         }
       },
@@ -1025,33 +1222,85 @@
         "codex": "Codex",
         "opencode": "OpenCode"
       },
-      "sourceActions": {
-        "more": "更多操作",
-        "rename": "重命名",
-        "refresh": "刷新模型",
-        "refreshing": "正在刷新模型",
-        "reauth": "重新登录",
-        "replaceKey": "更换 API Key",
-        "delete": "删除来源",
-        "renameTitle": "重命名来源",
-        "renameLabel": "显示名",
-        "renamePlaceholder": "例如 生产环境 Key",
-        "renamed": "已重命名",
-        "renameFailed": "重命名失败，请重试",
-        "refreshed": "已更新 {{count}} 个模型",
-        "refreshFailed": "未能获取最新模型，仍显示上次成功获取的清单。",
-        "deleteTitle": "删除来源？",
-        "deleteBody": "将从中枢移除「{{name}}」并撤销其凭证，此操作不可撤销。",
-        "deleteConfirm": "删除",
-        "deleteForceTitle": "仍要删除该来源？",
-        "deleteForceBody": "「{{name}}」是某个已选模型的唯一供给，删除后相关 Agent 将无来源可用。确认强制删除？",
-        "deleteForceConfirm": "强制删除",
-        "deleted": "已删除来源",
-        "deleteFailed": "删除失败，请重试",
-        "renameHint": "只改显示名，不动凭证",
-        "deleteHint": "删除前会再确认一次",
-        "reauthHint": "旧登录立即失效",
-        "replaceKeyHint": "填入新 Key，地址与显示名不变"
+      "sourceDetail": {
+        "back": "返回来源列表",
+        "status": {
+          "inUse": "使用中",
+          "needsAction": {
+            "oauthExpired": "需要重新登录",
+            "balanceExhausted": "余额用完",
+            "credentialRevoked": "凭据被吊销",
+            "accountBanned": "账号被限制"
+          },
+          "error": "异常",
+          "listUpdated": "· 型号列表更新于 {{time}}"
+        },
+        "summary_one": "{{host}} · {{count}} 个型号",
+        "summary_other": "{{host}} · {{count}} 个型号",
+        "action": {
+          "refetch": "重新拉取",
+          "addModel": "添加模型"
+        },
+        "refetch": {
+          "added": "新增",
+          "removed_one": "本次拉取移除了 {{count}} 个型号：{{models}}",
+          "removed_other": "本次拉取移除了 {{count}} 个型号：{{models}}",
+          "unchangedOnly": "本次拉取没有变化"
+        },
+        "row": { "remove": "移除" },
+        "fail": {
+          "refetch": "拉取没有回来，下面是这一页最后一次真的读到的列表",
+          "tier": "档位没保存上",
+          "addModel": "这个型号没添加上",
+          "removeModel": "这个型号没移除掉"
+        },
+        "retry": "重试",
+        "search": "搜索型号 ID",
+        "col": {
+          "id": "型号 ID",
+          "entry": "录入",
+          "tiers": "推理强度"
+        },
+        "entry": { "auto": "自动拉取", "manual": "手动添加" },
+        "tiers": {
+          "empty": "未设置档位",
+          "addFirst": "+ 添加档位",
+          "add": "+ 档位",
+          "inputHint": "回车添加 · 任意文本",
+          "remove": "移除 {{tier}}"
+        },
+        "addRow": { "hint": "拉取不到、或只想接入其中一个时用" },
+        "empty": "这个来源没有返回型号。可以手动添加，或重新拉取。",
+        "emptyNeverFetched": "还没有成功拉取过这个来源的型号列表。先处理上面的状态，再拉一次，或者手动添加一个型号。",
+        "footnote": "这里只管「这个来源有哪些型号」。型号走哪条路由链，在网关模块里改。档位自己填，两种录入方式都一样。接口类型在添加时认出并固定，页面上不显示、也不能改。"
+      },
+      "guard": {
+        "label": "会被移除的跳",
+        "count_one": "{{count}} 跳",
+        "count_other": "{{count}} 跳",
+        "hop": { "position": "顺序 #{{n}}" },
+        "hint": {
+          "safe": "这些型号还有别的来源可用。",
+          "interrupt": "有型号会因此没有可用来源。"
+        },
+        "gap": {
+          "label": "会失去可用来源的型号",
+          "subject": "{{backend}} · {{menuModel}}",
+          "agents": "已指定它的 Agent：{{agents}}"
+        },
+        "cancel": "取消",
+        "title": {
+          "refetch": "重新拉取 {{source}} 的型号",
+          "removeModel": "从 {{source}} 移除 {{model}}"
+        },
+        "subtitle": {
+          "refetch": "这次拉取会让部分型号从这个来源的清单里消失。",
+          "removeModel": "这个型号会从这个来源的清单里消失。"
+        },
+        "confirm": {
+          "refetch": "仍要拉取",
+          "removeModel": "仍要移除"
+        }
       },
       "repair": {
         "reauth": "重新登录",
@@ -1079,19 +1328,11 @@
         "unresolved": "仍然不可用",
         "failed": "没能处理，请重试"
       },
-      "dryRun": {
-        "action": "试跑一次",
-        "running": "试跑中…",
-        "ok": "{{name}} 可用 · {{ms}} ms",
-        "okNoLatency": "{{name}} 可用",
-        "failed": "{{name}} 没跑通 · {{detail}}",
-        "failedUnknown": "{{name}} 没跑通",
-        "error": "试跑没能进行，请重试"
-      },
       "migrationBanner": {
-        "title": "发现可导入中枢的原生配置",
-        "body": "检测到 {{count}} 项原生登录 / API Key 可搬进中枢；导入后每个 Agent 各自选用来源、各自排序。",
-        "import": "导入中枢",
+        "title": "发现可导入网关的原生配置",
+        "body_one": "检测到 {{count}} 项原生登录 / API Key 可搬进网关。",
+        "body_other": "检测到 {{count}} 项原生登录 / API Key 可搬进网关。",
+        "import": "导入网关",
         "dismiss": "忽略"
       }
     }
@@ -1220,11 +1461,12 @@
     },
     "source": {
       "cooldown": {
-        "network": "网络不通",
-        "timeout": "连续超时",
         "rate_limited": "触发限流",
         "quota_exhausted": "本周期额度用完",
         "server_error": "上游服务异常"
+      },
+      "backoff": {
+        "connection_failed": "连接失败，短暂退避"
       },
       "needs_action": {
         "oauth_expired": "需要重新登录",
@@ -1245,6 +1487,7 @@
     "retry": "重试"
   },
   "errors": {
+    "task_owner_session_unavailable": "这个 Task 的管理 Session 已不可用。请从可用的 Agent Session 创建替代 Task。",
     "share_id_taken": "这个自定义链接已被占用，换一个。",
     "invalid_share_id": "自定义链接只能用 3–64 位字母、数字、短横线或下划线，且首尾为字母或数字。",
     "missing_share_id": "请先输入自定义链接。",
@@ -1568,6 +1811,11 @@
       "newFolder": "新建文件夹",
       "newFolderName": "文件夹名称"
     }
+  },
+  "configRecovery": {
+    "title": "配置需要修复",
+    "body": "Avibe 已恢复部分配置并保留原文件。请先修复，再修改设置。",
+    "action": "诊断"
   },
   "appShell": {
     "title": "Avibe",
@@ -2955,6 +3203,7 @@
       "runtime": "运行时",
       "eventProcessing": "事件处理",
       "lastError": "上次错误",
+      "pauseReason": "暂停原因",
       "type": "类型",
       "triggeredBy": "触发来源",
       "result": "结果",
@@ -2986,6 +3235,9 @@
     },
     "taskKind": {
       "command": "命令"
+    },
+    "taskPauseReason": {
+      "ownerSessionUnavailable": "管理这个 Task 的 Session 已不可用。请从可用的 Agent Session 创建替代 Task。"
     },
     "onFailure": {
       "none": "仅通知（无 Agent）",

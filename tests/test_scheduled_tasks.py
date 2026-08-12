@@ -64,7 +64,9 @@ from core.session_turns import SessionTurnManager
 from core.scheduled_tasks import (
     BINDING_FOLLOWS_SESSION_METADATA_KEY,
     BINDING_RECOVERY_METADATA_KEY,
+    FAILURE_CODE_SESSION_TURN_GATE_UNAVAILABLE,
     ParsedSessionKey,
+    SESSION_TURN_GATE_UNAVAILABLE_I18N_KEY,
     ScheduledTask,
     ScheduledTaskService,
     ScheduledTaskStore,
@@ -72,8 +74,6 @@ from core.scheduled_tasks import (
     TaskDispatchResult,
     TaskExecutionRequest,
     TaskExecutionStore,
-    FAILURE_CODE_SEND_NOW_GATE_UNAVAILABLE,
-    SEND_NOW_GATE_UNAVAILABLE_I18N_KEY,
     _TASK_RESULT_NOT_RECORDED_I18N_KEY,
     _agent_run_message_for_request,
     build_session_key_for_context,
@@ -8997,21 +8997,83 @@ def test_avibe_agent_run_routes_through_gate_without_completing_early(monkeypatc
     assert handler_calls == []
 
 
-def test_avibe_agent_run_send_now_refuses_without_turn_gate(monkeypatch, tmp_path) -> None:
-    """A send-now Agent Run fails typed instead of bypassing durable admission."""
+def test_legacy_send_now_intent_reaches_the_shared_gate(monkeypatch, tmp_path) -> None:
+    """An upgrade preserves the raw alias long enough to recover old P3 admission."""
+
     session_id = _make_avibe_session(monkeypatch, tmp_path)
     request_store = TaskExecutionStore()
     request = request_store.enqueue_agent_run(
         session_id=session_id,
-        message="must stay durable",
+        message="recover legacy admission",
         agent_name="codex",
-        delivery_intent="send_now",
+    )
+    sqlite_backend = request_store.sqlite_backend
+    assert sqlite_backend is not None
+    with sqlite_backend.engine.begin() as conn:
+        metadata = json.loads(
+            conn.execute(
+                select(agent_runs.c.metadata_json).where(agent_runs.c.id == request.id)
+            ).scalar_one()
+        )
+        metadata["delivery_intent"] = "send_now"
+        conn.execute(
+            update(agent_runs)
+            .where(agent_runs.c.id == request.id)
+            .values(metadata_json=json.dumps(metadata))
+        )
+
+    submitted: list[str] = []
+
+    async def _submit_scheduled(_sid, _ctx, _text, *, delivery_intent="steer"):
+        submitted.append(delivery_intent)
+        return "ran"
+
+    async def _handle_scheduled_message(_context, _message, parsed_session_key=None):
+        raise AssertionError("a Session-bound Agent Run must use the shared gate")
+
+    controller = _avibe_controller_double(
+        gate=SimpleNamespace(submit_scheduled=_submit_scheduled, in_flight={}),
+        handle_scheduled_message=_handle_scheduled_message,
+    )
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+
+    _run_single_request(service, request.id)
+
+    assert submitted == ["send_now"]
+    stored = request_store.get_run(request.id)
+    assert stored is not None
+    assert stored["status"] == "running"
+
+
+def test_explicit_queue_delivery_intent_remains_queued() -> None:
+    assert normalize_agent_run_delivery_intent("queue") == "queue"
+    assert normalize_agent_run_delivery_intent("send_now") == "steer"
+
+
+@pytest.mark.parametrize("delivery_intent", ["steer", "queue", "send_now"])
+def test_session_agent_run_fails_closed_without_turn_gate(
+    monkeypatch,
+    tmp_path,
+    delivery_intent,
+) -> None:
+    """No Session-bound delivery may bypass its durable turn owner at startup."""
+
+    session_id = _make_avibe_session(monkeypatch, tmp_path)
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_id=session_id,
+        message="must stay behind the shared owner",
+        agent_name="codex",
+        delivery_intent=delivery_intent,
     )
     direct_calls: list[str] = []
 
-    async def _handle_scheduled_message(context, message, parsed_session_key=None):
+    async def _handle_scheduled_message(_context, message, parsed_session_key=None):
         direct_calls.append(message)
-        return None
 
     controller = _avibe_controller_double(
         gate=None,
@@ -9028,13 +9090,12 @@ def test_avibe_agent_run_send_now_refuses_without_turn_gate(monkeypatch, tmp_pat
     stored = request_store.get_run(request.id)
     assert stored is not None
     assert stored["status"] == "failed"
-    assert stored["error"] == i18n_t(SEND_NOW_GATE_UNAVAILABLE_I18N_KEY, "en")
-    assert stored["metadata"]["failure_code"] == FAILURE_CODE_SEND_NOW_GATE_UNAVAILABLE
+    assert stored["error"] == i18n_t(SESSION_TURN_GATE_UNAVAILABLE_I18N_KEY, "en")
+    assert (
+        stored["metadata"]["failure_code"]
+        == FAILURE_CODE_SESSION_TURN_GATE_UNAVAILABLE
+    )
     assert direct_calls == []
-
-
-def test_explicit_queue_delivery_intent_remains_queued() -> None:
-    assert normalize_agent_run_delivery_intent("queue") == "queue"
 
 
 def test_busy_avibe_agent_run_send_now_keeps_transferred_owner_running(monkeypatch, tmp_path) -> None:
@@ -9049,7 +9110,7 @@ def test_busy_avibe_agent_run_send_now_keeps_transferred_owner_running(monkeypat
     submitted: list[tuple] = []
     handler_calls: list = []
 
-    async def _submit_scheduled(sid, ctx, text, *, delivery_intent="queue"):
+    async def _submit_scheduled(sid, ctx, text, *, delivery_intent="steer"):
         from core.session_turns import TurnSubmissionResult
 
         submitted.append(
@@ -9095,9 +9156,9 @@ def test_busy_avibe_agent_run_send_now_keeps_transferred_owner_running(monkeypat
     assert run.get("started_at") is not None
     assert run.get("completed_at") is None
     assert "workbench_queue_holds_run" not in (run.get("metadata") or {})
-    assert run["metadata"]["delivery_intent"] == "send_now"
+    assert run["metadata"]["delivery_intent"] == "steer"
     assert submitted == [
-        (session_id, "run behind active workbench turn", request.id, "send_now")
+        (session_id, "run behind active workbench turn", request.id, "steer")
     ]
     assert handler_calls == []
 
@@ -9113,7 +9174,7 @@ def test_send_now_refusal_keeps_transferred_delivery_running(monkeypatch, tmp_pa
         agent_name="codex",
         delivery_intent="send_now",
     )
-    async def _submit_scheduled(_sid, _ctx, _text, *, delivery_intent="queue"):
+    async def _submit_scheduled(_sid, _ctx, _text, *, delivery_intent="steer"):
         return TurnSubmissionResult(
             route="enqueued",
             queue_persisted=True,
@@ -9236,7 +9297,7 @@ def test_send_now_runtime_uses_shared_delivery_for_im_session(monkeypatch, tmp_p
     assert stored["error"] is None
     assert direct_calls == []
     submit_scheduled.assert_awaited_once()
-    assert submit_scheduled.await_args.kwargs == {"delivery_intent": "send_now"}
+    assert submit_scheduled.await_args.kwargs == {}
 
 
 def test_busy_avibe_agent_run_requeue_preserves_session_fork_metadata(monkeypatch, tmp_path) -> None:

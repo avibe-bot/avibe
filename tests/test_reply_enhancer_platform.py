@@ -1648,7 +1648,7 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             prompt,
         )
         self.assertIn(
-            "Both forms work for Workbench and IM Sessions",
+            "Both commands work for Workbench and IM Sessions",
             prompt,
         )
         self.assertIn(
@@ -1672,19 +1672,19 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
             prompt,
         )
         self.assertIn(
-            "persist the new Run at P3 and then promote the exact FIFO head through P1",
+            "explicitly selects that same content-bearing P1 behavior",
             prompt,
         )
         self.assertIn(
-            "the new message never leapfrogs it",
+            "it does not promote an older queued message",
             prompt,
         )
         self.assertIn(
-            "the same exact-head P1 promotion without adding a Message",
+            "this content-free P1 promotes the exact existing FIFO head",
             prompt,
         )
         self.assertIn(
-            "the promoted head steers that same logical/native Turn",
+            "that head steers the same logical/native Turn",
             prompt,
         )
         self.assertIn(

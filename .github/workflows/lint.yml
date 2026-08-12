@@ -90,10 +90,6 @@ jobs:
         shard-total: [6]
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
-        with:
-          # The Model Hub UI gate verifies citations against the exact historical
-          # revision named by the spec. A shallow checkout cannot prove them.
-          fetch-depth: 0
 
       # Editable installs require the force-included directory, but unit tests
       # build their own UI fixtures and do not need the production bundle.

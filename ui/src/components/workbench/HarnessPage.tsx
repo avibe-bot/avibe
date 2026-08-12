@@ -1474,6 +1474,13 @@ export const TaskDetail: React.FC<TaskDetailProps> = ({ task, agent, onToggleEna
           </pre>
         </DetailField>
       )}
+      {task.resume_blocked?.code === 'task_owner_session_unavailable' && (
+        <DetailField label={t('harness.detail.pauseReason')}>
+          <span className="text-[12px] text-muted">
+            {t('harness.taskPauseReason.ownerSessionUnavailable')}
+          </span>
+        </DetailField>
+      )}
       <DetailField label={t('harness.detail.id')}>
         <code className="font-mono text-[11px] text-muted">{task.id}</code>
       </DetailField>

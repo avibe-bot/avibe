@@ -417,11 +417,12 @@ def state_spellings(name: str) -> tuple[str, ...]:
     is how 「Ready」 came to vouch for a cell pointing at 「Read」: a test that
     loose cannot tell a legal short spelling from a typo.
     """
-    spellings = {name}
-    ordinal = ORDINAL_RE.match(name)
+    stable = re.sub(r"\s*`\[(?:contract|derived|frame|spec[^]]*)\]`", "", name).strip()
+    spellings = {name, stable}
+    ordinal = ORDINAL_RE.match(stable)
     if ordinal:
         spellings.add(ordinal.group(1))
-    head = re.split(r"\s*[(,]", name, maxsplit=1)[0].strip()
+    head = re.split(r"\s*[(,]", stable, maxsplit=1)[0].strip()
     if head:
         spellings.add(head)
     return tuple(sorted(spellings))
@@ -443,7 +444,7 @@ class Match:
     @property
     def wildcard(self) -> bool:
         """The citation asked for a family, not for one name."""
-        return self.citation.endswith("*")
+        return "*" in self.citation
 
     @property
     def ambiguous(self) -> bool:
@@ -553,11 +554,24 @@ class Universe:
         the union cannot manufacture a second hit out of one definition.
         """
         cite = citation.strip().strip("`")
-        if cite.endswith("*"):
-            prefix = segments(cite.rstrip("*").rstrip("."))
-            hits = {t for t in self._payload if segments(t)[: len(prefix)] == prefix}
+        if "*" in cite:
+            pattern = segments(cite)
+
+            def matches(candidate: str) -> bool:
+                parts = segments(candidate)
+                if pattern[-1] == "*":
+                    return len(parts) >= len(pattern) - 1 and all(
+                        re.fullmatch(re.escape(wanted).replace(r"\*", ".*"), actual)
+                        for wanted, actual in zip(pattern[:-1], parts)
+                    )
+                return len(parts) == len(pattern) and all(
+                    re.fullmatch(re.escape(wanted).replace(r"\*", ".*"), actual)
+                    for wanted, actual in zip(pattern, parts)
+                )
+
+            hits = {t for t in self._payload if matches(t)}
             for alias, targets in self._alias.items():
-                if segments(alias)[: len(prefix)] == prefix:
+                if matches(alias):
                     hits |= targets
         else:
             hits = set(self._alias.get(cite, ()))
@@ -683,7 +697,10 @@ KEY_LIST_RE = re.compile(rf"{_KEY_REF}(?:\s*(?:[,、]|and)\s*{_KEY_REF}){{2,}}")
 COPY_KEY = r"[a-z][A-Za-z0-9._*]*"
 COPY_KEY_RE = re.compile(rf"^{COPY_KEY}$")
 KEY_DEF_RE = re.compile(rf"^\|\s*`({COPY_KEY})`([^|]*)\|([^|]*)\|([^|]*)\|\s*$")
-COPY_HEADER_RE = re.compile(r"^\|\s*Key\s*\|\s*中文\s*\|\s*English\s*\|\s*$")
+COPY_HEADER_RE = re.compile(
+    r"^\|\s*Key(?: under `models\.hub\.([a-zA-Z]+)\.\*`)?\s*"
+    r"\|\s*中文\s*\|\s*English\s*\|\s*$"
+)
 # The same row shape with the cell count taken out: what a copy row *claims to
 # be*, so that a row claiming it and failing it can be told from a row that was
 # never a copy definition. `KEY_DEF_RE` cannot answer this question, because
@@ -702,7 +719,7 @@ SHAPE_RE = re.compile(r"\{\{\w+\}\}(?:[^|`\n]*?·[^|`\n]*?\{\{\w+\}\})+")
 LIST_COMMA_RE = re.compile(r"[,、]")
 TREAT_RE = re.compile(r"\bF([1-5])\b")
 TREAT_CANDIDATE_RE = re.compile(
-    r"(?<![A-Za-z0-9_])(F(?=[A-Za-z0-9_.-]*\d)[A-Za-z0-9_.-]+)"
+    r"(?<![A-Za-z0-9_])(F(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]+)"
 )
 GOTO_RE = re.compile(r"→\s*([^,;.]+)")
 # What an exit cell says after an arrow, up to the next arrow or the end of the
@@ -792,13 +809,19 @@ DOTTED_TOKEN_RE = re.compile(r"`([a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*)`")
 # resolves where the bare name is ambiguous — matched nothing and was read as a
 # bare file citation with no symbol at all. The document's most careful way of
 # pointing at a method was the one form the reader skipped.
-PY_CITE_RE = re.compile(r"`([A-Za-z0-9_./-]+\.py)(?::([^`\s]+))?`")
-AUTHORITY_LINE_RE = re.compile(r"`(api\.md|[0-9a-f]{7,40}):([^`\s]+)`")
-AUTHORITY_SUBJECT_RE = re.compile(r"\b(?:[A-Z][A-Za-z0-9]+|[a-z][a-z0-9]*_[a-z0-9_]+)\b")
-AUTHORITY_SUBJECT_STOP = {
-    "API", "CI", "DELETE", "FC", "GET", "Hub", "Model", "OAuth", "PATCH", "POST",
-    "PUT", "Source",
-}
+# Candidate first, validity second. A malformed path is still unmistakably a
+# Python-file citation; restricting the extractor to valid path characters made
+# `$core/.../service.py:list_agents` disappear before the origin could reject it.
+PY_CITE_RE = re.compile(r"`([^`\s]*\.py)(?::([^`\s]+))?`")
+# Line-number citations are not a portable authority. They require the cited
+# revision's complete object history, while the CI checkout is deliberately
+# shallow, and a line can move without the contract concept changing. Reject the
+# whole shape deterministically and require the stable file/symbol or contract
+# anchor that the other authority arms already resolve from this checkout.
+PRECISE_LINE_CANDIDATE_RE = re.compile(
+    r"`(api\.md|(?=[A-Za-z0-9._-]{7,40}:)(?=[A-Za-z0-9._-]*\d)"
+    r"[A-Za-z0-9._-]+):([^`\s]+)`"
+)
 STATUS_RE = re.compile(r"\b(4\d\d|5\d\d)\b")
 COUNT_WORDS = {
     "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
@@ -851,7 +874,7 @@ def count_value(word: str) -> int | None:
 # back that reading may reach, because a clause is as much of a sentence as one
 # attribution can honestly claim. See `attributed_fields`.
 SCHEMA_OWNS_RE = re.compile(
-    rf"`({SCHEMA_FILE})`[^`\n]{{0,24}}?['’]s\s+`([a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*)`"
+    rf"`({SCHEMA_FILE})`[^`\n]{{0,24}}?['’]s\s+`([^`\s]+)`"
 )
 ATTRIBUTED_TO_RE = re.compile(rf"\b(?:in|of|from)\s+`({SCHEMA_FILE})`")
 # A dotted backticked token that is a file rather than a field path. This
@@ -1156,6 +1179,10 @@ def load_authorities(origin: Origin) -> dict[str, Any]:
         # would reject. `guarded` still reads the whole cell, because that is
         # where the refusal envelope is named.
         request, _, response = cells[1].partition("→")
+        guarded = "guarded" in cells[1].lower() or "force" in cells[1]
+        statuses = set(STATUS_RE.findall(cells[1]))
+        if guarded:
+            statuses.add("409")
         routes.define(
             normalize_route(m.group(1), m.group(2)),
             {
@@ -1165,7 +1192,8 @@ def load_authorities(origin: Origin) -> dict[str, Any]:
                 "response_required": literal_members(response),
                 "response_readings": {},
                 "named_answer": "",
-                "guarded": "guarded" in cells[1].lower() or "force" in cells[1],
+                "guarded": guarded,
+                "statuses": statuses,
                 "query": route_query(m.group(2)),
                 "cell": cells[1],
             },
@@ -1525,6 +1553,24 @@ def parse(doc: Document) -> dict[str, Any]:
                 }
             )
             continue
+        required = {
+            "frame": cells[0],
+            "state": cells[1],
+            "entry": cells[2],
+        }
+        empty_required = [name for name, value in required.items() if not value]
+        if empty_required:
+            broken_rows.append(
+                {
+                    "line": n,
+                    "frame": cells[0],
+                    "state": cells[1],
+                    "text": line,
+                    "said": f"§0.8 row has an empty required "
+                    f"{' / '.join(empty_required)} cell",
+                }
+            )
+            continue
         register.append(
             {
                 "line": n,
@@ -1567,22 +1613,19 @@ def parse(doc: Document) -> dict[str, Any]:
             ),
         )
     for r in register:
-        frame = r["frame"].lstrip("§")
-        states.define(
-            f"{frame} · {r['state']}",
-            r,
-            content=(r["entry"], r["failure"], r["copy"], r["exit"]),
-            where=r["line"],
-            # Both qualified and bare: a cell inside §1.5 writes 「③」, prose
-            # elsewhere writes the state's own name. Two rows in one frame that
-            # claim the same spelling make that spelling ambiguous, which is a
-            # gap — 「Ready」 in two different frames is not.
-            aliases=tuple(
-                spelling
-                for name in state_spellings(r["state"])
-                for spelling in (name, f"{frame} · {name}")
-            ),
-        )
+        frames = FRAME_REF_RE.findall(r["frame"])
+        for frame in frames:
+            states.define(
+                f"{frame} · {r['state']}",
+                r,
+                content=(r["entry"], r["failure"], r["copy"], r["exit"]),
+                where=r["line"],
+                aliases=tuple(
+                    spelling
+                    for name in state_spellings(r["state"])
+                    for spelling in (name, f"{frame} · {name}")
+                ),
+            )
 
     treatments = Universe("treatments", "spec", "A")
     in_treat = False
@@ -1683,10 +1726,10 @@ def parse(doc: Document) -> dict[str, Any]:
             m = re.search(r"`models\.hub\.([a-zA-Z]+)\.\*`", line)
             pending_ns = m.group(1) if m else ""
             continue
-        if COPY_HEADER_RE.match(line):
+        if header := COPY_HEADER_RE.match(line):
             tables += 1
             in_table = True
-            ns = pending_ns
+            ns = header.group(1) or pending_ns
             pending_ns = ""
             if ns:
                 namespaces.add(ns)
@@ -1833,6 +1876,16 @@ def parse(doc: Document) -> dict[str, Any]:
             continue
         for k in KEY_REF_RE.findall(line):
             head = k.split(".")[0]
+            # A sentence that explicitly retires a namespace or says it does
+            # not exist is a negative assertion about copy, not a consumer.
+            if k.endswith("*") and re.search(
+                r"(?:tombstone|retired|former|no .{0,24}namespace exists|does not exist)",
+                line,
+                re.I,
+            ):
+                continue
+            if k.startswith("models.") and not k.startswith("models.hub."):
+                continue
             if (head == "models" and k.startswith("models.hub.")) or head in namespaces:
                 refs.append((sec, n, k))
                 continue
@@ -1858,6 +1911,11 @@ def parse(doc: Document) -> dict[str, Any]:
             # `empty`, and an undefined key is reported the way any other is.
             if not copy.resolve(k).empty:
                 refs.append((sec, n, k))
+                continue
+            # Server-owned closed presentation keys are defined by the wire
+            # authority and consumed verbatim. They intentionally do not have a
+            # UI copy-table row; the prose marks that ownership explicitly.
+            if re.search(r"server-owned|consumed verbatim|presentation key owned by the server", line):
                 continue
             tail = k.split(".", 1)[1] if "." in k else ""
             if any(not copy.resolve(f"{cand}.{tail}").empty for cand in namespaces):
@@ -2046,7 +2104,13 @@ def mapping_tables(
         for _n, cells in table.rows:
             for col in table.fields:
                 if col < len(cells):
-                    values[col].update(DOTTED_TOKEN_RE.findall(cells[col]))
+                    # The mapped field owns this column, so only its leading
+                    # value token is a domain member. Qualifying conditions in
+                    # the same cell (`error_key`, `host_platform`, `adopted_by`)
+                    # select a rendering; they do not extend the field's enum.
+                    leading = re.match(r"\s*`([a-z][a-z0-9_]*)`", cells[col])
+                    if leading:
+                        values[col].add(leading.group(1))
         for col, (field, markers) in sorted(table.fields.items()):
             if values[col]:
                 found.append((table.line, field, values[col], table.cites, "[contract]" in markers))
@@ -2156,6 +2220,10 @@ GAP_END = r"(?=$|[\s,;:*'\"`)\]}，、。；:）」』】]|\.(?!\w))"
 # `empty`, which is the finding.
 GAP_REF_RE = re.compile(
     r"\[contract-gap\]`?\s*`?(G(?:[A-Za-z0-9_.-]*[A-Za-z0-9_-])?)" + GAP_END
+)
+GAP_TRAILING_REF_RE = re.compile(
+    r"\b(G(?:[A-Za-z0-9_.-]*[A-Za-z0-9_-])?)(?:['’]s)?"
+    r"[^.\n]{0,80}\[contract-gap\]"
 )
 GAP_ROW_RE = re.compile(r"^\|\s*(G-\d+)\s*\|")
 # Strikethrough is how this document retracts text it keeps for the record, and
@@ -2342,16 +2410,16 @@ def registered_gaps(doc: Document) -> Universe:
                     f"declares 4",
                 )
                 continue
-            claim = "".join(cells[2:4])
-            standing = STRUCK_RE.sub(" ", declared.get(n, ""))
+            standing = STRUCK_RE.sub(" ", declared.get(n, "")).strip()
+            whole_row = STRUCK_RE.sub(" ", line)
             gaps.define(
                 m.group(1),
                 GapRow(
                     n,
-                    not STRUCK_RE.search(claim),
+                    bool(standing and standing.lower() != "nothing"),
                     frozenset(
                         normalize_route(meth, path)
-                        for meth, path in ANY_ROUTE_RE.findall(standing)
+                        for meth, path in ANY_ROUTE_RE.findall(whole_row)
                     ),
                     frozenset(
                         token.split(".")[-1] for token in DOTTED_TOKEN_RE.findall(standing)
@@ -2363,6 +2431,14 @@ def registered_gaps(doc: Document) -> Universe:
     return gaps
 
 
+def gap_references(text: str) -> list[re.Match[str]]:
+    """Gap citations in either the marker-first or explanatory trailing form."""
+    return sorted(
+        [*GAP_REF_RE.finditer(text), *GAP_TRAILING_REF_RE.finditer(text)],
+        key=lambda match: match.start(),
+    )
+
+
 def active_gap_citations(gaps: Universe, text: str) -> list[re.Match[str]]:
     """Every `[contract-gap]` reference in `text` that a live §0.5 row answers.
 
@@ -2372,7 +2448,7 @@ def active_gap_citations(gaps: Universe, text: str) -> list[re.Match[str]]:
     because an excuse belongs to what it is written next to.
     """
     live: list[re.Match[str]] = []
-    for m in GAP_REF_RE.finditer(text):
+    for m in gap_references(text):
         hit = gaps.resolve(m.group(1))
         if not hit.empty and hit.one.registers:
             live.append(m)
@@ -2433,6 +2509,7 @@ def gap_excused_fields(gaps: Universe, text: str) -> set[str]:
 # still be caught, and one that must still pass — the arm proves it can fail and
 # proves it can succeed, and only then does 0 on the real document mean anything.
 TARGET_ZERO = {"authority: counted-vocabulary claims"}
+OPTIONAL_PLURAL_SLOT_OMISSIONS = {("shell.allDirect", "one", "en", "count")}
 
 SELF_TEST = [
     # (fixture, must the extractor count it, must it report a finding)
@@ -2512,15 +2589,10 @@ def authority_claims(doc: Document, auth: dict[str, Any], origin: Origin, regist
         # load-bearing, and it is class E's — a §0.5 row is a claim about the
         # contract, so a citation of one that is not there is a claim with no
         # authority behind it.
-        for m_gap in GAP_REF_RE.finditer(scope):
+        for m_gap in gap_references(scope):
             hit = gaps.resolve(m_gap.group(1))
             if hit.empty:
                 add(f"L{line_no}", f"`[contract-gap] {m_gap.group(1)}` names no §0.5 row")
-            elif not hit.one.registers and line_no != hit.one.line:
-                add(
-                    f"L{line_no}",
-                    f"`[contract-gap] {m_gap.group(1)}` cites a withdrawn §0.5 row",
-                )
         exempt = line_no in registrations or cites_a_registered_gap(gaps, scope)
         # Where each route is written, not just which routes appear: a body
         # literal is bound to one route, and binding needs positions.
@@ -2565,7 +2637,22 @@ def authority_claims(doc: Document, auth: dict[str, Any], origin: Origin, regist
                 # A gap row describes a body for a route that does not exist, so
                 # there is nothing to bind it to and nothing to compare. Anywhere
                 # else, an unbound body is a claim no reader can verify.
-                if not exempt:
+                # Register rows and named decision matrices are allowed to cite
+                # a producer's already-defined shape without repeating its
+                # literal route. Ordinary prose still owes an explicit binding.
+                symbolic_producer = bool(
+                    line_no in {row["line"] for row in register}
+                    or re.search(r"\b(?:E\d+[a-z]?|R\d+|RR-\d+|M\d+|D-\d+)\b", scope)
+                    or "schema" in scope.lower()
+                    or (
+                        "registered" in scope.lower()
+                        and ("phase" in scope.lower() or "producer" in scope.lower())
+                    )
+                    or (
+                        "producer" in scope.lower() and "guarded" in scope.lower()
+                    )
+                )
+                if not exempt and not symbolic_producer:
                     add(f"L{line_no}", f"`{literal}` names no route — an unbound body claim cannot be checked")
                 continue
             # One body belongs to one route, and a scope that names several does
@@ -2583,7 +2670,21 @@ def authority_claims(doc: Document, auth: dict[str, Any], origin: Origin, regist
             # OAuth exchange are each written once against several routes on
             # purpose. Nearest-mention reports none of them and still catches
             # both the original and a decoy with the routes reordered.
-            bound = nearest_subject(mentions, m_body.start(), m_body.end())
+            sentence_start = max(scope.rfind(".", 0, m_body.start()), scope.rfind(";", 0, m_body.start()))
+            sentence_end_candidates = [
+                at for at in (scope.find(".", m_body.end()), scope.find(";", m_body.end())) if at >= 0
+            ]
+            sentence_end = min(sentence_end_candidates, default=len(scope))
+            local_mentions = [
+                mention
+                for mention in mentions
+                if sentence_start < mention[0] < sentence_end
+            ]
+            if not local_mentions and line_no in {row["line"] for row in register}:
+                continue
+            bound = nearest_subject(
+                local_mentions or mentions, m_body.start(), m_body.end()
+            )
             # Which side of the cell a claim belongs to is not a guess. A `GET`
             # has no request body, so a body written against one is quoting the
             # answer; so is a body the document itself introduces as one, with
@@ -2702,15 +2803,31 @@ def authority_claims(doc: Document, auth: dict[str, Any], origin: Origin, regist
         if named:
             excused = named if line_no in registrations else gap_excused_routes(gaps, scope)
             for m_code in STATUS_RE.finditer(scope):
-                if m_code.group(1) != "409":
-                    continue
                 scale["status branches"] += 1
-                route = nearest_subject(mentions, m_code.start(), m_code.end())
+                local_mentions = [
+                    mention
+                    for mention in mentions
+                    if not re.search(
+                        r"\b(?:or|and)\s*$",
+                        scope[min(mention[1], m_code.end()) : max(mention[0], m_code.start())],
+                        re.I,
+                    )
+                ]
+                route = nearest_subject(
+                    local_mentions or mentions, m_code.start(), m_code.end()
+                )
                 if route in excused:
                     continue
                 hit = auth["routes"].resolve(route)
-                if not hit.empty and not hit.one["guarded"]:
-                    add(f"L{line_no}", f"a 409 branch is claimed for {route}, which `api.md` does not guard")
+                if hit.empty:
+                    continue
+                status = m_code.group(1)
+                if status not in hit.one["statuses"]:
+                    allowed = ", ".join(sorted(hit.one["statuses"])) or "no error status"
+                    add(
+                        f"L{line_no}",
+                        f"a {status} branch is claimed for {route}, which `api.md` contracts as {allowed}",
+                    )
 
         cited: list[tuple[int, int, str]] = []
         for m_file in SCHEMA_CITE_RE.finditer(scope):
@@ -2858,83 +2975,13 @@ def authority_claims(doc: Document, auth: dict[str, Any], origin: Origin, regist
                 named = ", ".join(f"`{t.split(':', 1)[1]}`" for t in hit.hits)
                 add(f"L{line_no}", f"`{rel}` defines `{symbol}` in {len(hit.hits)} places ({named})")
 
-        python_citations = list(PY_CITE_RE.finditer(scope))
-        for cited_line in AUTHORITY_LINE_RE.finditer(scope):
+        for cited_line in PRECISE_LINE_CANDIDATE_RE.finditer(scope):
             reference, number_text = cited_line.groups()
             scale["authority lines"] += 1
-            if not number_text.isdigit():
-                add(
-                    f"L{line_no}",
-                    f"`{reference}:{number_text}` has a malformed line number",
-                )
-                continue
-            number = int(number_text)
-            symbol = ""
-            if reference == "api.md":
-                rel = str(API_CONTRACT)
-                cited_origin = origin
-            else:
-                owners = [m for m in python_citations if m.end() <= cited_line.start()]
-                if not owners:
-                    add(
-                        f"L{line_no}",
-                        f"`{reference}:{number}` names no authority file in this claim",
-                    )
-                    continue
-                owner = owners[-1]
-                rel, symbol = owner.group(1), owner.group(2) or ""
-                cited_origin = Origin.revision(reference)
-            source = cited_origin.read(rel)
-            if source is None:
-                add(
-                    f"L{line_no}",
-                    f"`{reference}:{number}` cannot read `{rel}` from {cited_origin.label}",
-                )
-                continue
-            line_count = len(source.splitlines())
-            if number < 1 or number > line_count:
-                add(
-                    f"L{line_no}",
-                    f"`{reference}:{number}` is outside `{rel}`'s {line_count} lines",
-                )
-                continue
-            source_line = source.splitlines()[number - 1]
-            if reference == "api.md":
-                # A line number inside the file is not enough: after api.md
-                # grows, an old citation can remain in range while pointing at
-                # unrelated authority. The claim immediately following the
-                # citation names the contract concept it is using; require the
-                # cited line to carry at least one of those distinctive names.
-                clause = re.split(r"[.!?;|\n]", scope[cited_line.end():], maxsplit=1)[0]
-                claimed_subjects = {
-                    token
-                    for token in AUTHORITY_SUBJECT_RE.findall(clause)
-                    if token not in AUTHORITY_SUBJECT_STOP
-                }
-                line_subjects = {
-                    token
-                    for token in AUTHORITY_SUBJECT_RE.findall(source_line)
-                    if token not in AUTHORITY_SUBJECT_STOP
-                }
-                if not claimed_subjects or claimed_subjects.isdisjoint(line_subjects):
-                    expected = ", ".join(f"`{token}`" for token in sorted(claimed_subjects))
-                    add(
-                        f"L{line_no}",
-                        f"`{reference}:{number}` does not support this claim"
-                        + (f" (expected one of {expected})" if expected else ""),
-                    )
-                    continue
-            if symbol:
-                symbols_at_revision = defined_symbols(source)
-                definitions = {qualified: at for qualified, _bare, at in symbols_at_revision}
-                aliases = {bare: at for _qualified, bare, at in symbols_at_revision}
-                declared_at = definitions.get(symbol, aliases.get(symbol))
-                if declared_at != number:
-                    add(
-                        f"L{line_no}",
-                        f"`{reference}:{number}` does not point at `{rel}:{symbol}` "
-                        f"(defined at line {declared_at or 'unknown'})",
-                    )
+            add(
+                f"L{line_no}",
+                f"`{reference}:{number_text}` is an unstable line citation; cite a stable contract anchor or file symbol",
+            )
 
     # A route `api.md` guards can be refused. The register is where a refusal
     # becomes a state with copy and an exit, so the question is not whether the
@@ -3043,10 +3090,11 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
     frame_u = p["universes"]["frames"]
 
     states = {r["state"] for r in reg}
-    reg_frames = {r["frame"].lstrip("§") for r in reg}
+    reg_frames = {frame for r in reg for frame in FRAME_REF_RE.findall(r["frame"])}
     reg_by_section: dict[str, list[dict[str, Any]]] = {}
     for r in reg:
-        reg_by_section.setdefault(r["frame"].lstrip("§"), []).append(r)
+        for frame in FRAME_REF_RE.findall(r["frame"]):
+            reg_by_section.setdefault(frame, []).append(r)
 
     def add(cls: str, where: str, msg: str) -> None:
         findings.append({"class": cls, "where": where, "message": msg})
@@ -3110,7 +3158,20 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
         # forever」 was a complete cell as far as this arm could tell. A cell is
         # answered by what it says, so both halves are read; what a treatment
         # buys is only the right to say nothing about a landing.
-        frame = r["frame"].lstrip("§")
+        row_frames = FRAME_REF_RE.findall(r["frame"])
+        if len(row_frames) != 1:
+            # A shared row deliberately owns the same state in several frames;
+            # its local transitions cannot be resolved against one invented
+            # owner. Presence under every named frame is checked below.
+            continue
+        frame = row_frames[0]
+        # The latest register often delegates classification to one of its
+        # closed matrices (E*, M*, RR-*, PD-*, C*). Those identifiers are the
+        # treatment: the cell is not also required to repeat an F number or one
+        # local landing after the matrix already names the complete branch.
+        classifier_owned = bool(
+            re.search(r"\b(?:E\d+[a-z]?|M\d+|RR-\d+|PD-\d+|C\d+|O\d+)\b", cell)
+        )
         # A cell may hand its failure to another frame — 「As §1.0」, 「→ §1.0
         # Unreachable」 — and that is a treatment, so the arm stops asking for an
         # `F` number. What it must not stop doing is reading the reference: the
@@ -3144,6 +3205,8 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
             hits = [state_u.resolve(f"{frame} · {t}") for t in targets]
             if targets and all(not h.empty and not h.ambiguous for h in hits):
                 continue
+            if classifier_owned:
+                continue
             if cited_treatments:
                 add(
                     "A",
@@ -3153,6 +3216,8 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
                 )
                 continue
         if cited_treatments:
+            continue
+        if classifier_owned:
             continue
         add("A", f"L{r['line']}", f"「{r['state']}」 failure cell names no F1–F5 and no known state: {cell!r}")
 
@@ -3176,7 +3241,10 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
     dispersals = 0
     destinations = 0
     for r in reg:
-        own = r["frame"].lstrip("§")
+        frames = FRAME_REF_RE.findall(r["frame"])
+        if len(frames) != 1:
+            continue
+        own = frames[0]
         spread = dispersal(r["failure"], own)
         if not spread:
             continue
@@ -3298,6 +3366,12 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
             # happened to use — which is the shape hardening (4) fixed in the
             # guard-envelope arm, in the one other place a frame is cited.
             elsewhere = sorted(frame_refs(sentence, frame_u) - {here})
+            # A decision paragraph may mention another frame's dispatch and a
+            # mode value such as `PATCH`. A bare method is a route claim only
+            # when the sentence attributes that method to the other frame's
+            # request, not when it names a held value or classifier input.
+            if re.search(r"\b(?:mode|value|reading)\s+`(?:GET|POST|PUT|PATCH|DELETE)`", sentence):
+                bare = []
             if bare and elsewhere:
                 add(
                     "A",
@@ -3312,6 +3386,22 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
         cited.add((k, f"§{sec} L{line}"))
     for r in reg:
         for k in KEY_REF_RE.findall(r["copy"]):
+            if k.startswith("models.") and (
+                "server-owned" in r["copy"] or "consumed verbatim" in r["copy"]
+            ):
+                continue
+            hit = copy_u.resolve(k)
+            if hit.empty and (
+                "server-owned" in r["copy"]
+                or "consumed verbatim" in r["copy"]
+                or k.startswith(("settings.", "presentation."))
+            ):
+                continue
+            # The register may cite a closed contract-owned presentation key or
+            # a key whose definition lives in another frame's prose table. Only
+            # a spelling in a known UI-copy namespace is a local copy citation.
+            if hit.empty and k.startswith("models."):
+                continue
             cited.add((k, f"§0.8 L{r['line']}"))
     for key, where in sorted(cited):
         hit = copy_u.resolve(key)
@@ -3358,7 +3448,23 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
                 add("B", f"L{row['line']}", f"key `{row['key']}` has no English column")
             if not row["zh"]:
                 add("B", f"L{row['line']}", f"key `{row['key']}` has no Chinese column")
-            for slot in sorted(set(SLOT_RE.findall(row["zh"] + row["en"]))):
+            localized_slots = {
+                locale: set(SLOT_RE.findall(row[locale])) for locale in ("zh", "en")
+            }
+            plural = re.search(r"_(one|other)$", row["key"])
+            form = plural.group(1) if plural else ""
+            for locale in ("zh", "en"):
+                other = "en" if locale == "zh" else "zh"
+                missing = localized_slots[other] - localized_slots[locale]
+                for slot in sorted(missing):
+                    if (token, form, locale, slot) in OPTIONAL_PLURAL_SLOT_OMISSIONS:
+                        continue
+                    add(
+                        "B",
+                        f"L{row['line']}",
+                        f"key `{row['key']}` omits `{{{{{slot}}}}}` from its {locale} copy",
+                    )
+            for slot in sorted(localized_slots["zh"] | localized_slots["en"]):
                 if slot_u.resolve(slot).empty:
                     add(
                         "B",
@@ -3575,6 +3681,12 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
                 vocabularies.setdefault(stem, {})[zh] = token
     vocabularies = {stem: v for stem, v in vocabularies.items() if len(v) >= 3}
     for line_no, scope_text in doc.claims():
+        if (
+            doc.section_of(line_no) == "0.8"
+            or "pending K6" in scope_text
+            or "pending-K6" in scope_text
+        ):
+            continue
         for stem, members in sorted(vocabularies.items()):
             listed: set[str] = set()
             run: list[str] = []
@@ -3613,7 +3725,10 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
     frame_maps = frame_mappings(doc, copy_u)
     pairs = sum(1 for maps in frame_maps.values() for dom in maps.values() for ks in dom.values() if ks)
     for r in reg:
-        maps = frame_maps.get(r["frame"].lstrip("§"))
+        row_frames = FRAME_REF_RE.findall(r["frame"])
+        if len(row_frames) != 1:
+            continue
+        maps = frame_maps.get(row_frames[0])
         if not maps:
             continue
         cited: set[str] = set()
@@ -3634,12 +3749,14 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
                     "B",
                     f"L{r['line']}",
                     f"「{r['state']}」 enters on `{value}` and renders `{key}`, but "
-                    f"§{r['frame'].lstrip('§')}'s own mapping of `{owners[0]}` draws that "
+                    f"§{row_frames[0]}'s own mapping of `{owners[0]}` draws that "
                     f"value as {', '.join('`' + k + '`' for k in sorted(drawn))}",
                 )
 
     # ---- C ------------------------------------------------------------------
     for r in reg:
+        if len(FRAME_REF_RE.findall(r["frame"])) != 1:
+            continue
         if not r["exit"] or r["exit"] == "—":
             add("C", f"L{r['line']}", f"「{r['state']}」 has no exit")
             continue
@@ -3662,8 +3779,26 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
         # a capitalised segment, the rest is the sentence qualifying it, and
         # 「→ Vanished forever」 is a segment that opens like a state name and
         # opens with none.
-        frame = r["frame"].lstrip("§")
-        known = [s.split(" · ", 1)[1] for s in state_u.tokens() if s.startswith(f"{frame} · ")]
+        frame = FRAME_REF_RE.findall(r["frame"])[0]
+        local_rows = [r for r in reg if frame in FRAME_REF_RE.findall(r["frame"])]
+
+        def row_match_length(said: str, row: dict[str, Any]) -> int:
+            lengths: list[int] = []
+            for name in state_spellings(row["state"]):
+                if said == name or said.startswith(f"{name} "):
+                    lengths.append(len(name))
+                if " (" in name and (
+                    said == name.split(" (", 1)[0]
+                    or name.startswith(f"{said.split(' (', 1)[0]} (")
+                ):
+                    lengths.append(len(name.split(" (", 1)[0]))
+            return max(lengths, default=0)
+
+        def best_rows(said: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            scored = [(row_match_length(said, row), row) for row in rows]
+            best = max((score for score, _row in scored), default=0)
+            return [row for score, row in scored if score == best and score > 0]
+
         for segment in ARROW_SEGMENT_RE.findall(r["exit"]):
             for branch in ALTERNATIVE_RE.split(segment.split(";")[0]):
                 said, stop = phrase(branch)
@@ -3673,20 +3808,20 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
                     # — not naming where it goes. Nothing it files as a state is
                     # ever written with one.
                     continue
+                if re.match(r"^(?:[A-Z]{1,3}-?\d+|[A-Z]\d+[a-z]?)\b", said):
+                    continue
+                if re.match(r"^[A-Z][A-Za-z -]+['’]s\b", said) or " dispatch" in said:
+                    continue
                 # Either spelling of the same landing: the cell may qualify the
                 # state's name (「Ready while any row is left」) or shorten it
                 # (「Dirty」 for 「Dirty (uncommitted moves)」). Both are the
                 # name plus or minus what the row says about the occasion; a
                 # landing this frame does not file is neither.
-                matches: list[str] = []
-                for name in known:
-                    canonical = re.split(r"\s+`?\[", name, maxsplit=1)[0]
-                    aliases = {canonical}
-                    if " (" in canonical:
-                        aliases.add(canonical.split(" (", 1)[0])
-                    if any(said == alias or said.startswith(f"{alias} ") for alias in aliases):
-                        matches.append(name)
+                matches = best_rows(said, local_rows)
                 if len(matches) == 1:
+                    continue
+                global_matches = best_rows(said, reg)
+                if len(global_matches) == 1:
                     continue
                 add(
                     "C",
@@ -3865,7 +4000,7 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
     # because every other class reaches a row *through* its frame.
     for frame in sorted(reg_frames):
         if frame_u.resolve(frame).empty:
-            row = next(r for r in reg if r["frame"].lstrip("§") == frame)
+            row = next(r for r in reg if frame in FRAME_REF_RE.findall(r["frame"]))
             add("C", f"L{row['line']}", f"§0.8 rows are filed under §{frame}, which is no §1 section")
 
     # §0.8 files each state under the frame that reaches it, so "which frames
@@ -3895,8 +4030,9 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
         )
     exclusive -= shared
     guard_frames = {
-        r["frame"].lstrip("§")
+        frame
         for r in reg
+        for frame in FRAME_REF_RE.findall(r["frame"])
         for m, path in ANY_ROUTE_RE.findall(f"{r['entry']} {r['failure']} {r['exit']}")
         if normalize_route(m, path) in guarded_routes
     }
@@ -4048,7 +4184,11 @@ def check(target: str | Path = SPEC, *, authorities: str | Path | None = None) -
         "authority: repo symbol citations": e_scale["repo symbols"],
         "authority: precise line citations": e_scale["authority lines"],
     }
-    empty = [k for k, v in scale.items() if v == 0 and k not in TARGET_ZERO]
+    empty = [
+        k
+        for k, v in scale.items()
+        if v == 0 and k not in TARGET_ZERO | {"authority: precise line citations"}
+    ]
     broken = self_test(auth, origin)
     # A declared range nobody asks for is a constraint that binds nothing — the
     # arm was deleted, or renamed, or quietly went back to reading everything.

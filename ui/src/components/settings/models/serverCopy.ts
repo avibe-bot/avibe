@@ -81,10 +81,8 @@ const MATERIALIZE_CODES = ['discovery_failed', 'migration_item_conflict'];
  * thing that just happened to the one they have.
  */
 export const oauthFailureKey = (code: string | undefined, journey: OAuthJourney): string =>
-  code === 'consent_required'
-    ? 'settings.models.oauth.error.consent'
-    : code && MATERIALIZE_CODES.includes(code)
-      ? journey === 'reauth'
-        ? 'settings.models.oauth.error.finalizeReauth'
-        : 'settings.models.oauth.error.finalize'
-      : 'settings.models.oauth.error.generic';
+  code && MATERIALIZE_CODES.includes(code)
+    ? journey === 'reauth'
+      ? 'settings.models.oauth.error.finalizeReauth'
+      : 'settings.models.oauth.error.finalize'
+    : 'settings.models.oauth.error.generic';

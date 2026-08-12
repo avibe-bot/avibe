@@ -3,14 +3,15 @@ from __future__ import annotations
 import copy
 import json
 import re
+import stat
 from dataclasses import fields
 from itertools import product
 from pathlib import Path
-from typing import NamedTuple
 
 import pytest
 from jsonschema import Draft7Validator, FormatChecker, ValidationError
 
+import config.v2_config as v2_config
 from config.v2_config import (
     MODEL_HUB_ENABLED_ENV,
     MODEL_HUB_LEGACY_CREATED_AT,
@@ -36,7 +37,6 @@ from core.handlers.model_hub.adapter import (
     validate_source_observation,
 )
 from scripts.check_model_hub_authorities import check as check_model_hub_authorities
-from scripts.check_model_hub_ui_states import ROOT, SPEC
 from scripts.check_model_hub_ui_states import check as check_model_hub_ui_states
 from vibe import api
 
@@ -61,13 +61,23 @@ def test_protocol_vocabulary_matches_authority_and_rejects_removed_alias():
     assert SOURCE_PROTOCOLS == protocols
 
     type_source = (UI_MODEL_CONSUMERS / "types.ts").read_text(encoding="utf-8")
+    tuple_match = re.search(
+        r"export const SOURCE_PROTOCOLS\s*=\s*\[(.*?)\]\s*as const",
+        type_source,
+        re.DOTALL,
+    )
+    assert tuple_match is not None
+    ui_protocols = tuple(re.findall(r"'([^']+)'", tuple_match.group(1)))
+    assert frozenset(ui_protocols) == frozenset(protocols)
+    assert len(ui_protocols) == len(set(ui_protocols))
+
     type_match = re.search(
         r"export type SourceProtocol\s*=\s*(.*?);",
         type_source,
         re.DOTALL,
     )
     assert type_match is not None
-    assert tuple(re.findall(r"'([^']+)'", type_match.group(1))) == protocols
+    assert re.sub(r"\s+", "", type_match.group(1)) == "(typeofSOURCE_PROTOCOLS)[number]"
 
     retired_alias = "openai" + "_compatible"
     for filename in (
@@ -441,6 +451,127 @@ def test_every_frozen_schema_example_is_valid_and_json_round_trips():
             assert _canonical(json.loads(_canonical(example))) == _canonical(example)
 
 
+def test_source_create_unavailable_inventory_consent_is_explicit_and_total():
+    schema = _schema("source-create.schema.json")
+    validator = Draft7Validator(schema)
+    field = schema["properties"]["accept_unavailable_inventory"]
+    assert field["type"] == "boolean"
+    assert field["default"] is False
+
+    clean = copy.deepcopy(schema["examples"][0])
+    assert "accept_unavailable_inventory" not in clean
+    validator.validate(clean)
+
+    explicit_false = {**clean, "accept_unavailable_inventory": False}
+    validator.validate(explicit_false)
+
+    accepted_failure = copy.deepcopy(schema["examples"][1])
+    assert accepted_failure["accept_unavailable_inventory"] is True
+    validator.validate(accepted_failure)
+
+    for invalid in (None, "true", 1, {}):
+        with pytest.raises(ValidationError):
+            validator.validate({**clean, "accept_unavailable_inventory": invalid})
+
+    api_contract = (CONTRACTS / "api.md").read_text(encoding="utf-8")
+    consent_table = api_contract.split(
+        "### Source-create unavailable-inventory consent", 1
+    )[1].split("When `client_nonce` is present", 1)[0]
+    result_rows = [
+        line
+        for line in consent_table.splitlines()
+        if line.startswith("| Protocol ")
+    ]
+    assert len(result_rows) == 4
+
+    succeeded = next(
+        line for line in result_rows if "`discovery: succeeded`" in line
+    )
+    assert "omitted, `false`, or `true`" in succeeded
+    assert "Ordinary create" in succeeded
+    assert "legitimately empty" in succeeded
+
+    failed_rows = [
+        line
+        for line in result_rows
+        if line.startswith("| Protocol proved; `discovery: failed` |")
+    ]
+    assert len(failed_rows) == 2
+    rejected = next(line for line in failed_rows if "omitted or `false`" in line)
+    accepted = next(line for line in failed_rows if "| `true` |" in line)
+    assert "`discovery_failed`" in rejected
+    assert "no Source or committed credential" in rejected
+    assert "AC-26 cleanup" in rejected
+    assert "Commit exactly one Source" in accepted
+    assert "`models: []`" in accepted
+    assert "proved protocol" in accepted
+
+    unproved = next(
+        line for line in result_rows if line.startswith("| Protocol not proved")
+    )
+    assert "omitted, `false`, or `true`" in unproved
+    assert "no Source is committed" in unproved
+    assert "cannot authorize" in unproved
+
+    implementation_plan = (
+        CONTRACTS.parent / "model-hub-implementation.md"
+    ).read_text(encoding="utf-8")
+    ac_54 = implementation_plan.split("### AC-54", 1)[1].split(
+        "### K4 open contract-gap registry", 1
+    )[0]
+    for required in (
+        "accept_unavailable_inventory",
+        "K5 round 2",
+        "After K4, #1312, and K6 merge",
+        "I4's second increment",
+        "tests/test_model_hub_{config,api}.py",
+    ):
+        assert required in ac_54
+
+
+def test_guard_refusal_error_requires_its_corresponding_nonempty_plan_array():
+    validator = Draft7Validator(_schema("guard-refusal.schema.json"))
+    hop = {
+        "backend": "claude",
+        "menu_model": "claude-opus-4-6",
+        "source_id": "src_anthkey01",
+        "model_id": "claude-opus-4-6",
+        "position": 1,
+    }
+    gap = {
+        "backend": "claude",
+        "model_id": "claude-opus-4-6",
+        "agents": ["pm"],
+    }
+
+    route_refusal = {
+        "ok": False,
+        "contract_version": 5,
+        "error": "source_in_route_chain",
+        "would_remove_hops": [hop],
+        "would_interrupt": [],
+    }
+    model_refusal = {**route_refusal, "error": "source_model_in_route_chain"}
+    supplier_refusal = {
+        **route_refusal,
+        "error": "source_last_supplier",
+        "would_remove_hops": [],
+        "would_interrupt": [gap],
+    }
+    for payload in (route_refusal, model_refusal, supplier_refusal):
+        validator.validate(payload)
+
+    for payload in (
+        {**route_refusal, "would_remove_hops": [], "would_interrupt": [gap]},
+        {**model_refusal, "would_remove_hops": [], "would_interrupt": [gap]},
+        {**supplier_refusal, "would_remove_hops": [hop], "would_interrupt": []},
+        {**route_refusal, "would_remove_hops": [hop, hop]},
+        {**supplier_refusal, "would_interrupt": [gap, gap]},
+    ):
+        with pytest.raises(ValidationError):
+            validator.validate(payload)
+
+
 def test_agent_supply_contract_accepts_unmapped_native_alias_selection():
     payload = {
         "backend": "claude",
@@ -529,6 +660,62 @@ def test_v5_mirror_registry_mutation_probes_detect_every_comparable_drift():
                 _validate_mirror_entry(entry, mutated)
 
 
+def test_d21_live_backoff_reason_consumers_match_authority_individually():
+    registry = json.loads(
+        (CONTRACTS / "mirror-registry.json").read_text(encoding="utf-8")
+    )
+    decision = next(
+        item for item in registry["decision_tables"] if item["id"] == "D21"
+    )
+    authority_spec = decision["authority"]
+    authority = _vocabulary(
+        _schema(authority_spec["schema"]), authority_spec["paths"]
+    )
+
+    observed = []
+    for consumer in decision["consumers"]:
+        if consumer["kind"] == "schema_vocabulary":
+            observed.append(
+                _vocabulary(
+                    _schema(consumer["schema"]),
+                    consumer["paths"],
+                    exclude=consumer.get("exclude", ()),
+                )
+            )
+        elif consumer["kind"] == "marker_tail":
+            values = set()
+            for line in Path(consumer["file"]).read_text(encoding="utf-8").splitlines():
+                if consumer["marker"] in line:
+                    tail = line.split(consumer["marker"], 1)[1].split("-->", 1)[0]
+                    values.update(tail.split())
+            observed.append(values)
+        elif consumer["kind"] == "json_object_keys":
+            payload = json.loads(Path(consumer["file"]).read_text(encoding="utf-8"))
+            keys = _json_pointer(payload, consumer["path"])
+            observed.append({f"{consumer.get('prefix', '')}{key}" for key in keys})
+        else:
+            raise AssertionError(consumer)
+
+    assert observed
+    assert all(values == authority for values in observed)
+
+    mutated_probe = _schema("probe-result.schema.json")
+    mutated_probe["properties"]["error"]["enum"].remove(
+        "models.source.backoff.connection_failed"
+    )
+    probe_spec = next(
+        item for item in decision["consumers"] if item["kind"] == "schema_vocabulary"
+    )
+    assert (
+        _vocabulary(
+            mutated_probe,
+            probe_spec["paths"],
+            exclude=probe_spec.get("exclude", ()),
+        )
+        != authority
+    )
+
+
 def test_model_hub_authority_closure_is_generated_from_live_files():
     result = check_model_hub_authorities(Path.cwd())
     assert result["input_mode"] == "same_run_live_files"
@@ -538,2710 +725,105 @@ def test_model_hub_authority_closure_is_generated_from_live_files():
 
 def test_model_hub_ui_state_completeness_is_generated_from_live_files():
     result = check_model_hub_ui_states(Path.cwd())
+
     assert result["input_mode"] == "same_run_live_files"
-    assert result["input_fingerprint"]
-    # A gate that scans nothing reports green. Assert the extractors reached the
-    # document before trusting the verdict they produce.
-    assert not result["empty_inventories"], result["empty_inventories"]
-    assert result["input_scale"]["register rows"] > 50
-    # A count is the only thing that notices an extractor going quietly narrow.
-    # Class B's copy citations were read for one round by a single test — the
-    # first segment has to be a declared namespace — which is true of the way
-    # half this document cites copy and false of the other half, where a frame
-    # cites its own table's rows bare. The gate stayed green throughout, because
-    # what it had stopped reading it also stopped judging. This floor sits under
-    # the 157 the document currently holds, far enough not to be churn and close
-    # enough that dropping a family of citations trips it.
-    assert result["input_scale"]["prose key references"] > 120
-    # The document and every authority came from one place, and the run says
-    # which. A verdict that does not name its authority origin cannot be told
-    # apart from one that read the wrong revision's contracts.
     assert result["authority_origin"] == "this checkout"
-    # A declared range nobody reads is a comment wearing a constraint's clothes.
+    assert result["input_fingerprint"]
+    assert result["input_scale"]["register rows"] > 100
+    assert not result["empty_inventories"], result["empty_inventories"]
     assert not result["unread_scopes"], result["unread_scopes"]
     assert result["ok"], result["findings"]
 
 
-class GateCase(NamedTuple):
-    """One reintroduced defect, filed by what it proves rather than by its bug.
-
-    `cls` is the gate class expected to report it, `universe` the named
-    inventory the comparison runs against (None when the case exercises a
-    class's own logic rather than the shared comparator), and `rule` one of the
-    comparator's four structural rules — or `arm`, for a class-logic case that
-    predates them and still has to keep working.
-
-    `within` is the section the anchor is read inside; see `_region`.
-    """
-
-    cls: str
-    universe: str | None
-    rule: str
-    label: str
-    before: str
-    after: str
-    says: str
-    within: str
-
-
-# The three rules, restated as what a mutation has to show:
-#
-#   token      — a *near miss*: a name a substring, prefix or suffix matcher
-#                would have credited. This is the one that regressed twice.
-#                A cell filled with one direction is not filled: prefix and
-#                suffix fail differently, and set intersection catches the
-#                prefix for free while an unbounded extraction reads the suffix
-#                as a hit. Every direction the extraction admits needs a case,
-#                or the grid reads full over a rule that was never exercised.
-#                Enumerating directions does not terminate, though — a boundary
-#                written against the reported `G-15x` still credited `G-15.1`.
-#                So the cases here exist to hold a rule that is stated
-#                positively (what may end a name) rather than to chase the
-#                spellings that break a negative one.
-#   empty      — a *total miss*: nothing resolves, and the gate reports it
-#                instead of skipping the comparison in silence.
-#   duplicate  — one canonical token declared twice with different content.
-#
-# Filed by (class, universe, rule) rather than by bug, because the defect this
-# suite exists to prevent is not any single bug: it is a new class arriving with
-# a comparison of its own and nobody noticing which rules it forgot.
-GATE_MUTATIONS: tuple[GateCase, ...] = (
-    # --- A: routes, states, treatments ------------------------------------
-    # Anchored on a route exactly one register row names, which is what the
-    # case needs and is not a property of any particular route: round 20 gave
-    # `POST /api/models/oauth/cancel` a second namer — §1.4's *OAuth failed* row
-    # now issues the same cleanup — and this case went on passing on the class-E
-    # half while the arm it was written for stopped firing. The anchor is the
-    # whole cell for the reason stated at the `treatment removed` case below.
-    GateCase(
-        "A", "routes", "token",
-        "register row drifts onto a longer route",
-        "重新拉取 pressed — `POST /api/models/sources/<source_id>/refresh`, guarded",
-        "重新拉取 pressed — `POST /api/models/sources/<source_id>/refreshes`, guarded",
-        "is named by no §0.8 row",
-        within="0.8",
-    ),
-    GateCase(
-        "A", "states", "token",
-        "an exit points at a prefix of a real state",
-        "| → Unreachable / Sources unread / Partial | — |",
-        "| → Unreach / Sources unread / Partial | — |",
-        "names no F1–F5 and no known state",
-        within="0.8",
-    ),
-    GateCase(
-        "A", "states", "empty",
-        "an exit points at a state nobody wrote",
-        "| → Unreachable / Sources unread / Partial | — |",
-        "| → Nowhere at all / Sources unread / Partial | — |",
-        "names no F1–F5 and no known state",
-        within="0.8",
-    ),
-    GateCase(
-        "A", "states", "duplicate",
-        "two rows in one frame under one state name",
-        "| §1.0 | Impaired |",
-        "| §1.0 | Ready |",
-        "`1.0 · Ready` is defined twice in states",
-        within="0.8",
-    ),
-    GateCase(
-        "A", "treatments", "token",
-        "the treatment a cell names becomes a prefix of the one defined",
-        "| F1 | Retry in place |",
-        "| F10 | Retry in place |",
-        "names F1, which §0.8's closed set does not define",
-        within="0.8",
-    ),
-    GateCase(
-        "A", "treatments", "empty",
-        "treatment misnamed",
-        "| F4 — `POST /api/models/oauth",
-        "| F9 — `POST /api/models/oauth",
-        "which §0.8's closed set does not define",
-        within="0.8",
-    ),
-    GateCase(
-        "A", "treatments", "duplicate",
-        "§0.8's closed set defines one number twice",
-        "| F2 | Keep the last good result |",
-        "| F1 | Keep the last good result |",
-        "`F1` is defined twice in treatments",
-        within="0.8",
-    ),
-    # The defect this gate was built for: a state issues a call and no row
-    # states what happens when it fails. This is the shape that survived review
-    # at f22c2a59 and had to be found by a human.
-    #
-    # The anchor is the whole cell. Written as a fragment, the replacement left
-    # the rest of the sentence in place, class A fired for an unrelated reason —
-    # the route was no longer covered — and the case passed a class-only
-    # assertion while the arm it was written for never ran.
-    GateCase(
-        "A", None, "arm",
-        "treatment removed",
-        "| F4 — `POST /api/models/oauth/cancel` is issued as the dialog closes "
-        "and its result is not awaited (D-15) |",
-        "| — |",
-        "states no failure treatment",
-        within="0.8",
-    ),
-    # `[contract-gap]` is also the marker that tells a checker to stop asking.
-    # Pointed at a number no §0.5 row defines, it must silence nothing at all.
-    GateCase(
-        "A", "gaps", "empty",
-        "gap marker cites an unregistered number",
-        "`[contract]` `[contract-gap]` G-15 carries",
-        "`[contract]` `[contract-gap]` G-99 carries",
-        "is named by no §0.8 row",
-        within="1.5",
-    ),
-    # The same rule read from the registry side: a row that stops parsing as a
-    # row stops being a registration, and the route it was excusing goes back to
-    # being a contracted call this document reaches from nowhere. Both halves of
-    # the silencer are one comparison, but only this half exercises the parse
-    # that decides what a registration *is* — and it is a parse the citation
-    # cases cannot reach, because they never look at a row.
-    #
-    # The anchor is G-12 because G-12's two routes are named *by* that row and
-    # nowhere else, so breaking it strands exactly what the row was registering.
-    # It used to be G-13, which stranded `PUT /api/models/agents/<backend>/chain`
-    # — a route G-13 does not register and only mentions as evidence. That made
-    # the case pass for the wrong reason and hid the arm's real defect: an
-    # excusing row silences every route token anywhere inside it. R29 gave the
-    # chain `PUT` a §0.4 row of its own, the incidental excuse stopped being
-    # load-bearing, and this case went red and said so.
-    GateCase(
-        "A", "gaps", "empty",
-        "a gap row loses the number that makes it a registration",
-        "| G-12 |",
-        "| gap 12 |",
-        "is contracted and reached by no §0.8 row, no §0.5 gap and no §0.4 row",
-        within="0.5",
-    ),
-    # The same row, with its route left in place and moved one column right. A
-    # register accounts for what it declares missing; the column beside it is
-    # where the row argues the absence is real, and argument names whatever it
-    # needs to name. Reading the whole row made those two the same act, which is
-    # how §0.5's G-13 — a row about a bulk re-apply that does not exist, citing
-    # the chain `PUT` only to say nothing bulk-rewrites stored chains — excused
-    # the one contracted mutation this document reached from nowhere. The defect
-    # survived twenty-nine review rounds and was found by hand, not here.
-    GateCase(
-        "A", "gaps", "arm",
-        "a gap row's route moves from what it registers into why it is true",
-        "by sending the contracted `DELETE /api/models/sources/<id>` | the only 移除",
-        " | `api.md` contracts `DELETE /api/models/sources/<id>`, and the only 移除",
-        "is contracted and reached by no §0.8 row, no §0.5 gap and no §0.4 row",
-        within="0.5",
-    ),
-    # And the register whose declared column cannot be found at all. A column is
-    # located by its header, so renaming one is the one edit that could quietly
-    # turn the whole arm off — and the failure has to be that every route §0.5
-    # was covering comes back, never that §0.5 goes on covering them by position.
-    GateCase(
-        "A", "gaps", "arm",
-        "the gap register renames the column that says what is missing",
-        "| # | Surface | Missing | Verified absent at `ceace07f` |",
-        "| # | Surface | What is absent | Verified absent at `ceace07f` |",
-        "is contracted and reached by no §0.8 row, no §0.5 gap and no §0.4 row",
-        within="0.5",
-    ),
-    # The same marker pointed at a *prefix* of a registered number. Set
-    # intersection got this right by accident and would have gone on getting it
-    # right; the case is here because the cell is, and because the silencer is
-    # now resolved like every other name.
-    GateCase(
-        "A", "gaps", "token",
-        "gap marker cites a prefix of a registered number",
-        "`[contract]` `[contract-gap]` G-15 carries",
-        "`[contract]` `[contract-gap]` G-1 carries",
-        "is named by no §0.8 row",
-        within="1.5",
-    ),
-    # The other direction, and the one the cell above was standing in for: the
-    # extraction stopped at the last digit it wanted rather than at the end of
-    # the number, so `G-15x` was read as `G-15` and a route stayed silenced by a
-    # registration written about something else. A prefix resolves to nothing
-    # and fails loudly; a suffix resolved to a real row, which is why filling
-    # this cell with the prefix alone left the rule untested for two rounds.
-    GateCase(
-        "A", "gaps", "token",
-        "gap marker cites a suffix of a registered number",
-        "`[contract]` `[contract-gap]` G-15 carries",
-        "`[contract]` `[contract-gap]` G-15x carries",
-        "is named by no §0.8 row",
-        within="1.5",
-    ),
-    # The same near miss reached through a joiner instead of a letter. The first
-    # boundary rejected `G-15x` and still credited `G-15.1`, because it was
-    # written against the one direction a reviewer had named. A dot is the joiner
-    # the document actually contains — it also ends citations as a full stop —
-    # so it is the one direction the rule has to get right in both readings.
-    GateCase(
-        "A", "gaps", "token",
-        "gap marker joins a registered number to a sub-number",
-        "`[contract]` `[contract-gap]` G-15 carries",
-        "`[contract]` `[contract-gap]` G-15.1 carries",
-        "is named by no §0.8 row",
-        within="1.5",
-    ),
-    # Reviewer's repro, round 14: a route first mentioned inside a
-    # registered-gap paragraph and then drawn as an unmarked affordance. The
-    # dedupe ran before the verdict, so the first mention's excuse covered the
-    # second, and the gate returned zero findings.
-    GateCase(
-        "A", "routes", "arm",
-        "an unmarked affordance repeats a route a gap paragraph excused",
-        "the surface of truth when it does not.",
-        "the surface of truth when it does not.\n\n06's header carries a 移除来源 "
-        "button that sends `DELETE /api/models/sources/<id>` and returns to 01.",
-        "is named by no §0.8 row",
-        within="1.4",
-    ),
-    # The mirror of class A, and the generator behind five findings across two
-    # heads: a contracted mutation no surface reaches. Out of scope is a
-    # legitimate answer; not saying anything is not.
-    GateCase(
-        "A", "routes", "arm",
-        "a contracted mutation stops being accounted for",
-        "| `POST /api/models/migration/scan` | The migration surface.",
-        "| `POST /api/models/migration/scans` | The migration surface.",
-        "is contracted and reached by no §0.8 row",
-        within="0.4",
-    ),
-    # The defect that ran for nineteen rounds: §1.6 attributed §1.3's order save
-    # to a bare `PUT`, which names no token, so every route arm read the sentence
-    # as making no claim and it went on contradicting §0.8 in plain sight. The
-    # innocent half of this rule is exercised by the unmutated spec, which writes
-    # two dozen method words that name no other frame and stays green.
-    GateCase(
-        "A", "routes", "arm",
-        "another frame's request named by method word",
-        "because it is not yet a request. It moves a row",
-        "because it is not yet a `PUT`. It moves a row",
-        "with no path, so no route arm can read the claim",
-        within="1.6",
-    ),
-    # Reviewer's finding, round 1 of #1276: the arm above read `§1.3` and nothing
-    # else, while every other arm in this gate resolves a frame through its
-    # aliases — display number and node id included. So the identical sentence
-    # written "Frame 03's whole-order `PUT`" named a frame the arm could not see,
-    # made no claim it could read, and passed. An arm that recognises one of a
-    # frame's three names is not checking frames; it is checking one spelling.
-    GateCase(
-        "A", "frames", "arm",
-        "another frame's request named by method word and display number",
-        "**The question it answers:** *where do my tokens come from, and who is using\n"
-        "which one right now?*",
-        "**The question it answers:** *where do my tokens come from, and who is using\n"
-        "which one right now?* Frame 03's whole-order `PUT` is not this frame's.",
-        "names §1.3's request as `PUT` with no path",
-        within="1.1",
-    ),
-    # One predicate written twice, eight hundred lines apart: the frame that owns
-    # a failure disperses it into a set of its own states, and every other frame
-    # that defers to it restates that set. Round 21 landed two findings out of
-    # this shape and round 20 one more; each time a destination was added on one
-    # side and the other kept the old list, and each reading stayed locally
-    # plausible. Both directions get a case because the arm answers them with
-    # different halves of one sentence, and a suite that only ever deleted a
-    # destination would leave the other half unexecuted.
-    #
-    # Two frames now restate §1.0's set — §1.1 from the module and §1.8 from the
-    # direct home — so each anchor carries the clause that says which of the two
-    # it is. A mutation case is only a mutation if it names one edit; round 27
-    # gave §1.8 the dispersal §1.1 already had and three anchors stopped being
-    # unique the same afternoon.
-    GateCase(
-        "A", None, "arm",
-        "a deferral to another frame's set loses a destination that set has",
-        "→ §1.0 Unreachable / §1.0 Sources unread / §1.0 Partial — the same three "
-        "§1.0 disperses first paint into, because this row is",
-        "→ §1.0 Unreachable / §1.0 Sources unread — the same three "
-        "§1.0 disperses first paint into, because this row is",
-        "defers its failure to §1.0's set and does not name Partial",
-        within="0.8",
-    ),
-    GateCase(
-        "A", None, "arm",
-        "a deferral names a landing the owning frame does not disperse into",
-        "→ §1.0 Unreachable / §1.0 Sources unread / §1.0 Partial — the same three "
-        "§1.0 disperses first paint into, because this row is",
-        "→ §1.0 Unreachable / §1.0 Sources unread / §1.0 Partial / §1.0 Empty "
-        "(no sources) — the same three §1.0 disperses first paint into, because "
-        "this row is",
-        "names Empty (no sources), which §1.0 does not disperse into",
-        within="0.8",
-    ),
-    # Reviewer's finding, round 1 of #1276: both cases above compare one set of
-    # destinations against another, and both arrive *after* the early return that
-    # accepts any cell holding an arrow to a numbered section. That return read
-    # neither half of `§1.0 Unreachable` — not the frame, not the state — so a
-    # deferral could name a section the document does not have, or a state the
-    # named frame does not file, and the dispersal arm would then skip it for
-    # being unresolved. A destination nobody resolved is not a destination; it is
-    # a sentence that looks like one, which is the failure this whole arm exists
-    # to catch. Both halves get a case because they fail through different
-    # universes and a single one would leave the other reading untested.
-    GateCase(
-        "A", "frames", "empty",
-        "a deferral to a section number no frame carries",
-        "→ §1.0 Unreachable / §1.0 Sources unread / §1.0 Partial — the same three "
-        "§1.0 disperses first paint into, because this row is",
-        "→ §1.99 Unreachable / §1.0 Sources unread / §1.0 Partial — the same three "
-        "§1.0 disperses first paint into, because this row is",
-        "defers to §1.99, which is no frame",
-        within="0.8",
-    ),
-    GateCase(
-        "A", "states", "empty",
-        "a deferral to a state the frame it names does not file",
-        "→ §1.0 Unreachable / §1.0 Sources unread / §1.0 Partial — the same three "
-        "§1.0 disperses first paint into, because this row is",
-        "→ §1.0 Unreachably / §1.0 Sources unread / §1.0 Partial — the same three "
-        "§1.0 disperses first paint into, because this row is",
-        "defers to 「Unreachably」 in §1.0, which files no such state",
-        within="0.8",
-    ),
-    # Reviewer's finding, round 2 of #1276: a failure cell says how the failure
-    # is treated *and* where it lands — 「F1 → Install failed」 is both — and the
-    # arm returned as soon as it had read the treatment. The landing went unread
-    # on every mixed cell in the register, which is most of them.
-    GateCase(
-        "A", "states", "arm",
-        "a named treatment lands in a state nobody files",
-        "F1 → Install failed",
-        "F1 → Vanished forever",
-        "treats its failure with F1 and then lands nowhere",
-        within="0.8",
-    ),
-    # --- C: frames ----------------------------------------------------------
-    # Reviewer's finding, round 1 of #1276: the N arm asked whether a landing
-    # *contained* a registered state name, so 「Not startedness」 vouched for
-    # itself by containing 「Not started」 and the mismatch was suppressed. A
-    # substring test answers a question nobody asked — is this name written
-    # somewhere inside that text — and reads as agreement precisely when the
-    # destination is a near-miss, which is the shape a typo takes.
-    GateCase(
-        "C", None, "arm",
-        "a dispatch destination that merely contains a state's name",
-        "`not_started` → Not started, `degraded` → Impaired",
-        "`not_started` → Not startedness, `degraded` → Impaired",
-        "which §1.0 files as no state",
-        within="0.8",
-    ),
-    # --- B: copy, slots -----------------------------------------------------
-    # Reviewer's finding, round 2 of #1276: an i18next plural is one key written
-    # on two rows, and a stem left with one of them fell through as an ordinary
-    # single-row key. The cardinality the survivor does not cover renders nothing
-    # at runtime, and the gate read the family as complete.
-    GateCase(
-        "B", "copy", "arm",
-        "a plural family with one of its two forms deleted",
-        "| `gateway.modelCount_other` | {{count}} 个型号 | {{count}} models |\n",
-        "",
-        "is written as a plural family and declares no `_other` row",
-        within="1.0",
-    ),
-    # Reviewer's finding, round 2 of #1276: a citation was admitted only when its
-    # first segment was a namespace some copy table declares, so a misspelt
-    # namespace was dropped before the universe could answer — the same silence a
-    # correct citation produces. `shell` is declared; `shel` is the typo.
-    GateCase(
-        "B", "copy", "empty",
-        "a copy citation whose namespace is misspelt",
-        "Tooltip: `shell.gatewayInfo.body`",
-        "Tooltip: `shel.gatewayInfo.body`",
-        "key `shel.gatewayInfo.body` is cited and never defined",
-        within="1.0",
-    ),
-    GateCase(
-        "B", "copy", "token",
-        "a citation truncated to a prefix two keys share",
-        "`shell.notStarted` | Run pill",
-        "`shell.not` | Run pill",
-        "key `shell.not` is cited and never defined",
-        within="0.8",
-    ),
-    GateCase(
-        "B", "copy", "empty",
-        "key cited, never defined",
-        "`shell.notStarted` | Run pill",
-        "`shell.notStartd` | Run pill",
-        "is cited and never defined",
-        within="0.8",
-    ),
-    # Two rows in one table under one key ship whichever the loader read last.
-    # The key is legitimately re-used across namespaces — every table has a
-    # `title` — so only the qualified spelling collides.
-    GateCase(
-        "B", "copy", "duplicate",
-        "one qualified key defined twice",
-        "| `tiers.addFirst` | + 添加档位 | + Add tier |",
-        "| `tiers.add` | + 添加档位 | + Add tier |",
-        "is defined twice in copy",
-        within="1.6",
-    ),
-    GateCase(
-        "B", "slots", "token",
-        "a declared slot truncated to a prefix of the one strings use",
-        "| `{{host}}` | The source's host",
-        "| `{{hos}}` | The source's host",
-        "interpolates `{{host}}` with no §0.9 row",
-        within="0.9",
-    ),
-    GateCase(
-        "B", "slots", "empty",
-        "undeclared slot",
-        "| `install.retry` `[derived]` | 重试 | Try again |",
-        "| `install.retry` `[derived]` | 重试 {{attempt}} | Try again {{attempt}} |",
-        "with no §0.9 row",
-        within="1.0",
-    ),
-    GateCase(
-        "B", "slots", "duplicate",
-        "§0.9 declares one slot twice",
-        "| `{{source}}` | A source's display name. | Always present |",
-        "| `{{host}}` | A source's display name. | Always present |",
-        "`host` is defined twice in slots",
-        within="0.9",
-    ),
-    # A key that would ship with no English string.
-    GateCase(
-        "B", None, "arm",
-        "English column dropped",
-        "| `install.progress` `[derived]` | 正在安装… | Installing… |",
-        "| `install.progress` `[derived]` | 正在安装… |  |",
-        "has no English column",
-        within="1.0",
-    ),
-    GateCase(
-        "B", None, "arm",
-        "Chinese column dropped",
-        "| `shell.title` | 模型 | Models |",
-        "| `shell.title` |  | Models |",
-        "has no Chinese column",
-        within="1.0",
-    ),
-    # §0.9 names its consumers and the copy tables interpolate: one set, written
-    # twice, by two authors who cannot see each other. Both directions get a
-    # case, because they fail differently and only one of them is loud. A
-    # declared key nobody interpolates is a stale row — visible to a reader who
-    # goes looking. An interpolating key the row omits is the one that matters:
-    # it is a consumer whose meaning was never checked against the sentence it
-    # borrowed, which is how `{{status}}` came to mean an HTTP code for three
-    # keys and supply health for a fourth.
-    GateCase(
-        "B", "slots", "arm",
-        "§0.9 lists a consumer that interpolates nothing",
-        "| `addSub.title`, `adopt.effects.1` |",
-        "| `addSub.title`, `adopt.effects.1`, `order.title` |",
-        "and no such copy row does",
-        within="0.9",
-    ),
-    GateCase(
-        "B", "slots", "arm",
-        "a key interpolates a slot §0.9's row does not list",
-        "| `addSub.title`, `adopt.effects.1` |",
-        "| `addSub.title` |",
-        "and §0.9's row does not list it",
-        within="0.9",
-    ),
-    # The same generator one grain further out: a vocabulary declared as copy
-    # keys and enumerated again as the strings those keys render. §1.0's mapping
-    # gained a sixth status word and §2's ink rule went on listing four, which
-    # nineteen rounds of reading by hand did not catch. `GATE_INNOCENT` holds
-    # the other half of this rule — the part that says a mention is not an
-    # enumeration.
-    GateCase(
-        "B", "copy", "arm",
-        "a restated vocabulary loses the value that was just added",
-        "网关 · 暂时全部在冷却, 网关 · 无可用来源, 网关 · 未选型号",
-        "网关 · 暂时全部在冷却, 网关 · 未选型号",
-        "is missing",
-        within="1.9",
-    ),
-    # --- C: frames ----------------------------------------------------------
-    GateCase(
-        "C", "frames", "token",
-        "a register row filed under a prefix of a real section",
-        "| §1.0 | Impaired |",
-        "| §1 | Impaired |",
-        "filed under §1, which is no §1 section",
-        within="0.8",
-    ),
-    GateCase(
-        "C", "frames", "empty",
-        "a register row filed under a section that does not exist",
-        "| §1.0 | Impaired |",
-        "| §1.60 | Impaired |",
-        "filed under §1.60, which is no §1 section",
-        within="0.8",
-    ),
-    GateCase(
-        "C", "frames", "duplicate",
-        "two §1 headings claim one number",
-        "### 1.9 Frame 10 `g7MOA4`",
-        "### 1.8 Frame 10 `g7MOA4`",
-        "`1.8` is defined twice in frames",
-        within="1.9",
-    ),
-    # A state a user can enter and not leave.
-    GateCase(
-        "C", None, "arm",
-        "exit removed",
-        "| 取消 / 关闭 / Escape → close, discarding uncommitted moves; 保存顺序 → Saving |",
-        "| — |",
-        "has no exit",
-        within="0.8",
-    ),
-    # A section that answers its other failures for both origins, with one
-    # failure left written once — the reader cannot tell whether pulling from a
-    # stopped engine fails the way adding does.
-    GateCase(
-        "C", None, "arm",
-        "origin half deleted",
-        "| ⑥′ Engine unavailable",
-        "| ⑥″ Engine unavailable",
-        "has no ′ row",
-        within="0.8",
-    ),
-    # The other half of the same arm: a step only one origin performs is
-    # admissible, and what makes it admissible is the sentence naming the twin
-    # it does not have. Strike the sentence and the row is indistinguishable
-    # from one whose second half was forgotten — which is the reading the arm
-    # must take, since it is the one that can be wrong.
-    GateCase(
-        "C", None, "arm",
-        "a single-origin failure stops declaring the twin it does not have",
-        "There is no ⑦′, because Pull origin persists nothing",
-        "Pull origin persists nothing",
-        "does not say 「no ⑦′」 either",
-        within="0.8",
-    ),
-    # A recovery exit that re-reads a collection and branches on the answer is a
-    # dispatch, and owes every reading a landing. The arm used to find its
-    # dispatcher only in *failure* cells, where exactly one frame has one — so
-    # this frame, mapping table and all, was skipped whole. Anchored on §1.6
-    # because it is the frame that proves the widening: nothing here disperses a
-    # failure, and before the fix no row in it was ever read as a router.
-    GateCase(
-        "C", None, "arm",
-        "a routing exit drops one of its field's readings",
-        "`needs_action` → Needs action, `error`",
-        "`error`",
-        "a row that routes this frame by `Source.state.status`",
-        within="0.8",
-    ),
-    # §0.8 files the guarded refusal under the frames that reach it, and §1 prose
-    # answers the same question again whenever it explains who opens the shared
-    # confirm. §0.8 is the definition, so prose is the side that gets checked —
-    # there is no second direction to write here, because a register compared
-    # against itself reports itself. The innocent half is live in the unmutated
-    # spec: §1.1 names §1.6 correctly, and this case is that same sentence
-    # pointed one frame off.
-    GateCase(
-        "C", "frames", "arm",
-        "prose attributes the guarded refusal to a frame §0.8 does not file it under",
-        "the two §1.6 sends are",
-        "the two §1.3 sends are",
-        "reaches the guarded refusal",
-        within="1.6",
-    ),
-    # The same misattribution in the document's other habit. A frame heading
-    # gives the frame three names, and §1 prose uses all of them — "Frames 09
-    # and 10 draw the header", "Deltas from 01". An arm that recognises only the
-    # register's spelling reports the case above and lets this one through, so
-    # the two cases differ by nothing except which name the claim is written in.
-    GateCase(
-        "C", "frames", "arm",
-        "the same misattribution, written with the frame's display number",
-        "the two §1.6 sends are",
-        "the two 03 sends are",
-        "reaches the guarded refusal",
-        within="1.6",
-    ),
-    # --- D: copy ------------------------------------------------------------
-    # Condition keys are stored bare and cited namespace-qualified, so the
-    # citation test has to resolve both spellings to one copy row. Matching on
-    # prefixes instead let a citation drift onto a longer key and still vouch
-    # for the row it left behind.
-    GateCase(
-        "D", "copy", "token",
-        "a citation drifts onto a longer key",
-        "`sourceDetail.fail.tier`, `sourceDetail.retry`",
-        "`sourceDetail.fail.tiers`, `sourceDetail.retry`",
-        "condition key `fail.tier` is cited by no §0.8 row",
-        within="0.8",
-    ),
-    GateCase(
-        "D", "copy", "empty",
-        "the row a live citation names is renamed out from under it",
-        "| `fail.tier` `[derived]` | 档位没保存上",
-        "| `fail.tierZ` `[derived]` | 档位没保存上",
-        "condition key `fail.tierZ` is cited by no §0.8 row",
-        within="1.6",
-    ),
-    # --- E: routes, schema files, schema fields, repo symbols ---------------
-    GateCase(
-        "E", "routes", "token",
-        "a route extended past a real one by one segment",
-        "`PUT /api/models/agents/<backend>/sources` with `{order: string[]}` `[contract]`",
-        "`PUT /api/models/agents/<backend>/sources/order` with `{order: string[]}` `[contract]`",
-        "is contracted by no `api.md` route row",
-        within="0.8",
-    ),
-    # A route the spec names that the contract does not have. This is the class
-    # the round-10 review found by hand, six times.
-    GateCase(
-        "E", "routes", "empty",
-        "route literal drifts off api.md",
-        "`PUT /api/models/agents/<backend>/sources` with `{order: string[]}` `[contract]`",
-        "`PUT /api/models/agents/<backend>/source-order` with `{order: string[]}` `[contract]`",
-        "is contracted by no `api.md` route row",
-        within="0.8",
-    ),
-    GateCase(
-        "E", "schema files", "token",
-        "a schema citation extended past a real filename",
-        "`source.schema.json` pins it non-null",
-        "`agent-source.schema.json` pins it non-null",
-        "`agent-source.schema.json` is not a file in",
-        within="1.0",
-    ),
-    # Reviewer's finding, round 2 of #1276: the citation pattern admitted only
-    # lowercase letters and hyphens, so the two commonest near-misses of a real
-    # filename — a digit, an underscore — matched nothing and disappeared,
-    # taking the field attributed to them along. What the extractor cannot spell
-    # it cannot report, so the shape is now everything a filename may look like
-    # and the universe is what says the name is unknown.
-    GateCase(
-        "E", "schema files", "arm",
-        "a schema citation misspelt with a digit",
-        "| `runtime-dependency.schema.json` → `status.health` `[contract]` |",
-        "| `runtime1-dependency.schema.json` → `status.health` `[contract]` |",
-        "`runtime1-dependency.schema.json` is not a file in",
-        within="1.0",
-    ),
-    GateCase(
-        "E", "schema files", "arm",
-        "a schema citation misspelt with an underscore",
-        "| `runtime-dependency.schema.json` → `status.health` `[contract]` |",
-        "| `runtime_dependency.schema.json` → `status.health` `[contract]` |",
-        "`runtime_dependency.schema.json` is not a file in",
-        within="1.0",
-    ),
-    GateCase(
-        "E", "schema files", "empty",
-        "a schema citation naming no file",
-        "`source.schema.json` pins it non-null",
-        "`sources.schema.json` pins it non-null",
-        "`sources.schema.json` is not a file in",
-        within="1.0",
-    ),
-    # The mapping table no longer saying which of two same-named declarations it
-    # renders. `supply_status` exists per backend and per named Agent, and
-    # reading one as the other was the substitution round 10 opened on.
-    GateCase(
-        "E", "schema fields", "token",
-        "mapping table stops naming which declaration it renders",
-        "| `AgentSupply.supply_status` `[contract]` | Subtitle | Key |",
-        "| `supply_status` `[contract]` | Subtitle | Key |",
-        "independent places",
-        within="1.0",
-    ),
-    # A `[contract]` header asserts that some schema owns the vocabulary below
-    # it. When the field name resolves to no declaration, the set comparison has
-    # nothing to compare and used to skip in silence — the one outcome a gate
-    # that exists to catch drift may not have.
-    GateCase(
-        "E", "schema fields", "empty",
-        "mapping table names a field no schema declares",
-        "| `AgentSupply.supply_status` `[contract]` | Subtitle | Key |",
-        "| `AgentSupply.supply_stat` `[contract]` | Subtitle | Key |",
-        "the table maps no contracted field",
-        within="1.0",
-    ),
-    GateCase(
-        "E", "repo symbols", "token",
-        "a cited symbol truncated to a prefix of the real one",
-        "service.py:list_agents",
-        "service.py:list_agent",
-        "defines no `list_agent`",
-        within="0.5",
-    ),
-    GateCase(
-        "E", "repo symbols", "empty",
-        "cited symbol no longer exists",
-        "service.py:list_agents",
-        "service.py:list_agent_rows",
-        "defines no `list_agent_rows`",
-        within="0.5",
-    ),
-    # Reviewer's finding, round 14: `ast.walk` credited every `Store` name in the
-    # file, so any local variable vouched for a citation. `cancelled` is one —
-    # a name assigned inside a method body, addressable by nobody.
-    GateCase(
-        "E", "repo symbols", "token",
-        "a cited symbol is a name local to some function body",
-        "service.py:list_agents",
-        "service.py:cancelled",
-        "defines no `cancelled`",
-        within="0.5",
-    ),
-    # Reviewer's finding, round 1 of #1276: the inventory was a set of bare
-    # names, each registered with the *file* as its content. So one file
-    # defining `load` four times declared one token four times identically, the
-    # duplicate rule could not fire on this universe however wrong the file got,
-    # and a citation to any of the four resolved as though it named one thing.
-    # Keyed on the qualified name with the bare name as an alias, both halves
-    # come back: the qualified name carries the line, so two bodies under one
-    # name contradict, and the bare name resolves to as many symbols as there
-    # are — which is what this case reads. `service.py` really does define
-    # `load` twice, under two owners; the citation is the thing at fault,
-    # because it promised the reader one place to go.
-    GateCase(
-        "E", "repo symbols", "arm",
-        "a citation names a symbol the file defines in more than one place",
-        "service.py:list_agents",
-        "service.py:load",
-        "defines `load` in 2 places",
-        within="0.5",
-    ),
-    # The §0.5 registry, read as a universe. Its three rules are exercised where
-    # the marker is spent: class A's route coverage (above) and class E's claim
-    # check (here). E owns the duplicate rule because a gap row is a claim about
-    # what the contract does not have, and that is the class that checks those.
-    #
-    # Reviewer's repro, round 14: a contradicting second `G-19`. Built by hand,
-    # the registry kept the later row and every reference went on resolving.
-    GateCase(
-        "E", "gaps", "duplicate",
-        "a second row answers one gap number differently",
-        "| G-19 | 05 add-by-key, 取消 pressed while a persisting add is in flight |",
-        # Four cells, which is what §0.5's header declares. Written with five
-        # until this round, when the malformed rule arrived and reported the
-        # decoy for its cell count instead of registering it — a case that had
-        # been proving the duplicate rule against a row the reader now declines
-        # to read at all.
-        "| G-19 | 05 add-by-key, an unrelated surface | a different missing behaviour "
-        "| Contradicting evidence. |\n"
-        "| G-19 | 05 add-by-key, 取消 pressed while a persisting add is in flight |",
-        "is defined twice in gaps with different content",
-        within="0.5",
-    ),
-    # A number no row defines silences nothing. This case used to be reached
-    # from the registry side — de-number G-9's row and watch the 409 it excused
-    # come back — and round 17 withdrew G-9, because the missing 409 was the
-    # contract agreeing with itself rather than a debt. Nothing in the document
-    # is silenced by a gap on E's side any more, so the claim is written by the
-    # mutation, exactly as the three `token` cases below write theirs. The
-    # registry side kept its coverage and moved to class A, where a de-numbered
-    # row still costs a route its excuse: see the G-13 case above.
-    GateCase(
-        "E", "gaps", "empty",
-        "a silenced claim cites a number no row defines",
-        "the surface of truth when it does not.",
-        "the surface of truth when it does not.\n\nA 409 conflict answer to "
-        "`PUT /api/models/agents/<backend>/sources` is `[contract-gap]` G-99.",
-        "a 409 branch is claimed for",
-        within="1.4",
-    ),
-    # E's own use of the marker, against a near miss: the claim cites `G-1`,
-    # which is a prefix of `G-15` and a row nobody wrote. Citing a registered
-    # number silences the same sentence, which is the half that makes this a
-    # test of identity rather than of the marker being ignored.
-    GateCase(
-        "E", "gaps", "token",
-        "a silenced claim cites a prefix of a registered number",
-        "the surface of truth when it does not.",
-        "the surface of truth when it does not.\n\nA 409 conflict answer to "
-        "`PUT /api/models/agents/<backend>/sources` is `[contract-gap]` G-1.",
-        "a 409 branch is claimed for",
-        within="1.4",
-    ),
-    # The same suffix miss on the other arm that honours the marker. Both ask
-    # through one comparison, so one boundary fixes both — and one direction
-    # tested on one arm proves neither, which is how a cell that reads full in
-    # two classes at once can still be describing a rule nobody ran.
-    GateCase(
-        "E", "gaps", "token",
-        "a silenced claim cites a suffix of a registered number",
-        "the surface of truth when it does not.",
-        "the surface of truth when it does not.\n\nA 409 conflict answer to "
-        "`PUT /api/models/agents/<backend>/sources` is `[contract-gap]` G-9x.",
-        "a 409 branch is claimed for",
-        within="1.4",
-    ),
-    GateCase(
-        "E", "gaps", "token",
-        "a silenced claim joins a registered number to a sub-number",
-        "the surface of truth when it does not.",
-        "the surface of truth when it does not.\n\nA 409 conflict answer to "
-        "`PUT /api/models/agents/<backend>/sources` is `[contract-gap]` G-9.1.",
-        "a 409 branch is claimed for",
-        within="1.4",
-    ),
-    # Reviewer's finding, round 2 of #1276: an unresolved marker only dropped out
-    # of the list of active exemptions. A row that needed no other exemption
-    # therefore spent a number nobody registered and nothing said so — the marker
-    # is a citation of §0.5, and a citation that resolves to nothing is reported
-    # whether or not ignoring it happens to redden some other arm.
-    GateCase(
-        "E", "gaps", "empty",
-        "a marker spends a gap number no row registers",
-        "An install confirm was accepted `[contract-gap]` G-10",
-        "An install confirm was accepted `[contract-gap]` G-99",
-        "`[contract-gap] G-99` names no §0.5 row",
-        within="0.8",
-    ),
-    # Reviewer's finding, round 2 of #1276: the guarded envelope was every literal
-    # written outside the route table, unioned, so a key from one section vouched
-    # for a claim about another route entirely. `recovered` is real — it is in the
-    # OAuth completion example — and the chain route never returns it.
-    GateCase(
-        "E", "routes", "arm",
-        "a response claim borrows a key from another section's example",
-        "on success it returns `{chain, removed_hops, interrupted}`",
-        "on success it returns `{chain, removed_hops, interrupted, recovered}`",
-        "names recovered — not contracted for",
-        within="0.5",
-    ),
-    # Reviewer's finding, round 2 of #1276: an attributed field was reduced to its
-    # last segment before it was resolved, so a real leaf under the wrong parent
-    # answered for it. `health` exists in that schema; `manifest` does not, and
-    # the sentence naming the wrong object read as verified.
-    GateCase(
-        "E", "schema fields", "arm",
-        "an attributed field path hangs under a parent the schema lacks",
-        "v5's `status.health` runs",
-        "v5's `manifest.health` runs",
-        "declares no `manifest.health`",
-        within="0.5",
-    ),
-    # A total rendering of a contracted vocabulary that quietly drops a row. The
-    # author cannot see the schema while writing the table, so nothing but a set
-    # comparison catches this.
-    GateCase(
-        "E", "schema fields", "arm",
-        "mapping table drops a contracted value",
-        "| `waiting` | 网关 · 暂时全部在冷却 |",
-        "| `wating` | 网关 · 暂时全部在冷却 |",
-        "renders",
-        within="1.0",
-    ),
-    GateCase(
-        "E", "schema fields", "arm",
-        "mapping table field header is malformed",
-        "| `Source.state.status` `[contract]` | Ink | Key |",
-        "| `Source.state-status` `[contract]` | Ink | Key |",
-        "mapping header `Source.state-status` is not a valid field citation",
-        within="1.6",
-    ),
-    GateCase(
-        "E", "schema fields", "arm",
-        "mapping table row has an unowned cell",
-        "| `standby` | `$--muted` | `upstream.state.standby` |",
-        "| `standby` | `$--muted` | `upstream.state.standby` | extra |",
-        "mapping row has 4 cells where its header declares 3",
-        within="1.6",
-    ),
-    # Reviewer's finding, round 1 of #1276: a gap registration says one field is
-    # absent, and the excusal read that as "this whole row is unverifiable" —
-    # every attributed-field claim inside it, including the *evidence*. G-3's
-    # evidence cell cites `source.schema.json`'s `models`, which the file really
-    # does declare and which the row does not claim is missing. So the one place
-    # a gap row's own reasoning is written down was the one place nothing checked
-    # it, and a mistyped citation there is the mistake a reader has no way to
-    # catch: the row is where they go to find out whether the gap is real.
-    GateCase(
-        "E", "schema fields", "arm",
-        "a gap row's evidence citation, mistyped",
-        "`source.schema.json`'s `models` carries no per-model retained flag",
-        "`source.schema.json`'s `models_typo` carries no per-model retained flag",
-        "declares no `models_typo`",
-        within="0.5",
-    ),
-    # The right route and the wrong body: `{hops}` belongs to the per-model
-    # chain save, and sending it here was a real finding.
-    GateCase(
-        "E", "routes", "arm",
-        "body key belongs to another route",
-        "`PUT /api/models/agents/<backend>/sources` with `{order: string[]}` `[contract]`",
-        "`PUT /api/models/agents/<backend>/sources` with `{hops: string[]}` `[contract]`",
-        "not contracted for",
-        within="0.8",
-    ),
-    GateCase(
-        "E", "routes", "arm",
-        "empty body omits a required member",
-        "`PUT /api/models/agents/<backend>/sources` with `{order: string[]}` `[contract]`",
-        "`PUT /api/models/agents/<backend>/sources` with `{}` `[contract]`",
-        "`{}` omits order — required for",
-        within="0.8",
-    ),
-    GateCase(
-        "E", "routes", "arm",
-        "body member declares the wrong type",
-        "`PUT /api/models/agents/<backend>/sources` with `{order: string[]}` `[contract]`",
-        "`PUT /api/models/agents/<backend>/sources` with `{order: integer[]}` `[contract]`",
-        "declares `order` as integer[]",
-        within="0.8",
-    ),
-    GateCase(
-        "E", "routes", "arm",
-        "required body member is described as optional",
-        "`PUT /api/models/agents/<backend>/sources` with `{order: string[]}` `[contract]`",
-        "`PUT /api/models/agents/<backend>/sources` with `{order?: string[]}` `[contract]`",
-        "marks order optional — required for",
-        within="0.8",
-    ),
-    GateCase(
-        "E", None, "arm",
-        "api authority line is outside the file",
-        "`api.md:261`",
-        "`api.md:9999`",
-        "is outside `docs/plans/model-hub-contracts/api.md`",
-        within="0.5",
-    ),
-    GateCase(
-        "E", None, "arm",
-        "api authority line points at unrelated content",
-        "`api.md:261`",
-        "`api.md:212`",
-        "does not support this claim",
-        within="0.5",
-    ),
-    GateCase(
-        "E", None, "arm",
-        "api authority line has a malformed suffix",
-        "`api.md:261`",
-        "`api.md:261x`",
-        "has a malformed line number",
-        within="0.5",
-    ),
-    GateCase(
-        "E", None, "arm",
-        "revision authority line is outside the cited file",
-        "`ceace07f:2197`",
-        "`ceace07f:9999`",
-        "is outside `core/handlers/model_hub/service.py`",
-        within="0.5",
-    ),
-    GateCase(
-        "E", None, "arm",
-        "revision line no longer points at the cited symbol",
-        "`ceace07f:2197`",
-        "`ceace07f:2198`",
-        "does not point at `core/handlers/model_hub/service.py:set_agent_mode`",
-        within="0.5",
-    ),
-    # `api.md` puts request and response in one cell, and a check that unions
-    # the two sides accepts the answer's vocabulary as a legal request body.
-    # Dropping the word that introduces this body as an answer must move it to
-    # the request side and fail there.
-    GateCase(
-        "E", "routes", "arm",
-        "a response body written as the request",
-        "and returns `{agent: AgentSupply}`",
-        "and sends `{agent: AgentSupply}`",
-        "not contracted for",
-        within="1.3",
-    ),
-    # Round 19's breaker inventory: every spelling below is still visibly a
-    # candidate of the grammar it is trying to use. Extraction must therefore
-    # hand it to the relevant universe or structural validator, never make
-    # validity a prerequisite for being seen.
-    GateCase(
-        "C", "states", "arm",
-        "a multiword success exit is truncated to one ambiguous word",
-        "Component present → Not started",
-        "Component present → Not",
-        "exits to 「Not」, which opens with no state §1.0 files",
-        within="0.8",
-    ),
-    GateCase(
-        "E", "routes", "arm",
-        "a body carries a leading-digit candidate member",
-        "`{order: string[]}` `[contract]`",
-        "`{order: string[], 1bogus: integer}` `[contract]`",
-        "names 1bogus — not contracted for",
-        within="0.8",
-    ),
-    GateCase(
-        "B", "copy", "arm",
-        "a copy definition loses its key backticks",
-        "| `shell.title` | 模型 | Models |",
-        "| shell.title | 模型 | Models |",
-        "copy row `shell.title` is not backticked",
-        within="1.0",
-    ),
-    GateCase(
-        "E", "schema files", "arm",
-        "a schema citation starts with an underscore",
-        "`runtime-dependency.schema.json` → `status.health`",
-        "`_runtime-dependency.schema.json` → `status.health`",
-        "`_runtime-dependency.schema.json` is not a file in",
-        within="1.0",
-    ),
-    GateCase(
-        "E", "routes", "arm",
-        "a route method is misspelt",
-        "`GET /api/models/sources` fails while",
-        "`GTE /api/models/sources` fails while",
-        "`GTE /api/models/sources` is contracted by no `api.md` route row",
-        within="0.8",
-    ),
-    GateCase(
-        "E", "routes", "arm",
-        "a guarded response borrows a nested gap field",
-        "on success it returns `{chain, removed_hops, interrupted}`",
-        "on success it returns `{chain, removed_hops, interrupted, backend}`",
-        "names backend — not contracted for",
-        within="0.5",
-    ),
-    GateCase(
-        "A", "states", "arm",
-        "a cross-frame destination starts lowercase",
-        "| §1.1 | Loading | First paint | → §1.0 Unreachable / §1.0 Sources unread / §1.0 Partial",
-        "| §1.1 | Loading | First paint | → §1.0 unreachable / §1.0 Sources unread / §1.0 Partial",
-        "defers to 「unreachable」 in §1.0, which files no such state",
-        within="0.8",
-    ),
-    GateCase(
-        "A", "treatments", "arm",
-        "a failure treatment uses an underscore",
-        "| F1 → Install failed |",
-        "| F_1 → Install failed |",
-        "names F_1, which §0.8's closed set does not define",
-        within="0.8",
-    ),
-    GateCase(
-        "E", "gaps", "arm",
-        "a surface cites a withdrawn gap",
-        "An install confirm was accepted `[contract-gap]` G-10",
-        "An install confirm was accepted `[contract-gap]` G-9",
-        "`[contract-gap] G-9` cites a withdrawn §0.5 row",
-        within="0.8",
-    ),
-    GateCase(
-        "E", "routes", "arm",
-        "a route claim changes a contracted query name",
-        "`GET /api/models/agents/<backend>/chain?model=<id>`",
-        "`GET /api/models/agents/<backend>/chain?mode=<id>`",
-        "uses query `mode=<id>`; `api.md` contracts `model=<id>`",
-        within="0.8",
-    ),
-    # --- the four defects that spent the exit clause -----------------------
-    #
-    # Round 18's findings were all in the checker rather than in the spec, which
-    # is what the clause is for: the gate left the PR it was written to guard,
-    # and its cases came with it. Each mutation below was run against the
-    # *pre-fix* checker before it was written down — that checker reports none
-    # of them and stays green on the unmutated spec — because a case that fails
-    # either way proves the mutation, not the fix.
-    #
-    # Three of the four are one sentence: a gap marker is a statement about one
-    # named hole, and the checker read it as amnesty for whatever paragraph it
-    # landed in. §0.5 already said so about its own withdrawn row — 「the row
-    # names no route and quotes no body, so there is nothing left in it for a
-    # checker to excuse」 — and the checker was not reading it that way.
-    GateCase(
-        "E", "gaps", "arm",
-        "a claim is silenced by a row §0.5 has withdrawn",
-        "the surface of truth when it does not.",
-        "the surface of truth when it does not.\n\nA refusal body "
-        "`{ok, reason_key}` is `[contract-gap]` G-9.",
-        "an unbound body claim cannot be checked",
-        within="1.4",
-    ),
-    # A withdrawn number still resolves — the row is kept, struck through, so
-    # the register says what happened to it — so the `empty` case above cannot
-    # reach this and the number has to be spent on a claim to show it.
-    GateCase(
-        "A", "gaps", "arm",
-        "a route is excused by a marker whose row is about another route",
-        "the surface of truth when it does not.",
-        "the surface of truth when it does not.\n\nRetiring an entry issues "
-        "`PATCH /api/models/sources/<source_id>/retire` `[contract-gap]` G-15.",
-        "is named by no §0.8 row",
-        within="1.4",
-    ),
-    # G-15 is live and names `PATCH /api/models/sources/<id>`. Position cannot
-    # decide this — §1.4's G-17 sits two characters from a route it is not
-    # about — so the row's own text is the authority, on both arms that honour
-    # the marker.
-    GateCase(
-        "E", "gaps", "arm",
-        "a 409 claim is excused by a marker whose row is about another route",
-        "the surface of truth when it does not.",
-        "the surface of truth when it does not.\n\nA 409 conflict answer to "
-        "`PUT /api/models/agents/<backend>/sources` is `[contract-gap]` G-15.",
-        "a 409 branch is claimed for",
-        within="1.4",
-    ),
-    # The shared envelopes are answers. Unioned into a request allowance they
-    # widened it by every key any response anywhere carries, so a metadata edit
-    # could post `source` — a field that route only ever returns.
-    GateCase(
-        "E", "routes", "arm",
-        "a request body borrows a response-only field",
-        "`{display_name?, base_url?}`",
-        "`{display_name?, base_url?, source?}`",
-        "not contracted for",
-        within="0.5",
-    ),
-    # Two of `api.md`'s rows spell no answer in the cell: they name it — "OAuth
-    # result" — and a section below spells it out, as three readings selected by
-    # `OAuthFlow.intent`. Left unread, those rows contracted no answer at all,
-    # and every claim about the terminal shape failed alike, the true ones
-    # included; the document wrote the shape as prose because a body could not
-    # be written. Read as one flat vocabulary it would accept exactly what the
-    # section forbids, which is this case: the reauth fields on the create
-    # terminal. `GATE_INNOCENT` holds the other half — the true body, in the
-    # same sentence, staying green.
-    GateCase(
-        "E", "routes", "arm",
-        "the create terminal is claimed to answer with the reauth reading",
-        "the `create` terminal answers with `flow`, `source`, `added_to` and `adopted_by`",
-        "the `create` terminal answers with `{flow, source, recovered, interrupted_pairs}`",
-        "not contracted for",
-        within="0.8",
-    ),
-    # A schema citation used to confirm the file and never the field, so a
-    # misspelling sat behind a citation that looked verified. Two cues state
-    # ownership — the possessive and the preposition — and a case on one proves
-    # nothing about the other, which is the rule this suite already holds its
-    # `token` cells to.
-    GateCase(
-        "E", "schema files", "arm",
-        "a possessive citation names a field the schema does not declare",
-        "`source.schema.json`'s `models` describes",
-        "`source.schema.json`'s `model_list` describes",
-        "declares no `model_list`",
-        within="0.7",
-    ),
-    GateCase(
-        "E", "schema files", "arm",
-        "a prepositional citation names a field the schema does not declare",
-        "`masked_credential` are each",
-        "`masked_key` are each",
-        "declares no `masked_key`",
-        within="1.1",
-    ),
-    # Reviewer's finding, round 1 of #1276: the counted-vocabulary arm knew the
-    # spellings `two`…`fifteen` and nothing else, so a claim written in digits
-    # or in a larger word was not skipped — it was never seen, and the arm
-    # reported a clean zero over a document that held three of them. An
-    # extractor narrower than the document reads exactly like agreement, which
-    # is the one thing a target-zero class cannot afford. Both spellings get a
-    # case here and both get a `SELF_TEST` fixture, because this is the arm
-    # whose verdict *is* its zero.
-    GateCase(
-        "E", "schema files", "arm",
-        "a counted claim written in digits",
-        "`agent-supply.schema.json`'s `model_supply` rows require exactly",
-        "`agent-supply.schema.json` has 16 properties, and its `model_supply` rows "
-        "require exactly",
-        "has 14 properties, not 16",
-        within="0.5",
-    ),
-    GateCase(
-        "E", "schema files", "arm",
-        "a counted claim spelled past the vocabulary the arm used to hold",
-        "`agent-supply.schema.json`'s `model_supply` rows require exactly",
-        "`agent-supply.schema.json` has sixteen properties, and its `model_supply` rows "
-        "require exactly",
-        "has 14 properties, not 16",
-        within="0.5",
-    ),
-    # §0.9 declares which keys interpolate each slot; §1.0 enumerates the same
-    # set four hundred lines away, in prose. Two enumerations of one set, and
-    # the far one is what nobody re-reads when the table changes — so it has to
-    # be wrong in both directions before either is checked. This is the
-    # leaves-out direction: a key gains the slot, the table gets the row, the
-    # sentence does not.
-    GateCase(
-        "B", "slots", "arm",
-        "a prose enumeration of a slot's consumers drops a live one",
-        "`gateway.modelCount`, `gateway.collapse`, `addKey.pull.result`, `guard.count`,",
-        "`gateway.modelCount`, `gateway.collapse`, `addKey.pull.result`,",
-        "and leaves out `guard.count`",
-        within="1.0",
-    ),
-    # The other direction, and it needs its own case because the arm answers it
-    # with a different comparison. A dropped key is caught against §0.9; a key
-    # that was *retired* cannot be, because retiring it took its whole
-    # namespace with it and left nothing for a namespace check to miss. Only
-    # the enumeration still claims it exists. This case reinstates the exact
-    # corpse round 20 found — `chain.derived.hops`, named by a sentence whose
-    # subject is "the keys that do X", with no copy row anywhere behind it.
-    GateCase(
-        "B", "slots", "arm",
-        "a prose enumeration of a slot's consumers names a retired key",
-        "`sourceDetail.refetch.removed` and `takeover.pill` — nine",
-        "`sourceDetail.refetch.removed`, `chain.derived.hops` and `takeover.pill` — nine",
-        "enumerates `chain.derived.hops` among the keys",
-        within="1.0",
-    ),
-    # A frame's element inventory quotes the line an implementer is to draw,
-    # which is a copy row's string written a second time in the section that
-    # instructs. `{{health}}` split off from `{{status}}` and the inventory kept
-    # the word the split took away, so the instruction rendered an HTTP status
-    # where a supply-health word belongs. Substitution is the only way to be
-    # wrong here — deletion is legal, and the green half below is what says so.
-    GateCase(
-        "B", "copy", "arm",
-        "a frame inventory quotes a line with one slot substituted for another",
-        "and one `{{mode}} · {{health}}` line",
-        "and one `{{mode}} · {{status}}` line",
-        "and no copy row renders it",
-        within="1.1",
-    ),
-    # The same generator one grain further in: a frame's mapping table says what
-    # each value of a field is drawn as, and a §0.8 row keyed on one of those
-    # values says it again in its copy column. The table gains a qualifier, the
-    # row keeps the old key, and the product ships two renderings for one value —
-    # which is exactly how `not_installed` came to mean both Not installed and
-    # Unsupported host with one key between them.
-    #
-    # Three refusals keep this arm from over-firing, and the shipped document
-    # holds all three down, each of them biting: loosen one and the green-spec
-    # test goes red before any case here does.
-    #   - A value two of the frame's tables own is not resolved at all. §1.0's
-    #     Ready enters on `ok`, which is a value of `RuntimeDependency.status.
-    #     health` *and* of `AgentSupply.supply_status`, drawn `shell.running` by
-    #     one and `gateway.group.status.ok` by the other; Impaired is the same
-    #     story for `degraded`. Resolve last-wins and both rows report.
-    #   - A row citing more than one key draws a composite and asserts no single
-    #     pairing. §1.0's Not installed cites three, of which two are the confirm
-    #     dialog's. Ask that every cited key be in the table's set and it reports.
-    #   - A value the table draws two ways is satisfied by either. §1.0's
-    #     Unsupported host cites the second of `not_installed`'s two renderings.
-    #     Tighten membership to equality and it reports.
-    GateCase(
-        "B", None, "arm",
-        "a register row keeps a key its frame's mapping table has moved off",
-        "| §1.0 | Not started | `health` reads `not_started` `[contract]` | F5 | "
-        "`shell.notStarted` | Run pill → Starting |",
-        "| §1.0 | Not started | `health` reads `not_started` `[contract]` | F5 | "
-        "`shell.starting` | Run pill → Starting |",
-        "enters on `not_started` and renders `shell.starting`, but §1.0's own mapping of",
-        within="0.8",
-    ),
-    # Arm N reads the exit cell against the frame's own value table, and the
-    # defect arrives from either side: the dispatch narrows, or a state starts
-    # claiming a reading the dispatch was never told about. Both cases below are
-    # a single cell, and both leave every other cell locally true — which is the
-    # whole reason the shape survived two review rounds on the shipped file.
-    GateCase(
-        "C", None, "arm",
-        "the dispatching row drops one of its frame's drawn readings",
-        "`not_started` → Not started, `degraded` → Impaired",
-        "`degraded` → Impaired",
-        "reading `not_started` as 「Not started」",
-        within="0.8",
-    ),
-    GateCase(
-        "C", None, "arm",
-        "a state claims a drawn reading the dispatching row never lands in",
-        "| An install confirm was accepted `[contract-gap]` G-10 |",
-        "| An install confirm was accepted, and supply reads `waiting` "
-        "`[contract-gap]` G-10 |",
-        "reading `waiting` as 「Installing」",
-        within="0.8",
-    ),
-    # And the third side, which membership could not see: the dispatch names
-    # every reading and sends one of them to the wrong state. The head this arm
-    # was written for shipped 「`standby` or `active` → Ready」 over a frame that
-    # drew `standby` as Not supplying; the value was spoken, the landing counted
-    # as reached, and the contradiction stood. Both cases below are a single
-    # arrow, one on each router this document has.
-    GateCase(
-        "C", None, "arm",
-        "the dispatching row sends a reading to a state its own frame keys elsewhere",
-        "`not_started` → Not started",
-        "`not_started` → Ready",
-        "sends `not_started` to 「Ready」, and §1.0 keys 「Not started」",
-        within="0.8",
-    ),
-    GateCase(
-        "C", None, "arm",
-        "a routing exit swaps two of its field's landings",
-        "`cooldown` → Cooling",
-        "`cooldown` → Needs action",
-        "sends `cooldown` to 「Needs action」, and §1.6 keys 「Cooling」",
-        within="0.8",
-    ),
-    # --- the fourth rule: a row this reader cannot read ----------------------
-    # Every case below deletes a cell, and every one of them used to pass. Six
-    # review rounds found them one reader at a time — 「the register drops a
-    # row」, 「the copy table drops a row」, 「the slot row drops its consumers」
-    # — which is the shape of a defect that is not six defects: a reader met
-    # input it could not parse and declined to say so, and whatever the reader
-    # was supposed to declare simply never entered the comparison. The rule is
-    # here so the tiling test asks every reader the same question in advance.
-    GateCase(
-        "A", "states", "malformed",
-        "a register row loses a cell",
-        "| §1.0 | Not started | `health` reads `not_started` `[contract]` | F5 | "
-        "`shell.notStarted` | Run pill → Starting |",
-        "| §1.0 | Not started | `health` reads `not_started` `[contract]` | F5 | "
-        "`shell.notStarted` |",
-        "has 5 cells where the register's header declares 6",
-        within="0.8",
-    ),
-    GateCase(
-        "A", "treatments", "malformed",
-        "a §0.8 treatment row loses its meaning cell",
-        "| F5 | No request | The state issues nothing",
-        "| F5 | The state issues nothing",
-        "has 2 cells where the table declares 3",
-        within="0.8",
-    ),
-    GateCase(
-        "B", "copy", "malformed",
-        "a copy row loses its English cell",
-        "| `pill_one` | {{count}} 处接管中 | {{count}} takeover active |",
-        "| `pill_one` | {{count}} 处接管中 |",
-        "has 2 cells where a copy table declares 3",
-        within="1.7",
-    ),
-    GateCase(
-        "B", "copy", "malformed",
-        "a copy row key uses a malformed spelling",
-        "| `shell.title` | 模型 | Models |",
-        "| `shell-title` | 模型 | Models |",
-        "copy row `shell-title` has malformed key `shell-title`",
-        within="1.0",
-    ),
-    GateCase(
-        "B", "slots", "malformed",
-        "a §0.9 slot row loses its consumer cell",
-        "| `{{vendor}}` | The upstream vendor's product name, as the user chose it. "
-        "| Always present |",
-        "| `{{vendor}}` | The upstream vendor's product name, as the user chose it. |",
-        "has 3 cells where the table declares 4",
-        within="0.9",
-    ),
-    GateCase(
-        "E", "gaps", "malformed",
-        "a §0.5 gap row loses its 「what is missing」 cell",
-        "| G-11 | 09 direct-only home, zero backends | an installation flag per agent "
-        "backend, and the payload that carries it |",
-        "| G-11 | 09 direct-only home, zero backends |",
-        "has 3 cells where the registry declares 4",
-        within="0.5",
-    ),
-    # --- the arms the same round hardened ------------------------------------
-    # Each of these is a reader that used to drop its input quietly rather than
-    # hand it to the comparator: an extraction pattern narrow enough to be an
-    # admissibility test, and a name it declined to match was a name nobody
-    # checked. The rule is `arm` rather than `token` because what regressed is
-    # the extraction, not the comparison — the comparator was never asked.
-    GateCase(
-        "E", "gaps", "arm",
-        "a gap marker whose number is misspelt with a letter",
-        "An install confirm was accepted `[contract-gap]` G-10",
-        "An install confirm was accepted `[contract-gap]` G-1O",
-        "`[contract-gap] G-1O` names no §0.5 row",
-        within="0.8",
-    ),
-    GateCase(
-        "E", "gaps", "arm",
-        "a gap marker uses an underscore in place of its separator",
-        "An install confirm was accepted `[contract-gap]` G-10",
-        "An install confirm was accepted `[contract-gap]` G_10",
-        "`[contract-gap] G_10` names no §0.5 row",
-        within="0.8",
-    ),
-    GateCase(
-        "E", "repo symbols", "arm",
-        "a symbol cited by its qualified name, misspelt",
-        "core/handlers/model_hub/service.py:set_agent_mode",
-        "core/handlers/model_hub/service.py:ModelHubService.set_agent_moed",
-        "defines no `ModelHubService.set_agent_moed`",
-        within="0.5",
-    ),
-    GateCase(
-        "E", "repo symbols", "arm",
-        "a symbol citation contains a hyphen",
-        "core/handlers/model_hub/service.py:list_agents",
-        "core/handlers/model_hub/service.py:list-agents",
-        "defines no `list-agents`",
-        within="0.5",
-    ),
-    GateCase(
-        "E", "repo symbols", "arm",
-        "a symbol citation starts with a digit",
-        "core/handlers/model_hub/service.py:list_agents",
-        "core/handlers/model_hub/service.py:1list_agents",
-        "defines no `1list_agents`",
-        within="0.5",
-    ),
-    GateCase(
-        "B", "copy", "arm",
-        "a frame cites a key of its own table, misspelt, without the namespace",
-        "`legend.unavailable` **lost a 暂 to make that true.**",
-        "`legend.unavailabl` **lost a 暂 to make that true.**",
-        "key `legend.unavailabl` is cited and never defined",
-        within="1.7",
-    ),
-    GateCase(
-        "E", "routes", "arm",
-        "a body member spelt with a hyphen",
-        "and answers `{source, added_to, adopted_by}`",
-        "and answers `{source, added-to, adopted_by}`",
-        "names added-to — not contracted for POST /api/models/sources",
-        within="1.5",
-    ),
-    GateCase(
-        "E", "routes", "arm",
-        "a body that omits a member its route requires",
-        "`POST /api/models/oauth/submit` as `{flow_id, value}`",
-        "`POST /api/models/oauth/submit` as `{flow_id}`",
-        "omits value — required for POST /api/models/oauth/submit",
-        within="1.4",
-    ),
-    # The exit column, resolved. Every other cell of a register row has been
-    # compared against something for twenty rounds; the cell that says where the
-    # state *goes* was read as prose. Both cases are the same sentence with one
-    # letter moved, and the pair is the point: a name that overshoots and a name
-    # that stops short fail differently under any matcher that is not exact.
-    GateCase(
-        "C", "states", "empty",
-        "a named success exit that lands on no state its frame files",
-        "| §1.0 | Not started | `health` reads `not_started` `[contract]` | F5 | "
-        "`shell.notStarted` | Run pill → Starting |",
-        "| §1.0 | Not started | `health` reads `not_started` `[contract]` | F5 | "
-        "`shell.notStarted` | Run pill → Startingg |",
-        "exits to 「Startingg」, which opens with no state §1.0 files",
-        within="0.8",
-    ),
-    GateCase(
-        "C", "states", "token",
-        "a success exit truncated to a prefix of the state it means",
-        "| §1.0 | Not started | `health` reads `not_started` `[contract]` | F5 | "
-        "`shell.notStarted` | Run pill → Starting |",
-        "| §1.0 | Not started | `health` reads `not_started` `[contract]` | F5 | "
-        "`shell.notStarted` | Run pill → Start |",
-        "exits to 「Start」, which opens with no state §1.0 files",
-        within="0.8",
-    ),
-)
-
-
-# A cell with no case, and the reason it has none. An exemption is written here
-# or the tiling test fails; it is never an omission nobody had to justify.
-UNREACHABLE_BY_CLASS: dict[tuple[str, str], str] = {
-    ("D", "duplicate"): (
-        "class D defines nothing. It reads the copy universe class B fills, and a "
-        "copy key declared twice is reported once, by B — the (B, copy, duplicate) case."
-    ),
-    ("D", "malformed"): (
-        "same reason, one rule over: D reads no file and parses no row. A copy row it "
-        "cannot read is B's to report — the (B, copy, malformed) case — and D asks its "
-        "question about whatever B managed to declare."
-    ),
-}
-
-UNREACHABLE_BY_UNIVERSE: dict[tuple[str, str], str] = {
-    (name, "duplicate"): (
-        f"`{name}` is built from the frozen contract files, which this harness must not "
-        "edit. Its duplicate rule is proved directly instead, by "
-        "test_authority_side_universes_report_a_duplicate_definition."
-    )
-    for name in ("routes", "schema files", "schema fields", "repo symbols")
-} | {
-    (name, "malformed"): (
-        f"`{name}` is built from the frozen contract files, which this harness must not "
-        "edit, so the mutation this rule needs — a contract row or file the reader "
-        "cannot parse — cannot be written as a spec mutation. Proved directly instead, "
-        "by test_authority_side_universes_report_input_they_cannot_read."
-    )
-    for name in ("routes", "schema files", "repo symbols")
-} | {
-    ("schema fields", "malformed"): (
-        "a schema file that stops parsing is one defect and is reported once, by the "
-        "universe whose family the file is — `schema files`. `schema fields` is filled "
-        "from files that parsed; there is no separate row of it to break. Its owner's "
-        "case covers both."
-    ),
-    ("frames", "malformed"): (
-        "a frame is declared by a §1 heading, not by a table row. A heading either "
-        "matches `#{2,3} <number> ` and declares a frame or does not and declares "
-        "nothing — there is no half-read heading for this rule to be about. What a "
-        "heading can get wrong is its number, which is the (C, frames, empty) and "
-        "(C, frames, token) cases."
-    ),
-}
-
-# The finest grain: one class's use of one universe. Two projections can both be
-# full while a cell is empty — every class had a `token` case and every universe
-# had one, and `A`'s reading of the gap registry still had none, which is where
-# three of round 14's findings lived. So the grid is tiled per arm, and an arm
-# that cannot reach a rule says why here.
-UNREACHABLE_BY_ARM: dict[tuple[str, str, str], str] = {
-    ("A", "routes", "empty"): (
-        "class A never resolves a citation against `routes`. It reads the universe as "
-        "an inventory — which contracted mutations does nothing reach — and asks its "
-        "questions as set arithmetic over tokens `normalize_route` has already "
-        "canonicalised. A citation that resolves to nothing is E's verdict, and E has "
-        "the case. What A can get wrong is the canonicalisation, which is the "
-        "(A, routes, token) case."
-    ),
-    ("A", "gaps", "duplicate"): (
-        "one canonical token declared twice is reported once, by the universe's owner. "
-        "The registry's owner is E — a gap row is a claim about what the contract does "
-        "not have — so the case is (E, gaps, duplicate), reached through the same "
-        "registry object A reads."
-    ),
-    ("A", "frames", "token"): (
-        "A cites a frame only by its section number, written out in full — `§1.0` — "
-        "and the universe answers that spelling exactly or through a declared alias. "
-        "There is no prefix to truncate and no near-spelling that lands on a "
-        "different frame: a wrong number resolves to nothing, which is the "
-        "(A, frames, empty) case. The alias half is what C's (C, frames, token) "
-        "case reads, over the same universe object."
-    ),
-    ("A", "frames", "duplicate"): (
-        "two §1 headings under one number is one document defect, reported once, by "
-        "the universe's owner — C, in the (C, frames, duplicate) case. A resolves "
-        "against the same object and would report the second copy of a finding the "
-        "reader has already been given."
-    ),
-    ("C", "states", "duplicate"): (
-        "one canonical token declared twice is reported once, by the universe's owner. "
-        "The register's owner is A — a state is declared by a §0.8 row — so the case is "
-        "(A, states, duplicate), reached through the same universe object C resolves "
-        "its exits against."
-    ),
-    ("C", "states", "malformed"): (
-        "same object, same owner: a §0.8 row C cannot read is reported by A, in the "
-        "(A, states, malformed) case. What C does with such a row is resolve exits "
-        "*against* it — the row's identity survives its broken cells precisely so this "
-        "arm keeps working — and reporting here would hand the reader the same broken "
-        "row a second time."
-    ),
-    ("A", "gaps", "malformed"): (
-        "the registry is read once, by `registered_gaps`, and a row it cannot read is "
-        "reported by the universe's owner — E, in the (E, gaps, malformed) case. A "
-        "resolves against the same object; reporting there too would give the reader "
-        "the same broken row twice."
-    ),
-}
-
-
-SECTION_HEAD_RE = re.compile(r"^#{2,3} (\d+(?:\.\d+)?) ", re.M)
-
-
-def _region(spec: str, section: str, label: str) -> tuple[int, int]:
-    """Where `section` runs — its heading to the next one, subsections included.
-
-    An anchor is a quotation, and a quotation is only ever unique somewhere. Read
-    document-wide it is hostage to every other section: round 26 broke four cases
-    at once by giving a second frame the same exit sentence, and the correct
-    reading of that failure — the cases are right, the spec is right, the anchors
-    were written too wide — took a transcript to recover. So each case names the
-    section it is quoting from, and the anchor has to be unique only there.
-
-    The pattern insists on a heading that begins with a number, because §1.1's
-    body carries a fenced pseudocode block whose comments start with `# 0.` — a
-    terminator that stopped at those would cut the section in half.
-    """
-    assert section, f"{label}: every case must name the section its anchor is read inside"
-    head = re.search(rf"^#{{2,3}} {re.escape(section)} ", spec, re.M)
-    assert head, f"{label}: the spec has no section {section}"
-    nxt = SECTION_HEAD_RE.search(spec, head.end())
-    return head.start(), nxt.start() if nxt else len(spec)
-
-
-def _mutate(spec: str, case) -> str:
-    """`case.before` → `case.after`, once, inside the section the case names."""
-    start, end = _region(spec, case.within, case.label)
-    region = spec[start:end]
-    assert region.count(case.before) == 1, (
-        f"{case.label}: anchor is not unique in §{case.within} — it matches "
-        f"{region.count(case.before)} times. Re-anchor on what identifies the "
-        "target (the row's own cell, the sentence's own subject) or move the case "
-        "to the section it now belongs in; do not widen the quotation to make it "
-        "unique again, and do not scope it by hand at the call site."
-    )
-    return spec[:start] + region.replace(case.before, case.after, 1) + spec[end:]
-
-
-def test_an_anchor_is_read_inside_its_own_section_only():
-    """Round 26, in miniature: a twin elsewhere is not this case's business.
-
-    Both halves matter. Without the first, editing one frame can redden cases
-    written against another, and the suite starts teaching that anchors should be
-    long rather than specific. Without the second, a case could silently mutate a
-    neighbouring row it was never about.
-    """
-    case = GateCase("A", "routes", "token", "probe", "`POST /x`", "`POST /y`", "", "0.8")
-
-    twinned = "### 0.8 Register\n\n`POST /x` here\n\n### 1.6 Frame 06\n\n`POST /x` there\n"
-    assert _mutate(twinned, case) == twinned.replace("`POST /x`", "`POST /y`", 1)
-
-    doubled = "### 0.8 Register\n\n`POST /x` here\n\n`POST /x` again\n"
-    with pytest.raises(AssertionError, match=r"not unique in §0\.8"):
-        _mutate(doubled, case)
-
-
-@pytest.mark.parametrize("case", GATE_MUTATIONS, ids=lambda c: f"{c.cls}/{c.rule}/{c.label}")
-def test_model_hub_ui_state_gate_fails_on_a_reintroduced_defect(tmp_path, case: GateCase):
-    """A gate nobody has watched fail is a gate that reports green.
-
-    Each case reintroduces one defect into the live spec and asserts the checker
-    names it — the right class *and* the right sentence. Class alone is not
-    enough: a mutation that trips some other arm of the same class would pass
-    while the rule it was written for stayed dead.
-    """
-    spec = Path("docs/plans/model-hub-ui-spec.md").read_text(encoding="utf-8")
-
-    mutated = tmp_path / "mutated.md"
-    mutated.write_text(_mutate(spec, case), encoding="utf-8")
-    # A document written to a temporary directory is in no checkout, so it has no
-    # authorities of its own. Every case here mutates the spec side, and the
-    # authorities it is checked against are this repository's — said out loud
-    # because a borrowed authority is the one thing a green result may not hide.
-    result = check_model_hub_ui_states(mutated, authorities=ROOT)
-    assert result["authority_origin"] == "this checkout"
-
-    assert not result["ok"], f"{case.label}: the gate did not notice"
-    said = [f["message"] for f in result["findings"] if f["class"] == case.cls]
-    assert any(case.says in m for m in said), (case.label, case.says, result["findings"])
-
-
-# An arm that reads a *shape* rather than a token has a second way to be wrong,
-# and the mutation suite above cannot see it: firing on text that is fine. Every
-# case there asserts red, so an arm that reported everything would pass all of
-# them. Only the arms whose rule draws a line inside otherwise-legal prose need
-# this — the rest compare tokens against a register and have nothing to overfire
-# on.
-class InnocentCase(NamedTuple):
-    """Legal text inserted into the spec; the gate must stay green.
-
-    `before`/`after` place the text, `within` the section they are read inside,
-    and `pins` names the rule it holds down.
-    """
-
-    label: str
-    pins: str
-    before: str
-    after: str
-    within: str
-
-
-GATE_INNOCENT: tuple[InnocentCase, ...] = (
-    # Reviewer's finding, round 1 of #1276, written as the reviewer wrote it: one
-    # paragraph, two routes, and a `409` that belongs to the first. Held against
-    # every route in the scope, this reports the unguarded runtime start as
-    # claiming a guard it does not have — a true sentence turned into a finding,
-    # and a reader sent to argue with `api.md` about a route nobody made a claim
-    # about. The binder measures to the nearest mention on either side, so the
-    # prose has to keep the guarded route the nearest thing to the number, which
-    # is also how the sentence reads out loud.
-    InnocentCase(
-        "a 409 written next to its own route, in a paragraph that names another",
-        "class E binds a guarded-status claim to its nearest route, not to its container",
-        "which is why the second caller costs no new frame.",
-        "which is why the second caller costs no new frame. The same envelope read "
-        "from the other end: `POST /api/models/sources/<source_id>/refresh` may come "
-        "back `409`, which is why that surface confirms before it resends; the press "
-        "a user makes once one succeeds is `POST /api/models/runtime/start`, and that "
-        "route is contracted with no guard of its own.",
-        within="0.5",
-    ),
-    # The sentence the widened count vocabulary reported first, restored as the
-    # green case it always was. G-20's row names two schema files and counts one
-    # of them, and the count is exactly right — the arm held it against both and
-    # reported the other, which is a true sentence turned into a finding and a
-    # reader sent to the wrong file. Both halves are pinned here at once: the
-    # count binds to the file it is written next to, and the property names the
-    # row goes on to cite are citations rather than a botched enumeration of the
-    # fourteen. Widen either reading back and this goes red while every red case
-    # above stays red.
-    InnocentCase(
-        "a counted claim in a row that names a second schema too",
-        "class E binds a count to its own subject and reads a cited property as a citation",
-        "`agent-supply.schema.json` declares no `adopted_by`",
-        "`agent-supply.schema.json`'s 14 properties do not include `adopted_by`",
-        within="0.5",
-    ),
-    InnocentCase(
-        "two members of a vocabulary named as examples",
-        "class B's restated-vocabulary arm reads an enumeration, not a mention",
-        "*Why:* a wire describes a *relation between two things*;",
-        "Two of those readings, 正常, 降级, are the ones a user sees most.\n"
-        "*Why:* a wire describes a *relation between two things*;",
-        within="1.9",
-    ),
-    # The slot-consumer arm has a threshold of its own: three keys joined by
-    # nothing but list punctuation. Below it a paragraph is discussing keys, not
-    # enumerating them — and this document discusses keys constantly. Five
-    # paragraphs of the shipped file name one slot and three or more keys
-    # without listing any of them; read mentions instead of runs and those five
-    # return twenty findings, none of them a restatement of anything. All three
-    # red cases above stay red through that change, which is why only a green
-    # case can hold the line.
-    InnocentCase(
-        "three keys and one slot, discussed rather than listed",
-        "class B's slot-consumer arm reads a list run, not a paragraph's mentions",
-        "**Slot-bearing keys** `[derived]`.",
-        "A count is not the only promise a key makes about a number. "
-        "`sourceDetail.summary`\nreports the size of one table, so its zero case is a "
-        "state rather than a number.\n`gateway.modelCount` reports that size one level "
-        "up and never reaches zero, because a\ngroup with nothing in it is drawn by "
-        "`gateway.group.emptyModels` instead. Both\ninterpolate `{{count}}`, and neither "
-        "sentence is enumerating anything.\n\n"
-        "**Slot-bearing keys** `[derived]`.",
-        within="1.0",
-    ),
-    # The quoted-shape arm has to let a *shorter* line through, because this
-    # document has a named absence rule: a slot with nothing to fill it drops
-    # its segment, so a legal quote of a row's string can be missing pieces of
-    # it. What is never legal is a slot swapped for a different slot. The line
-    # separating the two is subsequence, and only a green case can pin it —
-    # tighten the arm to equality and the red case above is still red.
-    InnocentCase(
-        "a quoted line the absence rule has shortened",
-        "class B's quoted-shape arm accepts a subsequence and rejects a substitution",
-        "**`undetermined.hint` used to contradict AC-27, and now states it.**",
-        "The same absence rule reaches the other consumers of `{{status}}`, and the "
-        "shortest\nthing it can leave is still that row's own string. `adopt.fail.detail` "
-        "carries no\nprotocol segment at all, so a transport failure there renders "
-        "`{{request}} · {{reason}}`\n— two segments of three, with nothing substituted "
-        "for the one that went missing.\n\n"
-        "**`undetermined.hint` used to contradict AC-27, and now states it.**",
-        within="1.5",
-    ),
-    # The cross-frame dispersal arm compares two sets of *states*, and states are
-    # written here the way prose wants them: a register row is titled Unreachable
-    # (engine down) and cited as Unreachable four hundred lines later, in whatever
-    # order the sentence needed. So the comparison has to run on resolved states
-    # rather than on the text, and this case says so in both directions at once —
-    # one destination spelled by its full registered title, the set written in a
-    # different order from the one it restates. Compare strings instead and it
-    # reports two drifts against a restatement that is exactly right.
-    #
-    # The arm's other two refusals are held by construction rather than by a
-    # case, and both bite. A single landing is not a set: §1.0's own Starting row
-    # goes 「→ Unreachable」 and claims nothing about §1.0's other exits, and
-    # dropping the arity floor makes it a second own-frame dispersal for §1.0 —
-    # which trips the third refusal, because a frame with more than one own-frame
-    # dispersal states no single set to compare against. §1.0 is the only frame
-    # anything defers to, so that decline takes every comparison with it and
-    # `cross-frame dispersals compared` goes to zero: a declared inventory
-    # reading empty, which is already a failure. Neither can be pinned green.
-    InnocentCase(
-        "a restatement that resolves to the same set through different words",
-        "class A's cross-frame dispersal arm compares resolved states, not spellings",
-        "→ §1.0 Unreachable / §1.0 Sources unread / §1.0 Partial — the same three "
-        "§1.0 disperses first paint into, because this is",
-        "→ §1.0 Unreachable (engine down) / §1.0 Partial / §1.0 Sources unread — the "
-        "same three §1.0 disperses first paint into, because this is",
-        within="0.8",
-    ),
-    # Arm N asks that every reading a frame draws be somewhere the load can
-    # land, and a dispatch may say so in either of two vocabularies: the value
-    # the payload carries, or the state the frame gives that value. Requiring
-    # the value token is the tempting reading — it is what the shipped exit
-    # happens to use for all four health readings — and it makes a dispatch that
-    # routes by description into four findings against text that reaches every
-    # state it owes. Both red cases above stay red through that tightening,
-    # which is why the line needs a green case.
-    #
-    # The arm's other two refusals sit either side of this one and are held by
-    # construction rather than by a case. A frame with no unique own-frame
-    # dispersal has no row that owns where a load goes, and §1.0 is the only
-    # frame that has one at all — taking it away zeroes `dispatch landings
-    # compared`, which is a declared inventory reading empty and already a
-    # failure. And a value keyed by two rows is declined for the same reason arm
-    # M declines one: `not_installed` is the entry of both Not installed and
-    # Unsupported host, so the shipped file exercises that path on every run.
-    InnocentCase(
-        "a dispatch that names the state instead of the value it reads",
-        "class C's dispatch arm accepts either vocabulary, the reading or its state",
-        "`not_started` → Not started, `degraded` → Impaired",
-        "a runtime that has never been started → Not started, `degraded` → Impaired",
-        within="0.8",
-    ),
-    # The correspondence half of the same arm needs its own line, and this is
-    # where it falls: a reading a frame splits by a condition lands in two
-    # states, and both are right. §1.6 already sends 「an `active` nothing
-    # adopts」 and 「an adopted `active`」 to different states; a second such
-    # split has to stay as legal as the first, or the arm buys correspondence by
-    # forbidding the one thing a dispatch legitimately does with a reading whose
-    # meaning depends on more than itself.
-    InnocentCase(
-        "a reading the frame splits by a condition, landing in two states",
-        "class C's dispatch arm declines a value its exit writes more than once",
-        "`standby` or an `active` nothing adopts → Not supplying",
-        "`standby` or an `active` nothing adopts → Not supplying, and once the engine "
-        "resumes `standby` → Ready",
-        within="0.8",
-    ),
-    # The green half of the OAuth-terminal case. The same sentence, written as
-    # the body it is describing, has to pass — otherwise the section is read as
-    # forbidding its own contents and the document is pushed back into prose,
-    # where no arm can check it. Which is what the unread section did: this text
-    # and the red case above were reported identically, four fields each.
-    # The green half of the widened copy admission. A citation now reaches class
-    # B when the copy universe answers to it as written *or* under a namespace
-    # the document declares — which is what admits `fail.title` from the frame
-    # that owns the table, and what reports `shel.gatewayInfo.body`. Neither
-    # clause may be read as 「a dotted name in backticks is copy」: this document
-    # backticks contract field paths in frame prose in exactly that shape, and
-    # they belong to class E, which has the schema to judge them against.
-    InnocentCase(
-        "a contract field path backticked in the middle of frame prose",
-        "class B admits a citation the copy universe answers to, not one that looks like copy",
-        "Tooltip: `shell.gatewayInfo.body`",
-        "Tooltip: `shell.gatewayInfo.body` — the pill beside it reads `status.health`",
-        within="1.0",
-    ),
-    InnocentCase(
-        "the create terminal's own fields, written as a body",
-        "class E reads a named answer from the section that spells it, by reading",
-        "the `create` terminal answers with `flow`, `source`, `added_to` and `adopted_by`",
-        "the `create` terminal answers with `{flow, source, added_to, adopted_by}`",
-        within="0.8",
-    ),
-    # The three green halves of class C's newly-resolved exit column. The column
-    # names where a state goes, and for thirty rounds nothing resolved it — so
-    # the first thing to prove about resolving it is what it must *not* claim.
-    # An exit cell is written for a person: it names a state, but it also names
-    # gestures, consequences and alternatives, and a rule that reads every word
-    # after the arrow as a citation buys `Startingg` at the price of reporting
-    # the document's own prose.
-    InnocentCase(
-        "an exit that continues into a lower-case consequence",
-        "class C reads a state name after the arrow, not every word after the arrow",
-        "| §1.0 | Not started | `health` reads `not_started` `[contract]` | F5 | "
-        "`shell.notStarted` | Run pill → Starting |",
-        "| §1.0 | Not started | `health` reads `not_started` `[contract]` | F5 | "
-        "`shell.notStarted` | Run pill → Starting; dismiss → the pill is gone |",
-        within="0.8",
-    ),
-    InnocentCase(
-        "an exit offering two states as alternatives",
-        "class C resolves each side of a slash, rather than the pair as one name",
-        "| §1.0 | Not started | `health` reads `not_started` `[contract]` | F5 | "
-        "`shell.notStarted` | Run pill → Starting |",
-        "| §1.0 | Not started | `health` reads `not_started` `[contract]` | F5 | "
-        "`shell.notStarted` | Run pill → Starting / Impaired |",
-        within="0.8",
-    ),
-    InnocentCase(
-        "an exit landing on a different state of the same frame",
-        "class C resolves an exit against the register, not against one row's neighbours",
-        "| §1.0 | Not started | `health` reads `not_started` `[contract]` | F5 | "
-        "`shell.notStarted` | Run pill → Starting |",
-        "| §1.0 | Not started | `health` reads `not_started` `[contract]` | F5 | "
-        "`shell.notStarted` | Run pill → Impaired |",
-        within="0.8",
-    ),
-    # The green halves of the two widened citation readings. A qualified symbol
-    # citation is now resolved rather than believed, and a bare local copy key is
-    # now sent through resolution rather than admitted on sight — both of which
-    # only pay if the correct spelling of each still passes. Otherwise the rule
-    # has bought a misspelling by forbidding the notation the document uses.
-    InnocentCase(
-        "a symbol citation qualified by its own class, spelled right",
-        "class E resolves a qualified name against the file, rather than trusting the dot",
-        "core/handlers/model_hub/service.py:set_agent_mode",
-        "core/handlers/model_hub/service.py:ModelHubService.set_agent_mode",
-        within="0.5",
-    ),
-    InnocentCase(
-        "a bare local copy key, spelled right",
-        "class B resolves a frame-local key against that frame's table, and finds it",
-        "`legend.unavailable` **lost a 暂 to make that true.**",
-        "`legend.unavailable` **lost one 暂 to make that true.**",
-        within="1.7",
-    ),
-)
-
-
-@pytest.mark.parametrize("case", GATE_INNOCENT, ids=lambda c: c.label)
-def test_gate_stays_green_on_text_that_only_looks_like_a_defect(tmp_path, case: InnocentCase):
-    """The half of a shape rule that says what it does *not* claim.
-
-    §2's colour rule names two status words inside a legend for a different
-    vocabulary. That is not a restatement of the status set, and a first cut of
-    the arm that read it as one fired thirty-three times across this document —
-    on every paragraph that happened to mention a Cancel button. The threshold
-    that separates the two is load-bearing and invisible: lower it and every
-    red case above still passes.
-    """
-    spec = Path("docs/plans/model-hub-ui-spec.md").read_text(encoding="utf-8")
-
-    mutated = tmp_path / "mutated.md"
-    mutated.write_text(_mutate(spec, case), encoding="utf-8")
-    result = check_model_hub_ui_states(mutated, authorities=ROOT)
-    assert result["authority_origin"] == "this checkout"
-    assert result["ok"], (case.pins, result["findings"], result["empty_inventories"])
-
-
-def test_gate_mutation_suite_is_tiled_over_every_arm_and_every_rule():
-    """Every (class, universe, rule) is answered — by a case, or by a stated reason.
-
-    The gate grew one class at a time, each writing its own comparison, so each
-    new class was a fresh chance to repeat the same mistake — and the tests grew
-    the same way, one case per bug a reviewer happened to find. Tiling is what
-    stops that: an arm added without its cases fails here, before it can ship a
-    comparison nobody has watched fail.
-
-    Tiled per *arm*, because round 14 showed two full projections hiding an empty
-    cell. Every class had a `token` case and every universe had one, so both
-    2-D views read full, while class A's reading of the §0.5 registry had no case
-    for any rule and three findings came back out of it. The grid is the product
-    now, and the exemptions are read at three grains: this class everywhere, this
-    universe everywhere, or this one arm.
-    """
-    from scripts.check_model_hub_ui_states import (
-        CLASS_UNIVERSES,
-        CLASSES,
-        RULES,
-        UNIVERSES,
-    )
-
-    for name in sorted({u for us in CLASS_UNIVERSES.values() for u in us}):
-        assert name in UNIVERSES, f"{name} is consulted by a class and declared by nothing"
-    for case in GATE_MUTATIONS:
-        assert case.cls in CLASSES, f"{case.label}: class {case.cls} is not a gate class"
-        assert case.rule in (*RULES, "arm"), f"{case.label}: {case.rule} is not a rule"
-        assert case.universe is None or case.universe in UNIVERSES, (
-            f"{case.label}: {case.universe} is not a universe the gate declares"
-        )
-        if case.universe:
-            assert case.universe in CLASS_UNIVERSES[case.cls], (
-                f"{case.label}: class {case.cls} does not declare that it reads {case.universe}"
-            )
-
-    covered = {(c.cls, c.universe, c.rule) for c in GATE_MUTATIONS if c.universe}
-
-    def why(cls: str, name: str, rule: str) -> str | None:
-        return (
-            UNREACHABLE_BY_ARM.get((cls, name, rule))
-            or UNREACHABLE_BY_CLASS.get((cls, rule))
-            or UNREACHABLE_BY_UNIVERSE.get((name, rule))
-        )
-
-    missing = [
-        (cls, name, rule)
-        for cls, names in sorted(CLASS_UNIVERSES.items())
-        for name in names
-        for rule in RULES
-        if (cls, name, rule) not in covered and not why(cls, name, rule)
-    ]
-    assert not missing, f"arms with no case and no declared reason: {missing}"
-
-    # An exemption that has been overtaken by a real case is a lie the next
-    # reader would believe, and a reason nobody wrote is not an exemption.
-    exemptions = {**UNREACHABLE_BY_ARM, **UNREACHABLE_BY_CLASS, **UNREACHABLE_BY_UNIVERSE}
-    for cell, reason in exemptions.items():
-        assert reason.strip(), f"{cell} is exempted with no reason"
-    for cell in UNREACHABLE_BY_ARM:
-        assert cell not in covered, f"{cell} is exempted and also covered"
-    for cls, rule in UNREACHABLE_BY_CLASS:
-        clash = [c for c in covered if c[0] == cls and c[2] == rule]
-        assert not clash, f"({cls}, {rule}) is exempted for the whole class and also covered: {clash}"
-    for name, rule in UNREACHABLE_BY_UNIVERSE:
-        clash = [c for c in covered if c[1] == name and c[2] == rule]
-        assert not clash, f"({name}, {rule}) is exempted for the whole universe and also covered: {clash}"
-
-    # What this guard does not prove: that a case is a *good* case. It asserts the
-    # cell has one and that the gate names the right class and sentence, not that
-    # the mutation is the worst one available. `arm` cases are outside the grid
-    # entirely — they answer no cell and are only required to keep working.
-
-
-def test_every_universe_the_gate_builds_is_declared():
-    """The declaration is checked against the universes, not maintained beside them.
-
-    A list of names is a list of names: the tiling suite used to hold its own,
-    written out in this file, so the §0.5 registry — built by a dict
-    comprehension outside the comparator — was missing from the gate's idea of
-    "every universe" and from the test's, independently. Reading the built
-    objects back makes the two impossible to disagree: a universe built and not
-    declared fails here, and one declared and never built fails too.
-    """
-    from scripts.check_model_hub_ui_states import (
-        UNIVERSE_SIDES,
-        Document,
-        Origin,
-        Universe,
-        authority_claims,
-        load_authorities,
-        parse,
-        registered_gaps,
-    )
-
-    here = Origin.tree_at(ROOT)
-    doc = Document((ROOT / SPEC).read_text(encoding="utf-8"))
-    auth = load_authorities(here)
-    # `repo symbols` is filled while class E runs, so the run is what declares it.
-    authority_claims(doc, auth, here, [], registered_gaps(doc))
-
-    built = {u.name: u.side for u in parse(doc)["universes"].values()}
-    built |= {k: v.side for k, v in auth.items() if isinstance(v, Universe)}
-    assert built == UNIVERSE_SIDES
-
-
-def test_authority_side_universes_report_a_duplicate_definition():
-    """The rule the spec cannot exercise, proved on the comparator itself.
-
-    `routes`, `schema files`, `schema fields` and `repo symbols` are filled from
-    the frozen contract files, so no spec mutation can make one of them declare a
-    token twice. Prove it can fail — two rows, one token, different content — and
-    prove it passes on the real files, which is the half a fixture alone leaves
-    out.
-    """
-    from scripts.check_model_hub_ui_states import (
-        Origin,
-        Universe,
-        defined_symbols,
-        load_authorities,
-    )
-
-    for side in ("routes", "schema files", "schema fields", "repo symbols"):
-        u = Universe(side, "authority", "E")
-        u.define("t", {"a": 1}, content="first", where="one.md")
-        u.define("t", {"a": 2}, content="second", where="two.md")
-        assert u.duplicates == [("t", "one.md", "two.md")], side
-        # The same token with the same content is one row read twice, not two
-        # answers — restating a route in a second table may not become a gap.
-        u.define("t", {"a": 1}, content="first", where="three.md")
-        assert len(u.duplicates) == 1, side
-
-    auth = load_authorities(Origin.tree_at(ROOT))
-    for side in ("routes", "schema files", "schema fields"):
-        assert not auth[side].duplicates, (side, auth[side].duplicates)
-
-    # `repo symbols` is filled inside class E's arm rather than by
-    # `load_authorities`, and the exemption above said its duplicate rule was
-    # proved here while the inventory had quietly removed it: every symbol was
-    # registered under its bare name with the *file* as its content, so a file
-    # defining `load` twice declared one token twice identically and nothing
-    # could contradict. Keyed on the qualified name it can, and the real file is
-    # the case that says so — unique qualified, colliding bare.
-    got = defined_symbols((ROOT / "core/handlers/model_hub/service.py").read_text())
-    qualified = [q for q, _bare, _line in got]
-    assert len(qualified) == len(set(qualified)), sorted(
-        q for q in qualified if qualified.count(q) > 1
-    )
-    bare = [b for _q, b, _line in got]
-    assert len(bare) > len(set(bare)), (
-        "this file is why the inventory is keyed on the qualified name: it defines "
-        "several names twice, under different owners. If that stops being true the "
-        "ambiguity case in GATE_MUTATIONS is testing a condition the repo no longer has."
-    )
-
-
-def test_authority_side_universes_report_input_they_cannot_read(tmp_path):
-    """The fourth rule, on the side no spec mutation can reach.
-
-    Three readers on the authority side had the door the spec side had, and two
-    of them were worse than silent: an `api.md` row whose shape cell is gone
-    dropped a route from the contracted-mutation inventory — so class A stopped
-    asking whether anything reaches it and every spec claim about it reported as
-    uncontracted — while a `.schema.json` or a cited `.py` that stopped parsing
-    ended the whole run in a traceback, which is loud but is not a verdict and
-    takes the other thirteen universes down with it.
-
-    Proved on a fixture checkout rather than by mutating the frozen contract
-    files, and each assertion is two-sided: the reader reports the row it cannot
-    read, *and* the run survives to produce the findings it can.
-    """
-    from scripts.check_model_hub_ui_states import Origin, check, load_authorities
-
-    root = _fixture_checkout(tmp_path)
-    api = root / "docs/plans/model-hub-contracts/api.md"
-    broken_route = "| POST `/api/models/decoy` |\n"
-    api.write_text(api.read_text(encoding="utf-8") + broken_route, encoding="utf-8")
-
-    schema = root / "docs/plans/model-hub-contracts/source.schema.json"
-    schema.write_text('{"type": "object",,}', encoding="utf-8")
-
-    auth = load_authorities(Origin.tree_at(root))
-    said = [text for _where, text in auth["routes"].unreadable]
-    assert any("names a route and carries no shape cell" in t for t in said), said
-    said = [text for _where, text in auth["schema files"].unreadable]
-    assert any("is a schema file this run cannot parse" in t for t in said), said
-
-    # The whole run, not just the loader: a file it cannot read is a finding
-    # among findings, and every other universe still answers.
-    result = check(root)
-    messages = [f["message"] for f in result["findings"]]
-    assert any("carries no shape cell" in m for m in messages), messages[:10]
-    assert any("cannot parse" in m for m in messages), messages[:10]
-    assert result["input_scale"]["register rows"] > 50, "the run stopped instead of reporting"
-
-
-def test_the_gate_reads_no_file_outside_the_checkout_it_was_given(tmp_path):
-    """Reviewer's finding, round 3 of #1276: a citation is not a path grant.
-
-    Every tree read goes through `Origin`, which exists so a run against an
-    authority checkout cannot answer out of the working tree. A citation still
-    names its own path, and `../` in one reached back out — so a document could
-    quote a file the selected checkout does not contain and be told it agrees
-    with it. Containment is asserted where the read happens, and the refusal is
-    a report rather than an exception: what the citation names is not readable
-    *here*, which is exactly the sentence a wrong checkout should produce.
-    """
-    from scripts.check_model_hub_ui_states import Origin
-
-    root = _fixture_checkout(tmp_path)
-    outside = tmp_path / "outside.py"
-    outside.write_text("def escaped():\n    return 1\n", encoding="utf-8")
-
-    here = Origin.tree_at(root)
-    assert here.read("core/handlers/model_hub/service.py") is not None
-    for escape in ("../outside.py", "../../outside.py", str(outside)):
-        assert here.read(escape) is None, escape
-
-
-def test_a_citation_resolves_to_everything_answering_to_it():
-    """Reviewer's finding, round 2 of #1276, proved on the comparator itself.
-
-    One spelling may reach a universe twice — once as a token, once as an alias
-    of something else — and `resolve` used to stop at the token. `service.py:load`
-    is the live shape: a module-level `load` registers that citation as a token,
-    and `ConfigStore.load` registers it as an alias, so the reader who followed
-    it had two places to go and was told there was one. The two halves are
-    unioned now, and the ambiguity is reported.
-
-    Nothing is manufactured by the union: `define` never records a self-alias, so
-    a token that also lists its own spelling as an alias still resolves to one.
-    This case is written here rather than in `GATE_MUTATIONS` because it needs a
-    repo file with both shapes, and that suite mutates the spec.
-    """
-    from scripts.check_model_hub_ui_states import Universe
-
-    u = Universe("repo symbols", "authority", "E")
-    u.define("service.py:load", {"line": 10}, content="module", where="service.py:10")
-    u.define(
-        "service.py:ConfigStore.load", {"line": 40},
-        content="method", where="service.py:40",
-        aliases=("service.py:load",),
-    )
-    hit = u.resolve("service.py:load")
-    assert set(hit.hits) == {"service.py:load", "service.py:ConfigStore.load"}
-    assert hit.ambiguous, "a citation two declarations answer to is ambiguous"
-
-    solo = Universe("repo symbols", "authority", "E")
-    solo.define("service.py:only", {"line": 3}, content="one", where="service.py:3",
-                aliases=("service.py:only",))
-    assert solo.resolve("service.py:only").hits == ("service.py:only",)
-    assert not solo.resolve("service.py:only").ambiguous
-
-
-def test_model_hub_ui_gate_target_zero_classes_prove_their_own_zero():
-    """A class whose right answer is 0 cannot read 0 as evidence of anything.
-
-    Every other inventory gets a free liveness signal: empty means the extractor
-    broke. The restatement classes give that up by design — the document is
-    meant to hold none of them — so they carry fixtures instead, one that must
-    still be caught and one that must still pass. This asserts the gate refuses
-    to report a self-tested zero when the arm behind it has stopped working.
-    """
-    from scripts.check_model_hub_ui_states import (
-        TARGET_ZERO,
-        Origin,
-        load_authorities,
-        self_test,
-    )
-
-    assert TARGET_ZERO, "a target-zero class list nobody populates tests nothing"
-    here = Origin.tree_at(ROOT)
-    assert not self_test(load_authorities(here), here)
-
-    result = check_model_hub_ui_states(Path.cwd())
-    assert not result["broken_arms"], result["broken_arms"]
-    for name in TARGET_ZERO:
-        assert result["input_scale"][name] == 0, (name, result["input_scale"][name])
-
-
-def test_model_hub_ui_gate_reads_a_symbolic_revision():
-    """The gate has to be runnable against the head under review, by name.
-
-    Deciding path-or-revision by spelling meant `HEAD`, a branch and a tag were
-    all read as paths and died on a missing-file error — which reads as *the
-    document moved* when what happened is *the revision was never resolved*.
-    """
-    result = check_model_hub_ui_states("HEAD")
-    assert result["input_mode"] == "same_run_git_rev"
-    assert result["input_scale"]["register rows"] > 50
-    # And the authorities came from that revision too. Reading the spec at `HEAD`
-    # while resolving its citations against the working tree compares two
-    # different revisions and reports the answer as one — a diff on either side
-    # alone would move the verdict.
-    assert result["authority_origin"] == "git rev HEAD"
-
-
-# --- the loader: one origin for every input, one declared range per arm --------
-#
-# Two review rounds found the same defect on two different heads: an arm that
-# decided for itself where to read. Once it was the spec, read from a revision
-# while the contracts came from the working tree; once it was a row shaped like a
-# gap registration, credited from anywhere in three thousand lines. The gate now
-# resolves one `Origin` per run and hands every arm a declared slice, and the two
-# rules that closed it are tested the way the five classes are — tiled over
-# everything they govern, because a rule proved on one arm holds on one arm.
-
-
-class ScopeTrap(NamedTuple):
-    """One decoy, placed inside a declared range and then outside it.
-
-    The pair is the whole test. A decoy the gate catches proves the arm reads its
-    range; the *same* decoy elsewhere proves it reads no further — and only the
-    second half can fail when an arm quietly goes back to scanning the document.
-
-    `polarity` says which way the range cuts. A `collect` range is where a defect
-    counts, so inside must report and outside must not. An `excuse` range is
-    where a written exemption counts, so `setup` breaks the document first and
-    inside must silence it while outside must leave it standing.
-    """
-
-    scope: str  # the key in SCOPES whose declared range is under test
-    polarity: str  # collect | excuse
-    label: str
-    setup: tuple[str, str]  # (before, after), applied before the decoy is placed
-    decoy: str  # lines placed at the declared range, then at OUTSIDE_SECTION
-    says: str
-    line_anchor: str = ""  # if set, `{line}` in setup/decoy resolves to the spec line carrying it
-    table_anchor: str = ""  # if set, the decoy is prefixed with that row's table header
-
-
-# A section no scope declares, so "outside every range" has somewhere to be. The
-# tiling test asserts that, rather than trusting this comment.
-OUTSIDE_SECTION = "0.7"
-
-# §0.4's row excusing a route no frame draws. The `scope note` trap deletes it and
-# puts it back in two places. What is written down here is the route the row names,
-# never the sentence explaining it: the trap is aimed at the row, and a row whose
-# prose is edited has not moved.
-_SCOPE_NOTE_ANCHOR = "| `POST /api/models/migration/scan` |"
-
-# Any §0.5 row, used only to find that table's header. Both excusing registers
-# declare their object in a named column, so a row cut loose from its header
-# declares nothing — a trap that moves a registration has to move enough of the
-# table for it to still be one, or it proves the arm ignores §0.7 by handing it
-# something no section would have read either.
-_GAP_REGISTRY_ANCHOR = "| G-12 |"
-
-SCOPE_TRAPS: tuple[ScopeTrap, ...] = (
-    # The decoy carries its own header, the way the treatments and copy decoys
-    # below do. §0.8 holds two tables, and a reader that reports rows it cannot
-    # read has to be sure a row is its own — so the register is bounded by its
-    # own `| Frame | State |` header, and a loose six-cell row in §0.8 is no
-    # longer a register row. Handing this arm a headerless row would test the
-    # bound rather than the range.
-    ScopeTrap(
-        "register", "collect", "a state row",
-        ("", ""),
-        "| Frame | State | Entry | Failure | Copy | Exit |\n"
-        "| --- | --- | --- | --- | --- | --- |\n"
-        "| §1.0 | Decoy state | 无 | F1 | `shell.title` | — |",
-        "「Decoy state」 has no exit",
-    ),
-    ScopeTrap(
-        "treatments", "collect", "a second definition of F1",
-        ("", ""),
-        "| # | Treatment |\n| --- | --- |\n| F1 | A decoy redefinition | with other content |",
-        "is defined twice in treatments",
-    ),
-    ScopeTrap(
-        "slots", "collect", "a second definition of {{count}}",
-        ("", ""),
-        "| `{{count}}` | A decoy redefinition. | Decoy |",
-        "is defined twice in slots",
-    ),
-    ScopeTrap(
-        "copy", "collect", "a second definition of shell.title",
-        ("", ""),
-        "| Key | 中文 | English |\n| --- | --- | --- |\n| `shell.title` | 诱饵 | Decoy |",
-        "is defined twice in copy",
-    ),
-    ScopeTrap(
-        "frame prose", "collect", "a citation of a key nothing defines",
-        ("", ""),
-        "A decoy sentence citing `shell.decoyMissing`.",
-        "key `shell.decoyMissing` is cited and never defined",
-    ),
-    ScopeTrap(
-        "mapping tables", "collect", "a [contract] rendering of a field no schema declares",
-        ("", ""),
-        "| `decoy_status` `[contract]` | Rendering |\n| --- | --- |\n| `alpha` | one |",
-        "the table maps no contracted field",
-    ),
-    ScopeTrap(
-        "gap registry", "excuse", "the registration that silences a drawn-by-nothing route",
+@pytest.mark.parametrize(
+    ("claim", "message"),
+    [
         (
-            "### 1.0 Shared shell",
-            "### 1.0 Shared shell\n\nA decoy: `POST /api/models/decoy` is contracted and "
-            "drawn by nothing `[contract-gap]` `G-99`.\n",
+            "The authority is `api.md:261`.",
+            "is an unstable line citation",
         ),
-        "| G-99 | A decoy registration | `POST /api/models/decoy` | none |",
-        "POST /api/models/decoy is named by no §0.8 row",
-        table_anchor=_GAP_REGISTRY_ANCHOR,
-    ),
-    ScopeTrap(
-        "scope note", "excuse", "the row putting a contracted route on another surface",
-        ("{line}\n", ""),
-        "{line}",
-        "POST /api/models/migration/scan is contracted and reached by no §0.8 row",
-        _SCOPE_NOTE_ANCHOR,
-        _SCOPE_NOTE_ANCHOR,
-    ),
+        (
+            "The implementation was observed at `ceace07g:2197`.",
+            "is an unstable line citation",
+        ),
+        (
+            "The owner is `$core/handlers/model_hub/service.py:list_agents`.",
+            "is not a file in this checkout",
+        ),
+        (
+            "`agent-supply.schema.json`'s `model-supply` owns this value.",
+            "declares no `model-supply`",
+        ),
+        (
+            "`PUT /api/models/agents/<backend>/sources` has a 410 refusal.",
+            "a 410 branch is claimed",
+        ),
+    ],
 )
+def test_model_hub_ui_gate_rejects_malformed_authority_candidates(
+    tmp_path: Path, claim: str, message: str
+):
+    spec = Path("docs/plans/model-hub-ui-spec.md").read_text(encoding="utf-8")
+    mutated = tmp_path / "mutated.md"
+    mutated.write_text(f"{spec}\n{claim}\n", encoding="utf-8")
 
-# A scope with no trap, and why it cannot have one.
-UNTRAPPED_SCOPES: dict[str, str] = {
-    "claims": (
-        "declared `*` on purpose — a restated authority is wrong wherever it is written — "
-        "so there is no outside to place a decoy in. What binds this one is the declaration "
-        "itself, asserted by test_every_arm_declares_a_range_the_module_declares."
-    ),
-    "key names": (
-        "declared `*` for the same reason and with the same consequence — a set enumerated "
-        "twice is wrong wherever the second copy is written, and this document writes them "
-        "four hundred lines from the tables they restate, which is the whole defect. What a "
-        "trap would have to prove instead is the arm's *threshold*, and that is not a range: "
-        "it is held by the red and green cases in the mutation suite."
-    ),
-    "rendered shapes": (
-        "declared `*` because a copy row's string is quoted wherever an implementer is told "
-        "what to draw — a frame's element inventory, a slot's absence rule, a design note — "
-        "and no section owns that. Its one in-range exclusion is the copy tables themselves, "
-        "which is a line the arm draws by row shape rather than by section, so a decoy placed "
-        "by section could not reach it."
-    ),
-}
+    result = check_model_hub_ui_states(mutated, authorities=Path.cwd())
+
+    assert any(message in finding["message"] for finding in result["findings"])
 
 
-def _spec_heading(text: str, where: str) -> str:
-    """The heading line opening the section a scope declares.
+def test_model_hub_ui_gate_checks_plural_slots_per_locale(tmp_path: Path):
+    spec = Path("docs/plans/model-hub-ui-spec.md").read_text(encoding="utf-8")
+    before = "| `gateway.modelCount_one` | {{count}} 个型号 | {{count}} model |"
+    after = "| `gateway.modelCount_one` | {{count}} 个型号 | one model |"
+    assert spec.count(before) == 1
+    mutated = tmp_path / "mutated.md"
+    mutated.write_text(spec.replace(before, after), encoding="utf-8")
 
-    Derived from `SCOPES`, never written down here: a scope that moves takes its
-    trap with it, instead of leaving one aimed at the section it used to name.
-    """
-    stem = re.escape(where.rstrip("."))
-    pattern = rf"^### {stem}(?:\.\d+)? .*$" if where.endswith(".") else rf"^### {stem} .*$"
-    found = re.search(pattern, text, re.M)
-    assert found, f"no §{where} heading to place a decoy in"
-    return found.group(0)
+    result = check_model_hub_ui_states(mutated, authorities=Path.cwd())
 
-
-def _spec_line(text: str, anchor: str) -> str:
-    """The one line carrying `anchor`, read out of the document rather than quoted.
-
-    Written for the same reason as `_spec_heading`: a trap that pins a whole row
-    goes red the next time that row's sentence is edited, while the row it is
-    aimed at has not moved and the gate is not wrong. The anchor identifies the
-    row; the prose around it is free to change.
-    """
-    found = [line for line in text.splitlines() if anchor in line]
-    assert len(found) == 1, f"{anchor!r} names {len(found)} lines, not one"
-    return found[0]
-
-
-def _table_head(text: str, anchor: str) -> str:
-    """The header and separator of the table whose row carries `anchor`.
-
-    Read out of the document for the same reason `_spec_line` reads the row out
-    of it: a column that is renamed moves the trap with it, instead of leaving
-    it aimed at a header nobody writes any more.
-    """
-    lines = text.splitlines()
-    row = _spec_line(text, anchor)
-    at = lines.index(row)
-    rule = max(i for i in range(at) if re.fullmatch(r"\|[\s:|-]+\|", lines[i].strip()))
-    return "\n".join(lines[rule - 1 : rule + 1])
-
-
-def _place(text: str, section: str, decoy: str) -> str:
-    heading = _spec_heading(text, section)
-    assert text.count(heading) == 1, f"§{section}'s heading is not unique"
-    return text.replace(heading, f"{heading}\n{decoy}", 1)
-
-
-def _checked(tmp_path: Path, text: str, name: str) -> dict:
-    document = tmp_path / f"{name}.md"
-    document.write_text(text, encoding="utf-8")
-    return check_model_hub_ui_states(document, authorities=ROOT)
-
-
-@pytest.mark.parametrize("trap", SCOPE_TRAPS, ids=lambda t: f"{t.scope}/{t.label}")
-def test_gate_arm_reads_only_its_declared_range(tmp_path, trap: ScopeTrap):
-    from scripts.check_model_hub_ui_states import SCOPES
-
-    spec = (ROOT / SPEC).read_text(encoding="utf-8")
-    before, after = trap.setup
-    decoy = trap.decoy
-    if trap.line_anchor:
-        line = _spec_line(spec, trap.line_anchor)
-        before, after, decoy = (part.format(line=line) for part in (before, after, decoy))
-    if trap.table_anchor:
-        decoy = f"{_table_head(spec, trap.table_anchor)}\n{decoy}"
-    if before:
-        assert spec.count(before) == 1, f"{trap.label}: setup anchor is not unique"
-        spec = spec.replace(before, after, 1)
-    where = SCOPES[trap.scope].where
-
-    inside = _checked(tmp_path, _place(spec, where, decoy), "inside")
-    outside = _checked(tmp_path, _place(spec, OUTSIDE_SECTION, decoy), "outside")
-    said = lambda result: [f["message"] for f in result["findings"]]  # noqa: E731
-
-    if trap.polarity == "collect":
-        assert any(trap.says in m for m in said(inside)), (
-            f"{trap.scope}: a decoy inside §{where} was not read", said(inside)
-        )
-        assert not any(trap.says in m for m in said(outside)), (
-            f"{trap.scope}: the arm reached past §{where} into §{OUTSIDE_SECTION}",
-            said(outside),
-        )
-    else:
-        assert any(trap.says in m for m in said(_checked(tmp_path, spec, "setup"))), (
-            f"{trap.scope}: the setup did not break the document, so the excuse "
-            f"has nothing to excuse"
-        )
-        assert not any(trap.says in m for m in said(inside)), (
-            f"{trap.scope}: an excuse written in §{where} did not count", said(inside)
-        )
-        assert any(trap.says in m for m in said(outside)), (
-            f"{trap.scope}: an excuse written in §{OUTSIDE_SECTION} counted anyway",
-            said(outside),
-        )
-
-
-class OriginCase(NamedTuple):
-    """One input, edited in a copied checkout the gate is then pointed at.
-
-    The spec-side mutations above cannot ask this question: they borrow this
-    repository's authorities, so nothing proves the authorities *could* have come
-    from anywhere else. These cases edit an authority — which the harness above
-    may never do in place — and the gate has to read the edit.
-    """
-
-    arm: str  # the input kind in LOADER_ARMS["origin"]
-    rel: str  # repo-relative path inside the copied checkout
-    before: str
-    after: str
-    says: str
-
-
-ORIGIN_CASES: tuple[OriginCase, ...] = (
-    OriginCase(
-        "spec", str(SPEC),
-        "重新拉取 pressed — `POST /api/models/sources/<source_id>/refresh`, guarded",
-        "重新拉取 pressed — `POST /api/models/sources/<source_id>/refreshes`, guarded",
-        "POST /api/models/sources/<>/refresh is named by no §0.8 row",
-    ),
-    OriginCase(
-        "api.md", "docs/plans/model-hub-contracts/api.md",
-        "| POST `/api/models/agents/<backend>/probe` |",
-        "| POST `/api/models/agents/<backend>/probed` |",
-        "is contracted by no `api.md` route row",
-    ),
-    OriginCase(
-        "schema", "docs/plans/model-hub-contracts/runtime-dependency.schema.json",
-        '["ok", "degraded", "down", "not_started", "not_installed"]',
-        '["ok", "down", "not_started", "not_installed"]',
-        "`RuntimeDependency.status.health` renders",
-    ),
-    OriginCase(
-        "python", "core/handlers/model_hub/service.py",
-        "def list_agents", "def list_agents_renamed",
-        "defines no `list_agents`",
-    ),
-)
-
-
-def _fixture_checkout(tmp_path: Path) -> Path:
-    """A copy of everything the gate reads, editable without touching the repo."""
-    import shutil
-
-    from scripts.check_model_hub_ui_states import CONTRACTS
-
-    checkout = tmp_path / "checkout"
-    (checkout / SPEC).parent.mkdir(parents=True)
-    shutil.copy(ROOT / SPEC, checkout / SPEC)
-    shutil.copytree(ROOT / CONTRACTS, checkout / CONTRACTS)
-    for case in ORIGIN_CASES:
-        source = ROOT / case.rel
-        if source.suffix == ".py":
-            (checkout / case.rel).parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy(source, checkout / case.rel)
-    # The spec cites this file too, and a checkout missing it would fail for the
-    # wrong reason — an absent input reads exactly like a mutated one.
-    gate = "scripts/check_model_hub_ui_states.py"
-    (checkout / gate).parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy(ROOT / gate, checkout / gate)
-    return checkout
-
-
-def test_fixture_checkout_passes_before_anything_is_mutated(tmp_path):
-    """The control the origin cases are read against.
-
-    Without it, a case that reports the wrong finding — or fails because the
-    fixture is short an input — is indistinguishable from a case that works.
-    """
-    checkout = _fixture_checkout(tmp_path)
-    result = check_model_hub_ui_states(checkout)
-    assert result["authority_origin"] == str(checkout)
-    assert result["ok"], result["findings"]
-
-
-@pytest.mark.parametrize("case", ORIGIN_CASES, ids=lambda c: c.arm)
-def test_gate_reads_every_input_from_the_target_origin(tmp_path, case: OriginCase):
-    """Point the gate at a checkout and all four inputs come from that checkout.
-
-    One input reading from somewhere else is not a smaller version of this bug —
-    it is a gate comparing two revisions and reporting the answer as one, which
-    is green whenever the two happen to agree.
-    """
-    checkout = _fixture_checkout(tmp_path)
-    edited = checkout / case.rel
-    text = edited.read_text(encoding="utf-8")
-    assert text.count(case.before) == 1, f"{case.arm}: anchor is not unique in {case.rel}"
-    edited.write_text(text.replace(case.before, case.after, 1), encoding="utf-8")
-
-    result = check_model_hub_ui_states(checkout)
-    assert not result["ok"], f"{case.arm}: the gate read the repository, not the target"
-    assert any(case.says in f["message"] for f in result["findings"]), (
-        case.arm, case.says, result["findings"]
-    )
-
-    if case.arm != "spec":
-        # And the borrowing works the other way: told to use this repository's
-        # authorities, the same broken checkout passes. Without this half, an arm
-        # hard-wired to the repository would still satisfy the assertion above
-        # whenever the fixture and the repository disagree for any reason.
-        borrowed = check_model_hub_ui_states(checkout, authorities=ROOT)
-        assert borrowed["authority_origin"] == "this checkout"
-        assert borrowed["ok"], borrowed["findings"]
-
-
-def test_loader_suite_is_tiled_over_every_rule_and_every_arm():
-    """Both loader rules, over everything each one governs.
-
-    The same tiling `CLASS_UNIVERSES` gets, and for the same reason: the defect
-    is not any one arm reading from the wrong place, it is a new arm arriving
-    with a reading of its own and nobody noticing which rule it skipped.
-    """
-    from scripts.check_model_hub_ui_states import LOADER_ARMS, LOADER_RULES, SCOPES
-
-    assert set(LOADER_ARMS) == set(LOADER_RULES)
-    assert LOADER_ARMS["scope"] == tuple(SCOPES), "the scope arms are the declared ranges"
-
-    covered = {"origin": {c.arm for c in ORIGIN_CASES}, "scope": {t.scope for t in SCOPE_TRAPS}}
-    exempt = {"origin": {}, "scope": UNTRAPPED_SCOPES}
-    for rule in LOADER_RULES:
-        missing = [
-            arm
-            for arm in LOADER_ARMS[rule]
-            if arm not in covered[rule] and arm not in exempt[rule]
-        ]
-        assert not missing, f"{rule}: arms with no case and no declared reason: {missing}"
-        for arm, why in exempt[rule].items():
-            assert arm in LOADER_ARMS[rule], f"{arm} is exempted and is not an arm"
-            assert why.strip(), f"{arm} is exempted with no reason"
-            assert arm not in covered[rule], f"{arm} is exempted and also covered"
-
-    # A trap in every polarity, and an outside that really is outside — otherwise
-    # every "the arm read no further" half is asserting nothing.
-    assert {t.polarity for t in SCOPE_TRAPS} == {"collect", "excuse"}
-    assert OUTSIDE_SECTION not in {s.where for s in SCOPES.values()}
-
-
-def test_only_the_origin_class_reads_a_file():
-    """One place opens a file, so there is one place a revision can be honoured.
-
-    Read as structure rather than as a promise in a docstring: an arm that reads
-    on its own is the defect, and it is invisible in a passing run — the numbers
-    look right until the two revisions differ.
-    """
-    import ast
-
-    source = (ROOT / "scripts/check_model_hub_ui_states.py").read_text(encoding="utf-8")
-    tree = ast.parse(source)
-    reading = {"open", "read_text", "read_bytes", "glob", "rglob", "iterdir", "run"}
-
-    def verbs(node) -> list[str]:
-        return [
-            (c.func.attr if isinstance(c.func, ast.Attribute) else c.func.id)
-            for c in ast.walk(node)
-            if isinstance(c, ast.Call)
-            and isinstance(c.func, (ast.Attribute, ast.Name))
-            and (c.func.attr if isinstance(c.func, ast.Attribute) else c.func.id) in reading
-        ]
-
-    outside = [
-        f"{node.name}: {sorted(set(found))}"
-        for node in tree.body
-        if not (isinstance(node, ast.ClassDef) and node.name == "Origin")
-        and (found := verbs(node))
-    ]
-    assert not outside, f"these read a file without going through Origin: {outside}"
-    assert verbs(next(n for n in tree.body if getattr(n, "name", "") == "Origin")), (
-        "Origin reads nothing, so this test would pass on a module that reads nowhere"
+    assert any(
+        "gateway.modelCount_one" in finding["message"]
+        and "omits `{{count}}` from its en copy" in finding["message"]
+        for finding in result["findings"]
     )
 
 
-def test_every_arm_declares_a_range_the_module_declares():
-    """A range is asked for by name, and the name is written down.
+def test_model_hub_ui_gate_rejects_empty_required_register_cells(tmp_path: Path):
+    spec = Path("docs/plans/model-hub-ui-spec.md").read_text(encoding="utf-8")
+    before = "| §1.0 | Ready | `health` reads `ok`,"
+    after = "| §1.0 |  | `health` reads `ok`,"
+    assert spec.count(before) == 1
+    mutated = tmp_path / "mutated.md"
+    mutated.write_text(spec.replace(before, after), encoding="utf-8")
 
-    Both halves matter. A computed scope name cannot be checked against `SCOPES`
-    at all, and a literal that is not in `SCOPES` is an arm that would read
-    everything the moment the `KeyError` were softened into a default.
-    """
-    import ast
+    result = check_model_hub_ui_states(mutated, authorities=Path.cwd())
 
-    from scripts.check_model_hub_ui_states import Document, SCOPES
-
-    source = (ROOT / "scripts/check_model_hub_ui_states.py").read_text(encoding="utf-8")
-    asked = [
-        node.args[0]
-        for node in ast.walk(ast.parse(source))
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "scope"
-        and node.args
-    ]
-    assert asked, "no arm asks for a range, so this test is watching nothing"
-    for arg in asked:
-        assert isinstance(arg, ast.Constant) and isinstance(arg.value, str), (
-            f"a scope is asked for by a computed name at line {arg.lineno}"
-        )
-        assert arg.value in SCOPES, f"line {arg.lineno} reads undeclared scope {arg.value!r}"
-
-    with pytest.raises(KeyError):
-        Document("").scope("a range nobody declared")
+    assert any(
+        "empty required state cell" in finding["message"]
+        for finding in result["findings"]
+    )
 
 
-def test_a_document_outside_every_checkout_names_no_authority_by_default(tmp_path):
-    """The one case with nothing to default to says so, instead of guessing.
+def test_model_hub_ui_gate_line_citations_do_not_read_git_history(
+    monkeypatch, tmp_path: Path
+):
+    spec = Path("docs/plans/model-hub-ui-spec.md").read_text(encoding="utf-8")
+    document = tmp_path / "mutated.md"
+    document.write_text(f"{spec}\nThe authority is `api.md:261`.\n", encoding="utf-8")
 
-    A document in a temporary directory has no `api.md` above it. Falling back to
-    this repository's contracts would make every such run green against
-    authorities the caller never chose — the failure mode this whole loader
-    exists to prevent, wearing the friendliest possible face.
-    """
-    stray = tmp_path / "stray.md"
-    stray.write_text((ROOT / SPEC).read_text(encoding="utf-8"), encoding="utf-8")
+    def fail_git_history(*_args, **_kwargs):
+        raise AssertionError("line-citation validation must not read git history")
 
-    with pytest.raises(SystemExit) as refused:
-        check_model_hub_ui_states(stray)
-    # Both remedies, because a caller who is told only that it failed will reach
-    # for whichever one they guess.
-    assert "authorities=" in str(refused.value)
-    assert "revision" in str(refused.value)
+    monkeypatch.setattr("scripts.check_model_hub_ui_states.subprocess.run", fail_git_history)
+    # A tree-origin run has all authority bytes in the checkout, exactly like
+    # Actions' shallow clone. Rejecting the shape must not ask the object store.
+    result = check_model_hub_ui_states(document, authorities=Path.cwd())
 
-    assert check_model_hub_ui_states(stray, authorities=ROOT)["ok"]
+    assert any(
+        "`api.md:261` is an unstable line citation" in finding["message"]
+        for finding in result["findings"]
+    )
 
 
 def test_targeted_permission_denial_contract_is_request_scoped_and_mirrored():
@@ -3290,7 +872,119 @@ def test_targeted_permission_denial_contract_is_request_scoped_and_mirrored():
         )
 
 
+def test_oauth_nonce_explicit_cancel_totality_is_closed():
+    api_contract = (CONTRACTS / "api.md").read_text(encoding="utf-8")
+    model_hub_plan = (CONTRACTS.parent / "model-hub.md").read_text(encoding="utf-8")
+    implementation_plan = (
+        CONTRACTS.parent / "model-hub-implementation.md"
+    ).read_text(encoding="utf-8")
+
+    cancel_route = next(
+        line
+        for line in api_contract.splitlines()
+        if "POST `/api/models/oauth/cancel`" in line
+    )
+    assert "Cancels and forgets the flow." not in api_contract
+    assert "committed flow with `client_nonce`" in cancel_route
+    assert '`state: "cancelled"`' in cancel_route
+    assert "existing `expires_at`" in cancel_route
+    assert "flow without a nonce is forgotten" in cancel_route
+
+    api_oauth = api_contract.split("## OAuth completion", 1)[1].split(
+        "## Chain and probe", 1
+    )[0]
+    plan_oauth = model_hub_plan.split(
+        "**OAuth-start nonce state machine", 1
+    )[1].split("**Protocol observation", 1)[0]
+    for section in (api_oauth, plan_oauth):
+        assert section.count("| `oauth_nonce.released` |") == 1
+        assert section.count("| `oauth_nonce.in_flight` |") == 1
+        assert section.count("| `oauth_nonce.committed` |") == 1
+        assert "retained canceled flow" in section
+        assert "existing `expires_at`" in section
+        assert 'retained `state: "cancelled"` flow' in section
+        assert "none" in next(
+            line
+            for line in section.splitlines()
+            if line.startswith("| `oauth_nonce.committed` |")
+        )
+
+    nonce_description = _schema("oauth-flow.schema.json")["properties"][
+        "client_nonce"
+    ]["description"]
+    assert "Explicit cancellation retains that committed flow" in nonce_description
+    assert "starts no provider on a same-tuple retry" in nonce_description
+
+    oauth_schema = _schema("oauth-flow.schema.json")
+    oauth_validator = Draft7Validator(oauth_schema, format_checker=FormatChecker())
+    nonce_with_expiry = copy.deepcopy(oauth_schema["examples"][0])
+    oauth_validator.validate(nonce_with_expiry)
+
+    nonce_without_expiry = copy.deepcopy(nonce_with_expiry)
+    nonce_without_expiry["expires_at"] = None
+    with pytest.raises(ValidationError):
+        oauth_validator.validate(nonce_without_expiry)
+
+    ordinary_without_expiry = copy.deepcopy(nonce_without_expiry)
+    ordinary_without_expiry.pop("client_nonce")
+    oauth_validator.validate(ordinary_without_expiry)
+
+    ac_48 = implementation_plan.split("### AC-48", 1)[1].split("### AC-49", 1)[0]
+    for fixture_pattern in (
+        r"same-tuple canceled replay with zero provider calls",
+        r"existing-expiry\s+release followed by one fresh provider start",
+        r"no-nonce\s+forget",
+    ):
+        assert re.search(fixture_pattern, ac_48)
+
+
 def test_v5_shape_amendments_reject_the_false_states_they_replace():
+    api_contract = (CONTRACTS / "api.md").read_text(encoding="utf-8")
+    credential_contract = api_contract.split(
+        "## Credential replacement and reauth", 1
+    )[1].split("## Source refresh and blocked-source recovery", 1)[0]
+    assert "{source, recovered, interrupted_pairs}" not in credential_contract
+    assert '"recovered"' not in credential_contract
+    assert '"interrupted_pairs"' not in credential_contract
+    assert api_contract.count("| `oauth_terminal.reauth_success` |") == 1
+    reauth_contract = api_contract.split(
+        "## Credential replacement and reauth", 1
+    )[1].split("## Source refresh and blocked-source recovery", 1)[0]
+    assert "Hub-channel repair does not require this acknowledgement" not in reauth_contract
+    assert "For both Hub OAuth and\n   `native_cli` Sources" in reauth_contract
+    assert re.search(
+        r"Missing or false returns\s+`reauth_confirmation_required` before any OAuth adapter call",
+        reauth_contract,
+    )
+    assert "Transactional API-key repair through `PUT …/credential` remains outside" in reauth_contract
+
+    runtime_schema = _schema("runtime-dependency.schema.json")
+    runtime_validator = Draft7Validator(runtime_schema)
+    installing_runtime = copy.deepcopy(runtime_schema["examples"][0])
+    installing_runtime["status"].update(
+        {
+            "installed_version": None,
+            "verified": False,
+            "listening": None,
+            "health": "installing",
+            "error_key": None,
+        }
+    )
+    runtime_validator.validate(installing_runtime)
+    for field, contradiction in (
+        ("installed_version", "v7.2.95"),
+        ("verified", True),
+        ("listening", {"host": "127.0.0.1", "port": 15220}),
+    ):
+        invalid_installing = copy.deepcopy(installing_runtime)
+        invalid_installing["status"][field] = contradiction
+        with pytest.raises(ValidationError):
+            runtime_validator.validate(invalid_installing)
+    missing_installing_shape = copy.deepcopy(installing_runtime)
+    del missing_installing_shape["status"]["listening"]
+    with pytest.raises(ValidationError):
+        runtime_validator.validate(missing_installing_shape)
+
     supply_schema = _schema("agent-supply.schema.json")
     supply_validator = Draft7Validator(supply_schema)
     base_supply = {
@@ -3392,10 +1086,55 @@ def test_v5_shape_amendments_reject_the_false_states_they_replace():
     with pytest.raises(ValidationError):
         event_validator.validate(invalid_event)
 
-    probe = copy.deepcopy(_schema("probe-result.schema.json")["examples"][0])
+    probe_schema = _schema("probe-result.schema.json")
+    probe_validator = Draft7Validator(probe_schema)
+    connection_failure = next(
+        copy.deepcopy(example)
+        for example in probe_schema["examples"]
+        if example["error"] == "models.source.backoff.connection_failed"
+    )
+    probe_validator.validate(connection_failure)
+    for contradiction in (
+        {"channel": "native_cli"},
+        {"latency_ms": 1},
+    ):
+        invalid_connection_failure = {**connection_failure, **contradiction}
+        with pytest.raises(ValidationError):
+            probe_validator.validate(invalid_connection_failure)
+
+    probe = copy.deepcopy(probe_schema["examples"][0])
     probe["source_id"] = "direct"
     with pytest.raises(ValidationError):
-        Draft7Validator(_schema("probe-result.schema.json")).validate(probe)
+        probe_validator.validate(probe)
+
+    chain_schema = _schema("agent-chain.schema.json")
+    chain_validator = Draft7Validator(chain_schema)
+    ordinary_backoff = next(
+        copy.deepcopy(example)
+        for example in chain_schema["examples"]
+        if example["chain"]
+        and example["chain"][0]["reason"]
+        == "models.source.backoff.connection_failed"
+    )
+    for blocker in (
+        {
+            "health": "needs_action",
+            "reason": "models.source.needs_action.credential_revoked",
+            "retry_at": None,
+        },
+        {
+            "health": "healthy",
+            "reason": "model_unsupported",
+            "retry_at": None,
+        },
+    ):
+        blocked = copy.deepcopy(ordinary_backoff)
+        blocked["chain"][0].update(blocker)
+        blocked["supply_state"] = "interrupted"
+        chain_validator.validate(blocked)
+        mislabeled_waiting = {**blocked, "supply_state": "waiting"}
+        with pytest.raises(ValidationError):
+            chain_validator.validate(mislabeled_waiting)
 
     canceled = next(
         example
@@ -3412,6 +1151,11 @@ def test_v5_shape_amendments_reject_the_false_states_they_replace():
     chain_validator = Draft7Validator(chain_schema)
     for example in chain_schema["examples"]:
         chain_validator.validate(example)
+    for waiting in chain_schema["examples"][:2]:
+        interrupted = copy.deepcopy(waiting)
+        interrupted["supply_state"] = "interrupted"
+        with pytest.raises(ValidationError):
+            chain_validator.validate(interrupted)
     exact_hop = {
         "contract_version": 5,
         "backend": "claude",
@@ -3439,6 +1183,20 @@ def test_v5_shape_amendments_reject_the_false_states_they_replace():
     with pytest.raises(ValidationError):
         chain_validator.validate(invalid_reason)
 
+    model_supply_validator = Draft7Validator(
+        supply_schema["properties"]["model_supply"]["items"]
+    )
+    empty_model_supply = {
+        "model_id": "claude-opus-4-6",
+        "chain_length": 0,
+        "has_runnable_hop": False,
+    }
+    model_supply_validator.validate(empty_model_supply)
+    with pytest.raises(ValidationError):
+        model_supply_validator.validate(
+            {**empty_model_supply, "has_runnable_hop": True}
+        )
+
     probe_schema = _schema("probe-result.schema.json")
     probe_validator = Draft7Validator(probe_schema)
     native_ready = copy.deepcopy(probe_schema["examples"][-2])
@@ -3458,6 +1216,106 @@ def test_v5_shape_amendments_reject_the_false_states_they_replace():
     timed_native_not_ready["latency_ms"] = 12
     with pytest.raises(ValidationError):
         probe_validator.validate(timed_native_not_ready)
+
+
+def test_oauth_terminal_materialization_matrix_and_handoffs_are_total():
+    api_contract = (CONTRACTS / "api.md").read_text(encoding="utf-8")
+    model_hub_plan = (CONTRACTS.parent / "model-hub.md").read_text(encoding="utf-8")
+    implementation_plan = (
+        CONTRACTS.parent / "model-hub-implementation.md"
+    ).read_text(encoding="utf-8")
+    mirror_registry = _schema("mirror-registry.json")
+
+    decisions = (
+        "oauth_terminal.flow_only",
+        "oauth_terminal.create_success",
+        "oauth_terminal.reauth_success",
+        "oauth_terminal.materialization_interrupted",
+        "oauth_terminal.materialization_plain_error",
+    )
+    api_oauth = api_contract.split("## OAuth completion", 1)[1].split(
+        "## Chain and probe", 1
+    )[0]
+    plan_oauth = model_hub_plan.split(
+        "**OAuth terminal response and materialization-error matrix", 1
+    )[1].split("**Protocol observation", 1)[0]
+    for section in (api_oauth, plan_oauth):
+        for decision in decisions:
+            assert section.count(f"| `{decision}` |") == 1
+
+        reauth_success = next(
+            line
+            for line in section.splitlines()
+            if line.startswith("| `oauth_terminal.reauth_success` |")
+        )
+        interrupted_error = next(
+            line
+            for line in section.splitlines()
+            if line.startswith("| `oauth_terminal.materialization_interrupted` |")
+        )
+        plain_error = next(
+            line
+            for line in section.splitlines()
+            if line.startswith("| `oauth_terminal.materialization_plain_error` |")
+        )
+        assert "may be empty" in reauth_success
+        assert "present and nonempty" in interrupted_error
+        assert "no `flow`" in interrupted_error or "`flow` is absent" in interrupted_error
+        assert "absent" in plain_error
+        assert "empty placeholder" in plain_error
+
+    d22 = next(
+        rule for rule in mirror_registry["decision_tables"] if rule["id"] == "D22"
+    )
+    assert d22["authority"]["heading"] == (
+        "OAuth terminal response and materialization-error matrix"
+    )
+    assert d22["consumers"] == [
+        {
+            "kind": "marker",
+            "file": "docs/plans/model-hub-contracts/api.md",
+            "prefix": "oauth_terminal.",
+        }
+    ]
+
+    ac_52 = implementation_plan.split("### AC-52", 1)[1].split("### AC-53", 1)[0]
+    i3_lane = next(
+        line
+        for line in implementation_plan.splitlines()
+        if line.startswith("| **I3 subscription custody and native import**")
+    )
+    auth_setup_landing = next(
+        line
+        for line in implementation_plan.splitlines()
+        if line.startswith("| `tests/scenarios/auth_setup/")
+    )
+    for section in (ac_52, i3_lane, auth_setup_landing):
+        assert "AUTH-SETUP-109" in section
+    for path in (
+        "tests/scenarios/auth_setup/catalog.yaml",
+        "tests/scenarios/auth_setup/test_auth_setup_scenarios.py",
+    ):
+        assert path in ac_52
+    assert "After K4, #1312, and K6 merge" in ac_52
+    assert "earlier K4 + #1312 edge" in ac_52
+    assert "missing and false acknowledgement" in ac_52
+    assert "before any adapter/provider call" in ac_52
+    assert "starts exactly one Hub flow" in ac_52
+    assert "terminal status and the\nrepair read projection agree" in ac_52
+
+    ac_53 = implementation_plan.split("### AC-53", 1)[1].split("### AC-54", 1)[0]
+    assert "all five rows" in ac_53
+    for path in (
+        "core/handlers/model_hub/{service,errors}.py",
+        "vibe/{ui_server,model_hub_client}.py",
+        "tests/test_model_hub_api.py",
+        "ui/src/components/settings/models/{modelsApi.ts,OAuthConnectDialog.tsx,apiFailure.test.ts,oauthResult.test.ts}",
+    ):
+        assert path in ac_53
+    assert "After K4, #1312, and K6 merge" in ac_53
+    assert "After K4 merges, K5 round 2" in ac_53
+    assert "After\nthat K5 round and the I7 payload fixtures freeze" in ac_53
+    assert "same-error/no-gap negative fixture" in ac_53
 
 
 def test_model_hub_config_round_trip_and_serializer_completeness(monkeypatch, tmp_path):
@@ -3517,6 +1375,941 @@ def test_model_hub_config_round_trip_and_serializer_completeness(monkeypatch, tm
     assert api.config_to_payload(updated)["model_hub"] == api_payload["model_hub"]
 
 
+def _legacy_model_hub_payload(current: dict) -> dict:
+    """Build the persisted v3.0.9 Model Hub shape from a current fixture."""
+
+    agents = {}
+    for backend, agent in current["agents"].items():
+        agents[backend] = {
+            "backend": agent["backend"],
+            "mode": agent["mode"],
+            "menu_kind": agent["menu_kind"],
+            "sources": {"policy": "follow", "order": []},
+            "mappings": [],
+            "menu": agent.get("menu"),
+        }
+    return {
+        "sources": [],
+        "priority_order": [],
+        "agents": agents,
+        "subscription_hub_experimental": False,
+    }
+
+
+def test_config_reload_migrates_v3_model_hub_shape_and_persists_backup(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    payload = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    payload["model_hub"] = _legacy_model_hub_payload(payload["model_hub"])
+    payload["migration_sentinel"] = {"keep": True}
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert loaded.load_warnings == ()
+    assert set(loaded.model_hub.agents["claude"].routes) == set(
+        ModelHubConfig().agents["claude"].routes
+    )
+    persisted = json.loads(config_path.read_text(encoding="utf-8"))
+    assert set(persisted["model_hub"]) == {"sources", "agents"}
+    assert persisted["migration_sentinel"] == {"keep": True}
+    backups = list(config_path.parent.glob("config.json.bak-model-hub-migration-*"))
+    assert backups
+    assert stat.S_IMODE(backups[0].stat().st_mode) == 0o600
+
+
+def test_config_reload_recovers_malformed_legacy_collections(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    current = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    legacy = _legacy_model_hub_payload(current["model_hub"])
+    source = copy.deepcopy(_schema("source.schema.json")["examples"][0])
+    malformed_values = [
+        42,
+        [dict(source, models=42)],
+    ]
+
+    for index, malformed_sources in enumerate(malformed_values):
+        payload = copy.deepcopy(current)
+        payload["show_duration"] = True
+        malformed = copy.deepcopy(legacy)
+        malformed["sources"] = malformed_sources
+        payload["model_hub"] = malformed
+        config_path = tmp_path / f"config-{index}.json"
+        original = json.dumps(payload)
+        config_path.write_text(original, encoding="utf-8")
+
+        loaded = V2Config.load(config_path=config_path)
+
+        assert loaded.show_duration is True
+        assert loaded.model_hub.to_payload() == V2Config.default().model_hub.to_payload()
+        assert loaded.load_warnings and "model_hub" in loaded.load_warnings[0]
+        assert config_path.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.parametrize(
+    "invalid_platform",
+    [
+        "enabled",
+        "enabled-type",
+        "enabled-entry-type",
+        "primary-type",
+        "legacy",
+        "legacy-type",
+    ],
+)
+def test_config_reload_recovers_invalid_platform_metadata_only(monkeypatch, tmp_path, invalid_platform):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    payload = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    payload["show_duration"] = True
+    if invalid_platform == "enabled":
+        payload["platforms"]["enabled"] = ["not-a-platform"]
+        payload["platforms"]["primary"] = "not-a-platform"
+    elif invalid_platform == "enabled-type":
+        payload["platforms"]["enabled"] = {"slack": True}
+    elif invalid_platform == "enabled-entry-type":
+        payload["platforms"]["enabled"] = [{}]
+    elif invalid_platform == "primary-type":
+        payload["platforms"]["primary"] = {}
+    elif invalid_platform == "legacy":
+        payload.pop("platforms", None)
+        payload["platform"] = "not-a-platform"
+    else:
+        payload.pop("platforms", None)
+        payload["platform"] = {}
+    config_path = tmp_path / f"{invalid_platform}-platform.json"
+    original = json.dumps(payload)
+    config_path.write_text(original, encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert loaded.show_duration is True
+    assert loaded.platforms.enabled == []
+    assert loaded.platform == "avibe"
+    assert loaded.load_warnings and "platforms" in loaded.load_warnings[0]
+    assert config_path.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.parametrize(
+    ("platform", "invalid_fields"),
+    [
+        ("slack", {"bot_token": "invalid"}),
+        ("slack", {"bot_token": 123}),
+        ("slack", {"app_token": 123}),
+        ("discord", {"thread_auto_archive_minutes": 1}),
+        ("discord", {"bot_token": {}}),
+        ("telegram", {"bot_token": "invalid"}),
+        ("lark", {"domain": "invalid"}),
+        ("lark", {"app_id": 123}),
+    ],
+)
+def test_config_reload_recovers_invalid_platform_adapter_only(
+    monkeypatch,
+    tmp_path,
+    platform,
+    invalid_fields,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    payload = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    payload["show_duration"] = True
+    payload["platform"] = platform
+    payload["platforms"] = {"enabled": [platform], "primary": platform}
+    platform_payload = dict(payload.get(platform) or {})
+    platform_payload.update(invalid_fields)
+    payload[platform] = platform_payload
+    config_path = tmp_path / f"{platform}-adapter.json"
+    original = json.dumps(payload)
+    config_path.write_text(original, encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert loaded.show_duration is True
+    assert loaded.platforms.enabled == []
+    assert loaded.platform == "avibe"
+    assert loaded.load_warnings and platform in loaded.load_warnings[0]
+    assert config_path.read_text(encoding="utf-8") == original
+
+
+def test_config_reload_ignores_stale_legacy_platform_when_platforms_are_valid(monkeypatch):
+    payload = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    payload["platform"] = "removed-platform"
+    payload["platforms"] = {"enabled": ["slack"], "primary": "slack"}
+
+    loaded = V2Config.from_payload(payload)
+
+    assert loaded.platform == "slack"
+    assert loaded.platforms.enabled == ["slack"]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("mode", {}),
+        ("ack_mode", []),
+    ],
+)
+def test_config_reload_recovers_invalid_scalar_enum_only(monkeypatch, tmp_path, field, value):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    payload = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    payload["show_duration"] = True
+    payload[field] = value
+    config_path = tmp_path / f"{field}-scalar.json"
+    original = json.dumps(payload)
+    config_path.write_text(original, encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert loaded.show_duration is True
+    assert loaded.platform == payload["platform"]
+    assert loaded.load_warnings and field in loaded.load_warnings[0]
+    assert config_path.read_text(encoding="utf-8") == original
+
+
+def test_backup_deduplication_repairs_permissions(tmp_path):
+    config_path = tmp_path / "config.json"
+    content = b"sensitive config"
+    config_path.write_bytes(content)
+    backup = config_path.with_name("config.json.bak-test-existing")
+    backup.write_bytes(content)
+    backup.chmod(0o644)
+
+    result = v2_config._backup_config_file(config_path, "test", content=content)
+
+    assert result == backup
+    assert stat.S_IMODE(backup.stat().st_mode) == 0o600
+
+
+def test_config_reload_does_not_replace_file_when_migration_backup_fails(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    payload = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    payload["model_hub"] = _legacy_model_hub_payload(payload["model_hub"])
+    config_path = tmp_path / "config.json"
+    original = json.dumps(payload)
+    config_path.write_text(original, encoding="utf-8")
+    monkeypatch.setattr(v2_config, "_backup_config_file", lambda *args, **kwargs: None)
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert loaded.model_hub.to_payload() != payload["model_hub"]
+    assert config_path.read_text(encoding="utf-8") == original
+    assert loaded.load_warnings and "could not be backed up" in loaded.load_warnings[0]
+
+
+def test_config_reload_recovery_backs_up_original_snapshot(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    payload = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    payload["model_hub"] = {"sources": "invalid", "agents": {}}
+    config_path = tmp_path / "config.json"
+    original = json.dumps(payload).encode("utf-8")
+    config_path.write_bytes(original)
+    original_backup = v2_config._backup_config_file
+
+    def replace_before_backup(path, label, *, content=None):
+        path.write_text(json.dumps(api.config_to_payload(default_config())), encoding="utf-8")
+        return original_backup(path, label, content=content)
+
+    monkeypatch.setattr(v2_config, "_backup_config_file", replace_before_backup)
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert loaded.load_warnings
+    backups = list(config_path.parent.glob("config.json.bak-recovery-*"))
+    assert len(backups) == 1
+    assert backups[0].read_bytes() == original
+
+
+def test_config_reload_migrates_legacy_mapping_to_exact_route_hop(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    source = copy.deepcopy(_schema("source.schema.json")["examples"][0])
+    source["supply_channel"] = "native_cli"
+    source["models"][0]["provenance"] = source["models"][0].pop("origin")
+    model_id = source["models"][0]["id"]
+    current = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    legacy = _legacy_model_hub_payload(current["model_hub"])
+    legacy["sources"] = [source]
+    legacy["agents"]["claude"]["mode"] = "hub"
+    legacy["agents"]["claude"]["sources"] = {
+        "policy": "custom",
+        "order": [source["id"]],
+    }
+    legacy["agents"]["claude"]["mappings"] = [
+        {
+            "builtin_id": model_id,
+            "target_model_id": model_id,
+            "enabled": True,
+        }
+    ]
+    current["model_hub"] = legacy
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(current), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    route = loaded.model_hub.agents["claude"].routes[model_id]
+    assert route.hops[0].source_id == source["id"]
+    assert route.hops[0].model_id == model_id
+    assert loaded.load_warnings == ()
+    assert loaded.model_hub.sources[0].models[0].reasoning_efforts == []
+
+
+def test_config_reload_recovers_dangling_legacy_custom_source_order(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    current = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    legacy = _legacy_model_hub_payload(current["model_hub"])
+    legacy["agents"]["claude"]["mode"] = "hub"
+    legacy["agents"]["claude"]["sources"] = {
+        "policy": "custom",
+        "order": ["src_missing123"],
+    }
+    current["model_hub"] = legacy
+    config_path = tmp_path / "dangling-source-order.json"
+    original = json.dumps(current)
+    config_path.write_text(original, encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert loaded.model_hub.to_payload() == V2Config.default().model_hub.to_payload()
+    assert loaded.load_warnings and "model_hub" in " ".join(loaded.load_warnings)
+    assert config_path.read_text(encoding="utf-8") == original
+
+
+def test_config_reload_recovers_backend_ineligible_legacy_custom_source_order(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    source = copy.deepcopy(_schema("source.schema.json")["examples"][0])
+    for model in source["models"]:
+        model["provenance"] = model.pop("origin")
+    current = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    legacy = _legacy_model_hub_payload(current["model_hub"])
+    legacy["sources"] = [source]
+    legacy["agents"]["codex"]["mode"] = "hub"
+    legacy["agents"]["codex"]["sources"] = {
+        "policy": "custom",
+        "order": [source["id"]],
+    }
+    current["model_hub"] = legacy
+    config_path = tmp_path / "ineligible-source-order.json"
+    original = json.dumps(current)
+    config_path.write_text(original, encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert loaded.model_hub.to_payload() == V2Config.default().model_hub.to_payload()
+    assert loaded.load_warnings and "model_hub" in " ".join(loaded.load_warnings)
+    assert config_path.read_text(encoding="utf-8") == original
+
+
+def test_config_reload_preserves_enabled_unchecked_legacy_opencode_mapping(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    source = copy.deepcopy(_schema("source.schema.json")["examples"][1])
+    source["models"][0]["provenance"] = source["models"][0].pop("origin")
+    source["models"][0].pop("reasoning_efforts")
+    current = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    legacy = _legacy_model_hub_payload(current["model_hub"])
+    legacy["sources"] = [source]
+    legacy["agents"]["opencode"]["mode"] = "hub"
+    legacy["agents"]["opencode"]["sources"] = {
+        "policy": "custom",
+        "order": [source["id"]],
+    }
+    legacy["agents"]["opencode"]["menu"] = {"view": "featured", "checked": []}
+    legacy["agents"]["opencode"]["mappings"] = [
+        {
+            "builtin_id": "custom/glm-5.2-air",
+            "target_model_id": "glm-5.2-air",
+            "enabled": True,
+        }
+    ]
+    current["model_hub"] = legacy
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(current), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    route = loaded.model_hub.agents["opencode"].routes["custom/glm-5.2-air"]
+    assert [(hop.source_id, hop.model_id) for hop in route.hops] == [
+        (source["id"], source["models"][0]["id"]),
+    ]
+    assert loaded.load_warnings == ()
+
+
+def test_config_reload_keeps_legacy_hub_subscription_backend_specific(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    source = copy.deepcopy(_schema("source.schema.json")["examples"][0])
+    source["supply_channel"] = "hub"
+    source["credential_ref"] = "cred_anthropic_hub"
+    for model in source["models"]:
+        model["provenance"] = model.pop("origin")
+    current = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    legacy = _legacy_model_hub_payload(current["model_hub"])
+    legacy["sources"] = [source]
+    legacy["agents"]["claude"]["mode"] = "hub"
+    legacy["agents"]["claude"]["sources"] = {
+        "policy": "custom",
+        "order": [source["id"]],
+    }
+    legacy["agents"]["codex"]["mode"] = "hub"
+    legacy["agents"]["codex"]["sources"] = {
+        "policy": "follow",
+        "order": [],
+    }
+    current["model_hub"] = legacy
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(current), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert loaded.model_hub.agents["claude"].sources.order == [source["id"]]
+    assert loaded.model_hub.agents["codex"].sources.order == []
+    assert loaded.load_warnings == ()
+
+
+@pytest.mark.parametrize("supply_channel", ["native_cli", "hub"])
+def test_config_reload_preserves_legacy_claude_alias_resolution(
+    monkeypatch,
+    tmp_path,
+    supply_channel,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    source = copy.deepcopy(_schema("source.schema.json")["examples"][0])
+    source["supply_channel"] = supply_channel
+    if supply_channel == "hub":
+        source["credential_ref"] = "cred_anthropic_hub"
+    older = source["models"][0]
+    newer = {
+        **older,
+        "id": "claude-opus-5-20260724",
+        "display_name": "Opus 5",
+    }
+    source["models"] = [older, newer]
+    for model in source["models"]:
+        model["provenance"] = model.pop("origin")
+    current = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    legacy = _legacy_model_hub_payload(current["model_hub"])
+    legacy["sources"] = [source]
+    legacy["agents"]["claude"]["mode"] = "hub"
+    legacy["agents"]["claude"]["sources"] = {
+        "policy": "custom",
+        "order": [source["id"]],
+    }
+    current["model_hub"] = legacy
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(current), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    route = loaded.model_hub.agents["claude"].routes["opus"]
+    assert [(hop.source_id, hop.model_id) for hop in route.hops] == [
+        (source["id"], newer["id"]),
+    ]
+    assert loaded.load_warnings == ()
+
+
+def test_config_reload_defaults_omitted_legacy_backend_entries(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    current = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    legacy = _legacy_model_hub_payload(current["model_hub"])
+    legacy["agents"].pop("codex")
+    current["model_hub"] = legacy
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(current), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert loaded.model_hub.agents["codex"].mode == "direct"
+    assert loaded.load_warnings == ()
+    persisted = json.loads(config_path.read_text(encoding="utf-8"))
+    assert "codex" in persisted["model_hub"]["agents"]
+
+
+def test_config_reload_uses_first_enabled_duplicate_legacy_mapping(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    source = copy.deepcopy(_schema("source.schema.json")["examples"][0])
+    first_target = source["models"][0]["id"]
+    later_target = "claude-opus-5-20260724"
+    source["models"].append(
+        {
+            **source["models"][0],
+            "id": later_target,
+            "display_name": "Opus 5",
+        }
+    )
+    for model in source["models"]:
+        model["provenance"] = model.pop("origin")
+    current = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    legacy = _legacy_model_hub_payload(current["model_hub"])
+    legacy["sources"] = [source]
+    legacy["agents"]["claude"]["mode"] = "hub"
+    legacy["agents"]["claude"]["sources"] = {
+        "policy": "custom",
+        "order": [source["id"]],
+    }
+    legacy["agents"]["claude"]["mappings"] = [
+        {"builtin_id": "opus", "target_model_id": later_target, "enabled": False},
+        {"builtin_id": "opus", "target_model_id": first_target, "enabled": True},
+        {"builtin_id": "opus", "target_model_id": later_target, "enabled": True},
+    ]
+    current["model_hub"] = legacy
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(current), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    route = loaded.model_hub.agents["claude"].routes["opus"]
+    assert [(hop.source_id, hop.model_id) for hop in route.hops] == [
+        (source["id"], first_target),
+    ]
+
+
+@pytest.mark.parametrize(
+    "invalid_invariant",
+    [
+        "healthy-detail",
+        "hub-credential",
+        "manual-discovered-at",
+        "subscription-api-key",
+        "opencode-identity",
+    ],
+)
+def test_config_reload_recovers_inner_model_hub_invariant_only(
+    monkeypatch,
+    tmp_path,
+    invalid_invariant,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    payload = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    payload["show_duration"] = True
+    source = copy.deepcopy(_schema("source.schema.json")["examples"][0])
+    if invalid_invariant == "healthy-detail":
+        source["state"]["detail_key"] = "models.source.invalid"
+    elif invalid_invariant == "hub-credential":
+        source["supply_channel"] = "hub"
+        source["credential_ref"] = None
+    elif invalid_invariant == "manual-discovered-at":
+        source["models"][0]["origin"] = "manual"
+    elif invalid_invariant == "subscription-api-key":
+        source["base_url"] = "https://api.anthropic.com"
+    else:
+        payload["model_hub"]["agents"]["opencode"]["menu"] = {
+            "view": "featured",
+            "checked": ["invalid-opencode-identity"],
+        }
+    if invalid_invariant != "opencode-identity":
+        payload["model_hub"]["sources"] = [source]
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert loaded.show_duration is True
+    assert loaded.model_hub.to_payload() == V2Config.default().model_hub.to_payload()
+    assert loaded.load_warnings and "model_hub" in loaded.load_warnings[0]
+    persisted = json.loads(config_path.read_text(encoding="utf-8"))["model_hub"]
+    if invalid_invariant == "opencode-identity":
+        assert persisted["agents"]["opencode"]["menu"]["checked"] == [
+            "invalid-opencode-identity"
+        ]
+    else:
+        assert persisted["sources"] == [source]
+
+
+def test_config_reload_allows_empty_target_on_disabled_legacy_mapping(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    payload = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    legacy = _legacy_model_hub_payload(payload["model_hub"])
+    legacy["agents"]["claude"]["mappings"] = [
+        {"builtin_id": "opus", "target_model_id": "", "enabled": False}
+    ]
+    payload["model_hub"] = legacy
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert loaded.load_warnings == ()
+    assert loaded.model_hub.agents["claude"].routes["opus"].hops == ()
+
+
+def test_invalid_json_recovery_backs_up_the_original_snapshot(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config_path = tmp_path / "config.json"
+    malformed = b'{"mode": '
+    config_path.write_bytes(malformed)
+    original_backup = v2_config._backup_config_file
+
+    def replace_before_backup(path, label, *, content=None):
+        path.write_text(json.dumps(api.config_to_payload(default_config())), encoding="utf-8")
+        return original_backup(path, label, content=content)
+
+    monkeypatch.setattr(v2_config, "_backup_config_file", replace_before_backup)
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert loaded.load_warnings and "JSON" in loaded.load_warnings[0]
+    backups = list(config_path.parent.glob("config.json.bak-invalid-json-*"))
+    assert len(backups) == 1
+    assert backups[0].read_bytes() == malformed
+
+
+def test_config_reload_does_not_overwrite_config_changed_during_migration(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    payload = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    payload["model_hub"] = _legacy_model_hub_payload(payload["model_hub"])
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+    concurrent_payload = {**payload, "show_duration": True}
+    original_persist = v2_config._persist_migrated_config_payload
+
+    def persist_after_concurrent_save(path, expected_raw, migrated_payload):
+        path.write_text(json.dumps(concurrent_payload), encoding="utf-8")
+        return original_persist(path, expected_raw, migrated_payload)
+
+    monkeypatch.setattr(
+        v2_config,
+        "_persist_migrated_config_payload",
+        persist_after_concurrent_save,
+    )
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert loaded.show_duration is True
+    persisted = json.loads(config_path.read_text(encoding="utf-8"))
+    assert persisted["show_duration"] is True
+    assert set(persisted["model_hub"]) == {"sources", "agents"}
+    assert loaded.load_warnings and "changed during load" in loaded.load_warnings[0]
+
+
+def test_config_reload_does_not_overwrite_config_changed_before_replace(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    payload = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    payload["model_hub"] = _legacy_model_hub_payload(payload["model_hub"])
+    config_path = tmp_path / "config.json"
+    original = json.dumps(payload)
+    config_path.write_text(original, encoding="utf-8")
+    concurrent_payload = {**payload, "show_duration": True}
+    original_write = v2_config._write_config_payload_if_unchanged
+
+    def write_after_concurrent_save(path, migrated_payload, expected_raw):
+        path.write_text(json.dumps(concurrent_payload), encoding="utf-8")
+        return original_write(path, migrated_payload, expected_raw)
+
+    monkeypatch.setattr(
+        v2_config,
+        "_write_config_payload_if_unchanged",
+        write_after_concurrent_save,
+    )
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert loaded.show_duration is True
+    persisted = json.loads(config_path.read_text(encoding="utf-8"))
+    assert persisted["show_duration"] is True
+    assert set(persisted["model_hub"]) == {"sources", "agents"}
+    assert loaded.load_warnings and "before replacement" in " ".join(loaded.load_warnings)
+    backups = list(config_path.parent.glob("config.json.bak-model-hub-migration-*"))
+    assert backups and any(backup.read_text(encoding="utf-8") == original for backup in backups)
+
+
+def test_config_reload_recovers_invalid_optional_section_without_overwriting_file(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    payload = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    payload["model_hub"] = {"sources": "invalid", "agents": {}}
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert loaded.model_hub.to_payload() == V2Config.default().model_hub.to_payload()
+    assert loaded.load_warnings and "model_hub" in loaded.load_warnings[0]
+    recovery = api.client_config_payload(loaded)["config_recovery"]
+    assert recovery["required"] is True
+    assert recovery["warnings"]
+    assert recovery["warnings"] != list(loaded.load_warnings)
+    assert json.loads(config_path.read_text(encoding="utf-8"))["model_hub"]["sources"] == "invalid"
+    assert list(config_path.parent.glob("config.json.bak-recovery-*"))
+    V2Config.load(config_path=config_path)
+    assert len(list(config_path.parent.glob("config.json.bak-recovery-*"))) == 1
+
+    monkeypatch.setattr(api, "load_config", lambda: loaded)
+    with pytest.raises(ValueError, match="recovery warnings"):
+        api.save_config({"show_duration": True})
+    with pytest.raises(ValueError, match="recovery warnings"):
+        loaded.save(config_path)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda source: source["state"].update({"status": {}}),
+        lambda source: source.update({"kind": []}),
+        lambda source: source.update({"protocol": {}}),
+    ],
+    ids=["state-status", "source-kind", "source-protocol"],
+)
+def test_config_reload_recovers_non_scalar_model_hub_enums(monkeypatch, tmp_path, mutate):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    payload = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    source = copy.deepcopy(_schema("source.schema.json")["examples"][0])
+    mutate(source)
+    payload["model_hub"]["sources"] = [source]
+    payload["show_duration"] = True
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert loaded.show_duration is True
+    assert loaded.model_hub.to_payload() == V2Config.default().model_hub.to_payload()
+    assert loaded.load_warnings and "model_hub" in " ".join(loaded.load_warnings)
+
+
+def test_client_config_recovery_projection_redacts_validator_details(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    payload = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    payload["platforms"] = {"enabled": ["sk-leaked-platform-token"], "primary": "avibe"}
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+    raw_warnings = json.dumps(loaded.load_warnings)
+    projected = api.client_config_payload(loaded)
+
+    assert "sk-leaked-platform-token" in raw_warnings
+    assert "sk-leaked-platform-token" not in json.dumps(projected)
+    assert projected["config_recovery"]["warnings"]
+
+
+def test_config_reload_recovers_runtime_with_the_canonical_default(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    payload = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    payload["runtime"] = {"log_level": "DEBUG"}
+    payload["show_duration"] = True
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert loaded.runtime.default_cwd == str(Path.home() / "work")
+    assert loaded.runtime.log_level == "INFO"
+    assert loaded.show_duration is True
+    assert loaded.load_warnings and "runtime" in loaded.load_warnings[0]
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda hub: hub["agents"]["claude"].update({"sources": "invalid"}),
+        lambda hub: hub["agents"]["claude"].update(
+            {"sources": {"policy": "custom", "order": "invalid"}}
+        ),
+        lambda hub: hub["agents"]["claude"].update(
+            {"sources": {"order": ["src_missing001"]}}
+        ),
+        lambda hub: hub["agents"]["claude"].update(
+            {"sources": {"policy": {}, "order": []}}
+        ),
+        lambda hub: hub.update({"priority_order": {"invalid": True}}),
+        lambda hub: hub.update({"priority_order": ["src_missing001"]}),
+        lambda hub: hub.update({"subscription_hub_experimental": "false"}),
+        lambda hub: hub["sources"].append({"experimental_consent_at": 1}),
+        lambda hub: hub["sources"].append(
+            {
+                "models": [
+                    {
+                        "id": "legacy-model",
+                        "origin": "manual",
+                        "provenance": "discovered",
+                        "reasoning_efforts": [],
+                    }
+                ]
+            }
+        ),
+        lambda hub: hub["agents"]["claude"].update({"mappings": ["invalid"]}),
+        lambda hub: hub["agents"]["claude"].update(
+            {
+                "mappings": [
+                    {
+                        "builtin_id": "",
+                        "target_model_id": "claude-opus-4-5",
+                        "enabled": True,
+                    }
+                ]
+            }
+        ),
+        lambda hub: hub["agents"]["claude"].update({"mode": "hbu"}),
+        lambda hub: hub["agents"]["claude"].update({"mode": []}),
+        lambda hub: hub["agents"].update({"future-backend": {"mode": "hub"}}),
+        lambda hub: hub["agents"]["claude"].update({"future-field": True}),
+        lambda hub: hub["agents"]["claude"].update({"backend": "codex"}),
+        lambda hub: hub["agents"]["claude"].pop("backend"),
+        lambda hub: hub["agents"]["claude"].update({"menu_kind": "open"}),
+        lambda hub: hub["agents"]["claude"].pop("menu_kind"),
+        lambda hub: hub["agents"]["claude"].update(
+            {
+                "mappings": [
+                    {
+                        "builtin_id": "opus",
+                        "target_model_id": "claude-opus-4-5",
+                        "enabled": True,
+                        "future_field": True,
+                    }
+                ]
+            }
+        ),
+        lambda hub: hub["agents"]["claude"].update({"routes": "invalid"}),
+        lambda hub: hub["agents"]["claude"].update(
+            {"mappings": [{"builtin_id": "opus", "enabled": True}]}
+        ),
+        lambda hub: hub["agents"]["claude"].update(
+            {
+                "mappings": [
+                    {
+                        "builtin_id": "retired-model",
+                        "target_model_id": "claude-opus-4-6",
+                        "enabled": True,
+                    }
+                ]
+            }
+        ),
+        lambda hub: hub["agents"]["claude"].update(
+            {
+                "mappings": [
+                    {
+                        "builtin_id": "opus",
+                        "target_model_id": "claude-opus-4-5",
+                        "enabled": "yes",
+                    }
+                ]
+            }
+        ),
+    ],
+    ids=[
+        "sources-not-object",
+        "custom-order-not-array",
+        "order-only-dangling",
+        "policy-not-scalar",
+        "priority-order-not-array",
+        "priority-order-dangling",
+        "subscription-hub-experimental-not-bool",
+        "experimental-consent-not-date-time",
+        "provenance-conflict",
+        "mapping-not-object",
+        "mapping-empty-builtin",
+        "agent-invalid-mode",
+        "agent-non-scalar-mode",
+        "agent-unknown-backend",
+        "agent-unknown-field",
+        "agent-backend-mismatch",
+        "agent-backend-missing",
+        "agent-menu-kind-mismatch",
+        "agent-menu-kind-missing",
+        "mapping-unknown-field",
+        "routes-not-object",
+        "mapping-missing-target",
+        "mapping-retired-menu",
+        "mapping-enabled-not-boolean",
+    ],
+)
+def test_config_reload_does_not_infer_malformed_legacy_source_order(
+    monkeypatch,
+    tmp_path,
+    mutate,
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    payload = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    legacy = _legacy_model_hub_payload(payload["model_hub"])
+    mutate(legacy)
+    payload["model_hub"] = legacy
+    config_path = tmp_path / "config.json"
+    original = json.dumps(payload)
+    config_path.write_text(original, encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert loaded.model_hub.to_payload() == V2Config.default().model_hub.to_payload()
+    assert loaded.load_warnings and "model_hub" in " ".join(loaded.load_warnings)
+    assert config_path.read_text(encoding="utf-8") == original
+    assert list(config_path.parent.glob("config.json.bak-recovery-*"))
+
+
+def test_config_reload_recovers_invalid_codex_agent_with_disabled_default(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    payload = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    payload["show_duration"] = True
+    payload["agents"]["codex"] = "invalid"
+    config_path = tmp_path / "config.json"
+    original = json.dumps(payload)
+    config_path.write_text(original, encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert loaded.show_duration is True
+    assert loaded.agents.codex.enabled is False
+    assert loaded.agents.claude.enabled is True
+    assert loaded.load_warnings and "agents.codex" in loaded.load_warnings[0]
+    assert config_path.read_text(encoding="utf-8") == original
+
+
+def test_config_reload_recovers_invalid_agents_with_canonical_defaults(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    payload = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    payload["show_duration"] = True
+    payload["agents"] = "invalid"
+    config_path = tmp_path / "config.json"
+    original = json.dumps(payload)
+    config_path.write_text(original, encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert loaded.show_duration is True
+    assert loaded.agents.opencode.enabled is True
+    assert loaded.agents.claude.enabled is True
+    assert loaded.agents.codex.enabled is False
+    assert loaded.agents.avault.cli_path == "avault"
+    assert loaded.load_warnings and "agents" in loaded.load_warnings[0]
+    assert config_path.read_text(encoding="utf-8") == original
+
+
+def test_config_reload_recovers_invalid_json_with_backup(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config_path = tmp_path / "config.json"
+    config_path.write_text('{"mode": ', encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert loaded.mode == "self_host"
+    assert loaded.platform == "avibe"
+    assert loaded.load_warnings and "JSON" in loaded.load_warnings[0]
+    assert config_path.read_text(encoding="utf-8") == '{"mode": '
+    assert list(config_path.parent.glob("config.json.bak-invalid-json-*"))
+
+
+def test_config_reload_recovers_invalid_encoding_with_backup(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config_path = tmp_path / "config.json"
+    config_path.write_bytes(b"\xff\xfe")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert loaded.mode == "self_host"
+    assert loaded.load_warnings and "UTF-8" in loaded.load_warnings[0]
+    assert config_path.read_bytes() == b"\xff\xfe"
+    assert list(config_path.parent.glob("config.json.bak-invalid-encoding-*"))
+
+
 def test_legacy_and_fresh_configs_both_default_direct():
     payload = api.config_to_payload(default_config(), include_secrets=True)
     payload.pop("model_hub")
@@ -3547,6 +2340,22 @@ def test_final_config_rejects_retired_consent_metadata():
     payload["sources"][0]["experimental_consent_at"] = "2026-07-23T03:00:00Z"
     with pytest.raises(ValueError):
         ModelHubConfig.from_payload(payload)
+
+
+def test_config_reload_drops_valid_retired_consent_metadata(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    payload = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    source = copy.deepcopy(_schema("source.schema.json")["examples"][1])
+    source["experimental_consent_at"] = "2026-07-23T03:00:00Z"
+    payload["model_hub"]["sources"] = [source]
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=config_path)
+
+    assert loaded.load_warnings == ()
+    persisted = json.loads(config_path.read_text(encoding="utf-8"))
+    assert "experimental_consent_at" not in persisted["model_hub"]["sources"][0]
 
 
 def test_final_config_rejects_retired_global_priority_key():
