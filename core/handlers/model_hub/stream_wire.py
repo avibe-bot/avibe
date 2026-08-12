@@ -48,17 +48,17 @@ class SSEFrameTokenizer:
                     raise SSEFrameLimitError("SSE frame exceeds the configured limit")
         return tuple(frames)
 
-    def take_partial_frame(self) -> bytes | None:
+    def discard_partial_frame(self) -> bool | None:
+        """Discard an unterminated frame and report whether its line is open."""
+
         if not self._line and not self._frame_lines:
             return None
-        lines = [*self._frame_lines]
-        if self._line:
-            lines.append(bytes(self._line))
+        line_open = bool(self._line)
         self._line.clear()
         self._frame_lines.clear()
         self._frame_size = 0
         self._after_cr = False
-        return b"\n".join(lines)
+        return line_open
 
     def _finish_line(self, frames: list[bytes]) -> None:
         line = bytes(self._line)
@@ -179,12 +179,14 @@ class ProtocolSSEState:
         for frame in self.tokenizer.feed(chunk):
             self._observe_frame(frame)
 
-    def close_partial_frame(self) -> bytes:
-        frame = self.tokenizer.take_partial_frame()
-        if frame is None:
+    def invalidate_partial_frame(self) -> bytes:
+        """Make an already-forwarded partial frame non-terminal, then close it."""
+
+        line_open = self.tokenizer.discard_partial_frame()
+        if line_open is None:
             return b""
-        self._observe_frame(frame)
-        return b"\n\n"
+        line_break = b"\n" if line_open else b""
+        return line_break + b"data: {}\n\n"
 
     @property
     def next_sequence_number(self) -> int:

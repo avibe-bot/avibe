@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -56,6 +57,14 @@ from core.handlers.model_hub.service import (
 )
 
 
+E64_SETTLEMENT_BOUNDARIES = json.loads(
+    (
+        Path(__file__).parent
+        / "fixtures/model_hub/e64_settlement_boundaries.json"
+    ).read_text(encoding="utf-8")
+)
+
+
 class MemoryStore:
     def __init__(self, config: ModelHubConfig):
         self.config = config
@@ -97,6 +106,32 @@ def test_source_settlement_authority_is_transitive() -> None:
                     existing_status, middle_reason
                 ) and source_settlement_allowed(middle_status, final_reason):
                     assert source_settlement_allowed(existing_status, final_reason)
+
+
+@pytest.mark.parametrize(
+    "fixture",
+    E64_SETTLEMENT_BOUNDARIES["stream_errors"],
+    ids=lambda fixture: fixture["code"],
+)
+def test_streamed_native_transient_errors_keep_their_settlement_class(
+    fixture: dict[str, object],
+) -> None:
+    decision = classify_outcome(
+        RawCallOutcome(
+            kind=RawOutcomeKind.HTTP_ERROR,
+            http_status=200,
+            error_code=str(fixture["code"]),
+            redacted_message=None,
+            stream_started=True,
+            model_id="upstream-model",
+            source_id="src_streamerr01",
+        )
+    )
+
+    assert decision.action == "surface"
+    assert decision.reason == fixture["reason"]
+    assert decision.cooldown_seconds == fixture["cooldown_seconds"]
+    assert decision.error_code == "stream_interrupted"
 
 
 class FakeInvokeHandle:

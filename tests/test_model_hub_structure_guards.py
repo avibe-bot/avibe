@@ -38,6 +38,9 @@ TERMINAL_SETTLEMENT_FIXTURES = json.loads(
 RELEASED_V5_PERMISSION_DENIED = json.loads(
     (FIXTURES / "released_v5_permission_denied.json").read_text(encoding="utf-8")
 )
+E64_SETTLEMENT_BOUNDARIES = json.loads(
+    (FIXTURES / "e64_settlement_boundaries.json").read_text(encoding="utf-8")
+)
 
 # Owner rulings 19:50-00:06: guard expectations must never derive from guarded code.
 # Wire sources:
@@ -331,6 +334,51 @@ def test_complete_frame_after_terminal_is_always_invalid() -> None:
         state.observe(b'data: {"type":"response.completed"}\n\n')
         state.observe(frame)
         assert state.invalid_after_terminal is True
+
+
+@pytest.mark.parametrize(
+    "fixture",
+    E64_SETTLEMENT_BOUNDARIES["partial_terminals"],
+    ids=lambda fixture: fixture["protocol"] + ":" + str(fixture["payload"]),
+)
+def test_partial_terminal_cannot_be_completed_before_local_error(
+    fixture: dict[str, object],
+) -> None:
+    protocol = str(fixture["protocol"])
+    payload = fixture["payload"]
+    encoded = (
+        payload.encode("utf-8")
+        if isinstance(payload, str)
+        else json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    )
+    forwarded = b"data: " + encoded
+    tracker = ProtocolSSEState(protocol)
+    tracker.observe(forwarded)
+    prefix = tracker.invalidate_partial_frame()
+    downstream = ProtocolSSEState(protocol)
+    downstream.observe(forwarded + prefix)
+    assert downstream.terminal_outcome is None
+
+    rendered = PROTOCOL_STREAM_TAXONOMY[protocol].render_terminal_event(
+        "modelHub.launch.retry",
+        "Retry directly.",
+        downstream.next_sequence_number,
+    )
+    downstream.observe(
+        b"event: error\ndata: "
+        + json.dumps(rendered, separators=(",", ":")).encode("utf-8")
+        + b"\n\n"
+    )
+    assert downstream.terminal_outcome == "failed_terminal"
+
+
+def test_e64_settlement_boundary_fixture_covers_every_reviewed_authority() -> None:
+    assert set(E64_SETTLEMENT_BOUNDARIES) - {"source"} == {
+        "partial_terminals",
+        "stream_errors",
+        "concurrent_cooldown",
+        "stopped_after_terminal",
+    }
 
 
 def test_stream_boundary_catalog_exercises_every_enumerated_dimension() -> None:

@@ -3917,10 +3917,17 @@ class ModelHubService:
                 decision.reason,
             ):
                 return
+            retry_at = self.now() + timedelta(seconds=decision.cooldown_seconds)
+            if (
+                current.state.status == "cooldown"
+                and current.state.retry_at is not None
+                and _parse_datetime(current.state.retry_at) >= retry_at
+            ):
+                return
             already_cooling = current.state.status == "cooldown"
             current.state = ModelHubSourceStateConfig(
                 status="cooldown",
-                retry_at=(self.now() + timedelta(seconds=decision.cooldown_seconds)).isoformat(),
+                retry_at=retry_at.isoformat(),
                 detail_key=detail_key or f"models.source.cooldown.{decision.reason}",
             )
             persisted = self._save_runtime_config(config)

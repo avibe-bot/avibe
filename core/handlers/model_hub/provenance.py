@@ -1275,7 +1275,12 @@ class TurnCorrelationRegistry:
             canceled_attempt = None
             supply_state = None
             terminal_history_committed = (
-                trace.terminal_outcome is not None and trace.terminal_outcome.outcome != "canceled"
+                (
+                    trace.terminal_outcome is not None
+                    and trace.terminal_outcome.outcome != "canceled"
+                )
+                or trace.terminal_error is not None
+                or trace.served is not None
             )
             if settled_by == SETTLED_BY_STOPPED and not terminal_history_committed:
                 outcome = "canceled"

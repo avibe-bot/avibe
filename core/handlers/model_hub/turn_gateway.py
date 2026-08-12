@@ -616,7 +616,7 @@ class ModelHubTurnGateway:
         message = render_turn_outcome_copy(turn_outcome, self._language_provider() or "en")
         if copy is None or message is None:
             return
-        frame_prefix = wire_state.close_partial_frame()
+        frame_prefix = wire_state.invalidate_partial_frame()
         payload = json.dumps(
             render_protocol_terminal_event(
                 protocol,

@@ -93,16 +93,22 @@ class _MachineErrorRule:
 
     specificity: int
     action: ResolutionAction | None
+    reason: ResolutionReason | None
     error_code: str | None
+    cooldown_seconds: int
     downstream_status: int | None
 
 
 # This table is the sole owner of machine-code specificity and projection.
 _MACHINE_ERROR_TAXONOMY: Mapping[str, _MachineErrorRule] = {
-    "permission_error": _MachineErrorRule(100, "surface", "request_incompatible", 403),
-    "engine_down": _MachineErrorRule(100, "surface", "engine_down", 502),
-    "request_too_large": _MachineErrorRule(80, "surface", "upstream_request_invalid", 400),
-    "api_error": _MachineErrorRule(0, None, None, None),
+    "permission_error": _MachineErrorRule(100, "surface", None, "request_incompatible", 0, 403),
+    "engine_down": _MachineErrorRule(100, "surface", None, "engine_down", 0, 502),
+    "request_too_large": _MachineErrorRule(80, "surface", None, "upstream_request_invalid", 0, 400),
+    "rate_limit_error": _MachineErrorRule(80, "fallback", "rate_limited", None, 60, None),
+    "rate_limit_exceeded": _MachineErrorRule(80, "fallback", "rate_limited", None, 60, None),
+    "overloaded_error": _MachineErrorRule(80, "fallback", "server_error", None, 30, None),
+    "server_error": _MachineErrorRule(80, "fallback", "server_error", None, 30, None),
+    "api_error": _MachineErrorRule(0, None, None, None, 0, None),
 }
 _QUOTA_PATTERNS = re.compile(
     r"(?:quota[_ -]?(?:exhausted|exceeded)|insufficient[_ -]?(?:quota|credits)|"
@@ -192,7 +198,9 @@ def _classify_unstreamed(
         if machine_row.action is not None:
             return ResolutionDecision(
                 machine_row.action,
+                reason=machine_row.reason,
                 error_code=machine_row.error_code,
+                cooldown_seconds=machine_row.cooldown_seconds,
                 downstream_status=machine_row.downstream_status,
             )
 

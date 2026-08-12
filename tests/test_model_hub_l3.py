@@ -34,7 +34,7 @@ from core.handlers.model_hub.adapter import (
     RawOutcomeKind,
     SOURCE_PROTOCOLS,
 )
-from core.handlers.model_hub.classification import classify_outcome
+from core.handlers.model_hub.classification import ResolutionDecision, classify_outcome
 from core.handlers.model_hub.events import (
     BoundedEventLog,
     EVENT_REASON_AUTHORITY,
@@ -103,6 +103,9 @@ TERMINAL_SETTLEMENT_BOUNDARIES = json.loads(
 )["cases"]
 RELEASED_V5_PERMISSION_DENIED = json.loads(
     (MODEL_HUB_FIXTURES / "released_v5_permission_denied.json").read_text(encoding="utf-8")
+)
+E64_SETTLEMENT_BOUNDARIES = json.loads(
+    (MODEL_HUB_FIXTURES / "e64_settlement_boundaries.json").read_text(encoding="utf-8")
 )
 NOW = datetime(2026, 7, 29, 12, 0, tzinfo=timezone.utc)
 
@@ -240,21 +243,21 @@ def test_terminal_event_renderer_uses_native_protocol_shape(
         assert isinstance(event["choices"], list)
 
 
-def test_responses_terminal_event_continues_sequence_and_closes_partial_frame() -> None:
+def test_responses_terminal_event_discards_partial_sequence_before_injection() -> None:
     wire = _SSEWireState("openai_responses")
     wire.observe(b'data: {"type":"response.output_text.delta","sequence_number":7}\n\n')
     wire.observe(b'data: {"type":"response.output_text.delta","sequence_number":8}')
 
     assert wire.next_sequence_number == 8
-    assert wire.close_partial_frame() == b"\n\n"
-    assert wire.next_sequence_number == 9
+    assert wire.invalidate_partial_frame() == b"\ndata: {}\n\n"
+    assert wire.next_sequence_number == 8
     event = render_protocol_terminal_event(
         "openai_responses",
         "modelHub.launch.retry",
         "Retry directly.",
         next_sequence_number=wire.next_sequence_number,
     )
-    assert event["sequence_number"] == 9
+    assert event["sequence_number"] == 8
 
 
 def test_responses_terminal_event_continues_sequence_on_cr_only_frames() -> None:
@@ -264,7 +267,7 @@ def test_responses_terminal_event_continues_sequence_on_cr_only_frames() -> None
         b'data: {"type":"response.output_text.delta","sequence_number":8}\r\r'
     )
 
-    assert wire.close_partial_frame() == b""
+    assert wire.invalidate_partial_frame() == b""
     assert wire.next_sequence_number == 9
     event = render_protocol_terminal_event(
         "openai_responses",
@@ -1267,6 +1270,35 @@ def test_stopped_settlement_cannot_erase_committed_served_history(
     _assert_valid("turn-provenance.schema.json", record)
 
 
+def test_stopped_settlement_cannot_erase_committed_protocol_failure(
+    tmp_path: Path,
+) -> None:
+    fixture = E64_SETTLEMENT_BOUNDARIES["stopped_after_terminal"]
+    store = BoundedProvenanceStore(tmp_path / "stop-after-protocol.json")
+    registry = TurnCorrelationRegistry(store)
+    turn_id = "turn_stop_after_protocol"
+    exact_turn = _begin_hub_attempt(registry, turn_id=turn_id)
+    failure = _outcome(RawOutcomeKind.PROTOCOL_ERROR, stream_started=True)
+    registry.finish_attempt(
+        exact_turn,
+        outcome=failure,
+        decision=classify_outcome(failure),
+    )
+
+    registry.settle(
+        turn_id,
+        settled_by=SETTLED_BY_STOPPED,
+        ts=NOW.isoformat(),
+    )
+
+    record = store.get(turn_id)
+    assert record is not None
+    assert record["outcome"] == fixture["expected_outcome"]
+    assert record["terminal_error"]["reason"] == fixture["terminal_reason"]
+    assert record["canceled_attempt"] is None
+    _assert_valid("turn-provenance.schema.json", record)
+
+
 def test_released_v5_permission_denied_records_degrade_at_read_boundary(
     tmp_path: Path,
 ) -> None:
@@ -2038,8 +2070,10 @@ def test_gateway_live_settlement_emits_matrix_copy_before_eof(
             b"data: partial",
         ]
         terminal = response.writes[-1]
-        assert terminal.startswith(b"\n\nevent: error\ndata: ")
-        payload = json.loads(terminal.removeprefix(b"\n\nevent: error\ndata: "))
+        assert terminal.startswith(b"\ndata: {}\n\nevent: error\ndata: ")
+        payload = json.loads(
+            terminal.removeprefix(b"\ndata: {}\n\nevent: error\ndata: ")
+        )
         assert payload["sequence_number"] == 8
         assert payload["code"] == "modelHub.launch.retry"
         assert response.eof_called
@@ -5293,6 +5327,40 @@ def test_shared_source_cooldown_emits_only_on_state_transition(
     assert len(events) == 1
     assert events[0]["kind"] == "cooldown"
     assert events[0]["agent"] == "claude"
+
+
+def test_late_shorter_cooldown_keeps_the_longest_concurrent_deadline(
+    tmp_path: Path,
+) -> None:
+    fixture = E64_SETTLEMENT_BOUNDARIES["concurrent_cooldown"]
+    source = _source("src_cooldownmax01", "Shared source")
+    service = _service(tmp_path, sources=[source])
+    menu_models = _canonicalize_fixed_test_routes(service)
+
+    async def cool_in_completion_order() -> None:
+        for backend, seconds, reason in (
+            ("claude", fixture["first_seconds"], "quota_exhausted"),
+            ("codex", fixture["late_seconds"], "network"),
+        ):
+            await service._cooldown(
+                source,
+                ResolutionDecision(
+                    "fallback",
+                    reason=reason,
+                    cooldown_seconds=seconds,
+                ),
+                agent=backend,
+                model_id=menu_models[backend],
+            )
+
+    asyncio.run(cool_in_completion_order())
+
+    persisted = service.store.load().sources[0]
+    assert persisted.state.status == "cooldown"
+    assert persisted.state.retry_at == (
+        NOW + timedelta(seconds=fixture["expected_seconds"])
+    ).isoformat()
+    assert persisted.state.detail_key == "models.source.cooldown.quota_exhausted"
 
 
 def test_late_transient_settlement_preserves_needs_action_state(
