@@ -241,6 +241,7 @@
       }
     },
     "sessionArchived": "This session is archived and can no longer be changed.",
+    "sessionArchiveUnavailable": "This session cannot be archived while the Avibe controller is unavailable. Please try again shortly.",
     "workbenchAttachment": {
       "session_not_found": "This session is no longer available.",
       "file_required": "Choose a file to upload.",
@@ -286,6 +287,7 @@
     "channelNotEnabled": "This channel is not enabled. Please go to the control panel to enable it.",
     "unknownCommand": "Unknown command: `/{command}`\n\nPlease use `@avibe /start` to access all bot features.",
     "clearSession": "Error clearing session: {error}",
+    "memorySessionLifecycleBusy": "Memory is still processing this session. Please try /new again.",
     "settingsFailed": "Failed to open settings. Please try again.",
     "cwdChangeFailed": "Failed to open directory change dialog. Please try again.",
     "resumeFailed": "Failed to open resume dialog. Please try again.",
@@ -669,9 +671,54 @@
   },
   "memory": {
     "cli": {
+      "help": {
+        "command": "Use local Memory through the running controller",
+        "status": "Show Memory status",
+        "profile": "Show the Memory profile",
+        "search": "Search local Memory",
+        "remember": "Queue durable personal context",
+        "query": "Search query",
+        "limit": "Maximum results (1-20)",
+        "text": "Text to remember (maximum 4,000 characters)",
+        "json": "Print machine-readable output"
+      },
       "error": "Memory {operation} failed: {code}",
-      "status": "Memory status: {state}",
-      "counts": "Syncing: {syncing}; succeeded: {succeeded}; result unknown: {unknown}; failed: {failed}; dead: {dead}; missed: {missed}",
+      "status": "Memory source: {state}",
+      "provider": "EverOS {version}: {state}",
+      "sourceReason": "Source reason: {reason}",
+      "sourceState": {
+        "available": "available",
+        "stale": "stale",
+        "unavailable": "unavailable",
+        "unknown": "unknown"
+      },
+      "providerState": {
+        "ok": "healthy",
+        "unknown": "unknown"
+      },
+      "unknownVersion": "unknown version",
+      "reason": {
+        "memoryDisabled": "Memory is disabled",
+        "invalidInput": "invalid Memory input",
+        "accessDenied": "Memory access denied",
+        "inputTooLarge": "Memory input is too large",
+        "queueFull": "Memory queue is full",
+        "lowDiskSpace": "low disk space",
+        "storeUnavailable": "Memory store unavailable",
+        "runtimeMissing": "Memory runtime missing",
+        "runtimeUnsupported": "Memory runtime unsupported",
+        "runtimeInstallFailed": "Memory runtime installation failed",
+        "reconcileFailed": "Memory reconciliation failed",
+        "restartFailed": "Memory restart failed",
+        "sidecarUnavailable": "Memory sidecar unavailable",
+        "providerTimeout": "Memory provider timed out",
+        "providerResponseInvalid": "invalid Memory provider response",
+        "capabilityUnavailable": "Memory capability unavailable",
+        "processingFailed": "Memory processing failed",
+        "clearFailed": "Memory clear failed",
+        "factoryResetFailed": "Memory initialization failed",
+        "unknown": "unknown reason"
+      },
       "fault": {
         "credential": "The Memory engine cannot call the configured model endpoint. Check API key balance and permissions.",
         "engine": "The Memory engine reported an internal error. Try repairing the Memory runtime."

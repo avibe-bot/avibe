@@ -13,7 +13,7 @@ from scripts import memory_runtime_release_guard as guard
 from scripts.build_memory_runtime import LOCK_SHA256 as RUNTIME_LOCK_SHA256
 
 
-def test_guard_platform_contract_excludes_darwin_x64() -> None:
+def test_guard_platform_contract_keeps_no_follow_capable_shipped_targets_enabled() -> None:
     assert guard.EXPECTED_PLATFORMS == frozenset({"darwin-arm64", "linux-arm64", "linux-x64"})
 
 
@@ -35,7 +35,12 @@ def _archive(binary: bytes) -> bytes:
     return output.getvalue()
 
 
-def _manifest(tmp_path: Path) -> tuple[Path, dict[str, bytes]]:
+def _manifest(
+    tmp_path: Path,
+    *,
+    everos_version: str = "1.2.3",
+    lock_sha256: str = guard.EXPECTED_LOCK_SHA256,
+) -> tuple[Path, dict[str, bytes]]:
     tag = "v3.1.0"
     base_url = f"{guard.RELEASE_DOWNLOAD_ROOT}/{tag}"
     archives: dict[str, dict[str, object]] = {}
@@ -43,7 +48,7 @@ def _manifest(tmp_path: Path) -> tuple[Path, dict[str, bytes]]:
     for platform in sorted(guard.EXPECTED_PLATFORMS):
         binary = f"python-{platform}".encode()
         archive = _archive(binary)
-        name = f"memory-runtime-1.2.1-{platform}.tar.gz"
+        name = f"memory-runtime-{everos_version}-{platform}.tar.gz"
         url = f"{base_url}/{name}"
         archives[platform] = {
             "name": name,
@@ -56,10 +61,10 @@ def _manifest(tmp_path: Path) -> tuple[Path, dict[str, bytes]]:
         remote[url] = archive
     payload = {
         "schema_version": 1,
-        "everos_version": "1.2.1",
+        "everos_version": everos_version,
         "python_version": guard.EXPECTED_PYTHON_VERSION,
-        "lock_sha256": guard.EXPECTED_LOCK_SHA256,
-        "lock_id": f"uv-lock-sha256:{guard.EXPECTED_LOCK_SHA256}",
+        "lock_sha256": lock_sha256,
+        "lock_id": f"uv-lock-sha256:{lock_sha256}",
         "uv_version": guard.EXPECTED_UV_VERSION,
         "release_state": "published",
         "release_tag": tag,
@@ -70,6 +75,22 @@ def _manifest(tmp_path: Path) -> tuple[Path, dict[str, bytes]]:
     manifest.write_bytes(manifest_bytes)
     remote[f"{base_url}/memory-runtime-manifest.json"] = manifest_bytes
     return manifest, remote
+
+
+def test_guard_accepts_previous_published_runtime_provenance(tmp_path: Path) -> None:
+    previous = guard.PUBLISHED_RUNTIME_PROVENANCE["1.2.1"]
+    manifest, _ = _manifest(tmp_path, everos_version="1.2.1", lock_sha256=previous.lock_sha256)
+
+    spec = guard.load_release_spec(manifest)
+
+    assert spec.release_tag == "v3.1.0"
+
+
+def test_guard_rejects_unknown_runtime_provenance(tmp_path: Path) -> None:
+    manifest, _ = _manifest(tmp_path, everos_version="1.2.2")
+
+    with pytest.raises(guard.ReleaseGuardError, match="published supported EverOS version"):
+        guard.load_release_spec(manifest)
 
 
 def _fake_download(remote: dict[str, bytes]):

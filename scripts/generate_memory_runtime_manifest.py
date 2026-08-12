@@ -8,9 +8,9 @@ import tarfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 
-EVEROS_VERSION = "1.2.1"
+EVEROS_VERSION = "1.2.3"
 PYTHON_VERSION = "3.12.12"
-LOCK_SHA256 = "e7b59ee874e5cb2bfcbcb87cbd1e9c2d6ca2df752cd8a1059ddd3badb8c0246f"
+LOCK_SHA256 = "e6acc17e4c0969563d380326e90134965af0822259bb4a9adb4d54433e9737fe"
 UV_VERSION = "0.9.18"
 ARCHIVE_PREFIX = f"memory-runtime-{EVEROS_VERSION}-"
 ARCHIVE_SUFFIX = ".tar.gz"
@@ -21,6 +21,10 @@ EXPECTED_PLATFORMS = {
     "linux-arm64",
     "linux-x64",
 }
+SYNC_BOOTSTRAP_REVISION = 1
+SYNC_ARGV = ["-I", "-m", "everos.entrypoints.cli.main", "cascade", "sync"]
+SYNC_BOOTSTRAP_MEMBER = "lib/python3.12/site-packages/avibe_memory_sync_bootstrap.py"
+SYNC_SCRUBBERS_MEMBER = "lib/python3.12/site-packages/avibe_memory_sync_scrubbers.py"
 
 
 def _sha256(path: Path) -> str:
@@ -67,6 +71,30 @@ def _binary_sha256(archive: Path) -> str:
         return digest.hexdigest()
 
 
+def _archive_member_sha256(package: tarfile.TarFile, name: str) -> str | None:
+    try:
+        member = package.getmember(name)
+    except KeyError:
+        return None
+    if not member.isfile():
+        raise SystemExit(f"Memory Runtime sync member is not a regular file: {name}")
+    stream = package.extractfile(member)
+    if stream is None:
+        raise SystemExit(f"Memory Runtime sync member cannot be read: {name}")
+    digest = hashlib.sha256()
+    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+        digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _sync_digests(archive: Path) -> tuple[str | None, str | None]:
+    with tarfile.open(archive, "r:gz") as package:
+        return (
+            _archive_member_sha256(package, SYNC_BOOTSTRAP_MEMBER),
+            _archive_member_sha256(package, SYNC_SCRUBBERS_MEMBER),
+        )
+
+
 def build_manifest(*, archive_dir: Path, tag: str, repo: str, output: Path) -> dict:
     tag = tag.strip()
     repo = repo.strip().strip("/")
@@ -86,6 +114,9 @@ def build_manifest(*, archive_dir: Path, tag: str, repo: str, output: Path) -> d
             raise SystemExit(f"Missing or invalid Memory Runtime build metadata: {metadata_path.name}") from exc
         archive_sha256 = _sha256(archive)
         binary_sha256 = _binary_sha256(archive)
+        bootstrap_digest, scrubbers_digest = _sync_digests(archive)
+        if (bootstrap_digest is None) != (scrubbers_digest is None):
+            raise SystemExit(f"Memory Runtime sync contract is incomplete: {archive.name}")
         size = archive.stat().st_size
         expected_metadata = {
             "platform": platform,
@@ -99,7 +130,27 @@ def build_manifest(*, archive_dir: Path, tag: str, repo: str, output: Path) -> d
             "size": size,
             "bin_path": BIN_PATH,
         }
-        if metadata != expected_metadata:
+        metadata_for_compare = dict(metadata)
+        if bootstrap_digest is not None:
+            expected_metadata.update(
+                {
+                    "sync_bootstrap_revision": SYNC_BOOTSTRAP_REVISION,
+                    "sync_bootstrap_sha256": bootstrap_digest,
+                    "sync_scrubbers_sha256": scrubbers_digest,
+                    "sync_argv": SYNC_ARGV,
+                }
+            )
+            # The archive is authoritative for the executable contract. Build
+            # metadata is retained for provenance but cannot supply these digests.
+            metadata_for_compare.update(
+                {
+                    "sync_bootstrap_revision": SYNC_BOOTSTRAP_REVISION,
+                    "sync_bootstrap_sha256": bootstrap_digest,
+                    "sync_scrubbers_sha256": scrubbers_digest,
+                    "sync_argv": SYNC_ARGV,
+                }
+            )
+        if metadata_for_compare != expected_metadata:
             raise SystemExit(f"Memory Runtime build metadata mismatch: {metadata_path.name}")
         if size > MAX_ARCHIVE_BYTES:
             raise SystemExit(f"Memory Runtime archive exceeds the 1 GiB release limit: {archive.name}")
@@ -116,6 +167,19 @@ def build_manifest(*, archive_dir: Path, tag: str, repo: str, output: Path) -> d
     if missing:
         raise SystemExit("Missing Memory Runtime archives: " + ", ".join(missing))
 
+    archive_sync = {
+        _platform_from_archive(archive): _sync_digests(archive)
+        for archive in archive_dir.glob(f"{ARCHIVE_PREFIX}*{ARCHIVE_SUFFIX}")
+    }
+    sync_values = set(archive_sync.values())
+    if sync_values == {(None, None)}:
+        sync_contract = False
+    elif len(sync_values) != 1 or (None, None) in sync_values:
+        raise SystemExit("Memory Runtime sync contract differs across platform archives")
+    else:
+        sync_contract = True
+    bootstrap_values = {values[0] for values in sync_values}
+    scrubber_values = {values[1] for values in sync_values}
     manifest = {
         "schema_version": 1,
         "everos_version": EVEROS_VERSION,
@@ -131,6 +195,15 @@ def build_manifest(*, archive_dir: Path, tag: str, repo: str, output: Path) -> d
         "compatible_provider_root_formats": [],
         "archives": archives,
     }
+    if sync_contract:
+        manifest.update(
+            {
+                "sync_bootstrap_revision": SYNC_BOOTSTRAP_REVISION,
+                "sync_argv": SYNC_ARGV,
+                "sync_bootstrap_sha256": next(iter(bootstrap_values)),
+                "sync_scrubbers_sha256": next(iter(scrubber_values)),
+            }
+        )
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return manifest
