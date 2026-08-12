@@ -5,7 +5,7 @@
 // fix had been applied to the strings that were reported rather than to the class.
 // `model_hub.resolve()` returns a Direct launch only when the backend's own mode is
 // direct; past a switch to Hub an empty or blocked order raises
-// `mapping_target_unavailable` and the turn FAILS. So any copy telling a Hub user
+// `route_unconfigured` and the turn FAILS. So any copy telling a Hub user
 // that Direct will cover them is false, wherever it lives.
 //
 // The check is deliberately TOTAL rather than a list of known-bad keys: it walks
@@ -21,7 +21,7 @@ import { SUPPLY_WARNINGS } from './sufficiency';
 
 const BUNDLES = { zh, en } as const;
 
-const DIRECT = /直连|direct/i;
+const DIRECT = /直连|\bdirect\b/i;
 /** Verbs that turn a mention of Direct into a claim about falling back to it. */
 const FALLBACK = /回退|切回|退回|改用|回到|继续用|fall ?back|revert|switch(?:es|ed)? back|stays? on/i;
 
@@ -32,11 +32,12 @@ const FALLBACK = /回退|切回|退回|改用|回到|继续用|fall ?back|revert
  * and rewriting that sentence into a promise should re-trip the check.
  */
 const CLASSIFIED: Record<string, string> = {
-  'order.enabledEmpty': 'States the opposite — 「中枢不会替它回退到直连」 is the correction itself.',
+  'direct.note.perBackend': 'The user is choosing one backend at a time on the all-direct screen.',
+  'gateway.fail.switchToDirect': 'Reports a failed user-triggered switch; it does not promise an automatic fallback.',
+  'adopt.undo.1': 'Names the manual, user-triggered undo promised by the adoption dialog.',
+  'adopt.undo.2': 'Names the exact location of that manual undo control.',
   'migration.nonDestructive':
     'Describes a manual switch the user may make on the Backends page, not something the Hub does on their behalf.',
-  'consent.points.2':
-    'ToS advice: recommends the user choose Direct mode for subscriptions themselves. The subject is the user, not the Hub, and it is offered before enabling rather than after supply runs out.',
 };
 
 type Leaf = { key: string; text: string };
@@ -73,8 +74,8 @@ describe('Direct-fallback redline over settings.models copy', () => {
     // Guards the walk itself: a renamed namespace would otherwise make every
     // assertion below pass over an empty list.
     const all = leaves(BUNDLES[lng]);
-    expect(all.length).toBeGreaterThan(100);
-    expect(all.map((l) => l.key)).toContain('supply.interrupted');
+    expect(all.some((leaf) => DIRECT.test(leaf.text))).toBe(true);
+    expect(all.some((leaf) => FALLBACK.test(leaf.text))).toBe(true);
   });
 
   it.each(['zh', 'en'] as const)('classifies every Direct-fallback sentence in %s', (lng) => {
@@ -110,7 +111,7 @@ describe('Direct-fallback redline over settings.models copy', () => {
     expect(leaves(zh).map((l) => l.key).sort()).toEqual(leaves(en).map((l) => l.key).sort());
   });
 
-  it.each(['zh', 'en'] as const)('names the per-Agent source order in %s route copy', (lng) => {
+  it.each(['zh', 'en'] as const)('keeps Source order out of exact Route copy in %s', (lng) => {
     const routeCopy = leaves(BUNDLES[lng]).filter((leaf) => leaf.key.startsWith('routes.'));
     expect(routeCopy.map((leaf) => leaf.text).join('\n')).not.toMatch(/全局顺序|global (?:source )?order/i);
     for (const key of [
@@ -121,7 +122,7 @@ describe('Direct-fallback redline over settings.models copy', () => {
       'routes.orderDecidesSource',
       'routes.openMenuGlobal',
     ]) {
-      expect(lookup(BUNDLES[lng], key), `${key} does not name its backend in ${lng}`).toContain('{{backend}}');
+      expect(lookup(BUNDLES[lng], key), `${key} is retired in ${lng}`).toBeUndefined();
     }
   });
 });

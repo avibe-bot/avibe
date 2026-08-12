@@ -15,7 +15,6 @@ import en from '../../../i18n/en.json';
 import zh from '../../../i18n/zh.json';
 import {
   disprovedDrawnHead,
-  dryRunChainKey,
   dryRunOutcome,
   dryRunPlan,
   dryRunRowView,
@@ -33,7 +32,7 @@ import {
 } from './repair';
 import type { RepairOutcome } from './repair';
 import { PROBE_RESULT_CONTRACT_VERSION } from './types';
-import type { AgentSupply, ProbeResult, Source, SourceDetailKey, SourcePolicy, SupplyGap } from './types';
+import type { AgentSupply, ProbeResult, Source, SourceDetailKey, SupplyGap } from './types';
 
 /** A healthy hub api_key with a credential to replace — the base every case
  *  below narrows, so each test names only what it is actually about. */
@@ -66,7 +65,7 @@ const translated = (bundle: unknown, key: string): unknown =>
     return (node as Record<string, unknown>)[part];
   }, bundle);
 
-describe('repairAction — the one tap a stopped row offers (SourceRowMenu)', () => {
+describe('repairAction — the one tap a stopped source offers', () => {
   it('offers nothing to a source that is running', () => {
     // Not a disabled button: a healthy row has no problem, and an affordance for
     // a problem it does not have is noise the V6 row has no slot for.
@@ -161,21 +160,9 @@ describe('repairAction — the one tap a stopped row offers (SourceRowMenu)', ()
   });
 });
 
-describe('model-row repair routing', () => {
-  it('routes retest through the server recovery endpoint and refreshes the shared rows', () => {
-    const here = dirname(fileURLToPath(import.meta.url));
-    const card = readFileSync(join(here, 'AgentCard.tsx'), 'utf8');
-    const page = readFileSync(join(here, 'SettingsModelsPage.tsx'), 'utf8');
+const gap = (backend: SupplyGap['backend'], model_id: string): SupplyGap => ({ backend, model_id, agents: [] });
 
-    expect(card).toMatch(/repair\?\.kind === 'retest'[\s\S]*?onRetest\(repair\.source\)/);
-    expect(page).toMatch(/const refreshSource = async \(source: Source\)[\s\S]*?modelsApi\.refreshSource\(source\.id\)/);
-    expect(page).toMatch(/onRetest=\{\(source\) => void refreshSource\(source\)\}/);
-  });
-});
-
-const gap = (backend: SupplyGap['backend'], model_id: string): SupplyGap => ({ backend, model_id });
-
-describe('repairOutcome — 「did that fix it?」 (OAuthConnectDialog, ReplaceKeyDialog)', () => {
+describe('repairOutcome — 「did that fix it?」 (OAuthConnectDialog)', () => {
   it('reports a repair of a source that had been blocked', () => {
     expect(repairOutcome({ source: source(), recovered: true, interrupted_pairs: [] })).toEqual({ kind: 'repaired' });
   });
@@ -339,9 +326,10 @@ describe('the copy each remedy names', () => {
 
 const agent = (over: Partial<AgentSupply> = {}): AgentSupply => ({
   backend: 'claude',
+  cli_present: true,
   mode: 'hub',
   menu_kind: 'fixed',
-  sources: { policy: 'follow', order: ['src_a'] },
+  sources: { order: ['src_a'] },
   supply_status: 'ok',
   ...over,
 });
@@ -357,215 +345,10 @@ const probe = (over: Partial<ProbeResult> = {}): ProbeResult => ({
   source_id: 'src_a',
   model_id: 'claude-opus-4-6',
   latency_ms: 412,
-  via_mapping: false,
   error: null,
   ...over,
 });
 
-describe('dryRunChainKey — which edits make a 试跑 report stop being about anything', () => {
-  const base = agent({
-    selected_model_id: 'claude-opus-4-6',
-    // What the server sends beside a non-null id on a fixed-menu backend: the hub
-    // path echoes the stored request, so an id there always had a request behind it.
-    selected_model_explicit: true,
-    mappings: [{ builtin_id: 'claude-opus-4-6', target_model_id: 'glm-5.2', enabled: true }],
-    menu: { view: 'featured', checked: ['zhipuai/glm-5.2'] },
-  });
-  const key = (
-    over: Partial<AgentSupply> = {},
-    policy: SourcePolicy = 'follow',
-    order = ['src_a'],
-    sources: Source[] = [source({ id: 'src_a', models: [{ id: 'glm-5.2', provenance: 'discovered' }] })],
-  ) => dryRunChainKey({ ...base, ...over }, policy, order, sources);
-
-  it('moves for every surface the user selects the probed turn with', () => {
-    // The chain is not only its order: the probe takes no model, so the server
-    // resolves one from the same config the mapping drawer next door edits. Edit
-    // that and the sentence on screen is about a turn the button would no longer
-    // make.
-    const same = key();
-    expect(key()).toBe(same);
-    expect(key({}, 'custom')).not.toBe(same);
-    expect(key({}, 'follow', ['src_b', 'src_a'])).not.toBe(same);
-    expect(key({ selected_model_id: 'claude-sonnet-5' })).not.toBe(same);
-    expect(key({ mappings: [] })).not.toBe(same);
-    expect(key({ mappings: [{ builtin_id: 'claude-opus-4-6', target_model_id: 'glm-5.2', enabled: false }] })).not.toBe(
-      same,
-    );
-    expect(key({ menu: { view: 'featured', checked: [] } })).not.toBe(same);
-  });
-
-  it('keys on the selected model only while the user is the one who asked for it', () => {
-    // Round 15 escalated this gap and #1110 closed it. `selected_model_id` is the
-    // resolver's ECHO: on opencode with no explicit request the resolver walks
-    // `checked` and returns the first identifier whose source is runnable, so
-    // keying on it would let a failing probe cool the head, move the pick, and
-    // erase the very report the click produced. `selected_model_explicit` is the
-    // config fact behind that echo, so the member is present for an explicit pick
-    // on ANY backend and absent for a resolved one — no backend special case left.
-    const opencode = {
-      backend: 'opencode',
-      menu_kind: 'open',
-      menu: { view: 'featured', checked: ['zhipuai/glm-5.2', 'anthropic/claude-opus-4-6'] },
-    } as const;
-    const resolved = key({ ...opencode, selected_model_id: 'zhipuai/glm-5.2', selected_model_explicit: false });
-    // A pick the resolver made is not a surface the user selected with: which of
-    // the two runnable identifiers came back cannot move this key.
-    expect(
-      key({ ...opencode, selected_model_id: 'anthropic/claude-opus-4-6', selected_model_explicit: false }),
-    ).toBe(resolved);
-    // The same identifier, this time because the user asked for it — a different
-    // configuration, and now a different key.
-    const asked = key({ ...opencode, selected_model_id: 'zhipuai/glm-5.2', selected_model_explicit: true });
-    expect(asked).not.toBe(resolved);
-    // And an explicit opencode selection moves the key when it changes, which is
-    // exactly what the old backend exclusion dropped.
-    expect(key({ ...opencode, selected_model_id: 'zhipuai/glm-5.3', selected_model_explicit: true })).not.toBe(asked);
-  });
-
-  it('holds still for everything the server derives from those', () => {
-    // A failing 试跑 cools its own head down, moving the rollup and source health.
-    // Neither is a selection/config fact.
-    const same = key();
-    expect(key({ supply_status: 'interrupted' })).toBe(same);
-    expect(key({ supply_status: 'degraded' })).toBe(same);
-  });
-
-  it('moves for an inventory the user never touched from this page', () => {
-    // Round 18. Everything else in this key is a surface of THIS drawer, so the
-    // key was blind to the one chain change that arrives from outside it: a
-    // discovery, a key replacement or a re-auth in another client changes what a
-    // source supplies, eligibility runs over that inventory, and membership moves
-    // with every surface here identical. The two lists above only notice it by
-    // being pruned — and an agent with neither has nothing inventory-derived left.
-    const withGlm = [source({ id: 'src_a', models: [{ id: 'glm-5.2', provenance: 'discovered' }] })];
-    const same = key({}, 'follow', ['src_a'], withGlm);
-    expect(key({}, 'follow', ['src_a'], withGlm)).toBe(same);
-    // Discovered a second model: same policy, order, model, mappings and menu.
-    expect(
-      key({}, 'follow', ['src_a'], [
-        source({
-          id: 'src_a',
-          models: [
-            { id: 'glm-5.2', provenance: 'discovered' },
-            { id: 'glm-5.3', provenance: 'discovered' },
-          ],
-        }),
-      ]),
-    ).not.toBe(same);
-    // Stripped back to nothing — what a fail-closed re-auth leaves behind.
-    expect(key({}, 'follow', ['src_a'], [source({ id: 'src_a', models: [] })])).not.toBe(same);
-    // A source that `order` does not name still counts, because under `follow`
-    // order is a recommendation and eligibility is what puts a source in the chain.
-    expect(
-      key({}, 'follow', ['src_a'], [...withGlm, source({ id: 'src_b', models: [{ id: 'gpt-6', provenance: 'discovered' }] })]),
-    ).not.toBe(same);
-  });
-
-  it('holds still for a source whose health moved but whose inventory did not', () => {
-    // The reason the member above is safe to key on, and it is the same argument
-    // as the opencode exclusion read the other way: an inventory is not health.
-    // `_cooldown` and `_set_source_blocker` — the only two writers a failing 试跑
-    // reaches — assign `source.state` and nothing else. If this ever moved, the
-    // probe would erase its own answer.
-    const models = [{ id: 'glm-5.2', provenance: 'discovered' as const }];
-    const same = key({}, 'follow', ['src_a'], [source({ id: 'src_a', models })]);
-    expect(
-      key({}, 'follow', ['src_a'], [
-        source({ id: 'src_a', models, state: { status: 'cooldown', retry_at: '2026-07-30T13:00:00Z' } }),
-      ]),
-    ).toBe(same);
-    expect(
-      key({}, 'follow', ['src_a'], [
-        source({ id: 'src_a', models, state: { status: 'needs_action', detail_key: 'models.source.oauth_expired' } }),
-      ]),
-    ).toBe(same);
-    // Nor for the order the inventory happens to come back in.
-    expect(
-      key({}, 'follow', ['src_a'], [
-        source({
-          id: 'src_a',
-          models: [
-            { id: 'b', provenance: 'discovered' },
-            { id: 'a', provenance: 'discovered' },
-          ],
-        }),
-      ]),
-    ).toBe(
-      key({}, 'follow', ['src_a'], [
-        source({
-          id: 'src_a',
-          models: [
-            { id: 'a', provenance: 'discovered' },
-            { id: 'b', provenance: 'discovered' },
-          ],
-        }),
-      ]),
-    );
-  });
-
-  it('falls back to the opencode selection surface when the resolver made the pick', () => {
-    // The other half of the rule above: with the model member gone, what the user
-    // selects with on an open menu is the checked list itself, and that still moves
-    // the key. Otherwise excluding a resolved pick would leave opencode with no
-    // selection member at all.
-    const oc = { backend: 'opencode' as const, menu_kind: 'open' as const, selected_model_explicit: false };
-    expect(key({ ...oc, menu: { view: 'full', checked: ['openai/gpt-6'] } })).not.toBe(key(oc));
-  });
-
-  it('does not move for the order the mappings were written in', () => {
-    // `mappings` is a set the user edits by toggling; the API makes no ordering
-    // promise about it, and a re-read that returns the same overrides in another
-    // order would otherwise clear the report.
-    expect(
-      key({
-        mappings: [
-          { builtin_id: 'b', target_model_id: 'y', enabled: true },
-          { builtin_id: 'a', target_model_id: 'x', enabled: true },
-        ],
-      }),
-    ).toBe(
-      key({
-        mappings: [
-          { builtin_id: 'a', target_model_id: 'x', enabled: true },
-          { builtin_id: 'b', target_model_id: 'y', enabled: true },
-        ],
-      }),
-    );
-  });
-
-  it('moves for the order menu.checked was written in, because there order IS the pick', () => {
-    // Round 19, and this test used to assert the opposite — `checked` was
-    // canonicalized beside `mappings` as though both were sets. On opencode with
-    // no explicit request the resolver walks `checked` and takes the FIRST
-    // identifier whose source is runnable (`resolver.py:171-182`), so [A, B] and
-    // [B, A] are different turns — different model, possibly different source —
-    // with identical membership. `selected_model_id` is excluded there, so this
-    // list is the only thing in the key that can carry the difference. Nothing on
-    // this page writes `checked`, so a re-order arrives the way an inventory
-    // change does: from another client. `savedMenuKey` reads it in order too.
-    const oc = { backend: 'opencode' as const, menu_kind: 'open' as const };
-    expect(key({ ...oc, menu: { view: 'full', checked: ['a', 'b'] } })).not.toBe(
-      key({ ...oc, menu: { view: 'full', checked: ['b', 'a'] } }),
-    );
-    // The fixed-menu backends resolve through `selected_model_id`, so the order
-    // decides nothing for them — this member stays sensitive anyway rather than
-    // branching per backend. The whole cost is a still-true report cleared by an
-    // edit that did not matter, and the user answers that by re-running; the other
-    // direction is a sentence about a chain that moved. Only one is a wrong answer.
-    expect(key({ menu: { view: 'featured', checked: ['a', 'b'] } })).not.toBe(
-      key({ menu: { view: 'featured', checked: ['b', 'a'] } }),
-    );
-  });
-
-  it('keeps the parts apart', () => {
-    // A key is only as good as its separators: 「order a, model b」 and 「order a>b,
-    // no model」 are different chains and must not collide.
-    expect(key({ selected_model_id: 'src_b' }, 'follow', ['src_a'])).not.toBe(
-      key({ selected_model_id: '' }, 'follow', ['src_a', 'src_b']),
-    );
-  });
-});
 
 describe('dryRunOutcome — what the per-model probe came back with', () => {
   it('names the source the server actually started from', () => {
@@ -742,25 +525,13 @@ describe('probeArrival — an answer nobody wants can still be one the page owes
     );
   });
 
-  it('is how each model row reads its own probe, at both arrivals', () => {
-    // The regression this replaces was a `return` on the staleness guard ABOVE the
-    // refetch, so the shape matters as much as the rule: no early exit may sit
-    // between a probe arriving and the page being corrected.
-    const drawer = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'AgentCard.tsx'), 'utf8');
+  it('does not wire diagnostics into the model row or Frame 02', () => {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const row = readFileSync(join(here, 'AgentCard.tsx'), 'utf8');
+    const frame = readFileSync(join(here, 'RouteChainDialog.tsx'), 'utf8');
 
-    expect(drawer).not.toMatch(/if \(seq\.current !== mine\) return;/);
-    expect((drawer.match(/probeArrival\(/g) ?? []).length).toBe(2);
-    expect(drawer).toMatch(/if \(arrival\.reread\) onSettled\(\);/);
-    // And takes `serverNamed` from the error rather than inferring it from 「is it
-    // one of ours?」 — `bad_response` is one of ours and names nothing, so that
-    // inference skipped the reread in the one case it was added for.
-    expect(drawer).toMatch(/serverNamed: failure\?\.serverNamed \?\? false/);
-    expect(drawer).not.toMatch(/serverNamed: failure !== null/);
-    // The code rides along so the second reason can be asked at all.
-    expect(drawer).toMatch(/code: failure\?\.code \?\? null/);
-    // Invalidating the request generation invalidates its busy state too; an old
-    // finally block is no longer allowed to own the current button.
-    expect(drawer).toMatch(/seq\.current \+= 1;\s+setRunning\(false\);/);
+    expect(row).not.toMatch(/probeAgent|probeArrival/);
+    expect(frame).not.toMatch(/probeAgent|probeArrival|modelsApi/);
   });
 });
 
@@ -803,45 +574,10 @@ describe('mayHaveWritten — the same unknown, wherever it is caught', () => {
     expect(mayHaveWritten(null)).toBe(true);
   });
 
-  it('is what 更换 API Key re-reads on', () => {
-    // The write is atomic and re-discovers on commit, so a lost answer leaves the
-    // row showing the old key's state while 更换 would provision a second
-    // replacement. Reporting the error and re-reading the rows are not alternatives.
-    const dialog = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'ReplaceKeyDialog.tsx'), 'utf8');
-
-    expect(dialog).toMatch(/if \(mayHaveWritten\(failure\)\) onReplaced\(\);\n\s*setPhase\('error'\);/);
-    // The named refusal above it still returns before this, and still writes nothing.
-    expect(dialog).toMatch(/failure\?\.code === 'source_last_supplier' && !force/);
-  });
-
-  it('is one owner, not a predicate re-derived per caller', () => {
+  it('is one owner, not a predicate re-derived in a component', () => {
     const here = dirname(fileURLToPath(import.meta.url));
-    for (const file of ['ReplaceKeyDialog.tsx', 'SourceOrderDrawer.tsx', 'SourceRowMenu.tsx']) {
-      expect(readFileSync(join(here, file), 'utf8')).not.toMatch(/!\(?failure\?\.serverNamed/);
-    }
-  });
-
-  it('is not the question 删除 asks, so 删除 does not ask it', () => {
-    // Round 17's finding, and why it is answered without a gate rather than with
-    // this one. 更换 API Key asks 「did MY write land?」, because the cost of getting
-    // it wrong is provisioning a second replacement — `mayHaveWritten` is that
-    // question. A failed DELETE asks 「are the rows I am drawing still right?」, and
-    // the two come apart on both sides: a commit whose answer was lost is unknown
-    // AND stale, while `source_not_found` is server-NAMED, wrote nothing, and is
-    // news precisely because the row is already gone — the same shape
-    // `disprovedDrawnHead` above exists for. Gating on 「may it have written」 would
-    // leave that phantom row on screen until something else happened to refetch.
-    //
-    // So it re-reads either way, for the reason `releaseFlow` gives: a redundant
-    // re-read is inert, a missing one is the bug. The guarded refusal still leaves
-    // through the branch above this one, having provably written nothing.
-    const menu = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'SourceRowMenu.tsx'), 'utf8');
-
-    expect(menu).not.toMatch(/mayHaveWritten/);
-    expect(menu).toMatch(/onChanged\(\);\n\s*showToast\(t\('settings\.models\.sourceActions\.deleteFailed'/);
-    // Both delete outcomes now reach the page: the refusal escalates to a second
-    // confirm, everything else closes and re-reads.
-    expect(menu).toMatch(/failure\?\.code === 'source_last_supplier' && !forceMode/);
+    const components = readdirSync(here, { recursive: true, encoding: 'utf8' }).filter((file) => file.endsWith('.tsx'));
+    expect(components.filter((file) => /!\(?failure\?\.serverNamed/.test(readFileSync(join(here, file), 'utf8')))).toEqual([]);
   });
 });
 
@@ -911,7 +647,7 @@ describe('the class: no component decides a repair for itself', () => {
   it('sweeps a non-trivial file set', () => {
     // Without this the two rules below pass over an empty list after any move.
     expect(files.length).toBeGreaterThan(15);
-    expect(files).toContain('SourceRowMenu.tsx');
+    expect(files).toContain('SettingsModelsPage.tsx');
   });
 
   /**
@@ -962,8 +698,8 @@ describe('the class: no component decides a repair for itself', () => {
 
   /**
    * A hand-assembled 试跑 chain key. This is the class round 14 caught: the drawer
-   * built `${policy}|${order.join('>')}` inline, which is a complete statement of
-   * the chain only while nothing else selects the probed turn — and the model menu
+   * built a Source-order signature inline, which is a complete statement of the
+   * chain only while nothing else selects the probed turn — and the model menu
    * next door always did. Inline, the omission is invisible; behind
    * `dryRunChainKey` it is one function's business, and the test above says which
    * surfaces belong to it.
@@ -973,7 +709,7 @@ describe('the class: no component decides a repair for itself', () => {
   it('leaves the chain key to its owner', () => {
     const offenders = files.filter((f) => INLINE_CHAIN_KEY.test(read(f)));
     expect(offenders).toEqual([]);
-    expect(read('AgentCard.tsx')).toMatch(/modelsApi\.probeAgent\(agent\.backend, modelId\)/);
+    expect(read('AgentCard.tsx')).not.toMatch(/probeAgent|dryRunChainKey/);
     expect(read('SourceOrderDrawer.tsx')).not.toMatch(/probeAgent|dryRunChainKey/);
   });
 
@@ -989,12 +725,4 @@ describe('the class: no component decides a repair for itself', () => {
     expect(read(name)).not.toMatch(STORED_SENTENCE);
   });
 
-  it('keeps the dry-run failure as a reason, three states and all', () => {
-    const src = read('AgentCard.tsx');
-    // `{ key: null }` is not the same as `null`: 「it failed and nobody named why」
-    // has a sentence (the generic line), 「nothing ran yet」 has none.
-    expect(src).toMatch(/useState<\{ key: string \| null \} \| null>\(null\)/);
-    expect(src).toMatch(/setErrorReason\(\{ key: failure\?\.detail \?\? null \}\)/);
-    expect(src).toMatch(/serverText\(t, errorReason\.key, 'settings\.models\.probe\.error'\)/);
-  });
 });

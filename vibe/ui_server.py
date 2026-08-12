@@ -6805,7 +6805,7 @@ async def sessions_bootstrap(session_id: str):
         from storage import message_deliveries
 
         queued = message_deliveries.list_queued(conn, session_id)
-        draft = message_deliveries.get_draft(conn, session_id)
+        draft = message_deliveries.get_draft_state(conn, session_id)
 
     try:
         agents_payload = vibe_api.get_vibe_agents(include_disabled=False, include_archived=True)
@@ -6849,7 +6849,7 @@ async def sessions_bootstrap(session_id: str):
             "next_after_id": messages_result.get("next_after_id"),
             "next_before_id": messages_result.get("next_before_id"),
             "queued": queued,
-            "draft": {"text": (draft or {}).get("text") or ""},
+            "draft": _session_draft_payload(draft),
             "turn_state": turn_state,
         }
     )
@@ -8633,8 +8633,12 @@ async def sessions_messages_create(session_id: str):
             )
             if not quick_reply_for:
                 message_deliveries.set_draft(conn, session_id, None)
+            draft = message_deliveries.get_draft_state(conn, session_id)
             workbench_sessions_service.touch_session(conn, session_id)
-        return message_deliveries.delivery_payload(row)
+        result = message_deliveries.delivery_payload(row)
+        result["draft"] = _session_draft_payload(draft)
+        result["draft_advanced"] = not bool(quick_reply_for)
+        return result
 
     # Reserve the row FIRST (pending), then decide by the dispatch outcome.
     message = _persist_user_row()
@@ -8682,6 +8686,8 @@ async def sessions_messages_create(session_id: str):
         if current is None:
             return dict(message)
         payload = message_deliveries.delivery_payload(current)
+        payload["draft"] = message["draft"]
+        payload["draft_advanced"] = message["draft_advanced"]
         if current["state"] == "queued":
             payload["type"] = "queued"
             payload["queued"] = True
@@ -8764,7 +8770,14 @@ async def sessions_messages_create(session_id: str):
                         "dispatch_error": "dispatch_pending",
                     }
                 ), 502
-            return jsonify({**accepted, **body}), 201
+            return jsonify(
+                {
+                    **accepted,
+                    **body,
+                    "draft": message["draft"],
+                    "draft_advanced": message["draft_advanced"],
+                }
+            ), 201
         return jsonify({**current, **body}), 202
     current = _retire_unclaimed_delivery(f"internal_dispatch_rejected_{status}")
     return jsonify(
@@ -8919,6 +8932,13 @@ async def sessions_queue_send_now(session_id: str, message_id: str):
     return jsonify(body), status
 
 
+def _session_draft_payload(draft: dict | None) -> dict:
+    return {
+        "text": (draft or {}).get("text") or "",
+        "updated_at": (draft or {}).get("updated_at"),
+    }
+
+
 @app.route("/api/sessions/<session_id>/draft", methods=["GET"])
 def sessions_draft_get(session_id: str):
     """The session's saved unsent compose text (restored on open / device switch)."""
@@ -8926,8 +8946,8 @@ def sessions_draft_get(session_id: str):
 
     engine = _projects_engine()
     with engine.connect() as conn:
-        draft = message_deliveries.get_draft(conn, session_id)
-    return jsonify({"text": (draft or {}).get("text") or ""})
+        draft = message_deliveries.get_draft_state(conn, session_id)
+    return jsonify(_session_draft_payload(draft))
 
 
 @app.route("/api/sessions/<session_id>/draft", methods=["PUT"])
@@ -8935,26 +8955,50 @@ def sessions_draft_set(session_id: str):
     """Upsert the session's draft (debounced from the composer). Blank clears it."""
     from core.services import sessions as workbench_sessions_service
     from storage import message_deliveries
+    from storage.agent_session_rows import reserve_write_lock
 
     payload = request.json or {}
     text = payload.get("text")
+    expected_supplied = "expected_updated_at" in payload
+    expected_updated_at = payload.get("expected_updated_at")
+    if expected_supplied and expected_updated_at is not None and not isinstance(expected_updated_at, str):
+        return jsonify({"ok": False, "code": "invalid_expected_updated_at"}), 400
     engine = _projects_engine()
     try:
         with engine.begin() as conn:
+            # The version read and its update are one CAS decision. Reserving
+            # SQLite's writer slot before either read prevents a concurrent
+            # commit from turning this transaction's snapshot into BUSY_SNAPSHOT.
+            reserve_write_lock(conn)
             session = workbench_sessions_service.get_session(conn, session_id)
             # Archive is terminal: drop a late/debounced draft save (e.g. the
             # composer flushing as it unmounts right after archive) so it can't
             # recreate a draft on a session whose drafts were just reclaimed.
             if session.get("status") == "archived":
-                return jsonify({"ok": True})
+                current = message_deliveries.get_draft_state(conn, session_id)
+                return jsonify({"ok": True, "draft": _session_draft_payload(current)})
+            current = message_deliveries.get_draft_state(conn, session_id)
+            current_updated_at = (current or {}).get("updated_at")
+            if (
+                (not expected_supplied and current_updated_at is not None)
+                or (expected_supplied and current_updated_at != expected_updated_at)
+            ):
+                return jsonify(
+                    {
+                        "ok": False,
+                        "code": "draft_conflict",
+                        "draft": _session_draft_payload(current),
+                    }
+                ), 409
             message_deliveries.set_draft(
                 conn,
                 session_id,
                 text if isinstance(text, str) else None,
             )
+            saved = message_deliveries.get_draft_state(conn, session_id)
     except LookupError as err:
         return jsonify({"error": str(err)}), 404
-    return jsonify({"ok": True})
+    return jsonify({"ok": True, "draft": _session_draft_payload(saved)})
 
 
 @app.route("/api/events", methods=["GET"])
