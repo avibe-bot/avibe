@@ -947,14 +947,17 @@ class SessionTurnManager:
             )
             if candidates is not None:
                 stmt = (
-                    stmt.join(
+                    stmt.outerjoin(
                         session_turn_rows,
                         session_turn_rows.c.id == delivery_rows.c.turn_id,
                     )
                     .where(agent_runs.c.id.in_(candidates))
                     .where(
-                        session_turn_rows.c.state.in_(
-                            delivery_store.TURN_OWNER_STATES
+                        or_(
+                            delivery_rows.c.turn_id.is_(None),
+                            session_turn_rows.c.state.in_(
+                                delivery_store.TURN_OWNER_STATES
+                            ),
                         )
                     )
                 )

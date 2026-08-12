@@ -105,16 +105,34 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
         )
         calls = []
         event_loop_thread = threading.get_ident()
+        entered = threading.Event()
+        release = threading.Event()
 
         class _Store:
             def record_run_activity(self, run_ids):
                 calls.append((list(run_ids), threading.get_ident()))
+                entered.set()
+                release.wait(timeout=2)
 
         controller.scheduled_task_service = SimpleNamespace(request_store=_Store())
-        await dispatcher.emit_agent_message(context, "system", "working")
+        first_emit = asyncio.create_task(
+            dispatcher.emit_agent_message(context, "assistant", "working")
+        )
+        self.assertTrue(await asyncio.to_thread(entered.wait, 1))
+        await asyncio.wait_for(first_emit, timeout=0.5)
+        for index in range(3):
+            await asyncio.wait_for(
+                dispatcher.emit_agent_message(
+                    context, "assistant", f"working {index}"
+                ),
+                timeout=0.5,
+            )
+        release.set()
+        await dispatcher.drain_agent_run_activity()
 
         self.assertEqual(calls[0][0], ["run-live"])
         self.assertNotEqual(calls[0][1], event_loop_thread)
+        self.assertEqual([run_ids for run_ids, _thread_id in calls], [["run-live"]] * 2)
 
     async def test_detached_output_uses_explicit_run_lineage_over_receiver_context(self):
         controller = _StubController()

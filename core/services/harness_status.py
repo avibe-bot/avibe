@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Any, Iterable
 
 
-def _seconds_since(timestamp: object, now: datetime) -> float | None:
+def _parse_instant(timestamp: object) -> datetime | None:
     if not isinstance(timestamp, str) or not timestamp.strip():
         return None
     text = timestamp.strip()
@@ -19,7 +19,14 @@ def _seconds_since(timestamp: object, now: datetime) -> float | None:
         return None
     if observed.tzinfo is None:
         observed = observed.replace(tzinfo=timezone.utc)
-    return max(0.0, (now - observed.astimezone(timezone.utc)).total_seconds())
+    return observed.astimezone(timezone.utc)
+
+
+def _seconds_since(timestamp: object, now: datetime) -> float | None:
+    observed = _parse_instant(timestamp)
+    if observed is None:
+        return None
+    return max(0.0, (now - observed).total_seconds())
 
 
 def _canonical_workdir(value: object) -> str | None:
@@ -136,8 +143,8 @@ def build_harness_status(
     task_rows = [_project_task(dict(row)) for row in tasks]
     task_rows.sort(
         key=lambda row: (
-            row.get("next_run_at") is None,
-            str(row.get("next_run_at") or ""),
+            (instant := _parse_instant(row.get("next_run_at"))) is None,
+            instant or datetime.max.replace(tzinfo=timezone.utc),
             str(row.get("id") or ""),
         )
     )

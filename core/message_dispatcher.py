@@ -319,6 +319,12 @@ class ConsolidatedMessageDispatcher:
         # while a missing one defeats the feature.
         self._harness_prompt_echo_keys: set[str] = set()
         self._harness_prompt_echo_order: list[str] = []
+        # Run activity is best-effort liveness evidence, never part of an
+        # individual streamed event's delivery critical path.  One flush task
+        # coalesces repeated ids while a SQLite writer is busy; controller
+        # shutdown drains that exact task before stopping the shared executor.
+        self._pending_agent_run_activity_ids: set[str] = set()
+        self._agent_run_activity_flush_task: asyncio.Task[None] | None = None
         # Injectable monotonic-ish clock (wall time) so tests get deterministic
         # elapsed/stale values without sleeping.
         self._now = time.time
@@ -1562,12 +1568,12 @@ class ConsolidatedMessageDispatcher:
             if store is not None:
                 store.close()
 
-    async def _record_agent_run_activity(
+    def _schedule_agent_run_activity(
         self,
         context: MessageContext,
         output_semantics: MessageOutput,
     ) -> None:
-        """Persist one real non-terminal output as Run liveness evidence."""
+        """Coalesce one real non-terminal output into the liveness writer."""
 
         if not output_semantics.records_run_output or output_semantics.settles_run:
             return
@@ -1579,14 +1585,59 @@ class ConsolidatedMessageDispatcher:
         record_activity = getattr(runtime_store, "record_run_activity", None)
         if not callable(record_activity):
             return
-        try:
-            await asyncio.to_thread(record_activity, run_ids)
-        except Exception:
-            logger.warning(
-                "Failed to record Run activity for %s",
-                ",".join(run_ids),
-                exc_info=True,
+        self._pending_agent_run_activity_ids.update(run_ids)
+        task = self._agent_run_activity_flush_task
+        if task is None or task.done():
+            self._agent_run_activity_flush_task = asyncio.create_task(
+                self._flush_agent_run_activity(),
+                name="agent-run-activity-flush",
             )
+
+    async def _flush_agent_run_activity(self) -> None:
+        """Flush coalesced activity without delaying streamed delivery."""
+
+        try:
+            while self._pending_agent_run_activity_ids:
+                run_ids = tuple(sorted(self._pending_agent_run_activity_ids))
+                self._pending_agent_run_activity_ids.difference_update(run_ids)
+                scheduled_tasks = getattr(
+                    self.controller, "scheduled_task_service", None
+                )
+                runtime_store = getattr(scheduled_tasks, "request_store", None)
+                record_activity = getattr(runtime_store, "record_run_activity", None)
+                if not callable(record_activity):
+                    continue
+                try:
+                    supervisor = getattr(
+                        self.controller, "runtime_work_supervisor", None
+                    )
+                    run_sync = getattr(supervisor, "run_sync", None)
+                    if callable(run_sync):
+                        await run_sync(lambda: record_activity(run_ids))
+                    else:
+                        await asyncio.to_thread(record_activity, run_ids)
+                except Exception:
+                    logger.warning(
+                        "Failed to record Run activity for %s",
+                        ",".join(run_ids),
+                        exc_info=True,
+                    )
+        finally:
+            self._agent_run_activity_flush_task = None
+            if self._pending_agent_run_activity_ids:
+                self._agent_run_activity_flush_task = asyncio.create_task(
+                    self._flush_agent_run_activity(),
+                    name="agent-run-activity-flush",
+                )
+
+    async def drain_agent_run_activity(self) -> None:
+        """Join all activity writes admitted before controller shutdown."""
+
+        while True:
+            task = self._agent_run_activity_flush_task
+            if task is None:
+                return
+            await asyncio.shield(task)
 
     def _durable_accepted_agent_run_ids(self, context: MessageContext) -> list[str]:
         turn_id = str((context.platform_specific or {}).get("turn_token") or "").strip()
@@ -2094,7 +2145,7 @@ class ConsolidatedMessageDispatcher:
                 )
                 return None
         if current_runtime_turn or output_semantics.detached:
-            await self._record_agent_run_activity(context, output_semantics)
+            self._schedule_agent_run_activity(context, output_semantics)
         raw_text = text
         enhanced = None
         if visible_output_type and level != "silent":

@@ -447,6 +447,20 @@ def test_enabled_tasks_are_bounded_after_next_fire_ordering(tmp_path) -> None:
         store.close()
 
 
+def test_unified_view_sorts_task_fire_times_as_instants() -> None:
+    snapshot = build_harness_status(
+        runs=[],
+        watches=[],
+        tasks=[
+            {"id": "later", "next_run_at": "2026-08-12T08:00:00+00:00"},
+            {"id": "earlier", "next_run_at": "2026-08-12T09:00:00+02:00"},
+        ],
+        runtime_snapshot={"available": True, "ownership_available": True},
+    )
+
+    assert [task["id"] for task in snapshot["tasks"]] == ["earlier", "later"]
+
+
 def test_enabled_watches_prioritize_dead_waiters_before_limit(tmp_path) -> None:
     store = SQLiteBackgroundTaskStore(tmp_path / "state.sqlite")
     try:
