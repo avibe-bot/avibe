@@ -1999,12 +1999,12 @@ changed pairs. ET-17e alone owns the state edge when refreshed Hub authority inv
 new or changed row; this paragraph supplies the predicate, not a parallel destination.
 
 **按来源顺序重排 is a local sort of this draft, not the all-chain mutation** `[spec]`
-`[derived]` `[contract-gap]` pending `K4-source-order-clarification`. The pending
-contract clarification makes the sole-consumer rule govern server-side implicit application
-of stored Source order; an explicit per-model `hops` PUT carries no Source-order semantics,
-and a client editor may use order only as a local draft aid. Until that micro-round lands,
-this paragraph records the approved UI consumer against its pending anchor rather than
-narrowing the current contract prose locally. The control applies §4.6's stable total key to the current draft only: a hop whose
+`[derived]` `[contract]`. `model-hub.md` §4.2/§4.6 and `api.md` Per-backend source order
+make the sole-consumer rule govern server-side implicit application of stored Source order:
+the all-chain route is the only such post-creation operation. The per-model PUT accepts only
+explicit `hops`, its handler never reads `sources.order`, and the contract explicitly permits
+an editor to use its page-held Source-order projection as a local draft-sorting aid. The
+control applies §4.6's stable total key to the current draft only: a hop whose
 Source is in the backend's page-held current Source order sorts by `(0, source_order_index,
 original_index)`; an unlisted Source sorts by `(1, original_index, original_index)`.
 Membership, exact model mappings and within-Source relative order are preserved. The
@@ -2142,7 +2142,7 @@ cannot name the reducer/CA result for one row is incomplete.
 | RT-2 — M6 chain becomes Direct | AR-M has installed Hub Agents; its chain member returns `direct_mode` | AR-MD provisionally removes prior Route work, preserves independent successes and uses ET-18aM/ET-18aP to acquire landing Agents authority. Direct keeps Route not applicable; Hub acquires a new post-landing chain epoch |
 | RT-3 — Direct after Source success | Source settles successfully before either AR-D5 or AR-MD | Keep that Source installed/carried; disown only pending siblings. The landing Agents result, not the Direct error, selects the page form |
 | RT-4 — active Retry loses admission | Activate Retry in save reconciliation, mounted M6, transferred M6 or error-handoff page phases | CA synchronously moves focus to the destination phase's first FF-1-valid owner before disabling/inerting Retry; ET supplies no competing focus patch |
-| RT-5 — local Source-order draft sort | Activate frame-02 sort, then save its explicit pairs | Follow the pending K4 Source-order clarification: the local gesture may reorder the draft; the per-model PUT transmits only explicit `hops` and has no Source-order semantics; G-13 remains open for the all-chain producer |
+| RT-5 — local Source-order draft sort | Activate frame-02 sort, then save its explicit pairs | Follow `model-hub.md` §4.2/§4.6 and `api.md`'s negative fixture: the local gesture may reorder the draft; the per-model PUT transmits only explicit `hops`, its server path never reads `sources.order`, and G-13 remains open for the all-chain producer |
 
 ET-8a owns ordinary non-mutating exits. ET-8b alone handles Route save outcome unknown and
 hands the latest installed page projection to §1.1 Chain unresolved with the uncertain marker
