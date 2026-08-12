@@ -354,6 +354,39 @@ def test_remove_confined_path_refuses_to_follow_a_swapped_directory(
     assert victim.read_text(encoding="utf-8") == "outside must survive"
 
 
+def test_remove_confined_path_rejects_root_swap_before_directory_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+    target = home / "managed"
+    target.mkdir(mode=0o700)
+    held = home / "held-managed"
+
+    from core.memory import confined_filesystem
+
+    real_connect = confined_filesystem.sqlite3.connect
+    swapped = False
+
+    def swap_before_walk(*args, **kwargs):
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            target.rename(held)
+            target.mkdir(mode=0o700)
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(confined_filesystem.sqlite3, "connect", swap_before_walk)
+
+    with pytest.raises(ConfinedFilesystemError, match="changed during removal"):
+        remove_confined_path(home, target)
+
+    assert swapped
+    assert target.is_dir()
+    assert held.is_dir()
+
+
 def test_remove_confined_regular_file_does_not_initialize_directory_ordering(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -563,6 +596,83 @@ def test_confined_replace_and_cleanup_accept_owner_only_directory_modes(
     assert stat.S_IMODE(target.stat().st_mode) == 0o500
     remove_confined_path(home, target)
     assert not target.exists()
+
+
+@pytest.mark.parametrize("mode", (0o500, 0o755, 0o777))
+def test_remove_confined_path_hardens_owned_openable_directories(
+    tmp_path: Path,
+    mode: int,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+    target = home / "target"
+    target.mkdir(mode=0o700)
+    nested = target / "nested"
+    nested.mkdir(mode=0o700)
+    nested.chmod(mode)
+
+    remove_confined_path(home, target)
+
+    assert not target.exists()
+
+
+def test_remove_anchored_entry_rejects_foreign_owned_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+    target = home / "target"
+    target.mkdir(mode=0o700)
+    target.chmod(0o777)
+    descriptor = os.open(home, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    real_uid = os.getuid()
+
+    from core.memory import confined_filesystem
+
+    monkeypatch.setattr(confined_filesystem.os, "getuid", lambda: real_uid + 1)
+    try:
+        with pytest.raises(ConfinedFilesystemError):
+            remove_anchored_entry(descriptor, target.name)
+    finally:
+        os.close(descriptor)
+
+    assert target.is_dir()
+    assert stat.S_IMODE(target.stat().st_mode) == 0o777
+
+
+def test_remove_anchored_entry_rejects_cross_device_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+    target = home / "target"
+    target.mkdir(mode=0o700)
+    target.chmod(0o777)
+    descriptor = os.open(home, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+
+    from core.memory import confined_filesystem
+
+    real_stat = confined_filesystem.os.stat
+
+    def cross_device_stat(path, *args, **kwargs):
+        info = real_stat(path, *args, **kwargs)
+        if path == target.name and kwargs.get("dir_fd") == descriptor:
+            values = list(info)
+            values[2] = info.st_dev + 1
+            return os.stat_result(values)
+        return info
+
+    monkeypatch.setattr(confined_filesystem.os, "stat", cross_device_stat)
+    try:
+        with pytest.raises(ConfinedFilesystemError, match="filesystem boundary"):
+            remove_anchored_entry(descriptor, target.name)
+    finally:
+        os.close(descriptor)
+
+    assert target.is_dir()
+    assert stat.S_IMODE(target.stat().st_mode) == 0o777
 
 
 def test_private_sqlite_database_prepares_and_hardens_owned_files(tmp_path: Path) -> None:
