@@ -237,6 +237,7 @@ export const MemorySettingsPanel: React.FC<{
             http_status?: number | null;
             provider_error_code?: string | null;
           };
+          rebuild_required?: boolean;
         };
         setError(
           memoryErrorMessage(
@@ -255,7 +256,7 @@ export const MemorySettingsPanel: React.FC<{
         const validationFailure =
           failure.error === 'memory_embedding_unavailable' ||
           failure.error === 'memory_llm_unavailable';
-        if (!validationFailure) {
+        if (!validationFailure || failure.rebuild_required === true) {
           onReloadSettings();
           onReloadMaintenance();
         }

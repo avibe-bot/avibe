@@ -52,6 +52,8 @@ def test_preflight_recorder_creates_private_call_log_directory(tmp_path: Path) -
 
     record_preflight_call(
         db_path,
+        started_at_ms=1_700_000_000_000,
+        duration_ms=125,
         kind="embedding",
         model="embed",
         request={"model": "embed", "input": "OK"},
@@ -61,8 +63,10 @@ def test_preflight_recorder_creates_private_call_log_directory(tmp_path: Path) -
 
     assert stat.S_IMODE(db_path.parent.stat().st_mode) == 0o700
     with sqlite3.connect(db_path) as conn:
-        assert conn.execute("SELECT stage FROM provider_call").fetchall() == [
-            ("processing_preflight",)
+        assert conn.execute(
+            "SELECT started_at_ms, duration_ms, stage FROM provider_call"
+        ).fetchall() == [
+            (1_700_000_000_000, 125, "processing_preflight")
         ]
 
 

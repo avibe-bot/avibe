@@ -13,6 +13,7 @@ from concurrent.futures import TimeoutError as FutureTimeoutError
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -66,6 +67,7 @@ from core.memory.processing_record import (
     MemoryProcessingRecordPort,
     ProcessingRecordSummary,
     ProcessingSourceObservations,
+    ProviderCheckProjection,
     RuntimeHealthObservation,
     RuntimeHealthProjection,
     SourceObservation,
@@ -265,6 +267,10 @@ def _processing_record_payload(summary: ProcessingRecordSummary) -> dict[str, An
         },
         "anomalies": _anomaly_projection_payload(summary.anomalies),
         "maintenance": _maintenance_projection_payload(summary.maintenance),
+        "provider_checks": {
+            "source": _source_observation_payload(summary.provider_checks.source),
+            "items": list(summary.provider_checks.items),
+        },
     }
 
 
@@ -630,6 +636,7 @@ class MemoryRuntime:
             failure_log=self._processing_record_failure_log,
             recorder_health=lambda: dict(self._recorder_health),
             observe_sources=self._processing_record_sources,
+            provider_checks=self._processing_record_provider_checks,
             maintenance=self._processing_record_maintenance,
         )
 
@@ -1160,6 +1167,39 @@ class MemoryRuntime:
                 calls=unavailable,
             )
         return observation
+
+    async def _processing_record_provider_checks(
+        self,
+        maintenance_reason: str | None,
+    ) -> ProviderCheckProjection:
+        before = self._processing_runtime_snapshot()
+        reason = before.local_observation_reason(maintenance_reason)
+        if reason is not None:
+            return ProviderCheckProjection(
+                source=SourceObservation("unavailable", reason=reason),
+                items=(),
+            )
+        reader = self._insight_reader
+        if reader is None:
+            raise self._unavailable()
+        items = await run_blocking(reader.installation_preflight_calls)
+        after = self._processing_runtime_snapshot()
+        current_reason = after.local_observation_reason(maintenance_reason)
+        if after.generation != before.generation or current_reason is not None:
+            return ProviderCheckProjection(
+                source=SourceObservation(
+                    "unavailable",
+                    reason=current_reason or "busy",
+                ),
+                items=(),
+            )
+        return ProviderCheckProjection(
+            source=SourceObservation(
+                "available",
+                observed_at=datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+            ),
+            items=items,
+        )
 
     async def _processing_record_maintenance(
         self,
@@ -1797,9 +1837,13 @@ class MemoryRuntime:
         failure,
         base_url=None,
         api_key=None,
+        started_at_ms,
+        duration_ms,
     ) -> None:
         record_preflight_call(
             self._call_log_db_path,
+            started_at_ms=started_at_ms,
+            duration_ms=duration_ms,
             kind="embedding" if side == "embedding" else "llm",
             model=request.get("model") if isinstance(request, dict) else None,
             request=request,

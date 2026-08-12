@@ -324,6 +324,8 @@ export const SettingsMemoryPage: React.FC = () => {
                 failures={processingRecord?.anomalies.items ?? []}
                 recovery={processingRecord?.maintenance.clear_recovery ?? null}
                 logSections={processingRecord?.sources ?? null}
+                providerChecks={processingRecord?.provider_checks?.items ?? []}
+                providerChecksSource={processingRecord?.provider_checks?.source ?? null}
                 statusLoading={!processingRecordRead.loaded || processingRecordRead.loading}
                 failuresLoading={!processingRecordRead.loaded || processingRecordRead.loading}
                 statusError={processingRecordRead.error}

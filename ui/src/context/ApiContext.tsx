@@ -1817,7 +1817,12 @@ export type MemoryFailureDiagnostic = {
   provider_error_code?: string | null;
   message?: string;
 };
-export type MemoryFailure = { status: 'failed'; error: string; diagnostic?: MemoryFailureDiagnostic };
+export type MemoryFailure = {
+  status: 'failed';
+  error: string;
+  diagnostic?: MemoryFailureDiagnostic;
+  rebuild_required?: boolean;
+};
 
 export type MemorySettingsResult =
   | (MemorySettings & { runtime?: { ok?: boolean; [key: string]: unknown } })
@@ -1901,6 +1906,10 @@ export type MemoryProcessingRecordSummary = {
     data_exists: boolean;
     can_clear: boolean;
     clear_recovery: MemoryClearRecovery | null;
+  };
+  provider_checks?: {
+    source: MemoryLogSourceStatus;
+    items: MemoryProviderCall[];
   };
 };
 

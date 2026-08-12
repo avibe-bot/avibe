@@ -4047,6 +4047,14 @@
         "helpLabel": "About data sources",
         "description": "One source being temporarily unavailable doesn't mean Memory is broken."
       },
+      "providerChecks": {
+        "title": "Provider checks",
+        "help": "These installation-level checks validate the configured language and embedding providers. They are not attached to any conversation.",
+        "helpLabel": "About provider checks",
+        "description": "Recent checks made while validating Memory settings or a rebuild.",
+        "empty": "No provider checks recorded.",
+        "unavailable": "Provider checks are temporarily unavailable."
+      },
       "anomalies": {
         "title": "Issue log",
         "help": "Problems that came up during processing are recorded here. Check each entry's state: Dead, Rejected, and Manual review required entries won't recover automatically.",
@@ -4198,6 +4206,7 @@
         "embedding": "Embedding model"
       },
       "callStage": {
+        "processingPreflight": "Provider check",
         "boundary": "Request preparation",
         "strategy": "Strategy",
         "cascade": "Building memories",

@@ -929,7 +929,8 @@ def test_processing_preflight_preserves_http_status_for_non_json_errors() -> Non
 
 
 def test_processing_preflight_accepts_large_bounded_embedding_vectors() -> None:
-    vector = [0.1] * 1536
+    vector = [0.123456789] * 16_384
+    assert len(json.dumps({"data": [{"embedding": vector}]}).encode()) > 64 * 1024
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/chat/completions"):
@@ -954,6 +955,40 @@ def test_processing_preflight_accepts_large_bounded_embedding_vectors() -> None:
         )
         result = asyncio.run(run())
     assert result.ok is True
+
+
+def test_processing_preflight_records_actual_call_duration() -> None:
+    recorded: list[dict[str, object]] = []
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, json={"error": {"code": "unavailable"}})
+
+    async def run():
+        return await EverOSPort(
+            Path("/tmp/everos.sock"),
+            llm_base_url="https://llm.example.test/v1",
+            llm_model="chat",
+            llm_api_key="secret",
+            embedding_base_url="https://embed.example.test/v1",
+            embedding_model="embed",
+            embedding_api_key="secret",
+            preflight_call_recorder=lambda **kwargs: recorded.append(kwargs),
+        ).preflight()
+
+    real_async_client = httpx.AsyncClient
+    with (
+        patch("core.memory.everos.httpx.AsyncClient", autospec=True) as client_type,
+        patch("core.memory.everos._elapsed_ms", return_value=321),
+    ):
+        client_type.side_effect = lambda **kwargs: real_async_client(
+            transport=httpx.MockTransport(handler), **kwargs
+        )
+        result = asyncio.run(run())
+
+    assert result.ok is False
+    assert len(recorded) == 2
+    assert {item["duration_ms"] for item in recorded} == {321}
+    assert all(isinstance(item["started_at_ms"], int) for item in recorded)
 
 
 def test_processing_health_rejects_llm_probe_without_completion_content() -> None:

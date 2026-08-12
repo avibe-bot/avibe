@@ -576,6 +576,8 @@ def initialize_call_log(db_path: Path) -> None:
 def record_preflight_call(
     db_path: Path,
     *,
+    started_at_ms: int,
+    duration_ms: int,
     kind: ProviderKind,
     model: str | None,
     request: dict,
@@ -588,8 +590,8 @@ def record_preflight_call(
     """Record a parent-side bounded preflight call with its distinct stage."""
     call = ProviderCallInput(
         id=uuid4().hex,
-        started_at_ms=int(time.time() * 1000),
-        duration_ms=0,
+        started_at_ms=started_at_ms,
+        duration_ms=duration_ms,
         kind=kind,
         stage="processing_preflight",
         status=status,

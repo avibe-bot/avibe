@@ -125,6 +125,7 @@ const readyProcessingRecord = (): MemoryProcessingRecordSummary => ({
     can_clear: true,
     clear_recovery: null,
   },
+  provider_checks: { source, items: [] },
 });
 
 const renderPage = () => render(
