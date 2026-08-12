@@ -7297,7 +7297,11 @@ async def sessions_archive(session_id: str):
         )
     try:
         with engine.connect() as conn:
-            existing_session = workbench_sessions_service.get_session(conn, session_id)
+            existing_session = workbench_sessions_service.get_session(
+                conn,
+                session_id,
+                authorization_context=getattr(g, "authorization_context", None),
+            )
     except LookupError as err:
         return jsonify({"error": str(err)}), 404
     if existing_session.get("status") == "archived":
@@ -7306,6 +7310,7 @@ async def sessions_archive(session_id: str):
                 session = workbench_sessions_service.archive_session(
                     conn,
                     session_id,
+                    authorization_context=getattr(g, "authorization_context", None),
                 )
         except LookupError as err:
             return jsonify({"error": str(err)}), 404
