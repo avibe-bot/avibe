@@ -238,6 +238,84 @@ describe('MemorySettingsPanel', () => {
     }));
   });
 
+  it('preserves endpoint drafts after confirmed preflight validation fails', async () => {
+    api.saveMemorySettings.mockResolvedValue({
+      status: 'failed',
+      error: 'memory_embedding_unavailable',
+      diagnostic: { message: 'provider_request_timed_out' },
+    });
+    const onReloadSettings = vi.fn();
+    const onReloadMaintenance = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <MemorySettingsPanel
+        settings={legacySettings}
+        maintenance={null}
+        maintenanceError={null}
+        dependencyReady
+        onSaved={() => undefined}
+        onReloadSettings={onReloadSettings}
+        onReloadMaintenance={onReloadMaintenance}
+        onClearAll={() => undefined}
+        clearing={false}
+      />,
+    );
+
+    const embeddingBaseUrl = screen.getAllByPlaceholderText(
+      'memory.settings.baseUrlPlaceholder',
+    )[1] as HTMLInputElement;
+    await user.clear(embeddingBaseUrl);
+    await user.type(embeddingBaseUrl, 'https://candidate.example.test/v1');
+    await user.click(screen.getByRole('button', { name: 'memory.settings.save' }));
+    await user.click(await screen.findByRole('button', { name: 'confirm-rebuild' }));
+
+    await waitFor(() => expect(api.saveMemorySettings).toHaveBeenCalled());
+    expect(embeddingBaseUrl.value).toBe('https://candidate.example.test/v1');
+    expect(onReloadSettings).not.toHaveBeenCalled();
+    expect(onReloadMaintenance).not.toHaveBeenCalled();
+    expect(
+      screen.getByText(
+        'errors.memory_embedding_unavailable: errors.provider_request_timed_out',
+      ),
+    ).toBeTruthy();
+  });
+
+  it('reloads durable rebuild state after post-save preflight fails', async () => {
+    api.saveMemorySettings.mockResolvedValue({
+      status: 'failed',
+      error: 'memory_embedding_unavailable',
+      diagnostic: { message: 'provider_request_timed_out' },
+      rebuild_required: true,
+    });
+    const onReloadSettings = vi.fn();
+    const onReloadMaintenance = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <MemorySettingsPanel
+        settings={legacySettings}
+        maintenance={null}
+        maintenanceError={null}
+        dependencyReady
+        onSaved={() => undefined}
+        onReloadSettings={onReloadSettings}
+        onReloadMaintenance={onReloadMaintenance}
+        onClearAll={() => undefined}
+        clearing={false}
+      />,
+    );
+
+    const embeddingBaseUrl = screen.getAllByPlaceholderText(
+      'memory.settings.baseUrlPlaceholder',
+    )[1] as HTMLInputElement;
+    await user.clear(embeddingBaseUrl);
+    await user.type(embeddingBaseUrl, 'https://candidate.example.test/v1');
+    await user.click(screen.getByRole('button', { name: 'memory.settings.save' }));
+    await user.click(await screen.findByRole('button', { name: 'confirm-rebuild' }));
+
+    await waitFor(() => expect(onReloadSettings).toHaveBeenCalledOnce());
+    expect(onReloadMaintenance).toHaveBeenCalledOnce();
+  });
+
   it('retains and replays the first embedding identity draft after confirmation', async () => {
     api.saveMemorySettings.mockResolvedValue({
       ...firstSetupSettings,

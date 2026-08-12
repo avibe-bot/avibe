@@ -211,6 +211,15 @@ def _memory_embedding_configuration_changed(current: V2Config, candidate: V2Conf
     )
 
 
+def _memory_preflight_required(candidate: V2Config) -> bool:
+    """Require live admission unless a disabled candidate is still incomplete."""
+
+    memory = candidate.memory
+    return memory.enabled or (
+        memory.processing.llm.complete() and memory.processing.embedding.complete()
+    )
+
+
 def _memory_api_key_only_patch(patch_payload: object) -> bool:
     """Return whether this patch changes only one or both provider API keys."""
 
@@ -259,6 +268,14 @@ def _memory_closed_error(payload: dict, *, fallback: str) -> str:
     return value if is_memory_error_code(value) else fallback
 
 
+def _memory_preflight_projection(payload: dict) -> dict:
+    diagnostic = payload.get("diagnostic")
+    if not isinstance(diagnostic, dict):
+        return {}
+    allowed = {"side", "http_status", "provider_error_code", "message"}
+    return {key: diagnostic[key] for key in allowed if key in diagnostic}
+
+
 def _memory_rebuild_result(
     payload: dict,
     status_code: int,
@@ -278,7 +295,11 @@ def _memory_rebuild_result(
     error = payload.get("error")
     if payload.get("status") == "failed" and status_code >= 500:
         if isinstance(error, str) and is_memory_error_code(error):
-            return {"ok": False, "error": error, "result": "failed"}, 503
+            public = {"ok": False, "error": error, "result": "failed"}
+            diagnostic = _memory_preflight_projection(payload)
+            if diagnostic:
+                public["diagnostic"] = diagnostic
+            return public, 503
         return protocol_failure, 503
 
     result = payload.get("result")
@@ -307,6 +328,9 @@ def _memory_rebuild_result(
     if not isinstance(error, str) or not is_memory_error_code(error):
         return protocol_failure, 503
     public["error"] = error
+    diagnostic = _memory_preflight_projection(payload)
+    if diagnostic:
+        public["diagnostic"] = diagnostic
     return public, 503 if status_code >= 500 else 409
 
 
@@ -480,6 +504,8 @@ def _memory_repair_result(payload: dict, status_code: int) -> tuple[dict, int]:
         "memory_store_unavailable": 503,
         "memory_sidecar_unavailable": 503,
         "memory_repair_failed": 503,
+        "memory_embedding_unavailable": 409,
+        "memory_llm_unavailable": 409,
     }.get(error)
     if expected_status is None or expected_status != status_code:
         return protocol_failure, 503
@@ -765,6 +791,23 @@ async def _apply_memory_settings_patch(
             return _memory_response(await _settings_ok_payload(saved.memory))
 
         recovery_intent = "rebuild" if pending_marker or identity_changed else None
+
+        if identity_changed and confirm_rebuild and _memory_preflight_required(candidate):
+            from config.v2_config import memory_config_to_payload
+            preflight = await _memory_internal_result(
+                lambda: internal_client.memory_preflight(
+                    payload={"memory": memory_config_to_payload(candidate.memory, include_secrets=True)},
+                    user_key=user_key,
+                )
+            )
+            if preflight[0].get("ok") is not True:
+                failure = dict(preflight[0])
+                failure.pop("ok", None)
+                failure["status"] = "failed"
+                failure["diagnostic"] = _memory_preflight_projection(preflight[0])
+                failure_code = preflight[1] if preflight[1] >= 500 else 409
+                return _memory_response(failure, status_code=failure_code)
+
         try:
             # Persist a durable marker before asking the controller to inspect
             # the root. If Avibe exits in this interval, startup must re-run
@@ -802,6 +845,9 @@ async def _apply_memory_settings_patch(
                 )
                 payload["status"] = "failed"
                 payload["error"] = error
+                diagnostic = _memory_preflight_projection(runtime_payload)
+                if diagnostic:
+                    payload["diagnostic"] = diagnostic
                 # Keep the durable marker projection from latest config. Do not
                 # re-arm Retry after settlement if only activation failed later.
                 return _memory_response(payload, status_code=status_code if status_code >= 400 else 409)

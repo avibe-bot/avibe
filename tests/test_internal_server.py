@@ -659,6 +659,23 @@ def test_memory_rebuild_requires_signed_ui_operator() -> None:
     runtime.rebuild.assert_not_awaited()
 
 
+def test_memory_preflight_requires_signed_ui_operator() -> None:
+    runtime = SimpleNamespace(preflight=AsyncMock())
+    controller = _build_controller_double()
+    controller.memory_runtime = runtime
+    app = internal_server.create_app(controller, memory_ui_secret="test-secret")
+
+    async def _exercise() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post("/internal/memory/preflight", json={"memory": {}})
+
+    response = asyncio.run(_exercise())
+    assert response.status_code == 403
+    assert response.json() == {"ok": False, "error": "memory_access_denied"}
+    runtime.preflight.assert_not_awaited()
+
+
 def test_memory_factory_reset_requires_signed_ui_operator() -> None:
     from core.memory.http_headers import MEMORY_USER_KEY_HEADER
     from core.memory.ui_access import MEMORY_UI_PROOF_HEADER

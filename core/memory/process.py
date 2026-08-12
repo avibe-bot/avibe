@@ -40,10 +40,59 @@ from core.memory.confined_filesystem import (
     required_no_follow_flag,
 )
 from core.memory.everos import EverOSPort
+from core.memory.secret_scrubber import scrub_text
 from core.memory.types import MemoryErrorCode
 
 
 logger = logging.getLogger(__name__)
+
+
+async def _drain_probe_stderr(stream: object) -> bytes:
+    tail = bytearray()
+    try:
+        reader = getattr(stream, "read", None)
+        if not callable(reader):
+            return b""
+        while True:
+            chunk = await reader(4096)
+            if not chunk:
+                break
+            tail.extend(chunk if isinstance(chunk, bytes) else str(chunk).encode())
+            del tail[:-_PROCESSING_PROBE_STDERR_BYTES]
+    except Exception:
+        pass
+    return bytes(tail)
+
+
+async def _probe_stderr_tail(task: asyncio.Task[bytes] | None, *, settings: EverOSProcessSettings) -> str:
+    if task is None:
+        return ""
+    try:
+        data = await asyncio.wait_for(asyncio.shield(task), timeout=1.0)
+        text = data.decode("utf-8", "replace")
+        text = scrub_text(
+            text,
+            base_urls=tuple(
+                value for value in (
+                    settings.llm_base_url,
+                    settings.embedding_base_url,
+                ) if value
+            ),
+            exact_values=tuple(
+                value for value in (
+                    settings.llm_api_key,
+                    settings.embedding_api_key,
+                ) if value
+            ),
+        )
+        compact = " ".join(text.split())
+        return compact.encode("utf-8")[-_PROCESSING_PROBE_STDERR_BYTES:].decode(
+            "utf-8",
+            "ignore",
+        )
+    except Exception:
+        task.cancel()
+        return ""
 
 _STARTUP_TIMEOUT_SECONDS = 30.0
 _STOP_TIMEOUT_SECONDS = 10.0
@@ -51,6 +100,7 @@ _HEALTHY_RESET_SECONDS = 5 * 60.0
 _RESTART_DELAYS_SECONDS = (1.0, 5.0, 30.0, 120.0)
 _MAX_CONSECUTIVE_FAILURES = 5
 _PROCESSING_PROBE_TIMEOUT_SECONDS = 20.0
+_PROCESSING_PROBE_STDERR_BYTES = 2048
 _SOCKET_MODE = 0o600
 _OWNER_DIR_MODE = 0o700
 _SAFETY_MONITOR_INTERVAL_SECONDS = 0.2
@@ -391,6 +441,7 @@ class _ProcessHost(Protocol):
         cwd: Path,
         env: Mapping[str, str],
         socket_path: Path | None = None,
+        capture_stderr: bool = False,
     ) -> asyncio.subprocess.Process: ...
 
     def process_group(self, pid: int) -> int | None: ...
@@ -616,22 +667,32 @@ class EverOSProcess:
         if not self._python.is_file() or not _settings_complete(self._settings):
             return False
         try:
-            probe = await self._host.spawn(
-                _ProcessKind.PROCESSING_PROBE,
-                self._python,
-                cwd=self._effective_home,
-                env=self._child_environment(),
-            )
+            try:
+                probe = await self._host.spawn(
+                    _ProcessKind.PROCESSING_PROBE,
+                    self._python,
+                    cwd=self._effective_home,
+                    env=self._child_environment(),
+                    capture_stderr=True,
+                )
+            except TypeError:
+                probe = await self._host.spawn(
+                    _ProcessKind.PROCESSING_PROBE,
+                    self._python,
+                    cwd=self._effective_home,
+                    env=self._child_environment(),
+                )
         except (OSError, ValueError):
-            logger.warning("EverOS processing probe could not start")
+            logger.warning("EverOS processing probe could not start; branch=probe_spawn")
             return False
 
         process_group = self._host.process_group(probe.pid)
         owned_processes = self._host.snapshot_tree(probe.pid, process_group)
+        stderr = getattr(probe, "stderr", None)
+        stderr_task = asyncio.create_task(_drain_probe_stderr(stderr)) if stderr is not None else None
         try:
             await asyncio.wait_for(probe.wait(), timeout=_PROCESSING_PROBE_TIMEOUT_SECONDS)
         except asyncio.TimeoutError:
-            logger.warning("EverOS processing probe timed out")
             try:
                 await self._terminate_owned_tree(
                     probe,
@@ -640,6 +701,10 @@ class EverOSProcess:
                 )
             except Exception:
                 logger.warning("EverOS processing probe cleanup failed")
+            logger.warning(
+                "EverOS processing probe timed out; stderr_tail=%s",
+                await _probe_stderr_tail(stderr_task, settings=self._settings),
+            )
             return False
         except asyncio.CancelledError:
             # ``MemoryWorker`` bounds this probe independently. Do not let that
@@ -652,6 +717,7 @@ class EverOSProcess:
                 )
             except Exception:
                 logger.warning("EverOS processing probe cleanup failed")
+            await _probe_stderr_tail(stderr_task, settings=self._settings)
             raise
 
         try:
@@ -665,6 +731,14 @@ class EverOSProcess:
         except Exception:
             logger.warning("EverOS processing probe cleanup failed")
             return False
+        if probe.returncode != 0:
+            logger.warning(
+                "EverOS processing probe failed exit_code=%s stderr_tail=%s",
+                probe.returncode,
+                await _probe_stderr_tail(stderr_task, settings=self._settings),
+            )
+        else:
+            await _probe_stderr_tail(stderr_task, settings=self._settings)
         return probe.returncode == 0
 
     async def _start_locked(self) -> bool:
@@ -3429,6 +3503,7 @@ class _SystemProcessHost:
         cwd: Path,
         env: Mapping[str, str],
         socket_path: Path | None = None,
+        capture_stderr: bool = False,
     ) -> asyncio.subprocess.Process:
         if kind is _ProcessKind.CASCADE_REBUILD:
             arguments = [
@@ -3462,7 +3537,7 @@ class _SystemProcessHost:
             env=dict(env),
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE if capture_stderr else asyncio.subprocess.DEVNULL,
             start_new_session=True,
         )
 

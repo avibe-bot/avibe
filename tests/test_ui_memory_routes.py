@@ -23,6 +23,31 @@ from vibe import api, internal_client, remote_access, ui_memory_routes, ui_serve
 from vibe.ui_server import app
 
 
+def test_memory_rebuild_result_preserves_closed_preflight_diagnostic() -> None:
+    payload, status = ui_memory_routes._memory_rebuild_result(
+        {
+            "ok": False,
+            "error": "memory_embedding_unavailable",
+            "result": "failed",
+            "diagnostic": {
+                "side": "embedding",
+                "http_status": 404,
+                "provider_error_code": "model_not_supported",
+                "message": "unsupported model",
+                "raw": "must not cross",
+            },
+        },
+        409,
+    )
+    assert status == 409
+    assert payload["diagnostic"] == {
+        "side": "embedding",
+        "http_status": 404,
+        "provider_error_code": "model_not_supported",
+        "message": "unsupported model",
+    }
+
+
 def _save_config(tmp_path) -> None:
     V2Config(
         mode="self_host",
@@ -80,6 +105,16 @@ def _renewable_remote_session_cookie(
 
 def _local_headers() -> dict[str, str]:
     return {"Origin": "http://127.0.0.1:15131"}
+
+
+@pytest.fixture(autouse=True)
+def _preflight_passes_by_default(monkeypatch):
+    """Keep legacy route fixtures focused unless a test exercises preflight."""
+
+    async def preflight(*, payload: dict, user_key: str):
+        return {"status_code": 200, "body": {"ok": True}}
+
+    monkeypatch.setattr(internal_client, "memory_preflight", preflight)
 
 
 def test_memory_factory_reset_public_result_keeps_truthful_root_contract() -> None:
@@ -1217,6 +1252,11 @@ def test_memory_confirmed_first_embedding_identity_runs_retained_rebuild(
     _save_config(tmp_path)
     observed: list[tuple[str | None, str | None, str | None]] = []
 
+    async def unexpected_preflight(*, payload: dict, user_key: str):
+        raise AssertionError("incomplete disabled candidates do not need live preflight")
+
+    monkeypatch.setattr(internal_client, "memory_preflight", unexpected_preflight)
+
     async def rebuild(*, user_key: str):
         persisted = V2Config.load().memory
         observed.append(
@@ -1271,6 +1311,69 @@ def test_memory_confirmed_first_embedding_identity_runs_retained_rebuild(
     ]
     persisted = V2Config.load().memory
     assert persisted.processing.embedding.base_url == "https://embed.example.test/v1"
+    assert persisted.processing.embedding.model == "embed-v1"
+    assert persisted.recovery_intent is None
+
+
+def test_memory_confirmed_preflight_failure_keeps_config_unchanged(monkeypatch, tmp_path) -> None:
+    """Scenario: MEMORY-REBUILD-301"""
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    current = MemoryConfig(
+        enabled=False,
+        processing=MemoryProcessingConfig(
+            llm=MemoryEndpointConfig("https://llm.example.test/v1", "chat", "llm-key"),
+            embedding=MemoryEndpointConfig("https://embed.example.test/v1", "embed-v1", "embed-key"),
+        ),
+    )
+    _save_memory(current)
+    from config.paths import get_config_path
+
+    config_before = get_config_path().read_bytes()
+
+    async def preflight(*, payload: dict, user_key: str):
+        assert user_key == "avibe:local"
+        assert payload["memory"]["processing"]["embedding"]["model"] == "embed-v2"
+        return {
+            "status_code": 409,
+            "body": {
+                "ok": False,
+                "error": "memory_embedding_unavailable",
+                "diagnostic": {
+                    "side": "embedding",
+                    "http_status": 404,
+                    "provider_error_code": "model_not_supported",
+                    "message": "model unavailable",
+                },
+            },
+        }
+
+    monkeypatch.setattr(internal_client, "memory_preflight", preflight)
+    client = app.test_client()
+    response = client.patch(
+        "/api/memory/settings",
+        json={
+            "processing": {"embedding": {"model": "embed-v2"}},
+            "confirm_rebuild": True,
+        },
+        headers=csrf_headers(client, "http://127.0.0.1:15131"),
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 409
+    assert response.get_json() == {
+        "status": "failed",
+        "error": "memory_embedding_unavailable",
+        "diagnostic": {
+            "side": "embedding",
+            "http_status": 404,
+            "provider_error_code": "model_not_supported",
+            "message": "model unavailable",
+        },
+    }
+    assert get_config_path().read_bytes() == config_before
+    persisted = V2Config.load().memory
     assert persisted.processing.embedding.model == "embed-v1"
     assert persisted.recovery_intent is None
 
@@ -1390,8 +1493,14 @@ def test_memory_confirmed_rebuild_failure_keeps_candidate(monkeypatch, tmp_path)
             "status_code": 409,
             "body": {
                 "ok": False,
-                "error": "memory_rebuild_root_busy",
-                "result": "root_busy",
+                "error": "memory_embedding_unavailable",
+                "result": "failed",
+                "diagnostic": {
+                    "side": "embedding",
+                    "http_status": 404,
+                    "provider_error_code": "model_not_supported",
+                    "message": "provider_error",
+                },
             },
         }
 
@@ -1410,7 +1519,13 @@ def test_memory_confirmed_rebuild_failure_keeps_candidate(monkeypatch, tmp_path)
 
     assert response.status_code == 409
     body = response.get_json()
-    assert body["error"] == "memory_rebuild_root_busy"
+    assert body["error"] == "memory_embedding_unavailable"
+    assert body["diagnostic"] == {
+        "side": "embedding",
+        "http_status": 404,
+        "provider_error_code": "model_not_supported",
+        "message": "provider_error",
+    }
     assert body["rebuild_required"] is True
     persisted = V2Config.load().memory
     assert persisted.processing.embedding.model == "embed-v2"

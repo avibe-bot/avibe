@@ -259,7 +259,7 @@ const StepRow: React.FC<{ step: MemoryLogStep }> = ({ step }) => {
   );
 };
 
-const ProviderCallRow: React.FC<{ call: MemoryProviderCall }> = ({ call }) => {
+export const ProviderCallRow: React.FC<{ call: MemoryProviderCall }> = ({ call }) => {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
   const succeeded = call.status === 'ok' || call.status === 'success';
