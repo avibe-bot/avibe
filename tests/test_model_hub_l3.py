@@ -895,6 +895,49 @@ class DeferredLifecycleHandle:
         return self._outcome
 
 
+class RepeatedCancellationHandle:
+    def __init__(self, outcome: RawCallOutcome, blocked_phase: str):
+        self._outcome = outcome
+        self._blocked_phase = blocked_phase
+        self.started = asyncio.Event()
+        self.phase_started = asyncio.Event()
+        self.release_phase = asyncio.Event()
+        self.close_calls = 0
+        self.outcome_calls = 0
+        self._available = False
+        self._stream = self._iterate()
+
+    async def _iterate(self):
+        yield b"data: [DONE]\n\n"
+        self.started.set()
+        await asyncio.Event().wait()
+
+    @property
+    def stream(self):
+        return self._stream
+
+    @property
+    def outcome_available(self) -> bool:
+        return self._available
+
+    async def close_stream(self) -> None:
+        self.close_calls += 1
+        if self.close_calls > 1:
+            return
+        if self._blocked_phase == "resource_teardown":
+            self.phase_started.set()
+            await self.release_phase.wait()
+        self._available = True
+        await self._stream.aclose()
+
+    async def outcome(self) -> RawCallOutcome:
+        self.outcome_calls += 1
+        if self._blocked_phase == "handle_outcome":
+            self.phase_started.set()
+            await self.release_phase.wait()
+        return self._outcome
+
+
 def _prepared_gateway_request(
     gateway: ModelHubTurnGateway,
     *,
@@ -2105,10 +2148,11 @@ def test_handle_settlement_requires_an_explicit_termination_origin(
         record_attempt = Mock()
         settlement = await service.settle_handle_outcome(
             resolved,
-            outcome,
+            None,
             termination_origin="downstream_cancel",
             record_attempt=record_attempt,
         )
+        assert settlement.outcome is None
         assert settlement.decision is None
         assert settlement.turn_outcome == produce_turn_outcome("turn.canceled")
         assert render_turn_outcome_copy(settlement.turn_outcome, "en") is None
@@ -2334,6 +2378,49 @@ def test_gateway_closes_producer_before_downstream_cancel_settlement(
     asyncio.run(exercise())
 
 
+def test_gateway_close_barrier_preserves_terminal_error_seen_on_failed_write(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        source = _source("src_barrier01", "Barrier source")
+        outcome = _outcome(
+            RawOutcomeKind.HTTP_ERROR,
+            status=429,
+            code="rate_limit_error",
+            source_id=source.id,
+        )
+        handle = DeferredLifecycleHandle(outcome)
+        service = _service(tmp_path, sources=[source], live_handles=[handle])
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        gateway = ModelHubTurnGateway(service)
+        request = _prepared_gateway_request(
+            gateway,
+            turn_id="turn_fact_barrier",
+            requested_model=requested_model,
+            source_id=source.id,
+            stream=True,
+        )
+        service.settle_handle_outcome = AsyncMock(wraps=service.settle_handle_outcome)
+
+        with patch(
+            "core.handlers.model_hub.turn_gateway.web.StreamResponse",
+            return_value=FakeStreamResponse(
+                write_error=ConnectionResetError("terminal frame write failed")
+            ),
+        ):
+            with pytest.raises(ConnectionError, match="terminal frame"):
+                await gateway._handle_request(request)
+
+        assert handle.close_calls == 1
+        assert handle.outcome_calls == 1
+        call = service.settle_handle_outcome.await_args
+        assert call.kwargs["termination_origin"] == "upstream_terminal"
+        assert call.args[1] is outcome
+        assert service.store.load().sources[0].state.status == "cooldown"
+
+    asyncio.run(exercise())
+
+
 def test_gateway_downstream_cancellation_does_not_mutate_source(
     tmp_path: Path,
 ) -> None:
@@ -2535,6 +2622,109 @@ def test_gateway_cancellation_during_upstream_settlement_preserves_history(
         assert record["outcome"] == "served"
         assert service.store.load().sources[0].state.status == "standby"
         assert service.events.list() == []
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize(
+    "blocked_phase",
+    [
+        "resource_teardown",
+        "handle_outcome",
+        "service_settlement",
+        "service_transition",
+    ],
+)
+def test_gateway_repeated_cancellation_drains_settlement_before_reraise(
+    tmp_path: Path,
+    blocked_phase: str,
+) -> None:
+    async def exercise() -> None:
+        source = _source("src_canceldr1", "Repeated cancellation")
+        outcome = _outcome(
+            (
+                RawOutcomeKind.NETWORK_ERROR
+                if blocked_phase == "service_transition"
+                else RawOutcomeKind.SUCCESS
+            ),
+            source_id=source.id,
+        )
+        handle = RepeatedCancellationHandle(outcome, blocked_phase)
+        service = _service(tmp_path, sources=[source], live_handles=[handle])
+        requested_model = _canonicalize_fixed_test_routes(service)["codex"]
+        settle_handle_outcome = service.settle_handle_outcome
+
+        async def blocked_settlement(*args, **kwargs):
+            if blocked_phase == "service_settlement":
+                handle.phase_started.set()
+                await handle.release_phase.wait()
+            return await settle_handle_outcome(*args, **kwargs)
+
+        service.settle_handle_outcome = AsyncMock(side_effect=blocked_settlement)
+        settle_fallback_source = service._settle_fallback_source
+
+        async def blocked_transition(*args, **kwargs):
+            handle.phase_started.set()
+            await handle.release_phase.wait()
+            return await settle_fallback_source(*args, **kwargs)
+
+        if blocked_phase == "service_transition":
+            service._settle_fallback_source = AsyncMock(
+                side_effect=blocked_transition
+            )
+        gateway = ModelHubTurnGateway(service)
+        record_turn_outcome = gateway.correlation.record_turn_outcome
+        gateway.correlation.record_turn_outcome = Mock(
+            side_effect=record_turn_outcome
+        )
+        request = _prepared_gateway_request(
+            gateway,
+            turn_id="turn_repeated_cancel",
+            requested_model=requested_model,
+            source_id=source.id,
+            stream=True,
+        )
+        response = FakeStreamResponse()
+
+        with patch(
+            "core.handlers.model_hub.turn_gateway.web.StreamResponse",
+            return_value=response,
+        ):
+            task = asyncio.create_task(gateway._handle_request(request))
+            await asyncio.wait_for(handle.started.wait(), timeout=1)
+            task.cancel()
+            await asyncio.wait_for(handle.phase_started.wait(), timeout=1)
+            await asyncio.sleep(0)
+            task.cancel()
+            await asyncio.sleep(0)
+            task.cancel()
+            assert not task.done()
+            handle.release_phase.set()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, timeout=1)
+
+        service.settle_handle_outcome.assert_awaited_once()
+        gateway.correlation.record_turn_outcome.assert_called_once()
+        assert (
+            service.settle_handle_outcome.await_args.kwargs["termination_origin"]
+            == "upstream_terminal"
+        )
+        gateway.correlation.settle(
+            "turn_repeated_cancel",
+            settled_by=SETTLED_BY_TERMINAL_RESULT,
+            ts=NOW.isoformat(),
+        )
+        record = service.provenance.get("turn_repeated_cancel")
+        assert record is not None
+        if blocked_phase == "service_transition":
+            assert record["outcome"] == "failed_terminal"
+            assert service.store.load().sources[0].state.status == "cooldown"
+            assert [event["reason"] for event in service.events.list()] == ["network"]
+        else:
+            assert record["outcome"] == "served"
+            assert record["terminal_error"] is None
+        assert handle.close_calls >= 1
+        assert handle.outcome_calls == 1
 
     asyncio.run(exercise())
 

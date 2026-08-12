@@ -8,6 +8,14 @@ from typing import Callable, Final, Literal, Mapping
 
 
 SSE_LINE_ENDINGS: Final = (b"\r\n", b"\n", b"\r")
+# One line may fill the runtime's 64 KiB transport read; one logical event may
+# span four such reads. Both retained buffers remain bounded under hostile input.
+SSE_MAX_LINE_BYTES: Final = 64 * 1024
+SSE_MAX_FRAME_BYTES: Final = 256 * 1024
+
+
+class SSEFrameLimitError(ValueError):
+    """Raised when retained SSE parser state crosses a configured bound."""
 
 
 @dataclass
@@ -17,6 +25,7 @@ class SSEFrameTokenizer:
     _line: bytearray = field(default_factory=bytearray)
     _frame_lines: list[bytes] = field(default_factory=list)
     _after_cr: bool = False
+    _frame_size: int = 0
 
     def feed(self, chunk: bytes) -> tuple[bytes, ...]:
         frames: list[bytes] = []
@@ -32,6 +41,11 @@ class SSEFrameTokenizer:
                 self._finish_line(frames)
             else:
                 self._line.append(byte)
+                if len(self._line) > SSE_MAX_LINE_BYTES:
+                    raise SSEFrameLimitError("SSE line exceeds the configured limit")
+                self._frame_size += 1
+                if self._frame_size > SSE_MAX_FRAME_BYTES:
+                    raise SSEFrameLimitError("SSE frame exceeds the configured limit")
         return tuple(frames)
 
     def take_partial_frame(self) -> bytes | None:
@@ -42,6 +56,7 @@ class SSEFrameTokenizer:
             lines.append(bytes(self._line))
         self._line.clear()
         self._frame_lines.clear()
+        self._frame_size = 0
         self._after_cr = False
         return b"\n".join(lines)
 
@@ -54,6 +69,7 @@ class SSEFrameTokenizer:
         if self._frame_lines:
             frames.append(b"\n".join(self._frame_lines))
             self._frame_lines.clear()
+            self._frame_size = 0
 
 
 def parse_sse_frame(frame: bytes) -> tuple[str | None, bytes | None]:
@@ -133,7 +149,7 @@ PROTOCOL_STREAM_TAXONOMY: Final[Mapping[str, ProtocolStreamTaxonomy]] = {
     "openai_responses": ProtocolStreamTaxonomy(
         success_types=frozenset({"response.completed", "response.done"}),
         success_literal=None,
-        error_types=frozenset({"error"}),
+        error_types=frozenset({"error", "response.failed", "response.incomplete"}),
         render_terminal_event=_responses_terminal_event,
     ),
     # https://platform.openai.com/docs/api-reference/chat/create#chat-create-stream
@@ -157,6 +173,7 @@ class ProtocolSSEState:
     terminal_outcome: StreamTerminalOutcome | None = None
     error_payload: bytes | None = None
     last_sequence_number: int = -1
+    invalid_after_terminal: bool = False
 
     def observe(self, chunk: bytes) -> None:
         for frame in self.tokenizer.feed(chunk):
@@ -174,12 +191,13 @@ class ProtocolSSEState:
         return self.last_sequence_number + 1
 
     def _observe_frame(self, frame: bytes) -> None:
+        if self.terminal_outcome is not None:
+            self.invalid_after_terminal = True
+            return
         _event_name, data = parse_sse_frame(frame)
         if data is None:
             return
         taxonomy = PROTOCOL_STREAM_TAXONOMY[self.protocol]
-        if self.terminal_outcome is not None:
-            return
         if taxonomy.success_literal is not None and data == taxonomy.success_literal:
             self.terminal_outcome = "served"
             return

@@ -857,31 +857,6 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header('Content-Length', '0')
             self.end_headers()
             return
-        if payload['model'].endswith('/stalled-first-byte'):
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.send_header('Content-Length', '1')
-            self.end_headers()
-            self.wfile.flush()
-            time.sleep(1)
-            return
-        if payload['model'].endswith('/stalled-error-body'):
-            self.send_response(429)
-            self.send_header('Content-Type', 'application/json')
-            self.send_header('Content-Length', '1')
-            self.end_headers()
-            self.wfile.flush()
-            time.sleep(1)
-            return
-        if payload['model'].endswith('/stalled-non-stream'):
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.send_header('Content-Length', '2')
-            self.end_headers()
-            self.wfile.write(b'{{')
-            self.wfile.flush()
-            time.sleep(1)
-            return
         if payload['model'].endswith('/invalid-json'):
             body = b'not-json'
             self.send_response(200)
@@ -1641,6 +1616,112 @@ def test_engine_client_keeps_served_after_terminal_marker_then_disconnect(
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("event_type", ["response.failed", "response.incomplete"])
+def test_engine_client_recognizes_responses_failure_terminals(
+    monkeypatch: pytest.MonkeyPatch,
+    event_type: str,
+) -> None:
+    async def run() -> None:
+        terminal = json.dumps(
+            {"type": event_type, "code": "permission_error"},
+            separators=(",", ":"),
+        ).encode()
+
+        class Content:
+            async def read(self, _size: int) -> bytes:
+                return b"data: " + terminal + b"\n\n"
+
+            async def iter_chunked(self, _size: int):
+                if False:
+                    yield b""
+
+        class Response:
+            status = 200
+            content = Content()
+
+            def close(self) -> None:
+                return None
+
+        class Session:
+            async def post(self, *_args, **_kwargs):
+                return Response()
+
+            async def close(self) -> None:
+                return None
+
+        monkeypatch.setattr(client_module.aiohttp, "ClientSession", lambda **_: Session())
+        source = SourceRecord(
+            source_id="src_fixture123",
+            vendor="custom",
+            protocol="openai_responses",
+            base_url="https://api.example.test/v1",
+            credential_ref="cred_fixture123",
+            allowed_origins=(),
+            model_ids=("model-a",),
+            prefix="source-fixture123",
+        )
+        handle = await EngineClient(
+            EngineConnection("http://127.0.0.1:15220", "management", "gateway")
+        ).invoke(source, "model-a", {}, stream=True)
+        assert handle.stream is not None
+        assert [chunk async for chunk in handle.stream]
+        outcome = await handle.outcome()
+        assert outcome.kind is RawOutcomeKind.HTTP_ERROR
+        assert outcome.error_code == "permission_error"
+
+    asyncio.run(run())
+
+
+def test_engine_client_rejects_complete_frame_after_success_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> None:
+        first = b'data: {"type":"response.completed"}\n\n'
+        extra = b'data: {"type":"response.output_text.delta"}\n\n'
+
+        class Content:
+            async def read(self, _size: int) -> bytes:
+                return first
+
+            async def iter_chunked(self, _size: int):
+                yield extra
+
+        class Response:
+            status = 200
+            content = Content()
+
+            def close(self) -> None:
+                return None
+
+        class Session:
+            async def post(self, *_args, **_kwargs):
+                return Response()
+
+            async def close(self) -> None:
+                return None
+
+        monkeypatch.setattr(client_module.aiohttp, "ClientSession", lambda **_: Session())
+        source = SourceRecord(
+            source_id="src_fixture123",
+            vendor="custom",
+            protocol="openai_responses",
+            base_url="https://api.example.test/v1",
+            credential_ref="cred_fixture123",
+            allowed_origins=(),
+            model_ids=("model-a",),
+            prefix="source-fixture123",
+        )
+        handle = await EngineClient(
+            EngineConnection("http://127.0.0.1:15220", "management", "gateway")
+        ).invoke(source, "model-a", {}, stream=True)
+        assert handle.stream is not None
+        assert [chunk async for chunk in handle.stream] == [first, extra]
+        outcome = await handle.outcome()
+        assert outcome.kind is RawOutcomeKind.PROTOCOL_ERROR
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize(
     ("protocol", "first", "expected_kind"),
     [
@@ -1866,45 +1947,77 @@ def test_engine_error_fields_preserve_nested_candidates(
 
 
 @pytest.mark.parametrize(
-    ("model_id", "stream", "expected_kind", "expected_status", "stream_started"),
+    ("phase", "stream", "expected_kind", "expected_status", "stream_started"),
     [
-        ("stalled-first-byte", True, RawOutcomeKind.TIMEOUT, None, False),
-        ("stalled-error-body", True, RawOutcomeKind.HTTP_ERROR, 429, False),
-        ("stalled-non-stream", False, RawOutcomeKind.TIMEOUT, 200, True),
+        ("first_byte", True, RawOutcomeKind.TIMEOUT, None, False),
+        ("error_body", True, RawOutcomeKind.HTTP_ERROR, 429, False),
+        ("non_stream", False, RawOutcomeKind.TIMEOUT, 200, True),
     ],
 )
 def test_engine_client_times_out_before_completion(
-    tmp_path: Path,
-    model_id: str,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
     stream: bool,
     expected_kind: RawOutcomeKind,
     expected_status: int | None,
     stream_started: bool,
 ) -> None:
     async def run() -> None:
-        supervisor, store = _fixture_supervisor(tmp_path / model_id)
-        credential_ref = store.store_api_key(
-            "upstream-secret",
-            base_url="https://api.example.test/v1",
-        )
-        store.sync_sources([_binding(credential_ref, model_ids=(model_id,))])
-        connection = supervisor.ensure_running()
-        source = store.get_source("src_fixture123")
-        assert source is not None
+        blocked_phase = asyncio.Event()
+        never_release = asyncio.Event()
 
-        handle = await EngineClient(connection, timeout=0.05).invoke(
+        class Content:
+            reads = 0
+
+            async def read(self, _size: int) -> bytes:
+                self.reads += 1
+                if phase == "non_stream" and self.reads == 1:
+                    return b"{"
+                blocked_phase.set()
+                await never_release.wait()
+                return b""
+
+        class Response:
+            status = 429 if phase == "error_body" else 200
+            content = Content()
+
+            def close(self) -> None:
+                return None
+
+        class Session:
+            async def post(self, *_args, **_kwargs):
+                return Response()
+
+            async def close(self) -> None:
+                return None
+
+        monkeypatch.setattr(client_module.aiohttp, "ClientSession", lambda **_: Session())
+        source = SourceRecord(
+            source_id="src_fixture123",
+            vendor="custom",
+            protocol="openai_chat",
+            base_url="https://api.example.test/v1",
+            credential_ref="cred_fixture123",
+            allowed_origins=(),
+            model_ids=("model-a",),
+            prefix="source-fixture123",
+        )
+        handle = await EngineClient(
+            EngineConnection("http://127.0.0.1:15220", "management", "gateway"),
+            timeout=0.01,
+        ).invoke(
             source,
-            model_id,
+            "model-a",
             {},
             stream=stream,
         )
 
+        assert blocked_phase.is_set()
         assert handle.stream is None
         outcome = await handle.outcome()
         assert outcome.kind is expected_kind
         assert outcome.http_status == expected_status
         assert outcome.stream_started is stream_started
-        supervisor.stop()
 
     asyncio.run(run())
 

@@ -6,7 +6,7 @@ import asyncio
 import json
 import socket
 from collections.abc import Callable
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, suppress
 from dataclasses import dataclass
 from typing import Final, Optional
 
@@ -69,6 +69,7 @@ class _TurnExecution:
     handle: InvokeHandle | None = None
     settlement_task: asyncio.Task[tuple[RawCallOutcome | None, HandleSettlement]] | None = None
     settlement_origin: HandleTerminationOrigin | None = None
+    settlement_recorded: bool = False
 
 
 class _SSEWireState(ProtocolSSEState):
@@ -191,38 +192,92 @@ class ModelHubTurnGateway:
             token=token,
         ) as terminalizer:
             execution = _TurnExecution()
+            resources = AsyncExitStack()
+            await resources.__aenter__()
+            request_task = asyncio.create_task(
+                self._run_request_turn(
+                    request,
+                    backend=backend,
+                    terminalizer=terminalizer,
+                    execution=execution,
+                    resources=resources,
+                )
+            )
+            exit_task: asyncio.Task[bool] | None = None
             try:
-                async with AsyncExitStack() as resources:
-                    return await self._run_request_turn(
-                        request,
-                        backend=backend,
-                        terminalizer=terminalizer,
-                        execution=execution,
-                        resources=resources,
+                try:
+                    response = await asyncio.shield(request_task)
+                    error: BaseException | None = None
+                except Exception as caught:
+                    response = None
+                    error = caught
+                exit_task = asyncio.create_task(
+                    resources.__aexit__(
+                        type(error) if error is not None else None,
+                        error,
+                        error.__traceback__ if error is not None else None,
                     )
-            except asyncio.CancelledError:
-                await self._settle_boundary_termination(
-                    execution,
-                    terminalizer,
-                    termination_origin="downstream_cancel",
                 )
-                raise
-            except _DownstreamDisconnected:
-                await self._settle_boundary_termination(
-                    execution,
-                    terminalizer,
-                    termination_origin="downstream_cancel",
-                )
-                raise
-            except Exception:
-                if execution.handle is not None:
-                    _outcome, settlement = await self._settle_turn_handle(
+                await asyncio.shield(exit_task)
+                exit_task.result()
+                if isinstance(error, _DownstreamDisconnected):
+                    await self._settle_boundary_termination(
                         execution,
                         terminalizer,
-                        termination_origin="upstream_terminal",
+                        termination_origin="downstream_cancel",
                     )
-                    terminalizer.record_turn_outcome(settlement.turn_outcome)
-                raise
+                    raise error
+                if error is not None:
+                    if execution.handle is not None:
+                        _outcome, settlement = await self._settle_turn_handle(
+                            execution,
+                            terminalizer,
+                            termination_origin="upstream_terminal",
+                        )
+                        self._record_handle_settlement(
+                            execution,
+                            terminalizer,
+                            settlement,
+                        )
+                    raise error
+                assert response is not None
+                return response
+            except asyncio.CancelledError as cancelled:
+                # Fact barrier: t0 resources -> t2 protocol terminal -> t3
+                # close/finally -> t4 settlement/history -> t5 render -> t6 EOF.
+                # Only the request is canceled. Owned teardown and settlement
+                # are shielded and drained before this boundary re-raises.
+                if not request_task.done():
+                    request_task.cancel()
+                while not request_task.done():
+                    with suppress(asyncio.CancelledError):
+                        await asyncio.shield(request_task)
+                with suppress(BaseException):
+                    request_task.result()
+                if exit_task is None:
+                    exit_task = asyncio.create_task(
+                        resources.__aexit__(
+                            asyncio.CancelledError,
+                            cancelled,
+                            cancelled.__traceback__,
+                        )
+                    )
+                while not exit_task.done():
+                    with suppress(asyncio.CancelledError):
+                        await asyncio.shield(exit_task)
+                exit_task.result()
+                settlement_task = asyncio.create_task(
+                    self._settle_boundary_termination(
+                        execution,
+                        terminalizer,
+                        termination_origin="downstream_cancel",
+                    )
+                )
+                while not settlement_task.done():
+                    with suppress(asyncio.CancelledError):
+                        await asyncio.shield(settlement_task)
+                settlement_task.result()
+                raise cancelled
 
     async def _run_request_turn(
         self,
@@ -373,7 +428,7 @@ class ModelHubTurnGateway:
                 terminalizer,
                 termination_origin="upstream_terminal",
             )
-            terminalizer.record_turn_outcome(settlement.turn_outcome)
+            self._record_handle_settlement(execution, terminalizer, settlement)
             assert outcome is not None
             assert settlement.decision is not None
             if settlement.decision.action != "return":
@@ -410,7 +465,7 @@ class ModelHubTurnGateway:
             terminalizer,
             termination_origin="upstream_terminal",
         )
-        terminalizer.record_turn_outcome(settlement.turn_outcome)
+        self._record_handle_settlement(execution, terminalizer, settlement)
         await self._write_stream_terminal_copy(
             response,
             protocol,
@@ -467,22 +522,27 @@ class ModelHubTurnGateway:
         *,
         termination_origin: HandleTerminationOrigin,
     ) -> None:
-        if (
-            termination_origin == "downstream_cancel"
-            and execution.handle is not None
-            and execution.handle.outcome_available
-        ):
-            # The producer has already recorded the upstream history. A later
-            # downstream write failure cannot rewrite that history as cancel.
-            termination_origin = "upstream_terminal"
         _outcome, settlement = await self._settle_turn_handle(
             execution,
             terminalizer,
             termination_origin=termination_origin,
         )
-        terminalizer.record_turn_outcome(settlement.turn_outcome)
+        self._record_handle_settlement(execution, terminalizer, settlement)
         if execution.settlement_origin == "downstream_cancel":
             terminalizer.mark_downstream_canceled()
+
+    @staticmethod
+    def _record_handle_settlement(
+        execution: _TurnExecution,
+        terminalizer: GatewayTurnTerminalizer,
+        settlement: HandleSettlement,
+    ) -> None:
+        """Consume a handle settlement projection exactly once per turn."""
+
+        if execution.settlement_recorded:
+            return
+        terminalizer.record_turn_outcome(settlement.turn_outcome)
+        execution.settlement_recorded = True
 
     async def _settle_turn_handle(
         self,
@@ -495,6 +555,7 @@ class ModelHubTurnGateway:
             execution.settlement_origin = termination_origin
             execution.settlement_task = asyncio.create_task(
                 self._settle_consumed_handle(
+                    execution,
                     execution.resolved,
                     execution.handle,
                     terminalizer,
@@ -505,6 +566,7 @@ class ModelHubTurnGateway:
 
     async def _settle_consumed_handle(
         self,
+        execution: _TurnExecution,
         resolved: ResolvedInvocation | None,
         handle: InvokeHandle | None,
         terminalizer: GatewayTurnTerminalizer,
@@ -513,8 +575,20 @@ class ModelHubTurnGateway:
     ) -> tuple[RawCallOutcome | None, HandleSettlement]:
         """Route every handle terminal through the service settlement owner."""
 
+        # Fact barrier: t0 resource acquisition -> t1 handle -> t2 protocol
+        # terminal observation -> t3 close/finally commits outcome -> t4
+        # settlement/history -> t5 render settlement -> t6 downstream EOF.
         if handle is not None:
             await handle.close_stream()
+        if (
+            termination_origin == "downstream_cancel"
+            and handle is not None
+            and handle.outcome_available
+        ):
+            # A producer outcome that became available during close owns history;
+            # a downstream write/cancel after that barrier cannot rewrite it.
+            termination_origin = "upstream_terminal"
+            execution.settlement_origin = termination_origin
         outcome = (
             await handle.outcome()
             if handle is not None and handle.outcome_available

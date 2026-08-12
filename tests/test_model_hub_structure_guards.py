@@ -10,7 +10,11 @@ import pytest
 
 from core.handlers.model_hub.stream_wire import (
     PROTOCOL_STREAM_TAXONOMY,
+    SSE_MAX_FRAME_BYTES,
+    SSE_MAX_LINE_BYTES,
     SSE_LINE_ENDINGS,
+    SSEFrameLimitError,
+    SSEFrameTokenizer,
     ProtocolSSEState,
     ProtocolStreamTaxonomy,
 )
@@ -44,6 +48,10 @@ STREAM_ACCEPTANCE_FIXTURES = {
         ),
         "failed_terminal": (
             b'{"type":"error","code":"permission_error"}',
+            # https://platform.openai.com/docs/api-reference/responses-streaming/response/failed
+            b'{"type":"response.failed"}',
+            # https://platform.openai.com/docs/api-reference/responses-streaming/response/incomplete
+            b'{"type":"response.incomplete"}',
         ),
     },
     "openai_chat": {
@@ -132,6 +140,25 @@ def test_g2_outcome_reads_have_one_settlement_owner() -> None:
     calls = {node.lineno for node in ast.walk(tree) if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "outcome"}
     owned = {node.lineno for node in ast.walk(owner) if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "outcome"}
     assert calls == owned
+    source = ast.get_source_segment(TURN_GATEWAY.read_text(encoding="utf-8"), owner)
+    assert source is not None
+    # Owner ruling 09:44: t0 resources -> t2 protocol terminal -> t3 close/finally
+    # commits outcome -> t4 settlement/history -> t5 render -> t6 downstream EOF.
+    close_at = source.index("await handle.close_stream()")
+    available_at = source.index("handle.outcome_available")
+    outcome_at = source.index("await handle.outcome()")
+    settlement_at = source.index("self.service.settle_handle_outcome")
+    assert close_at < available_at < outcome_at < settlement_at
+    response_owner = ast.get_source_segment(
+        TURN_GATEWAY.read_text(encoding="utf-8"),
+        _functions(tree)["_resolved_response"],
+    )
+    assert response_owner is not None
+    stream_at = response_owner.index("response = web.StreamResponse")
+    settle_at = response_owner.index("await self._settle_turn_handle", stream_at)
+    render_at = response_owner.index("await self._write_stream_terminal_copy", settle_at)
+    eof_at = response_owner.index("await self._downstream_io(response.write_eof())", render_at)
+    assert settle_at < render_at < eof_at
 
 
 def test_g3_settlement_returns_are_consumed() -> None:
@@ -144,6 +171,16 @@ def test_g3_settlement_returns_are_consumed() -> None:
         parent = parents[node]
         parent = parents[parent] if isinstance(parent, ast.Await) else parent
         assert not isinstance(parent, ast.Expr), node.lineno
+    boundary = _functions(tree)["_handle_request"]
+    source = ast.get_source_segment(TURN_GATEWAY.read_text(encoding="utf-8"), boundary)
+    assert source is not None
+    # C9 behavior guard: request cancellation precedes owned teardown, which
+    # precedes owned settlement; both drains ignore repeated caller cancellation.
+    cancel_at = source.index("request_task.cancel()")
+    exit_at = source.index("resources.__aexit__", cancel_at)
+    settle_at = source.index("self._settle_boundary_termination", exit_at)
+    reraise_at = source.index("raise cancelled", settle_at)
+    assert cancel_at < exit_at < settle_at < reraise_at
 
 
 def test_g4_terminal_projection_has_no_execution_channel() -> None:
@@ -231,6 +268,29 @@ def test_stream_authority_guard_rejects_an_unaccepted_alias() -> None:
     )
     with pytest.raises(AssertionError):
         _assert_stream_taxonomy_matches("openai_responses", mutated)
+
+
+def test_sse_tokenizer_bounds_lines_and_frames() -> None:
+    with pytest.raises(SSEFrameLimitError, match="line"):
+        SSEFrameTokenizer().feed(b"x" * (SSE_MAX_LINE_BYTES + 1))
+    tokenizer = SSEFrameTokenizer()
+    line = b"x" * SSE_MAX_LINE_BYTES + b"\n"
+    for _ in range(SSE_MAX_FRAME_BYTES // SSE_MAX_LINE_BYTES):
+        tokenizer.feed(line)
+    with pytest.raises(SSEFrameLimitError, match="frame"):
+        tokenizer.feed(b"x")
+
+
+def test_complete_frame_after_terminal_is_always_invalid() -> None:
+    frames = (
+        b"event: ping\n\n",
+        b'data: {"type":"response.output_text.delta"}\n\n',
+    )
+    for frame in frames:
+        state = ProtocolSSEState("openai_responses")
+        state.observe(b'data: {"type":"response.completed"}\n\n')
+        state.observe(frame)
+        assert state.invalid_after_terminal is True
 
 
 def test_stream_boundary_catalog_exercises_every_enumerated_dimension() -> None:

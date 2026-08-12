@@ -19,11 +19,39 @@ from pathlib import Path
 from typing import Any
 
 
-REPO_ROOT = Path(__file__).resolve().parents[4]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
 
-from core.handlers.model_hub.stream_wire import SSEFrameTokenizer  # noqa: E402
+class SSEFrameTokenizer:
+    """Dependency-free SSE tokenizer matching the probe's accepted line endings."""
+
+    def __init__(self) -> None:
+        self._line = bytearray()
+        self._frame_lines: list[bytes] = []
+        self._after_cr = False
+
+    def feed(self, chunk: bytes) -> tuple[bytes, ...]:
+        frames: list[bytes] = []
+        for byte in chunk:
+            if self._after_cr:
+                self._after_cr = False
+                if byte == 0x0A:
+                    continue
+            if byte == 0x0D:
+                self._finish_line(frames)
+                self._after_cr = True
+            elif byte == 0x0A:
+                self._finish_line(frames)
+            else:
+                self._line.append(byte)
+        return tuple(frames)
+
+    def _finish_line(self, frames: list[bytes]) -> None:
+        line = bytes(self._line)
+        self._line.clear()
+        if line:
+            self._frame_lines.append(line)
+        elif self._frame_lines:
+            frames.append(b"\n".join(self._frame_lines))
+            self._frame_lines.clear()
 
 
 REQUIRED_VENDOR_KEYS = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY")

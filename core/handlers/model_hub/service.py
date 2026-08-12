@@ -4043,12 +4043,16 @@ class ModelHubService:
     ) -> HandleSettlement:
         """Settle every consumed hub handle before its terminal facts are exposed."""
 
-        if termination_origin == "downstream_cancel":
+        if termination_origin == "downstream_cancel" and outcome is None:
             return HandleSettlement(
                 outcome=outcome,
                 decision=None,
                 turn_outcome=produce_turn_outcome("turn.canceled"),
             )
+        if termination_origin == "downstream_cancel":
+            # The gateway selects this origin only after closing the producer.
+            # A committed outcome at that barrier owns history over cancellation.
+            termination_origin = "upstream_terminal"
         if termination_origin != "upstream_terminal":
             raise AssertionError("unknown handle termination origin")
         if resolved is None or resolved.supply_channel != "hub":

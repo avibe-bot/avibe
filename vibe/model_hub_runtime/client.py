@@ -15,7 +15,7 @@ import aiohttp
 
 from config.v2_config import normalize_model_hub_base_url
 from core.handlers.model_hub.adapter import RawCallOutcome, RawOutcomeKind
-from core.handlers.model_hub.stream_wire import ProtocolSSEState
+from core.handlers.model_hub.stream_wire import ProtocolSSEState, SSEFrameLimitError
 from vibe.model_hub_runtime.state import SourceRecord
 
 
@@ -529,6 +529,15 @@ async def _response_stream(
                 ),
                 stream_started=True,
             )
+    except SSEFrameLimitError as exc:
+        outcome = _outcome(
+            kind=RawOutcomeKind.PROTOCOL_ERROR,
+            source=source,
+            model_id=model_id,
+            http_status=response.status,
+            message=str(exc),
+            stream_started=True,
+        )
     except asyncio.TimeoutError:
         outcome = _observed_stream_terminal_outcome(
             wire_state,
@@ -584,6 +593,15 @@ def _observed_stream_terminal_outcome(
     model_id: str,
     http_status: int,
 ) -> RawCallOutcome | None:
+    if wire_state.invalid_after_terminal:
+        return _outcome(
+            kind=RawOutcomeKind.PROTOCOL_ERROR,
+            source=source,
+            model_id=model_id,
+            http_status=http_status,
+            message="upstream emitted data after a protocol terminal event",
+            stream_started=True,
+        )
     if wire_state.terminal_outcome == "served":
         return _outcome(
             kind=RawOutcomeKind.SUCCESS,
