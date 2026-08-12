@@ -114,6 +114,7 @@ import {
   InstanceProjectsPage,
 } from './features/organization/pages/OrganizationInstancePages';
 import { OrganizationResourcesPage } from './features/organization/pages/OrganizationResourcesPage';
+import { OrganizationShell } from './features/organization/OrganizationShell';
 
 const RemoteLoginGate = ({ target }: { target: string }) => {
     const { t } = useTranslation();
@@ -613,15 +614,17 @@ const router = createBrowserRouter(
         {/* Control Panel mode — existing pages moved under /admin/* */}
         <Route path="/admin" element={<Navigate to="/admin/dashboard" replace />} />
         <Route path="/admin/dashboard" element={<Dashboard />} />
-        <Route path="/admin/organization" element={<Navigate to="/admin/organization/overview" replace />} />
-        <Route path="/admin/organization/overview" element={<OrganizationOverviewPage />} />
-        <Route path="/admin/organization/members" element={<OrganizationMembersPage />} />
-        <Route path="/admin/organization/groups" element={<OrganizationGroupsPage />} />
-        <Route path="/admin/organization/groups/:groupId" element={<OrganizationGroupDetailPage />} />
-        <Route path="/admin/organization/instances" element={<OrganizationInstancesPage />} />
-        <Route path="/admin/organization/instances/:instanceId/access" element={<InstanceAccessPage />} />
-        <Route path="/admin/organization/instances/:instanceId/projects" element={<InstanceProjectsPage />} />
-        <Route path="/admin/organization/resources" element={<OrganizationResourcesPage />} />
+        <Route path="/admin/organization" element={<OrganizationShell />}>
+          <Route index element={<Navigate to="/admin/organization/overview" replace />} />
+          <Route path="overview" element={<OrganizationOverviewPage />} />
+          <Route path="members" element={<OrganizationMembersPage />} />
+          <Route path="groups" element={<OrganizationGroupsPage />} />
+          <Route path="groups/:groupId" element={<OrganizationGroupDetailPage />} />
+          <Route path="instances" element={<OrganizationInstancesPage />} />
+          <Route path="instances/:instanceId/access" element={<InstanceAccessPage />} />
+          <Route path="instances/:instanceId/projects" element={<InstanceProjectsPage />} />
+          <Route path="resources" element={<OrganizationResourcesPage />} />
+        </Route>
         <Route path="/admin/remote-access" element={<RemoteAccessPage />} />
         <Route path="/admin/groups" element={<ChannelList isPage />} />
         <Route path="/admin/users" element={<UserList />} />
